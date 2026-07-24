@@ -1178,9 +1178,11 @@ fn pick_entity_bound_includes_box_prop_bounds() {
         "Crate",
         NodeKind::BoxProp {
             materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            uvs: [GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
             vertices: psxed_project::box_prop_vertices_for_size(1024),
             collision_enabled: true,
             break_flags: 0,
+            erosion: psxed_project::BoxPropErosion::default(),
         },
     );
     let workspace = EditorWorkspace::with_project(test_temp_dir("box-prop-pick"), project);

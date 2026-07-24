@@ -1348,6 +1348,13 @@ impl EditorWorkspace {
             return;
         }
 
+        let first_room = targets[0].0;
+        let target_room = targets
+            .iter()
+            .all(|(room, _, _)| *room == first_room)
+            .then_some(first_room);
+        let deleted_floor = self.active_floor;
+
         self.push_undo();
         let mut removed = 0usize;
         for (room, sx, sz) in targets {
@@ -1365,7 +1372,17 @@ impl EditorWorkspace {
         self.clear_sector_selection();
         self.clear_primitive_selection_state();
         if removed > 0 {
-            self.status = if removed == 1 {
+            let removed_layer =
+                target_room.and_then(|room| self.remove_empty_layer_in_room(room, deleted_floor));
+            self.status = if let Some((replacement, count)) = removed_layer {
+                format!(
+                    "Deleted {removed} tile{} and empty layer {}; now editing layer {} of {}",
+                    if removed == 1 { "" } else { "s" },
+                    deleted_floor + 1,
+                    replacement + 1,
+                    count
+                )
+            } else if removed == 1 {
                 "Deleted tile".to_string()
             } else {
                 format!("Deleted {removed} tiles")
@@ -2083,6 +2100,7 @@ impl EditorWorkspace {
                         | NodeKind::PointLight { .. }
                         | NodeKind::ImageProp { .. }
                         | NodeKind::BoxProp { .. }
+                        | NodeKind::CylinderProp { .. }
                 ) {
                     node.transform.translation[0] = snap_node_transform_component_to_world_step(
                         node.transform.translation[0],

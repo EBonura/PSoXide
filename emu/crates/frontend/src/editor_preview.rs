@@ -429,6 +429,21 @@ pub fn build_phase1_frame(
             preview_bounds,
             &mut scratch,
         );
+        walk_cylinder_props(
+            project,
+            room_id,
+            grid,
+            floor_index,
+            y_offset,
+            textures,
+            world_camera,
+            fog,
+            hidden_scene_nodes,
+            selected,
+            hovered_entity_node,
+            preview_bounds,
+            &mut scratch,
+        );
         walk_water_volumes(
             project,
             room_id,
@@ -1152,9 +1167,11 @@ fn walk_box_props(
         }
         let NodeKind::BoxProp {
             materials,
+            uvs: face_uvs,
             vertices,
             collision_enabled: _,
             break_flags: _,
+            erosion,
         } = &node.kind
         else {
             continue;
@@ -1162,11 +1179,36 @@ fn walk_box_props(
         let mut origin = node_room_local_origin(grid, &node.transform);
         origin.y += y_offset;
         let world_vertices = box_prop_vertices(origin, *vertices, node.transform.rotation_degrees);
-        for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+        let generated = psxed_project::generate_box_prop_erosion_quads(*vertices, *erosion);
+        let generated_quads: Vec<(usize, [psx_engine::WorldVertex; 4], [[u8; 2]; 4])> = generated
+            .iter()
+            .map(|quad| {
+                (
+                    usize::from(quad.source_face),
+                    box_prop_world_quad(origin, quad.vertices, node.transform.rotation_degrees),
+                    quad.uv_q8,
+                )
+            })
+            .collect();
+        let face_count = if generated_quads.is_empty() {
+            psxed_project::BOX_PROP_FACE_COUNT
+        } else {
+            generated_quads.len()
+        };
+        for rendered_face in 0..face_count {
+            let (face, face_vertices, generated_uvs) = if generated_quads.is_empty() {
+                (
+                    rendered_face,
+                    box_prop_face_vertices(world_vertices, rendered_face),
+                    None,
+                )
+            } else {
+                let (face, vertices, uv_q8) = generated_quads[rendered_face];
+                (face, vertices, Some(uv_q8))
+            };
             let Some(material_id) = materials[face] else {
                 continue;
             };
-            let face_vertices = box_prop_face_vertices(world_vertices, face);
             let Some(projected) = camera.project_world_quad(face_vertices) else {
                 continue;
             };
@@ -1192,7 +1234,15 @@ fn walk_box_props(
                 FaceShade::Textured { slot, .. } => {
                     let u_max = slot.texture_width.saturating_sub(1);
                     let v_max = slot.texture_height.saturating_sub(1);
-                    [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]
+                    let corners = face_uvs[face].apply_to_quad([
+                        (0, 0),
+                        (u_max, 0),
+                        (u_max, v_max),
+                        (0, v_max),
+                    ]);
+                    generated_uvs
+                        .map(|uvs| uvs.map(|uv| box_prop_face_uv_at(corners, uv)))
+                        .unwrap_or(corners)
                 }
                 FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
             };
@@ -1209,6 +1259,139 @@ fn walk_box_props(
             );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_cylinder_props(
+    project: &ProjectDocument,
+    room_id: psxed_project::NodeId,
+    grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
+    textures: &EditorTextures,
+    camera: psx_engine::WorldCamera,
+    fog: PreviewFog,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    hovered: Option<NodeId>,
+    preview_bounds: bool,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
+    for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+            || node_enclosing_floor(scene, node.id) != floor_index
+        {
+            continue;
+        }
+        let NodeKind::CylinderProp {
+            materials,
+            uvs,
+            geometry,
+            collision_enabled: _,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let mut origin = node_room_local_origin(grid, &node.transform);
+        origin.y += y_offset;
+        let generated = psxed_project::generate_cylinder_prop_surfaces(*geometry);
+        let is_selected = node.id == selected;
+        let is_hovered = hovered == Some(node.id);
+        let outline = entity_bound_style(
+            psxed_ui::EntityBoundKind::CylinderProp,
+            is_selected,
+            is_hovered,
+        );
+        for surface in generated {
+            let slot_index = usize::from(surface.material_slot)
+                .min(psxed_project::CYLINDER_PROP_MATERIAL_COUNT - 1);
+            let world_vertices =
+                box_prop_world_quad(origin, surface.vertices, node.transform.rotation_degrees);
+            let Some(projected) = camera.project_world_quad(world_vertices) else {
+                continue;
+            };
+            let p = projected.map(preview_projected_from_engine);
+            if let Some(material_id) = materials[slot_index] {
+                let shade = face_shade(
+                    project,
+                    Some(material_id),
+                    cylinder_prop_fallback_color(slot_index),
+                    textures,
+                )
+                .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
+                let center = average_world_quad(world_vertices);
+                let depth = face_depth(camera, center);
+                let shade = fog.apply_shade(
+                    light_face(shade, center, &lights, grid.ambient_color),
+                    depth,
+                );
+                let surface_uvs = match shade {
+                    FaceShade::Textured { slot, .. } => {
+                        let u_max = slot.texture_width.saturating_sub(1);
+                        let v_max = slot.texture_height.saturating_sub(1);
+                        let corners = uvs[slot_index].apply_to_quad([
+                            (0, 0),
+                            (u_max, 0),
+                            (u_max, v_max),
+                            (0, v_max),
+                        ]);
+                        surface.uv_q8.map(|uv| box_prop_face_uv_at(corners, uv))
+                    }
+                    FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
+                };
+                if surface.vertex_count == 3 {
+                    let _ = emit_face_tri(
+                        scratch,
+                        [p[0], p[1], p[2]],
+                        [surface_uvs[0], surface_uvs[1], surface_uvs[2]],
+                        shade,
+                    );
+                } else {
+                    emit_box_prop_face(scratch, p, surface_uvs, shade);
+                }
+            }
+            if preview_bounds || is_selected || is_hovered {
+                let count = usize::from(surface.vertex_count.clamp(3, 4));
+                for index in 0..count {
+                    let next = (index + 1) % count;
+                    if p[index].sz != 0 && p[next].sz != 0 {
+                        push_screen_line(scratch, p[index], p[next], outline);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn box_prop_face_uv_at(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> (u8, u8) {
+    let u = u32::from(uv_q8[0]);
+    let v = u32::from(uv_q8[1]);
+    let inv_u = 255 - u;
+    let inv_v = 255 - v;
+    let interpolate = |axis: usize| {
+        let values = if axis == 0 {
+            [
+                u32::from(corners[0].0),
+                u32::from(corners[1].0),
+                u32::from(corners[2].0),
+                u32::from(corners[3].0),
+            ]
+        } else {
+            [
+                u32::from(corners[0].1),
+                u32::from(corners[1].1),
+                u32::from(corners[2].1),
+                u32::from(corners[3].1),
+            ]
+        };
+        let top = values[0] * inv_u + values[1] * u;
+        let bottom = values[3] * inv_u + values[2] * u;
+        ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
+    };
+    (interpolate(0), interpolate(1))
 }
 
 fn walk_water_volumes(
@@ -1257,9 +1440,7 @@ fn walk_water_volumes(
             let floor = grid
                 .sector(array_x, array_z)
                 .and_then(|sector| sector.floor.as_ref());
-            let floor_y = floor
-                .map(|floor| floor.height_at_local(sector_size / 2, sector_size / 2, sector_size))
-                .unwrap_or(0);
+            let floor_y = floor.map(|floor| floor.lowest_height()).unwrap_or(0);
             let y = floor_y
                 .saturating_add(i32::from(settings.height_above_floor))
                 .saturating_add(y_offset);
@@ -1377,6 +1558,33 @@ fn box_prop_vertices(
     out
 }
 
+fn box_prop_world_quad(
+    origin: psx_engine::WorldVertex,
+    vertices: [[i16; 3]; 4],
+    rotation_degrees: [f32; 3],
+) -> [psx_engine::WorldVertex; 4] {
+    let rotation = [
+        yaw_to_q12(rotation_degrees[0]),
+        yaw_to_q12(rotation_degrees[1]),
+        yaw_to_q12(rotation_degrees[2]),
+    ];
+    vertices.map(|local| {
+        let rotated = rotate_image_prop_local(
+            [
+                i32::from(local[0]),
+                i32::from(local[1]),
+                i32::from(local[2]),
+            ],
+            rotation,
+        );
+        psx_engine::WorldVertex::new(
+            origin.x.saturating_add(rotated[0]),
+            origin.y.saturating_add(rotated[1]),
+            origin.z.saturating_add(rotated[2]),
+        )
+    })
+}
+
 fn box_prop_face_vertices(
     vertices: [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT],
     face: usize,
@@ -1408,6 +1616,16 @@ fn box_prop_fallback_color(face: usize) -> (u8, u8, u8) {
         (0x90, 0x98, 0xA0),
     ];
     COLORS[face]
+}
+
+fn cylinder_prop_fallback_color(slot: usize) -> (u8, u8, u8) {
+    const COLORS: [(u8, u8, u8); psxed_project::CYLINDER_PROP_MATERIAL_COUNT] = [
+        (0x88, 0xA8, 0xB8),
+        (0xB8, 0xC0, 0xC8),
+        (0x70, 0x78, 0x80),
+        (0x90, 0x78, 0x68),
+    ];
+    COLORS[slot]
 }
 
 fn push_box_prop_wireframe(
@@ -2595,7 +2813,9 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         NodeKind::ImageProp { .. } => Some((0xD0, 0xAA, 0x78)),
         // Box props render as real textured geometry in
         // `walk_box_props`; don't cover them with a 2D marker.
-        NodeKind::BoxProp { .. } | NodeKind::WaterVolume { .. } => None,
+        NodeKind::BoxProp { .. } | NodeKind::CylinderProp { .. } | NodeKind::WaterVolume { .. } => {
+            None
+        }
         NodeKind::Entity => Some((0xA0, 0xB0, 0xC0)),
         // Lights draw their own bulb icon + radius ring in
         // `walk_light_gizmos`; using the generic billboard square

@@ -101,7 +101,7 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
             .get(entity)
             .map(|record| record.model_instance)
             .unwrap_or(psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE);
-        let mut cylinders = [CharacterCollisionCylinder::EMPTY; MAX_MODEL_INSTANCES];
+        let mut cylinders = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
         let mut cylinder_count = 0usize;
         for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
             if inst.room != room || cylinder_count >= cylinders.len() {
@@ -140,6 +140,12 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
             );
             cylinder_count += 1;
         }
+        cylinder_count +=
+            psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers(
+                CYLINDER_PROPS,
+                room,
+                &mut cylinders[cylinder_count..],
+            );
 
         let mut aabbs = [CharacterCollisionAabb::EMPTY; MAX_BOX_PROP_BLOCKERS];
         let aabb_count = self

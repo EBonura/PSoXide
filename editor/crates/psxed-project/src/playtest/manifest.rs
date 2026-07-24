@@ -1132,9 +1132,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
         let _ = writeln!(
             out,
-            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, surface_first: {}, surface_count: {}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
             prop.room,
             prop.blend_modes,
+            prop.uvs,
             prop.x,
             prop.y,
             prop.z,
@@ -1142,7 +1143,64 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             prop.pitch,
             prop.yaw,
             prop.roll,
+            prop.surface_first,
+            prop.surface_count,
             prop.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cook-generated directional erosion surfaces for BoxProps.\n");
+    out.push_str("pub static BOX_PROP_SURFACES: &[LevelBoxPropSurfaceRecord] = &[\n");
+    for surface in &package.box_prop_surfaces {
+        let _ = writeln!(
+            out,
+            "    LevelBoxPropSurfaceRecord {{ vertices: {:?}, center: {:?}, normal: {:?}, uv_q8: {:?}, baked_vertex_rgb: {:?}, source_face: {}, flags: {} }},",
+            surface.vertices,
+            surface.center,
+            surface.normal,
+            surface.uv_q8,
+            surface.baked_vertex_rgb,
+            surface.source_face,
+            surface.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Placed low-poly procedural radial props.\n");
+    out.push_str("pub static CYLINDER_PROPS: &[LevelCylinderPropRecord] = &[\n");
+    for prop in &package.cylinder_props {
+        let texture_assets = render_cylinder_prop_texture_assets(&prop.texture_asset_indices);
+        let _ = writeln!(
+            out,
+            "    LevelCylinderPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, surface_first: {}, surface_count: {}, center: {:?}, cull_radius: {}, bounds_min: {:?}, bounds_max: {:?}, flags: {} }},",
+            prop.room,
+            prop.blend_modes,
+            prop.uvs,
+            prop.surface_first,
+            prop.surface_count,
+            prop.center,
+            prop.cull_radius,
+            prop.bounds_min,
+            prop.bounds_max,
+            prop.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cook-generated CylinderProp triangles and quads.\n");
+    out.push_str("pub static CYLINDER_PROP_SURFACES: &[LevelCylinderPropSurfaceRecord] = &[\n");
+    for surface in &package.cylinder_prop_surfaces {
+        let _ = writeln!(
+            out,
+            "    LevelCylinderPropSurfaceRecord {{ vertices: {:?}, center: {:?}, normal: {:?}, uv_q8: {:?}, baked_vertex_rgb: {:?}, material_slot: {}, vertex_count: {} }},",
+            surface.vertices,
+            surface.center,
+            surface.normal,
+            surface.uv_q8,
+            surface.baked_vertex_rgb,
+            surface.material_slot,
+            surface.vertex_count,
         );
     }
     out.push_str("];\n\n");
@@ -3020,6 +3078,25 @@ fn render_box_prop_texture_assets(
     out
 }
 
+fn render_cylinder_prop_texture_assets(
+    texture_assets: &[Option<usize>; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+) -> String {
+    let mut out = String::from("[");
+    for (index, texture_asset) in texture_assets.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        match texture_asset {
+            Some(asset) => {
+                let _ = write!(out, "Some(AssetId({asset}))");
+            }
+            None => out.push_str("None"),
+        }
+    }
+    out.push(']');
+    out
+}
+
 fn render_box_prop_vertices(vertices: &[[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT]) -> String {
     let mut out = String::from("[");
     for (index, vertex) in vertices.iter().enumerate() {
@@ -3565,6 +3642,9 @@ use psx_level::{
     LevelCachedRoomVertexRecord,
     LevelAssetRecord,
     LevelBoxPropRecord,
+    LevelBoxPropSurfaceRecord,
+    LevelCylinderPropRecord,
+    LevelCylinderPropSurfaceRecord,
     LevelCameraRecord,
     LevelCloudLayerRecord,
     LevelCharacterRecord,

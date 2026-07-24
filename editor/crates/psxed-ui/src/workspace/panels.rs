@@ -1615,6 +1615,7 @@ impl EditorWorkspace {
             self.inspector_undo_transaction = None;
             return;
         }
+        self.refresh_texture_thumbs(ctx);
         self.prepare_inspector_undo_frame(ctx);
         let undo_candidate =
             inspector_has_edit_input(ctx).then(|| (self.project.clone(), self.history.epoch()));
@@ -1677,6 +1678,13 @@ impl EditorWorkspace {
                                 }
 
                                 let material_options = self.project.material_options();
+                                let material_texture_dimensions: Vec<(ResourceId, [u16; 2])> = self
+                                    .texture_thumbs
+                                    .iter()
+                                    .map(|(id, entry)| {
+                                        (*id, [entry.stats.width, entry.stats.height])
+                                    })
+                                    .collect();
                                 let texture_options: Vec<(ResourceId, String)> = self
                                     .project
                                     .resources
@@ -1797,6 +1805,8 @@ impl EditorWorkspace {
                                                 &mut node.kind,
                                             NodeKindEditorContext {
                                                 material_options: &material_options,
+                                                material_texture_dimensions:
+                                                    &material_texture_dimensions,
                                                 texture_options: &texture_options,
                                                 room_options: &room_options,
                                                 model_options: &model_options,

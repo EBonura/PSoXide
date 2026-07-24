@@ -47,8 +47,11 @@ impl Playtest {
         self.logic.init_from_records(LOGIC);
         self.box_props.reset_dynamic_state();
         self.sync_door_box_props();
-        self.camera
-            .snap_to_player_with_yaw(self.camera_target(None, false), self.camera_config(), yaw);
+        self.camera.snap_to_player_with_yaw(
+            self.camera_target(None, false),
+            self.camera_config(),
+            yaw,
+        );
         self.render_camera = world_camera_from_position_focus(
             PROJECTION,
             self.camera.position(),
@@ -130,7 +133,7 @@ impl Playtest {
 
     pub(super) fn collect_collision_blockers(
         &self,
-        out: &mut [CharacterCollisionCylinder; MAX_MODEL_INSTANCES],
+        out: &mut [CharacterCollisionCylinder],
     ) -> usize {
         let mut count = 0usize;
         for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
@@ -167,6 +170,11 @@ impl Playtest {
             count += 1;
         }
         count
+            + psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers(
+                CYLINDER_PROPS,
+                self.room_index,
+                &mut out[count..],
+            )
     }
 
     pub(super) fn collect_collision_rooms(
@@ -430,8 +438,8 @@ impl Playtest {
             .get(self.room_index.to_usize())
             .map(room_depth_range)
             .unwrap_or(WORLD_DEPTH_RANGE);
-        let projector = PROP_PARTICLE_GTE_PROJECT_ENABLED
-            .then(|| LoadedWorldCameraGte::load(camera));
+        let projector =
+            PROP_PARTICLE_GTE_PROJECT_ENABLED.then(|| LoadedWorldCameraGte::load(camera));
         draw_water_wade_splash(
             player.x,
             water.surface_y,
@@ -502,7 +510,7 @@ impl Playtest {
             fog_rgb: Rgb8::from_array(room_record.fog_rgb),
             fog_near: room_record.fog_near,
             fog_far: room_record.fog_far,
-            lights: LIGHTS,
+            lights: room_light_slice(LIGHTS, self.room_index),
         })
     }
 

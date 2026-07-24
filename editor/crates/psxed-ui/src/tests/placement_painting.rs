@@ -166,6 +166,90 @@ fn place_image_prop_with_material_uses_it_directly() {
 }
 
 #[test]
+fn box_prop_tool_places_without_requiring_a_material_selection() {
+    let (mut workspace, room) = workspace_with_populated_grid("box-prop-tool-place", 1, 1);
+    workspace.project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    workspace.project.add_resource(
+        "Brick",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::BoxProp)));
+    workspace.dispatch_paint_3d(
+        Some((
+            FaceRef {
+                room,
+                sx: 0,
+                sz: 0,
+                kind: FaceKind::Floor,
+            },
+            [512.0, 0.0, 512.0],
+        )),
+        None,
+    );
+
+    let node = workspace
+        .project
+        .active_scene()
+        .node(workspace.selected_node_id())
+        .expect("placed box prop is selected");
+    let NodeKind::BoxProp { materials, .. } = &node.kind else {
+        panic!("expected box prop node");
+    };
+    assert_eq!(*materials, [None; psxed_project::BOX_PROP_FACE_COUNT]);
+    assert_eq!(node.parent, Some(room));
+    assert_eq!(workspace.status, "Placed Box Prop at 0,0");
+    assert_eq!(workspace.active_tool, ViewTool::Select);
+    assert!(workspace.is_dirty());
+}
+
+#[test]
+fn cylinder_prop_tool_places_a_separate_six_sided_node() {
+    let (mut workspace, room) = workspace_with_populated_grid("cylinder-prop-tool-place", 1, 1);
+
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::CylinderProp)));
+    workspace.dispatch_paint_3d(
+        Some((
+            FaceRef {
+                room,
+                sx: 0,
+                sz: 0,
+                kind: FaceKind::Floor,
+            },
+            [512.0, 0.0, 512.0],
+        )),
+        None,
+    );
+
+    let node = workspace
+        .project
+        .active_scene()
+        .node(workspace.selected_node_id())
+        .expect("placed cylinder prop is selected");
+    let NodeKind::CylinderProp {
+        materials,
+        geometry,
+        collision_enabled,
+        ..
+    } = &node.kind
+    else {
+        panic!("expected cylinder prop node");
+    };
+    assert_eq!(
+        *materials,
+        [None; psxed_project::CYLINDER_PROP_MATERIAL_COUNT]
+    );
+    assert_eq!(geometry.sides, psxed_project::DEFAULT_CYLINDER_PROP_SIDES);
+    assert!(*collision_enabled);
+    assert_eq!(node.parent, Some(room));
+    assert_eq!(workspace.status, "Placed Cylinder Prop at 0,0");
+    assert_eq!(workspace.active_tool, ViewTool::Select);
+}
+
+#[test]
 fn portal_icon_place_writes_edge_midpoint_marker() {
     let mut project = ProjectDocument::new("portal-edge-place");
     let mut grid = WorldGrid::empty(2, 1, 1024);

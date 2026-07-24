@@ -750,6 +750,59 @@ fn ctrl_selected_sector_delete_removes_all_selected_tiles() {
 }
 
 #[test]
+fn deleting_every_tile_removes_the_now_empty_layer_in_the_same_undo_step() {
+    let mut project = ProjectDocument::new("delete-emptied-layer");
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.push_floor();
+    grid.floor_mut(1).unwrap().set_floor(0, 0, 0, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    project
+        .active_scene_mut()
+        .node_mut(room)
+        .unwrap()
+        .transform
+        .translation[1] = -2.0;
+    let upper_entity = project
+        .active_scene_mut()
+        .add_node(room, "Upper entity", NodeKind::Entity);
+    project
+        .active_scene_mut()
+        .node_mut(upper_entity)
+        .unwrap()
+        .floor = 1;
+
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
+    workspace.delete_selected_sectors();
+
+    let scene = workspace.project.active_scene();
+    let room_node = scene.node(room).unwrap();
+    let NodeKind::Room { grid } = &room_node.kind else {
+        panic!("room node");
+    };
+    assert_eq!(grid.floor_count(), 1);
+    assert!(grid.sector(0, 0).unwrap().floor.is_some());
+    assert_eq!(room_node.transform.translation[1], 0.0);
+    assert_eq!(scene.node(upper_entity).unwrap().floor, 0);
+    assert_eq!(workspace.active_floor, 0);
+
+    workspace.do_undo();
+    let scene = workspace.project.active_scene();
+    let room_node = scene.node(room).unwrap();
+    let NodeKind::Room { grid } = &room_node.kind else {
+        panic!("room node");
+    };
+    assert_eq!(grid.floor_count(), 2);
+    assert!(grid.sector(0, 0).unwrap().floor.is_some());
+    assert!(grid.floor(1).unwrap().sector(0, 0).unwrap().floor.is_some());
+    assert_eq!(room_node.transform.translation[1], -2.0);
+    assert_eq!(scene.node(upper_entity).unwrap().floor, 1);
+}
+
+#[test]
 fn autotile_selected_sector_walls_updates_all_selected_tiles() {
     let mut project = ProjectDocument::new("autotile-selected-tiles");
     let mut grid = WorldGrid::empty(2, 1, 1024);

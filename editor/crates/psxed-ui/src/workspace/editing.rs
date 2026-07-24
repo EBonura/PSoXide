@@ -608,6 +608,93 @@ impl EditorWorkspace {
         .collect()
     }
 
+    /// Six object-aligned resize anchors, one at the centre of each Box
+    /// Prop face. The short stem points outwards and supplies an
+    /// unambiguous drag direction even when a face is seen obliquely.
+    pub(crate) fn box_prop_face_screen_handles(&self, rect: Rect) -> Vec<BoxPropFaceScreenHandle> {
+        if self.transform_gizmo_mode != TransformGizmoMode::Scale {
+            return Vec::new();
+        }
+        let targets = self.selected_node_gizmo_targets();
+        let [node_id] = targets.as_slice() else {
+            return Vec::new();
+        };
+        let scene = self.project.active_scene();
+        let Some(node) = scene.node(*node_id) else {
+            return Vec::new();
+        };
+        let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+            return Vec::new();
+        };
+        let Some(room_id) = enclosing_room_id(scene, *node_id) else {
+            return Vec::new();
+        };
+        let Some(room) = scene.node(room_id) else {
+            return Vec::new();
+        };
+        let NodeKind::Room { grid } = &room.kind else {
+            return Vec::new();
+        };
+        let floor = psxed_project::floor_view::node_floor(scene, *node_id);
+        let Some(node_grid) = grid.floor(floor) else {
+            return Vec::new();
+        };
+        let Some(y_offset) = psxed_project::floor_view::node_draw_offset(
+            scene,
+            room_id,
+            self.active_floor,
+            *node_id,
+        ) else {
+            return Vec::new();
+        };
+        let mut origin =
+            psxed_project::spatial::node_preview_origin_f32(node_grid, &node.transform);
+        origin[1] += y_offset as f32;
+        let basis = euler_degrees_to_matrix(node.transform.rotation_degrees);
+        let camera = self.viewport_3d_camera();
+        let stem_length = (node_grid.sector_size.max(1) as f32 * 0.18).max(64.0);
+        const FACE_NORMALS: [[f32; 3]; psxed_project::BOX_PROP_FACE_COUNT] = [
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ];
+
+        psxed_project::BOX_PROP_FACE_VERTEX_INDICES
+            .iter()
+            .enumerate()
+            .filter_map(|(face, indices)| {
+                let mut local_center = [0.0; 3];
+                for index in indices {
+                    for axis in 0..3 {
+                        local_center[axis] += f32::from(vertices[*index][axis]) * 0.25;
+                    }
+                }
+                let rotated_center = rotate_vector_by_matrix(&basis, local_center);
+                let center_world = [
+                    origin[0] + rotated_center[0],
+                    origin[1] + rotated_center[1],
+                    origin[2] + rotated_center[2],
+                ];
+                let normal = rotate_vector_by_matrix(&basis, FACE_NORMALS[face]);
+                let end_world = [
+                    center_world[0] + normal[0] * stem_length,
+                    center_world[1] + normal[1] * stem_length,
+                    center_world[2] + normal[2] * stem_length,
+                ];
+                let center = project_world_to_viewport_screen(camera, rect, center_world)?;
+                let end = project_world_to_viewport_screen(camera, rect, end_world)?;
+                ((end - center).length_sq() >= 16.0).then_some(BoxPropFaceScreenHandle {
+                    face: face as u8,
+                    center,
+                    end,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn node_gizmo_screen_planes(&self, rect: Rect) -> Vec<NodeGizmoScreenPlane> {
         if self.transform_gizmo_mode != TransformGizmoMode::Move {
             return Vec::new();
@@ -799,6 +886,17 @@ impl EditorWorkspace {
                 .min_by(|(a, _), (b, _)| a.total_cmp(b))
                 .map(|(_, axis)| NodeGizmoHandle::Axis(axis));
         }
+        if self.transform_gizmo_mode == TransformGizmoMode::Scale {
+            if let Some((_, handle)) = self
+                .box_prop_face_screen_handles(rect)
+                .into_iter()
+                .map(|handle| ((pointer - handle.end).length(), handle))
+                .filter(|(distance, _)| *distance <= GIZMO_AXIS_PICK_RADIUS)
+                .min_by(|(a, _), (b, _)| a.total_cmp(b))
+            {
+                return Some(NodeGizmoHandle::BoxFace(handle.face));
+            }
+        }
         // Axes and move planes overlap on screen: each plane handle is an
         // inner quad spanning two axes, so a cursor inside a plane is also
         // within the axis pick radius of both of that plane's axes.
@@ -955,6 +1053,34 @@ impl EditorWorkspace {
                 }
             }
             return;
+        }
+        if self.transform_gizmo_mode == TransformGizmoMode::Scale {
+            let handles = self.box_prop_face_screen_handles(rect);
+            if !handles.is_empty() {
+                let active_handle = self.interaction.node_gizmo_drag().map(|drag| drag.handle);
+                for handle in handles {
+                    let face_handle = NodeGizmoHandle::BoxFace(handle.face);
+                    let highlighted =
+                        active_handle == Some(face_handle) || hovered_handle == Some(face_handle);
+                    let axis = box_prop_face_axis(handle.face);
+                    let color = gizmo_axis_color(axis, highlighted);
+                    painter.line_segment(
+                        [handle.center, handle.end],
+                        Stroke::new(gizmo_axis_stroke_width(highlighted), color),
+                    );
+                    painter.circle_filled(
+                        handle.end,
+                        gizmo_axis_handle_radius(highlighted) + 1.5,
+                        color,
+                    );
+                    painter.circle_stroke(
+                        handle.end,
+                        gizmo_axis_handle_radius(highlighted) + 3.5,
+                        Stroke::new(1.0, Color32::from_white_alpha(150)),
+                    );
+                }
+                return;
+            }
         }
         let axes = self.node_gizmo_screen_axes(rect);
         if axes.is_empty() {
@@ -1280,7 +1406,14 @@ impl EditorWorkspace {
         if ids.is_empty() {
             return false;
         }
-        if mode != TransformGizmoMode::Move && !matches!(handle, NodeGizmoHandle::Axis(_)) {
+        if mode != TransformGizmoMode::Move
+            && !matches!(
+                (mode, handle),
+                (TransformGizmoMode::Rotate, NodeGizmoHandle::Axis(_))
+                    | (TransformGizmoMode::Scale, NodeGizmoHandle::Axis(_))
+                    | (TransformGizmoMode::Scale, NodeGizmoHandle::BoxFace(_))
+            )
+        {
             return false;
         }
 
@@ -1354,7 +1487,17 @@ impl EditorWorkspace {
                 };
                 screen_plane.corners[2] - screen_plane.corners[0]
             }
-            (_, NodeGizmoHandle::Plane(_)) => return false,
+            (TransformGizmoMode::Scale, NodeGizmoHandle::BoxFace(face)) => {
+                let Some(handle) = self
+                    .box_prop_face_screen_handles(rect)
+                    .into_iter()
+                    .find(|candidate| candidate.face == face)
+                else {
+                    return false;
+                };
+                handle.end - handle.center
+            }
+            (_, NodeGizmoHandle::Plane(_) | NodeGizmoHandle::BoxFace(_)) => return false,
         };
         if screen_axis_delta.length_sq() < 64.0 {
             return false;
@@ -1380,6 +1523,10 @@ impl EditorWorkspace {
                     },
                     start_box_prop_vertices: match &node.kind {
                         NodeKind::BoxProp { vertices, .. } => Some(*vertices),
+                        _ => None,
+                    },
+                    start_cylinder_prop_geometry: match &node.kind {
+                        NodeKind::CylinderProp { geometry, .. } => Some(*geometry),
                         _ => None,
                     },
                     sector_size: node_enclosing_sector_size(scene, id),
@@ -1541,6 +1688,7 @@ impl EditorWorkspace {
                             target.sector_size,
                         );
                     }
+                    NodeGizmoHandle::BoxFace(_) => {}
                 },
                 TransformGizmoMode::Rotate => {
                     if let NodeGizmoHandle::Axis(axis) = handle {
@@ -1553,17 +1701,25 @@ impl EditorWorkspace {
                         );
                     }
                 }
-                TransformGizmoMode::Scale => {
-                    if let NodeGizmoHandle::Axis(axis) = handle {
-                        apply_node_gizmo_scale(
-                            node,
-                            target.start_image_prop_size,
-                            target.start_box_prop_vertices,
-                            axis,
-                            steps,
-                        );
-                    }
-                }
+                TransformGizmoMode::Scale => match handle {
+                    NodeGizmoHandle::Axis(axis) => apply_node_gizmo_scale(
+                        node,
+                        target.start_image_prop_size,
+                        target.start_box_prop_vertices,
+                        target.start_cylinder_prop_geometry,
+                        axis,
+                        steps,
+                    ),
+                    NodeGizmoHandle::BoxFace(face) => apply_box_prop_face_gizmo_resize(
+                        node,
+                        target.start_translation,
+                        target.start_box_prop_vertices,
+                        face,
+                        steps,
+                        target.sector_size,
+                    ),
+                    NodeGizmoHandle::Plane(_) => {}
+                },
             }
         }
         self.mark_dirty();

@@ -379,6 +379,7 @@ impl ViewportHarness {
                 PrimitiveGizmoAxis::Y => 'y',
                 PrimitiveGizmoAxis::Z => 'z',
             },
+            Some(Viewport3dPointerTarget::NodeGizmo(NodeGizmoHandle::BoxFace(_))) => 'B',
             Some(Viewport3dPointerTarget::PrimitiveGizmo(_)) => 'P',
             Some(Viewport3dPointerTarget::Entity(_)) => 'E',
             Some(Viewport3dPointerTarget::Surface { .. }) => '#',
