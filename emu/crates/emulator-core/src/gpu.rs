@@ -57,6 +57,10 @@ fn default_u32_256() -> [u32; 256] {
     [0; 256]
 }
 
+fn default_u64_256() -> [u64; 256] {
+    [0; 256]
+}
+
 /// GPU state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Gpu {
@@ -341,6 +345,14 @@ pub struct Gpu {
     /// from save states.
     #[serde(skip, default = "default_u32_256")]
     gp0_opcode_hist: [u32; 256],
+    /// Accumulated silicon-timing cost by GP0 opcode. This reuses the exact
+    /// cost already charged to `busy_credit`, so diagnostics can attribute
+    /// GPU work without performing another raster-area estimate.
+    #[serde(skip, default = "default_u64_256")]
+    gp0_timing_hist: [u64; 256],
+    /// Subset of `gp0_timing_hist` submitted through DMA channel 2.
+    #[serde(skip, default = "default_u64_256")]
+    gp0_dma_timing_hist: [u64; 256],
     /// Count of GP1 writes by opcode byte. Same diagnostic role as
     /// gp0_opcode_hist but for the display / control port. Excluded
     /// from save states.
@@ -537,6 +549,8 @@ impl Gpu {
             drawing_end_raw: 0,
             drawing_offset_raw: 0,
             gp0_opcode_hist: [0; 256],
+            gp0_timing_hist: [0; 256],
+            gp0_dma_timing_hist: [0; 256],
             gp1_opcode_hist: [0; 256],
             display_start_history: std::collections::BTreeSet::new(),
             display_mode_history: std::collections::BTreeSet::new(),
@@ -588,6 +602,16 @@ impl Gpu {
     /// executed packets keyed by high-byte of word 0. Diagnostic.
     pub fn gp0_opcode_histogram(&self) -> [u32; 256] {
         self.gp0_opcode_hist
+    }
+
+    /// Snapshot of accumulated GPU execution cycles grouped by GP0 opcode.
+    pub fn gp0_timing_histogram(&self) -> [u64; 256] {
+        self.gp0_timing_hist
+    }
+
+    /// Snapshot of accumulated GPU DMA cycles grouped by GP0 opcode.
+    pub fn gp0_dma_timing_histogram(&self) -> [u64; 256] {
+        self.gp0_dma_timing_hist
     }
 
     /// Snapshot of the GP1 opcode histogram. Diagnostic.
@@ -1912,6 +1936,12 @@ impl Gpu {
             pixel_cost.saturating_add(320)
         };
         self.gp0_opcode_hist[op as usize] = self.gp0_opcode_hist[op as usize].saturating_add(1);
+        self.gp0_timing_hist[op as usize] =
+            self.gp0_timing_hist[op as usize].saturating_add(timing_cost);
+        if from_dma {
+            self.gp0_dma_timing_hist[op as usize] =
+                self.gp0_dma_timing_hist[op as usize].saturating_add(timing_cost);
+        }
         // If the pixel tracer is armed, stamp this packet into the
         // command log *before* dispatching -- `plot_pixel` uses
         // `current_cmd_index` to tag every write, so it must point

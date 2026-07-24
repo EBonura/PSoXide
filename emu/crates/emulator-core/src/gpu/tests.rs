@@ -1049,6 +1049,146 @@ fn textured_shaded_tri_consumes_full_packet_without_panic() {
     assert_eq!(gpu.gp0_expected, 0);
 }
 
+/// Studio models store authored triangle winding, so adjacent triangles that
+/// form one quad generally need a cyclic vertex rotation before their shared
+/// diagonal matches GP0(2Ch)'s native split. Cyclic rotation must preserve the
+/// exact flat-textured raster, including tie-Y edges and semi-transparency.
+///
+/// The ordering table is LIFO: if the game inserts authored `tri0` and then
+/// `tri1` into one bucket, the GPU receives `tri1` first. GP0(2Ch) likewise
+/// rasterizes `(v1,v3,v2)` before `(v0,v1,v2)`. This test drives those exact
+/// SDK packet structs and proves that one quad remains pixel-identical to the
+/// two source triangles after arbitrary cyclic rotations.
+#[test]
+fn flat_textured_model_pair_cyclic_rotation_matches_quad_bitexact() {
+    use psx_gpu::material::{BlendMode, TextureMaterial};
+    use psx_gpu::prim::{QuadTexturedMaterial, TriTextured};
+
+    const TPAGE: u16 = 0x0115;
+
+    fn submit_packet<T>(gpu: &mut Gpu, packet: &T, words: u8) {
+        // SAFETY: PSX primitive structs are repr(C), u32-aligned packets with
+        // one OT tag followed by exactly WORDS GP0 data words.
+        let raw = unsafe {
+            core::slice::from_raw_parts((packet as *const T).cast::<u32>(), 1 + words as usize)
+        };
+        for &word in &raw[1..] {
+            gpu.write32(GP0_ADDR, word);
+        }
+    }
+
+    fn make_gpu() -> Gpu {
+        let mut gpu = Gpu::new();
+        gpu.write32(GP0_ADDR, 0xE300_0000);
+        gpu.write32(GP0_ADDR, 0xE400_0000 | 0x3FF | (0x0FF << 10));
+        // 15bpp texture page at (320,256), outside the draw area. Keep STP set
+        // so the translucent cases exercise blending rather than overwrite.
+        for y in 256..512u16 {
+            for x in 320..640u16 {
+                let color = (((x as u32) * 3 + (y as u32) * 5) & 0x7FFF) as u16;
+                gpu.vram.set_pixel(x, y, color | 0x8001);
+            }
+        }
+        gpu
+    }
+
+    fn rotate3<T: Copy>(values: [T; 3], amount: usize) -> [T; 3] {
+        match amount % 3 {
+            0 => values,
+            1 => [values[1], values[2], values[0]],
+            _ => [values[2], values[0], values[1]],
+        }
+    }
+
+    let mut tris = make_gpu();
+    let mut quad = make_gpu();
+    let mut seed = 0x71C3_4A5Du32;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        seed
+    };
+
+    for iteration in 0..2_000usize {
+        // Jitter each corner inside its own quadrant. This produces projected
+        // model-like convex quads and naturally covers horizontal/tie-Y edges.
+        let bx = 12 + (next() % 430) as i16;
+        let by = 8 + (next() % 150) as i16;
+        let width = 8 + (next() % 135) as i16;
+        let height = 8 + (next() % 78) as i16;
+        let verts = [
+            (bx + (next() % 5) as i16, by + (next() % 5) as i16),
+            (bx + width - (next() % 5) as i16, by + (next() % 5) as i16),
+            (
+                bx + width - (next() % 5) as i16,
+                by + height - (next() % 5) as i16,
+            ),
+            (bx + (next() % 5) as i16, by + height - (next() % 5) as i16),
+        ];
+        let uvs = [
+            ((next() % 64) as u8, (next() % 64) as u8),
+            ((next() % 64) as u8, (next() % 64) as u8),
+            ((next() % 64) as u8, (next() % 64) as u8),
+            ((next() % 64) as u8, (next() % 64) as u8),
+        ];
+        let blend = match iteration % 5 {
+            0 => BlendMode::Opaque,
+            1 => BlendMode::Average,
+            2 => BlendMode::Add,
+            3 => BlendMode::Subtract,
+            _ => BlendMode::AddQuarter,
+        };
+        let tint = (
+            (0x40 + next() % 0xC0) as u8,
+            (0x40 + next() % 0xC0) as u8,
+            (0x40 + next() % 0xC0) as u8,
+        );
+        let material = TextureMaterial::opaque(0, TPAGE, tint).with_blend_mode(blend);
+
+        let min_x = verts.iter().map(|point| point.0).min().unwrap().max(0) as u16;
+        let max_x = verts.iter().map(|point| point.0).max().unwrap().min(639) as u16;
+        let min_y = verts.iter().map(|point| point.1).min().unwrap().max(0) as u16;
+        let max_y = verts.iter().map(|point| point.1).max().unwrap().min(255) as u16;
+        // Restore the same non-zero destination under each candidate so all
+        // four blend modes are compared, not just transparent black.
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let background = (((x as u32) * 7 + (y as u32) * 11) & 0x7FFF) as u16 | 1;
+                tris.vram.set_pixel(x, y, background);
+                quad.vram.set_pixel(x, y, background);
+            }
+        }
+
+        // Authored pair: tri0=(v0,v1,v2), tri1=(v1,v3,v2). Rotate each
+        // independently as real HMD8 data does, then submit in OT traversal
+        // order (tri1 before tri0).
+        let tri0_rotation = (next() % 3) as usize;
+        let tri0_verts = rotate3([verts[0], verts[1], verts[2]], tri0_rotation);
+        let tri0_uvs = rotate3([uvs[0], uvs[1], uvs[2]], tri0_rotation);
+        let tri1_rotation = (next() % 3) as usize;
+        let tri1_verts = rotate3([verts[1], verts[3], verts[2]], tri1_rotation);
+        let tri1_uvs = rotate3([uvs[1], uvs[3], uvs[2]], tri1_rotation);
+        let tri1 = TriTextured::with_material_packet_texcoords(tri1_verts, tri1_uvs, material);
+        let tri0 = TriTextured::with_material_packet_texcoords(tri0_verts, tri0_uvs, material);
+        submit_packet(&mut tris, &tri1, TriTextured::WORDS);
+        submit_packet(&mut tris, &tri0, TriTextured::WORDS);
+
+        let one_quad = QuadTexturedMaterial::with_material(verts, uvs, material);
+        submit_packet(&mut quad, &one_quad, QuadTexturedMaterial::WORDS);
+
+        let mut differences = 0usize;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                differences += usize::from(tris.vram.get_pixel(x, y) != quad.vram.get_pixel(x, y));
+            }
+        }
+        assert_eq!(
+            differences, 0,
+            "iteration {iteration}: cyclic source pair differs from quad; \
+             verts={verts:?}, blend={blend:?}",
+        );
+    }
+}
+
 /// A room surface is a quad split into two triangles sharing the
 /// `0`-`2` diagonal: `tri(v0,v1,v2) + tri(v0,v2,v3)`. The PS1 GPU quad
 /// primitive (0x3C) splits on the `1`-`2` diagonal instead. Emitting
