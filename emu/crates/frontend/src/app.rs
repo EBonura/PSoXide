@@ -2482,7 +2482,12 @@ impl AppState {
                 .set_status("Start Embedded Play before recording input");
             return;
         }
-        self.playtest_input_tape.start_recording();
+        let start_poll = self
+            .bus
+            .as_ref()
+            .map(|bus| bus.port1_completed_polls())
+            .unwrap_or(0);
+        self.playtest_input_tape.start_recording(start_poll);
         #[cfg(not(target_arch = "wasm32"))]
         self.begin_input_profile_capture();
         let _ = self.embedded_playtest.capture_input();
@@ -2822,6 +2827,12 @@ impl AppState {
         sample
     }
 
+    /// Advance the input tape by the pad polls the guest completed during the
+    /// frame that just ran. Call once per stepped frame, after the step.
+    pub fn input_note_polls(&mut self, live_sample: Port1PadSample, polls: u64) {
+        self.playtest_input_tape.note_polls(live_sample, polls);
+    }
+
     /// `(recording, frames)` for the persistent on-screen REC indicator.
     pub fn input_recording_status(&self) -> (bool, usize) {
         (
@@ -2852,7 +2863,12 @@ impl AppState {
                 return;
             }
         }
-        self.playtest_input_tape.start_recording();
+        let start_poll = self
+            .bus
+            .as_ref()
+            .map(|bus| bus.port1_completed_polls())
+            .unwrap_or(0);
+        self.playtest_input_tape.start_recording(start_poll);
         #[cfg(not(target_arch = "wasm32"))]
         self.begin_input_profile_capture();
         self.running = true;

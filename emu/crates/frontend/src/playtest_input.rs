@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(any(target_arch = "wasm32", test))]
 use emulator_core::input_tape::tape_to_csv;
-use emulator_core::input_tape::{read_tape, write_tape};
+use emulator_core::input_tape::{read_tape_full, write_tape_poll_bound, TapeClock};
 #[cfg(feature = "editor")]
 use psxed_ui::{EditorPlaytestTapeMode, EditorPlaytestTapeStatus};
 
@@ -21,8 +21,8 @@ pub(crate) use emulator_core::input_tape::PadSample as Port1PadSample;
 /// Read a persisted input tape. Only the headless CLI (`--input-tape`) reads
 /// tapes from a path; that CLI is compiled out on wasm, so this is dead there.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn read_input_tape(path: &Path) -> Result<Vec<Port1PadSample>, String> {
-    read_tape(path)
+pub(crate) fn read_input_tape(path: &Path) -> Result<emulator_core::input_tape::Tape, String> {
+    read_tape_full(path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +51,13 @@ pub(crate) struct PlaytestInputTape {
     mode: PlaytestInputMode,
     samples: Vec<Port1PadSample>,
     replay_cursor: usize,
+    /// Port-1 completed-poll count when recording started, persisted in the
+    /// tape so a replay from a cold boot knows which poll sample 0 belongs to.
+    start_poll: u64,
+    /// Set when the loaded tape is video-frame clocked (`PXITAPE1`). Those
+    /// tapes cannot be replayed deterministically across builds of differing
+    /// speed, so they are advanced one sample per frame, as before.
+    frame_clocked: bool,
 }
 
 impl PlaytestInputTape {
@@ -84,17 +91,44 @@ impl PlaytestInputTape {
     }
 
     /// Start a new tape, discarding the in-memory previous recording.
-    pub(crate) fn start_recording(&mut self) {
+    /// `poll_count` is the guest's current port-1 completed-poll count.
+    pub(crate) fn start_recording(&mut self, poll_count: u64) {
         self.samples.clear();
         self.replay_cursor = 0;
+        self.start_poll = poll_count;
+        self.frame_clocked = false;
         self.mode = PlaytestInputMode::Recording;
+    }
+
+    /// Advance the tape by the pad polls the guest completed during the frame
+    /// that just ran. Recording appends the sample the guest actually read for
+    /// each of them; replay steps its cursor by the same amount, so both sides
+    /// are indexed by the guest's own input clock rather than by wall time.
+    pub(crate) fn note_polls(&mut self, live_sample: Port1PadSample, polls: u64) {
+        if polls == 0 {
+            return;
+        }
+        match self.mode {
+            PlaytestInputMode::Recording => {
+                for _ in 0..polls {
+                    self.samples.push(live_sample);
+                }
+            }
+            PlaytestInputMode::Replaying if !self.frame_clocked => {
+                self.replay_cursor = self
+                    .replay_cursor
+                    .saturating_add(polls as usize)
+                    .min(self.samples.len());
+            }
+            _ => {}
+        }
     }
 
     /// Stop recording and persist the tape.
     pub(crate) fn stop_recording(&mut self, path: &Path) -> Result<usize, String> {
         let frames = self.finish_recording();
         archive_existing_tape(path)?;
-        write_tape(path, &self.samples)?;
+        write_tape_poll_bound(path, &self.samples, self.start_poll)?;
         Ok(frames)
     }
 
@@ -109,7 +143,10 @@ impl PlaytestInputTape {
     /// Start replaying a persisted tape, falling back to memory.
     pub(crate) fn start_replay(&mut self, path: &Path) -> Result<usize, String> {
         if path.is_file() {
-            self.samples = read_tape(path)?;
+            let tape = read_tape_full(path)?;
+            self.samples = tape.samples;
+            self.start_poll = tape.start_poll;
+            self.frame_clocked = tape.clock == TapeClock::VideoFrame;
         }
         if self.samples.is_empty() {
             return Err("no recorded input tape found".to_string());
@@ -133,9 +170,17 @@ impl PlaytestInputTape {
     ) -> (Port1PadSample, Option<PlaytestInputEvent>) {
         match self.mode {
             PlaytestInputMode::Idle => (live_sample, None),
-            PlaytestInputMode::Recording => {
-                self.samples.push(live_sample);
-                (live_sample, None)
+            PlaytestInputMode::Recording => (live_sample, None),
+            PlaytestInputMode::Replaying if !self.frame_clocked => {
+                let Some(sample) = self.samples.get(self.replay_cursor).copied() else {
+                    let frames = self.samples.len();
+                    self.mode = PlaytestInputMode::Idle;
+                    return (
+                        live_sample,
+                        Some(PlaytestInputEvent::ReplayFinished { frames }),
+                    );
+                };
+                (sample, None)
             }
             PlaytestInputMode::Replaying => {
                 let Some(sample) = self.samples.get(self.replay_cursor).copied() else {
@@ -235,12 +280,13 @@ mod tests {
             },
         ];
         let mut tape = PlaytestInputTape::default();
-        tape.start_recording();
+        tape.start_recording(0);
         for frame in frames {
             assert_eq!(tape.sample_for_frame(frame).0, frame);
+            tape.note_polls(frame, 1);
         }
         assert_eq!(tape.stop_recording(&path).unwrap(), frames.len());
-        assert_eq!(read_input_tape(&path).unwrap(), frames);
+        assert_eq!(read_input_tape(&path).unwrap().samples, frames);
 
         let mut replay = PlaytestInputTape::default();
         assert_eq!(replay.start_replay(&path).unwrap(), frames.len());
@@ -248,8 +294,17 @@ mod tests {
             replay.sample_for_frame(Port1PadSample::default()).0,
             frames[0]
         );
+        // A poll-bound replay holds sample 0 until the guest polls, however
+        // many host frames that takes.
+        assert_eq!(
+            replay.sample_for_frame(Port1PadSample::default()).0,
+            frames[0]
+        );
+        replay.note_polls(Port1PadSample::default(), 1);
         let (last, event) = replay.sample_for_frame(Port1PadSample::default());
         assert_eq!(last, frames[1]);
+        replay.note_polls(Port1PadSample::default(), 1);
+        let (_, event) = replay.sample_for_frame(Port1PadSample::default());
         assert_eq!(
             event,
             Some(PlaytestInputEvent::ReplayFinished {
@@ -278,20 +333,20 @@ mod tests {
             ..Port1PadSample::default()
         };
         let mut tape = PlaytestInputTape::default();
-        tape.start_recording();
-        tape.sample_for_frame(first);
+        tape.start_recording(0);
+        tape.note_polls(first, 1);
         tape.stop_recording(&path).unwrap();
-        tape.start_recording();
-        tape.sample_for_frame(second);
+        tape.start_recording(0);
+        tape.note_polls(second, 1);
         tape.stop_recording(&path).unwrap();
 
-        assert_eq!(read_input_tape(&path).unwrap(), [second]);
+        assert_eq!(read_input_tape(&path).unwrap().samples, [second]);
         let archived = std::fs::read_dir(root.join("archive"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
         assert_eq!(archived.len(), 1);
-        assert_eq!(read_input_tape(&archived[0]).unwrap(), [first]);
+        assert_eq!(read_input_tape(&archived[0]).unwrap().samples, [first]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -305,8 +360,8 @@ mod tests {
             left_y: 0xa0,
         };
         let mut tape = PlaytestInputTape::default();
-        tape.start_recording();
-        tape.sample_for_frame(frame);
+        tape.start_recording(0);
+        tape.note_polls(frame, 1);
 
         let (frames, csv) = tape.stop_recording_csv();
 
