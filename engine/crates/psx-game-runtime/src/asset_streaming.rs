@@ -208,6 +208,21 @@ impl<const PAGES: usize, const ASSETS: usize> WorldChunkDestination
     }
 }
 
+/// Failure reason: the asset's cooked record is unusable (slot id out of
+/// range, or a zero byte count). A cook problem, not a disc problem.
+pub const ASSET_FAIL_BAD_RECORD: u32 = 100;
+
+/// Failure reason: the pool had no gap large enough. Either the cooked budget
+/// is too small for the neighbourhood, or first-fit fragmented past serving it.
+pub const ASSET_FAIL_NO_SPACE: u32 = 101;
+
+/// Failure reason: the read reported no error but delivered fewer bytes than
+/// the TOC promised, or the payload did not checksum.
+pub const ASSET_FAIL_SHORT_READ: u32 = 102;
+
+/// Reported in place of an asset id when a failure cannot be pinned to one.
+pub const ASSET_ID_UNKNOWN: u16 = u16::MAX;
+
 /// Loading state for all persistent gameplay assets in one asset pack.
 pub struct PersistentAssetStreamer<const PAGES: usize, const ASSETS: usize> {
     storage: PersistentAssetStorage<PAGES, ASSETS>,
@@ -219,6 +234,10 @@ pub struct PersistentAssetStreamer<const PAGES: usize, const ASSETS: usize> {
     started: bool,
     ready: bool,
     failed: bool,
+    /// Asset id of the first failure, [`ASSET_ID_UNKNOWN`] if unattributed.
+    failed_asset: u16,
+    /// Chunk status or `ASSET_FAIL_*` reason behind that first failure.
+    failed_reason: u32,
 }
 
 impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASSETS> {
@@ -234,6 +253,8 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             started: false,
             ready: false,
             failed: false,
+            failed_asset: ASSET_ID_UNKNOWN,
+            failed_reason: 0,
         }
     }
 
@@ -249,6 +270,8 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             started: false,
             ready: false,
             failed: false,
+            failed_asset: ASSET_ID_UNKNOWN,
+            failed_reason: 0,
         }
     }
 
@@ -277,13 +300,14 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             }
             let slot = asset.id.0 as usize;
             let byte_count = asset.ram_bytes as usize;
-            if count >= ASSETS
-                || slot >= ASSETS
-                || byte_count == 0
-                || !self.storage.prepare_slot(slot, byte_count)
-            {
+            if count >= ASSETS || slot >= ASSETS || byte_count == 0 {
                 self.started = true;
-                self.fail();
+                self.fail(asset.id.0, ASSET_FAIL_BAD_RECORD);
+                return;
+            }
+            if !self.storage.prepare_slot(slot, byte_count) {
+                self.started = true;
+                self.fail(asset.id.0, ASSET_FAIL_NO_SPACE);
                 return;
             }
             self.ids[count] = asset.id.0;
@@ -404,14 +428,18 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             let slot = asset.id.0 as usize;
             let byte_count = asset.ram_bytes as usize;
             if slot >= ASSETS || byte_count == 0 {
-                self.fail();
+                self.fail(asset.id.0, ASSET_FAIL_BAD_RECORD);
                 return false;
             }
             if self.storage.resident(slot) {
                 continue;
             }
-            if count >= ASSETS || !self.storage.prepare_slot(slot, byte_count) {
-                self.fail();
+            if count >= ASSETS {
+                self.fail(asset.id.0, ASSET_FAIL_BAD_RECORD);
+                return false;
+            }
+            if !self.storage.prepare_slot(slot, byte_count) {
+                self.fail(asset.id.0, ASSET_FAIL_NO_SPACE);
                 return false;
             }
             self.ids[count] = asset.id.0;
@@ -458,18 +486,33 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         self.finish_if_done()
     }
 
-    /// Latch the failure and count it exactly once.
+    /// Latch the failure and report it exactly once.
     ///
-    /// `failed` is sticky and makes `pump` return early forever, so without a
-    /// counter the only symptom is a loading screen that never advances. Every
-    /// path that gives up routes through here so that a failure is always
-    /// visible in telemetry, whatever set it.
-    fn fail(&mut self) {
+    /// `failed` is sticky and makes `pump` return early forever, so without
+    /// this the only symptom is a loading screen that never advances. Every
+    /// path that gives up routes through here, and each names the asset and the
+    /// reason: a bare failure count leaves the whole streamed asset set as the
+    /// search space.
+    fn fail(&mut self, asset: u16, reason: u32) {
         if self.failed {
             return;
         }
         self.failed = true;
+        self.failed_asset = asset;
+        self.failed_reason = reason;
         telemetry::counter(telemetry::counter::PERSISTENT_ASSET_LOAD_FAILURES, 1);
+        telemetry::counter(telemetry::counter::PERSISTENT_ASSET_FAILED_ID, asset as u32);
+        telemetry::counter(telemetry::counter::PERSISTENT_ASSET_FAILED_REASON, reason);
+    }
+
+    /// Asset id behind the first failure, [`ASSET_ID_UNKNOWN`] if unattributed.
+    pub const fn failed_asset(&self) -> u16 {
+        self.failed_asset
+    }
+
+    /// Chunk status or `ASSET_FAIL_*` reason behind the first failure.
+    pub const fn failed_reason(&self) -> u32 {
+        self.failed_reason
     }
 
     fn finish_if_done(&mut self) -> bool {
@@ -481,7 +524,14 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         let mut index = 0usize;
         while index < self.asset_count {
             if statuses[index] != ROOM_CHUNK_STATUS_OK || !completed[index] {
-                self.fail();
+                // A completed-but-unverified entry has an OK status, so report
+                // the read timeout that a short delivery amounts to.
+                let reason = if statuses[index] != ROOM_CHUNK_STATUS_OK {
+                    statuses[index]
+                } else {
+                    ASSET_FAIL_SHORT_READ
+                };
+                self.fail(self.ids[index], reason);
                 return false;
             }
             index += 1;
@@ -787,6 +837,16 @@ mod tests {
         assert!(streamer.failed(), "an unallocatable asset must fail at begin");
         assert!(!streamer.ready());
         assert!(!streamer.pump(&mut CdController::zeroed(), 8), "no progress");
+        // Naming the asset is the point: a bare count leaves every streamed
+        // asset in the level as the search space.
+        assert_eq!(streamer.failed_asset(), 0);
+        assert_eq!(streamer.failed_reason(), ASSET_FAIL_NO_SPACE);
+
+        // A record the cooker should never emit is a different diagnosis.
+        let mut bad = PersistentAssetStreamer::<1, 2>::new();
+        bad.begin(0, &[], &[persistent_asset(7, 64)]);
+        assert_eq!(bad.failed_asset(), 7, "slot id out of range names the asset");
+        assert_eq!(bad.failed_reason(), ASSET_FAIL_BAD_RECORD);
     }
 
     #[test]
