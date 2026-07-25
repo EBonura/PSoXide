@@ -2884,7 +2884,13 @@ impl EditorWorkspace {
             .parent()
             .ok_or_else(|| format!("{} has no parent directory", delete_dir.display()))?;
         if !paths_equivalent(parent, &projects_root) {
-            return Err("Only projects in editor/projects can be deleted".to_string());
+            // The guard is the resolved projects root, not a literal path, so
+            // it follows `projects_dir()` into a shipped build's per-user data
+            // directory. Report the root it actually enforced.
+            return Err(format!(
+                "Only projects in {} can be deleted",
+                projects_root.display()
+            ));
         }
         let fallback_dir = Self::delete_project_fallback_dir(&delete_dir)?;
         let mut opened = Self::open_directory(&fallback_dir)?;
