@@ -383,6 +383,23 @@ pub struct LaunchArgs {
     /// Hold the game run button during the headless run.
     #[arg(long)]
     pub hold_run: bool,
+    /// Press buttons at scheduled route ticks, so a headless run can clear a
+    /// menu and reach gameplay.
+    ///
+    /// `--hold-forward` only holds the stick, and every project now boots to a
+    /// menu, which left no headless route into gameplay at all and so no way to
+    /// measure a render change. Recorded tapes do not fill the gap: they are
+    /// keyed to the pad-poll clock of the run that recorded them and desync.
+    ///
+    /// Spec is `tick:button[:hold]`, comma separated, ticks counted from the
+    /// start of the route. `hold` defaults to 4 ticks, which is long enough for
+    /// the guest to poll the pad at least once. Buttons: cross, circle, square,
+    /// triangle, start, select, up, down, left, right, l1, r1, l2, r2.
+    ///
+    /// Combines with `--hold-forward`: held input stays applied, and a scheduled
+    /// press is added on top for its duration.
+    #[arg(long)]
+    pub press: Option<String>,
     /// Enable GPU wireframe render mode (edges only) for this run, mirroring the
     /// toolbar toggle. Pair with `--dump-hw` for a single-frame edge render.
     #[arg(long)]
@@ -961,6 +978,10 @@ fn run_headless_launch(
         bus.gpu.wireframe_enabled = true;
     }
 
+    let scripted_presses = match args.press.as_deref() {
+        Some(spec) => parse_press_script(spec)?,
+        None => Vec::new(),
+    };
     let mut held_button_mask = 0u16;
     if args.hold_forward || args.hold_run {
         if args.hold_run {
@@ -1171,6 +1192,19 @@ fn run_headless_launch(
             route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
             route_tick_steps = 0;
             route_ticks += 1;
+            if !scripted_presses.is_empty() {
+                // Re-derive the whole mask each tick rather than tracking
+                // press/release edges: overlapping presses then just OR
+                // together, and a missed release cannot leave a button stuck
+                // down for the rest of the run.
+                let mut mask = held_button_mask;
+                for press in &scripted_presses {
+                    if route_ticks >= press.tick && route_ticks < press.tick + press.hold {
+                        mask |= press.mask;
+                    }
+                }
+                bus.set_port1_buttons(ButtonState::from_bits(mask));
+            }
             if args.input_tape_transcribe.is_some() {
                 // Attribute polls to the sample that was live while they ran,
                 // before this tick installs a new one. The bus sample is
@@ -1446,6 +1480,14 @@ fn run_headless_launch(
                 Some(i) => format!("  stopped-at={i}"),
                 None => String::new(),
             }
+        );
+        // A headless route that never leaves a menu looks identical whether the
+        // guest ignored the input or never read the pad at all, so report the
+        // poll count: zero means scripted presses and tapes alike were written
+        // to a port nobody is reading.
+        println!(
+            "route-ticks={route_ticks}  port1-polls={}",
+            bus.port1_completed_polls()
         );
         if std::env::var_os("PSOXIDE_TRACE_HLE_BIOS").is_some() {
             eprintln!(
@@ -2186,6 +2228,7 @@ fn validation_launch_args(
         cd_command_log: None,
         dump_guest_profile: false,
         hold_forward: checkpoint.hold_forward,
+        press: None,
         hold_run: checkpoint.hold_run,
         wireframe: false,
         texture_filter: "none".to_string(),
@@ -3012,4 +3055,101 @@ fn write_vram_words_ppm(path: &std::path::Path, words: &[u16]) -> Result<(), Str
     }
     f.write_all(&rgb).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// One scheduled button press from `--press`.
+struct ScriptedPress {
+    /// Route tick the press starts on.
+    tick: u64,
+    /// How many route ticks to hold it.
+    hold: u64,
+    /// Pad button bits.
+    mask: u16,
+}
+
+/// Parse a `--press` spec: `tick:button[:hold]`, comma separated.
+fn parse_press_script(spec: &str) -> Result<Vec<ScriptedPress>, String> {
+    let mut out = Vec::new();
+    for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let mut parts = entry.split(':');
+        let (Some(tick), Some(name)) = (parts.next(), parts.next()) else {
+            return Err(format!("--press '{entry}': expected tick:button[:hold]"));
+        };
+        let tick: u64 = tick
+            .trim()
+            .parse()
+            .map_err(|_| format!("--press '{entry}': '{tick}' is not a tick number"))?;
+        let mask = press_button_mask(name.trim())
+            .ok_or_else(|| format!("--press '{entry}': unknown button '{name}'"))?;
+        // A press shorter than a pad-poll interval can fall entirely between
+        // two polls and never be seen, so the default is several ticks.
+        let hold = match parts.next() {
+            Some(hold) => hold
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| format!("--press '{entry}': '{hold}' is not a hold length"))?,
+            None => 4,
+        };
+        if hold == 0 {
+            return Err(format!("--press '{entry}': hold must be at least 1 tick"));
+        }
+        if parts.next().is_some() {
+            return Err(format!("--press '{entry}': expected tick:button[:hold]"));
+        }
+        out.push(ScriptedPress { tick, hold, mask });
+    }
+    if out.is_empty() {
+        return Err("--press: no presses in spec".to_string());
+    }
+    Ok(out)
+}
+
+/// Map a `--press` button name to its pad bits.
+fn press_button_mask(name: &str) -> Option<u16> {
+    use emulator_core::pad::button;
+    Some(match name.to_ascii_lowercase().as_str() {
+        "cross" | "x" => button::CROSS,
+        "circle" | "o" => button::CIRCLE,
+        "square" => button::SQUARE,
+        "triangle" => button::TRIANGLE,
+        "start" => button::START,
+        "select" => button::SELECT,
+        "up" => button::UP,
+        "down" => button::DOWN,
+        "left" => button::LEFT,
+        "right" => button::RIGHT,
+        "l1" => button::L1,
+        "r1" => button::R1,
+        "l2" => button::L2,
+        "r2" => button::R2,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod press_script_tests {
+    use super::*;
+
+    #[test]
+    fn parses_ticks_buttons_and_optional_hold() {
+        let script = parse_press_script("30:cross, 60:start:12").expect("valid spec");
+        assert_eq!(script.len(), 2);
+        assert_eq!(script[0].tick, 30);
+        assert_eq!(script[0].hold, 4, "default hold spans several pad polls");
+        assert_eq!(script[0].mask, emulator_core::pad::button::CROSS);
+        assert_eq!(script[1].tick, 60);
+        assert_eq!(script[1].hold, 12);
+        assert_eq!(script[1].mask, emulator_core::pad::button::START);
+    }
+
+    #[test]
+    fn rejects_specs_that_would_silently_do_nothing() {
+        // A typo'd button, a zero hold and an empty spec all mean the run
+        // quietly never leaves the menu, which is the failure this flag exists
+        // to remove. Fail loudly instead.
+        assert!(parse_press_script("30:corss").is_err());
+        assert!(parse_press_script("30:cross:0").is_err());
+        assert!(parse_press_script("").is_err());
+        assert!(parse_press_script("cross").is_err());
+    }
 }
