@@ -331,6 +331,34 @@ the runtime slot could never be made resident. But the consequence is that
 **cortex_v1 is currently the only streamable project**, and it is far too small
 to exercise the streaming system it is the sole test case for.
 
+### Root cause: the split rule ignores the byte budget
+
+The error message asks the author to add portal seams, which misdirects. Chunking
+is already automatic: cortex_v1's eight chunks come from ONE authored room. The
+partition happens in [`playtest.rs:315`](../editor/crates/psxed-project/src/playtest.rs#L315),
+which walks `plan.rooms` from the portal-room plan and cooks one chunk per portal
+room.
+
+That plan is derived from portal seams alone. Nothing in it consults
+`MAX_STREAMED_ROOM_CHUNK_BYTES`, so a portal room with no internal seams may cook
+to any size at all, and the violation is only caught later at manifest write.
+
+For a seamless world this is the wrong place to put the constraint. An author
+building a large hall should not have to reverse-engineer a 32 KiB cooked-byte
+budget by inserting seams until the cook stops failing. The cooker knows the
+cooked size of every candidate chunk, so it should subdivide a portal room on the
+grid until each piece fits, generating the interior seams itself.
+
+That is the fix, and it is not small: subdividing a portal room means synthesising
+portals at each cut and rebuilding the neighbour links, visibility sets and portal
+records that `plan.portals` and `portal_room.neighbours` carry. It belongs in the
+portal-plan stage, not as a post-pass over cooked bytes.
+
+**Note for whoever picks this up:** `cook-playtest` overwrites `generated/` and
+leaves it incomplete when it fails, so a failed cook of one project destroys the
+previously cooked manifest of another. Recook the working project immediately, or
+make the writer stage to a temporary directory and swap on success.
+
 This reframes findings 4 and 5. They are not blocked on a tool nobody has
 written; they are blocked on authored content that fits the runtime contract.
 Splitting cortex_v2's room 0 along more portal seams would produce, in one step,
