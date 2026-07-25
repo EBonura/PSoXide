@@ -424,6 +424,14 @@ struct Playtest {
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Persistent model bytes are resident and the parsed runtime tables are valid.
     runtime_models_loaded: bool,
+    /// Last world-ready condition set reported by `trace_world_ready_conditions`,
+    /// OR'd with a seen bit so the zeroed initial value cannot be mistaken for
+    /// "all conditions false, already reported".
+    #[cfg(feature = "boot-trace")]
+    world_ready_trace_mask: u32,
+    /// Last persistent-asset progress reported, so the trace can show movement.
+    #[cfg(feature = "boot-trace")]
+    world_ready_trace_progress: i32,
     /// Predecoded model face records, shared by `models`.
     model_faces: [TexturedModelRenderFace; MAX_RUNTIME_MODEL_FACES],
     model_face_count: usize,
@@ -623,6 +631,29 @@ impl Playtest {
         #[cfg(feature = "cd-stream-bench")]
         {
             if !self.runtime_models_loaded {
+                // Traced too: this is the earliest condition and it returns
+                // before the rest are even evaluated, so a stall here is
+                // otherwise silent.
+                // `failed` is sticky and stops the pump, so a single bad
+                // persistent asset hangs the loading screen forever with
+                // nothing reported. Distinguish the two.
+                let arena_failed = persistent_assets_arena().failed();
+                #[cfg(feature = "boot-trace")]
+                {
+                    // Distinguish "slow" from "wedged": a load that is merely
+                    // slow keeps moving this.
+                    let progress = persistent_assets_arena().progress_q12();
+                    if progress != self.world_ready_trace_progress {
+                        self.world_ready_trace_progress = progress;
+                        psx_rt::tty::print("persistent progress q12 ");
+                        psx_rt::tty::print_hex_u32(progress as u32);
+                        psx_rt::tty::println("");
+                    }
+                }
+                self.trace_world_ready_conditions(&[
+                    ("runtime_models_loaded", false),
+                    ("persistent_assets_not_failed", !arena_failed),
+                ]);
                 return false;
             }
             if !self.chunked_level() {
@@ -632,13 +663,65 @@ impl Playtest {
                 return true;
             };
             let textures_ready = self.initial_stream_ring_textures_ready();
-            self.current_collision_room.is_some()
-                && !self.window.job.active
-                && self.portal_visible_rooms_are_active(record)
-                && self.initial_stream_ring_resident()
-                && textures_ready
-                && self.streaming_jobs.vram_uploads_idle()
-                && !streamed_room_stream_active()
+            let conditions = [
+                ("collision_room", self.current_collision_room.is_some()),
+                ("window_job_idle", !self.window.job.active),
+                ("portal_rooms_active", self.portal_visible_rooms_are_active(record)),
+                ("ring_resident", self.initial_stream_ring_resident()),
+                ("ring_textures", textures_ready),
+                ("vram_uploads_idle", self.streaming_jobs.vram_uploads_idle()),
+                ("stream_quiet", !streamed_room_stream_active()),
+            ];
+            self.trace_world_ready_conditions(&conditions);
+            let mut ready = true;
+            let mut i = 0;
+            while i < conditions.len() {
+                ready &= conditions[i].1;
+                i += 1;
+            }
+            ready
+        }
+    }
+
+    /// Report which world-ready conditions are still false, once per change.
+    ///
+    /// A stalled load is otherwise invisible: `initial_world_ready` collapses
+    /// seven conditions into one bool, none of them is a telemetry counter, and
+    /// the loading screen looks identical whichever one is stuck. Finding that
+    /// out cost a whole session once (see docs/known-issues-2026-07-25.md).
+    ///
+    /// Printing only on change keeps a 30 Hz loading loop from flooding the TTY
+    /// while still showing the order conditions settle in, which is what says
+    /// whether a load is progressing or wedged.
+    #[cfg(feature = "cd-stream-bench")]
+    fn trace_world_ready_conditions(&mut self, conditions: &[(&str, bool)]) {
+        #[cfg(not(feature = "boot-trace"))]
+        {
+            let _ = conditions;
+        }
+        #[cfg(feature = "boot-trace")]
+        {
+            let mut mask = 0u32;
+            let mut i = 0;
+            while i < conditions.len() {
+                if conditions[i].1 {
+                    mask |= 1 << i;
+                }
+                i += 1;
+            }
+            const TRACED: u32 = 1 << 31;
+            if mask | TRACED == self.world_ready_trace_mask {
+                return;
+            }
+            self.world_ready_trace_mask = mask | TRACED;
+            psx_rt::tty::println("world-ready pending:");
+            let mut i = 0;
+            while i < conditions.len() {
+                if !conditions[i].1 {
+                    psx_rt::tty::println(conditions[i].0);
+                }
+                i += 1;
+            }
         }
     }
 
