@@ -33,6 +33,11 @@ pub(crate) fn cook_ui_nodes(
     project_root: &Path,
     texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
+    // Collects the project-global UI source files this cook touched: CD-DA
+    // and SFX `.wav`s plus UI image textures. They are not reachable from any
+    // room, so a room-driven walk misses them entirely and a project copied
+    // without them boots to a placeholder menu with no audio.
+    used_ui_source_paths: &mut Vec<String>,
     report: &mut PlaytestValidationReport,
 ) -> (
     Vec<PlaytestUiNode>,
@@ -83,6 +88,14 @@ pub(crate) fn cook_ui_nodes(
     }
 
     let game_flow = cook_game_flow(project, &ui_scenes);
+
+    // Harvest from the same dedupe maps the cook used, so the shipped set
+    // cannot drift from what was actually read.
+    used_ui_source_paths.extend(ui_sfx_sample_for_wav.keys().cloned());
+    used_ui_source_paths.extend(cdda_track_for_wav.keys().cloned());
+    used_ui_source_paths.extend(ui_image_texture_for_path.keys().cloned());
+    used_ui_source_paths.sort();
+    used_ui_source_paths.dedup();
 
     (
         ui_nodes,

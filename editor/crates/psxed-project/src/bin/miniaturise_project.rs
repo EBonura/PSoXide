@@ -14,36 +14,21 @@
 //! miniaturise-project projects/cortex_v5/project.ron /tmp/cortex_v5_slim
 //! ```
 //!
-//! # INCOMPLETE -- do not ship its output yet
+//! # Acceptance test
 //!
-//! Only textures reached through room materials, model meshes, model atlases
-//! and animation clips are copied. A round-trip on cortex_v1 -- cook the
-//! original, cook the copy, diff `generated/` -- showed three asset classes are
-//! missed entirely:
+//! Cook the original, cook the copy, diff `generated/`. The copy is only
+//! shippable when that diff is empty and the cook logs no placeholder or
+//! missing-source warnings. cortex_v1 passes: 566 source assets down to 44,
+//! 295 MB down to 1.0 MB, byte-identical cooked output.
 //!
-//! - **UI images.** The menu art cooks as PLACEHOLDERS, with warnings like
-//!   `failed to read texture 'BONNIE_STUDIOS_LOGO' ... using placeholder`.
-//! - **CD-DA tracks.** `track02.cdda` is absent from the copy.
-//! - **UI SFX.** `ui_sfx_000.psau` is absent.
+//! Getting there needed three asset classes a room-driven walk never reaches --
+//! UI image textures, UI SFX and CD-DA, all cooked in `playtest/cook_ui.rs` --
+//! and two traps worth remembering. A CD-DA key is an asset IDENTITY, not a
+//! path: it may be absolute and carries a `#<loop-point>` fragment. And a
+//! source that fails to resolve must be reported, never folded in with
+//! procedurally generated materials, or the counters read healthy while the
+//! copy quietly loses files.
 //!
-//! A shipped copy would therefore boot to a broken menu with no audio. These
-//! are project-global assets rather than per-room reachable ones, so they do
-//! not need reachability analysis -- copying all of them is correct.
-//!
-//! All three live in `playtest/cook_ui.rs`, which this tool never traced:
-//!
-//! | Asset | Site | Note |
-//! |---|---|---|
-//! | CD-DA music | `cook_ui.rs:971` | `.wav` source via `resolve_path(trimmed, project_root)` |
-//! | UI SFX | `cook_ui.rs:1114` | `.wav` source, same resolution |
-//! | UI image textures | same module | reported by `"...is missing; using placeholder"` at `cook_ui.rs:770` |
-//!
-//! Collect those paths the way textures and models are collected -- from the
-//! cook rather than a second traversal -- add them to the used set, and re-run
-//! the round-trip until the diff is empty.
-//!
-//! The round-trip diff is the acceptance test for this tool. Until it comes
-//! back clean, treat the output as a size experiment, not a shippable project.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -96,6 +81,7 @@ fn main() {
         .used_texture_paths
         .iter()
         .chain(package.used_model_paths.iter())
+        .chain(package.used_ui_paths.iter())
         .map(String::as_str)
         .collect();
 
@@ -109,15 +95,61 @@ fn main() {
     let mut copied = 0usize;
     let mut copied_bytes = 0u64;
     let mut generated = 0usize;
-    for relative in &used {
-        let source = project_dir.join(relative);
+    let mut missing = 0usize;
+    for key in &used {
+        // A CD-DA key carries a `#<loop-point>` fragment and may be absolute,
+        // so the map key is an asset IDENTITY rather than a path. Recover the
+        // file, then re-derive a project-relative destination so the copy keeps
+        // the layout `project.ron` expects.
+        // A generated material's key is its descriptor, not a path. The cook
+        // rebuilds it from `project.ron`, so there is nothing to copy.
+        if key.starts_with('@') {
+            generated += 1;
+            continue;
+        }
+        let path_part = key.split('#').next().unwrap_or(key);
+        let source = if Path::new(path_part).is_absolute() {
+            PathBuf::from(path_part)
+        } else {
+            project_dir.join(path_part)
+        };
+        // The destination MUST stay inside `out_dir`. `Path::join` silently
+        // discards its base when given an absolute path, so a failed
+        // strip_prefix here would write over the source tree instead of the
+        // copy. Compare canonical forms, and refuse rather than escape.
+        let relative_owned = match (source.canonicalize(), project_dir.canonicalize()) {
+            (Ok(abs_source), Ok(abs_root)) => abs_source
+                .strip_prefix(&abs_root)
+                .ok()
+                .map(|rel| rel.to_path_buf()),
+            _ => None,
+        };
+        let Some(relative) = relative_owned else {
+            eprintln!(
+                "[miniaturise] REFUSED '{path_part}': outside the project directory"
+            );
+            missing += 1;
+            continue;
+        };
+        let relative = relative.as_path();
         // The cook's texture map is keyed by texture IDENTITY, not always a
         // path: a procedurally generated material's key is its descriptor, and
         // cortex_v5's art is mostly generated. Those have no source file -- the
         // cook rebuilds them from the descriptor in `project.ron` -- so they
         // need nothing copied and must not be reported as missing.
         if !source.is_file() {
-            generated += 1;
+            // A procedurally generated material's key is its descriptor, not a
+            // path, and the cook rebuilds it from `project.ron`, so it needs no
+            // file. Anything that LOOKS like a path but does not resolve is a
+            // real miss and must be loud: silently folding the two together is
+            // how CD-DA and SFX `.wav`s went missing while the counter still
+            // read healthy.
+            if path_part.contains('.') && !path_part.starts_with('@') {
+                eprintln!("[miniaturise] MISSING source for '{path_part}'");
+                missing += 1;
+            } else {
+                generated += 1;
+            }
             continue;
         }
         let destination = out_dir.join(relative);
@@ -156,6 +188,12 @@ fn main() {
     if generated > 0 {
         println!("[miniaturise] {generated} generated texture(s) need no source file");
     }
+    if missing > 0 {
+        eprintln!(
+            "[miniaturise] {missing} source file(s) could not be resolved; \
+             the copy is INCOMPLETE"
+        );
+    }
     println!("[miniaturise] wrote → {}", out_dir.display());
     if available > copied {
         println!(
@@ -177,7 +215,9 @@ fn count_source_assets(project_dir: &Path) -> usize {
                 walk(&path, count);
             } else if path
                 .extension()
-                .is_some_and(|ext| ext == "psxt" || ext == "psxmdl" || ext == "psxanim")
+                .is_some_and(|ext| {
+                    ext == "psxt" || ext == "psxmdl" || ext == "psxanim" || ext == "wav"
+                })
             {
                 *count += 1;
             }
