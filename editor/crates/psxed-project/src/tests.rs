@@ -205,9 +205,15 @@ fn enemy_behavior_deserializes_without_combat_director_tuning_fields() {
 
 #[test]
 fn cortex_project_deserializes_authored_enemy_combat_profile() {
+    // Reads the TRACKED sample rather than a working project. The original
+    // fixture, `projects/cortex_ignition_v1`, was renamed and its successor
+    // lives under `projects/`, which is gitignored so working projects stay
+    // untracked -- so pointing this at cortex_v1 would pass locally and fail on
+    // any fresh checkout. `samples/cortex_v1` is the miniaturised copy that
+    // ships with releases, and it carries the same authored enemy profile.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../projects/cortex_ignition_v1/project.ron");
-    let text = std::fs::read_to_string(&path).expect("tracked Cortex project is readable");
+        .join("../../samples/cortex_v1/project.ron");
+    let text = std::fs::read_to_string(&path).expect("tracked Cortex sample is readable");
     let project = ProjectDocument::from_ron_str(&text).expect("tracked Cortex project parses");
     let enemy = project
         .active_scene()
