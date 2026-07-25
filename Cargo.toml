@@ -124,6 +124,18 @@ rfd         = "0.15"
 lto = "fat"
 codegen-units = 1
 
+# Packaging smoke tests. Same code as `release`, without the two settings that
+# dominate a cold build: `lto = "fat"` re-optimises the whole dependency graph
+# at link time, and `codegen-units = 1` forbids parallel codegen, so the final
+# link is effectively single-threaded. Together they put a two-architecture CI
+# build at roughly eleven minutes. A dispatch run exercising the archive does
+# not need a maximally optimised binary; a tagged release still builds
+# `release`.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 # Optimize the emulator's hot code at -O3 even in debug builds so `cargo run` /
 # `trunk serve` run near release speed, while the crate under edit (frontend)
 # stays at opt-level 0 for fast incremental rebuilds.
