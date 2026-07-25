@@ -1116,3 +1116,122 @@ const fn max3(a: i32, b: i32, c: i32) -> i32 {
         c
     }
 }
+
+/// Exploratory harness: submit one cached wall quad standing `distance` in
+/// front of the camera and report what the room renderer emitted.
+fn wall_submission_probe(distance: i32, half_extent: i32) -> (usize, GridVisibilityStats) {
+    let mut ot_storage = psx_gpu::ot::OrderingTable::<64>::new();
+    let mut ot = crate::OtFrame::begin(&mut ot_storage);
+    let mut packet_scratch = crate::PrimitivePacketScratch::<256>::ZERO;
+    let mut triangles = crate::PrimitivePacketArena::new(&mut packet_scratch);
+    let mut commands = [crate::WorldTriCommand::EMPTY; 256];
+    let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+    let projection = WorldProjection::new(160, 120, 200, 16);
+    let camera = WorldCamera::from_basis(
+        projection,
+        WorldVertex::new(0, 0, 0),
+        Q12::ZERO,
+        Q12::ONE,
+        Q12::ZERO,
+        Q12::ONE,
+    );
+    // Vertical wall plane facing the camera, which looks down -Z.
+    let z = -distance;
+    let vertices = [
+        WorldVertex::new(-half_extent, half_extent, z),
+        WorldVertex::new(half_extent, half_extent, z),
+        WorldVertex::new(half_extent, -half_extent, z),
+        WorldVertex::new(-half_extent, -half_extent, z),
+    ];
+    let cells = [CachedRoomCell::new(
+        0,
+        0,
+        0,
+        -half_extent,
+        half_extent,
+        0,
+        1,
+        0,
+        4,
+    )];
+    let surface = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Wall {
+                direction: DIR_NORTH,
+            },
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::new(0, 0, z),
+            baked_vertex_rgb: None,
+            ordinal: 0,
+        },
+        SPLIT_NW_SE,
+        WHOLE_QUAD_TRIANGLE_INDEX,
+    );
+    let mut projected_indices = [0u16; 4];
+    let mut projected = [ProjectedVertex::default(); 4];
+    let mut projected_depths = [0; 4];
+    let mut accepted_cell_indices = [0u16; 1];
+    let mut accepted_cell_depths = [0; 1];
+
+    let stats = draw_indexed_cached_room_vertex_lit_visible_cells(
+        &cells,
+        &[0, 1, 2, 3],
+        &vertices,
+        &[surface],
+        &mut projected_indices,
+        &mut projected,
+        &mut projected_depths,
+        &mut accepted_cell_indices,
+        &mut accepted_cell_depths,
+        1,
+        1664,
+        &[WorldRenderMaterial::both(TextureMaterial::opaque(
+            0,
+            0,
+            (128, 128, 128),
+        ))],
+        &NoWorldSurfaceLighting,
+        &camera,
+        WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 25_000))
+            .with_adaptive_subdivision_sector_size(1664)
+            .with_adaptive_subdivision_max_levels(1)
+            .with_adaptive_subdivision_kinds(AdaptiveSubdivisionKindMask::FLOOR_WALL),
+        CachedRoomDepthMode::Hybrid,
+        CachedRoomSubdivisionMode::All,
+        &[GridVisibleCell::new(0, 0, -half_extent, half_extent)],
+        0,
+        None,
+        &mut triangles,
+        &mut pass,
+    );
+    (pass.command_len(), stats)
+}
+
+/// Walls must take the same adaptive subdivision schedule as floors, and
+/// must keep rendering when the camera is close enough that the projected quad
+/// blows past the PS1 hardware extent. Both were reported broken in cortex_v1;
+/// this pins the room-renderer half of that report.
+#[test]
+fn wall_surfaces_subdivide_inside_the_band_and_survive_close_range() {
+    let far_depth = 1664 * 5;
+    let underdraw_depth = far_depth / 2;
+    let emitted = |distance| wall_submission_probe(distance, 832).0;
+
+    // Beyond the subdivision band the wall stays one authored quad.
+    assert_eq!(emitted(far_depth + 1_000), 1);
+    // Inside the band it becomes four generated leaves, plus the authored
+    // crack-cover polygon while the root is still past the underdraw depth.
+    assert_eq!(emitted(far_depth - 1_000), 5);
+    assert_eq!(emitted(underdraw_depth - 1_000), 4);
+    // Close range must keep emitting geometry rather than dropping the wall.
+    for distance in [400, 200, 100, 50] {
+        assert!(
+            emitted(distance) >= 4,
+            "wall vanished at distance {distance}"
+        );
+    }
+}
