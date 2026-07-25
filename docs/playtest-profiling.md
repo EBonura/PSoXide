@@ -46,8 +46,16 @@ cd tools/mkisopsx && cargo run --release -- \
   --volume CORTEX_IGNITION_V1 --cdtest-sectors 32 \
   --world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
   --world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+  --ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+  --ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
   --cdda-track-list ../../engine/examples/editor-playtest/generated/cdda_tracks.txt
 ```
+
+**The UI pack flags are NOT optional.** Persistent gameplay assets live in the
+UI pack, so a disc built without `--ui-pack-dir`/`--ui-pack-order-file` has
+nothing at `UI_PACK_START_LBA` and the asset arena waits forever for sectors
+nobody wrote. It looks exactly like an engine streaming stall: loading screen
+forever, zero sectors, no error. Cost a full session on 2026-07-25.
 
 Then replay and dump (`emu/crates/frontend/src/cli.rs`, `launch` subcommand):
 
