@@ -1802,6 +1802,10 @@ pub struct PlaytestPackage {
     /// [`Self::used_texture_paths`]: taken from the maps the cook itself keeps,
     /// so it cannot name a file the cook did not use, nor miss one it did.
     pub used_model_paths: Vec<String>,
+    /// Project-global UI source files: CD-DA and SFX `.wav`s plus UI image
+    /// textures. Not reachable from any room, so they need copying wholesale
+    /// rather than by reachability.
+    pub used_ui_paths: Vec<String>,
     /// Cached-room depth sorting mode selected by the project.
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
     /// Runtime room triangle subdivision scope.
