@@ -584,6 +584,11 @@ impl Playtest {
         // stable between crossings; debounce eviction on the camera room (not the
         // player) and let the scheduler LRU absorb visible-set jitter.
         evict_unreferenced_vram(self.visibility.root, &desired, count);
+        // Same desired set, same residency phase: scope the persistent RAM
+        // assets to it so textures page with the window instead of the whole
+        // level staying pinned for the run.
+        #[cfg(feature = "cd-stream-bench")]
+        request_persistent_assets(&desired, count);
     }
 
     pub(super) fn current_floor_link_sector(&self) -> Option<psx_engine::SectorCollision> {
