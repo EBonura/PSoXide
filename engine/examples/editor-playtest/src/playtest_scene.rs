@@ -135,6 +135,13 @@ impl Scene for Playtest {
         #[cfg(feature = "cd-stream-bench")]
         {
             if !self.runtime_models_loaded {
+                // A failed persistent load never resumes, so leaving the bar
+                // parked at whatever fraction it reached reads as "still
+                // working". Empty and stuck is the honest signal, and it is the
+                // only one this screen can give without authored error UI.
+                if persistent_assets_arena().failed() {
+                    return 0;
+                }
                 return persistent_assets_arena().progress_q12().saturating_mul(3) / 8;
             }
             let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
