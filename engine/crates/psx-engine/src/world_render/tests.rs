@@ -322,29 +322,34 @@ fn wall_material_swaps_front_and_back_only() {
     );
 }
 
+/// Sector walls are solid geometry, so both faces are real surfaces. Culling
+/// the interior face deleted any boundary wall for a player standing in the
+/// cell that owns it, which is the only side of a room-bounding wall anyone can
+/// stand on. `wall_material` still swaps the authored per-side texture, so the
+/// two faces keep their own appearance; only the culling changes.
 #[test]
-fn diagonal_wall_materials_are_forced_double_sided() {
+fn wall_materials_are_double_sided_in_every_direction() {
     let texture = TextureMaterial::opaque(0, 0, (128, 128, 128));
-    assert_eq!(
-        wall_material_for_direction(WorldRenderMaterial::front(texture), DIR_NORTH).sidedness,
-        SurfaceSidedness::Back
-    );
-    assert_eq!(
-        wall_material_for_direction(
+    for direction in [
+        DIR_NORTH,
+        DIR_EAST,
+        DIR_SOUTH,
+        DIR_WEST,
+        DIR_NORTH_WEST_SOUTH_EAST,
+        DIR_NORTH_EAST_SOUTH_WEST,
+    ] {
+        for material in [
             WorldRenderMaterial::front(texture),
-            DIR_NORTH_WEST_SOUTH_EAST
-        )
-        .sidedness,
-        SurfaceSidedness::Both
-    );
-    assert_eq!(
-        wall_material_for_direction(
             WorldRenderMaterial::back(texture),
-            DIR_NORTH_EAST_SOUTH_WEST
-        )
-        .sidedness,
-        SurfaceSidedness::Both
-    );
+            WorldRenderMaterial::both(texture),
+        ] {
+            assert_eq!(
+                wall_material_for_direction(material, direction).sidedness,
+                SurfaceSidedness::Both,
+                "direction {direction} should render both wall faces"
+            );
+        }
+    }
 }
 
 #[test]
