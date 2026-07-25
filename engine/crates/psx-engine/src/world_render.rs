@@ -2753,14 +2753,6 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     prebuilt_ready_value: u8,
     profile: &mut RoomSurfaceMicroProfile,
 ) {
-    let (verts, uv_words, colors) = match material.sidedness {
-        SurfaceSidedness::Back => (
-            reverse_quad_winding(verts),
-            reverse_quad_winding(uv_words),
-            reverse_quad_winding(colors),
-        ),
-        SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uv_words, colors),
-    };
     let opts = options.with_material_layer(material.texture);
     // The hardware quad (GP0 3Ch) rasterizes as tri(q0,q1,q2)+tri(q1,q2,q3),
     // i.e. the 1-2 diagonal. Reorder the four corners so that diagonal
@@ -2769,19 +2761,11 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     // GPU tests). Unknown split ids use the standard NW-SE fallback, matching
     // `split_triangles_runtime`.
     if let Some(prepared_depth) = prepared_depth {
-        let (quad_verts, quad_uv_words, quad_colors) = if split == SPLIT_NE_SW {
-            (
-                [verts[0], verts[1], verts[3], verts[2]],
-                [uv_words[0], uv_words[1], uv_words[3], uv_words[2]],
-                [colors[0], colors[1], colors[3], colors[2]],
-            )
-        } else {
-            (
-                [verts[1], verts[0], verts[2], verts[3]],
-                [uv_words[1], uv_words[0], uv_words[2], uv_words[3]],
-                [colors[1], colors[0], colors[2], colors[3]],
-            )
-        };
+        let (quad_verts, quad_uv_words, quad_colors) = (
+            quad_packet_order(verts, split),
+            quad_packet_order(uv_words, split),
+            quad_packet_order(colors, split),
+        );
         let _ = world.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
             triangles,
             prebuilt,
@@ -2798,6 +2782,14 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
         let _ = profile;
         return;
     }
+    let (verts, uv_words, colors) = match material.sidedness {
+        SurfaceSidedness::Back => (
+            reverse_quad_winding(verts),
+            reverse_quad_winding(uv_words),
+            reverse_quad_winding(colors),
+        ),
+        SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uv_words, colors),
+    };
     let split_triangles = split_triangles_runtime(split);
     let [(a, b, c), (d, e, f)] = split_triangles;
     #[cfg(feature = "room-surface-profile")]
@@ -3169,6 +3161,29 @@ fn wall_vertices(
 #[cfg(test)]
 fn wall_uvs() -> [(u8, u8); 4] {
     WALL_UVS
+}
+
+/// Corner order for one hardware quad packet.
+///
+/// GP0's quad rasterizes tri(q0,q1,q2) + tri(q1,q2,q3), so this puts the
+/// authored split diagonal on the shared q1-q2 edge.
+///
+/// The order deliberately does NOT depend on `SurfaceSidedness`. Reversing the
+/// four corners for a `Back` face gives the same two triangles with reversed
+/// winding, but it also SWAPS WHICH ONE IS SUBMITTED FIRST, and
+/// `submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth` falls
+/// back to emitting them as separate triangles that compute their own depth
+/// whenever the quad needs splitting. On a wall seen at a grazing angle those
+/// two depths straddle anything standing in front of it, so the swap flipped
+/// the tie and the wall painted over the player. The winding is not needed
+/// here: the software backface cull has already run and the GPU does not cull.
+#[inline(always)]
+fn quad_packet_order<T: Copy>(values: [T; 4], split: u8) -> [T; 4] {
+    if split == SPLIT_NE_SW {
+        [values[0], values[1], values[3], values[2]]
+    } else {
+        [values[1], values[0], values[2], values[3]]
+    }
 }
 
 fn reverse_quad_winding<T: Copy>(corners: [T; 4]) -> [T; 4] {
