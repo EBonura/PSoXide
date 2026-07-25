@@ -371,6 +371,50 @@ continuous world means many rooms, and every one of them must stay under 32 KiB
 of cooked chunk. That is an authoring budget the editor should surface while
 building a room, not a cook-time failure discovered later.
 
+## 10. Unblocking the scale measurement: add one portal seam
+
+The chunk-overflow finding above led me toward a cooker change. That would have
+been wrong, and the reason is worth recording.
+
+`plan_portal_rooms` ([`portal_rooms.rs:207`](../editor/crates/psxed-project/src/portal_rooms.rs#L207))
+splits a room on authored portal seams only, deliberately. `PortalRoomConfig`
+already carries `max_width`, `max_depth`, `max_triangles` and `max_bytes`, and
+`over_budget()` already flags every violating room, with `over_budget_count()` on
+the plan. The budget check exists, runs, and marks the offenders. The design is
+that the AUTHOR owns room boundaries and the tool reports violations.
+
+So auto-subdividing in the cooker would override a deliberate decision, the same
+class of mistake as changing the failed-cook manifest contract that
+`failed_cook_removes_stale_cooked_manifest` pins. The engineering gap is only
+that `over_budget_count()` is not surfaced while authoring, so a violation
+appears at cook time instead of while building the room.
+
+cortex_v2's room 0 is 4,808 bytes over. It needs one seam.
+
+### Recipe for a throwaway streaming test fixture
+
+The author's own level should not be reshaped to serve a measurement. Copy it:
+
+1. `cp -R editor/projects/cortex_v2 editor/projects/cortex_v2_streamtest`
+2. In its `project.ron`, add a `Portal` node parented to the Room node, following
+   the shape cortex_v1 uses:
+   `kind: Portal(target_room: None, target_entry: "", entry_name: "portal_<x>_<z>_<dir>")`
+   with a fresh unique node id, a `transform.translation` on the seam cell, and the
+   Room node's id in `parent`. cortex_v1 carries seven of these; copy one and
+   change the cell, direction and id.
+3. Place the seam so neither resulting chunk exceeds
+   `MAX_STREAMED_ROOM_CHUNK_BYTES` (32,768). Room 0 is 37,576 bytes, so a roughly
+   central cut is sufficient.
+4. `cook-playtest projects/cortex_v2_streamtest/project.ron`, then
+   `make build-editor-playtest` and the mkisopsx step.
+
+That yields 658 material references across multiple chunks: an asset set larger
+than one neighbourhood and a disc layout with real gaps. Findings 4 and 5 both
+become measurable from it in a single cook, via
+`persistent asset resident bytes` and `persistent asset load failures`.
+
+**Back up `generated/` first.** A failed cook still discards it (finding 1's note).
+
 ## Recommended order
 
 1. **Consume the residency manifest** (finding 1). Nothing else here matters if
