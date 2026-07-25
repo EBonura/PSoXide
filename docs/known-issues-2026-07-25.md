@@ -383,13 +383,33 @@ What the misdiagnosis cost, and the two genuine bugs it exposed:
    `request_rooms` (which was the sole counted path, and not the one the missing
    pack took). That is what makes the table above readable.
 
-   **Still open, and it is a design call, not a bug fix:** nothing ACTS on
-   `failed()`. `step_persistent_model_assets` returns `runtime_models_loaded ==
-   false`, `step_streaming_jobs` returns early, and the loading screen sits
-   there forever exactly as before. A player sees no difference; only a headless
-   run with `--dump-guest-profile` does. Deciding what the game shows instead
-   (an error scene, a message on the loading screen, a fall back to the menu) is
-   the remaining work.
+   **Now names the asset.** A failure count alone leaves every streamed asset in
+   the level as the search space. `fail()` takes the asset id and a reason, and
+   both go out as counters (`PERSISTENT_ASSET_FAILED_ID`,
+   `PERSISTENT_ASSET_FAILED_REASON`). Reasons 0..11 are `cd_stream` chunk
+   statuses; 100+ are `asset_streaming` codes (`ASSET_FAIL_BAD_RECORD`,
+   `ASSET_FAIL_NO_SPACE`, `ASSET_FAIL_SHORT_READ`).
+
+   On the missing-pack disc this reports asset **26** (`Rust Mantis` mesh, 6800
+   RAM bytes) with reason **4**, `STATUS_DATA_TIMEOUT`. Read that pairing
+   carefully: reason 4 means the drive delivered nothing, so 26 is simply the
+   first asset in read order, not a faulty asset. The reason code is the
+   diagnosis and the id only localises it. `ASSET_FAIL_NO_SPACE` or a
+   per-chunk status is where the id genuinely identifies the culprit.
+
+   **On a correctly built cortex_v1 disc no asset fails at all** (0 failures,
+   gameplay from frame 292). The hang is only reachable from a bad build.
+
+   **The loading screen no longer pretends.** `loading_progress_q12` returns 0
+   once the arena has failed, so the bar empties and stays empty instead of
+   parking part-full and reading as slow progress, and the guest prints
+   `PERSISTENT ASSET LOAD FAILED: asset <id> reason <n>` to TTY once,
+   unconditionally rather than under `boot-trace`, because this state never
+   resolves.
+
+   **Still a design call:** the game stays on that screen. It does not offer an
+   error scene or a way back to the menu, and doing either needs authored UI or
+   a new `Scene` hook rather than a runtime change.
 
 Ruled out along the way, so nobody re-walks them: the confirm press
 (`just_pressed` is edge-triggered, but pressing every 30 ticks changed nothing),
