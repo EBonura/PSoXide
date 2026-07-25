@@ -267,6 +267,51 @@ runs near the camera: the TR subdivision band,
 [0, 0, -64, 320]`. A negative height in a wall quad; one sector to fix in the
 editor.
 
+## cortex_v1 never finishes loading headless (2026-07-25)
+
+Root cause of the "headless gameplay is unreachable" entry below, found after
+adding `--press`. It is NOT an input problem: the guest completes pad polls
+normally (401 polls over 517 route ticks) and simply never satisfies its exit
+condition.
+
+`GameApp::update` leaves the loading scene only when
+`loading_confirm_ready && confirmed`, where `loading_confirm_ready = world_ready
+&& hold_done` (`engine/crates/psx-engine/src/game_app.rs:1189`). `confirmed` is a
+fresh CROSS or START, which `--press` supplies. So the stall is `world_ready`,
+i.e. `gameplay.loading_update` never returns true.
+
+Evidence, from an 8117-route-tick run (~135 s of guest time):
+
+- **22** `cd_room_chunk_loads` in total, all early, then nothing for the rest.
+- `room_stream_requests`, `room_stream_pending_loads` and
+  `room_stream_failed_loads` are **0** for the entire run, so the stall is not a
+  reported failure. Nothing is even asking.
+- PC sampling shows the guest busy in the loading UI:
+  `FontAtlas::text_width` 27.6%, `draw_transformed_text_paint` 18.0%,
+  `draw_label` 7.6%, `draw_quad_paint` 6.6% -- and, tellingly,
+  `cd_stream::hw::read_one_sector_blocking` at **12.3%**.
+- Route screenshots at ticks 1000..8000 animate (a two-state blink) but never
+  advance.
+
+**The contradiction worth chasing:** the guest spends 12% of its time inside
+`read_one_sector_blocking` while completing zero further chunk loads. Sectors are
+being read continuously and never assembled into a chunk, which reads as a retry
+or restart loop in the CD stream layer rather than a slow load. Start at
+`psx-game-runtime/src/cd_stream.rs` and ask what makes a sector read succeed
+without advancing a chunk.
+
+This matters beyond profiling: if it can happen headless it is a streaming
+reliability bug, and the editor differing only hides it.
+
+Reproduce:
+
+```sh
+cd emu && cargo run -p frontend --release -- launch \
+  --path ../build/examples/mipsel-sony-psx/release/editor-playtest.cue \
+  --embedded-playtest --press "100:cross:20" \
+  --profile-log /tmp/long.csv --guest-visual-frames 4000 --steps 4000000000
+```
+
 ## Headless gameplay is unreachable, which blocks all render A/B (2026-07-25)
 
 No headless run can reach gameplay any more, so no render change can be measured
@@ -286,13 +331,13 @@ Two paths existed and both are closed:
   same archive-fragment text screen. This is the desync recorded for demo10 in
   `CLAUDE.md`, still unfixed and now the only remaining path.
 
-**Fix worth doing:** let the headless route press buttons. The cheapest version
-is a flag that feeds a short scripted button sequence before handing over to
-`--hold-forward`, which is enough to clear a menu. A synthesised `PXITAPE2` would
-also work and is poll-bound, so it cannot desync the way the recorded tape does.
+**Half fixed.** `--press "tick:button[:hold]"` now feeds scheduled button presses
+on the route clock and combines with `--hold-forward`, so a headless run can work
+a menu. It is not enough on its own: cortex_v1 then stalls in its loading scene
+for a different reason, recorded above.
 
-Until then a render change can only be gated visually in the editor, and any
-cycle figure quoted for one is an estimate.
+Until that stall is fixed a render change can only be gated visually in the
+editor, and any cycle figure quoted for one is an estimate.
 
 ## The cooker overwrites `generated/` when it fails (2026-07-25)
 
