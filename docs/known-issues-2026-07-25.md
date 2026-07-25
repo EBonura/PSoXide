@@ -311,12 +311,25 @@ What the misdiagnosis cost, and the two genuine bugs it exposed:
    entered every frame -- is equally consistent with "the data is not on the
    disc". Nothing in the guest says which. A pack whose TOC is absent or empty
    should be a loud failure at `begin`, not an infinite wait.
-2. **The stall detector cannot fire** (still true, still worth fixing).
-   `Ok(false)` from `try_read_stream_sector` increments `data_wait_polls` toward
-   `DATA_READY_STALL_POLL_LIMIT`, but `begin_next_group` resets it to 0, so a job
-   that keeps re-arming groups polls forever without ever timing out. Had this
-   fired, it would have said "data timeout" in seconds instead of costing a
-   session.
+2. **The stall detector did not fire, and I do not know why.** `Ok(false)` from
+   `try_read_stream_sector` increments `data_wait_polls` toward
+   `DATA_READY_STALL_POLL_LIMIT` (4096, `cd_stream.rs:124`), and
+   `begin_next_group` resets it to 0 (`cd_stream.rs:589`). I claimed the reset
+   was the reason and that is NOT established: once a group is armed the state
+   stays `Reading`, so the counter should have accumulated one per pump call and
+   tripped well inside an 8117-tick run. It never did -- the arena never reported
+   `failed()` either.
+
+   So something upstream stopped the job before the detector could count. The
+   likely shape, given the pack was absent, is that
+   `next_world_pack_info_read_group` returned `None` immediately and `finish()`
+   put the job in `Done`, after which `poll_into` returns early forever. But
+   `finish_if_done` should then have set `failed`, and it did not. That
+   contradiction is unresolved and is the thread to pull.
+
+   Re-arming still is not progress, so resetting `data_wait_polls` there is
+   questionable on its own merits -- but do not "fix" it until the above is
+   understood, or it will look fixed while the real path stays silent.
 3. **A sticky `failed` stops the pump silently** (unrelated to this incident, but
    real). One bad persistent asset sets `AssetArena::failed`, `pump` then returns
    early forever and nothing surfaces it.
