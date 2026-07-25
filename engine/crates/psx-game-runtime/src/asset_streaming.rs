@@ -15,7 +15,9 @@ struct PersistentAssetStorage<const PAGES: usize, const ASSETS: usize> {
     pages: [[u32; SECTOR_BYTES / 4]; PAGES],
     offsets: [u32; ASSETS],
     lengths: [u32; ASSETS],
-    used_bytes: usize,
+    /// Identity of the physical byte layout. Any change means live assets
+    /// moved, so parsed views holding pointers into the pool must be rebuilt.
+    layout_generation: u32,
 }
 
 impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSETS> {
@@ -24,24 +26,115 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
             pages: [[0; SECTOR_BYTES / 4]; PAGES],
             offsets: [0; ASSETS],
             lengths: [0; ASSETS],
-            used_bytes: 0,
+            layout_generation: 0,
         }
+    }
+
+    const fn capacity_bytes() -> usize {
+        PAGES * SECTOR_BYTES
+    }
+
+    /// First byte past the highest live allocation, 4-aligned.
+    ///
+    /// Allocation always appends here and relies on [`Self::compact`] to close
+    /// gaps, which keeps the allocator O(ASSETS) with no free list. Assets are
+    /// placed once per residency change, not per frame, so a linear bump plus
+    /// an occasional compaction is the cheap answer.
+    fn allocation_end(&self) -> usize {
+        let mut end = 0usize;
+        let mut slot = 0usize;
+        while slot < ASSETS {
+            if self.lengths[slot] != 0 {
+                let slot_end = (self.offsets[slot] as usize)
+                    .saturating_add(self.lengths[slot] as usize)
+                    .next_multiple_of(4);
+                if slot_end > end {
+                    end = slot_end;
+                }
+            }
+            slot += 1;
+        }
+        end
+    }
+
+    /// Total live bytes, 4-aligned per asset, ignoring gaps.
+    fn live_bytes(&self) -> usize {
+        let mut total = 0usize;
+        let mut slot = 0usize;
+        while slot < ASSETS {
+            if self.lengths[slot] != 0 {
+                total = total.saturating_add((self.lengths[slot] as usize).next_multiple_of(4));
+            }
+            slot += 1;
+        }
+        total
+    }
+
+    fn resident(&self, slot: usize) -> bool {
+        slot < ASSETS && self.lengths[slot] != 0
+    }
+
+    /// Drop `slot`'s allocation. Its bytes stay in place until the next
+    /// compaction reclaims them.
+    fn release_slot(&mut self, slot: usize) {
+        if slot >= ASSETS || self.lengths[slot] == 0 {
+            return;
+        }
+        self.lengths[slot] = 0;
+        self.offsets[slot] = 0;
+    }
+
+    /// Pack every live allocation toward byte zero in slot order, closing the
+    /// gaps that releases left behind.
+    ///
+    /// This MOVES live bytes, so it bumps `layout_generation` and must not run
+    /// while a CD job is writing into the pool. Allocation is the only caller,
+    /// and it always completes before a job is armed.
+    fn compact(&mut self) -> bool {
+        let base = self.pages.as_mut_ptr().cast::<u8>();
+        let mut cursor = 0usize;
+        let mut moved = false;
+        let mut slot = 0usize;
+        while slot < ASSETS {
+            let length = self.lengths[slot] as usize;
+            if length != 0 {
+                let from = self.offsets[slot] as usize;
+                if from != cursor {
+                    // SAFETY: both ranges were validated on allocation and lie
+                    // inside `pages`; `cursor <= from` always, because the
+                    // cursor only ever trails the slot order it is packing.
+                    unsafe { core::ptr::copy(base.add(from), base.add(cursor), length) };
+                    self.offsets[slot] = cursor as u32;
+                    moved = true;
+                }
+                cursor = cursor.saturating_add(length).next_multiple_of(4);
+            }
+            slot += 1;
+        }
+        if moved {
+            self.layout_generation = self.layout_generation.wrapping_add(1).max(1);
+        }
+        moved
     }
 
     fn prepare_slot(&mut self, slot: usize, byte_count: usize) -> bool {
         if slot >= ASSETS || byte_count == 0 || self.lengths[slot] != 0 {
             return false;
         }
-        let offset = self.used_bytes.next_multiple_of(4);
-        let Some(end) = offset.checked_add(byte_count) else {
+        if self.live_bytes().saturating_add(byte_count) > Self::capacity_bytes() {
+            // No compaction can create room that does not exist.
             return false;
-        };
-        if end > PAGES.saturating_mul(SECTOR_BYTES) {
-            return false;
+        }
+        let mut offset = self.allocation_end();
+        if offset.saturating_add(byte_count) > Self::capacity_bytes() {
+            self.compact();
+            offset = self.allocation_end();
+            if offset.saturating_add(byte_count) > Self::capacity_bytes() {
+                return false;
+            }
         }
         self.offsets[slot] = offset as u32;
         self.lengths[slot] = byte_count as u32;
-        self.used_bytes = end;
         true
     }
 
@@ -270,6 +363,58 @@ mod tests {
         assert_eq!(storage.bytes_for(1, 3), Some(&[1, 2, 3][..]));
         assert_eq!(storage.bytes_for(3, 5), Some(&[4, 5, 6, 7, 8][..]));
         assert!(!storage.write_chunk_bytes(1, 2, &[9, 9]));
+    }
+
+    #[test]
+    fn released_asset_bytes_are_reclaimed_by_compaction() {
+        // A pool exactly two allocations wide, so reclaiming is the only way a
+        // third can fit. This is the property whole-level asset residency was
+        // missing: the old bump allocator could never reuse a freed asset.
+        let mut storage = PersistentAssetStorage::<1, 4>::new();
+        let third = SECTOR_BYTES / 2;
+        assert!(storage.prepare_slot(0, third));
+        assert!(storage.prepare_slot(1, third));
+        assert!(!storage.prepare_slot(2, third), "pool should be full");
+
+        // Free the FIRST allocation, leaving a hole below a live one so the
+        // reclaim genuinely requires moving bytes rather than just bumping down.
+        assert!(storage.write_chunk_bytes(1, 0, &[7u8; 8]));
+        storage.release_slot(0);
+        assert!(!storage.resident(0));
+        assert!(storage.resident(1));
+
+        let before = storage.layout_generation;
+        assert!(storage.prepare_slot(2, third), "compaction should reclaim");
+        assert!(storage.layout_generation > before, "layout must be invalidated");
+
+        // The surviving asset kept its contents across the move.
+        assert_eq!(&storage.bytes_for(1, third).expect("live")[..8], &[7u8; 8]);
+        assert_eq!(storage.offsets[1], 0, "live asset packed to zero");
+    }
+
+    #[test]
+    fn compaction_cannot_invent_absent_capacity() {
+        let mut storage = PersistentAssetStorage::<1, 4>::new();
+        assert!(storage.prepare_slot(0, SECTOR_BYTES / 2));
+        // Live bytes plus the request exceed the pool, so this must fail
+        // outright rather than compacting and then aliasing.
+        assert!(!storage.prepare_slot(1, SECTOR_BYTES));
+        assert_eq!(storage.layout_generation, 0, "no pointless compaction");
+        assert!(storage.resident(0));
+        assert_eq!(storage.live_bytes(), SECTOR_BYTES / 2);
+    }
+
+    #[test]
+    fn releasing_every_asset_returns_the_whole_pool() {
+        let mut storage = PersistentAssetStorage::<2, 4>::new();
+        assert!(storage.prepare_slot(0, SECTOR_BYTES));
+        assert!(storage.prepare_slot(1, SECTOR_BYTES));
+        storage.release_slot(0);
+        storage.release_slot(1);
+        assert_eq!(storage.live_bytes(), 0);
+        assert_eq!(storage.allocation_end(), 0);
+        // A single allocation spanning the entire pool now fits.
+        assert!(storage.prepare_slot(2, 2 * SECTOR_BYTES));
     }
 
     #[test]
