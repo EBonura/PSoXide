@@ -55,7 +55,8 @@ pub(super) fn ensure_room_resident(residency: &psx_level::RoomResidencyRecord) {
 pub(super) fn request_persistent_assets(desired: &[RoomIndex], count: usize) {
     let desired = &desired[..count.min(desired.len())];
     let arena = persistent_assets_arena_mut();
-    let failed_before = arena.failed();
+    // The streamer counts PERSISTENT_ASSET_LOAD_FAILURES on the failing edge
+    // itself, so every path that gives up is counted, not just this one.
     arena.request_rooms(
         UI_PACK_START_LBA,
         UI_PACK_TOC,
@@ -63,11 +64,6 @@ pub(super) fn request_persistent_assets(desired: &[RoomIndex], count: usize) {
         desired,
         ROOM_RESIDENCY,
     );
-    if arena.failed() && !failed_before {
-        // An under-sized or fragmented pool otherwise shows up only as a
-        // texture that never appears. Count it so the budget is falsifiable.
-        telemetry::counter(telemetry::counter::PERSISTENT_ASSET_LOAD_FAILURES, 1);
-    }
     telemetry::counter(
         telemetry::counter::PERSISTENT_ASSET_RESIDENT_BYTES,
         arena.resident_bytes().min(u32::MAX as usize) as u32,

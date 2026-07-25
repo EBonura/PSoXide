@@ -120,8 +120,20 @@ const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
 const PARAMETER_ROOM_POLL_LIMIT: u32 = 16_384;
 #[cfg(feature = "cd-stream-benchmark")]
 const DATA_READY_POLL_LIMIT: u32 = 1_000_000;
+/// Consecutive `poll_into` calls that may find no sector waiting before the
+/// read is declared dead.
+///
+/// The unit is PUMP CALLS, not spin-polls: `try_read_stream_sector` checks the
+/// IRQ flag once and returns, and the caller breaks out of its loop on the
+/// first empty result, so at most one increment happens per `poll_into`. The
+/// old 4096 was written as if it counted spins; at one pump per two sim ticks
+/// that was a 136-second budget, which is why a disc with nothing at the pack
+/// LBA hung an 8117-tick headless run without ever tripping the detector.
+///
+/// 256 pumps is ~8.5 s at 30 pumps/second, well past any real seek and
+/// re-acquire, and short enough that a dead read reports instead of hanging.
 #[cfg(target_arch = "mips")]
-const DATA_READY_STALL_POLL_LIMIT: u32 = 4096;
+const EMPTY_PUMP_STALL_LIMIT: u32 = 256;
 /// Spin budget for one blocking UI image sector read.
 #[cfg(target_arch = "mips")]
 const DATA_READY_BLOCKING_POLL_LIMIT: u32 = 1_000_000;
@@ -252,7 +264,7 @@ pub struct WorldRoomSlotsReadJob<const N: usize> {
     group_start: u32,
     group_end: u32,
     sector_offset: u32,
-    data_wait_polls: u32,
+    empty_pumps: u32,
     world_pack_lba: u32,
     result: RoomChunkLoadResult,
     state: WorldRoomSlotsReadState,
@@ -278,7 +290,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             group_start: 0,
             group_end: 0,
             sector_offset: 0,
-            data_wait_polls: 0,
+            empty_pumps: 0,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
                 status: STATUS_OK,
@@ -305,7 +317,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             group_start: 0,
             group_end: 0,
             sector_offset: 0,
-            data_wait_polls: 0,
+            empty_pumps: 0,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
                 status: STATUS_OK,
@@ -435,11 +447,11 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
 
                 match try_read_stream_sector(cd, &mut polls) {
                     Ok(true) => {
-                        self.data_wait_polls = 0;
+                        self.empty_pumps = 0;
                     }
                     Ok(false) => {
-                        self.data_wait_polls = self.data_wait_polls.saturating_add(1);
-                        if self.data_wait_polls > DATA_READY_STALL_POLL_LIMIT {
+                        self.empty_pumps = self.empty_pumps.saturating_add(1);
+                        if self.empty_pumps > EMPTY_PUMP_STALL_LIMIT {
                             self.fail_all(STATUS_DATA_TIMEOUT);
                             cleanup_read_stream(cd, &mut polls);
                             self.state = WorldRoomSlotsReadState::Done;
@@ -586,7 +598,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         self.group_start = group_start;
         self.group_end = group_end;
         self.sector_offset = group_start;
-        self.data_wait_polls = 0;
+        self.empty_pumps = 0;
         self.group_entries = group_entries;
         self.state = WorldRoomSlotsReadState::Reading;
         true
