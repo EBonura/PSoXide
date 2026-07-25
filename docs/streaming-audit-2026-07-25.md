@@ -31,6 +31,30 @@ The room-geometry streamer is well built and is not the problem. It is
 non-blocking, budgeted, LRU-evicted, and it degrades by not drawing rather than
 by stalling. Four paged-room tests and three asset-streamer tests cover it.
 
+**Status as of 2026-07-25, end of the implementation pass.** Findings 1, 2 and 3
+are closed; 4, 5 and 6 remain and each is blocked on the same missing thing.
+
+| # | Finding | Status |
+|---:|---|---|
+| 1 | Per-room asset residency cooked and ignored | **closed** — pool can reclaim, residency is neighbourhood-scoped, verified |
+| 2 | Pump budget unanchored | **closed** — derived from the drive with a floor assertion |
+| 3 | Gap discard unbounded | **closed** — capped at the seek break-even |
+| 4 | One load job in flight | open — needs a scattered-room level to measure |
+| 5 | Pool sized from whole-level figures | open — a no-op on cortex_v1, see below |
+| 6 | Miss policy is emergent | open — a design decision, not a defect |
+
+Findings 4 and 5 share a blocker: **cortex_v1 cannot validate either.** Its eight
+rooms are small enough that the worst-case neighbourhood is the whole level, so
+scoping residency correctly still leaves every persistent asset resident
+(measured: 314,952 bytes, the full packed set, with nothing evicted). Shrinking
+the cooked budget against that number would change nothing, and a two-slot job
+queue has no seek to overlap when the whole world is 54 KB and disc-adjacent.
+
+Both need a synthetic level with rooms deliberately scattered on disc and an
+asset set larger than a neighbourhood. Building that generator is the next piece
+of work, and it gates the two remaining performance findings rather than being
+optional groundwork.
+
 The problems are around it. In priority order:
 
 1. **Per-room asset residency is cooked and then ignored.** Every asset in the
