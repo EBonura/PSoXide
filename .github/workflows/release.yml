@@ -46,8 +46,14 @@ jobs:
 
       # Both architectures, because a release that only runs on Apple Silicon
       # silently excludes every Intel Mac.
+      # CARGO_TARGET_DIR is set explicitly because the emu workspace does not
+      # put its output under `emu/target`: the repo's cargo config redirects it,
+      # which is why the Makefile's PGO target refers to `target/release/frontend`.
+      # Guessing that path is what broke the first run of this workflow.
       - name: Build frontend for both architectures
         working-directory: emu
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/build/release-target
         run: |
           cargo build --release -p frontend --target x86_64-apple-darwin
           cargo build --release -p frontend --target aarch64-apple-darwin
@@ -56,8 +62,8 @@ jobs:
         run: |
           mkdir -p dist/PSoXide
           lipo -create -output dist/PSoXide/psoxide \
-            emu/target/x86_64-apple-darwin/release/frontend \
-            emu/target/aarch64-apple-darwin/release/frontend
+            build/release-target/x86_64-apple-darwin/release/frontend \
+            build/release-target/aarch64-apple-darwin/release/frontend
           lipo -info dist/PSoXide/psoxide
 
       # Ship a project small enough to download: miniaturise-project strips a
