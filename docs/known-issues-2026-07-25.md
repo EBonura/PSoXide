@@ -69,7 +69,22 @@ arena back did not recover them, which points at code/data layout rather than
 size. Removing the cache that should not exist is more likely to come out net
 positive than resizing it was.
 
-## 3. Floor tiles vanish near the player in cortex_v1 rooms 6/7
+## 3. Floor tiles vanish near the player in cortex_v1 rooms 6/7 -- FIXED
+
+**Resolved 2026-07-25.** `submit_tomb_raider_cached_room_quad` discarded its
+submit result with `let _` and returned `true` unconditionally. The caller reads
+`true` as "this surface is drawn" and skips its own whole-quad submit, so any
+subdivision that emitted nothing became a silent hole. It now returns whether
+geometry actually reached the sink, and a failed subdivision falls back to the
+authored quad. Verified on the recorded tape: every hole gone, subdivision still
+enabled, so near-floor affine correction is retained.
+
+The history below is kept because six hypotheses were falsified before this one,
+all of them assuming something REJECTED the surface. Nothing did; a failure was
+swallowed. The lesson is that a function returning `bool` while discarding a
+richer result is worth suspecting when geometry vanishes with no counter moving.
+
+### Original investigation
 
 **State:** open, but **localised to floor subdivision, and pre-existing.**
 
