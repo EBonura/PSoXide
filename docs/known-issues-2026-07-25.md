@@ -267,185 +267,45 @@ runs near the camera: the TR subdivision band,
 [0, 0, -64, 320]`. A negative height in a wall quad; one sector to fix in the
 editor.
 
-## cortex_v1 never finishes loading headless (2026-07-25)
+## RESOLVED: the "loading stall" was a disc built without the UI pack
 
-Root cause of the "headless gameplay is unreachable" entry below, found after
-adding `--press`. It is NOT an input problem: the guest completes pad polls
-normally (401 polls over 517 route ticks) and simply never satisfies its exit
-condition.
+**There is no engine stall. This was my build error, and the whole entry below
+was wrong.** Recorded in full because the way it failed is a real reliability
+problem even though the cause was not.
 
-`GameApp::update` leaves the loading scene only when
-`loading_confirm_ready && confirmed`, where `loading_confirm_ready = world_ready
-&& hold_done` (`engine/crates/psx-engine/src/game_app.rs:1189`). `confirmed` is a
-fresh CROSS or START, which `--press` supplies. So the stall is `world_ready`,
-i.e. `gameplay.loading_update` never returns true.
+The iso template in `CLAUDE.md` omits `--ui-pack-dir` and `--ui-pack-order-file`.
+The Makefile's `profile-demo3-disc-stream-forward` target passes both. Persistent
+gameplay assets live in that UI pack, so a disc built from the template has
+nothing at `UI_PACK_START_LBA`: the asset arena waits forever for sectors that
+were never written. Add both flags and cortex_v1 boots to gameplay -- verified,
+1360 gameplay rows out of 3030, first at row 288, with `--press` clearing the
+menu.
 
-Evidence, from an 8117-route-tick run (~135 s of guest time):
+What the misdiagnosis cost, and the two genuine bugs it exposed:
 
-- **22** `cd_room_chunk_loads` in total, all early, then nothing for the rest.
-- `room_stream_requests`, `room_stream_pending_loads` and
-  `room_stream_failed_loads` are **0** for the entire run, so the stall is not a
-  reported failure. Nothing is even asking.
-- PC sampling shows the guest busy in the loading UI:
-  `FontAtlas::text_width` 27.6%, `draw_transformed_text_paint` 18.0%,
-  `draw_label` 7.6%, `draw_quad_paint` 6.6% -- and, tellingly,
-  `cd_stream::hw::read_one_sector_blocking` at **12.3%**.
-- Route screenshots at ticks 1000..8000 animate (a two-state blink) but never
-  advance.
+1. **A missing pack is indistinguishable from a hung drive.** Every symptom I
+   chased -- zero sectors, zero completed entries, no failure reported, readers
+   entered every frame -- is equally consistent with "the data is not on the
+   disc". Nothing in the guest says which. A pack whose TOC is absent or empty
+   should be a loud failure at `begin`, not an infinite wait.
+2. **The stall detector cannot fire** (still true, still worth fixing).
+   `Ok(false)` from `try_read_stream_sector` increments `data_wait_polls` toward
+   `DATA_READY_STALL_POLL_LIMIT`, but `begin_next_group` resets it to 0, so a job
+   that keeps re-arming groups polls forever without ever timing out. Had this
+   fired, it would have said "data timeout" in seconds instead of costing a
+   session.
+3. **A sticky `failed` stops the pump silently** (unrelated to this incident, but
+   real). One bad persistent asset sets `AssetArena::failed`, `pump` then returns
+   early forever and nothing surfaces it.
 
-**Narrowed to a single condition (2026-07-25, later).** Added `boot-trace`
-reporting of the world-ready conditions to `initial_world_ready`, which prints
-only on change so a 30 Hz loading loop does not flood the TTY. Guest TTY reaches
-host stdout through the HLE BIOS putchar, so this needs no new telemetry counter.
+Ruled out along the way, so nobody re-walks them: the confirm press
+(`just_pressed` is edge-triggered, but pressing every 30 ticks changed nothing),
+the `poll_into` group-start break (`begin_next_group` always leaves state
+`Reading`), and CD-DA contention (a disc built with no tracks at all stalls
+identically).
 
-Result, in order of elimination:
-
-1. Only `runtime_models_loaded` is ever pending. The other six conditions are
-   never even evaluated: it returns before them.
-2. `persistent_assets_arena().failed()` is **false**, so this is not the sticky
-   failure path in `AssetArena::finish_if_done`. (Worth knowing that path exists:
-   one bad asset sets `failed`, `pump` then returns early forever, and nothing is
-   reported. A different hang with the same symptom.)
-3. `progress_q12()` never changes from 0 across the whole run. `begin` always
-   sets `started`, and `count == 0` would set `ready`, so the arena is started
-   with a non-empty asset list and **not one entry ever completes** -- while the
-   guest spends 12.3% of its time reading sectors.
-
-So the wedge is inside the grouped read job, `WorldRoomSlotsRead::poll_into`
-(`engine/crates/psx-game-runtime/src/cd_stream.rs:394`), which reads sectors
-without ever completing an entry.
-
-**One hypothesis already ruled out.** In `poll_into`:
-
-```rust
-if self.state == WorldRoomSlotsReadState::Ready {
-    if !self.begin_next_group(cd, &mut polls) { break; }
-    if sectors_this_poll == 0 { break; }   // always true here
-}
-```
-
-`sectors_this_poll` is zero-initialised per call, so the call that starts a group
-always breaks immediately. This is NOT the bug: `begin_next_group`
-(`cd_stream.rs:564`) sets `state = Reading` on every path that returns `true`, so
-the break costs one pump tick per group and the next call proceeds to the read.
-
-**Most likely cause: two readers sharing the drive.** The counters already
-collected say the streaming pump never receives a single sector.
-`poll_into` emits `CD_ROOM_CHUNK_SECTORS` whenever `sector_delta > 0`, and that
-counter is **0 for every row of the run** (as are `cd_room_chunk_bytes`). So
-`try_read_stream_sector` is returning `Ok(false)` -- no data ready -- on every
-call, and `copy_window_info_sector` is never reached.
-
-Meanwhile 12.3% of guest time sits in `read_one_sector_blocking`, which is a
-DIFFERENT function on a different path. Something else is holding the CD
-controller and consuming its DataReady IRQs while the persistent-asset pump polls
-a drive that never answers it.
-
-`step_persistent_model_assets` already warns about exactly this hazard:
-
-> Model parsing owns the CD first. Only now seed portal visibility and the
-> incremental room-window job; the same tick can reconcile and pump WORLD.PAK
-> without two readers sharing the controller.
-
-The ordering it describes protects the world stream from the model load. The
-observed stall is upstream of that: the persistent arena itself never gets the
-drive. The first thing to establish is who else is calling a blocking read while
-the loading screen is up -- the menu/UI image preload is the obvious suspect,
-since `prepare_loading_assets` is documented as deliberately never touching the
-CD for this reason.
-
-**Strongest lead: CD-DA is playing.** The two blocking callers are
-`VramCache::preload_all_contiguous` (`vram.rs:251`, the menu UI image preload)
-and `load_streamed_sky_from_cd` (`vram.rs:1491`). The guest renders at a steady
-30 fps for the whole run, so neither is blocked inside a single call: they are
-being entered and returning without progress every frame. BOTH loaders are
-starved, not just the asset arena, which points at the state of the drive rather
-than at any one consumer.
-
-The engine already documents the mechanism, in `Scene::front_end_assets_ready`:
-
-> on real hardware the single laser cannot stream a UI image from the disc and
-> play a CD-DA track at the same time (the read hangs and the music dies;
-> emulators have no laser/seek model so they hide it)
-
-The menu plays a CD-DA track. If the track is still playing when the loading
-screen comes up, every read hangs, nothing completes, and no failure is ever
-reported -- exactly the observed signature. A human player passes the menu
-quickly and stops the music; a headless route that lingers may not, which would
-also explain why this reproduces headless and not in the editor.
-
-Test it first, before touching the stream code: check whether the drive reports
-PLAYING during the stall (`cdda_drive_stopped` in `game_app.rs` already asks
-this), and whether stopping the track lets the load complete. If that is it, the
-bug is that the loading flow does not guarantee CD-DA has stopped before the
-world stream starts -- and note the emulator hides the hardware version of this,
-so a headless pass is not proof for silicon either way.
-
-The other reader is named. `read_one_sector_blocking` has exactly two callers,
-both in `cd_stream.rs`: `read_chunk_blocking` (line 773) and
-`read_chunks_contiguous` (line 900). The second is the "contiguous menu preload"
-that `prepare_loading_assets` refers to, and it is blocking. Confirm which of the
-two is live while the loading screen is up, then decide whether the preload
-should finish before the arena pumps or the two should share a single reader.
-
-Verify by identifying the caller, not by changing ordering and seeing if the
-symptom moves.
-
-Why it does not trip the stall timeout: `Ok(false)` increments
-`data_wait_polls`, which fails the job past `DATA_READY_STALL_POLL_LIMIT` -- but
-`data_wait_polls` is reset to 0 on every `begin_next_group`, so a job that keeps
-re-arming groups can poll forever without ever tripping it. That is consistent
-with the arena never reporting `failed()`.
-
-That leaves the `Reading` path itself. The state does advance, sectors are read
-continuously, and yet `processed_count` never rises, so look at what turns read
-sectors into a completed entry: whether `try_read_stream_sector` keeps returning
-`Ok(false)` and burns the budget, whether `sector_offset` ever reaches
-`group_end`, and whether `mark_group_processed` is reached but the entry is then
-rejected. `data_wait_polls` and its timeout are worth watching, since a retry
-that resets progress would look exactly like this.
-
-**The confirm is not the blocker.** `confirmed` is edge-triggered
-(`just_pressed`), so an early press is consumed before the world is ready and
-never repeated -- a trap worth knowing when scripting a route. Ruled out by
-pressing CROSS every 30 ticks for 6000 ticks: still zero gameplay rows. So
-`initial_world_ready()` (`engine/examples/editor-playtest/src/main.rs:618`) is
-genuinely false, and the next step is to find which of its seven conditions
-never flips:
-
-```text
-runtime_models_loaded
-current_collision_room.is_some()
-!window.job.active
-portal_visible_rooms_are_active(record)
-initial_stream_ring_resident()
-initial_stream_ring_textures_ready()
-streaming_jobs.vram_uploads_idle()
-!streamed_room_stream_active()
-```
-
-None of them is currently visible in telemetry, which is why this took a whole
-session to corner. Emitting them as counters is the cheap fix and would pay for
-itself the next time a load stalls.
-
-**The contradiction worth chasing:** the guest spends 12% of its time inside
-`read_one_sector_blocking` while completing zero further chunk loads. Sectors are
-being read continuously and never assembled into a chunk, which reads as a retry
-or restart loop in the CD stream layer rather than a slow load. Start at
-`psx-game-runtime/src/cd_stream.rs` and ask what makes a sector read succeed
-without advancing a chunk.
-
-This matters beyond profiling: if it can happen headless it is a streaming
-reliability bug, and the editor differing only hides it.
-
-Reproduce:
-
-```sh
-cd emu && cargo run -p frontend --release -- launch \
-  --path ../build/examples/mipsel-sony-psx/release/editor-playtest.cue \
-  --embedded-playtest --press "100:cross:20" \
-  --profile-log /tmp/long.csv --guest-visual-frames 4000 --steps 4000000000
-```
+**Fix the template.** `CLAUDE.md`'s replay recipe should carry the UI pack flags,
+or the next person loses the same day.
 
 ## Headless gameplay is unreachable, which blocks all render A/B (2026-07-25)
 
@@ -466,13 +326,10 @@ Two paths existed and both are closed:
   same archive-fragment text screen. This is the desync recorded for demo10 in
   `CLAUDE.md`, still unfixed and now the only remaining path.
 
-**Half fixed.** `--press "tick:button[:hold]"` now feeds scheduled button presses
-on the route clock and combines with `--hold-forward`, so a headless run can work
-a menu. It is not enough on its own: cortex_v1 then stalls in its loading scene
-for a different reason, recorded above.
-
-Until that stall is fixed a render change can only be gated visually in the
-editor, and any cycle figure quoted for one is an estimate.
+**FIXED.** `--press "tick:button[:hold]"` feeds scheduled button presses on the
+route clock and combines with `--hold-forward`, so a headless run can work a
+menu. Together with a disc built with the UI pack flags (see above), cortex_v1
+reaches gameplay headless again and render changes can be measured.
 
 ## The cooker overwrites `generated/` when it fails (2026-07-25)
 
