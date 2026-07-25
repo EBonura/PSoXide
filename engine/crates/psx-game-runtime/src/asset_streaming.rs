@@ -5,6 +5,7 @@
 //! gameplay lifetime, so parsed model and animation views can safely borrow
 //! them without baking the source blobs into the executable.
 
+use psx_engine::telemetry;
 use psx_level::{
     asset_flags, AssetId, AssetKind, LevelAssetRecord, LevelWorldPackEntryRecord, RoomIndex,
     RoomResidencyRecord,
@@ -282,7 +283,7 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
                 || !self.storage.prepare_slot(slot, byte_count)
             {
                 self.started = true;
-                self.failed = true;
+                self.fail();
                 return;
             }
             self.ids[count] = asset.id.0;
@@ -403,14 +404,14 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             let slot = asset.id.0 as usize;
             let byte_count = asset.ram_bytes as usize;
             if slot >= ASSETS || byte_count == 0 {
-                self.failed = true;
+                self.fail();
                 return false;
             }
             if self.storage.resident(slot) {
                 continue;
             }
             if count >= ASSETS || !self.storage.prepare_slot(slot, byte_count) {
-                self.failed = true;
+                self.fail();
                 return false;
             }
             self.ids[count] = asset.id.0;
@@ -457,6 +458,20 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         self.finish_if_done()
     }
 
+    /// Latch the failure and count it exactly once.
+    ///
+    /// `failed` is sticky and makes `pump` return early forever, so without a
+    /// counter the only symptom is a loading screen that never advances. Every
+    /// path that gives up routes through here so that a failure is always
+    /// visible in telemetry, whatever set it.
+    fn fail(&mut self) {
+        if self.failed {
+            return;
+        }
+        self.failed = true;
+        telemetry::counter(telemetry::counter::PERSISTENT_ASSET_LOAD_FAILURES, 1);
+    }
+
     fn finish_if_done(&mut self) -> bool {
         if !self.job.is_done() {
             return false;
@@ -466,7 +481,7 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         let mut index = 0usize;
         while index < self.asset_count {
             if statuses[index] != ROOM_CHUNK_STATUS_OK || !completed[index] {
-                self.failed = true;
+                self.fail();
                 return false;
             }
             index += 1;
@@ -759,6 +774,19 @@ mod tests {
         assert!(storage.prepare_slot(0, SECTOR_BYTES - 3));
         assert!(!storage.prepare_slot(1, 4));
         assert_eq!(storage.slot_capacity_bytes(1), 0);
+    }
+
+    /// A pack the streamer cannot satisfy must latch `failed`, not sit in a
+    /// half-started state that `pump` keeps returning early from with nothing
+    /// to show for it.
+    #[test]
+    fn an_unsatisfiable_pack_fails_instead_of_waiting() {
+        // One page of pool, one asset asking for four.
+        let mut streamer = PersistentAssetStreamer::<1, 2>::new();
+        streamer.begin(0, &[], &[persistent_asset(0, 4 * SECTOR_BYTES as u32)]);
+        assert!(streamer.failed(), "an unallocatable asset must fail at begin");
+        assert!(!streamer.ready());
+        assert!(!streamer.pump(&mut CdController::zeroed(), 8), "no progress");
     }
 
     #[test]
