@@ -50,6 +50,37 @@ const WORLD_PACK_MAX_SECTORS: u32 = 512;
 /// allocation quantum so a sector can land directly in its final RAM page.
 pub const SECTOR_BYTES: usize = 2048;
 
+/// CD frames (sectors) per second at single speed. A PS1 spec figure: the
+/// drive's sector clock is `psx_clock / 75`.
+pub const CD_SECTORS_PER_SECOND_1X: usize = 75;
+
+/// Sectors per second at the double speed the runtime reads at.
+pub const CD_SECTORS_PER_SECOND_2X: usize = CD_SECTORS_PER_SECOND_1X * 2;
+
+/// Display fields per second, NTSC. Rounded from 59.94 in the pessimistic
+/// direction for a per-tick budget: assuming slightly more ticks per second
+/// than reality understates the sectors each one may drain.
+pub const DISPLAY_FIELDS_PER_SECOND: usize = 60;
+
+/// A seek costs four single-speed sector periods, so at double speed it is
+/// worth reading and discarding up to this many gap sectors rather than
+/// reseeking past them. Beyond it, seeking is cheaper.
+///
+/// `4 * (1 / 75) / (1 / 150) == 8`.
+pub const SEEK_BREAK_EVEN_SECTORS: usize = 8;
+
+/// Sectors the drive can deliver between two background pump ticks.
+///
+/// The pump runs on alternate simulation ticks, so its period is two display
+/// fields. At double speed that is `150 / 60 * 2 == 5` sectors. A pump's
+/// budget is a DRAIN ceiling, not a request, so it must be at least this or
+/// sectors that already arrived would be left for the next tick and the
+/// streamer would fall behind the drive it is reading from.
+pub const fn drive_sectors_per_background_tick() -> usize {
+    // Integer arithmetic, rounded up, to avoid understating the delivery.
+    (CD_SECTORS_PER_SECOND_2X * 2).div_ceil(DISPLAY_FIELDS_PER_SECOND)
+}
+
 /// Destination used by the incremental WORLD.PAK reader.
 ///
 /// Keeping this interface sector-oriented lets the room streamer choose its
@@ -907,8 +938,16 @@ pub fn read_chunks_contiguous(
             continue;
         }
         let plan = plans[i];
-        // Read and discard any gap sectors before this chunk so the
-        // single continuous ReadN stays aligned to chunk boundaries.
+        // Read and discard any gap sectors before this chunk so the single
+        // continuous ReadN stays aligned to chunk boundaries. This trades
+        // bandwidth for a seek and only wins while the gap is under the
+        // break-even; a longer gap means the caller's chunk ordering is wrong
+        // for this read, and discarding it would cost more than reseeking.
+        if plan.sector_offset.saturating_sub(cur) as usize > SEEK_BREAK_EVEN_SECTORS {
+            out_status[i] = STATUS_DATA_TIMEOUT;
+            i += 1;
+            continue;
+        }
         while cur < plan.sector_offset {
             if read_one_sector_blocking(cd, &mut polls).is_err() {
                 aborted = true;
