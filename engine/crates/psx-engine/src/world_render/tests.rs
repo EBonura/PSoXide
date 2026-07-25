@@ -1120,6 +1120,16 @@ const fn max3(a: i32, b: i32, c: i32) -> i32 {
 /// Exploratory harness: submit one cached wall quad standing `distance` in
 /// front of the camera and report what the room renderer emitted.
 fn wall_submission_probe(distance: i32, half_extent: i32) -> (usize, GridVisibilityStats) {
+    wall_submission_probe_pooled(distance, half_extent, false)
+}
+
+/// As above, but `warmed` routes the surface through the prebuilt room-quad
+/// pool, which is what the shipping runtime does.
+fn wall_submission_probe_pooled(
+    distance: i32,
+    half_extent: i32,
+    warmed: bool,
+) -> (usize, GridVisibilityStats) {
     let mut ot_storage = psx_gpu::ot::OrderingTable::<64>::new();
     let mut ot = crate::OtFrame::begin(&mut ot_storage);
     let mut packet_scratch = crate::PrimitivePacketScratch::<256>::ZERO;
@@ -1176,6 +1186,8 @@ fn wall_submission_probe(distance: i32, half_extent: i32) -> (usize, GridVisibil
     let mut projected_depths = [0; 4];
     let mut accepted_cell_indices = [0u16; 1];
     let mut accepted_cell_depths = [0; 1];
+    let mut prebuilt_quads = [QuadTexturedGouraud::EMPTY; 8];
+    let mut prebuilt_valid = [0u8; 8];
 
     let stats = draw_indexed_cached_room_vertex_lit_visible_cells(
         &cells,
@@ -1204,7 +1216,7 @@ fn wall_submission_probe(distance: i32, half_extent: i32) -> (usize, GridVisibil
         CachedRoomSubdivisionMode::All,
         &[GridVisibleCell::new(0, 0, -half_extent, half_extent)],
         0,
-        None,
+        warmed.then(|| (&mut prebuilt_quads[..], &mut prebuilt_valid[..])),
         &mut triangles,
         &mut pass,
     );
@@ -1232,6 +1244,26 @@ fn wall_surfaces_subdivide_inside_the_band_and_survive_close_range() {
         assert!(
             emitted(distance) >= 4,
             "wall vanished at distance {distance}"
+        );
+    }
+}
+
+/// The shipping runtime submits room quads through the prebuilt pool. That path
+/// decides whether it can skip the hardware splitter from
+/// `ProjectedQuadMetrics::hardware_extent_safe`, which tests only the projected
+/// SPAN. Screen coordinates leave the GTE already saturated to signed 11 bits,
+/// so a wall close enough to project off-screen collapses onto the saturation
+/// boundary and its span shrinks back into range. The quad then looks "safe",
+/// skips the splitter, and is emitted as a degenerate primitive covering
+/// nothing: the cortex_v1 disappearing-wall report.
+#[test]
+fn warmed_wall_quads_keep_splitting_at_point_blank_range() {
+    for distance in [400, 200, 100, 50] {
+        let dynamic = wall_submission_probe_pooled(distance, 832, false).0;
+        let warmed = wall_submission_probe_pooled(distance, 832, true).0;
+        assert!(
+            warmed >= 4,
+            "warmed wall collapsed at distance {distance}: {warmed} commands (dynamic path emits {dynamic})"
         );
     }
 }
