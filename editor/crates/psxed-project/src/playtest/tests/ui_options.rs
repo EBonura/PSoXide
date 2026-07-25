@@ -143,6 +143,7 @@ fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
     assert_eq!(scenes.len(), 1);
@@ -230,6 +231,7 @@ fn ui_gradient_roles_cook_to_paint_table_refs() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
 
@@ -270,6 +272,7 @@ fn ui_image_effect_cooks_to_image_node() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
 
@@ -312,6 +315,7 @@ fn random_label_messages_cook_into_compact_runtime_text() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
 
@@ -348,6 +352,7 @@ fn boot_target_sets_game_flow_entry_to_the_chosen_scene() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
 
@@ -384,6 +389,7 @@ fn boot_target_falls_back_to_gameplay_when_scene_missing() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
     let gameplay_state = flow
@@ -451,6 +457,7 @@ fn button_and_slider_cook_action_colours_and_option_binding() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
 
@@ -526,6 +533,7 @@ fn button_sfx_cooks_wav_to_sample_and_cue_range() {
         &root,
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -598,6 +606,7 @@ fn button_set_option_and_back_actions_lower_to_runtime_ids() {
         Path::new("."),
         &mut texture_asset_for_resource,
         &mut assets,
+        &mut Vec::new(),
         &mut report,
     );
 
