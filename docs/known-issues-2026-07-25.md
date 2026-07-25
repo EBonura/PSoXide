@@ -94,6 +94,12 @@ The original report said "only when tessellating them" and was correct. It was
 argued down on a `split_tris` reading of 0, but that counter measures the
 HARDWARE splitter, not TR subdivision, so it was never evidence either way.
 
+*Also ruled out: the leaf depth key.* Floors take a prepared whole-quad depth
+while walls take a different branch, and a floor recedes steeply, so its leaves
+span a far wider depth range than a wall's. Plausible, and wrong: forcing
+`CachedRoomDepthMode::PerTriangle`, so every leaf computes its own depth,
+leaves the holes unchanged.
+
 Disabling floor subdivision is not the fix -- it exists for affine correction on
 near floors. The remaining work is in the leaf emission itself; start at
 `submit_tomb_raider_cached_room_quad` and the leaf path in
