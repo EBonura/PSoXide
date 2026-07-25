@@ -53,18 +53,132 @@ pub use document_types::*;
 /// the next build.
 const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/default/project.ron");
 
-/// Source-tree projects directory: `editor/projects/`.
+/// Where user projects live, resolved for both the dev tree and a shipped
+/// binary.
 ///
-/// Captured via `env!("CARGO_MANIFEST_DIR")` at compile time, so it
-/// resolves wherever cargo built this crate from. Works for the
-/// dev workflow (`cargo run -p frontend` from anywhere in the
-/// repo); will need a different strategy when the editor ever
-/// ships as a standalone binary.
+/// Precedence, deliberately ordered so the developer workflow cannot regress:
+///
+/// 1. `PSOXIDE_PROJECTS_DIR`, an explicit override for tests and unusual installs.
+/// 2. The source tree, when it exists. `env!("CARGO_MANIFEST_DIR")` is baked at
+///    compile time, so this hits for `cargo run` from a checkout and keeps the
+///    old behaviour byte-for-byte. A shipped binary's build directory does not
+///    exist on the user's machine, so this branch simply misses.
+/// 3. The per-user data directory, for a downloaded build.
+///
+/// This is the single choke point: [`default_project_dir`], [`list_projects`]
+/// and the delete guard all derive from it, so they follow automatically.
 pub fn projects_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    if let Some(override_dir) = std::env::var_os("PSOXIDE_PROJECTS_DIR") {
+        return PathBuf::from(override_dir);
+    }
+    let source_tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
+        .join("projects");
+    if source_tree.is_dir() {
+        return source_tree;
+    }
+    user_projects_dir()
+}
+
+/// Per-user projects directory for a shipped build.
+///
+/// Matches the location the runtime already uses for playtest tapes, so a
+/// downloaded editor and emulator agree on where a user's data lives. Resolved
+/// from the environment rather than through a crate dependency, because the
+/// paths are stable platform conventions and this crate has no other need for
+/// one.
+pub fn user_projects_dir() -> PathBuf {
+    const QUALIFIED: &str = "com.psoxide.PSoXide";
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(QUALIFIED)
+                .join("projects");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("PSoXide").join("projects");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+            return PathBuf::from(data_home).join("psoxide").join("projects");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("psoxide")
+                .join("projects");
+        }
+    }
+    // No home directory at all: keep everything beside the executable rather
+    // than writing to the working directory, which a launcher may set anywhere.
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("projects")
+}
+
+#[cfg(test)]
+mod projects_dir_tests {
+    use super::*;
+
+    /// The override must win outright: it is what lets a test, or a user with
+    /// an unusual install, point the editor somewhere specific. The delete
+    /// guard compares against this same root, so if the override were ignored
+    /// the guard would enforce a directory the editor is not using.
+    #[test]
+    fn explicit_override_beats_every_other_source() {
+        let previous = std::env::var_os("PSOXIDE_PROJECTS_DIR");
+        // SAFETY: single-threaded test; restored before returning.
+        unsafe { std::env::set_var("PSOXIDE_PROJECTS_DIR", "/tmp/psoxide-override") };
+        assert_eq!(projects_dir(), PathBuf::from("/tmp/psoxide-override"));
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("PSOXIDE_PROJECTS_DIR", value),
+                None => std::env::remove_var("PSOXIDE_PROJECTS_DIR"),
+            }
+        }
+    }
+
+    /// Without an override, a checkout keeps its source tree, so `cargo run`
+    /// behaviour is unchanged by the shipped-build resolution added around it.
+    #[test]
+    fn a_checkout_still_resolves_to_the_source_tree() {
+        let previous = std::env::var_os("PSOXIDE_PROJECTS_DIR");
+        unsafe { std::env::remove_var("PSOXIDE_PROJECTS_DIR") };
+        let resolved = projects_dir();
+        assert!(
+            resolved.is_dir(),
+            "source tree should exist when running from a checkout"
+        );
+        assert!(resolved.ends_with("projects"));
+        unsafe {
+            if let Some(value) = previous {
+                std::env::set_var("PSOXIDE_PROJECTS_DIR", value);
+            }
+        }
+    }
+
+    /// A shipped build has no source tree, so it must land in per-user data
+    /// rather than the working directory, which a launcher may set anywhere.
+    #[test]
+    fn user_directory_is_absolute_and_project_scoped() {
+        let dir = user_projects_dir();
+        assert!(dir.ends_with("projects"));
+        if std::env::var_os("HOME").is_some() {
+            assert!(dir.is_absolute(), "user data dir must not be relative");
+        }
+    }
 }
 
 /// Filesystem-safe stem derived from a project display name.
