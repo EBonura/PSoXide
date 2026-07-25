@@ -442,9 +442,12 @@ pub(super) const MAX_COLLISION_CYLINDERS: usize = MAX_MODEL_INSTANCES + MAX_CYLI
 /// A maximum-detail full arch contributes 14 entries, while the default
 /// contributes 8. The fixed cap keeps stack/RAM cost explicit on PS1.
 pub(super) const MAX_STATIC_PROP_AABB_BLOCKERS: usize = psx_level::MAX_STATIC_PROP_AABB_BLOCKERS;
-/// Fixed authored box-prop state budget. Props beyond this still render
-/// as static props, but cannot be toggled broken in this no-heap runtime.
-pub(super) const MAX_BOX_PROP_STATE: usize = 128;
+/// Authored box-prop state budget, cooked from the project's actual prop
+/// count. Each slot costs about 1.4 KB, so a fixed worst-case budget spent
+/// a large share of the PS1's 2 MB on props that do not exist. Props beyond
+/// this still render as static props, but cannot be toggled broken in this
+/// no-heap runtime.
+pub(super) const MAX_BOX_PROP_STATE: usize = BOX_PROP_STATE_COUNT;
 pub(super) const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 /// Active baked break bursts retained after a prop is marked broken.
 pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
