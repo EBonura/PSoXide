@@ -58,30 +58,42 @@ jobs:
       # put its output under `emu/target`: the repo's cargo config redirects it,
       # which is why the Makefile's PGO target refers to `target/release/frontend`.
       # Guessing that path is what broke the first run of this workflow.
+      # Tagged releases get the full `release` profile. A dispatch run is a
+      # packaging smoke test, so it uses `dist` and finishes in a few minutes
+      # instead of eleven.
+      - name: Select build profile
+        id: profile
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "name=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=dist" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build frontend for both architectures
         working-directory: emu
         run: |
-          cargo build --release -p frontend --target x86_64-apple-darwin
-          cargo build --release -p frontend --target aarch64-apple-darwin
+          cargo build --profile ${{ steps.profile.outputs.name }} -p frontend --target x86_64-apple-darwin
+          cargo build --profile ${{ steps.profile.outputs.name }} -p frontend --target aarch64-apple-darwin
 
       - name: Combine into a universal binary
         run: |
           mkdir -p dist/PSoXide
           lipo -create -output dist/PSoXide/psoxide \
-            build/release-target/x86_64-apple-darwin/release/frontend \
-            build/release-target/aarch64-apple-darwin/release/frontend
+            build/release-target/x86_64-apple-darwin/${{ steps.profile.outputs.name }}/frontend \
+            build/release-target/aarch64-apple-darwin/${{ steps.profile.outputs.name }}/frontend
           lipo -info dist/PSoXide/psoxide
 
-      # Ship a project small enough to download: miniaturise-project strips a
-      # project to the assets its level actually reaches. cortex_v1 goes from
-      # 295 MB to about 1 MB, and its miniaturised copy cooks to byte-identical
-      # output, which is that tool's acceptance test.
-      - name: Build the sample project
-        working-directory: editor
+      # The sample is committed already miniaturised rather than stripped here.
+      # cortex_v1 itself is not in the repo -- it is a local 295 MB working
+      # project -- so an earlier version of this step failed on CI with "no such
+      # file". `sample_cortex_v1` is its miniaturise-project output: 45 files,
+      # 1.0 MB, verified to cook byte-identically to the full project.
+      - name: Stage the sample project
         run: |
-          cargo run --release -p psxed-project --bin miniaturise-project -- \
-            projects/cortex_v1/project.ron \
-            ../dist/PSoXide/projects/cortex_v1
+          mkdir -p dist/PSoXide/projects
+          cp -R editor/samples/cortex_v1 dist/PSoXide/projects/cortex_v1
+          du -sh dist/PSoXide/projects/cortex_v1
 
       - name: Stage the archive
         run: |
