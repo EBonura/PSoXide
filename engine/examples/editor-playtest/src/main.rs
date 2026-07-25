@@ -432,6 +432,11 @@ struct Playtest {
     /// Last persistent-asset progress reported, so the trace can show movement.
     #[cfg(feature = "boot-trace")]
     world_ready_trace_progress: i32,
+    /// Whether the persistent-asset failure has already been announced. The
+    /// flag is sticky and the loading screen runs forever, so without this the
+    /// report would repeat every tick.
+    #[cfg(feature = "cd-stream-bench")]
+    persistent_failure_reported: bool,
     /// Predecoded model face records, shared by `models`.
     model_faces: [TexturedModelRenderFace; MAX_RUNTIME_MODEL_FACES],
     model_face_count: usize,
@@ -638,6 +643,18 @@ impl Playtest {
                 // persistent asset hangs the loading screen forever with
                 // nothing reported. Distinguish the two.
                 let arena_failed = persistent_assets_arena().failed();
+                if arena_failed && !self.persistent_failure_reported {
+                    // Unconditional, not behind `boot-trace`: this state never
+                    // resolves, so the run is over and the only question left
+                    // is which asset and why. Reason 0..11 is a cd_stream chunk
+                    // status, 100+ an asset_streaming reason code.
+                    self.persistent_failure_reported = true;
+                    psx_rt::tty::print("PERSISTENT ASSET LOAD FAILED: asset ");
+                    psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_asset() as u32);
+                    psx_rt::tty::print(" reason ");
+                    psx_rt::tty::print_hex_u32(persistent_assets_arena().failed_reason());
+                    psx_rt::tty::println("");
+                }
                 #[cfg(feature = "boot-trace")]
                 {
                     // Distinguish "slow" from "wedged": a load that is merely

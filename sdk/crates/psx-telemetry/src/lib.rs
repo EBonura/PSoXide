@@ -641,11 +641,22 @@ pub mod counter {
     /// past the point first-fit can serve. The visible symptom is otherwise a
     /// texture that silently never loads, so this must stay at zero.
     pub const PERSISTENT_ASSET_LOAD_FAILURES: u16 = 235;
+
+    /// Asset id of the FIRST persistent asset that failed to load, or
+    /// `u16::MAX` if the failure could not be attributed to one asset. Without
+    /// it `PERSISTENT_ASSET_LOAD_FAILURES` says only that something broke, and
+    /// the search space is every streamed asset in the level.
+    pub const PERSISTENT_ASSET_FAILED_ID: u16 = 236;
+
+    /// Why that asset failed: a `cd_stream` chunk status (0..11) when the
+    /// read reached the drive, or one of the `asset_streaming` reason codes
+    /// (100+) when it failed before any read was armed.
+    pub const PERSISTENT_ASSET_FAILED_REASON: u16 = 237;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 236;
+pub const COUNTER_COUNT: usize = 238;
 
-const _: () = assert!(counter::PERSISTENT_ASSET_LOAD_FAILURES as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PERSISTENT_ASSET_FAILED_REASON as usize == COUNTER_COUNT - 1);
