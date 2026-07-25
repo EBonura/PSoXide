@@ -90,9 +90,11 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
     /// Pack every live allocation toward byte zero in slot order, closing the
     /// gaps that releases left behind.
     ///
-    /// This MOVES live bytes, so it bumps `layout_generation` and must not run
-    /// while a CD job is writing into the pool. Allocation is the only caller,
-    /// and it always completes before a job is armed.
+    /// This MOVES live bytes, so it bumps `layout_generation`. Allocation
+    /// deliberately does NOT call it: `RuntimeModelAsset` holds a
+    /// `Model<'static>` borrowed from the pool, and relocating under it would
+    /// dangle. Reserved for a boundary where no parsed view is live, such as a
+    /// level change, and the caller must rebuild views on a generation change.
     fn compact(&mut self) -> bool {
         let base = self.pages.as_mut_ptr().cast::<u8>();
         let mut cursor = 0usize;
@@ -120,22 +122,48 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
         moved
     }
 
+    /// Lowest offset at which `byte_count` fits between live allocations.
+    ///
+    /// First fit, and deliberately never relocates anything: `RuntimeModelAsset`
+    /// holds a `Model<'static>` borrowed from this pool, so moving live bytes
+    /// would dangle it. Fragmentation is the accepted cost, and
+    /// [`Self::prepare_slot`] reports the failure rather than papering over it.
+    fn find_gap(&self, byte_count: usize) -> Option<usize> {
+        let mut cursor = 0usize;
+        loop {
+            // Lowest live allocation starting at or after the cursor.
+            let mut next_start = Self::capacity_bytes();
+            let mut next_end = Self::capacity_bytes();
+            let mut slot = 0usize;
+            while slot < ASSETS {
+                if self.lengths[slot] != 0 {
+                    let start = self.offsets[slot] as usize;
+                    if start >= cursor && start < next_start {
+                        next_start = start;
+                        next_end = start
+                            .saturating_add(self.lengths[slot] as usize)
+                            .next_multiple_of(4);
+                    }
+                }
+                slot += 1;
+            }
+            if next_start.saturating_sub(cursor) >= byte_count {
+                return Some(cursor);
+            }
+            if next_end >= Self::capacity_bytes() {
+                return None;
+            }
+            cursor = next_end;
+        }
+    }
+
     fn prepare_slot(&mut self, slot: usize, byte_count: usize) -> bool {
         if slot >= ASSETS || byte_count == 0 || self.lengths[slot] != 0 {
             return false;
         }
-        if self.live_bytes().saturating_add(byte_count) > Self::capacity_bytes() {
-            // No compaction can create room that does not exist.
+        let Some(offset) = self.find_gap(byte_count) else {
             return false;
-        }
-        let mut offset = self.allocation_end();
-        if offset.saturating_add(byte_count) > Self::capacity_bytes() {
-            self.compact();
-            offset = self.allocation_end();
-            if offset.saturating_add(byte_count) > Self::capacity_bytes() {
-                return false;
-            }
-        }
+        };
         self.offsets[slot] = offset as u32;
         self.lengths[slot] = byte_count as u32;
         true
@@ -577,43 +605,76 @@ mod tests {
         ));
     }
 
+    /// The property whole-level residency was missing: a freed asset's bytes
+    /// must become available again. Crucially the hole is reused IN PLACE, with
+    /// no relocation, because `RuntimeModelAsset` holds a `Model<'static>`
+    /// borrowed from this pool.
     #[test]
-    fn released_asset_bytes_are_reclaimed_by_compaction() {
-        // A pool exactly two allocations wide, so reclaiming is the only way a
-        // third can fit. This is the property whole-level asset residency was
-        // missing: the old bump allocator could never reuse a freed asset.
+    fn a_released_hole_is_reused_without_moving_live_assets() {
         let mut storage = PersistentAssetStorage::<1, 4>::new();
-        let third = SECTOR_BYTES / 2;
+        let third = SECTOR_BYTES / 4;
         assert!(storage.prepare_slot(0, third));
         assert!(storage.prepare_slot(1, third));
-        assert!(!storage.prepare_slot(2, third), "pool should be full");
+        assert!(storage.prepare_slot(2, third));
+        let live_offset = storage.offsets[2];
+        assert!(storage.write_chunk_bytes(2, 0, &[7u8; 8]));
 
-        // Free the FIRST allocation, leaving a hole below a live one so the
-        // reclaim genuinely requires moving bytes rather than just bumping down.
-        assert!(storage.write_chunk_bytes(1, 0, &[7u8; 8]));
-        storage.release_slot(0);
-        assert!(!storage.resident(0));
-        assert!(storage.resident(1));
+        // Free the MIDDLE asset, so reuse requires finding an interior gap
+        // rather than just bumping down from the end.
+        storage.release_slot(1);
+        assert!(!storage.resident(1));
 
-        let before = storage.layout_generation;
-        assert!(storage.prepare_slot(2, third), "compaction should reclaim");
-        assert!(storage.layout_generation > before, "layout must be invalidated");
-
-        // The surviving asset kept its contents across the move.
-        assert_eq!(&storage.bytes_for(1, third).expect("live")[..8], &[7u8; 8]);
-        assert_eq!(storage.offsets[1], 0, "live asset packed to zero");
+        assert!(storage.prepare_slot(3, third), "interior hole must be reused");
+        assert_eq!(
+            storage.offsets[3], storage.offsets[0] + third as u32,
+            "new asset lands in the freed hole"
+        );
+        assert_eq!(storage.layout_generation, 0, "nothing may be relocated");
+        assert_eq!(storage.offsets[2], live_offset, "live asset did not move");
+        assert_eq!(&storage.bytes_for(2, third).expect("live")[..8], &[7u8; 8]);
     }
 
     #[test]
-    fn compaction_cannot_invent_absent_capacity() {
+    fn allocation_fails_rather_than_relocating_when_fragmented() {
         let mut storage = PersistentAssetStorage::<1, 4>::new();
-        assert!(storage.prepare_slot(0, SECTOR_BYTES / 2));
-        // Live bytes plus the request exceed the pool, so this must fail
-        // outright rather than compacting and then aliasing.
-        assert!(!storage.prepare_slot(1, SECTOR_BYTES));
-        assert_eq!(storage.layout_generation, 0, "no pointless compaction");
-        assert!(storage.resident(0));
+        let quarter = SECTOR_BYTES / 4;
+        for slot in 0..4 {
+            assert!(storage.prepare_slot(slot, quarter));
+        }
+        // Free two non-adjacent quarters: half the pool is free, but no single
+        // gap is larger than a quarter.
+        storage.release_slot(0);
+        storage.release_slot(2);
         assert_eq!(storage.live_bytes(), SECTOR_BYTES / 2);
+
+        // A half-pool request cannot be satisfied without moving live bytes,
+        // which is forbidden, so it must fail visibly.
+        let mut wide = PersistentAssetStorage::<1, 5>::new();
+        core::mem::swap(&mut wide.pages, &mut storage.pages);
+        wide.offsets[..4].copy_from_slice(&storage.offsets[..4]);
+        wide.lengths[..4].copy_from_slice(&storage.lengths[..4]);
+        assert!(!wide.prepare_slot(4, SECTOR_BYTES / 2));
+        assert_eq!(wide.layout_generation, 0, "no relocation attempted");
+        // The quarter-sized holes are still usable.
+        assert!(wide.prepare_slot(4, quarter));
+    }
+
+    /// `compact` stays available for a boundary where no parsed view is live.
+    #[test]
+    fn explicit_compaction_closes_gaps_and_flags_the_move() {
+        let mut storage = PersistentAssetStorage::<1, 4>::new();
+        let quarter = SECTOR_BYTES / 4;
+        assert!(storage.prepare_slot(0, quarter));
+        assert!(storage.prepare_slot(1, quarter));
+        assert!(storage.write_chunk_bytes(1, 0, &[9u8; 8]));
+        storage.release_slot(0);
+
+        assert!(storage.compact());
+        assert!(storage.layout_generation > 0, "callers must rebuild views");
+        assert_eq!(storage.offsets[1], 0, "survivor packed to zero");
+        assert_eq!(&storage.bytes_for(1, quarter).expect("live")[..8], &[9u8; 8]);
+        // A full-pool allocation now fits where it previously could not.
+        assert!(storage.prepare_slot(2, SECTOR_BYTES - quarter));
     }
 
     #[test]
