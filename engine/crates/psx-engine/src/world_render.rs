@@ -242,16 +242,23 @@ const fn wall_material_for_direction(
     mut material: WorldRenderMaterial,
     direction: u8,
 ) -> WorldRenderMaterial {
-    // Cardinal wall windings make the owning cell's interior the back side.
-    // Diagonal walls are freestanding cuts through a cell and are always used
-    // from both sides, so they ignore the authored Front/Back distinction.
-    match direction {
-        DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => {
-            material.sidedness = SurfaceSidedness::Both;
-            material
-        }
-        _ => wall_material(material),
-    }
+    // Cardinal wall windings make the owning cell's interior the back side, so
+    // backface culling used to delete a boundary wall for anyone standing in
+    // the cell that owns it -- which, for a wall that bounds the playable area,
+    // is the only place a player can stand. That is the cortex_v1 report:
+    // approach the corridor's west wall and it disappears once you enter its
+    // owning cell, with no counter recording the loss because a backface cull
+    // is a legitimate outcome.
+    //
+    // A sector wall is solid geometry, not a one-sided cut, so both of its
+    // faces are real surfaces. Diagonal walls already opted out of the
+    // Front/Back distinction for exactly this reason; cardinals now match them.
+    // `wall_material` still selects the authored per-side texture, so the two
+    // faces keep their own appearance.
+    let _ = direction;
+    material = wall_material(material);
+    material.sidedness = SurfaceSidedness::Both;
+    material
 }
 
 /// Kind of room surface currently being emitted.
