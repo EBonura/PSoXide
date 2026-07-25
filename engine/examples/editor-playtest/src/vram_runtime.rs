@@ -46,6 +46,23 @@ pub(super) fn ensure_room_resident(residency: &psx_level::RoomResidencyRecord) {
     let _ = vram_arena().ensure_room_resident(residency);
 }
 
+/// Scope the persistent RAM asset set to `desired`'s residency needs.
+///
+/// Releases texture payloads no desired room requires or warms, and reads only
+/// the ones that are missing, so crossing into a neighbour that shares textures
+/// costs no CD traffic. Model meshes and clips stay pinned for the level; see
+/// `PersistentAssetStreamer::evictable`.
+pub(super) fn request_persistent_assets(desired: &[RoomIndex], count: usize) {
+    let desired = &desired[..count.min(desired.len())];
+    persistent_assets_arena_mut().request_rooms(
+        UI_PACK_START_LBA,
+        UI_PACK_TOC,
+        ASSETS,
+        desired,
+        ROOM_RESIDENCY,
+    );
+}
+
 /// Debounced room-texture eviction against the desired resident set;
 /// policy and the last-evict-room debounce live on
 /// `VramRuntime::evict_unreferenced_vram`.
