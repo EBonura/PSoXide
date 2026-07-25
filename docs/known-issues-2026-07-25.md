@@ -100,11 +100,29 @@ span a far wider depth range than a wall's. Plausible, and wrong: forcing
 `CachedRoomDepthMode::PerTriangle`, so every leaf computes its own depth,
 leaves the holes unchanged.
 
+*The `tessellation-debug` capture, and what it changes.* Run over the same tape,
+leaves colour cyan, underdraw yellow and un-subdivided roots red. Walls show
+cyan and yellow. **The affected floor shows none of the three.**
+
+That rules out leaf emission, which was the previous suspect. A leaf failing to
+emit would leave its siblings drawn, so the floor would appear as cyan patches
+with gaps. Contributing no debug-coloured geometry at all -- not even red, the
+un-subdivided root colour -- means those floor surfaces never reach the
+colouring path.
+
+So the failure is UPSTREAM of leaf emission, at the point a surface is routed
+into the subdivision path rather than inside it. That is consistent with
+disabling floor subdivision restoring the floor: the subdivision *decision* is
+implicated, not the leaves it produces.
+
+The specific candidate: `tomb_raider_warmed_quad_requires_dynamic_submit` forces
+a subdividing quad off the warmed fast path
+([`indexed_cache.rs`](../engine/crates/psx-engine/src/world_render/indexed_cache.rs)).
+If the dynamic fallback then declines it too, the surface is dropped by both
+paths with no counter recording it. Check that hand-off first.
+
 Disabling floor subdivision is not the fix -- it exists for affine correction on
-near floors. The remaining work is in the leaf emission itself; start at
-`submit_tomb_raider_cached_room_quad` and the leaf path in
-`world_pass_gouraud.rs`, with `tessellation-debug` colouring to see which leaves
-survive.
+near floors.
 
 **Original state, for the record:** open, and provenance unknown. Reported against a build from this
 branch; never checked against `main`. Three changes here touch the room render
