@@ -241,9 +241,6 @@ const fn wall_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial
 const fn wall_material_for_direction(
     mut material: WorldRenderMaterial,
     direction: u8,
-    // Whether the cooker proved the owning cell is the only walkable side; see
-    // `CACHED_SURFACE_WALL_FACES_OWNER`.
-    faces_owner: bool,
 ) -> WorldRenderMaterial {
     // Cardinal wall windings make the owning cell's interior the back side, so
     // backface culling used to delete a boundary wall for anyone standing in
@@ -258,23 +255,7 @@ const fn wall_material_for_direction(
     // Front/Back distinction for exactly this reason; cardinals now match them.
     // `wall_material` still selects the authored per-side texture, so the two
     // faces keep their own appearance.
-    //
-    // Both faces is correct but not free: it doubles the wall's raster work and
-    // costs +9.09% of the render stage. When the cooker can prove from grid
-    // adjacency that the neighbour behind the wall is absent or non-walkable,
-    // the owning cell is the ONLY side a player can reach, so skipping the
-    // front/back swap puts the visible face where the player is and one face
-    // suffices. Anything the cooker cannot prove -- including walls walkable
-    // from both sides -- keeps the conservative answer above.
-    // A diagonal cuts through a cell rather than bounding it, so it has no
-    // single neighbour to prove empty and is reachable from both sides.
-    let cardinal = !matches!(
-        direction,
-        DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST
-    );
-    if cardinal && faces_owner {
-        return material;
-    }
+    let _ = direction;
     material = wall_material(material);
     material.sidedness = SurfaceSidedness::Both;
     material
@@ -612,13 +593,6 @@ pub struct CachedRoomSurface {
 }
 
 impl CachedRoomSurface {
-    /// Whether this wall's playable side is the cell that owns it.
-    ///
-    /// See [`CACHED_SURFACE_WALL_FACES_OWNER`].
-    pub const fn wall_faces_owner(&self) -> bool {
-        self.kind_flags & CACHED_SURFACE_WALL_FACES_OWNER != 0
-    }
-
     /// Empty placeholder for fixed runtime cache arrays.
     pub const EMPTY: Self = Self {
         material_slot: 0,
@@ -707,14 +681,6 @@ impl CachedRoomSurface {
     }
 
     #[inline(always)]
-    fn with_wall_faces_owner(mut self, faces_owner: bool) -> Self {
-        if faces_owner {
-            self.kind_flags |= CACHED_SURFACE_WALL_FACES_OWNER;
-        }
-        self
-    }
-
-    #[inline(always)]
     fn with_horizontal_non_flat(mut self, non_flat: bool) -> Self {
         if non_flat {
             self.kind_flags |= CACHED_SURFACE_HORIZONTAL_NON_FLAT;
@@ -755,15 +721,6 @@ const CACHED_SURFACE_KIND_MASK: u8 = 0b0000_0011;
 const CACHED_SURFACE_KIND_FLOOR: u8 = 0;
 const CACHED_SURFACE_KIND_CEILING: u8 = 1;
 const CACHED_SURFACE_KIND_WALL: u8 = 2;
-/// A cardinal wall whose playable side is the cell that OWNS it.
-///
-/// Cardinal wall windings put the owning cell's interior on the back face, so a
-/// wall is visible from its neighbour by default. When that neighbour is absent
-/// or non-walkable the owning cell is the only side a player can stand on, and
-/// without this the wall is culled from the one place it can be seen. The cooker
-/// sets this from grid adjacency; the renderer flips such a wall and keeps it
-/// single-sided, instead of paying for both faces everywhere.
-const CACHED_SURFACE_WALL_FACES_OWNER: u8 = 0b0000_0100;
 const CACHED_SURFACE_HORIZONTAL_NON_FLAT: u8 = 0b0100_0000;
 const CACHED_SURFACE_HAS_BAKED_RGB: u8 = 0b1000_0000;
 
@@ -2193,7 +2150,7 @@ fn emit_wall<const OT: usize>(
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
         return;
     };
-    let material = wall_material_for_direction(material, direction, false);
+    let material = wall_material_for_direction(material, direction);
     if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
         submit_split_triangle(
             camera,
@@ -2392,7 +2349,7 @@ fn emit_wall_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
         return;
     };
-    let material = wall_material_for_direction(material, direction, false);
+    let material = wall_material_for_direction(material, direction);
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
         submit_split_triangle_vertex_lit(
