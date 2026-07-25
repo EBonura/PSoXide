@@ -141,8 +141,28 @@ assumed something was rejecting it.
 **The surface is submitted, and the debug capture shows no coloured geometry
 reaches the screen. Those reconcile only if `submit_adaptive_cached_room_quad`
 returns `true` while emitting nothing visible** -- claiming success so the caller
-skips the fallback. That is where to instrument: compare its return value against
-what it actually pushed into the arena.
+skips the fallback.
+
+**That is exactly what it does.** At
+[`indexed_cache.rs:2045`](../engine/crates/psx-engine/src/world_render/indexed_cache.rs#L2045):
+
+```rust
+let _ = world.submit_adaptive_textured_gouraud_view_quad_uv_words(...);
+true
+```
+
+The submit's result is discarded and `true` is returned unconditionally. The
+caller reads that as success and skips its whole-quad fallback, so a submit that
+emitted nothing leaves a hole with no counter recording it. This fits every piece
+of evidence rather than contradicting some of it, and it explains why six
+hypotheses hunting a REJECTION all missed: nothing rejects the surface, a failure
+is simply swallowed.
+
+**Before fixing, confirm the discarded value can signal failure.** If it is a
+stats struct with no failure indicator, this is a red herring and the emission
+itself is at fault. If it carries an overflow flag or a dropped-primitive count,
+the fix is to propagate it so a failed subdivision falls through to the ordinary
+quad submit, which the caller already has.
 
 A second silent path exists nearby -- `count_lighting_reject()` returns `0` when
 `indexed_vertex_lighting_colors` yields `None` -- but walls share it and render
