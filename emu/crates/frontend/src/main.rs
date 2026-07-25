@@ -297,6 +297,18 @@ impl Default for Shell {
 
 impl Shell {
     fn new(config_dir: Option<std::path::PathBuf>, fullscreen: bool, gpu_compute: bool) -> Self {
+        // A downloaded build has no projects directory yet. Copy the bundled
+        // sample in once, before anything reads the project list. Failure is
+        // non-fatal: starting with no sample beats refusing to start.
+        #[cfg(not(target_arch = "wasm32"))]
+        match psxed_project::ensure_projects_seeded() {
+            Ok(true) => eprintln!(
+                "[projects] seeded sample project into {}",
+                psxed_project::projects_dir().display()
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!("[projects] could not seed sample project: {error}"),
+        }
         let audio = audio::AudioOut::open();
         if let Some(a) = audio.as_ref() {
             eprintln!("[audio] opened host stream @ {} Hz", a.host_sample_rate());

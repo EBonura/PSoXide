@@ -128,6 +128,56 @@ pub fn user_projects_dir() -> PathBuf {
         .join("projects")
 }
 
+/// Copy the bundled sample project into the per-user projects directory the
+/// first time a downloaded build runs.
+///
+/// Deliberately NOT part of [`projects_dir`]. That function is called from the
+/// delete guard, and a path lookup that also writes to disk is the kind of
+/// surprise that turns into a real bug. Call this once at startup instead.
+///
+/// Seeds only when the directory is ABSENT, never merely empty: a user who
+/// deletes the sample should not have it reappear on next launch.
+///
+/// The sample is copied rather than read in place because it is meant to be
+/// edited. An archive dragged into a read-only location would otherwise give a
+/// project that opens but cannot be saved.
+///
+/// Failure is not fatal and is reported to the caller: no sample beats
+/// refusing to start.
+pub fn ensure_projects_seeded() -> std::io::Result<bool> {
+    let target = projects_dir();
+    if target.exists() {
+        return Ok(false);
+    }
+    // Only a shipped layout has projects beside the executable; a checkout
+    // resolves to its source tree above and never reaches here.
+    let Some(bundled) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join("projects"))
+        .filter(|dir| dir.is_dir())
+    else {
+        return Ok(false);
+    };
+    copy_dir_recursive(&bundled, &target)?;
+    Ok(true)
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let destination = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&source, &destination)?;
+        } else {
+            std::fs::copy(&source, &destination)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod projects_dir_tests {
     use super::*;
@@ -167,6 +217,25 @@ mod projects_dir_tests {
                 std::env::set_var("PSOXIDE_PROJECTS_DIR", value);
             }
         }
+    }
+
+    /// Seeding must respect a deletion. Re-creating the sample every launch
+    /// because the directory is empty would be infuriating, so absence of the
+    /// directory itself is the trigger.
+    #[test]
+    fn seeding_is_skipped_when_the_directory_already_exists() {
+        let previous = std::env::var_os("PSOXIDE_PROJECTS_DIR");
+        let existing = std::env::temp_dir().join("psoxide-seed-existing");
+        std::fs::create_dir_all(&existing).expect("temp dir");
+        unsafe { std::env::set_var("PSOXIDE_PROJECTS_DIR", &existing) };
+        assert_eq!(ensure_projects_seeded().expect("seed"), false);
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("PSOXIDE_PROJECTS_DIR", value),
+                None => std::env::remove_var("PSOXIDE_PROJECTS_DIR"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&existing);
     }
 
     /// A shipped build has no source tree, so it must land in per-user data
