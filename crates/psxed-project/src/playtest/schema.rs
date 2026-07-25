@@ -1787,6 +1787,21 @@ pub struct PlaytestEntity {
 /// instances, and residency.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestPackage {
+    /// Project-relative paths of every source texture the cook actually
+    /// reached, deduplicated.
+    ///
+    /// A project's `assets/` directory is a library, not a working set:
+    /// cortex_v5 carries 704 `.psxt` files and its level reaches 3. This is the
+    /// reachable set, taken from the same map the cook uses to dedupe texture
+    /// references, so it cannot disagree with what was actually cooked. Used to
+    /// produce a shippable copy of a project containing only what it needs, and
+    /// as an orphaned-asset report.
+    pub used_texture_paths: Vec<String>,
+    /// Project-relative paths of every source model mesh and animation clip the
+    /// cook actually reached. Same purpose and same guarantee as
+    /// [`Self::used_texture_paths`]: taken from the maps the cook itself keeps,
+    /// so it cannot name a file the cook did not use, nor miss one it did.
+    pub used_model_paths: Vec<String>,
     /// Cached-room depth sorting mode selected by the project.
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
     /// Runtime room triangle subdivision scope.
