@@ -220,6 +220,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out,
         "pub const PERSISTENT_ASSET_PAGE_COUNT: usize = {persistent_asset_page_count};\n",
     );
+    // Box-prop runtime state is one slot per authored prop. Cooking the
+    // count keeps ~1.4 KB per unused slot out of the PS1's 2 MB.
+    let box_prop_state_count = package.box_props.len().max(1);
+    let _ = writeln!(
+        out,
+        "pub const BOX_PROP_STATE_COUNT: usize = {box_prop_state_count};\n",
+    );
     let runtime_depth_sort_mode = package.runtime_depth_sort_mode.manifest_value();
     let _ = writeln!(
         out,
