@@ -290,6 +290,39 @@ measurement, NOT a correctness gate: walls must be checked visually across a
 whole route in the editor, because the earlier global-flip attempt looked right
 on a single frame while having inverted every wall that was already correct.
 
+### VISUAL A/B: the change is not safe to merge (2026-07-25, evening)
+
+Three guest builds over the same cooked cortex_v1 data and the same scripted
+route (`--hold-forward` plus the menu `--press` set), all reaching 3069 route
+ticks, screenshots every 100 ticks:
+
+| build | what it is |
+| --- | --- |
+| before | `a4814df2`, walls forced to both faces |
+| after | `4fd44d5b`, the optimization |
+| control | `4fd44d5b` clean, without the streaming changes in this commit |
+
+- The SIMULATION is identical between before and after: `cam_x/y/z`,
+  `current_room` and `drawn_mask` match on all 3038 counter-log frames. Only
+  what is drawn changed.
+- **27 of 30 captured frames differ.** This is a route, not a pose.
+- From about tick 400 onward the PLAYER IS NOT DRAWN in the after build. She is
+  present in the simulation, the camera tracks her, and she renders normally in
+  the both-faces build at the same tick.
+- Per frame, roughly 36k pixels shift slightly across the walls and about 2.8k
+  shift strongly, in a band wider than her silhouette.
+- The control is PIXEL-IDENTICAL to the after build on all 30 frames, so the
+  streaming changes committed alongside this note are not involved and cost
+  nothing visually.
+
+Mechanism not yet established. Two candidates fit the evidence: a wall face that
+was previously culled now faces the camera and occludes her, or the change
+perturbs something shared with the model draw path. Worth distinguishing before
+any further attempt, rather than guessing, given this rule's history.
+
+Coverage caveat: `--hold-forward` walks one corridor, so this is a strong signal
+rather than whole-route coverage.
+
 ## RESOLVED: the "loading stall" was a disc built without the UI pack
 
 **There is no engine stall. This was my build error, and the whole entry below
@@ -311,28 +344,52 @@ What the misdiagnosis cost, and the two genuine bugs it exposed:
    entered every frame -- is equally consistent with "the data is not on the
    disc". Nothing in the guest says which. A pack whose TOC is absent or empty
    should be a loud failure at `begin`, not an infinite wait.
-2. **The stall detector did not fire, and I do not know why.** `Ok(false)` from
-   `try_read_stream_sector` increments `data_wait_polls` toward
-   `DATA_READY_STALL_POLL_LIMIT` (4096, `cd_stream.rs:124`), and
-   `begin_next_group` resets it to 0 (`cd_stream.rs:589`). I claimed the reset
-   was the reason and that is NOT established: once a group is armed the state
-   stays `Reading`, so the counter should have accumulated one per pump call and
-   tripped well inside an 8117-tick run. It never did -- the arena never reported
-   `failed()` either.
+2. **The stall detector did not fire. RESOLVED: its budget was 136 seconds.**
+   Nothing upstream stopped the job, and the `begin_next_group` reset was not
+   the cause either. The counter's UNIT was wrong.
 
-   So something upstream stopped the job before the detector could count. The
-   likely shape, given the pack was absent, is that
-   `next_world_pack_info_read_group` returned `None` immediately and `finish()`
-   put the job in `Done`, after which `poll_into` returns early forever. But
-   `finish_if_done` should then have set `failed`, and it did not. That
-   contradiction is unresolved and is the thread to pull.
+   `try_read_stream_sector` checks the IRQ flag once and returns; on `Ok(false)`
+   the caller `break`s out of its sector loop. So `data_wait_polls` could
+   increment at most **once per `poll_into` call**, never once per spin, despite
+   the name. The pump runs on alternate sim ticks
+   (`ROOM_WINDOW_BACKGROUND_TICK_MASK == 1`), so 4096 increments needed 8194
+   ticks. The run was 8117. It came within about 80 ticks of firing and simply
+   ran out of road, which is also why `failed()` was never set: the job stayed
+   in `Reading` the whole time and `finish_if_done` had nothing to judge.
 
-   Re-arming still is not progress, so resetting `data_wait_polls` there is
-   questionable on its own merits -- but do not "fix" it until the above is
-   understood, or it will look fixed while the real path stays silent.
-3. **A sticky `failed` stops the pump silently** (unrelated to this incident, but
-   real). One bad persistent asset sets `AssetArena::failed`, `pump` then returns
-   early forever and nothing surfaces it.
+   The reset in `begin_next_group` is fine on its merits and stays: that state
+   is only reached at job start or after `mark_group_processed` retired a group,
+   both of which are real progress, never a re-arm of the same work.
+
+   **Fixed** by naming the unit and setting a budget in it: `empty_pumps` with
+   `EMPTY_PUMP_STALL_LIMIT = 256`, about 8.5 s at 30 pumps/second.
+
+   Measured both ways on cortex_v1, same guest binary:
+
+   | disc | route ticks | `persistent asset load failures` | gameplay |
+   |---|---:|---:|---|
+   | built without `--ui-pack-dir` | 3117 | **1** | none, as expected |
+   | built with the UI pack flags | 3069 | 0 | 2749 frames, first at 290 |
+
+   The failing run reports inside 3117 ticks where the old limit needed 8194, and
+   the tighter limit does not false-positive on a healthy load.
+3. **A sticky `failed` stops the pump silently.** One bad persistent asset sets
+   `AssetArena::failed`, `pump` then returns early forever and nothing surfaces
+   it.
+
+   **Partly fixed.** Every path in `PersistentAssetStreamer` that gives up now
+   routes through one `fail()` that counts `PERSISTENT_ASSET_LOAD_FAILURES`
+   once, so a failure is always visible in telemetry rather than only in
+   `request_rooms` (which was the sole counted path, and not the one the missing
+   pack took). That is what makes the table above readable.
+
+   **Still open, and it is a design call, not a bug fix:** nothing ACTS on
+   `failed()`. `step_persistent_model_assets` returns `runtime_models_loaded ==
+   false`, `step_streaming_jobs` returns early, and the loading screen sits
+   there forever exactly as before. A player sees no difference; only a headless
+   run with `--dump-guest-profile` does. Deciding what the game shows instead
+   (an error scene, a message on the loading screen, a fall back to the menu) is
+   the remaining work.
 
 Ruled out along the way, so nobody re-walks them: the confirm press
 (`just_pressed` is edge-triggered, but pressing every 30 ticks changed nothing),
