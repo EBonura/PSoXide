@@ -13,6 +13,27 @@
 //! ```text
 //! miniaturise-project projects/cortex_v5/project.ron /tmp/cortex_v5_slim
 //! ```
+//!
+//! # INCOMPLETE -- do not ship its output yet
+//!
+//! Only textures reached through room materials, model meshes, model atlases
+//! and animation clips are copied. A round-trip on cortex_v1 -- cook the
+//! original, cook the copy, diff `generated/` -- showed three asset classes are
+//! missed entirely:
+//!
+//! - **UI images.** The menu art cooks as PLACEHOLDERS, with warnings like
+//!   `failed to read texture 'BONNIE_STUDIOS_LOGO' ... using placeholder`.
+//! - **CD-DA tracks.** `track02.cdda` is absent from the copy.
+//! - **UI SFX.** `ui_sfx_000.psau` is absent.
+//!
+//! A shipped copy would therefore boot to a broken menu with no audio. These
+//! are project-global assets rather than per-room reachable ones, so they do
+//! not need reachability analysis -- copying all of them is correct. The work
+//! is finding where each declares its source path and adding them to the used
+//! set, then re-running the round-trip until the diff is empty.
+//!
+//! The round-trip diff is the acceptance test for this tool. Until it comes
+//! back clean, treat the output as a size experiment, not a shippable project.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
