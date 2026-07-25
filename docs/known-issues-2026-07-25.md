@@ -115,6 +115,11 @@ into the subdivision path rather than inside it. That is consistent with
 disabling floor subdivision restoring the floor: the subdivision *decision* is
 implicated, not the leaves it produces.
 
+*Also ruled out: the warmed path's backface early return.* That function returns
+`true` ("handled") without drawing, which matches the no-debug-colour signature
+exactly. Disabling it entirely leaves the holes unchanged, so it is not the
+silent drop.
+
 The specific candidate: `adaptive_warmed_quad_requires_dynamic_submit` forces
 a subdividing quad off the warmed fast path
 ([`indexed_cache.rs`](../engine/crates/psx-engine/src/world_render/indexed_cache.rs)).
