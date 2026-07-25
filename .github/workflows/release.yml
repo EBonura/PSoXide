@@ -1,0 +1,115 @@
+name: Release
+
+# Tagged standalone builds, so people do not have to compile PSoXide themselves.
+#
+# One artifact per platform, because `frontend` already contains BOTH the
+# emulator and the editor -- `make run` is just `cargo run -p frontend`. There
+# is nothing to bundle together.
+#
+# macOS first: it is the platform the maintainer can test directly, and a first
+# release will have problems worth hitting in a tight loop rather than by proxy.
+# Adding Windows and Linux is adding matrix rows plus whatever path handling
+# they expose; nothing here is thrown away by starting narrow.
+#
+# The binary resolves its projects directory at runtime (see
+# `psxed_project::projects_dir`): an explicit `PSOXIDE_PROJECTS_DIR`, else the
+# source tree when present, else per-user data. A downloaded build takes the
+# third branch, so it does not need the repo layout beside it.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Lets the packaging be exercised without minting a tag. Produces the same
+  # artifacts, uploaded to the run instead of to a release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins a dated nightly, so the toolchain comes from
+      # the repo rather than being named here and drifting from it.
+      - name: Add Apple targets
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: emu
+
+      # Both architectures, because a release that only runs on Apple Silicon
+      # silently excludes every Intel Mac.
+      - name: Build frontend for both architectures
+        working-directory: emu
+        run: |
+          cargo build --release -p frontend --target x86_64-apple-darwin
+          cargo build --release -p frontend --target aarch64-apple-darwin
+
+      - name: Combine into a universal binary
+        run: |
+          mkdir -p dist/PSoXide
+          lipo -create -output dist/PSoXide/psoxide \
+            emu/target/x86_64-apple-darwin/release/frontend \
+            emu/target/aarch64-apple-darwin/release/frontend
+          lipo -info dist/PSoXide/psoxide
+
+      # Ship a project small enough to download: miniaturise-project strips a
+      # project to the assets its level actually reaches. cortex_v1 goes from
+      # 295 MB to about 1 MB, and its miniaturised copy cooks to byte-identical
+      # output, which is that tool's acceptance test.
+      - name: Build the sample project
+        working-directory: editor
+        run: |
+          cargo run --release -p psxed-project --bin miniaturise-project -- \
+            projects/cortex_v1/project.ron \
+            ../dist/PSoXide/projects/cortex_v1
+
+      - name: Stage the archive
+        run: |
+          cp README.md dist/PSoXide/ 2>/dev/null || true
+          cd dist && zip -r psoxide-macos-universal.zip PSoXide
+          shasum -a 256 psoxide-macos-universal.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: psoxide-macos-universal
+          path: dist/psoxide-macos-universal.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/psoxide-macos-universal.zip
+          # An unsigned binary from the internet is quarantined by Gatekeeper
+          # and reports itself as damaged, which reads as a broken download
+          # rather than a security prompt. Say so up front. Signing and
+          # notarising needs an Apple Developer account and is a later step.
+          body: |
+            ## PSoXide ${{ github.ref_name }}
+
+            One binary containing both the emulator and the editor, universal
+            for Apple Silicon and Intel.
+
+            ### Running it
+
+            macOS quarantines unsigned downloads, so clear the flag once:
+
+            ```sh
+            xattr -dr com.apple.quarantine PSoXide
+            ./PSoXide/psoxide
+            ```
+
+            ### Notes
+
+            - No BIOS is included and none can be; supply your own.
+            - A sample project ships under `projects/`. Your own projects live
+              in `~/Library/Application Support/com.psoxide.PSoXide/projects`.
+            - Windows and Linux builds are not published yet.
