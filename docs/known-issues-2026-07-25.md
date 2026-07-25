@@ -293,6 +293,29 @@ Evidence, from an 8117-route-tick run (~135 s of guest time):
 - Route screenshots at ticks 1000..8000 animate (a two-state blink) but never
   advance.
 
+**The confirm is not the blocker.** `confirmed` is edge-triggered
+(`just_pressed`), so an early press is consumed before the world is ready and
+never repeated -- a trap worth knowing when scripting a route. Ruled out by
+pressing CROSS every 30 ticks for 6000 ticks: still zero gameplay rows. So
+`initial_world_ready()` (`engine/examples/editor-playtest/src/main.rs:618`) is
+genuinely false, and the next step is to find which of its seven conditions
+never flips:
+
+```text
+runtime_models_loaded
+current_collision_room.is_some()
+!window.job.active
+portal_visible_rooms_are_active(record)
+initial_stream_ring_resident()
+initial_stream_ring_textures_ready()
+streaming_jobs.vram_uploads_idle()
+!streamed_room_stream_active()
+```
+
+None of them is currently visible in telemetry, which is why this took a whole
+session to corner. Emitting them as counters is the cheap fix and would pay for
+itself the next time a load stalls.
+
 **The contradiction worth chasing:** the guest spends 12% of its time inside
 `read_one_sector_blocking` while completing zero further chunk loads. Sectors are
 being read continuously and never assembled into a chunk, which reads as a retry
