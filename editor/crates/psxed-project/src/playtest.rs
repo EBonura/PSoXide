@@ -225,6 +225,7 @@ pub fn build_package(
     // texture's compact "texture index" via `texture_asset_for_path.len()`
     // at first insertion (never removed). HashMap is fine -- we
     // only use it for presence tests.
+    let mut used_ui_source_paths: Vec<String> = Vec::new();
     let mut texture_asset_for_path: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut sky_texture_assets: Vec<(crate::ResolvedSkySettings, usize)> = Vec::new();
@@ -1918,6 +1919,7 @@ pub fn build_package(
             project_root,
             &mut texture_asset_for_path,
             &mut assets,
+            &mut used_ui_source_paths,
             &mut report,
         );
     if !report.is_ok() {
@@ -1943,6 +1945,7 @@ pub fn build_package(
             // registered, and `model_clip_remaps` records which of a model's
             // clips survived the runtime-clip filter, so a clip the cook skipped
             // is not shipped.
+            used_ui_paths: used_ui_source_paths,
             used_model_paths: {
                 let mut paths: std::collections::BTreeSet<String> =
                     std::collections::BTreeSet::new();
