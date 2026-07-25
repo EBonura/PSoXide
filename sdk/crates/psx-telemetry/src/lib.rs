@@ -630,11 +630,22 @@ pub mod counter {
     /// Entity attacks that connected with the player (i-framed and
     /// out-of-arc swings whiff and do not count).
     pub const PLAYER_HITS_TAKEN: u16 = 233;
+
+    /// Live bytes in the persistent gameplay asset pool. Makes the difference
+    /// between whole-level and neighbourhood-scoped residency observable, which
+    /// is the only way to tell that asset paging is doing anything.
+    pub const PERSISTENT_ASSET_RESIDENT_BYTES: u16 = 234;
+
+    /// Times the persistent asset pool refused an allocation. Non-zero means the
+    /// cooked budget is too small for the neighbourhood, or the pool fragmented
+    /// past the point first-fit can serve. The visible symptom is otherwise a
+    /// texture that silently never loads, so this must stay at zero.
+    pub const PERSISTENT_ASSET_LOAD_FAILURES: u16 = 235;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 234;
+pub const COUNTER_COUNT: usize = 236;
 
-const _: () = assert!(counter::PLAYER_HITS_TAKEN as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PERSISTENT_ASSET_LOAD_FAILURES as usize == COUNTER_COUNT - 1);
