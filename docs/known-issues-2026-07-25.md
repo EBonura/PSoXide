@@ -315,7 +315,7 @@ So the wedge is inside the grouped read job, `WorldRoomSlotsRead::poll_into`
 (`engine/crates/psx-game-runtime/src/cd_stream.rs:394`), which reads sectors
 without ever completing an entry.
 
-**Unverified hypothesis, next thing to test.** In `poll_into`:
+**One hypothesis already ruled out.** In `poll_into`:
 
 ```rust
 if self.state == WorldRoomSlotsReadState::Ready {
@@ -325,11 +325,17 @@ if self.state == WorldRoomSlotsReadState::Ready {
 ```
 
 `sectors_this_poll` is zero-initialised per call, so the call that starts a group
-always breaks immediately. That is harmless if `begin_next_group` leaves the
-state `Reading`, costing one pump tick per group. If it can return `true` while
-leaving the state `Ready`, every pump call starts a group and breaks, forever,
-which matches all three observations above. Check what states
-`begin_next_group` can exit in before changing anything.
+always breaks immediately. This is NOT the bug: `begin_next_group`
+(`cd_stream.rs:564`) sets `state = Reading` on every path that returns `true`, so
+the break costs one pump tick per group and the next call proceeds to the read.
+
+That leaves the `Reading` path itself. The state does advance, sectors are read
+continuously, and yet `processed_count` never rises, so look at what turns read
+sectors into a completed entry: whether `try_read_stream_sector` keeps returning
+`Ok(false)` and burns the budget, whether `sector_offset` ever reaches
+`group_end`, and whether `mark_group_processed` is reached but the entry is then
+rejected. `data_wait_polls` and its timeout are worth watching, since a retry
+that resets progress would look exactly like this.
 
 **The confirm is not the blocker.** `confirmed` is edge-triggered
 (`just_pressed`), so an early press is consumed before the world is ready and
