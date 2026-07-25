@@ -293,6 +293,44 @@ Evidence, from an 8117-route-tick run (~135 s of guest time):
 - Route screenshots at ticks 1000..8000 animate (a two-state blink) but never
   advance.
 
+**Narrowed to a single condition (2026-07-25, later).** Added `boot-trace`
+reporting of the world-ready conditions to `initial_world_ready`, which prints
+only on change so a 30 Hz loading loop does not flood the TTY. Guest TTY reaches
+host stdout through the HLE BIOS putchar, so this needs no new telemetry counter.
+
+Result, in order of elimination:
+
+1. Only `runtime_models_loaded` is ever pending. The other six conditions are
+   never even evaluated: it returns before them.
+2. `persistent_assets_arena().failed()` is **false**, so this is not the sticky
+   failure path in `AssetArena::finish_if_done`. (Worth knowing that path exists:
+   one bad asset sets `failed`, `pump` then returns early forever, and nothing is
+   reported. A different hang with the same symptom.)
+3. `progress_q12()` never changes from 0 across the whole run. `begin` always
+   sets `started`, and `count == 0` would set `ready`, so the arena is started
+   with a non-empty asset list and **not one entry ever completes** -- while the
+   guest spends 12.3% of its time reading sectors.
+
+So the wedge is inside the grouped read job, `WorldRoomSlotsRead::poll_into`
+(`engine/crates/psx-game-runtime/src/cd_stream.rs:394`), which reads sectors
+without ever completing an entry.
+
+**Unverified hypothesis, next thing to test.** In `poll_into`:
+
+```rust
+if self.state == WorldRoomSlotsReadState::Ready {
+    if !self.begin_next_group(cd, &mut polls) { break; }
+    if sectors_this_poll == 0 { break; }   // always true here
+}
+```
+
+`sectors_this_poll` is zero-initialised per call, so the call that starts a group
+always breaks immediately. That is harmless if `begin_next_group` leaves the
+state `Reading`, costing one pump tick per group. If it can return `true` while
+leaving the state `Ready`, every pump call starts a group and breaks, forever,
+which matches all three observations above. Check what states
+`begin_next_group` can exit in before changing anything.
+
 **The confirm is not the blocker.** `confirmed` is edge-triggered
 (`just_pressed`), so an early press is consumed before the world is ready and
 never repeated -- a trap worth knowing when scripting a route. Ruled out by
