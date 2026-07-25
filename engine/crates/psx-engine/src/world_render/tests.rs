@@ -327,12 +327,8 @@ fn wall_material_swaps_front_and_back_only() {
 /// cell that owns it, which is the only side of a room-bounding wall anyone can
 /// stand on. `wall_material` still swaps the authored per-side texture, so the
 /// two faces keep their own appearance; only the culling changes.
-///
-/// This is now the answer for a wall the cooker could NOT prove owner-facing,
-/// hence `false` below. The proven case is covered by
-/// `cache_build::wall_orientation_tests`.
 #[test]
-fn unproven_wall_materials_are_double_sided_in_every_direction() {
+fn wall_materials_are_double_sided_in_every_direction() {
     let texture = TextureMaterial::opaque(0, 0, (128, 128, 128));
     for direction in [
         DIR_NORTH,
@@ -348,7 +344,7 @@ fn unproven_wall_materials_are_double_sided_in_every_direction() {
             WorldRenderMaterial::both(texture),
         ] {
             assert_eq!(
-                wall_material_for_direction(material, direction, false).sidedness,
+                wall_material_for_direction(material, direction).sidedness,
                 SurfaceSidedness::Both,
                 "direction {direction} should render both wall faces"
             );
