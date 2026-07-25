@@ -1931,6 +1931,52 @@ pub fn build_package(
 
     (
         Some(PlaytestPackage {
+            // Same map the cook uses to dedupe texture references, so the
+            // reachable set cannot drift from what was actually cooked.
+            used_texture_paths: {
+                let mut paths: Vec<String> =
+                    texture_asset_for_path.keys().cloned().collect();
+                paths.sort();
+                paths
+            },
+            // `model_for_resource` holds exactly the model resources that were
+            // registered, and `model_clip_remaps` records which of a model's
+            // clips survived the runtime-clip filter, so a clip the cook skipped
+            // is not shipped.
+            used_model_paths: {
+                let mut paths: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                for resource_id in model_for_resource.keys() {
+                    let Some(resource) = project.resource(*resource_id) else {
+                        continue;
+                    };
+                    let crate::ResourceData::Model(model) = &resource.data else {
+                        continue;
+                    };
+                    paths.insert(model.model_path.clone());
+                    if let Some(atlas) = &model.texture_path {
+                        paths.insert(atlas.clone());
+                    }
+                    // Same accessor the cook uses to enumerate a model's clips,
+                    // filtered by the remap it produced, so a clip dropped by the
+                    // runtime-clip filter is not shipped either.
+                    let remap = model_clip_remaps.get(resource_id);
+                    for (index, clip) in
+                        project
+                            .resolved_model_animation_clips(*resource_id)
+                            .iter()
+                            .enumerate()
+                    {
+                        let kept = remap
+                            .map(|r| r.get(index).is_some_and(Option::is_some))
+                            .unwrap_or(true);
+                        if kept {
+                            paths.insert(clip.psxanim_path.clone());
+                        }
+                    }
+                }
+                paths.into_iter().collect()
+            },
             runtime_depth_sort_mode: project.runtime_depth_sort_mode,
             runtime_texture_split_mode: project.runtime_texture_split_mode,
             runtime_room_draw_order_mode: project.runtime_room_draw_order_mode,
