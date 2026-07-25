@@ -10,9 +10,12 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Channel {
-    /// MDEC→RAM (decoded macroblocks in).
+    /// RAM→MDEC: run-length coefficient data *into* the decoder. This is
+    /// the direction the name refers to, not the direction of transfer to
+    /// RAM -- channel 0 feeds the MDEC, channel 1 drains it.
     MdecIn = 0,
-    /// RAM→MDEC (raw DCT blocks out).
+    /// MDEC→RAM: decoded macroblocks *out of* the decoder, 256 pixels
+    /// (16x16) per macroblock at 15bpp.
     MdecOut = 1,
     /// RAM↔GPU.
     Gpu = 2,
