@@ -6,7 +6,7 @@
 //! them without baking the source blobs into the executable.
 
 use psx_level::{
-    asset_flags, AssetId, LevelAssetRecord, LevelWorldPackEntryRecord, RoomIndex,
+    asset_flags, AssetId, AssetKind, LevelAssetRecord, LevelWorldPackEntryRecord, RoomIndex,
     RoomResidencyRecord,
 };
 
@@ -330,6 +330,21 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         false
     }
 
+    /// Whether an asset of this kind may be released while gameplay runs.
+    ///
+    /// Texture payloads are read once at VRAM upload and the uploaded copy is
+    /// what gets sampled, so dropping the RAM bytes is safe and they reload from
+    /// the keep-set if a room wants them again.
+    ///
+    /// Model meshes and animation clips are NOT safe. `RuntimeModelAsset` holds a
+    /// `Model<'static>` borrowed from this pool, and clips are read the same way.
+    /// Releasing one leaves that view over a hole, which the next first-fit
+    /// allocation would overwrite underneath it. They stay pinned for the level;
+    /// paging them needs a rebuild path that does not exist yet.
+    const fn evictable(kind: AssetKind) -> bool {
+        matches!(kind, AssetKind::Texture | AssetKind::RoomWorld)
+    }
+
     /// Make the persistent set match `desired`'s residency needs.
     ///
     /// Releases anything no desired room needs, then arms one grouped read for
@@ -353,6 +368,9 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         // Evict first: a release can free the very bytes the delta needs.
         for asset in assets {
             if asset.flags & asset_flags::STREAMED_GAMEPLAY_PERSISTENT == 0 {
+                continue;
+            }
+            if !Self::evictable(asset.kind) {
                 continue;
             }
             let slot = asset.id.0 as usize;
@@ -510,9 +528,13 @@ mod tests {
     }
 
     const fn persistent_asset(id: u16, ram_bytes: u32) -> LevelAssetRecord {
+        persistent_asset_of(id, ram_bytes, AssetKind::Texture)
+    }
+
+    const fn persistent_asset_of(id: u16, ram_bytes: u32, kind: AssetKind) -> LevelAssetRecord {
         LevelAssetRecord {
             id: AssetId(id),
-            kind: psx_level::AssetKind::Texture,
+            kind,
             bytes: &[],
             ram_bytes,
             vram_bytes: 0,
@@ -579,6 +601,29 @@ mod tests {
         assert_eq!(crossing.ids[0], 3);
         assert!(!crossing.storage.resident(1), "asset 1 evicted");
         assert!(crossing.storage.resident(2), "shared asset retained");
+    }
+
+    /// Model bytes back a live `Model<'static>`, so they must survive an
+    /// eviction pass even when no desired room lists them.
+    #[test]
+    fn model_assets_are_never_evicted() {
+        type Streamer = PersistentAssetStreamer<4, 8>;
+        const ROOMS: &[RoomResidencyRecord] = &[residency(0, &[AssetId(1)], &[])];
+        let assets = [
+            persistent_asset(1, 64),
+            persistent_asset(2, 64),
+            persistent_asset_of(3, 64, AssetKind::ModelMesh),
+            persistent_asset_of(4, 64, AssetKind::ModelAnimation),
+        ];
+        let mut streamer = Streamer::new();
+        for slot in 1..=4 {
+            assert!(streamer.storage.prepare_slot(slot, 64));
+        }
+        streamer.request_rooms(0, &[], &assets, &[RoomIndex(0)], ROOMS);
+        assert!(streamer.storage.resident(1), "required texture kept");
+        assert!(!streamer.storage.resident(2), "unwanted texture evicted");
+        assert!(streamer.storage.resident(3), "model mesh pinned");
+        assert!(streamer.storage.resident(4), "animation clip pinned");
     }
 
     #[test]
