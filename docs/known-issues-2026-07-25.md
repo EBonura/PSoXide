@@ -266,3 +266,45 @@ runs near the camera: the TR subdivision band,
 `cortex_v3` does not cook: `sector 1,13 East wall has invalid heights
 [0, 0, -64, 320]`. A negative height in a wall quad; one sector to fix in the
 editor.
+
+## Headless gameplay is unreachable, which blocks all render A/B (2026-07-25)
+
+No headless run can reach gameplay any more, so no render change can be measured
+before it ships. This is worse than any single bug in this file: it removes the
+evidence step from the perf workflow.
+
+Two paths existed and both are closed:
+
+- **`--hold-forward`.** It only holds the left stick and never presses CROSS.
+  That was fine when the demo projects booted straight into play. They no longer
+  do: demo_05 boots to the menu exactly like cortex_v1, so the run sits on the
+  menu for its whole length. There is no CLI flag that presses a button
+  (`launch --help` offers `--hold-forward` and `--hold-run`, nothing else).
+- **`--input-tape`.** Replaying `cortex_v1.pxtape` headless never leaves the
+  intro. Measured, not assumed: of 2097 telemetry rows, **0** have
+  `room_cells_drawn > 0`, and route screenshots at ticks 300..2100 all show the
+  same archive-fragment text screen. This is the desync recorded for demo10 in
+  `CLAUDE.md`, still unfixed and now the only remaining path.
+
+**Fix worth doing:** let the headless route press buttons. The cheapest version
+is a flag that feeds a short scripted button sequence before handing over to
+`--hold-forward`, which is enough to clear a menu. A synthesised `PXITAPE2` would
+also work and is poll-bound, so it cannot desync the way the recorded tape does.
+
+Until then a render change can only be gated visually in the editor, and any
+cycle figure quoted for one is an estimate.
+
+## The cooker overwrites `generated/` when it fails (2026-07-25)
+
+A failed cook prints "Nothing was written; the previously generated output is
+intact" and that is not true. Cooking `demo_03` (which fails on a 89208-byte
+room, over the 32 KiB chunk limit) left `engine/examples/editor-playtest/generated/`
+in a state where the next `build-editor-playtest` failed with four unresolved
+imports: `COMBAT_CAPSULES`, `ROOM_REFLECTION_PROBES`, `GAMEPLAY_PACK_MAX_CHUNK_BYTES`,
+the `UI_PACK_*` set and `LOADING_UI_SCENE`. Re-cooking a project that succeeds
+repairs it.
+
+This contradicts the failed-cook manifest contract restored in 67d8cf92, so
+either the contract regressed or it does not cover every output the manifest
+needs. The symptom is nasty because the compile errors point at the guest source
+rather than at the cook that broke it.
