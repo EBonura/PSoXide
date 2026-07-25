@@ -31,6 +31,14 @@ jobs:
   macos:
     name: macOS universal
     runs-on: macos-latest
+    # Job-scoped so the cache action and the build steps agree on one target
+    # directory. Setting it only on the build step left Swatinem/rust-cache
+    # caching a directory cargo never wrote to, which would make every run a
+    # cold ~11 minute build of the full graphics stack rather than only the
+    # first. It also removes the guess about where cargo puts output, which is
+    # what broke this workflow's first run.
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/build/release-target
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +50,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: emu
+          workspaces: emu -> ${{ github.workspace }}/build/release-target
 
       # Both architectures, because a release that only runs on Apple Silicon
       # silently excludes every Intel Mac.
@@ -52,8 +60,6 @@ jobs:
       # Guessing that path is what broke the first run of this workflow.
       - name: Build frontend for both architectures
         working-directory: emu
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/build/release-target
         run: |
           cargo build --release -p frontend --target x86_64-apple-darwin
           cargo build --release -p frontend --target aarch64-apple-darwin
