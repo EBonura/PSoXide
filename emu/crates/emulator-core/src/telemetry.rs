@@ -713,6 +713,8 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_MATERIAL_TEXTURE_DROPS => "room material texture drops",
         counter::PERSISTENT_ASSET_RESIDENT_BYTES => "persistent asset resident bytes",
         counter::PERSISTENT_ASSET_LOAD_FAILURES => "persistent asset load failures",
+        counter::PERSISTENT_ASSET_FAILED_ID => "persistent asset failed id",
+        counter::PERSISTENT_ASSET_FAILED_REASON => "persistent asset failed reason",
         counter::ROOM_MATERIAL_SLOT_OVERFLOW => "room material slot overflow",
         counter::GAME_ENTITIES_THOUGHT => "game entities thought",
         counter::GAME_ENTITY_PATROL_ENTERS => "game entity patrol enters",
