@@ -313,7 +313,13 @@ pub fn cache_room_vertex_lit_surfaces(
                                 sample,
                                 split,
                                 triangle_index,
-                            ),
+                            )
+                            .with_wall_faces_owner(wall_faces_owning_cell(
+                                room,
+                                sx,
+                                sz,
+                                wall.direction(),
+                            )),
                         ) {
                             return CachedRoomSurfaceCacheStats {
                                 cell_count,
@@ -373,5 +379,99 @@ pub fn cache_room_vertex_lit_surfaces(
         surface_count,
         vertex_count,
         overflow: false,
+    }
+}
+
+/// Whether a cardinal wall's only reachable side is the cell that owns it.
+///
+/// Cardinal wall windings put the owning cell's interior on the back face, so a
+/// wall is culled for a player standing inside its own cell. Making every wall
+/// double-sided fixes that but doubles its raster work. Grid adjacency settles
+/// most of them for free: if the cell across the wall has no floor -- or is
+/// outside the room, which is the room's outer shell -- then nobody can stand
+/// on the far side, the owning cell is the only viewpoint, and one face is
+/// enough.
+///
+/// Only `true` is a claim. `false` means "not proven", and the renderer falls
+/// back to both faces, so a wrong answer here costs cycles rather than
+/// geometry. Diagonals are excluded: they cut through a cell rather than
+/// bounding it, so they have no single neighbour.
+fn wall_faces_owning_cell(room: RoomRender<'_, '_>, sx: u16, sz: u16, direction: u8) -> bool {
+    let Some((nx, nz)) = wall_neighbour_cell(sx, sz, direction) else {
+        // Diagonal, or off the near edge of the room.
+        return matches!(direction, DIR_NORTH | DIR_SOUTH | DIR_WEST | DIR_EAST);
+    };
+    if nx >= room.width() || nz >= room.depth() {
+        return true;
+    }
+    room.sector(nx, nz).is_none_or(|sector| !sector.has_floor())
+}
+
+/// Cell on the far side of a cardinal wall, or `None` for a diagonal or a wall
+/// on the room's `0` edge.
+///
+/// The offsets follow `wall_vertices`: north sits on the cell's low-z edge and
+/// west on its low-x edge, so their neighbours are the lower cells. Getting a
+/// sign wrong here reintroduces the disappearing-wall bug by proving the wrong
+/// cell empty, which is why this is separated out and tested.
+const fn wall_neighbour_cell(sx: u16, sz: u16, direction: u8) -> Option<(u16, u16)> {
+    match direction {
+        DIR_NORTH => match sz.checked_sub(1) {
+            Some(nz) => Some((sx, nz)),
+            None => None,
+        },
+        DIR_SOUTH => Some((sx, sz + 1)),
+        DIR_WEST => match sx.checked_sub(1) {
+            Some(nx) => Some((nx, sz)),
+            None => None,
+        },
+        DIR_EAST => Some((sx + 1, sz)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod wall_orientation_tests {
+    use super::*;
+
+    #[test]
+    fn cardinal_neighbours_match_wall_vertex_edges() {
+        // North/west walls sit on the low edge, so they face the lower cell.
+        assert_eq!(wall_neighbour_cell(4, 4, DIR_NORTH), Some((4, 3)));
+        assert_eq!(wall_neighbour_cell(4, 4, DIR_SOUTH), Some((4, 5)));
+        assert_eq!(wall_neighbour_cell(4, 4, DIR_WEST), Some((3, 4)));
+        assert_eq!(wall_neighbour_cell(4, 4, DIR_EAST), Some((5, 4)));
+    }
+
+    #[test]
+    fn room_edge_and_diagonals_have_no_single_neighbour() {
+        assert_eq!(wall_neighbour_cell(0, 0, DIR_NORTH), None);
+        assert_eq!(wall_neighbour_cell(0, 0, DIR_WEST), None);
+        assert_eq!(wall_neighbour_cell(4, 4, DIR_NORTH_WEST_SOUTH_EAST), None);
+        assert_eq!(wall_neighbour_cell(4, 4, DIR_NORTH_EAST_SOUTH_WEST), None);
+    }
+
+    #[test]
+    fn owner_facing_wall_keeps_one_face_and_others_keep_both() {
+        let base = WorldRenderMaterial::front(TextureMaterial::opaque(0, 0, (128, 128, 128)));
+        // Proven owner-only: no front/back swap, so the visible face is the one
+        // the player can reach, and it stays single-sided.
+        // Same swap as the both-faces path, one face instead of two. The
+        // orientation must match what renders correctly there, not the
+        // authored front.
+        let owned = wall_material_for_direction(base, DIR_NORTH, true);
+        assert_eq!(owned.sidedness, SurfaceSidedness::Back);
+        assert_ne!(owned.sidedness, SurfaceSidedness::Both, "one face, not two");
+        // Unproven: the conservative both-faces answer this replaced.
+        assert_eq!(
+            wall_material_for_direction(base, DIR_NORTH, false).sidedness,
+            SurfaceSidedness::Both
+        );
+        // A diagonal cuts through a cell and is used from both sides even when
+        // the flag is set.
+        assert_eq!(
+            wall_material_for_direction(base, DIR_NORTH_WEST_SOUTH_EAST, true).sidedness,
+            SurfaceSidedness::Both
+        );
     }
 }
