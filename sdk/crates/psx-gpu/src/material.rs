@@ -269,6 +269,12 @@ impl TextureMaterial {
     }
 
     /// Return a copy using `blend_mode`.
+    ///
+    /// For a **textured** primitive this only selects the blending equation.
+    /// Which texels actually blend is decided per texel by bit 15 of the
+    /// palette entry (`psx_vram::Color555::with_stp`); a CLUT without that bit
+    /// draws fully opaque whatever is set here, and nothing reports it. For an
+    /// untextured primitive the mode applies to the whole polygon.
     pub const fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
         self.blend_mode = blend_mode;
         self
