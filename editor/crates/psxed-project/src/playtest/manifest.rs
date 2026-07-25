@@ -3406,21 +3406,24 @@ pub fn write_cook_result(
     package: Option<&PlaytestPackage>,
     generated_dir: &Path,
 ) -> std::io::Result<()> {
-    // A failed cook must not leave a stale cooked manifest for subsequent
-    // runtime builds -- but `generated_dir` is shared by every project, so
-    // deleting unconditionally meant a failed cook of one project destroyed the
-    // cooked output of whichever project was there before it. Validate first and
-    // only replace the manifest once this package is known to be writable, so a
-    // failure is a clean no-op.
-    let Some(package) = package else {
-        return Ok(());
-    };
-    validate_streamed_room_chunks(package)?;
+    // A failed cook must not leave a stale cooked manifest for subsequent runtime
+    // builds: `failed_cook_removes_stale_cooked_manifest` pins that, and it is the
+    // right call, because building against the manifest of a level you just failed
+    // to cook would silently run the wrong world.
+    //
+    // It has a sharp edge worth knowing about. `generated_dir` holds one project at
+    // a time and every project shares it, so a failed cook of project B also
+    // discards project A's cooked output and A's disc must be rebuilt. Keeping A's
+    // manifest would be worse, since the next runtime build would silently be A.
+    // Removing the edge means making the generated directory per project rather
+    // than picking between the two failure modes; see the streaming audit.
     let cooked_manifest = generated_dir.join(COOKED_MANIFEST_FILENAME);
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
-    write_package(package, generated_dir)?;
+    if let Some(package) = package {
+        write_package(package, generated_dir)?;
+    }
     Ok(())
 }
 
