@@ -8,7 +8,58 @@ use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValu
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 const CD_SECTOR_BYTES: usize = 2048;
 
+/// Refuse a package whose cooked room chunks cannot fit the runtime's per-room
+/// CD slot.
+///
+/// The runtime slot is sized from `MAX_STREAMED_ROOM_CHUNK_BYTES`, so an
+/// oversized chunk would fail every load silently and the room would never
+/// appear. Reported for all offending rooms at once rather than one per cook,
+/// since a large level tends to trip several.
+fn validate_streamed_room_chunks(package: &PlaytestPackage) -> std::io::Result<()> {
+    let mut offenders = Vec::new();
+    for room_index in 0..package.rooms.len() {
+        let payload = streamed_room_chunk_payload(package, room_index as u16)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if payload.len() > psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES {
+            offenders.push((room_index, payload.len()));
+        }
+    }
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "{} room chunk(s) exceed the {}-byte runtime room slot \
+         (psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES). The portal-room plan splits on \
+         authored seams only and does not consult this budget, so a room with no \
+         interior seam can cook to any size:",
+        offenders.len(),
+        psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES,
+    );
+    for (room_index, len) in &offenders {
+        let _ = write!(message, "\n  room {room_index}: {len} bytes");
+    }
+    let _ = write!(
+        message,
+        "\nAdd portal seams to split the offending room(s), or reduce their geometry. \
+         Nothing was written; the previously generated output is intact."
+    );
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
+}
+
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
+    // Validate the streaming contract BEFORE touching the filesystem.
+    //
+    // Writing starts by purging the generated directories, so a failure part
+    // way through leaves `generated/` emptied and incomplete -- and because the
+    // directory is shared by every project, a failed cook of one project
+    // destroys the cooked manifest of whichever project was there before. The
+    // oversized-chunk case is the one that actually fires, so check every room
+    // up front and fail as a clean no-op.
+    validate_streamed_room_chunks(package)?;
+
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
     let ui_stream_chunks_dir = generated_dir.join(UI_STREAM_CHUNKS_DIRNAME);
@@ -77,18 +128,9 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         // is sized from this constant; an oversized chunk would fail every
         // runtime load silently and the room would never appear. Refuse to
         // ship it.
-        if payload.len() > psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "room {room_index} stream chunk is {} bytes; the runtime room slot \
-                     is {} bytes (psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES) -- split the \
-                     room with more portal seams or reduce its geometry",
-                    payload.len(),
-                    psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES,
-                ),
-            ));
-        }
+        // Already validated before any filesystem mutation; see
+        // `validate_streamed_room_chunks`.
+        debug_assert!(payload.len() <= psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES);
         std::fs::write(
             stream_chunks_dir.join(streamed_room_chunk_filename(room_index as u16)),
             payload,
@@ -3364,17 +3406,21 @@ pub fn write_cook_result(
     package: Option<&PlaytestPackage>,
     generated_dir: &Path,
 ) -> std::io::Result<()> {
-    // A failed cook must not leave a stale cooked manifest for
-    // subsequent runtime builds. If validation fails before a
-    // package exists, editor-playtest falls back to the tracked
-    // placeholder manifest.
+    // A failed cook must not leave a stale cooked manifest for subsequent
+    // runtime builds -- but `generated_dir` is shared by every project, so
+    // deleting unconditionally meant a failed cook of one project destroyed the
+    // cooked output of whichever project was there before it. Validate first and
+    // only replace the manifest once this package is known to be writable, so a
+    // failure is a clean no-op.
+    let Some(package) = package else {
+        return Ok(());
+    };
+    validate_streamed_room_chunks(package)?;
     let cooked_manifest = generated_dir.join(COOKED_MANIFEST_FILENAME);
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
-    if let Some(package) = package {
-        write_package(package, generated_dir)?;
-    }
+    write_package(package, generated_dir)?;
     Ok(())
 }
 
