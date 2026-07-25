@@ -39,8 +39,9 @@ are closed; 4, 5 and 6 remain and each is blocked on the same missing thing.
 | 1 | Per-room asset residency cooked and ignored | **closed** — pool can reclaim, residency is neighbourhood-scoped, verified |
 | 2 | Pump budget unanchored | **closed** — derived from the drive with a floor assertion |
 | 3 | Gap discard unbounded | **closed** — capped at the seek break-even |
-| 4 | One load job in flight | open — needs a scattered-room level to measure |
-| 5 | Pool sized from whole-level figures | open — a no-op on cortex_v1, see below |
+| 4 | One load job in flight | open — blocked on content, see finding 9 |
+| 5 | Pool sized from whole-level figures | open — blocked on content, see finding 9 |
+| 9 | Larger projects exceed the 32 KiB room chunk cap | **open — gates 4 and 5** |
 | 6 | Miss policy is emergent | open — a design decision, not a defect |
 
 Findings 4 and 5 share a blocker: **cortex_v1 cannot validate either.** Its eight
@@ -311,6 +312,36 @@ Cook them as separate chunks keyed by `(room, flip_state)` and pin only the live
 variant. The residency reconcile already keys by `RoomIndex`, so the change is
 in the key rather than the mechanism. The neighbourhood sizing rule in finding 5
 must then take the maximum over flip states as well.
+
+## 9. The larger projects cannot stream at all — critical for the goal
+
+Found while trying to validate findings 4 and 5 against real content rather than
+a synthetic level. cortex_v2 carries 658 material references against cortex_v1's
+22, which is exactly the asset scale needed to prove neighbourhood residency
+evicts anything. It does not cook:
+
+```text
+[cook-playtest] write failed: room 0 stream chunk is 37576 bytes; the runtime
+room slot is 32768 bytes (psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES) -- split the
+room with more portal seams or reduce its geometry
+```
+
+The cooker is right to refuse, and the check is well placed: a chunk larger than
+the runtime slot could never be made resident. But the consequence is that
+**cortex_v1 is currently the only streamable project**, and it is far too small
+to exercise the streaming system it is the sole test case for.
+
+This reframes findings 4 and 5. They are not blocked on a tool nobody has
+written; they are blocked on authored content that fits the runtime contract.
+Splitting cortex_v2's room 0 along more portal seams would produce, in one step,
+both the scattered-room disc layout finding 4 needs and the larger-than-a-
+neighbourhood asset set finding 5 needs, out of real content rather than a
+synthetic fixture.
+
+It is also a live constraint on the seamless-world goal in its own right. A large
+continuous world means many rooms, and every one of them must stay under 32 KiB
+of cooked chunk. That is an authoring budget the editor should surface while
+building a room, not a cook-time failure discovered later.
 
 ## Recommended order
 
