@@ -134,8 +134,32 @@ impl Color555 {
     /// Set the mask bit (bit 15). Matters when `GP0 0xE6` has
     /// "check mask on draw" enabled -- writes are skipped where
     /// existing mask is set. Games use this for UI overlays.
+    ///
+    /// In a **CLUT entry** bit 15 means something else entirely: see
+    /// [`Self::with_stp`].
     pub const fn with_mask_bit(self) -> Self {
         Self(self.0 | 0x8000)
+    }
+
+    /// Set the semi-transparency bit (STP, bit 15) for use in a **CLUT entry**.
+    ///
+    /// This is the same bit as [`Self::with_mask_bit`], but when the halfword
+    /// is a palette entry rather than a framebuffer pixel the GPU reads it as
+    /// "blend this texel". Selecting a blend mode on a textured primitive is
+    /// not enough on its own: the mode says *how* to blend, STP says *which
+    /// texels* blend. A palette without it draws fully opaque whatever blend
+    /// mode the primitive carries, and nothing reports it -- a silent failure
+    /// that reads like a brightness bug rather than a blending one.
+    ///
+    /// Set it on every entry of an additive or translucent palette, leaving
+    /// the fully transparent index (usually 0) at [`Self::TRANSPARENT`].
+    pub const fn with_stp(self) -> Self {
+        Self(self.0 | 0x8000)
+    }
+
+    /// Whether bit 15 is set (the mask bit, or STP in a CLUT entry).
+    pub const fn has_stp(self) -> bool {
+        self.0 & 0x8000 != 0
     }
 }
 
@@ -1073,6 +1097,18 @@ pub fn upload_clut(clut: Clut, entries: &[Color555]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stp_is_the_mask_bit_named_for_its_palette_meaning() {
+        let opaque = Color555::rgb8(255, 255, 255);
+        assert!(!opaque.has_stp());
+        assert_eq!(opaque.with_stp().as_u16(), opaque.with_mask_bit().as_u16());
+        assert!(opaque.with_stp().has_stp());
+        // The fully transparent slot must stay 0x0000: setting STP there would
+        // make the GPU blend the texel instead of skipping it.
+        assert_eq!(Color555::TRANSPARENT.as_u16(), 0);
+        assert!(!Color555::TRANSPARENT.has_stp());
+    }
 
     #[test]
     fn color_rgb8_truncates_low_bits() {
