@@ -2042,7 +2042,7 @@ fn submit_adaptive_cached_room_quad<const OT: usize>(
     let options = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, CullMode::Back))
         .with_material_layer(material.texture);
-    let _ = world.submit_adaptive_textured_gouraud_view_quad_uv_words(
+    let stats = world.submit_adaptive_textured_gouraud_view_quad_uv_words(
         primitives,
         packet_views,
         packet_uv_words,
@@ -2051,7 +2051,13 @@ fn submit_adaptive_cached_room_quad<const OT: usize>(
         material.texture,
         options,
     );
-    true
+    // The caller treats `true` as "this surface is drawn" and skips its own
+    // whole-quad submit. Discarding these stats and returning `true`
+    // unconditionally therefore turned any subdivision that emitted nothing
+    // into a silent hole with no counter recording it -- the cortex_v1 rooms
+    // 6/7 floor report. Report success only when geometry actually reached the
+    // sink, so a failed subdivision falls back to the authored quad.
+    stats.submitted_triangles > 0 && !stats.primitive_overflow && !stats.command_overflow
 }
 
 #[cfg(test)]
