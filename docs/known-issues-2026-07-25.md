@@ -354,6 +354,33 @@ the loading screen is up -- the menu/UI image preload is the obvious suspect,
 since `prepare_loading_assets` is documented as deliberately never touching the
 CD for this reason.
 
+**Strongest lead: CD-DA is playing.** The two blocking callers are
+`VramCache::preload_all_contiguous` (`vram.rs:251`, the menu UI image preload)
+and `load_streamed_sky_from_cd` (`vram.rs:1491`). The guest renders at a steady
+30 fps for the whole run, so neither is blocked inside a single call: they are
+being entered and returning without progress every frame. BOTH loaders are
+starved, not just the asset arena, which points at the state of the drive rather
+than at any one consumer.
+
+The engine already documents the mechanism, in `Scene::front_end_assets_ready`:
+
+> on real hardware the single laser cannot stream a UI image from the disc and
+> play a CD-DA track at the same time (the read hangs and the music dies;
+> emulators have no laser/seek model so they hide it)
+
+The menu plays a CD-DA track. If the track is still playing when the loading
+screen comes up, every read hangs, nothing completes, and no failure is ever
+reported -- exactly the observed signature. A human player passes the menu
+quickly and stops the music; a headless route that lingers may not, which would
+also explain why this reproduces headless and not in the editor.
+
+Test it first, before touching the stream code: check whether the drive reports
+PLAYING during the stall (`cdda_drive_stopped` in `game_app.rs` already asks
+this), and whether stopping the track lets the load complete. If that is it, the
+bug is that the loading flow does not guarantee CD-DA has stopped before the
+world stream starts -- and note the emulator hides the hardware version of this,
+so a headless pass is not proof for silicon either way.
+
 The other reader is named. `read_one_sector_blocking` has exactly two callers,
 both in `cd_stream.rs`: `read_chunk_blocking` (line 773) and
 `read_chunks_contiguous` (line 900). The second is the "contiguous menu preload"
