@@ -19,7 +19,13 @@ use psx_vram::{upload_bytes, VramRect};
 // of texture uploads at once; anything that does not fit here is dropped to the
 // untextured fallback until the material pump re-queues it, so a slightly deeper
 // queue reduces those transient drops during heavy streaming.
-const VRAM_UPLOAD_QUEUE_CAP: usize = 12;
+// Room material textures are requested in bursts when the active-room window
+// moves. cortex_v1's recorded route overflowed a 12-job queue 128 times while
+// completing only 21 uploads, and every rejection is a dropped texture rather
+// than a deferred one. A rejected request is invisible to the completion pump,
+// so widening the queue turns drops into ordinary pending work at a cost of a
+// few hundred bytes and no per-frame time.
+const VRAM_UPLOAD_QUEUE_CAP: usize = 24;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum VramUploadKind {

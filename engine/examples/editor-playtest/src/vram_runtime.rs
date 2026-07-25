@@ -138,7 +138,7 @@ pub(super) fn acquire_shared_ui_fonts(ui_fonts: &mut [Option<FontAtlas>; MAX_RUN
     vram_arena().acquire_shared_ui_fonts(VRAM_LAYOUT, font_scratch_arena(), UI_FONTS, ui_fonts);
 }
 
-const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 512;
+const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 768;
 const ROOM_WINDOW_BACKGROUND_TICK_MASK: u32 = 1;
 
 #[derive(Copy, Clone)]

@@ -125,7 +125,10 @@ pub(super) fn build_active_room(
     }
     let _ = room_reflection_probe_ready(index);
     let payload = parse_active_room_payload(slot, index, record)?;
-    let (materials, material_count, _all_resolved) = build_runtime_room_material_table(record);
+    // A room entering a stream slot cannot inherit that slot's materials: they
+    // belong to whichever room held it last.
+    let (materials, material_count, _all_resolved) =
+        build_runtime_room_material_table(record, &[]);
     let stream_slot = active_room_stream_slot(index);
     #[cfg(feature = "cd-stream-bench")]
     store_room_materials(stream_slot, materials, material_count);
@@ -212,8 +215,22 @@ pub(super) fn active_room_stream_slot(index: RoomIndex) -> u16 {
     }
 }
 
+/// Build a room's material table, keeping `previous` for any slot whose
+/// texture has not resolved yet.
+///
+/// `room_material_fallback` carries CLUT word zero, which addresses VRAM
+/// (0, 0) -- inside framebuffer 0. Substituting it for a slot that had already
+/// resolved makes every surface using that slot sample its palette out of the
+/// framebuffer, so a textured wall redraws in background colours and reads as
+/// having vanished. That is the cortex_v1 disappearing-wall report: the VRAM
+/// upload queue fills, `build_room_materials` leaves the slot unresolved, and
+/// the retry pump kept restamping the fallback for as long as the queue stayed
+/// full. Pass the room's currently stored table so a pending or dropped upload
+/// keeps the last good material instead. Pass an empty slice when the room is
+/// entering a stream slot, since the slot's contents belong to another room.
 pub(super) fn build_runtime_room_material_table(
     record: &LevelRoomRecord,
+    previous: &[WorldRenderMaterial],
 ) -> ([WorldRenderMaterial; MAX_ROOM_MATERIALS], usize, bool) {
     let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
     let (material_count, all_resolved) = build_room_materials(record, &mut resolved_materials);
@@ -221,6 +238,8 @@ pub(super) fn build_runtime_room_material_table(
     for i in 0..material_count {
         if let Some(material) = resolved_materials[i] {
             materials[i] = material;
+        } else if let Some(previous) = previous.get(i) {
+            materials[i] = *previous;
         }
     }
     (materials, material_count, all_resolved)
