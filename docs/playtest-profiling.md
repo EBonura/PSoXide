@@ -108,6 +108,52 @@ host+guest stats: `host_*`, `egui_*`, `psx_vblanks`, `guest_visual_*`,
 the per-vblank alternation chart. Use the headless `--profile-log` path for
 per-vblank work.
 
+## Diagnosing missing geometry from a recorded tape
+
+Guest telemetry only counts what the engine believes it did. A surface that is
+legitimately culled is not an error, so a wrongly culled surface moves no
+overflow, drop or cull counter and reads as a healthy frame. Chasing one of
+those through the stage counters alone will falsify hypothesis after hypothesis.
+
+Census the GPU instead. It is the only observer that sees what was actually
+drawn:
+
+```sh
+cd emu && cargo run -p frontend --release -- launch \
+  --path ../build/examples/mipsel-sony-psx/release/editor-playtest.cue \
+  --embedded-playtest \
+  --input-tape "$HOME/Library/Application Support/com.psoxide.PSoXide/editor/playtest_tapes/<project>.pxtape" \
+  --steps 6000000000 \
+  --gpu-frame-stats-log /tmp/gpu.csv \
+  --route-screenshot-dir /tmp/shots --route-screenshot-interval 40
+```
+
+`--gpu-frame-stats-log` writes a per-route-tick GP0 command census. Bucket it by
+window and read `textured_quads` against `textured_tris`: room surfaces are
+quads, models and the player are triangles, so a quad count that falls while the
+triangle count holds steady means room geometry is being lost. Only ticks with a
+non-zero `commands` count are rendered frames, so divide by those rather than by
+tick count or a 30 Hz cadence will halve every average.
+
+Bisect with a blunt instrument once the census confirms geometry is missing.
+Forcing `CullMode::None` across the cached room path separates "not submitted"
+from "submitted and rejected" in a single run, and is far faster than reasoning
+about which predicate fired. That is how the cortex_v1 disappearing-wall report
+was localised after five stage-counter hypotheses had been falsified: cardinal
+wall windings made the owning cell's interior the back face, so backface culling
+deleted every wall that bounds the playable area from the only side a player can
+stand on.
+
+Two cautions from that investigation:
+
+- Host unit tests cannot reproduce GTE defects. Host projection does not
+  saturate screen coordinates to signed 11 bits and does not overflow MAC0, so a
+  screen-space defect passes on the host and fails on the guest.
+- Some micro-profile counters (`room_surf_screen_culled`,
+  `room_surf_backface_culled`) only populate under the `room-surface-profile`
+  feature, and the warmed quad path does not feed them at all. A zero there
+  means "not measured", not "did not happen".
+
 ## Related docs
 - `docs/frontend.md`: FrameProfiler fields; `make profile-demo7-camera-sweep` benchmark.
 - `docs/floors-plan.md`: example of `--input-tape` plus `--counter-log` headless tape diagnosis.
