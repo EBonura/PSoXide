@@ -391,6 +391,38 @@ appears at cook time instead of while building the room.
 
 cortex_v2's room 0 is 4,808 bytes over. It needs one seam.
 
+### Portal marker convention (established by two failed attempts)
+
+Adding a seam by hand has three requirements, and missing any one makes the
+marker silently vanish with the chunk byte-identical -- no warning, no counter.
+
+1. **The marker must be in the Room node's `children` array.**
+   `collect_portal_seams` filters on `scene.is_descendant_of(node.id, room_node)`
+   ([`portal_rooms.rs:347`](../editor/crates/psxed-project/src/portal_rooms.rs#L347)).
+   Setting only the child's `parent: Some((<room>))` is NOT enough. This was the
+   first failed attempt.
+
+2. **The translation is in editor units, not world cells.**
+   `portal_edge_key_for_node` routes it through
+   `WorldGrid::editor_to_world_cells`, which is
+   `editor + grid_center_cells()` ([`world_types.rs:1716`](../editor/crates/psxed-project/src/world_types.rs#L1716)).
+   So `world_cells = translation.xz + grid_centre`, then the array cell is
+   `world_cells - grid.origin`, floored, with the fractional part choosing the
+   edge. Treating translation as world cells was the second failed attempt.
+
+3. **Both cells across the chosen edge must be populated.**
+   The edge candidate list requires `populated(grid, x, z) && populated(grid, nx, nz)`
+   ([`portal_rooms.rs:381`](../editor/crates/psxed-project/src/portal_rooms.rs#L381)),
+   and the winning direction is whichever edge the fractional position is nearest:
+   `local_z` for South, `1 - local_x` for East, `1 - local_z` for North,
+   `local_x` for West. A marker in an empty cell, or on the outer boundary,
+   yields no edge at all.
+
+So placing a seam programmatically means reading the sector grid, finding a
+populated cell pair spanning the intended cut, and solving 2 backwards for the
+translation. Doing it in the editor instead is far cheaper: drop a Portal marker
+on the wall you want to divide and it satisfies all three by construction.
+
 ### Recipe for a throwaway streaming test fixture
 
 The author's own level should not be reshaped to serve a measurement. Copy it:
