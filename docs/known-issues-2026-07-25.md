@@ -120,7 +120,35 @@ implicated, not the leaves it produces.
 exactly. Disabling it entirely leaves the holes unchanged, so it is not the
 silent drop.
 
-The specific candidate: `tomb_raider_warmed_quad_requires_dynamic_submit` forces
+*What reading the path actually shows.* The floor branch was read end to end
+rather than probed. Two things follow.
+
+The divergence the subdivision toggle causes is visible: the warmed whole-quad
+early return is gated on `!tomb_raider_subdivision`, so with floor subdivision
+ON a floor skips it and falls through to the dynamic path.
+
+But that dynamic path does NOT drop anything:
+
+```
+if tomb_raider_subdivision && submit_tomb_raider_cached_room_quad(...) { return 1; }
+// otherwise falls through to the ordinary quad submit
+```
+
+A `false` return still draws the floor as a whole quad. So nothing in this branch
+rejects the surface, which contradicts every hypothesis tested so far -- all six
+assumed something was rejecting it.
+
+**The surface is submitted, and the debug capture shows no coloured geometry
+reaches the screen. Those reconcile only if `submit_tomb_raider_cached_room_quad`
+returns `true` while emitting nothing visible** -- claiming success so the caller
+skips the fallback. That is where to instrument: compare its return value against
+what it actually pushed into the arena.
+
+A second silent path exists nearby -- `count_lighting_reject()` returns `0` when
+`indexed_vertex_lighting_colors` yields `None` -- but walls share it and render
+correctly, so it is the weaker candidate.
+
+The earlier candidate, now superseded: `tomb_raider_warmed_quad_requires_dynamic_submit` forces
 a subdividing quad off the warmed fast path
 ([`indexed_cache.rs`](../engine/crates/psx-engine/src/world_render/indexed_cache.rs)).
 If the dynamic fallback then declines it too, the surface is dropped by both
