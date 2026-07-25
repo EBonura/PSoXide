@@ -27,6 +27,41 @@ wall it knows which neighbouring cell is open and which is solid. Emitting each
 wall single-sided facing its open side is correct *and* free. Only a wall with
 walkable cells on both sides needs both faces.
 
+### Design, worked out 2026-07-25
+
+Sidedness currently comes from the MATERIAL, and walls share materials, so per-
+wall orientation cannot be expressed there. It needs a per-SURFACE bit.
+
+`CachedRoomSurface::kind_flags` has room: bits 0-1 are the kind, bit 6 is
+`CACHED_SURFACE_HORIZONTAL_NON_FLAT`, bit 7 is `CACHED_SURFACE_HAS_BAKED_RGB`.
+**Bits 2-5 are free** ([`world_render.rs:720`](../engine/crates/psx-engine/src/world_render.rs#L720)).
+
+The rule follows from `cardinal_wall_backs_face_their_owning_cell`: a wall's back
+faces the cell that owns it, so by default it is visible only from the
+neighbouring cell. Therefore:
+
+- Neighbour in the wall's direction absent or non-walkable -> the owning cell is
+  the only side a player can occupy, so **flip the wall** and keep it
+  single-sided. This is the cortex_v1 case: the corridor's west boundary wall had
+  no neighbour west of it.
+- Neighbour walkable on both sides -> genuinely needs `Both`.
+
+Touch points:
+
+1. Cooker: `blocker_mask_for_sector` in
+   [`cook_world.rs:58`](../editor/crates/psxed-project/src/playtest/cook_world.rs#L58)
+   already tests per-direction wall solidity, and the sector grid gives neighbour
+   presence, so both inputs are in hand.
+2. Cooked format: set the new bit in the surface's `kind_flags`.
+3. Runtime: `wall_material_for_direction`
+   ([`world_render.rs:241`](../engine/crates/psx-engine/src/world_render.rs#L241))
+   stops forcing `Both` and honours the bit.
+
+Verify by replaying the recorded tape: walls must stay visible everywhere they
+are today, and the render stage should give back most of the +9.09% room-surface
+cost. Do NOT judge it on a single position -- the earlier global-flip attempt
+looked plausible on one frame and had inverted every already-correct wall.
+
 **Do not repeat this mistake.** An attempt to take the cheap path removed the
 sidedness swap *globally*, which flipped every wall including those already
 facing correctly, so more walls disappeared and the experiment was misread as
