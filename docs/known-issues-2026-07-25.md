@@ -267,6 +267,29 @@ runs near the camera: the TR subdivision band,
 [0, 0, -64, 320]`. A negative height in a wall quad; one sector to fix in the
 editor.
 
+## MEASURED: wall orientation from grid adjacency
+
+With headless gameplay working again, the wall-orientation change (`fb884080`)
+was A/B'd by reverting it, rebuilding the guest, and replaying the identical
+scripted route. Both sides produced exactly 1360 gameplay rows, so the routes
+match frame for frame.
+
+| stage | before | after | delta |
+| --- | --- | --- | --- |
+| `render` | 555,806 | 521,716 | **-6.13%** |
+| `room` | 166,152 | 126,170 | **-24.06%** |
+| `frame_cycles` | 986,629 | 984,089 | -0.26% |
+
+The room stage, which is what the change actually touches, drops by a quarter.
+`frame_cycles` barely moves because `present` busy-waits to the vblank boundary
+and absorbs the saving; that is expected and is why `render` is the honest
+number here (see the chart caveat in `CLAUDE.md`).
+
+This beats the +4.34% estimate it was designed against. It is still a cycle
+measurement, NOT a correctness gate: walls must be checked visually across a
+whole route in the editor, because the earlier global-flip attempt looked right
+on a single frame while having inverted every wall that was already correct.
+
 ## RESOLVED: the "loading stall" was a disc built without the UI pack
 
 **There is no engine stall. This was my build error, and the whole entry below
