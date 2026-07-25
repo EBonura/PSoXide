@@ -273,8 +273,11 @@ impl Playtest {
         while slot < MAX_ACTIVE_ROOMS {
             if let Some(active) = self.window.rooms[slot] {
                 if let Some(record) = ROOMS.get(active.index.to_usize()) {
+                    // Same room, so its stored table is the right seed: an
+                    // unresolved slot keeps the material it last resolved to.
+                    let previous = active_room_materials(&active);
                     let (materials, material_count, all_resolved) =
-                        build_runtime_room_material_table(record);
+                        build_runtime_room_material_table(record, previous);
                     if !all_resolved {
                         unresolved = true;
                     }
