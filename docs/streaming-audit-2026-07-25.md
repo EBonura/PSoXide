@@ -109,18 +109,45 @@ It is also the finding with the least work behind it, because the hard part —
 knowing exactly what each room needs, and what its neighbours will need next —
 is already cooked and sitting unused.
 
+### The structural blocker: asset storage cannot evict
+
+One more correction to the picture above. `begin` does not load *every* asset: it
+filters on `asset_flags::STREAMED_GAMEPLAY_PERSISTENT`, which in cortex_v1 is 22
+of 56 assets (26 are static, 7 UI, 1 transient). So the problem is whole-level
+residency *for the gameplay-persistent class* — which is precisely the class that
+grows with world size, so the conclusion is unchanged.
+
+The reason that class cannot page is its storage. `PersistentAssetStorage`
+([`asset_streaming.rs:21`](../engine/crates/psx-game-runtime/src/asset_streaming.rs#L21))
+is a **monotonic bump allocator**: `offsets`, `lengths`, `used_bytes` and
+`prepare_slot`, with no release path. Once an asset is placed it can never be
+freed, so no amount of manifest plumbing will make assets stream until the
+allocator can reclaim.
+
+The template already exists in the same crate. `StreamedRoomPages` has
+`release_slot`, `free_page_count`, and fragmented-pool compaction with live-byte
+preservation, all covered by four passing paged-room tests. The asset streamer
+needs the same treatment.
+
+That reorders the work: the allocator is the prerequisite, not the plumbing.
+
 ### Shape of the work
 
-1. Replace the `begin(..., ASSETS)` call with a residency request driven by the
+1. **Give `PersistentAssetStorage` a page pool with release and compaction**,
+   modelled on `StreamedRoomPages`. Nothing downstream is possible without it.
+2. Replace the `begin(..., ASSETS)` call with a residency request driven by the
    active-room window: the union of `required_ram` over resident rooms plus
-   `warm_ram` over their portal neighbours.
-2. Give the persistent streamer a RAM-side twin of `evict_unreferenced_vram`,
+   `warm_ram` over their portal neighbours. Keep `begin`'s one-shot semantics for
+   the initial neighbourhood so the boot loading screen's `progress_q12` and
+   `ready` keep working, and add an incremental top-up for later crossings.
+3. Give the persistent streamer a RAM-side twin of `evict_unreferenced_vram`,
    using the same union as the keep-set. `vram_asset_required` is the template;
    it needs a `ram_asset_required` sibling reading `required_ram`/`warm_ram`.
-3. Consult `warm_vram` in the VRAM path too. Today only `required_vram` is read,
+4. Consult `warm_vram` in the VRAM path too. Today only `required_vram` is read,
    so neighbour textures upload on arrival rather than ahead of it.
-4. Size the pool from the worst-case neighbourhood rather than
-   `package.assets.len()` — the same rule finding 5 applies to room pages.
+5. Only then size the pool from the worst-case neighbourhood rather than
+   `package.assets.len()`. Shrinking it before eviction works would make rooms
+   late in a large level unloadable.
 
 Steps 1 and 2 give delta streaming for free: an asset already resident is
 already in the union and is never re-requested. That is precisely the
