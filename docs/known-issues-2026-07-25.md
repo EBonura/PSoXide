@@ -329,6 +329,40 @@ always breaks immediately. This is NOT the bug: `begin_next_group`
 (`cd_stream.rs:564`) sets `state = Reading` on every path that returns `true`, so
 the break costs one pump tick per group and the next call proceeds to the read.
 
+**Most likely cause: two readers sharing the drive.** The counters already
+collected say the streaming pump never receives a single sector.
+`poll_into` emits `CD_ROOM_CHUNK_SECTORS` whenever `sector_delta > 0`, and that
+counter is **0 for every row of the run** (as are `cd_room_chunk_bytes`). So
+`try_read_stream_sector` is returning `Ok(false)` -- no data ready -- on every
+call, and `copy_window_info_sector` is never reached.
+
+Meanwhile 12.3% of guest time sits in `read_one_sector_blocking`, which is a
+DIFFERENT function on a different path. Something else is holding the CD
+controller and consuming its DataReady IRQs while the persistent-asset pump polls
+a drive that never answers it.
+
+`step_persistent_model_assets` already warns about exactly this hazard:
+
+> Model parsing owns the CD first. Only now seed portal visibility and the
+> incremental room-window job; the same tick can reconcile and pump WORLD.PAK
+> without two readers sharing the controller.
+
+The ordering it describes protects the world stream from the model load. The
+observed stall is upstream of that: the persistent arena itself never gets the
+drive. The first thing to establish is who else is calling a blocking read while
+the loading screen is up -- the menu/UI image preload is the obvious suspect,
+since `prepare_loading_assets` is documented as deliberately never touching the
+CD for this reason.
+
+Not yet verified, and it should be verified by identifying the caller rather
+than by changing ordering and seeing if the symptom moves.
+
+Why it does not trip the stall timeout: `Ok(false)` increments
+`data_wait_polls`, which fails the job past `DATA_READY_STALL_POLL_LIMIT` -- but
+`data_wait_polls` is reset to 0 on every `begin_next_group`, so a job that keeps
+re-arming groups can poll forever without ever tripping it. That is consistent
+with the arena never reporting `failed()`.
+
 That leaves the `Reading` path itself. The state does advance, sectors are read
 continuously, and yet `processed_count` never rises, so look at what turns read
 sectors into a completed entry: whether `try_read_stream_sector` keeps returning
