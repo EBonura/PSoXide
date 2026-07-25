@@ -131,6 +131,32 @@ needs the same treatment.
 
 That reorders the work: the allocator is the prerequisite, not the plumbing.
 
+### Hazard for the wiring: `Model<'static>` borrows the pool
+
+Found while wiring step 2, and it constrains the design rather than being a
+detail. `RuntimeModelAsset` retains `model: Model<'static>`
+([`model_rendering.rs:132`](../engine/crates/psx-game-runtime/src/model_rendering.rs#L132)),
+a parsed view over the asset bytes. Its face, part and vertex pools are owned
+copies, so those are safe, but the `Model` itself is a borrow.
+
+Releasing an asset never moves bytes, so eviction alone is safe. **Compaction
+is not.** It runs inside `prepare_slot` whenever appending no longer fits, which
+is exactly what a portal crossing that needs new assets will trigger, and it
+would leave every `Model<'static>` pointing at moved bytes. The failure would be
+silent corruption of mesh data far from its cause, which is the worst kind of bug
+to inherit.
+
+`layout_generation` exists for this. The wiring must compare it across
+`request_rooms` and force a model rebuild when it changes, via the existing
+`runtime_models_loaded` flag that already gates `load_runtime_models`. Note that
+the rebuild is synchronous and also re-uploads atlases, so it needs a frame-time
+budget of its own; dropping it into a gameplay tick unmeasured is not acceptable.
+
+The cheaper alternative worth measuring first: keep model assets pinned for the
+level and scope only textures and room payloads to the neighbourhood. Models are
+a small share of the persistent class and pinning them removes the compaction
+hazard entirely.
+
 ### Shape of the work
 
 1. **Give `PersistentAssetStorage` a page pool with release and compaction**,
