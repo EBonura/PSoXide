@@ -234,7 +234,20 @@ pub(super) fn build_runtime_room_material_table(
 ) -> ([WorldRenderMaterial; MAX_ROOM_MATERIALS], usize, bool) {
     let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
     let (material_count, all_resolved) = build_room_materials(record, &mut resolved_materials);
-    let mut materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
+    // Last resort for a slot with no resolved material and no previous value:
+    // borrow the CLUT and tpage of any material in this room that DID resolve.
+    // The surface then samples a real palette -- the wrong texture, obviously a
+    // placeholder -- instead of `room_material_fallback`, whose CLUT word is zero
+    // and therefore addresses VRAM (0, 0) inside framebuffer 0. That fallback is
+    // what made room 6/7 floors render as flat framebuffer garbage while their
+    // walls, whose material slot resolved, textured correctly.
+    let stand_in = resolved_materials[..material_count]
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .unwrap_or_else(room_material_fallback);
+    let mut materials = [stand_in; MAX_ROOM_MATERIALS];
     for i in 0..material_count {
         if let Some(material) = resolved_materials[i] {
             materials[i] = material;
