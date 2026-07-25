@@ -1345,7 +1345,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             }
         }
         WorldSurfaceKind::Wall { direction } => {
-            let wall_material = wall_material_for_direction(material, direction);
+            let wall_material =
+                wall_material_for_direction(material, direction, surface.wall_faces_owner());
             let surface_risky = cached_surface_risk_for_modes(
                 depth_mode,
                 subdivision_mode,
@@ -1601,7 +1602,11 @@ pub fn prewarm_indexed_cached_room_quads(
                         (cached_uv_material(base_material), surface.split, true)
                     }
                     WorldSurfaceKind::Wall { direction } => (
-                        wall_material_for_direction(cached_uv_material(base_material), direction),
+                        wall_material_for_direction(
+                            cached_uv_material(base_material),
+                            direction,
+                            surface.wall_faces_owner(),
+                        ),
                         SPLIT_NW_SE,
                         false,
                     ),
@@ -1847,7 +1852,10 @@ fn draw_near_clipped_cached_room_surface<const OT: usize, L: WorldSurfaceLightin
         WorldSurfaceKind::Floor => (base_material, false),
         WorldSurfaceKind::Ceiling => (base_material, true),
         WorldSurfaceKind::Wall { direction } => {
-            (wall_material_for_direction(base_material, direction), false)
+            (
+                wall_material_for_direction(base_material, direction, surface.wall_faces_owner()),
+                false,
+            )
         }
     };
     let opts = triangle_depth_options(options)
