@@ -354,8 +354,15 @@ the loading screen is up -- the menu/UI image preload is the obvious suspect,
 since `prepare_loading_assets` is documented as deliberately never touching the
 CD for this reason.
 
-Not yet verified, and it should be verified by identifying the caller rather
-than by changing ordering and seeing if the symptom moves.
+The other reader is named. `read_one_sector_blocking` has exactly two callers,
+both in `cd_stream.rs`: `read_chunk_blocking` (line 773) and
+`read_chunks_contiguous` (line 900). The second is the "contiguous menu preload"
+that `prepare_loading_assets` refers to, and it is blocking. Confirm which of the
+two is live while the loading screen is up, then decide whether the preload
+should finish before the arena pumps or the two should share a single reader.
+
+Verify by identifying the caller, not by changing ordering and seeing if the
+symptom moves.
 
 Why it does not trip the stall timeout: `Ok(false)` increments
 `data_wait_polls`, which fails the job past `DATA_READY_STALL_POLL_LIMIT` -- but
