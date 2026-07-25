@@ -1567,6 +1567,13 @@ const WARMED_ROOM_QUAD_READY: u8 = 0x80;
 const WARMED_ROOM_QUAD_REVERSE: u8 = 0x01;
 const WARMED_ROOM_QUAD_SPLIT_NE_SW: u8 = 0x02;
 const WARMED_ROOM_QUAD_DOUBLE_SIDED: u8 = 0x04;
+/// Packet-corner reversal, carrying ONLY `reverse_front` (ceilings).
+///
+/// Kept apart from [`WARMED_ROOM_QUAD_REVERSE`], which also folds in a `Back`
+/// sidedness and drives the CULL test. Letting sidedness reach the corner order
+/// swaps which of the quad's two triangles is submitted first; see
+/// `quad_packet_order`.
+const WARMED_ROOM_QUAD_REVERSE_FRONT: u8 = 0x08;
 
 /// Build the immutable payload of baked whole-quad room packets before the
 /// room reaches the render loop.
@@ -1648,6 +1655,11 @@ const fn warmed_room_quad_ready_value(
     let reverse = reverse_front ^ matches!(sidedness, SurfaceSidedness::Back);
     WARMED_ROOM_QUAD_READY
         | if reverse { WARMED_ROOM_QUAD_REVERSE } else { 0 }
+        | if reverse_front {
+            WARMED_ROOM_QUAD_REVERSE_FRONT
+        } else {
+            0
+        }
         | if split == SPLIT_NE_SW {
             WARMED_ROOM_QUAD_SPLIT_NE_SW
         } else {
@@ -1665,7 +1677,7 @@ fn warmed_room_quad_packet_vertices_from_ready(
     mut verts: [ProjectedVertex; 4],
     ready: u8,
 ) -> [ProjectedVertex; 4] {
-    if ready & WARMED_ROOM_QUAD_REVERSE != 0 {
+    if ready & WARMED_ROOM_QUAD_REVERSE_FRONT != 0 {
         verts = reverse_quad_winding(verts);
     }
     if ready & WARMED_ROOM_QUAD_SPLIT_NE_SW != 0 {
@@ -1775,7 +1787,10 @@ fn warmed_room_quad_packet_values<T: Copy>(
     split: u8,
     reverse_front: bool,
 ) -> [T; 4] {
-    if reverse_front ^ (sidedness == SurfaceSidedness::Back) {
+    // `sidedness` deliberately does not reach the corner order; see
+    // `quad_packet_order` in `world_render.rs`.
+    let _ = sidedness;
+    if reverse_front {
         values = reverse_quad_winding(values);
     }
     if split == SPLIT_NE_SW {

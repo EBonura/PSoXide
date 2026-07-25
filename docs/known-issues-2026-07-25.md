@@ -315,13 +315,49 @@ ticks, screenshots every 100 ticks:
   streaming changes committed alongside this note are not involved and cost
   nothing visually.
 
-Mechanism not yet established. Two candidates fit the evidence: a wall face that
-was previously culled now faces the camera and occludes her, or the change
-perturbs something shared with the model draw path. Worth distinguishing before
-any further attempt, rather than guessing, given this rule's history.
+### FIXED: the quad packet's corner order must not depend on sidedness
 
-Coverage caveat: `--hold-forward` walks one corridor, so this is a strong signal
-rather than whole-route coverage.
+The wall rule was never the problem. The bisect isolated it:
+
+| experiment | result |
+| --- | --- |
+| new rule + flag, sidedness forced back to `Both` | pixel-identical to before, 0/30 |
+| single face, warmed packets disabled | pixel-identical to broken, 0/30 |
+| owner-facing walls skipped entirely | player visible, wall gone: it IS the occluder |
+| per-triangle wall depth | player returns in FRAGMENTS: a depth tie |
+
+The drawn set can only SHRINK when a face goes from `Both` to `Back`, so extra
+occlusion was impossible and the difference had to be ordering. The diff map
+agreed: outside her silhouette the wall differed only at dither level.
+
+`submit_sided_projected_gouraud_quad_cached_uv_words` reversed the four corners
+for a `Back` face before reordering them into the hardware quad. That yields the
+SAME two triangles with reversed winding, which is why the wall itself looked
+right, but it also swaps WHICH TRIANGLE IS SUBMITTED FIRST. That matters because
+`submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth` abandons the
+single prepared depth and emits the two triangles separately, each computing its
+own depth, whenever the quad needs splitting. A corridor wall seen at a grazing
+angle spans a huge depth range, so its two triangle depths straddle anything
+standing in front of it. Swapping their order flipped the tie and the wall
+painted over the player.
+
+Fix: `quad_packet_order` builds the packet from the authored corners and never
+consults sidedness. The winding is not needed there anyway, since the software
+backface cull has already run and the GPU does not cull. The warmed packet path
+gets its own `WARMED_ROOM_QUAD_REVERSE_FRONT` bit so ceiling `reverse_front`
+ordering is untouched while the cull keeps using the sidedness-folded bit.
+
+Verified on the identical 3069-tick route, 3001 render hits, 1360 room hits:
+
+- **29 of 30 route frames are pixel-identical to the both-faces build.** The
+  30th is tick 400, a one-frame phase shift, with the player visible in both.
+- `room surface draw` per hit 121,298 against the both-faces 129,921, so
+  **-6.6%** of the room stage is kept. The broken build's -10.6% was partly
+  paid for by not drawing the player.
+- 267 psx-engine tests pass.
+
+Coverage caveat: `--hold-forward` walks one corridor, so this still wants an
+editor pass over a wider route.
 
 ## RESOLVED: the "loading stall" was a disc built without the UI pack
 
