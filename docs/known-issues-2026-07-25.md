@@ -71,7 +71,36 @@ positive than resizing it was.
 
 ## 3. Floor tiles vanish near the player in cortex_v1 rooms 6/7
 
-**State:** open, and **provenance unknown**. Reported against a build from this
+**State:** open, but **localised to floor subdivision, and pre-existing.**
+
+Two experiments closed this down on 2026-07-25.
+
+*Provenance.* Built at `e78b44fe`, the last commit before any render change on
+`perf/engine-30fps`, and replayed the same tape. The holes are identical. None
+of the three render-path changes on that branch (double-sided walls, material
+stand-in, texture eviction) caused it. Getting there needed a workaround: the
+older cooker hard-errors on cortex_v1's empty `.wav` files while the current one
+tolerates them, so valid 16-bit stubs were written into a throwaway copy. That
+cook produced identical geometry (8 rooms, 234 cells, 889 tris), which is what
+makes the comparison meaningful.
+
+*Cause.* Setting `ROOM_TOMB_RAIDER_SUBDIVISION_KINDS` to `WALL` only, disabling
+floor subdivision, **removes every hole**. The floor renders textured and
+continuous across the whole route. So the loss is in the Tomb Raider subdivision
+path for floor surfaces: the generated leaf quads, not the authored surface,
+which is consistent with everything else already ruled out.
+
+The original report said "only when tessellating them" and was correct. It was
+argued down on a `split_tris` reading of 0, but that counter measures the
+HARDWARE splitter, not TR subdivision, so it was never evidence either way.
+
+Disabling floor subdivision is not the fix -- it exists for affine correction on
+near floors. The remaining work is in the leaf emission itself; start at
+`submit_tomb_raider_cached_room_quad` and the leaf path in
+`world_pass_gouraud.rs`, with `tessellation-debug` colouring to see which leaves
+survive.
+
+**Original state, for the record:** open, and provenance unknown. Reported against a build from this
 branch; never checked against `main`. Three changes here touch the room render
 path (double-sided walls, the material stand-in, live texture eviction), so this
 work cannot rule itself out. **Establish whether it reproduces on `main` first.**
