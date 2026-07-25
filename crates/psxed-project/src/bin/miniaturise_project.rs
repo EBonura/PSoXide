@@ -28,9 +28,19 @@
 //!
 //! A shipped copy would therefore boot to a broken menu with no audio. These
 //! are project-global assets rather than per-room reachable ones, so they do
-//! not need reachability analysis -- copying all of them is correct. The work
-//! is finding where each declares its source path and adding them to the used
-//! set, then re-running the round-trip until the diff is empty.
+//! not need reachability analysis -- copying all of them is correct.
+//!
+//! All three live in `playtest/cook_ui.rs`, which this tool never traced:
+//!
+//! | Asset | Site | Note |
+//! |---|---|---|
+//! | CD-DA music | `cook_ui.rs:971` | `.wav` source via `resolve_path(trimmed, project_root)` |
+//! | UI SFX | `cook_ui.rs:1114` | `.wav` source, same resolution |
+//! | UI image textures | same module | reported by `"...is missing; using placeholder"` at `cook_ui.rs:770` |
+//!
+//! Collect those paths the way textures and models are collected -- from the
+//! cook rather than a second traversal -- add them to the used set, and re-run
+//! the round-trip until the diff is empty.
 //!
 //! The round-trip diff is the acceptance test for this tool. Until it comes
 //! back clean, treat the output as a size experiment, not a shippable project.
