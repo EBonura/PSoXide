@@ -33,8 +33,9 @@ by stalling. Four paged-room tests and three asset-streamer tests cover it.
 
 The problems are around it. In priority order:
 
-1. **Texture loading blocks the frame.** Room geometry streams asynchronously;
-   the textures those rooms need do not.
+1. **Per-room asset residency is cooked and then ignored.** Every asset in the
+   level is loaded and pinned; the manifest that would allow streaming the
+   minimum sits unused.
 2. **The pump budget is fiction.** It asks for 1.6x more sectors per vblank than
    a 2x drive can deliver, and the number is not derived from the drive at all.
 3. **Seek time is absent from the scheduler's model**, though one seek costs as
@@ -43,39 +44,88 @@ The problems are around it. In priority order:
 5. **Pool capacity is sized from whole-level figures**, which does not
    generalise to a big world.
 
-## 1. Texture loading blocks the frame — critical
+## 1. Per-room asset residency is cooked and then ignored — critical
 
-Room chunks are read through the non-blocking job path:
-[`cd_stream.rs:405`](../engine/crates/psx-game-runtime/src/cd_stream.rs#L405)
-calls `try_read_stream_sector`, which returns `Ok(false)` when no sector has
-landed. The scheduler's `pump` advances the job by at most `max_sectors` and
-returns. That is the correct shape and it is what makes room streaming
-seamless today.
+**Corrected 2026-07-25 after review.** An earlier draft of this section named
+blocking texture reads as the critical hole. That was wrong on two counts and
+both corrections matter, so they are recorded rather than quietly edited out.
 
-Texture and VRAM assets do not use it. [`vram.rs:303`](../engine/crates/psx-game-runtime/src/vram.rs#L303)
-calls `read_chunks_contiguous` and [`vram.rs:1524`](../engine/crates/psx-game-runtime/src/vram.rs#L1524)
-calls `read_chunk_blocking`. Both spin inside `read_one_sector_blocking`
-([`cd_stream/hw.rs:240`](../engine/crates/psx-game-runtime/src/cd_stream/hw.rs#L240)),
-which waits on `IRQ_DATA_READY` with a poll limit before DMAing the sector.
+First, the blocking reads in [`vram.rs:303`](../engine/crates/psx-game-runtime/src/vram.rs#L303)
+and [`vram.rs:1524`](../engine/crates/psx-game-runtime/src/vram.rs#L1524) are
+the UI image pack and the sky panorama. Both are menu/transition loads, not
+per-room gameplay streaming. `read_one_sector_blocking` measuring 2.01% of guest
+PC samples on the 900-frame route is consistent with that: the route spends most
+of its length in menu and story screens. It is still worth moving off the frame,
+but it is not the seamless-world hole.
 
-Measured: `read_one_sector_blocking` was **2.01% of all guest PC samples** on the
-900-frame route, ranking 13th of 123 symbols. Each blocked sector costs
-225,792 cycles at 2x — **0.4 of a vblank per sector**. A texture that needs four
-sectors stalls the frame for more than a full vblank before any seek.
+Second, and more importantly: **room textures are not streamed per room at all.**
 
-This is the hole in the seamless-world story. Walk into a room whose geometry
-prefetched correctly but whose textures did not, and the frame stops.
+### What already exists
 
-It also explains a finding from the RAM/VRAM survey that looked contradictory
-there: 28 room-material texture drops and 128 upload-queue-full events against
-only 21 successful uploads, while a quarter of VRAM sat untouched. The address
-space was never the constraint. The upload path was, and behind it a blocking
-CD read that the frame budget cannot absorb.
+[`RoomResidencyRecord`](../engine/crates/psx-level/src/lib.rs#L1344) carries a
+complete per-room dependency set:
 
-**Fix.** Move VRAM asset loading onto the same non-blocking job the room
-streamer uses, and let the material table keep the previous texture until the
-new one lands. The second half of that already shipped on this branch
-(`19663b55`); the first half has not.
+| Field | Meaning | Cooked? |
+|---|---|---|
+| `required_ram` | assets that must be RAM-resident to render the room | yes, populated |
+| `required_vram` | assets that must be uploaded to VRAM | yes, populated |
+| `warm_ram` | neighbour-room RAM hints across open portals | yes, populated |
+| `warm_vram` | neighbour-room VRAM hints | yes, populated |
+
+The type's doc comment still claims the warm sets are "Empty in this pass"; the
+cooker has outgrown it. cortex_v1 room 0 warms `[14, 17]` in RAM and
+`[15, 16, 25, 18]` in VRAM.
+
+The VRAM side already behaves the way a delta streamer should. Uploads are keyed
+by asset id, so `find_vram_slot` ([`vram.rs:909`](../engine/crates/psx-game-runtime/src/vram.rs#L909))
+skips anything already resident, and `evict_unreferenced_vram`
+([`vram.rs:686`](../engine/crates/psx-game-runtime/src/vram.rs#L686)) frees only
+what no room in the desired set needs, via `vram_asset_required`. Walking into a
+neighbour that shares textures with the current room already costs nothing.
+
+### What is missing
+
+`required_ram`, `warm_ram` and `warm_vram` have **no consumers anywhere in the
+engine**. A repo-wide search outside the type definition returns nothing.
+
+Instead, [`model_rendering.rs:55`](../engine/examples/editor-playtest/src/model_rendering.rs#L55)
+calls `assets.begin(UI_PACK_START_LBA, UI_PACK_TOC, ASSETS)` — every asset in
+the level, unconditionally — and the cooker sizes the pool to match at
+[`manifest.rs:161`](../editor/crates/psxed-project/src/playtest/manifest.rs#L161):
+`persistent_asset_slot_count = package.assets.len()`.
+
+So the RAM asset pool is whole-level residency by construction. That is the
+`PersistentAssetStreamer<154, 56>` at 318,364 bytes the RAM survey found holding
+48% of all arena memory, and it is why room textures never need streaming: they
+are already there, all of them, always.
+
+### Why this is the blocker for a big world
+
+This is the one finding in this audit that does not scale at all. Room geometry
+pages properly; assets do not page. A world ten times the size of cortex_v1
+needs roughly 3 MB of asset payload permanently resident in a 2 MB console.
+
+It is also the finding with the least work behind it, because the hard part —
+knowing exactly what each room needs, and what its neighbours will need next —
+is already cooked and sitting unused.
+
+### Shape of the work
+
+1. Replace the `begin(..., ASSETS)` call with a residency request driven by the
+   active-room window: the union of `required_ram` over resident rooms plus
+   `warm_ram` over their portal neighbours.
+2. Give the persistent streamer a RAM-side twin of `evict_unreferenced_vram`,
+   using the same union as the keep-set. `vram_asset_required` is the template;
+   it needs a `ram_asset_required` sibling reading `required_ram`/`warm_ram`.
+3. Consult `warm_vram` in the VRAM path too. Today only `required_vram` is read,
+   so neighbour textures upload on arrival rather than ahead of it.
+4. Size the pool from the worst-case neighbourhood rather than
+   `package.assets.len()` — the same rule finding 5 applies to room pages.
+
+Steps 1 and 2 give delta streaming for free: an asset already resident is
+already in the union and is never re-requested. That is precisely the
+"stream the bare minimum" behaviour the goal needs, and the manifest to do it
+has been cooked into every build for some time.
 
 ## 2. The pump budget is not derived from the drive
 
@@ -187,9 +237,8 @@ must then take the maximum over flip states as well.
 
 ## Recommended order
 
-1. **Move VRAM asset loading onto the non-blocking job** (finding 1). It is the
-   only item here that stalls a frame today, and it is measurable immediately
-   through `read_one_sector_blocking` disappearing from the PC profile.
+1. **Consume the residency manifest** (finding 1). Nothing else here matters if
+   assets cannot page, and the cooked data already exists.
 2. **Size the page pool from the room graph's worst neighbourhood** (finding 5).
    Cheap, cook-time, and it is what makes the design independent of world size.
 3. **Derive the pump budget from `CD_READ_TIME`** (finding 2), then cap the
