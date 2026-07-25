@@ -307,11 +307,19 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         self.finish_if_done();
     }
 
-    /// Whether `asset` is needed by any room in `desired`.
+    /// Whether `asset` must keep its RAM bytes for any room in `desired`.
     ///
-    /// The union of `required_ram` and `warm_ram` is the keep-set: an asset a
-    /// neighbour will want next must survive eviction, or crossing a portal
-    /// would re-read what we just discarded.
+    /// The keep-set spans all four cooked sets, not just the RAM pair. A texture
+    /// is listed only under `required_vram`/`warm_vram` -- cortex_v1's persistent
+    /// textures are ids 27 and 33, and neither appears in any `required_ram` --
+    /// but VRAM is uploaded FROM these RAM bytes, so dropping them leaves the
+    /// texture unable to re-upload once its VRAM slot is evicted. Keying
+    /// eviction on the RAM sets alone silently discarded every persistent
+    /// texture on the first residency pass and only looked correct because the
+    /// already-uploaded VRAM copies survived.
+    ///
+    /// The warm sets are included so crossing a portal does not evict exactly
+    /// what the neighbour is about to want.
     pub fn ram_asset_required(
         asset: AssetId,
         desired: &[RoomIndex],
@@ -321,9 +329,11 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             let Some(res) = room_residency.iter().find(|r| r.room == room) else {
                 continue;
             };
-            if res.required_ram.iter().any(|&a| a == asset)
+            let listed = res.required_ram.iter().any(|&a| a == asset)
                 || res.warm_ram.iter().any(|&a| a == asset)
-            {
+                || res.required_vram.iter().any(|&a| a == asset)
+                || res.warm_vram.iter().any(|&a| a == asset);
+            if listed {
                 return true;
             }
         }
@@ -631,10 +641,18 @@ mod tests {
         type Streamer = PersistentAssetStreamer<4, 8>;
         const ROOMS: &[RoomResidencyRecord] = &[
             residency(0, &[AssetId(1)], &[AssetId(2)]),
-            residency(1, &[AssetId(3)], &[]),
+            RoomResidencyRecord {
+                room: RoomIndex(1),
+                required_ram: &[AssetId(3)],
+                required_vram: &[AssetId(5)],
+                warm_ram: &[],
+                warm_vram: &[],
+            },
         ];
         let desired = [RoomIndex(0), RoomIndex(1)];
-        for (id, want) in [(1u16, true), (2, true), (3, true), (4, false)] {
+        // Asset 5 is listed only under required_vram, which still needs its RAM
+        // bytes alive to upload from.
+        for (id, want) in [(1u16, true), (2, true), (3, true), (5, true), (4, false)] {
             assert_eq!(
                 Streamer::ram_asset_required(AssetId(id), &desired, ROOMS),
                 want,

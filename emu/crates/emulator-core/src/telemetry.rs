@@ -711,6 +711,8 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::VRAM_CLUT_FULL => "vram clut full",
         counter::VRAM_UPLOAD_QUEUE_FULL => "vram upload queue full",
         counter::ROOM_MATERIAL_TEXTURE_DROPS => "room material texture drops",
+        counter::PERSISTENT_ASSET_RESIDENT_BYTES => "persistent asset resident bytes",
+        counter::PERSISTENT_ASSET_LOAD_FAILURES => "persistent asset load failures",
         counter::ROOM_MATERIAL_SLOT_OVERFLOW => "room material slot overflow",
         counter::GAME_ENTITIES_THOUGHT => "game entities thought",
         counter::GAME_ENTITY_PATROL_ENTERS => "game entity patrol enters",
