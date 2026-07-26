@@ -40,8 +40,11 @@ shift with code alignment, so the baseline was re-pinned.
   pages by itself. Previously the battery ran with nothing on screen and progress
   went only to the debug TTY, which does not exist on a console: the operator saw
   a black screen for tens of seconds and reasonably concluded the disc was dead.
-- A main menu (TRIANGLE from anywhere) reruns the startup tests or opens results,
-  scans and probes, replacing a flat mode ring that had to be cycled blindly.
+- A two-level main menu (START from anywhere, printed on every screen) reruns
+  the startup tests or opens results, scans and probes. It replaces a flat mode
+  ring that had to be cycled blindly, and every page fits on screen without
+  scrolling. All 21 modes are reachable, and the audio readout is a listed row
+  rather than only a hidden button.
 - The audio readout is silent until SQUARE asks for it, and plays at a quarter
   scale rather than full. It used to start automatically at maximum volume.
 
