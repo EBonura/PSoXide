@@ -979,7 +979,8 @@ fn main() -> ! {
         video_mode,
         visual_pacing: playtest_visual_pacing(video_mode),
         scheduler: SchedulerConfig::new()
-            .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual),
+            .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual)
+            .with_visual_lockstep(cfg!(feature = "lockstep-visuals")),
         loading_ui_scene: generated::LOADING_UI_SCENE,
         ..Config::default()
     };

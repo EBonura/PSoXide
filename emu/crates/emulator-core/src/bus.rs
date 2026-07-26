@@ -266,6 +266,14 @@ pub struct Bus {
     dma_log_enabled: bool,
     #[serde(skip)]
     dma_log: Vec<(String, u64, u64, u64)>,
+    /// Optional linked-list GPU DMA node trace used to diagnose ordering-table
+    /// corruption/order changes without perturbing guest code generation.
+    #[serde(skip)]
+    gpu_linked_list_log_enabled: bool,
+    #[serde(skip)]
+    gpu_linked_list_transfer: u32,
+    #[serde(skip)]
+    gpu_linked_list_log: Vec<(u32, u32, u32)>,
 }
 
 /// `#[serde(default = ...)]` target for the skipped
@@ -351,6 +359,9 @@ impl Bus {
             unmapped_write_seen: std::collections::BTreeSet::new(),
             dma_log_enabled: false,
             dma_log: Vec::new(),
+            gpu_linked_list_log_enabled: false,
+            gpu_linked_list_transfer: 0,
+            gpu_linked_list_log: Vec::new(),
         };
 
         bus.maybe_poison_memory();
@@ -1693,6 +1704,21 @@ impl Bus {
         std::mem::take(&mut self.dma_log)
     }
 
+    /// Enable or disable capture of `(transfer, node_address, header)` for
+    /// every ordering-table node consumed by linked-list GPU DMA.
+    pub fn set_gpu_linked_list_log_enabled(&mut self, enabled: bool) {
+        self.gpu_linked_list_log_enabled = enabled;
+        if enabled {
+            self.gpu_linked_list_transfer = 0;
+            self.gpu_linked_list_log.clear();
+        }
+    }
+
+    /// Return the captured linked-list GPU DMA nodes.
+    pub fn gpu_linked_list_log(&self) -> &[(u32, u32, u32)] {
+        &self.gpu_linked_list_log
+    }
+
     fn log_dma_schedule(&mut self, kind: &str, delta: u64, target: u64) {
         if self.dma_log_enabled {
             self.dma_log
@@ -2120,6 +2146,8 @@ impl Bus {
 
     fn dma_gpu_linked_list(&mut self) -> u32 {
         let mut addr = self.dma.channels[2].base & 0x001F_FFFC;
+        let transfer = self.gpu_linked_list_transfer;
+        self.gpu_linked_list_transfer = self.gpu_linked_list_transfer.wrapping_add(1);
         // Count traversed headers and payload words, then apply the captured
         // DRAM-burst and per-node arbitration costs to the completion delay.
         let mut total_words: u32 = 0;
@@ -2127,6 +2155,9 @@ impl Bus {
         // Bound the walk so a malformed list can't spin forever.
         for _ in 0..0x100_0000 {
             let header = read_ram_u32(&self.ram[..], addr);
+            if self.gpu_linked_list_log_enabled {
+                self.gpu_linked_list_log.push((transfer, addr, header));
+            }
             node_count = node_count.saturating_add(1);
             let word_count = (header >> 24) & 0xFF;
             for i in 0..word_count {
