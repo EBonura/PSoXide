@@ -2080,12 +2080,48 @@ fn project_tomb_raider_view_quad_gte(
 fn project_tomb_raider_view_lattice_gte(
     vertices: [ViewVertex; 9],
     projection: WorldProjection,
+    root_projected: Option<[ProjectedVertex; 4]>,
 ) -> Option<[ProjectedVertex; 9]> {
     if vertices
         .iter()
         .any(|vertex| vertex.z <= 0 || vertex.z < projection.near_z)
     {
         return None;
+    }
+    if let Some(root) = root_projected {
+        let generated = [
+            tomb_raider_view_gte_input(vertices[1]),
+            tomb_raider_view_gte_input(vertices[3]),
+            tomb_raider_view_gte_input(vertices[4]),
+            tomb_raider_view_gte_input(vertices[5]),
+            tomb_raider_view_gte_input(vertices[7]),
+        ];
+        let [Some(top), Some(left), Some(center), Some(right), Some(bottom)] = generated else {
+            return Some([
+                root[0],
+                projection.project_view(vertices[1])?,
+                root[1],
+                projection.project_view(vertices[3])?,
+                projection.project_view(vertices[4])?,
+                projection.project_view(vertices[5])?,
+                root[2],
+                projection.project_view(vertices[7])?,
+                root[3],
+            ]);
+        };
+        let first = scene::project_triangle_scheduled(top, left, center);
+        let second = scene::project_triangle_scheduled(right, bottom, center);
+        return Some([
+            root[0],
+            tomb_raider_projected_option_from_gte(first[0], projection.near_z)?,
+            root[1],
+            tomb_raider_projected_option_from_gte(first[1], projection.near_z)?,
+            tomb_raider_projected_option_from_gte(first[2], projection.near_z)?,
+            tomb_raider_projected_option_from_gte(second[0], projection.near_z)?,
+            root[2],
+            tomb_raider_projected_option_from_gte(second[1], projection.near_z)?,
+            root[3],
+        ]);
     }
     let inputs = [
         tomb_raider_view_gte_input(vertices[0]),
@@ -3796,7 +3832,7 @@ fn textured_gouraud_view_uv_word(vertex: TexturedGouraudViewVertex) -> u16 {
     (vertex.u.clamp(0, 255) as u16) | ((vertex.v.clamp(0, 255) as u16) << 8)
 }
 
-fn tomb_raider_quad_farthest_depth(vertices: [TexturedGouraudViewVertex; 4]) -> i32 {
+fn tomb_raider_quad_farthest_depth(vertices: &[TexturedGouraudViewVertex; 4]) -> i32 {
     vertices[0]
         .position
         .z
@@ -3805,7 +3841,7 @@ fn tomb_raider_quad_farthest_depth(vertices: [TexturedGouraudViewVertex; 4]) -> 
         .max(vertices[3].position.z)
 }
 
-fn tomb_raider_triangle_farthest_depth(vertices: [TexturedGouraudViewVertex; 3]) -> i32 {
+fn tomb_raider_triangle_farthest_depth(vertices: &[TexturedGouraudViewVertex; 3]) -> i32 {
     vertices[0]
         .position
         .z

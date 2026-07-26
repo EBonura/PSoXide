@@ -49,6 +49,7 @@ use psx_asset::{Animation, ModelPart, ModelVertex};
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 use psx_engine::draw_room_vertex_lit;
 use psx_engine::ui::UiTextureSlot;
+use psx_engine::world_render::PortalCellWindow;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
 #[cfg(feature = "world-grid-visible")]
