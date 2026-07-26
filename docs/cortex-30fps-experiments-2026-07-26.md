@@ -95,8 +95,8 @@ body size or disassembly appearance alone is not evidence.
 | ID | Candidate | State | Acceptance / rejection evidence |
 |---|---|---|---|
 | M2 | Emulator-owned I-cache refill events/stall cycles by route window | accepted | 176k v1 / 388k v3 stalls per visual; hashes and VRAM exact |
-| R1 | Surface-level zero-fog warm-path gate | queued | Exact hash gate; now diagnostic priority |
-| R2 | `#[inline(never)]` hot dispatcher leaves | queued | MIPS/disassembly and M2 must improve |
+| R1 | Surface-level zero-fog warm-path gate | rejected | safe form: v3 14.03→14.36 FPS, but 1/927 transient hashes changed; packet-fast form changed 734/927 |
+| R2 | `#[inline(never)]` hot dispatcher leaves | rejected | v3 14.03→13.67 FPS, render mean +4.3%, I-cache stalls +1.7%; 534/927 lockstep hashes changed |
 | R3 | Residency-built `SurfaceDrawRecord` + option variants | queued | Remove static per-surface interpretation |
 | R4 | Residency-built lattice UV/RGB attributes | queued | Test after M1 corrected the upper bound |
 | R5 | Packet template copy/patch; remove arena double-write | queued | Must preserve packet bytes and OT slots |
