@@ -181,12 +181,16 @@ fn preview_scratch_command_log_walk_terminates() {
 }
 
 #[test]
-fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
+fn sample_project_preview_frame_contains_draw_commands() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
         .expect("repo root");
-    let project_root = repo_root.join("editor/projects/cortex_ignition_v1");
+    // The committed miniaturised sample, not a local working project:
+    // `editor/projects/*` is gitignored, so a test keyed on one passes only
+    // on the machine that authored it and fails everywhere else, which is
+    // how these went red after cortex_ignition_v1 was renamed.
+    let project_root = repo_root.join("editor/samples/cortex_v1");
     let project =
         ProjectDocument::load_from_path(project_root.join("project.ron")).expect("project loads");
     let mut textures = crate::editor_textures::EditorTextures::new();
@@ -245,7 +249,7 @@ fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
         .count();
     assert!(
         draw_count > 0,
-        "cortex_ignition_v1 preview should emit draw commands; opcodes={:?}",
+        "sample project preview should emit draw commands; opcodes={:?}",
         frame
             .cmd_log
             .iter()
@@ -254,11 +258,11 @@ fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
     );
     assert!(
         translated.total() > 0,
-        "cortex_ignition_v1 preview should translate to vertices"
+        "sample project preview should translate to vertices"
     );
     assert!(
         nonblack_vertices > 0,
-        "cortex_ignition_v1 preview should contain visible non-black vertices"
+        "sample project preview should contain visible non-black vertices"
     );
 
     if let Some(mut renderer) = headless_preview_renderer() {
@@ -269,7 +273,7 @@ fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
         let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
         assert!(
             count_nonblack_rgba(&rgba) > 0,
-            "cortex_ignition_v1 preview should render non-black pixels"
+            "sample project preview should render non-black pixels"
         );
     }
 }
@@ -487,12 +491,16 @@ fn cylinder_prop_preview_renders_shared_generated_profile_headlessly() {
 }
 
 #[test]
-fn cortex_aletha_crystal_preview_uses_its_generated_texture() {
+fn sample_aletha_crystal_preview_uses_its_generated_texture() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
         .expect("repo root");
-    let project_root = repo_root.join("editor/projects/cortex_ignition_v1");
+    // The committed miniaturised sample, not a local working project:
+    // `editor/projects/*` is gitignored, so a test keyed on one passes only
+    // on the machine that authored it and fails everywhere else, which is
+    // how these went red after cortex_ignition_v1 was renamed.
+    let project_root = repo_root.join("editor/samples/cortex_v1");
     let project =
         ProjectDocument::load_from_path(project_root.join("project.ron")).expect("project loads");
     let player_crystal = project
