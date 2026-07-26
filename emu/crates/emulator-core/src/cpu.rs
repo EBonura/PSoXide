@@ -107,6 +107,20 @@ struct HleIrqFrame {
     clean_irq_entry: bool,
 }
 
+/// Emulator-owned instruction-cache counters.
+///
+/// These counters observe timing already charged to the emulated CPU. They do
+/// not participate in guest state and are reset when a save state is loaded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InstructionCacheProfileSnapshot {
+    /// Instruction fetches that filled one or more cache words.
+    pub refill_events: u64,
+    /// Cache words fetched across all refill events.
+    pub refill_words: u64,
+    /// CPU stall cycles already charged for those refills.
+    pub refill_stall_cycles: u64,
+}
+
 /// MIPS R3000A CPU state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
@@ -269,6 +283,10 @@ pub struct Cpu {
     /// exception?". Excluded from save states.
     #[serde(skip)]
     should_take_interrupt_steps: u64,
+    /// Emulator-owned instruction-cache refill profile. Excluded from save
+    /// states because it is diagnostic history, not emulated hardware state.
+    #[serde(skip)]
+    instruction_cache_profile: InstructionCacheProfileSnapshot,
     /// COP2 -- Geometry Transformation Engine. Holds 32 data + 32
     /// control registers and dispatches the GTE function set.
     cop2: Gte,
@@ -362,6 +380,7 @@ impl Cpu {
             exception_counts: [0; 32],
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
+            instruction_cache_profile: InstructionCacheProfileSnapshot::default(),
             cop2: Gte::new(),
             freelook: FreelookState::default(),
             isr_depth: 0,
@@ -544,6 +563,12 @@ impl Cpu {
         self.tick
     }
 
+    /// Snapshot emulator-owned instruction-cache refill counters.
+    #[inline]
+    pub fn instruction_cache_profile(&self) -> InstructionCacheProfileSnapshot {
+        self.instruction_cache_profile
+    }
+
     /// Write a general-purpose register, enforcing the MIPS invariant
     /// that `$0` is hardwired to zero.
     ///
@@ -593,6 +618,20 @@ impl Cpu {
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
         let (instruction, filled_words) = self.instruction_cache.fetch(phys, iblksz, bus);
         let stalls = bus.icache_fill_stalls(phys, filled_words);
+        if filled_words != 0 {
+            self.instruction_cache_profile.refill_events = self
+                .instruction_cache_profile
+                .refill_events
+                .saturating_add(1);
+            self.instruction_cache_profile.refill_words = self
+                .instruction_cache_profile
+                .refill_words
+                .saturating_add(filled_words as u64);
+            self.instruction_cache_profile.refill_stall_cycles = self
+                .instruction_cache_profile
+                .refill_stall_cycles
+                .saturating_add(stalls as u64);
+        }
         bus.add_cycles(stalls);
         instruction
     }
