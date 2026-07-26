@@ -106,14 +106,20 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.1: Operator flow. Boot runs the battery behind a visible progress bar,
+//       then lands on the capture pages; a main menu (TRIANGLE) reruns the
+//       startup tests or opens results, scans and probes; the audio readout is
+//       silent until asked for. No record changed meaning, but the guest binary
+//       did, and timing records shift with code alignment, so the baseline was
+//       re-pinned.
 // v1.0: PX7. CD/CD-DA/GPU/MDEC/SIO batteries, interrupt-masked sampling,
 //       median column, explicit record ids, raster hashes, audio readout.
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 0;
+const SUITE_VERSION_MINOR: u8 = 1;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.0";
+const SUITE_VERSION: &str = "HWTEST v1.1";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -184,6 +190,8 @@ enum Status {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
+    /// Main menu. Entered after the operator has scanned the capture pages.
+    Menu,
     ReverbProbe,
     HandoffProbe,
     TransitionProbe,
@@ -210,6 +218,7 @@ enum Mode {
 impl Mode {
     const fn label(self) -> &'static str {
         match self {
+            Self::Menu => "MAIN MENU",
             Self::ReverbProbe => "HL REVERB STATE",
             Self::HandoffProbe => "HL VOICE HANDOFF",
             Self::TransitionProbe => "HL BANK TRANSITION",
@@ -236,6 +245,7 @@ impl Mode {
 
     const fn hint(self) -> &'static str {
         match self {
+            Self::Menu => "UP/DOWN SELECT  CROSS RUN",
             Self::ReverbProbe
             | Self::HandoffProbe
             | Self::TransitionProbe
@@ -262,6 +272,7 @@ impl Mode {
 
     const fn description(self) -> &'static str {
         match self {
+            Self::Menu => "STARTUP TESTS, RESULTS, SCANS AND PROBES",
             Self::ReverbProbe => "BIOS REVERB STATE + MAP DMA RESET VARIANTS QR",
             Self::HandoffProbe => "SELECTABLE MENU-VOICE SHUTDOWN + BANK SPLIT QR",
             Self::TransitionProbe => "EXACT FULL/LIGHT/MAP LIVE-BANK HANDOFF QR",
@@ -288,6 +299,7 @@ impl Mode {
 
     const fn aux_label(self) -> &'static str {
         match self {
+            Self::Menu => "MENU",
             Self::ReverbProbe
             | Self::HandoffProbe
             | Self::TransitionProbe
@@ -312,8 +324,13 @@ impl Mode {
         }
     }
 
+    /// Stable id used in the section-report hash. Values must not change:
+    /// they are mixed into digests that checked-in baselines pin.
     const fn index(self) -> u8 {
         match self {
+            // Menu is not a measurement section and never reaches a report,
+            // so it takes a value outside the original range.
+            Self::Menu => u8::MAX,
             Self::ReverbProbe => 0,
             Self::HandoffProbe => 1,
             Self::TransitionProbe => 2,
@@ -335,32 +352,6 @@ impl Mode {
             Self::GteScan => 18,
             Self::SpuScan => 19,
             Self::TimingScan => 20,
-        }
-    }
-
-    const fn from_index(index: u8) -> Self {
-        match index % MODE_COUNT {
-            0 => Self::ReverbProbe,
-            1 => Self::HandoffProbe,
-            2 => Self::TransitionProbe,
-            3 => Self::VoiceProbe,
-            4 => Self::AudioProbe,
-            5 => Self::ControllerProbe,
-            6 => Self::AllChecks,
-            7 => Self::CpuChecks,
-            8 => Self::MemoryChecks,
-            9 => Self::IrqChecks,
-            10 => Self::DmaChecks,
-            11 => Self::TimerChecks,
-            12 => Self::GpuChecks,
-            13 => Self::GteChecks,
-            14 => Self::SpuChecks,
-            15 => Self::CdromChecks,
-            16 => Self::SioChecks,
-            17 => Self::CpuScan,
-            18 => Self::GteScan,
-            19 => Self::SpuScan,
-            _ => Self::TimingScan,
         }
     }
 
@@ -396,14 +387,6 @@ impl Mode {
             Self::SioChecks => spec.group == "SIO",
             _ => false,
         }
-    }
-
-    const fn next(self) -> Self {
-        Self::from_index(self.index() + 1)
-    }
-
-    const fn previous(self) -> Self {
-        Self::from_index(self.index() + MODE_COUNT - 1)
     }
 }
 
@@ -520,6 +503,43 @@ const PRECISION_VALUE_COUNT: usize = 192;
 /// event or a genuinely bimodal distribution (cache or DRAM-refresh
 /// interaction) that a min/max pair cannot distinguish.
 const TIMING_SAMPLES: usize = 5;
+
+/// What a menu row does when chosen.
+#[derive(Copy, Clone)]
+enum MenuAction {
+    /// Re-run exactly what boot runs: conformance, scans, timing battery.
+    RerunStartup,
+    Open(Mode),
+}
+
+/// The main menu, in the order it is displayed. Grouped by kind and prefixed,
+/// so an operator can find a thing without knowing the internal mode order.
+const MENU: [(&str, MenuAction); 22] = [
+    ("RERUN STARTUP TESTS", MenuAction::RerunStartup),
+    ("VIEW CAPTURE (QR PAGES)", MenuAction::Open(Mode::TimingScan)),
+    ("RESULTS: ALL CHECKS", MenuAction::Open(Mode::AllChecks)),
+    ("RESULTS: CPU", MenuAction::Open(Mode::CpuChecks)),
+    ("RESULTS: RAM", MenuAction::Open(Mode::MemoryChecks)),
+    ("RESULTS: IRQ", MenuAction::Open(Mode::IrqChecks)),
+    ("RESULTS: DMA", MenuAction::Open(Mode::DmaChecks)),
+    ("RESULTS: TIMERS", MenuAction::Open(Mode::TimerChecks)),
+    ("RESULTS: GPU", MenuAction::Open(Mode::GpuChecks)),
+    ("RESULTS: GTE", MenuAction::Open(Mode::GteChecks)),
+    ("RESULTS: SPU", MenuAction::Open(Mode::SpuChecks)),
+    ("RESULTS: CDROM", MenuAction::Open(Mode::CdromChecks)),
+    ("RESULTS: SIO", MenuAction::Open(Mode::SioChecks)),
+    ("SCAN: CPU SWEEP", MenuAction::Open(Mode::CpuScan)),
+    ("SCAN: GTE SWEEP", MenuAction::Open(Mode::GteScan)),
+    ("SCAN: SPU MAP", MenuAction::Open(Mode::SpuScan)),
+    ("PROBE: CONTROLLER", MenuAction::Open(Mode::ControllerProbe)),
+    ("PROBE: HL REVERB STATE", MenuAction::Open(Mode::ReverbProbe)),
+    ("PROBE: HL VOICE HANDOFF", MenuAction::Open(Mode::HandoffProbe)),
+    ("PROBE: HL BANK TRANSITION", MenuAction::Open(Mode::TransitionProbe)),
+    ("PROBE: HL VOICE BANK", MenuAction::Open(Mode::VoiceProbe)),
+    ("PROBE: CD/SPU AUDIO", MenuAction::Open(Mode::AudioProbe)),
+];
+/// Menu rows visible at once; the window scrolls with the cursor.
+const MENU_WINDOW: usize = 15;
 
 #[derive(Copy, Clone)]
 struct TimingRecord {
@@ -1507,7 +1527,10 @@ struct HardwareTests {
     /// timing wakes a strict original pad.
     probe_variants: [psx_pad::RawPoll; PROBE_VARIANT_COUNT],
     /// Index into `audio_link::RATE_DIVISORS` for the readout tone rate.
+    /// Zero means off, so the disc is silent unless asked.
     audio_rate: usize,
+    /// Selected row in [`MENU`].
+    menu_cursor: usize,
 }
 
 #[cfg(target_arch = "mips")]
@@ -1534,10 +1557,15 @@ impl HardwareTests {
     const fn new(boot_reverb: ReverbSnapshot) -> Self {
         Self {
             font: None,
-            // Boot into the tier-1 summary. A tier-2 probe must never be the
-            // boot mode: it owns SPU state, and the automatic capture has to
-            // describe a console those probes have not touched.
-            mode: Mode::AllChecks,
+            // Boot into the QR capture pages. This disc exists to get values
+            // off a console, so the payload should be on screen the moment the
+            // battery finishes rather than behind a menu keypress. The mode
+            // menu is still reachable with Up/Down.
+            //
+            // A tier-2 probe must never be the boot mode either: it owns SPU
+            // state, and the automatic capture has to describe a console those
+            // probes have not touched.
+            mode: Mode::TimingScan,
             results: [TestResult::pending(); TEST_COUNT],
             cpu_scan: ScanReport::pending("press x to sweep"),
             gte_scan: ScanReport::pending("press x to sweep"),
@@ -1557,12 +1585,16 @@ impl HardwareTests {
             rerun_count: 0,
             probe_variants: [psx_pad::RawPoll::NONE; PROBE_VARIANT_COUNT],
             audio_rate: 0,
+            menu_cursor: 0,
         }
     }
 
     fn run_all(&mut self) {
         for (index, spec) in TESTS.iter().enumerate() {
             self.results[index] = (spec.run)();
+            // Green while conformance runs, blue while the timing battery does;
+            // the operator can tell which phase is slow.
+            draw_init_progress(index + 1, TEST_COUNT, (96, 240, 128));
         }
         self.recount();
         self.rerun_count = self.rerun_count.wrapping_add(1);
@@ -1697,12 +1729,18 @@ impl Scene for HardwareTests {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
         self.run_all();
         self.run_startup_scans();
-        // Start the audio readout last: it claims voice 0 and most of SPU RAM,
+        // Upload the audio readout last: it claims voice 0 and most of SPU RAM,
         // and every measurement must already be in the payload it transmits.
-        let bits = audio_link::transmit(self.timing_capture.binary());
-        tty::print("hardware-tests: audio-link bits=");
+        //
+        // It is uploaded SILENT. Auto-playing it meant the console screeched
+        // harsh square waves at full volume the instant it booted, which is
+        // both alarming and useless to anyone not recording at that moment.
+        // SQUARE starts it when the operator is ready.
+        let bits = audio_link::prepare(self.timing_capture.binary());
+        tty::print("hardware-tests: audio-link ready bits=");
         tty_print_dec_u16(bits as u16);
-        tty::println("");
+        tty::println(" (press SQUARE to transmit)");
+        draw_init_progress(1, 1, (96, 240, 128));
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
@@ -1748,14 +1786,39 @@ impl Scene for HardwareTests {
             }
         }
 
+        if matches!(self.mode, Mode::Menu) {
+            if ctx.just_pressed(button::UP) {
+                self.menu_cursor = (self.menu_cursor + MENU.len() - 1) % MENU.len();
+            }
+            if ctx.just_pressed(button::DOWN) {
+                self.menu_cursor = (self.menu_cursor + 1) % MENU.len();
+            }
+            if ctx.just_pressed(button::CROSS) {
+                match MENU[self.menu_cursor].1 {
+                    MenuAction::RerunStartup => {
+                        // Same work boot does, and it lands back on the capture
+                        // pages the same way, so a re-run and a fresh boot are
+                        // indistinguishable to the operator.
+                        self.run_all();
+                        self.run_startup_scans();
+                        self.enter_mode(Mode::TimingScan);
+                    }
+                    MenuAction::Open(mode) => self.enter_mode(mode),
+                }
+            }
+            return;
+        }
+
+        // TRIANGLE always returns to the menu, from any screen.
+        if ctx.just_pressed(button::TRIANGLE) {
+            self.mode = Mode::Menu;
+            self.page = 0;
+            return;
+        }
         if ctx.just_pressed(button::START) {
             self.mode = Mode::TimingScan;
             self.page = 0;
             self.encode_capture(0);
-        } else if ctx.just_pressed(button::UP) {
-            self.enter_mode(self.mode.previous());
-        } else if ctx.just_pressed(button::DOWN) {
-            self.enter_mode(self.mode.next());
         }
 
         if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
@@ -1791,15 +1854,22 @@ impl Scene for HardwareTests {
         if ctx.just_pressed(button::CROSS) {
             self.run_active();
         }
-        // SQUARE cycles the audio-link rate. If the capture chain cannot decode
-        // the fast mode, the operator drops to a slower one here instead of
-        // needing another burn.
+        // SQUARE steps the audio readout: off, then each rate, then off again.
+        // Off is the default and the first press is what starts it, so the disc
+        // is silent unless the operator wants the tone. If the capture chain
+        // cannot decode the fast rate, keep pressing for a slower, more robust
+        // one instead of needing another burn.
         if ctx.just_pressed(button::SQUARE) {
-            self.audio_rate = (self.audio_rate + 1) % audio_link::RATE_DIVISORS.len();
-            audio_link::set_rate(self.audio_rate);
-            tty::print("hardware-tests: audio-link rate index ");
-            tty_print_dec_u8(self.audio_rate as u8);
-            tty::println("");
+            self.audio_rate = (self.audio_rate + 1) % (audio_link::RATE_DIVISORS.len() + 1);
+            if self.audio_rate == 0 {
+                audio_link::stop();
+                tty::println("hardware-tests: audio-link off");
+            } else {
+                audio_link::set_rate(self.audio_rate - 1);
+                tty::print("hardware-tests: audio-link rate index ");
+                tty_print_dec_u8((self.audio_rate - 1) as u8);
+                tty::println("");
+            }
         }
     }
 
@@ -1814,6 +1884,11 @@ impl Scene for HardwareTests {
         let Some(font) = self.font.as_ref() else {
             return;
         };
+
+        if matches!(self.mode, Mode::Menu) {
+            draw_menu(font, self);
+            return;
+        }
 
         if !matches!(
             self.mode,
@@ -1925,8 +2000,57 @@ fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(224, 8, SUITE_VERSION, (112, 136, 170));
     font.draw_text(8, 18, "SECTION", (140, 160, 190));
     font.draw_text(72, 18, suite.mode.label(), (255, 232, 128));
-    font.draw_text(184, 18, "UP/DN NEXT", (140, 160, 190));
-    font.draw_text(232, 18, "START CAPTURE", (140, 160, 190));
+    font.draw_text(200, 18, "TRIANGLE MENU", (140, 160, 190));
+}
+
+/// The main menu: a windowed list with a cursor.
+fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
+    font.draw_text(8, 6, "PS1 HARDWARE TESTS", (232, 236, 244));
+    font.draw_text(224, 6, SUITE_VERSION, (112, 136, 170));
+    font.draw_text(8, 18, "UP/DOWN SELECT   CROSS RUN", (140, 160, 190));
+
+    // Scroll the window so the cursor stays inside it.
+    let first = if suite.menu_cursor < MENU_WINDOW / 2 {
+        0
+    } else if suite.menu_cursor + MENU_WINDOW / 2 >= MENU.len() {
+        MENU.len().saturating_sub(MENU_WINDOW)
+    } else {
+        suite.menu_cursor - MENU_WINDOW / 2
+    };
+
+    let mut y = 34i16;
+    let mut row = first;
+    while row < MENU.len() && row < first + MENU_WINDOW {
+        let selected = row == suite.menu_cursor;
+        font.draw_text(
+            10,
+            y,
+            if selected { ">" } else { " " },
+            (255, 232, 128),
+        );
+        font.draw_text(
+            22,
+            y,
+            MENU[row].0,
+            if selected {
+                (255, 232, 128)
+            } else {
+                (176, 190, 210)
+            },
+        );
+        y += 12;
+        row += 1;
+    }
+
+    // Audio readout state belongs here: it is operator-facing, and its being
+    // silent by default is exactly the thing that needs saying out loud.
+    font.draw_text(8, 226, "SQUARE AUDIO READOUT:", (140, 160, 190));
+    if suite.audio_rate == 0 {
+        font.draw_text(184, 226, "OFF", (176, 190, 210));
+    } else {
+        font.draw_text(184, 226, "ON", (96, 240, 128));
+        font.draw_text(212, 226, hex2((suite.audio_rate - 1) as u8).as_str(), (96, 240, 128));
+    }
 }
 
 fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
@@ -3443,10 +3567,6 @@ fn push_timing_record(
     next: &mut usize,
     record: TimingRecord,
 ) {
-    // Progress line per record. The CD and GPU batteries do tens of seconds of
-    // real drive and raster work with nothing changing on screen, which looks
-    // exactly like a hang; an operator would reasonably reset the console.
-    // Also the only way to see WHERE a battery wedges on hardware.
     tty::print("hardware-tests: rec ");
     tty::print(hex2(record.id).as_str());
     tty::print(" min=");
@@ -3456,6 +3576,47 @@ fn push_timing_record(
     tty::println("");
     records[*next] = record;
     *next += 1;
+    draw_init_progress(*next, TIMING_RECORD_COUNT, (80, 200, 255));
+}
+
+/// Draw a progress bar straight into the visible framebuffer.
+///
+/// The whole battery runs inside `Scene::init`, before the engine has drawn a
+/// single frame, so `tty::print` progress is invisible on a real console: the
+/// operator watches a black screen for tens of seconds and reasonably concludes
+/// the disc is dead. That is exactly what happened on the first burn.
+///
+/// Immediate GP0 fill-rects need no framebuffer swap, no font upload and no
+/// access to `Ctx`, so they work at any point during init. Both buffer halves
+/// are painted because which one is currently being scanned out depends on how
+/// many swaps have happened, and a bar only visible half the time is no better
+/// than no bar.
+fn draw_init_progress(done: usize, total: usize, colour: (u8, u8, u8)) {
+    const BAR_X: u32 = 24;
+    const BAR_W: u32 = 272;
+    const BAR_H: u32 = 8;
+    let filled = if total == 0 {
+        0
+    } else {
+        (BAR_W * done as u32 / total as u32).min(BAR_W)
+    };
+    let rgb = (colour.0 as u32) | ((colour.1 as u32) << 8) | ((colour.2 as u32) << 16);
+
+    gpu_io::wait_cmd_ready();
+    for buffer_y in [200u32, 440] {
+        // Track, then the filled portion. GP0 0x02 takes absolute VRAM
+        // coordinates and ignores draw area and offset, which is what makes it
+        // usable before any draw environment has been set up.
+        gpu_io::write_gp0(0x0200_0000 | 0x0020_2020);
+        gpu_io::write_gp0((buffer_y << 16) | BAR_X);
+        gpu_io::write_gp0((BAR_H << 16) | BAR_W);
+        if filled != 0 {
+            gpu_io::write_gp0(0x0200_0000 | rgb);
+            gpu_io::write_gp0((buffer_y << 16) | BAR_X);
+            gpu_io::write_gp0((BAR_H << 16) | filled);
+        }
+    }
+    gpu_io::wait_cmd_ready();
 }
 
 /// Repeat the probe with interrupts masked, then keep min/median/max.
