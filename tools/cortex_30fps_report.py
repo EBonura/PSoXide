@@ -61,13 +61,26 @@ def format_count(value: float | None) -> str:
 
 
 def summarise(run_dir: Path) -> dict[str, str]:
-    gameplay = gameplay_rows(integer_rows(run_dir / "profile.csv"))
+    all_profile_rows = integer_rows(run_dir / "profile.csv")
+    gameplay = gameplay_rows(all_profile_rows)
     visuals = [row for row in gameplay if row["visual_frames"] > 0]
     room_visuals = [row for row in visuals if row["room_surfaces_considered"] > 0]
     render = [row["render"] for row in visuals]
     period_work = visual_period_work(gameplay)
     visual_count = sum(row["visual_frames"] for row in gameplay)
     within_budget = sum(value <= TWO_VBLANK_CYCLES for value in period_work)
+    icache_stalls_per_visual: float | None = None
+    route_path = run_dir / "route.csv"
+    if route_path.exists():
+        route = integer_rows(route_path)
+        if route and "icache_refill_stall_cycles_delta" in route[0]:
+            gameplay_start_cycles = gameplay[0]["start_bus_cycles"]
+            gameplay_stalls = sum(
+                row["icache_refill_stall_cycles_delta"]
+                for row in route
+                if row["bus_cycles"] >= gameplay_start_cycles
+            )
+            icache_stalls_per_visual = gameplay_stalls / visual_count
 
     return {
         "run": run_dir.parent.name,
@@ -77,6 +90,7 @@ def summarise(run_dir: Path) -> dict[str, str]:
         "render p95": f"{percentile(render, 0.95):,}",
         "render max": f"{max(render):,}",
         "period <=2vb": f"{100.0 * within_budget / len(period_work):.1f}%",
+        "I$ stalls": format_count(icache_stalls_per_visual),
         "surfaces": format_count(
             mean_counter(room_visuals, "room_surfaces_considered")
         ),
