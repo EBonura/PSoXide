@@ -586,7 +586,8 @@ hwtest-audio: hardware-tests-disc
 	cd emu && cargo run -q -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
-		--steps 1200000000 --dump-audio ../$(HWTEST_WAV) > /dev/null
+		--steps 1200000000 --pad-pulses '0x8000@1900+6' \
+		--dump-audio ../$(HWTEST_WAV) > /dev/null
 	python3 tools/hwtest-audio-decode.py $(HWTEST_WAV) --emit-pages $(HWTEST_AUDIO_PAGES)
 	python3 tools/hwtest-report.py $(HWTEST_AUDIO_PAGES) > /dev/null
 	@echo "audio link OK: payload recovered from audio and parsed as PX7"

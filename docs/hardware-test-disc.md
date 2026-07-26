@@ -35,18 +35,18 @@ This is what `make hwtest-diff` gates and what a checked-in baseline describes.
 **Tier 2, bespoke probes.** PA2-PA5 and the controller probe. These own SPU
 state or need a specific boot state, so they cannot be batched: PA5 must
 snapshot untouched BIOS reverb state before SDK init, and its variants are one
-per reboot. They arm on menu entry (`HardwareTests::enter_mode`), never at
-boot.
+per reboot. They arm when selected from the main menu
+(`HardwareTests::enter_mode`), never at boot.
 
-A tier-2 probe must never become the boot mode. Until 2026-07-25 the disc
-booted straight into PA5, whose `spu::init()` ran before every automatic
-capture; the tier-1 payload therefore described a console PA5 had already
-touched. Only a probe reached from a fresh boot sees a true BIOS handoff, so
+A tier-2 probe must never become the boot mode. The disc once booted straight
+into PA5, whose `spu::init()` ran before every automatic capture, so the tier-1
+payload described a console PA5 had already touched. Boot now goes to the
+capture pages. Only a probe reached from a fresh boot sees a true BIOS handoff, so
 PA5's variants still require a reboot each.
 
 ## Capturing and clearing stale BIOS reverb state (`PA5`)
 
-PA5 is reachable from the mode menu and waits five seconds on a variant
+PA5 is reachable from the main menu (TRIANGLE) and waits five seconds on a variant
 selector (default
 `DEPTH0`). PA4 SPLIT established that the real-console noise begins only when
 the t0a0 map bank is uploaded, after SDK init and the light bank, with all
@@ -79,7 +79,7 @@ ONLY`). Decode the final payload with:
 python3 tools/hwtest-audio-report.py /tmp/pa5-qr.txt
 ```
 
-Press Down from the completed PA5 screen to revisit PA4.
+Press TRIANGLE from the completed PA5 screen to return to the menu.
 
 ### SCPH hardware result (2026-07-20)
 
@@ -139,7 +139,7 @@ Decode each final `PA4/.../C:...` QR with:
 python3 tools/hwtest-audio-report.py /tmp/pa4-qr.txt
 ```
 
-Press Down from the completed PA4 screen to revisit PA3.
+Press TRIANGLE from the completed PA4 screen to return to the menu.
 
 ## Reproducing the Hazard Course bank transition (`PA3`)
 
@@ -172,7 +172,7 @@ visible for several seconds, decode its `PA3/.../C:...` text, then run:
 python3 tools/hwtest-audio-report.py /tmp/pa3-qr.txt
 ```
 
-Press Down once from the completed PA3 screen to reach PA2.
+Press TRIANGLE from the completed PA3 screen to return to the menu.
 
 ## Capturing hl-psx voice-bank audio (`PA2`)
 
@@ -217,24 +217,54 @@ once from the completed PA2 screen to reach the older PA1 CD-route probe.
    scan all three pages from the new run. Do not mix pages from different
    runs.
 
-## Burn-session runbook
+## Operator flow
 
-The battery now does real mechanical and raster work, so the disc takes
-noticeably longer to reach the results screen than it used to. Every record
-prints a `hardware-tests: rec <id> min= max=` line as it completes, both to the
-TTY and as visible progress, because roughly 40 seeks plus the GPU and MDEC
-batteries mean tens of seconds where nothing else changes. Without that it looks
-exactly like a hang and the natural reaction is to reset the console.
+Boot, watch a bar, scan five QR codes, then a menu. That is the whole disc.
 
-1. Start recording video **and audio** before powering on.
-2. Let the battery finish. Watch the `rec` lines advance.
-3. Scan the five QR pages (Start, then Right to page through).
-4. Keep recording for at least 15 more seconds: the audio link needs ~13.6 s to
-   transmit one full copy, and more repetitions give the decoder more to work
-   with.
-5. If the audio decodes cleanly, done. If not, press **SQUARE** on the capture
-   page to drop to a slower, more robust tone rate and record again. Four rates
-   are available and the decoder detects which one was used.
+1. **Battery runs automatically.** A progress bar advances across the bottom of
+   the screen: green while the 173 conformance cases run, blue while the timing
+   battery does. Nothing else is on screen and that is expected; the bar is the
+   only thing saying the disc is alive, and it exists because the first burn
+   showed a black screen for tens of seconds and looked dead.
+2. **The capture pages appear by themselves.** No keypress. Left/Right pages
+   through all five QR symbols; the header reads `PX7 CAPTURE  PAGE 01/05`.
+3. **TRIANGLE opens the menu.** From there:
+   - `RERUN STARTUP TESTS` does exactly what boot does and lands back on the
+     capture pages, so a re-run and a fresh boot are indistinguishable.
+   - `VIEW CAPTURE (QR PAGES)` returns to the capture.
+   - `RESULTS: ...` per-section conformance detail.
+   - `SCAN: ...` the CPU/GTE/SPU sweeps.
+   - `PROBE: ...` the controller probe and the tier-2 audio probes.
+
+   Up/Down moves the cursor, Cross runs the selection, TRIANGLE returns here
+   from anywhere.
+
+**The disc is silent unless you ask.** SQUARE steps the audio readout: off,
+then each of the four tone rates, then off again. Off is the default and the
+menu shows the current state. Auto-playing it meant the console screeched harsh
+square waves at full volume the moment it booted, which is alarming and useless
+to anyone not recording at that instant.
+
+### Recording a capture
+
+Record video **and** audio from before power-on. Let the bar finish. Scan the
+five pages. Then press SQUARE and keep recording at least 15 seconds: one
+repetition of the audio payload is ~13.6 s. If it will not decode, press SQUARE
+again for a slower, more robust rate; the decoder detects which was used.
+
+Expect the battery to take noticeably longer than it used to. It does around 40
+real seeks plus the GPU, MDEC and SIO work.
+
+## Timing records move when the guest binary changes
+
+Adding unrelated code shifts I-cache alignment, which genuinely changes measured
+cycle counts. A rebuild therefore drifts the timing baseline even when no
+measurement logic changed at all.
+
+`make hwtest-verify-code` is what separates the two cases: it digests the
+instructions between each probe's markers, so `drift=0` there while
+`hwtest-diff` reports drift means the measured blocks are byte-identical and only
+their addresses moved. That is a re-baseline, not a regression.
 
 ## CD-DA contention (records `0x9B`-`0x9E`)
 
