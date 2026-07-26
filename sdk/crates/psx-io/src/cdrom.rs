@@ -41,6 +41,10 @@ pub const CMD_DEMUTE: u8 = 0x0C;
 pub const CMD_SETMODE: u8 = 0x0E;
 /// CdlGetlocP command: current physical play position.
 pub const CMD_GETLOCP: u8 = 0x11;
+/// CdlSeekL command: seek in data mode, homing on the data-sector headers.
+pub const CMD_SEEKL: u8 = 0x15;
+/// CdlInit command: reset mode, abort pending reads, spin the motor up.
+pub const CMD_INIT: u8 = 0x0A;
 
 const REG_INDEX: u32 = BASE;
 const REG_COMMAND_RESPONSE: u32 = BASE + 1;
@@ -50,6 +54,7 @@ const REG_REQUEST_IRQ: u32 = BASE + 3;
 const STATUS_PARAM_NOT_FULL: u8 = 1 << 4;
 const STATUS_RESPONSE_NOT_EMPTY: u8 = 1 << 5;
 const IRQ_ACK: u8 = 3;
+const IRQ_DATA_READY: u8 = 1;
 const IRQ_COMPLETE: u8 = 2;
 const IRQ_ERROR: u8 = 5;
 const IRQ_ACK_ALL: u8 = 0x1F;
@@ -113,6 +118,86 @@ pub fn try_command(command: u8, params: &[u8], spin_limit: u32) -> Option<Respon
     write_byte(REG_COMMAND_RESPONSE, command);
     let irq = wait_irq_bounded(IRQ_ACK, spin_limit)?;
     Some(finish_polled_command(irq_enable, irq))
+}
+
+/// Current CD-ROM IRQ flag value (0 = none, 1 = data ready, 2 = complete,
+/// 3 = ack, 5 = error).
+///
+/// Exposed so callers can build their own wait loops bounded by a hardware
+/// timer rather than by a poll count. A poll budget is only a proxy for time
+/// and drifts with CPU and bus speed, which matters when the thing being
+/// measured is mechanical.
+pub fn irq_flag_value() -> u8 {
+    irq_flag()
+}
+
+/// Acknowledge the given CD-ROM IRQ bits.
+pub fn acknowledge_irq(bits: u8) {
+    ack_irq(bits);
+}
+
+/// Drain any pending response bytes, discarding them.
+pub fn discard_response() {
+    drain_response_fifo();
+}
+
+/// Send a command without waiting for any response. Pairs with
+/// [`irq_flag_value`] for caller-timed waits.
+///
+/// Returns `false` if the parameter FIFO never made room. Leaves CD-ROM IRQ
+/// output masked exactly as the polled helpers do, so a late ACK cannot
+/// interrupt the caller mid-measurement; call [`restore_irq_output`] when done.
+pub fn dispatch_command(command: u8, params: &[u8], spin_limit: u32) -> Option<u8> {
+    let irq_enable = begin_polled_command();
+    select_index(0);
+    for &param in params {
+        if !wait_param_room_bounded(spin_limit) {
+            finish_failed_polled_command(irq_enable);
+            return None;
+        }
+        write_byte(REG_PARAMETER, param);
+    }
+    write_byte(REG_COMMAND_RESPONSE, command);
+    Some(irq_enable)
+}
+
+/// Restore the CD-ROM IRQ enable saved by [`dispatch_command`].
+pub fn restore_irq_output(saved: u8) {
+    drain_response_fifo();
+    ack_irq(IRQ_ACK_ALL);
+    restore_irq_enable(saved);
+    select_index(0);
+}
+
+/// Wait for the next streamed data sector (INT1) and acknowledge it.
+///
+/// Use between [`try_read_n`] and [`try_pause_until_complete`] to step through
+/// a sector stream. Unrelated pending IRQs are drained and acknowledged so a
+/// stale response cannot be mistaken for a sector arrival. Returns `false` on
+/// a drive error or if no sector arrives within `spin_limit` polls.
+pub fn try_wait_data_sector(spin_limit: u32) -> bool {
+    let mut spins = spin_limit;
+    loop {
+        let flag = irq_flag();
+        if flag == IRQ_DATA_READY {
+            ack_irq(flag);
+            return true;
+        }
+        if flag == IRQ_ERROR {
+            let _ = read_response_fifo();
+            ack_irq(flag);
+            return false;
+        }
+        if flag != 0 {
+            let _ = read_response_fifo();
+            ack_irq(flag);
+        }
+        if spins == 0 {
+            return false;
+        }
+        spins -= 1;
+        core::hint::spin_loop();
+    }
 }
 
 /// Get the CD-ROM drive status byte.
@@ -204,7 +289,7 @@ pub fn try_pause(spin_limit: u32) -> Option<Response> {
 /// Unlike [`try_stop`], this leaves the drive spun up, which makes it the
 /// right handoff before gameplay code starts issuing data-read commands.
 pub fn try_pause_until_complete(spin_limit: u32) -> bool {
-    try_command_until_complete(CMD_PAUSE, &[], spin_limit)
+    try_command_until_complete_inner(CMD_PAUSE, &[], spin_limit)
 }
 
 /// Stop the CD-ROM motor/playback.
@@ -350,7 +435,18 @@ fn wait_irq_bounded(expected: u8, mut spins: u32) -> Option<u8> {
     }
 }
 
-fn try_command_until_complete(command: u8, params: &[u8], spin_limit: u32) -> bool {
+/// Send a command and wait for its SECOND response (the completion IRQ),
+/// not just the initial acknowledgement.
+///
+/// Seek, read and init all acknowledge immediately and finish much later, so
+/// timing them against the ack measures command dispatch rather than the
+/// mechanical operation. Returns `false` if either response fails to arrive
+/// within `spin_limit` polls.
+pub fn try_command_until_complete(command: u8, params: &[u8], spin_limit: u32) -> bool {
+    try_command_until_complete_inner(command, params, spin_limit)
+}
+
+fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32) -> bool {
     let irq_enable = begin_polled_command();
     select_index(0);
     for &param in params {

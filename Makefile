@@ -33,6 +33,7 @@
 	showcase-fog showcase-fog-disc run-showcase-fog \
 	showcase-particles showcase-particles-disc run-showcase-particles \
 	hardware-tests hardware-tests-disc run-hardware-tests \
+	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio \
 	hello-engine hello-engine-disc run-hello-engine \
 	cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
@@ -311,10 +312,15 @@ ARES_CORTEX_IGNITION_V1_LOG ?= build/external-emulator-smoke/cortex_ignition_v1-
 EXTERNAL_EMULATOR_SMOKE_TIMEOUT ?= 12
 REDUX_CORTEX_IGNITION_V1_BIOS ?= $(PSOXIDE_BIOS)
 REDUX_CORTEX_IGNITION_V1_STEPS ?= 240000000
-CORTEX_IGNITION_V1_PROJECT ?= editor/projects/cortex_ignition_v1
-CORTEX_IGNITION_V1_CUE ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/cortex_ignition_v1.cue
-CORTEX_IGNITION_V1_BIN ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/cortex_ignition_v1.bin
-CORTEX_IGNITION_V1_PREBURN_OUT ?= build/preburn/cortex_ignition_v1
+# The project was renamed cortex_ignition_v1 -> cortex_v1. Every path and the
+# ISO volume id derive from these two, so a future rename is a two-line change
+# rather than a hunt through the recipes.
+CORTEX_IGNITION_V1_NAME ?= cortex_v1
+CORTEX_IGNITION_V1_VOLUME ?= CORTEX_V1
+CORTEX_IGNITION_V1_PROJECT ?= editor/projects/$(CORTEX_IGNITION_V1_NAME)
+CORTEX_IGNITION_V1_CUE ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/$(CORTEX_IGNITION_V1_NAME).cue
+CORTEX_IGNITION_V1_BIN ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/$(CORTEX_IGNITION_V1_NAME).bin
+CORTEX_IGNITION_V1_PREBURN_OUT ?= build/preburn/$(CORTEX_IGNITION_V1_NAME)
 CORTEX_IGNITION_V1_PREBURN_VISUAL_FRAMES ?= 90
 CORTEX_IGNITION_V1_PREBURN_GUEST_FRAMES ?= 360
 CORTEX_IGNITION_V1_PREBURN_STEPS ?= 240000000
@@ -330,8 +336,8 @@ CORTEX_IGNITION_V1_PREBURN_AUDIO_MIN_PEAK ?= 256
 CORTEX_IGNITION_V1_PREBURN_FEATURES ?= cd-stream-bench emulator-telemetry
 CORTEX_IGNITION_V1_PREBURN_PAD_PULSES ?= 0x4000@45+12,0x4000@80+16,0x4000@120+20
 CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR ?= $(CORTEX_IGNITION_V1_PREBURN_OUT)/internal-disc
-CORTEX_IGNITION_V1_PREBURN_INTERNAL_CUE ?= $(CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR)/cortex_ignition_v1.cue
-CORTEX_IGNITION_V1_PREBURN_INTERNAL_BIN ?= $(CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR)/cortex_ignition_v1.bin
+CORTEX_IGNITION_V1_PREBURN_INTERNAL_CUE ?= $(CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR)/$(CORTEX_IGNITION_V1_NAME).cue
+CORTEX_IGNITION_V1_PREBURN_INTERNAL_BIN ?= $(CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR)/$(CORTEX_IGNITION_V1_NAME).bin
 CORTEX_IGNITION_V1_BRINGUP_REPORT ?= $(CORTEX_IGNITION_V1_PREBURN_OUT)/BRINGUP_REPORT.md
 PSOXIDE_DEV ?= cargo run --manifest-path tools/psoxide-dev/Cargo.toml --release --
 PROFILE_DEMO3_FRAMES ?= 60
@@ -517,16 +523,111 @@ showcase-particles:
 hardware-tests:
 	cd engine/examples/hardware-tests && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
+# --- hardware-test capture pipeline -------------------------------------
+# The disc runs its whole tier-1 battery at boot and mirrors every PX6 page
+# to the debug TTY, so a capture needs no pad input and no QR scanning.
+HWTEST_CAPTURE  := build/hwtest-capture.log
+HWTEST_BASELINE := docs/hardware-refs/px7-emulator-2026-07-25.txt
+HWTEST_STEPS    := 400000000
+
+# Always run a source-built emulator. `cargo run` guarantees that; invoking a
+# path under target/ by hand does not, and a stale binary silently produces a
+# capture that describes an emulator nobody is running any more.
+# Build diagnostics stay on stderr so only guest TTY output reaches the log.
+# Side-loads the EXE (the HLE entry path the guest's TTY output depends on)
+# while mounting the CUE with --disc, because the CD battery needs a disc in
+# the drive. Against a driveless EXE every CD command burns its full poll
+# budget timing out, which alone exhausts the instruction cap before the
+# capture encodes; booting the CUE directly produces no guest TTY at all.
+hwtest-capture: hardware-tests-disc
+	@mkdir -p $(dir $(HWTEST_CAPTURE))
+	cd emu && cargo run -q -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
+		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
+		--steps $(HWTEST_STEPS) > ../$(HWTEST_CAPTURE)
+	@echo "captured $$(grep -c 'px7' $(HWTEST_CAPTURE)) PX7 pages -> $(HWTEST_CAPTURE)"
+
+HWTEST_CODE_BASELINE := docs/hardware-refs/hwtest-machine-code-2026-07-25.txt
+
+# Audit the linked EXE: the instructions between each probe's markers must be
+# the ones the source asked for, or its cycle count measures something else.
+hwtest-verify-code: hardware-tests
+	python3 tools/verify-hwtest-machine-code.py $(EXAMPLE_OUT)/hardware-tests.exe \
+		--baseline $(HWTEST_CODE_BASELINE) --fail-on-change
+
+# CI gate: any observation, timing minimum, or precision value that moves
+# against the baseline fails the build and is named in the output.
+hwtest-diff: hwtest-verify-code hwtest-capture
+	python3 tools/hwtest-report.py --baseline $(HWTEST_BASELINE) \
+		--fail-on-change $(HWTEST_CAPTURE)
+
+HWTEST_WAV        := build/hwtest-audio.wav
+HWTEST_AUDIO_PAGES := build/hwtest-audio-pages.txt
+
+# End-to-end check of the audio readout: the disc streams the whole payload as
+# FSK and loops it, so this records the emulator's SPU output, decodes it back,
+# and runs the recovered bytes through the SAME report pipeline a scanned QR
+# capture uses. Needs a longer run than hwtest-capture because the payload
+# takes ~11.6 s of audio to transmit once.
+hwtest-audio: hardware-tests-disc
+	@mkdir -p $(dir $(HWTEST_WAV))
+	cd emu && cargo run -q -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
+		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
+		--steps 1200000000 --dump-audio ../$(HWTEST_WAV) > /dev/null
+	python3 tools/hwtest-audio-decode.py $(HWTEST_WAV) --emit-pages $(HWTEST_AUDIO_PAGES)
+	python3 tools/hwtest-report.py $(HWTEST_AUDIO_PAGES) > /dev/null
+	@echo "audio link OK: payload recovered from audio and parsed as PX7"
+
+# Deliberate re-baseline. Review the hwtest-diff output BEFORE running this:
+# it overwrites the reference every later run is judged against.
+hwtest-baseline: hwtest-capture
+	@{ \
+		echo "# PSoXide hardware-test capture baseline"; \
+		echo "#"; \
+		echo "# SOURCE: PSoXide EMULATOR, headless. This is NOT a silicon capture."; \
+		echo "#   It detects emulator-side drift only. It is not hardware truth and"; \
+		echo "#   must never be cited as a console measurement."; \
+		echo "#"; \
+		echo "# captured:  $$(date -u +%Y-%m-%d)"; \
+		echo "# git:       $$(git describe --always --dirty)"; \
+		echo "# guest exe: sha256:$$(shasum -a 256 $(EXAMPLE_OUT)/hardware-tests.exe | cut -c1-16)"; \
+		echo "# emulator:  frontend launch --steps $(HWTEST_STEPS) (no pad input)"; \
+		echo "# schema:    PX7, 4 pages"; \
+		echo "#"; \
+		grep 'px7' $(HWTEST_CAPTURE) | sed 's/^hardware-tests: px7 //'; \
+	} > $(HWTEST_BASELINE)
+	@echo "re-baselined $(HWTEST_BASELINE)"
+
+# Ingest a real console capture. Pass the OBS-decoded payload text:
+#   make hwtest-silicon SILICON=captures/scph9902-2026-07-25.txt
+# This is the comparison that actually matters; the emulator baseline above
+# only guards against our own drift.
+hwtest-silicon: hwtest-capture
+	@test -n "$(SILICON)" || { echo "usage: make hwtest-silicon SILICON=<payload.txt>"; exit 2; }
+	python3 tools/hwtest-report.py --baseline $(SILICON) $(HWTEST_CAPTURE)
+
 # PA5 snapshots BIOS reverb state and selects reset variants before PA4's
 # proven map-DMA trigger. PA3/PA2 retain prior fixtures and PA1 reads a deterministic 600-sector
 # CDTEST.BIN at LBA 424.
 # Keep the file explicit so every burn and emulator run uses identical inputs.
-hardware-tests-disc: hardware-tests
+# The CD-DA track is required, not decorative: read-while-CD-DA contention is
+# the one CD failure no emulator reproduces, and it cannot be probed without a
+# real audio track on the disc. The tone is synthesised (tools/gen-cdda-tone.py)
+# so the image stays redistributable and bit-reproducible.
+HWTEST_CDDA := $(EXAMPLE_OUT)/hardware-tests-cdda.pcm
+
+$(HWTEST_CDDA):
+	@mkdir -p $(dir $@)
+	python3 tools/gen-cdda-tone.py --seconds 10 --out $@
+
+hardware-tests-disc: hardware-tests $(HWTEST_CDDA)
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(EXAMPLE_OUT)/hardware-tests.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 600
+		--cdtest-sectors 600 \
+		--cdda-track ../../$(HWTEST_CDDA)
 
 $(foreach example,$(DATA_DISC_EXAMPLES),$(eval $(call build_data_disc,$(example))))
 
@@ -753,7 +854,7 @@ cortex-ignition-v1-preburn-struct: cortex-ignition-v1-project-disc
 	cd emu && cargo run -p frontend --release -- preburn-check \
 		--cue "$(CORTEX_IGNITION_V1_CUE)" \
 		--exe "$(EXAMPLE_OUT)/editor-playtest.exe" \
-		--volume CORTEX_IGNITION_V1 \
+		--volume $(CORTEX_IGNITION_V1_VOLUME) \
 		--require-file "SYSTEM.CNF;1" \
 		--require-file "PSX.EXE;1" \
 		--require-file "WORLD.PAK;1" \
