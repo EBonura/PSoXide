@@ -252,6 +252,24 @@ to anyone not recording at that instant.
 
 ### Recording a capture
 
+**Turn the audio readout on.** It is off by default, and the 2026-07-26 console
+run was recorded with it off, which left only the QR route. That route then lost
+a page: four of five symbols decoded from the video, and page 4 was unreadable in
+every frame it was displayed for. One unreadable symbol costs the whole capture,
+because the payload is only valid complete.
+
+**Record at least three repetitions of the tone**, about 45 seconds. OBS encodes
+audio as AAC by default, and AAC is lossy: a link recorded through it does NOT
+decode from any single repetition. It decodes reliably from three via the
+per-bit majority vote, which is verified. Recording PCM/lossless instead removes
+the need, but three repetitions is the cheaper habit.
+
+**A recording usually spans several runs.** A reboot or `RERUN STARTUP TESTS`
+produces different measurements under the same page numbers, so pages from
+different runs cannot be combined; `tools/hwtest-video-qr.py` resolves this by
+requiring the whole-binary CRC to check out.
+
+
 Record video **and** audio from before power-on. Let the bar finish. Scan the
 five pages. Then start the audio readout and keep recording at least 15 seconds: one
 repetition of the audio payload is ~13.6 s. If it will not decode, press SQUARE
