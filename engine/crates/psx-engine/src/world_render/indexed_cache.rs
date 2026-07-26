@@ -403,6 +403,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             cell.visibility_center[2],
         );
         let portal_view = portal_window.map(|_| loaded_camera.view_vertex(visibility_center));
+        let mut visibility_half_y = None;
         let cell_depth = if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_PRECULLED {
             portal_view
                 .unwrap_or_else(|| loaded_camera.view_vertex(visibility_center))
@@ -414,6 +415,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 .saturating_sub(cell.min_y)
                 .abs()
                 .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs());
+            visibility_half_y = Some(half_y);
             if !cell_frustum.cell_aabb_visible(visibility_view, cell_half_xz, half_y, cell_half_xz)
             {
                 stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
@@ -428,10 +430,12 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         if let Some(window) = portal_window {
             let visibility_view =
                 portal_view.unwrap_or_else(|| loaded_camera.view_vertex(visibility_center));
-            let half_y = cell.visibility_center[1]
-                .saturating_sub(cell.min_y)
-                .abs()
-                .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs());
+            let half_y = visibility_half_y.unwrap_or_else(|| {
+                cell.visibility_center[1]
+                    .saturating_sub(cell.min_y)
+                    .abs()
+                    .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs())
+            });
             if !cell_frustum.cell_aabb_intersects_portal_window(
                 visibility_view,
                 cell_half_xz,
