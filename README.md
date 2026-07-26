@@ -19,8 +19,9 @@ disc images, and run them in emulators or on original hardware.
 
 **Try it now:** the emulator runs in your browser at
 [ebonura.github.io/PSoXide](https://ebonura.github.io/PSoXide/), booting the
-bundled homebrew Celeste Classic Collection. No install, no BIOS; it rebuilds
-and redeploys from `main` on every push.
+bundled homebrew Celeste Classic Collection. The SDK and engine samples are
+baked in too, under **Examples**, so there is something to run without supplying
+a disc. No install, no BIOS; it rebuilds and redeploys from `main` on every push.
 
 The primary reference project is a dark, third-person PS1 action-RPG vertical
 slice. The public tools are built around proving the full workflow end to end.
@@ -42,7 +43,8 @@ slice. The public tools are built around proving the full workflow end to end.
 - **Emulator** - CPU, GTE, GPU, DMA, CD-ROM, SIO, timers, MDEC, and SPU, with an
   HLE BIOS path so homebrew needs no retail BIOS. Desktop frontend
   (winit/wgpu/egui) with debugger panels for registers, memory, VRAM, execution
-  history, profiling, and savestates.
+  history, profiling, and savestates, plus a free camera that detaches the view
+  from the game's own so geometry can be inspected while it runs.
 - **SDK** - bare-metal Rust crates for the `mipsel-sony-psx` target: GPU, GTE,
   SPU, pad, fonts, DMA/ordering tables, and runtime.
 - **Engine** - a Scene/App framework with a streamed room runtime (chunk
@@ -121,7 +123,7 @@ process, desktop focus, notifications, and Spaces cannot affect the capture:
 
 ```bash
 make editor-ui-screenshot \
-  EDITOR_UI_PROJECT=editor/projects/cortex_ignition_v1 \
+  EDITOR_UI_PROJECT=editor/samples/cortex_v1 \
   EDITOR_UI_VIEW=animation \
   EDITOR_UI_RESOURCE='Stand To Roll' \
   EDITOR_UI_FRAME_SELECTED=1 \
@@ -159,6 +161,24 @@ cargo run -p frontend
 The pinned nightly installs `rustfmt`, `clippy`, `rust-src`, and `llvm-tools`
 automatically. The bare-metal PSX target builds via `-Zbuild-std` + `rust-src`
 (there is no prebuilt standard library for it).
+</details>
+
+<details>
+<summary><strong>Free camera</strong></summary>
+
+Detaches the view from the game's own camera so geometry, culling, and framing
+can be inspected while the game keeps running.
+
+| | |
+| --- | --- |
+| Toggle | Toolbar **EYE** button, or **tap L3+R3** on a pad |
+| Move / look | Left stick moves, right stick looks, **R2** boosts |
+| Reset | **Hold L3+R3** to put the camera back at the game's viewpoint |
+
+Switching modes keeps the camera where it is, so you can glance back at the game
+and return to the shot you had lined up. While the free camera is engaged the
+guest sees a neutral controller: nothing you press reaches the game, which is
+why a standing **FREECAM** badge is shown.
 </details>
 
 <details>
@@ -223,6 +243,10 @@ The repo ships runnable examples that double as the SDK/engine test suite:
 small games (Pong, Breakout, Space Invaders). Build them all with
 `make examples`; descriptions are in the [`sdk/`](sdk/README.md) and
 [`engine/`](engine/README.md) READMEs.
+
+They are also baked into the emulator itself, under **Examples** in the menu, so
+the [web build](https://ebonura.github.io/PSoXide/) and a binary with no source
+tree beside it both have something to run without supplying a disc.
 
 | ![showcase-3d](assets/media/readme/examples/showcase-3d.png) | ![showcase-fog](assets/media/readme/examples/showcase-fog.png) | ![showcase-model](assets/media/readme/examples/showcase-model.png) |
 | --- | --- | --- |
