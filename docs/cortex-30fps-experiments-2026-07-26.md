@@ -115,6 +115,22 @@ as its counter's zero value. Older frozen logs were written before
 missing value as `None`. This is a parser-only compatibility fix; it does not
 change any measured row or guest execution.
 
+### M5: exact lockstep scheduling and host-side OT/DMA tracing
+
+The original `lockstep-visuals` implementation only capped the number of
+catch-up updates before a visual. A slow and a fast binary could still present
+different simulation ticks after accumulated wall-clock backlog, which made a
+single transient hash difference look like missing geometry. The diagnostic
+mode now waits until exactly one configured visual interval of fixed updates
+has completed before rendering. Ordinary builds retain the deadline-driven
+scheduler.
+
+The emulator can also record every linked-list GPU DMA node as
+`(transfer,address,header)` through `PSOXIDE_DUMP_DMA_LL`. This observes the
+actual ordering table without changing guest code generation. Rebuilt
+like-for-like cortex_v1 control and candidate discs each emitted 1,047 visual
+checkpoints and traversed exactly 2,260,381 DMA nodes.
+
 ## Accepted engine changes
 
 ### V0: reuse the cell vertical AABB extent
@@ -132,6 +148,24 @@ that need only one test.
 Surface, primitive, and visible-cell counts are unchanged. This is a small
 engine-wide win rather than the main answer, but it meets the strict visual
 gate on both projects and reduces the targeted cell-selection work.
+
+### V4: exact cylinder-prop UV edge interpolation
+
+Cylinder/card props evaluate authored quad UVs at runtime. Most generated
+vertices lie on `u` or `v` edges, where the full four-corner bilinear equation
+reduces exactly to a two-corner interpolation. The runtime now takes those
+four endpoint paths while retaining the original equation for interior
+samples. An exhaustive host test compares all 256 positions on all four edges
+across varied corner sets against the original implementation.
+
+| Project | FPS | Mean render | I-cache stalls / visual | Visual proof |
+|---|---:|---:|---:|---|
+| cortex_v1 | 25.61→25.58 | 763,256→763,475 | 174,895→172,802 | 1,047 / 1,047 exact; identical DMA-node count |
+| cortex_v3 | 14.07→14.25 | 1,401,072→1,394,252 | 386,202→374,342 | 925 / 925 exact; display and VRAM exact |
+
+The v1 render delta is within replay noise, while v3 saves 6,820 mean render
+cycles and 11,860 I-cache stall cycles per visual. This is retained as an
+engine-wide, data-layout-preserving win.
 
 ## Rejected engine changes
 
@@ -177,6 +211,15 @@ that other surface paths can replace implicit GTE control state between
 submissions. The experiment was fully reverted; state loads remain local to
 each submission.
 
+### R9: cook every cylinder-prop UV into the surface record
+
+Moving the complete bilinear result into each cooked cylinder surface improved
+cortex_v3 more than the edge-only runtime change (mean render work fell by
+about 30,000 cycles), but altered the resident record/schema and produced
+transient painter-order differences in the first lockstep comparison. The
+schema rewrite was removed in favour of V4, which captures a measurable part
+of the win without changing data layout or packet identity.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -198,7 +241,8 @@ each submission.
 | V3 | Cooked variable-length portal-to-cell masks | queued | Debug proof against current frustum path |
 | T1 | Event-driven active-room field copies / borrowed slices | queued | Exact state and replay route |
 | T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
-| T3 | Image-prop resolved records and packet templates | queued | Targets v3 tail |
+| T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
+| V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
 | G1 | GPU overdraw/timing census and silicon constraint | queued | No GPU reorder before hardware evidence |
 | P1 | VBlank/frame-pacing wait diagnosis | queued | Idle is not counted as recovered CPU work |
 | C1 | Cooker worst-view 30 FPS/RAM/packet validator | queued | Fit only after surviving engine changes |
