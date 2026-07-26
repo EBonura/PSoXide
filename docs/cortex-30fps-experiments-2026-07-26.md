@@ -169,6 +169,186 @@ engine-wide, data-layout-preserving win.
 
 ## Rejected engine changes
 
+### R1 retest: zero-weight fog bypass
+
+The earlier zero-fog idea was retested in five shapes against the newer exact
+gate. The mathematically safe form only bypassed four fog blends when all four
+prepared fog weights were zero; it never changed packet topology, geometry,
+ordering, or subdivision. The best inline v3 result was 14.25→14.40 FPS,
+mean render 1,394,252→1,374,463 cycles, and I-cache stalls
+374,342→367,764 per visual. Its lockstep v3 run matched 925/925 hashes.
+
+That form perturbed one v1 presentation boundary. Moving the test into
+`RuntimeRoomLighting`, trying a four-compare test and a single-OR test, and
+forcing the fog shader out of line could each make either project's full tape
+exact, but never both simultaneously. The out-of-line form that was exact in
+v1 saved only 9,949 v3 render cycles and changed 1/925 v3 lockstep hashes; the
+compact inline form that was exact in v3 changed 2/1,046 v1 hashes. Final VRAM
+and display images were identical in every variant, but the full-route
+guest-frame gate intentionally rejects transient differences too. All R1
+variants were removed.
+
+### R3a: borrow `WorldSurfaceOptions` in the per-surface loop
+
+Replacing the by-value `WorldSurfaceOptions` argument to
+`draw_indexed_cached_room_surface` with a reference was exact across 1,047
+cortex_v1 and 926 cortex_v3 lockstep checkpoints. It is nevertheless a severe
+cross-project regression:
+
+| Project | FPS | Mean render | I-cache stalls / visual |
+|---|---:|---:|---:|
+| cortex_v1 | 25.58→22.15 | 763,475→877,235 | 172,802→211,058 |
+| cortex_v3 | 14.25→14.29 | 1,394,252→1,386,410 | 374,342→372,001 |
+
+The dependent loads/register pressure improve the v3 mix slightly while
+expanding v1's hot working set enough to lose 3.43 FPS. The borrow-only change
+was removed. A future surface-record experiment must reduce interpretation as
+a whole; it cannot assume that replacing a large value argument with a pointer
+is cheaper on MIPS-I.
+
+### R3b: residency-cached surface class bits
+
+The prebuilt-quad residency pool was widened by one byte per surface and used
+to cache surface kind plus animated/translucent material classification. The
+draw path consumed those bits while leaving geometry, material resolution,
+subdivision, packet construction, and ordering unchanged.
+
+All 925 comparable cortex_v3 lockstep hashes matched. The normal tape,
+however, showed no useful reduction: FPS stayed 14.25, mean render moved
+1,394,252→1,395,491 cycles, and I-cache stalls moved
+374,342→372,657 per visual. The lockstep render mean moved only
+1,451,868→1,451,511 cycles. This prices the cached decisions at noise while
+adding 2 KiB to the eight-slot pool, so the change was removed. A complete
+`SurfaceDrawRecord` must eliminate substantially more interpretation than
+kind and two material predicates to justify its data traffic.
+
+### R3c: six-entry per-cell option table
+
+The exact `(floor|ceiling|wall) × (calm|risky)` option results and prepared
+depths were built once per accepted cell, replacing per-surface calls to the
+depth/subdivision option constructors. All 36 focused renderer tests passed,
+but the larger stack record and indexed loads are substantially worse on
+MIPS-I. The cortex_v1 lockstep tape moved from 791,057 to 849,858 mean render
+cycles, p95 from 1,124,007 to 1,189,537, and I-cache stalls from 171,364 to
+186,976 per visual; one of 1,046 hashes also changed. The table was removed
+without spending a cortex_v3 run. Any eventual compiled record must encode
+the few decisions compactly in the record itself, not indirect through a
+copied `WorldSurfaceOptions` table.
+
+### R6: offline whole-subdivision proof is not currently sound
+
+The proposed `WHOLE` classification requires a conservative minimum
+camera-to-surface distance over every legal camera position. The engine's
+current content contract does not provide that volume to the cooker: free
+orbit and collision-bypassing camera modes exist, and rooms without a complete
+camera collision hull are valid. Under the proposal's own fail-open rule,
+every surface without such a proof remains `SPLIT`; classifying any of them
+`WHOLE` would change the subdivision topology for a legal view.
+
+Consequently the current engine-wide form is a no-op if correct and a visual
+regression if made aggressive. It is rejected until projects can opt into a
+cooked, enforced camera-volume contract. The existing runtime projected-edge
+test remains authoritative.
+
+### T1a: defer fallback material-array clear
+
+`apply_current_active_room_fields` previously cleared the full current-room
+material array before scanning the active window and copying the resident
+room's real materials over it. Moving that clear to the actual missing-room
+case preserves state, but this call is not frequent enough on the measured
+steady-state path: cortex_v1 update mean improved only about 105 cycles.
+Meanwhile code-layout/I-cache effects raised render mean 791,057→794,762,
+raised I-cache stalls 171,364→174,890, and shifted one lockstep presentation
+boundary. The reorder was removed. T1 must instead eliminate repeated
+residency/material copies at their callers, guarded by explicit dirty state.
+
+### T1b: skip settled residency reconciliation
+
+The residency owner retained the ordered desired set plus its visible/pinned
+prefix and skipped scheduler reconciliation only when both were unchanged and
+every requested room was resident or already loading. The CD pump, VRAM
+eviction pass, and persistent-asset requests remained active, so no streaming
+progress was delayed. This saved 2,397 update cycles/tick and 2,342
+`sim_residency` cycles/tick on cortex_v1, but render mean rose 5,714 cycles,
+I-cache stalls rose 5,116 per visual, and 1/1,046 lockstep hashes changed.
+The dirty state and fast path were removed. This proves repeated scheduler
+planning is real but too small to justify more hot-code footprint in this
+layout.
+
+### T1c: decode only the selected collision floor triangle
+
+Out-of-band return-address sampling resolved the previously opaque
+compiler-builtins `memcpy` cost. Two copies inside
+`RoomCollision::sector` accounted for 37.8% of all sampled `memcpy`
+instructions: collision was decoding and returning a 152-byte render-rich
+`WorldSector`, including materials, UVs, ceiling data, and both split
+triangles, even when the character or camera needed one floor triangle.
+
+The accepted path decodes only the selected floor triangle's flags and
+heights. It applies the same horizontal override records and interpolation
+inputs as the full decoder. Renderer data, portal state, draw order, and
+packet emission are untouched.
+
+| Project | FPS | Update mean | Camera mean | Render p95 | I-cache / visual |
+|---|---:|---:|---:|---:|---:|
+| cortex_v1 | 25.58→25.97 | 143,171→127,681 | 37,433→35,481 | 1,098,246→1,096,729 | 172,802→174,334 |
+| cortex_v3 | 14.25→15.09 | 159,415→137,814 | 42,157→40,851 | 1,996,668→1,977,978 | 374,342→357,343 |
+
+All 925 cortex_v3 lockstep hashes matched. In cortex_v1, all 1,045 common
+checkpoints matched; one old checkpoint was replaced by one newly rendered
+checkpoint when the faster update crossed a presentation deadline. There
+were no mismatching images. The normal tapes rendered 11 additional v1
+frames and 23 additional v3 frames. Focused character, camera, and asset
+tests also pass.
+
+### T1d: use the header-only sector probe for character walls
+
+Character cylinder wall checks decoded the full sector solely to read its wall
+range. The camera path already had a collision-only probe containing exactly
+`has_floor`, `first_wall`, and `wall_count`; the character path now uses the
+same probe and probe-wall accessor.
+
+All 925 cortex_v3 common lockstep hashes and all 1,045 cortex_v1 common
+lockstep hashes match. As with T1c, cortex_v1 replaced one presentation
+checkpoint after crossing a deadline, with no mismatching common image.
+
+| Project | FPS | Update mean | Two-vblank periods | I-cache / visual |
+|---|---:|---:|---:|---:|
+| cortex_v1 | 25.97→26.28 | 128,321→118,072 (lockstep) | 71.4%→73.9% | 174,334→171,976 |
+| cortex_v3 | 15.09→15.38 | 138,437→125,478 (lockstep) | 0.2%→0.5% | 357,343→348,665 |
+
+### V1: carry portal window and far plane into the all-cells fallback
+
+The no-PVS/all-cells path was given the same conservative portal-window AABB
+test and far plane as the PVS path, while root/overlap rooms without an
+incoming aperture retained the existing fail-open no-far behaviour. All 926
+cortex_v3 lockstep hashes matched, but the tape exposed no usable window in
+the fallback rooms: considered surfaces were unchanged (88.6→88.7), mean
+render moved only 55 cycles, and FPS remained 14.25. The extra runtime branch
+was removed. A useful portal refinement must preserve each admitting wedge
+rather than relying on information absent from the fallback.
+
+### V2: reject cells outside every individual portal wedge
+
+The visible-cell path kept its component-wise portal-window union as a broad
+test, then required a surviving cell to intersect at least one individual
+admitting portal wedge. Scratch capacity matched the 64-frustum visibility
+result and overflow was explicitly fail-open. A focused host test confirmed
+the intended disjoint-window OR semantics.
+
+The refinement is not conservative with respect to the current room-cell
+representation: it changed 61 of 926 cortex_v3 lockstep display hashes,
+beginning at guest frame 698, which is direct missing-geometry evidence. It
+also made the normal run slower:
+
+| FPS | Mean render | p95 render | I-cache stalls / visual |
+|---:|---:|---:|---:|
+| 14.25→14.03 | 1,394,252→1,413,654 | 1,996,668→2,017,582 | 374,342→383,976 |
+
+The per-wedge scan was removed. The conservative union remains mandatory
+until a cooked cell mask can prove coverage against actual submitted
+geometry, not only a cell AABB and one clipped path.
+
 ### R4/R4a: precompute lattice attributes or remove leaf copies
 
 Two variants tested the proposed one-level TR lattice data rewrite. A full
@@ -227,19 +407,26 @@ of the win without changing data layout or packet identity.
 | M2 | Emulator-owned I-cache refill events/stall cycles by route window | accepted | 176k v1 / 388k v3 stalls per visual; hashes and VRAM exact |
 | M3 | Room-only packet/command boundary counters | accepted | v3: 131.9 arena packets and 169.8 commands/visual; TR contributes about 90 commands |
 | V0 | Reuse cell AABB `half_y` across frustum/portal tests | accepted | v1/v3 render mean -0.18%/-0.24%; all 1,974 lockstep hashes and final VRAM exact |
-| R1 | Surface-level zero-fog warm-path gate | rejected | safe form: v3 14.03→14.36 FPS, but 1/927 transient hashes changed; packet-fast form changed 734/927 |
+| R1 | Surface-level zero-fog warm-path gate | rejected after five shapes | best exact-v3 form: 14.25→14.40 FPS, but 2/1,046 v1 hashes changed; exact-v1 form changed 1/925 v3 hashes |
 | R2 | `#[inline(never)]` hot dispatcher leaves | rejected | v3 14.03→13.67 FPS, render mean +4.3%, I-cache stalls +1.7%; 534/927 lockstep hashes changed |
 | R3 | Residency-built `SurfaceDrawRecord` + option variants | queued | Remove static per-surface interpretation |
+| R3a | Borrow per-cell options in the surface loop | rejected | exact visuals; v3 render -7,842 cycles, but v1 +113,760 cycles and 25.58→22.15 FPS |
+| R3b | Cache surface kind and dynamic-material class at residency | rejected | 925/925 v3 hashes exact; FPS unchanged, mean render +1,239 cycles for +2 KiB pool RAM |
+| R3c | Six-entry per-cell option table | rejected | v1 render +58,801 cycles, p95 +65,530, I-cache +15,612; 1/1,046 hashes changed |
 | R4 | Residency-built lattice UV/RGB attributes | rejected | +57 KB RAM; v3 render mean +14,110 cycles vs frozen baseline; 14.03 FPS unchanged |
 | R4a | Address lattice leaves by index instead of copying four vertices | rejected | v3 render mean +3,903 cycles vs frozen baseline; 14.03 FPS unchanged |
 | R5 | Packet template copy/patch; remove arena double-write | rejected | MIPS codegen already emits the 14 packet words directly into the arena; no temporary packet copy exists |
-| R6 | Offline whole-subdivision proof + runtime demotion | queued | No topology or threshold change |
+| R6 | Offline whole-subdivision proof + runtime demotion | rejected pending camera-volume contract | Current legal cameras are not cooker-bounded; correct fallback classifies every unproved surface `SPLIT` |
 | R7 | Fully cooked render clusters / packet-ready primitives | queued | RAM/code/stream budget gated |
 | R8 | Retain TR identity GTE state across room surfaces | rejected | unsafe variants changed 1–38/1,047 v1 frames; exact variant regressed v1 render mean by 2,302 cycles |
-| V1 | Carry portal window + far plane through all-cells fallback | queued | Must fail open for root/overlap rooms |
-| V2 | Per-wedge disjoint frustum rejection after conservative union | queued | Every admitting path remains OR-ed |
+| V1 | Carry portal window + far plane through all-cells fallback | rejected | 926/926 hashes exact; v3 surfaces/FPS unchanged and render -55 cycles (noise) |
+| V2 | Per-wedge disjoint frustum rejection after conservative union | rejected | 61/926 v3 hashes changed; FPS 14.25→14.03 and mean render +19,402 cycles |
 | V3 | Cooked variable-length portal-to-cell masks | queued | Debug proof against current frustum path |
 | T1 | Event-driven active-room field copies / borrowed slices | queued | Exact state and replay route |
+| T1a | Clear fallback materials only when current room is absent | rejected | update -105 cycles, but render +3,705 and I-cache +3,526; one presentation boundary shifted |
+| T1b | Skip settled unchanged residency reconciliation | rejected | update -2,397 cycles/tick, but render +5,714, I-cache +5,116, and 1/1,046 hashes changed |
+| T1c | Decode only the selected collision floor triangle | accepted | v1 25.58→25.97 FPS; v3 14.25→15.09 FPS; all common lockstep images exact |
+| T1d | Use header-only sector probes for character wall checks | accepted | v1 25.97→26.28 FPS; v3 15.09→15.38 FPS; all common lockstep images exact |
 | T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |

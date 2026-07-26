@@ -490,6 +490,72 @@ fn world_round_trip_1x1_with_wall() {
 }
 
 #[test]
+fn floor_collision_decode_matches_full_sector_with_override() {
+    use psxed_format::world;
+
+    const LEN: usize = psxed_format::AssetHeader::SIZE
+        + world::WorldHeader::SIZE
+        + world::SectorRecord::SIZE
+        + world::HorizontalOverrideRecord::SIZE;
+    let mut buf = [0u8; LEN];
+    buf[0..4].copy_from_slice(&world::MAGIC);
+    buf[4..6].copy_from_slice(&world::VERSION.to_le_bytes());
+    buf[8..12].copy_from_slice(&((LEN - psxed_format::AssetHeader::SIZE) as u32).to_le_bytes());
+    buf[12..14].copy_from_slice(&1u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&1u16.to_le_bytes());
+    buf[16..20].copy_from_slice(&world::SECTOR_SIZE.to_le_bytes());
+    buf[20..22].copy_from_slice(&1u16.to_le_bytes());
+    buf[32..34].copy_from_slice(&1u16.to_le_bytes());
+
+    let sector_offset = psxed_format::AssetHeader::SIZE + world::WorldHeader::SIZE;
+    buf[sector_offset] = world::sector_flags::HAS_FLOOR | world::sector_flags::FLOOR_WALKABLE;
+    buf[sector_offset + 1] = world::split::NORTH_WEST_SOUTH_EAST;
+    for (index, height) in [10i32, 20, 30, 40].into_iter().enumerate() {
+        let offset = sector_offset + 12 + index * 4;
+        buf[offset..offset + 4].copy_from_slice(&height.to_le_bytes());
+    }
+
+    let override_offset = sector_offset + world::SectorRecord::SIZE;
+    buf[override_offset + 2] = world::horizontal_surface::FLOOR;
+    buf[override_offset + 3] =
+        world::horizontal_flags::TRI_A_PRESENT | world::horizontal_flags::TRI_A_WALKABLE;
+    for (index, height) in [101i32, 102, 103, 201, 202, 203].into_iter().enumerate() {
+        let offset = override_offset + 24 + index * 4;
+        buf[offset..offset + 4].copy_from_slice(&height.to_le_bytes());
+    }
+
+    let world = World::from_bytes(&buf).expect("parse overridden world");
+    let full = world.sector(0, 0).expect("sector");
+    for (local_x, local_z) in [
+        (0, 0),
+        (world::SECTOR_SIZE, 0),
+        (0, world::SECTOR_SIZE),
+        (world::SECTOR_SIZE, world::SECTOR_SIZE),
+    ] {
+        let triangle = world_topology::horizontal_triangle_at_local(
+            full.floor_split(),
+            local_x,
+            local_z,
+            world::SECTOR_SIZE,
+        );
+        let reduced = world.sector_floor_collision(0, 0, local_x, local_z, world::SECTOR_SIZE);
+        if full.floor_triangle_present(triangle) {
+            let reduced = reduced.expect("present triangle");
+            assert_eq!(reduced.split(), full.floor_split());
+            assert_eq!(reduced.triangle(), triangle);
+            assert_eq!(reduced.walkable(), full.floor_triangle_walkable(triangle));
+            assert_eq!(reduced.floor_heights(), full.floor_heights());
+            assert_eq!(
+                reduced.triangle_heights(),
+                full.floor_triangle_heights(triangle)
+            );
+        } else {
+            assert!(reduced.is_none());
+        }
+    }
+}
+
+#[test]
 fn world_rejects_bad_sector_count() {
     use psxed_format::world;
 
