@@ -35,12 +35,26 @@ PREAMBLE_BITS = 64
 # Bin indices within one 28-sample window. Bit 1 is the lower tone.
 BIN_ONE = 1
 BIN_ZERO = 2
-# A window whose combined tone energy falls below this fraction of the
-# recording's own peak is silence rather than a bit. Relative, not absolute:
-# capture-card gain and console volume vary by orders of magnitude, and a
-# fixed floor would either reject a quiet capture entirely or admit noise in a
-# loud one.
-SILENCE_FRACTION = 0.10
+# A window whose combined tone energy falls below this fraction of the TYPICAL
+# loud-window energy is silence rather than a bit.
+#
+# Measured against a high percentile, not the peak: a single transient (a CD-DA
+# note, a pop when the console powers on) sets a peak far above the readout
+# tone, and a floor derived from it rejects the entire transmission. A console
+# recording was 97% "silence" by that rule while carrying a perfectly good tone.
+SILENCE_FRACTION = 0.25
+# Percentile of window energy taken as the reference "signal is present" level.
+SIGNAL_PERCENTILE = 90
+# Preamble bits that must match. Not all of them: one bit error in 64 would
+# otherwise discard an entire repetition, and lossy audio produces exactly that.
+PREAMBLE_MIN_MATCH = 54
+# Bit errors tolerated in the sync word.
+SYNC_MAX_ERRORS = 3
+# Calibration tones the disc sends ahead of each frame, in bit slots.
+CALIBRATION_BITS = 128
+# Samples of phase drift tolerated when grouping repetitions of one
+# transmission. The capture clock and the console clock are independent.
+PHASE_TOLERANCE = 4000
 # The link's bit clock IS the console's 44.1 kHz sample rate. Capture chains
 # very often record at 48 kHz (OBS defaults to it), where a bit stops being a
 # whole number of samples and the tones no longer land on exact DFT bins.
@@ -76,8 +90,10 @@ class RateDecoder:
         self.span = span
         one, zero = sliding_magnitudes(samples, span)
         energy = one + zero
-        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-        self.floor = peak * span * SILENCE_FRACTION
+        reference = (
+            float(np.percentile(energy, SIGNAL_PERCENTILE)) if energy.size else 0.0
+        )
+        self.floor = reference * SILENCE_FRACTION
         # -1 = silence / no signal, else the decided bit.
         self.bits = np.where(energy < self.floor, -1, (one > zero).astype(np.int8))
         self.valid = self.bits.size
@@ -99,30 +115,45 @@ def bits_to_int(bits: list[int], start: int, count: int) -> int:
 
 
 def find_frames(decoder: RateDecoder, limit: int) -> list[int]:
-    """Sample offsets where a preamble-then-sync sequence begins."""
-    starts: list[int] = []
+    """Sample offsets where a preamble-then-sync sequence begins.
+
+    Matching is deliberately fuzzy, and scored across the WHOLE preamble rather
+    than gated on its first few bits. Requiring any bits to be exact means one
+    error discards a whole repetition, and lossy capture audio produces single
+    bit errors constantly: a console recording yielded 2 usable frames under
+    exact matching and dozens under this.
+
+    The scan is vectorised because fuzzy matching cannot short-circuit. Each of
+    the 64 preamble positions is compared across every candidate offset at once,
+    which is 64 array comparisons instead of millions of Python loops.
+    """
     span = decoder.span
-    position = 0
-    while position < decoder.valid - span * (PREAMBLE_BITS + 16) and len(starts) < limit:
-        if decoder.bit(position) != 1:
-            position += 1
-            continue
-        # Cheap gate: a real frame opens with alternating bits starting at 1.
-        if decoder.read(position, 8) != [1, 0, 1, 0, 1, 0, 1, 0]:
-            position += 1
+    bits = decoder.bits
+    reach = span * (PREAMBLE_BITS + 16)
+    count = bits.size - reach
+    if count <= 0:
+        return []
+
+    score = np.zeros(count, dtype=np.int16)
+    for i in range(PREAMBLE_BITS):
+        expected = 1 if i % 2 == 0 else 0
+        score += (bits[i * span : i * span + count] == expected)
+
+    candidates = np.flatnonzero(score >= PREAMBLE_MIN_MATCH)
+    starts: list[int] = []
+    last = -(10**9)
+    for position in candidates.tolist():
+        # One preamble produces a run of adjacent hits; keep the first.
+        if position - last < span * PREAMBLE_BITS:
             continue
         window = decoder.read(position, PREAMBLE_BITS + 16)
-        if -1 in window:
-            position += 1
-            continue
-        if any(window[i] != (1 if i % 2 == 0 else 0) for i in range(PREAMBLE_BITS)):
-            position += 1
-            continue
-        if bits_to_int(window, PREAMBLE_BITS, 16) != SYNC_WORD:
-            position += 1
+        sync = bits_to_int([max(b, 0) for b in window], PREAMBLE_BITS, 16)
+        if bin(sync ^ SYNC_WORD).count("1") > SYNC_MAX_ERRORS:
             continue
         starts.append(position)
-        position += span * PREAMBLE_BITS
+        last = position
+        if len(starts) >= limit:
+            break
     return starts
 
 
@@ -171,6 +202,44 @@ def emit_pages(payload: bytes) -> str:
         crc = binascii.crc32(chunk.encode("ascii")) & 0xFFFF_FFFF
         lines.append(f"PX7/{number:02X}{len(chunks):02X}/{chunk}/C:{crc:08X}")
     return "\n".join(lines) + "\n"
+
+
+def transmission_groups(
+    decoder: RateDecoder, starts: list[int]
+) -> list[tuple[int, list[int]]]:
+    """Group frame offsets that belong to the same uploaded payload.
+
+    One transmission repeats with an exact period, so its repetitions share a
+    phase modulo that period. A rerun uploads a different payload and starts at
+    an unrelated offset, so it lands in a different group. Groups are returned
+    largest first, because more repetitions means a stronger vote.
+    """
+    by_length: dict[int, list[int]] = {}
+    for start in starts:
+        length = frame_length(decoder, start)
+        if length is not None:
+            by_length.setdefault(length, []).append(start)
+
+    groups: list[tuple[int, list[int]]] = []
+    for length, offsets in by_length.items():
+        # Total framed bits for this payload, hence the repetition period.
+        period = decoder.span * (
+            CALIBRATION_BITS + PREAMBLE_BITS + 16 + 16 + length * 8 + 32
+        )
+        buckets: dict[int, list[int]] = {}
+        for offset in offsets:
+            phase = offset % period
+            # Tolerate drift: a capture clock is not the console's clock.
+            for known in buckets:
+                if min(abs(phase - known), period - abs(phase - known)) <= PHASE_TOLERANCE:
+                    buckets[known].append(offset)
+                    break
+            else:
+                buckets[phase] = [offset]
+        for offsets_in_phase in buckets.values():
+            groups.append((length, sorted(offsets_in_phase)))
+    groups.sort(key=lambda item: len(item[1]), reverse=True)
+    return groups
 
 
 def vote_payload(frames: list[list[int]], length: int) -> bytes | None:
@@ -271,24 +340,22 @@ def main() -> int:
         print(f"# rate {span} samples/bit: {len(starts)} frame(s) at {starts}")
 
         # A clean repetition needs no voting, so try each on its own first.
-        collected: list[list[int]] = []
-        length = 0
         for start in starts:
             payload = decode_frame(decoder, start)
             if payload is not None:
                 return emit(payload, args)
-            candidate = frame_length(decoder, start)
-            if candidate is None:
-                continue
-            if length == 0:
-                length = candidate
-            if candidate != length:
-                continue
-            collected.append(payload_bits(decoder, start, length))
 
-        if len(collected) >= 3:
-            print(f"# no clean repetition; voting across {len(collected)}")
-            voted = vote_payload(collected, length)
+        # Otherwise vote. Frames must be grouped by TRANSMISSION first: a
+        # recording spans reruns, each re-uploading a different payload under
+        # the same framing, and voting across two payloads yields neither.
+        # Repetitions of one transmission are an exact period apart, so their
+        # start offsets share a phase.
+        for length, group in transmission_groups(decoder, starts):
+            if len(group) < 3:
+                continue
+            print(f"# voting across {len(group)} repetitions of one transmission")
+            frames = [payload_bits(decoder, start, length) for start in group]
+            voted = vote_payload(frames, length)
             if voted is not None:
                 return emit(voted, args)
 

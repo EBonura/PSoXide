@@ -223,9 +223,15 @@ pub(crate) fn set_rate(index: usize) {
     // buying nothing.
     let level = spu::Volume::linear(1, 4);
     voice.set_volume(level, level);
-    // No envelope: an attack ramp would amplitude-modulate the first bits, and
-    // a release would fade the loop out. The tone must stay flat.
-    voice.set_adsr(spu::Adsr::passthrough());
+    // Adsr::sample(): instant attack, sustain level MAX, so the level holds
+    // flat for as long as the voice plays.
+    //
+    // NOT passthrough(). That is all-zeroes, which means sustain level 0, and
+    // on real hardware the envelope therefore decays to silence shortly after
+    // key-on: a console recording carried only ~3 seconds of a 13.6 second
+    // payload before fading out. PSoXide does not model that decay and looped
+    // happily, so the emulator could not have caught this.
+    voice.set_adsr(spu::Adsr::sample());
     spu::set_main_volume(spu::Volume::HALF, spu::Volume::HALF);
     spu::Voice::key_on(voice.mask());
 }

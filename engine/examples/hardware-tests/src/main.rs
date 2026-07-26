@@ -106,6 +106,10 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.3: Audio readout holds its level. v1.2 keyed the voice with an all-zero
+//       ADSR, which is sustain level 0, so on hardware the envelope decayed and
+//       a console capture carried ~3 seconds of a 13.6 second payload. The
+//       emulator does not model that decay, so only silicon could show it.
 // v1.2: Audio readout on by default. Off-by-default cost a console session:
 //       the operator has no reason to know a silent disc is withholding the
 //       payload, and the QR route then lost a symbol, which costs the whole
@@ -121,9 +125,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 2;
+const SUITE_VERSION_MINOR: u8 = 3;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.2";
+const SUITE_VERSION: &str = "HWTEST v1.3";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
