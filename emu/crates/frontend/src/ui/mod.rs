@@ -305,19 +305,13 @@ fn draw_freecam_indicator(ctx: &egui::Context, state: &AppState) {
                 .corner_radius(egui::CornerRadius::same(4))
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(0, 191, 230),
-                            crate::icons::EYE.to_string(),
-                        );
-                        ui.label(
-                            egui::RichText::new(
-                                "FREECAM  game input paused · tap L3+R3 to exit · hold to reset",
-                            )
-                            .color(egui::Color32::WHITE)
-                            .strong(),
-                        );
-                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "FREECAM  game input paused · tap L3+R3 to exit · hold to reset",
+                        )
+                        .color(egui::Color32::WHITE)
+                        .strong(),
+                    );
                 });
         });
 }
