@@ -30,6 +30,21 @@ header.
 
 ## History
 
+### v1.2 (2026-07-26, schema PX7)
+
+Audio readout on by default. No record changed meaning; the baseline was
+re-pinned because the guest binary changed.
+
+Off-by-default cost a console session. The operator has no reason to know a
+silent disc is withholding the payload, and with the readout off the only route
+left was the QR pages, which then lost a symbol: four of five decoded from the
+recording and page 4 was unreadable in every frame it appeared in. One missing
+symbol costs the whole capture. The original complaint was the VOLUME, which
+v1.1 already fixed, not the readout existing.
+
+SQUARE still steps rate and off, for dropping to a slower rate when a chain
+cannot decode the fastest.
+
 ### v1.1 (2026-07-26, schema PX7)
 
 Operator flow only; no record changed meaning, so v1.0 captures remain
