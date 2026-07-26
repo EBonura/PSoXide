@@ -44,6 +44,46 @@ to hold. The SDK's `Adsr::passthrough()` documented itself as exactly that
 disc came to use it and lose 80% of its payload on the first console capture.
 That doc comment is corrected as of the same change.
 
+## Conformance: 13 observations diverge
+
+**Status:** open. **Found:** 2026-07-26, partial console capture, HWTEST v1.3.
+
+Only page 1 of 5 was recovered, which carries the header and the first 138 of
+173 conformance observations. Thirteen of those 138 differ from PSoXide. The
+timing records and precision values live on the unrecovered pages and remain
+unknown.
+
+| Case | Group | Test | PSoXide | Console |
+|---:|---|---|---|---|
+| 10 | IRQ | GPU IRQ visible through I_STAT | `0x0000000C` | `0x0000000A` |
+| 17 | GPU | GP0 IRQ set + GP1 ack | `0x00000001` | `0x00000000` |
+| 23 | SPU | SPUSTAT readable | `0x00000800` | `0x00000000` |
+| 32 | TMR | mode read clears sticky flags | `0x00000003` | `0x00000001` |
+| 44 | SIO | direct port 1 pad poll stability | `0x00737373` | `0x00414141` |
+| 46 | GPU | DMA direction mode latch | `0x00000004` | `0x0000000B` |
+| 49 | GPU | GPU IRQ1 flag settle latency | `0x00010001` | `0x00010000` |
+| 52 | GPU | DMA-direction readback values | `0x000000A0` | `0x000000D6` |
+| 121 | GTE | LZCR settle +1 | `0x0000001F` | `0x00000008` |
+
+Cases 14, 15, 38 and 51 also differ but are raw timer counts, where a small
+difference is expected rather than a defect; they are listed here only so a
+later capture is not mistaken for a new finding:
+
+| Case | Test | PSoXide | Console |
+|---:|---|---|---|
+| 14 | timer2 free-run increments | `0x00009251` | `0x00009253` |
+| 15 | timer1 scanline range | `0x00000070` | `0x00000049` |
+| 38 | timer1 HBlank clock advances | `0x00000228` | `0x00000227` |
+| 51 | timer0 dot/system tick counts | `0x92A71CB6` | `0x925D1CC4` |
+
+The three startup scan digests (CPU, GTE, SPU register-behaviour fingerprints)
+match exactly, so those subsystems agree at the level those scans probe.
+
+Case 15 is worth singling out: `0x70` against `0x49` is a 27-line difference in
+the scanline range, far larger than counter jitter, and case 23's `0x800`
+against `0x000` is an entire SPUSTAT bit that PSoXide reports and the console
+does not.
+
 ## How these get found
 
 The hardware-test disc is the instrument: `make hwtest-silicon SILICON=<pages>`
@@ -51,6 +91,8 @@ diffs a console capture against the emulator record by record. A gap that shows
 up as a moved number there is far cheaper to act on than one inferred from a
 game misbehaving.
 
-Nothing has been diffed yet: no console capture has been recovered in full, for
-reasons tracked in `hardware-test-disc.md`. The ADSR gap above was found from
-the *shape* of a failed capture rather than from its contents.
+No capture has been recovered in FULL yet, for reasons tracked in
+`hardware-test-disc.md`, so the timing records and precision values have never
+been compared. The conformance findings above come from a single recovered QR
+page; the SPU ADSR gap came from the *shape* of a failed capture rather than its
+contents.
