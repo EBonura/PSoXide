@@ -90,6 +90,23 @@ pathology. Most of the difference currently tracks v3 doing 2.23x as much
 surface work. Candidate R2 must therefore demonstrate a full-replay reduction;
 body size or disassembly appearance alone is not evidence.
 
+### M3: room-only packet and command boundaries
+
+Diagnostic builds now count the primitive-arena packets and world commands
+emitted strictly inside room-surface draws. Water, props, models, and actors
+are outside the boundary. This resolves the ambiguity in the global GPU and
+packet-arena counters without changing normal builds.
+
+The cortex_v3 diagnostic replay measured 88.5 whole-quad surface records, 18.0
+successful TR subdivisions, 131.9 arena packets, and 169.8 room commands per
+visual. The packet arena count is lower because warmed whole quads live in the
+persistent prebuilt pool; the command count includes both storage sources.
+Thus TR subdivision applies to only 20% of surfaces but still accounts for
+about 90 of 170 room commands (four child quads plus one underdraw per
+subdivided surface). Template/lattice work remains relevant, but its honest
+upper bound is roughly half the room command stream rather than nearly all
+surfaces.
+
 ## Accepted engine changes
 
 ### V0: reuse the cell vertical AABB extent
@@ -113,6 +130,7 @@ gate on both projects and reduces the targeted cell-selection work.
 | ID | Candidate | State | Acceptance / rejection evidence |
 |---|---|---|---|
 | M2 | Emulator-owned I-cache refill events/stall cycles by route window | accepted | 176k v1 / 388k v3 stalls per visual; hashes and VRAM exact |
+| M3 | Room-only packet/command boundary counters | accepted | v3: 131.9 arena packets and 169.8 commands/visual; TR contributes about 90 commands |
 | V0 | Reuse cell AABB `half_y` across frustum/portal tests | accepted | v1/v3 render mean -0.18%/-0.24%; all 1,974 lockstep hashes and final VRAM exact |
 | R1 | Surface-level zero-fog warm-path gate | rejected | safe form: v3 14.03→14.36 FPS, but 1/927 transient hashes changed; packet-fast form changed 734/927 |
 | R2 | `#[inline(never)]` hot dispatcher leaves | rejected | v3 14.03→13.67 FPS, render mean +4.3%, I-cache stalls +1.7%; 534/927 lockstep hashes changed |
