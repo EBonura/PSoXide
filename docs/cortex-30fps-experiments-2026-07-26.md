@@ -90,11 +90,30 @@ pathology. Most of the difference currently tracks v3 doing 2.23x as much
 surface work. Candidate R2 must therefore demonstrate a full-replay reduction;
 body size or disassembly appearance alone is not evidence.
 
+## Accepted engine changes
+
+### V0: reuse the cell vertical AABB extent
+
+The visible-cell loop previously derived the same `half_y` extent separately
+for the frustum and portal-window tests. It now retains the first result and
+reuses it when both tests run, while preserving the lazy calculation on paths
+that need only one test.
+
+| Project | FPS | Mean render | p95 render | I-cache stalls / visual | `room_cell_select` / visual | Visual proof |
+|---|---:|---:|---:|---:|---:|---|
+| cortex_v1 | 25.54→25.61 | 764,652→763,256 | 1,092,343→1,086,879 | 176,124→174,895 | 56,349→55,105 | 1,047 / 1,047 exact; display and VRAM exact |
+| cortex_v3 | 14.03→14.07 | 1,404,382→1,401,072 | 1,994,267→1,989,066 | 388,056→386,202 | 49,706→48,221 | 927 / 927 exact; display and VRAM exact |
+
+Surface, primitive, and visible-cell counts are unchanged. This is a small
+engine-wide win rather than the main answer, but it meets the strict visual
+gate on both projects and reduces the targeted cell-selection work.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
 |---|---|---|---|
 | M2 | Emulator-owned I-cache refill events/stall cycles by route window | accepted | 176k v1 / 388k v3 stalls per visual; hashes and VRAM exact |
+| V0 | Reuse cell AABB `half_y` across frustum/portal tests | accepted | v1/v3 render mean -0.18%/-0.24%; all 1,974 lockstep hashes and final VRAM exact |
 | R1 | Surface-level zero-fog warm-path gate | rejected | safe form: v3 14.03→14.36 FPS, but 1/927 transient hashes changed; packet-fast form changed 734/927 |
 | R2 | `#[inline(never)]` hot dispatcher leaves | rejected | v3 14.03→13.67 FPS, render mean +4.3%, I-cache stalls +1.7%; 534/927 lockstep hashes changed |
 | R3 | Residency-built `SurfaceDrawRecord` + option variants | queued | Remove static per-surface interpretation |
