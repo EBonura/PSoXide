@@ -186,6 +186,11 @@ pub struct SchedulerConfig {
     /// time before another visual frame is rendered. This is the default
     /// because slow visuals should drop frames, not slow gameplay time.
     pub max_fixed_ticks_before_visual: u16,
+    /// Force each visual to follow exactly one configured visual interval of
+    /// fixed updates. This is a diagnostic replay mode: it waits for missing
+    /// VBlanks instead of letting host/guest execution cost change which
+    /// simulation tick is presented.
+    pub visual_lockstep: bool,
 }
 
 impl SchedulerConfig {
@@ -196,6 +201,7 @@ impl SchedulerConfig {
     pub const fn new() -> Self {
         Self {
             max_fixed_ticks_before_visual: Self::DEFAULT_MAX_FIXED_TICKS_BEFORE_VISUAL,
+            visual_lockstep: false,
         }
     }
 
@@ -205,9 +211,16 @@ impl SchedulerConfig {
         self
     }
 
+    /// Make visual checkpoints independent of render execution time.
+    pub const fn with_visual_lockstep(mut self, enabled: bool) -> Self {
+        self.visual_lockstep = enabled;
+        self
+    }
+
     const fn normalized(self, _visual_interval: u16) -> Self {
         Self {
             max_fixed_ticks_before_visual: self.max_fixed_ticks_before_visual,
+            visual_lockstep: self.visual_lockstep,
         }
     }
 }
@@ -279,6 +292,25 @@ impl FrameScheduler {
     pub fn next_action(&self, elapsed_vblank_ticks: u32) -> SchedulerAction {
         let fixed_ticks_ready = self.next_fixed_tick <= elapsed_vblank_ticks;
         let visual_due = self.due_visual_intervals != 0;
+
+        if self.config.visual_lockstep {
+            if self.fixed_ticks_since_visual < self.visual_interval {
+                return if fixed_ticks_ready {
+                    SchedulerAction::RunFixedUpdate {
+                        tick: SimTick::from_u32(self.next_fixed_tick),
+                    }
+                } else {
+                    SchedulerAction::WaitForVBlank
+                };
+            }
+            if visual_due {
+                return SchedulerAction::RunVisualFrame {
+                    missed_visual_intervals: self.missed_visual_intervals(elapsed_vblank_ticks),
+                    fixed_update_clamped: fixed_ticks_ready,
+                };
+            }
+        }
+
         let fixed_burst_open = !visual_due
             || self.config.max_fixed_ticks_before_visual == 0
             || self.fixed_ticks_since_visual < self.config.max_fixed_ticks_before_visual;
@@ -504,5 +536,33 @@ mod tests {
         scheduler.complete_visual_frame();
 
         assert_eq!(scheduler.next_action(0), SchedulerAction::WaitForVBlank);
+    }
+
+    #[test]
+    fn visual_lockstep_presents_after_exactly_one_interval() {
+        let config = SchedulerConfig::new().with_visual_lockstep(true);
+        let mut scheduler = FrameScheduler::new(config, 2);
+
+        complete_due_update(&mut scheduler, 0);
+        assert_eq!(scheduler.next_action(0), SchedulerAction::WaitForVBlank);
+        complete_due_update(&mut scheduler, 1);
+        assert_eq!(
+            scheduler.next_action(20),
+            SchedulerAction::RunVisualFrame {
+                missed_visual_intervals: 9,
+                fixed_update_clamped: true,
+            }
+        );
+
+        scheduler.complete_visual_frame();
+        complete_due_update(&mut scheduler, 20);
+        complete_due_update(&mut scheduler, 20);
+        assert_eq!(
+            scheduler.next_action(20),
+            SchedulerAction::RunVisualFrame {
+                missed_visual_intervals: 8,
+                fixed_update_clamped: true,
+            }
+        );
     }
 }
