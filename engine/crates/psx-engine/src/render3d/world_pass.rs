@@ -630,7 +630,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     }
 
     /// Sort and insert all submitted triangles into the ordering table.
-    pub fn flush(mut self) {
+    pub fn flush(&mut self) {
         if self.ordering == WorldCommandOrdering::DeferredSorted {
             sort_world_for_ot_insert(&mut self.commands[..self.command_len]);
             let mut command_index = 0;
