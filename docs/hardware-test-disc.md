@@ -262,11 +262,18 @@ FIFO flag and stays set while idle, so polling it never returns), and a command
 holds busy until it has consumed *exactly* the number of payload words it
 implies (16 for luma-only quant, 32 for luma+chroma, 32 for scale).
 
-**Known gap: decode timing is not measured.** A decode command holds busy until
-its output is drained, and producing output needs a genuinely valid RLE/VLC
-bitstream; a synthetic DC-then-EOB block yields nothing. Rather than ship a
-record that only ever reports its own timeout, decode is left out until there is
-a real bitstream fixture.
+Decode-to-drained is measured for one and two macroblocks (`0xB4`, `0xB5`),
+using minimal but valid blocks: a head halfword carrying quant scale and a
+signed 10-bit DC, then `0xFE00`, whose run-length field of 63 overflows the
+coefficient index and terminates the block.
+
+Draining is part of the measurement, not overhead. It is also where the two
+platforms disagree, so the wait accepts **either** termination: real hardware
+clears busy once the decode finishes and its output is read, whereas PSoXide
+only re-evaluates busy when the last parameter word arrives (output is already
+queued by then), so busy stays set forever and a busy-only wait never returns.
+Draining the expected pixel count terminates in emulation; the busy check
+terminates, sooner, on silicon.
 
 ## SIO / pad (records `0xB6`-`0xB9`)
 
@@ -532,7 +539,18 @@ no filter design.
 The emulator path is verified end to end by `make hwtest-audio`, which records
 the SPU output, decodes it, and parses the result. The recovered bytes are
 byte-identical to the QR payload, at both the fast rate and a slower fallback
-rate. That proves the encoding and framing; it does
+rate.
+
+`make hwtest-audio-chain` goes further and degrades that recording the way a
+real capture chain does, requiring the decoder to still recover the identical
+payload. All twelve cases pass: resampling to 48/32/96 kHz, a 20x gain range,
+hard clipping, DC offset, band-limiting, 25% noise, and a stacked worst case.
+
+**Recordings are resampled to 44.1 kHz before decoding, and this is not
+optional.** The link's bit clock IS the console's 44.1 kHz sample rate, so at
+48 kHz a bit spans 30.48 samples and the tones no longer land on exact DFT
+bins. A 48 kHz recording fails completely without that step, and 48 kHz is what
+OBS records by default. That proves the encoding and framing; it does
 not prove analog robustness through a real capture chain, which only a console
 recording can establish.
 
@@ -545,6 +563,7 @@ boot and mirrors every page to the TTY.
 make hwtest-capture   # build guest + run headless -> build/hwtest-capture.log
 make hwtest-diff      # audit the linked EXE, then diff the capture vs baseline
 make hwtest-audio     # record SPU output, decode it, parse the recovered payload
+make hwtest-audio-chain  # decode again through simulated capture-card damage
 make hwtest-baseline  # deliberately re-pin the baseline (review the diff first)
 make hwtest-silicon SILICON=<payload.txt>   # compare against a console capture
 ```

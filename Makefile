@@ -33,7 +33,7 @@
 	showcase-fog showcase-fog-disc run-showcase-fog \
 	showcase-particles showcase-particles-disc run-showcase-particles \
 	hardware-tests hardware-tests-disc run-hardware-tests \
-	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio \
+	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio hwtest-audio-chain \
 	hello-engine hello-engine-disc run-hello-engine \
 	cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
@@ -585,6 +585,15 @@ hwtest-audio: hardware-tests-disc
 	python3 tools/hwtest-audio-decode.py $(HWTEST_WAV) --emit-pages $(HWTEST_AUDIO_PAGES)
 	python3 tools/hwtest-report.py $(HWTEST_AUDIO_PAGES) > /dev/null
 	@echo "audio link OK: payload recovered from audio and parsed as PX7"
+
+# Robustness matrix for the audio link. A clean emulator recording proves the
+# encoding; this degrades it the way a real capture chain does (resampling to
+# 48/32/96 kHz, 20x gain range, clipping, DC offset, band-limiting, noise) and
+# requires the decoder to still recover the identical payload. It cannot prove
+# the real chain works, but it does stop the decoder being brittle against the
+# damage a chain is known to introduce.
+hwtest-audio-chain: hwtest-audio
+	python3 tools/hwtest-audio-chaintest.py $(HWTEST_WAV)
 
 # Deliberate re-baseline. Review the hwtest-diff output BEFORE running this:
 # it overwrites the reference every later run is judged against.
