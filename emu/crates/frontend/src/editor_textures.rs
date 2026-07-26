@@ -1562,14 +1562,18 @@ mod tests {
     }
 
     #[test]
-    fn cortex2_stacked_floor_materials_receive_native_preview_slots() {
+    fn stacked_floor_materials_receive_native_preview_slots() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .canonicalize()
             .expect("repo root");
-        let project_root = repo_root.join("editor/projects/cortex2");
+        // The committed miniaturised sample, not a local working project:
+        // `editor/projects/*` is gitignored, so a test keyed on one passes only
+        // on the machine that authored it and fails everywhere else, which is
+        // how these went red after cortex_ignition_v1 was renamed.
+        let project_root = repo_root.join("editor/samples/cortex_v1");
         let project = ProjectDocument::load_from_path(project_root.join("project.ron"))
-            .expect("cortex2 loads");
+            .expect("sample project loads");
         let grid = project
             .active_scene()
             .nodes()
@@ -1578,7 +1582,7 @@ mod tests {
                 NodeKind::Room { grid } => Some(grid),
                 _ => None,
             })
-            .expect("cortex2 room");
+            .expect("sample project room");
         let mut used = std::collections::HashMap::new();
         for floor_index in 0..grid.floor_count() {
             let floor = grid.floor(floor_index).expect("floor index is valid");
@@ -1616,6 +1620,15 @@ mod tests {
                 used.entry(*material).or_insert(node.floor);
             }
         }
+
+        // The real assertion below is "nothing is missing", which is vacuously
+        // true against a project with no stacked-floor materials at all. Pin
+        // the premise so repointing this test at the wrong project fails loudly
+        // instead of passing while checking nothing.
+        assert!(
+            used.len() > 1,
+            "sample project has no stacked-floor materials to check"
+        );
 
         let mut textures = EditorTextures::new();
         textures.refresh(&project, &project_root);
