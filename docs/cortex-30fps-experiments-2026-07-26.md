@@ -107,6 +107,14 @@ subdivided surface). Template/lattice work remains relevant, but its honest
 upper bound is roughly half the room command stream rather than nearly all
 surfaces.
 
+### M4: tolerate legacy short initial route rows
+
+The report tool now treats a missing trailing field in the initial route row
+as its counter's zero value. Older frozen logs were written before
+`port1_polls` was present on that row, and Python's `DictReader` exposes the
+missing value as `None`. This is a parser-only compatibility fix; it does not
+change any measured row or guest execution.
+
 ## Accepted engine changes
 
 ### V0: reuse the cell vertical AABB extent
@@ -125,6 +133,23 @@ Surface, primitive, and visible-cell counts are unchanged. This is a small
 engine-wide win rather than the main answer, but it meets the strict visual
 gate on both projects and reduces the targeted cell-selection work.
 
+## Rejected engine changes
+
+### R8: retain TR identity GTE state across surfaces
+
+Hoisting the identity projection load out of each adaptive subdivision
+submission gave cortex_v3 a small local win: 14.07→14.18 FPS, mean render
+1,401,072→1,398,923 cycles, and I-cache stalls 386,202→382,926 per visual.
+All 927 v3 lockstep hashes matched.
+
+It is not a valid engine-wide change. The fully hoisted form changed one of
+1,047 cortex_v1 frames. Restoring the triangle load made every v1 hash exact,
+but regressed its normal render mean by 2,302 cycles and I-cache stalls by
+2,893 per visual. Two lazy ownership variants changed 37–38 v1 frames, proving
+that other surface paths can replace implicit GTE control state between
+submissions. The experiment was fully reverted; state loads remain local to
+each submission.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -139,6 +164,7 @@ gate on both projects and reduces the targeted cell-selection work.
 | R5 | Packet template copy/patch; remove arena double-write | queued | Must preserve packet bytes and OT slots |
 | R6 | Offline whole-subdivision proof + runtime demotion | queued | No topology or threshold change |
 | R7 | Fully cooked render clusters / packet-ready primitives | queued | RAM/code/stream budget gated |
+| R8 | Retain TR identity GTE state across room surfaces | rejected | unsafe variants changed 1–38/1,047 v1 frames; exact variant regressed v1 render mean by 2,302 cycles |
 | V1 | Carry portal window + far plane through all-cells fallback | queued | Must fail open for root/overlap rooms |
 | V2 | Per-wedge disjoint frustum rejection after conservative union | queued | Every admitting path remains OR-ed |
 | V3 | Cooked variable-length portal-to-cell masks | queued | Debug proof against current frustum path |
