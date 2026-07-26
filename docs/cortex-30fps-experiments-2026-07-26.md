@@ -131,6 +131,60 @@ actual ordering table without changing guest code generation. Rebuilt
 like-for-like cortex_v1 control and candidate discs each emitted 1,047 visual
 checkpoints and traversed exactly 2,260,381 DMA nodes.
 
+### M6: shipping-style build without guest telemetry
+
+The benchmark feature set includes `emulator-telemetry`, while the hardware
+feature set does not. To test whether stage/counter emission materially
+distorted the target, both projects were rebuilt from R10 without that feature
+and measured solely through emulator-owned display flips, I-cache counters,
+and GPU command logs. Gameplay boundaries were aligned by poll-bound tape
+frame, not guest telemetry.
+
+| Project | Instrumented FPS | No-telemetry FPS | I-cache stalls / visual | Final display |
+|---|---:|---:|---:|---|
+| cortex_v1 | 27.004 | 26.898 | 170,679→167,971 | exact |
+| cortex_v3 | 15.713 | 15.713 | 346,461→350,047 | exact |
+
+Removing every guest stage marker and counter did not recover a single
+cortex_v3 visual and slightly hurt cortex_v1 through code-layout changes. The
+30 FPS gap is therefore real engine work, not profiler overhead. Moving the
+counter block behind the GPU kick is demoted: it cannot be a production win
+because the entire block is already absent from production builds.
+
+### M7: warmed room-surface micro-profile and workload-density check
+
+The surface micro-profile was replayed first in its original diagnostic form,
+which deliberately disables the warmed packet path, then again with that path
+temporarily enabled. Both are instrumentation builds and are used only for
+proportions. The warmed-path cortex_v3 run measured:
+
+| Counter | Cycles / visual |
+|---|---:|
+| `room_surface_draw` | 917,896 |
+| projection gather/validity | 50,725 |
+| screen bounds | 7,874 |
+| kind decode | 6,945 |
+| material lookup/animation | 30,459 |
+| backface | 13,778 |
+| lighting | 62,782 |
+| instrumented submission leaves | 369,391 |
+
+Kind plus material—the main static interpretation a residency record would
+remove—account for only 37,404 cycles in this deliberately slowed build.
+Submission is nearly 10x larger, and the unassigned remainder includes
+option/risk decisions, TR reprojection, branches, and profiler overhead. This
+falsifies the reviews' predicted 200–320k saving from a surface record by
+itself. A record may still help a genuinely smaller submit architecture, but
+static classification is not the main missing budget.
+
+The ordinary R10 tapes also rule out a portal loop. cortex_v1 and cortex_v3
+draw almost the same number of cells (23.7 versus 25.4 per visual), while v3
+contains 88.9 considered quads versus 40.1. That is 3.50 surfaces per drawn
+cell in v3 versus 1.69 in v1. v3 screen-rejects 20.7 and backface-rejects 6.1
+of those quads; the remaining density is authored visible geometry. The same
+engine is doing roughly twice the surface work, not revisiting rooms through a
+portal cycle.
+
 ## Accepted engine changes
 
 ### V0: reuse the cell vertical AABB extent
@@ -266,6 +320,65 @@ all never-used tails begin empty. It saved 2,072 mean render cycles and 2,651
 I-cache stall cycles in cortex_v1 lockstep, but still changed one of 1,046
 common images. Both forms were removed. The portal result keeps its full reset
 until the implicit state/layout sensitivity is isolated separately.
+
+### R12/R12b: leave camera duplicate-set overflow storage uninitialized
+
+Four adjacent `memcpy` callsites in the camera solve were the construction of
+four 356-byte `CheckedCameraCells` values. Each copied a 72-entry
+`u32::MAX` fallback array even though its `len` began at zero. R12 changed the
+entries to `MaybeUninit`; LLVM replaced the four reads/copies with one
+1,424-byte zero fill. R12b separated that logically uninitialized overflow
+storage from the initialized bitset/count, reducing the generated
+initialization to a single 272-byte zero fill and shrinking
+`update_vblanks_with_collision_rooms` by 228 bytes.
+
+The optimized form preserves duplicate detection for every key and passed all
+25 focused camera tests. It saved 2,739 camera cycles per gameplay tick in
+cortex_v1 lockstep and 2,520 in the ordinary tape. However, the new layout
+added 1,797 I-cache stall cycles per visual in lockstep and 1,976 in the
+ordinary run. Effective FPS remained 26.99, two-vblank periods slipped
+79.2%→79.0%, and one presentation checkpoint moved (all 1,045 common images
+were exact). With no net engine gain, both forms were removed before spending
+a cortex_v3 run.
+
+### R13: const-specialize cached-room depth/subdivision policies
+
+The cached-room entry points were temporarily made const-generic over the
+generated depth and subdivision modes. This forced a project-specific MIPS
+monomorph and should have removed every policy branch if the existing enum
+arguments were blocking constant propagation.
+
+The cortex_v3 lockstep replay was identical to R10 in every reported
+performance metric: mean render 1,416,120, p95 2,002,178, max 2,259,241, and
+321,902 I-cache stall cycles per visual. All 925 display hashes matched. LLVM
+was already propagating these constants through the shared engine; the API
+change generated the same machine behaviour and was removed.
+
+### R14/R14b: accelerate TR root world-to-view transforms
+
+R14 moved the three/four root transforms before TR subdivision from the CPU to
+the otherwise-idle GTE. It exposed genuine arithmetic headroom: cortex_v3
+lockstep mean render fell 40,675 cycles and p95 fell 46,225. It is not
+visually valid. The GTE combines yaw and pitch in one matrix operation while
+the established path rounds after yaw and again after pitch. That difference
+changed 820 of 925 display hashes and reduced the primitive mean from 418.2 to
+376.3, so the experiment was immediately removed.
+
+R14b retained the exact CPU arithmetic and batched three/four vertices behind
+one shared camera-basis load. All 925 hashes matched and lockstep render saved
+599 cycles, but the ordinary v3 replay regressed 3,966 mean render cycles,
+p95 regressed 10,225, and two-vblank coverage fell 0.9%→0.5%. LLVM already
+hoists enough of the original calls; the explicit batch's layout is worse in
+the production path. It too was removed.
+
+### R15: explicitly outline the TR room entry leaves
+
+Both cached-room TR entry functions were marked `#[inline(never)]` to test a
+narrower version of the reviews' code-layout proposal without disturbing the
+ordinary warm path. The complete cortex_v3 lockstep capture was exactly
+identical to R10—every timing percentile and I-cache count, plus all 925
+hashes. LLVM already keeps these large generic entries out of the caller, so
+the attributes were removed as redundant.
 
 ### R6: offline whole-subdivision proof is not currently sound
 
@@ -457,6 +570,8 @@ of the win without changing data layout or packet identity.
 |---|---|---|---|
 | M2 | Emulator-owned I-cache refill events/stall cycles by route window | accepted | 176k v1 / 388k v3 stalls per visual; hashes and VRAM exact |
 | M3 | Room-only packet/command boundary counters | accepted | v3: 131.9 arena packets and 169.8 commands/visual; TR contributes about 90 commands |
+| M6 | Rebuild both projects without `emulator-telemetry` | diagnostic complete | v3 unchanged at 15.713 FPS; v1 -0.106 FPS; telemetry is not the missing budget |
+| M7 | Warmed surface micro-profile + workload-density check | diagnostic complete | v3 kind+material only 37.4k diagnostic cycles vs 369.4k submit; 25.4 cells but 88.9 authored quads, no portal loop |
 | V0 | Reuse cell AABB `half_y` across frustum/portal tests | accepted | v1/v3 render mean -0.18%/-0.24%; all 1,974 lockstep hashes and final VRAM exact |
 | R1 | Surface-level zero-fog warm-path gate | rejected after five shapes | best exact-v3 form: 14.25→14.40 FPS, but 2/1,046 v1 hashes changed; exact-v1 form changed 1/925 v3 hashes |
 | R2 | `#[inline(never)]` hot dispatcher leaves | rejected | v3 14.03→13.67 FPS, render mean +4.3%, I-cache stalls +1.7%; 534/927 lockstep hashes changed |
@@ -481,6 +596,10 @@ of the win without changing data layout or packet identity.
 | R10 | Borrow `WorldRenderPass` during flush instead of copying 8,212 bytes | accepted | v1/v3 lockstep render -29,735/-29,725 cycles; all 1,971 hashes exact |
 | R10a | Lazily build forced-split options after the quad extent check | rejected | v3 render -6,610, but v1 render +856, I-cache +1,002, and 1/1,044 common hashes changed |
 | R11/R11b | Logical-only or used-prefix portal-result reset | rejected | prefix form saved 2,072 render cycles in v1 but changed 1/1,046 common images; count-only changed 2 |
+| R12/R12b | Avoid initializing camera duplicate-set overflow entries | rejected | camera -2,520 cycles/tick, but render I-cache +1,976/visual; v1 stayed 26.99 FPS and <=2vb slipped 0.2 points |
+| R13 | Const-specialize room depth/subdivision modes | rejected | v3 metrics exactly identical to R10; all 925 hashes exact, so LLVM already specializes them |
+| R14/R14b | GTE or exact batched CPU TR root transforms | rejected | GTE saved 40.7k but changed 820/925 images and primitive topology; exact batch regressed normal v3 render by 4.0k |
+| R15 | Explicitly outline cached-room TR entry leaves | rejected | all v3 metrics exactly equal to R10 and 925/925 hashes exact; compiler already outlines them |
 | T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
