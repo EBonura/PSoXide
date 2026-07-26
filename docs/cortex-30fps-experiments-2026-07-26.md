@@ -69,11 +69,32 @@ subdivide. The ~413 room primitives per visual are mainly amplified elsewhere,
 so precomputed TR lattice attributes remain worth testing but are not the first
 architectural lever.
 
+### M2: emulator-owned instruction-cache refill counters
+
+The headless route log now reports refill events, words, and the exact stall
+cycles the emulator already charges for cached instruction fetches. The
+counters are host-only diagnostic history: they are excluded from save states
+and cannot affect guest state or timing.
+
+Full replays of the frozen, unmodified discs reproduced every visual hash and
+the final display/VRAM byte-for-byte:
+
+| Project | I-cache stall cycles / visual | Share of mean render | Stall cycles / considered surface |
+|---|---:|---:|---:|
+| cortex_v1 | 176,124 | 23.0% | 4,425 |
+| cortex_v3 | 388,056 | 27.6% | 4,365 |
+
+The absolute v3 cost is large enough to justify code-layout experiments, but
+the nearly identical per-surface cost argues against a special v3-only cache
+pathology. Most of the difference currently tracks v3 doing 2.23x as much
+surface work. Candidate R2 must therefore demonstrate a full-replay reduction;
+body size or disassembly appearance alone is not evidence.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
 |---|---|---|---|
-| M2 | Emulator-owned I-cache refill events/stall cycles by route window | next | Quantify before leaf splitting |
+| M2 | Emulator-owned I-cache refill events/stall cycles by route window | accepted | 176k v1 / 388k v3 stalls per visual; hashes and VRAM exact |
 | R1 | Surface-level zero-fog warm-path gate | queued | Exact hash gate; now diagnostic priority |
 | R2 | `#[inline(never)]` hot dispatcher leaves | queued | MIPS/disassembly and M2 must improve |
 | R3 | Residency-built `SurfaceDrawRecord` + option variants | queued | Remove static per-surface interpretation |
