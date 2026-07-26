@@ -5,6 +5,21 @@ same executable in PSoXide and on a real PlayStation. Real-console data is
 transported through QR payloads, so a TV/capture card is enough and no
 character-by-character transcription is required.
 
+## Versioning
+
+Every payload carries a **suite version** alongside the transport schema
+version. The schema says how bytes are laid out; the suite version says what a
+record id *means*, which a schema version cannot express because an id can be
+redefined without the layout changing.
+
+`hwtest-report.py` refuses to diff captures across a MAJOR suite bump, since the
+same id may name two different measurements. Baselines are named by version
+rather than date. The bump rule and the full history of what each version
+changed are in [hardware-test-versions.md](hardware-test-versions.md).
+
+Current: **v1.0**, schema PX7. Not comparable with v0.18 captures, whose timing
+was sampled without interrupt masking.
+
 ## Test tiers
 
 Tests are split by one rule: **can this run in an arbitrary order without
