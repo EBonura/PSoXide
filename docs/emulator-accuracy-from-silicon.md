@@ -84,6 +84,69 @@ the scanline range, far larger than counter jitter, and case 23's `0x800`
 against `0x000` is an entire SPUSTAT bit that PSoXide reports and the console
 does not.
 
+## Triage of the 13 conformance divergences
+
+Investigated 2026-07-26. Most are NOT quick wins, and it is worth being precise
+about why rather than filing thirteen tickets.
+
+**Already known, blocked on FIFO/latency modelling (cases 10, 17, 46, 49, 52).**
+The suite itself marks these `info` and says so in the source: *"Racy on
+silicon: both the GPUSTAT.24 and the I_STAT observations race the GPU command
+FIFO and flip run-to-run"* and *"the GPUSTAT bits 29-30 readback lags the GP1(04)
+write through the FIFO"*. They flip between runs on hardware, so the console
+values recorded above are one sample of a race, not a target to match. Closing
+them means modelling GPU FIFO latency, which is gated on CPU cycle accuracy.
+
+**Instantaneous snapshots of toggling state (case 23).** `SPUSTAT readable`
+reads the register once. The difference is bit 11, "writing to first/second half
+of capture buffers", which toggles continuously as the SPU runs. A single read
+landing on a different phase is not a defect.
+
+**Environmental (case 44).** `direct port 1 pad poll stability` depends on the
+physical controller and what it reports; an emulated pad answering differently
+from an SCPH-1200 is expected.
+
+**Raw timer counts (cases 14, 15, 38, 51).** Small differences are jitter. Case
+15's 27-line gap in the scanline range is larger than that and may be real, but
+it needs a second capture to separate from a one-off.
+
+**Genuinely actionable: case 32, `mode read clears sticky flags`.** See below.
+
+## Timers: registers are read without catching up first
+
+**Status:** open, root-caused, not yet fixed. **Found:** 2026-07-26.
+
+The test sets Timer 2 to target 24 with reset-at-target, lets it free-run, then
+reads the mode register twice. Reading mode clears the sticky reached-target
+flag, so the expected result is "set on the first read, clear on the second".
+PSoXide gives exactly that (`0x3`). The console gives `0x1`: set on the first
+read, and *still set* on the second.
+
+The console is right, and for a mechanical reason. The timer is free-running at
+the system clock with a target of 24, so it reaches target every 24 ticks, which
+is fewer cycles than two consecutive MMIO reads take. The flag is genuinely
+re-latched between the two reads. It cannot be otherwise on hardware.
+
+PSoXide never sees this because `Timers::read32` returns the register value
+without advancing the timer to the current cycle first, and the bus timer-read
+paths (`bus.rs`, the 8/16/32-bit branches) call it directly. Between two
+adjacent reads the emulated counter does not move at all.
+
+The code already anticipates the behaviour it does not implement:
+
+> Reading mode acknowledges both sticky reached flags. If the counter is still
+> at its terminal condition, hardware may latch the target flag again on a later
+> timer clock.
+
+**Fix shape:** advance the timers to the current cycle before servicing a timer
+register read, the usual catch-up-on-access pattern. `Timers::advance_to` already
+exists and `bus.rs` already calls `advance_to_video` elsewhere, so the pieces are
+there; the read paths need the current cycle and video parameters threaded in.
+
+**Expect fallout.** Making timers advance on access will move timing-derived
+numbers across the suite, so the emulator baseline will need re-pinning and the
+change wants checking against the timing records rather than landing blind.
+
 ## How these get found
 
 The hardware-test disc is the instrument: `make hwtest-silicon SILICON=<pages>`
