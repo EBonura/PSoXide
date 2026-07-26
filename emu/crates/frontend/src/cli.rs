@@ -329,6 +329,13 @@ pub struct LaunchArgs {
     /// no guest telemetry code, RAM, or timing hooks are required.
     #[arg(long)]
     pub pc_sample_log: Option<PathBuf>,
+    /// Sample the guest program counter together with register $ra and the
+    /// words at `$sp + 20` and `$sp + 36`, then write aggregate callsite
+    /// counts. The latter recovers the caller through the standard 16-byte
+    /// compiler-builtins inner frame plus 20-byte wrapper save slot, attributing
+    /// memcpy/memset interiors without guest instrumentation.
+    #[arg(long)]
+    pub pc_sample_callsite_log: Option<PathBuf>,
     /// Write out-of-band PC samples grouped into route-tick windows. This
     /// identifies which guest code dominates individual slow gameplay spans
     /// instead of averaging menu, loading and gameplay into one profile.
@@ -1127,6 +1134,10 @@ fn run_headless_launch(
     let mut observed_counter_frames = observed_guest_frames;
     let mut profile_log = GuestProfileLog::new(args.profile_log.as_deref())?;
     let mut pc_samples = args.pc_sample_log.as_ref().map(|_| BTreeMap::new());
+    let mut pc_callsite_samples = args
+        .pc_sample_callsite_log
+        .as_ref()
+        .map(|_| BTreeMap::new());
     let mut pc_window_samples = args.pc_sample_window_log.as_ref().map(|_| BTreeMap::new());
     let pc_sample_interval = args.pc_sample_instructions.max(1);
     let pc_sample_window_ticks = args.pc_sample_window_ticks.max(1);
@@ -1141,6 +1152,28 @@ fn run_headless_launch(
         if i >= next_pc_sample {
             if let Some(samples) = pc_samples.as_mut() {
                 *samples.entry(cpu.pc()).or_insert(0u64) += 1;
+            }
+            if let Some(samples) = pc_callsite_samples.as_mut() {
+                let stack_offset = (cpu.gpr(29) as usize & 0x1f_ffff).saturating_add(20);
+                let stack_return_address = bus
+                    .ram()
+                    .get(stack_offset..stack_offset.saturating_add(4))
+                    .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                    .unwrap_or_default();
+                let inner_stack_offset = (cpu.gpr(29) as usize & 0x1f_ffff).saturating_add(36);
+                let inner_stack_return_address = bus
+                    .ram()
+                    .get(inner_stack_offset..inner_stack_offset.saturating_add(4))
+                    .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                    .unwrap_or_default();
+                *samples
+                    .entry((
+                        cpu.pc(),
+                        cpu.gpr(31),
+                        stack_return_address,
+                        inner_stack_return_address,
+                    ))
+                    .or_insert(0u64) += 1;
             }
             if let Some(samples) = pc_window_samples.as_mut() {
                 let window_start = route_ticks / pc_sample_window_ticks * pc_sample_window_ticks;
@@ -1618,6 +1651,21 @@ fn run_headless_launch(
             let total = samples.values().copied().sum::<u64>();
             eprintln!(
                 "[cli] PC samples → {} ({} samples, {} addresses)",
+                path.display(),
+                total,
+                samples.len()
+            );
+        }
+    }
+    if let (Some(path), Some(samples)) = (
+        args.pc_sample_callsite_log.as_ref(),
+        pc_callsite_samples.as_ref(),
+    ) {
+        write_pc_callsite_sample_log(path, samples)?;
+        if emit_summary {
+            let total = samples.values().copied().sum::<u64>();
+            eprintln!(
+                "[cli] PC callsite samples → {} ({} samples, {} pairs)",
                 path.display(),
                 total,
                 samples.len()
@@ -2274,6 +2322,7 @@ fn validation_launch_args(
         route_screenshot_dir: None,
         route_screenshot_interval: 3_000,
         pc_sample_log: None,
+        pc_sample_callsite_log: None,
         pc_sample_window_log: None,
         pc_sample_window_ticks: 300,
         pc_sample_instructions: 16_384,
@@ -3063,6 +3112,63 @@ fn write_pc_sample_log(path: &Path, samples: &BTreeMap<u32, u64>) -> Result<(), 
     writer.flush().map_err(|error| error.to_string())
 }
 
+fn write_pc_callsite_sample_log(
+    path: &Path,
+    samples: &BTreeMap<(u32, u32, u32, u32), u64>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let file = std::fs::File::create(path)
+        .map_err(|error| format!("create {}: {error}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    writeln!(
+        writer,
+        "pc,return_address,stack_return_address,inner_stack_return_address,samples,percent"
+    )
+    .map_err(|error| error.to_string())?;
+    let total = samples.values().copied().sum::<u64>();
+    let mut ranked = samples
+        .iter()
+        .map(
+            |(&(pc, return_address, stack_return_address, inner_stack_return_address), &count)| {
+                (
+                    pc,
+                    return_address,
+                    stack_return_address,
+                    inner_stack_return_address,
+                    count,
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(
+        |(pc_a, return_a, stack_a, inner_a, count_a),
+         (pc_b, return_b, stack_b, inner_b, count_b)| {
+            count_b
+                .cmp(count_a)
+                .then_with(|| pc_a.cmp(pc_b))
+                .then_with(|| return_a.cmp(return_b))
+                .then_with(|| stack_a.cmp(stack_b))
+                .then_with(|| inner_a.cmp(inner_b))
+        },
+    );
+    for (pc, return_address, stack_return_address, inner_stack_return_address, count) in ranked {
+        let percent = if total == 0 {
+            0.0
+        } else {
+            count as f64 * 100.0 / total as f64
+        };
+        writeln!(
+            writer,
+            "0x{pc:08x},0x{return_address:08x},0x{stack_return_address:08x},0x{inner_stack_return_address:08x},{count},{percent:.6}"
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
 fn write_pc_window_sample_log(
     path: &Path,
     samples: &BTreeMap<(u64, u32), u64>,
@@ -3209,5 +3315,22 @@ mod press_script_tests {
         assert!(parse_press_script("30:cross:0").is_err());
         assert!(parse_press_script("").is_err());
         assert!(parse_press_script("cross").is_err());
+    }
+
+    #[test]
+    fn callsite_sample_csv_keeps_both_stack_return_addresses() {
+        let path =
+            std::env::temp_dir().join(format!("psoxide-pc-callsites-{}.csv", std::process::id()));
+        let mut samples = BTreeMap::new();
+        samples.insert((0x800b_5608, 0x800b_622c, 0x800b_622c, 0x8009_4ce8), 3);
+        samples.insert((0x800b_560c, 0x800b_622c, 0x800b_622c, 0x8007_e5ec), 1);
+        write_pc_callsite_sample_log(&path, &samples).expect("write callsite CSV");
+        let csv = std::fs::read_to_string(&path).expect("read callsite CSV");
+        let _ = std::fs::remove_file(&path);
+        assert!(csv.starts_with(
+            "pc,return_address,stack_return_address,inner_stack_return_address,samples,percent\n"
+        ));
+        assert!(csv.contains("0x800b5608,0x800b622c,0x800b622c,0x80094ce8,3,75.000000"));
+        assert!(csv.contains("0x800b560c,0x800b622c,0x800b622c,0x8007e5ec,1,25.000000"));
     }
 }
