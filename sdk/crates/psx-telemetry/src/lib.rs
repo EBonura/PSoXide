@@ -652,11 +652,17 @@ pub mod counter {
     /// read reached the drive, or one of the `asset_streaming` reason codes
     /// (100+) when it failed before any read was armed.
     pub const PERSISTENT_ASSET_FAILED_REASON: u16 = 237;
+
+    /// Room surfaces whose exact TR subdivision predicate passed.
+    pub const ROOM_SURF_TR_SUBDIVISION_CANDIDATES: u16 = 238;
+
+    /// TR subdivision candidates that successfully emitted geometry.
+    pub const ROOM_SURF_TR_SUBDIVISION_SUBMITTED: u16 = 239;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 238;
+pub const COUNTER_COUNT: usize = 240;
 
-const _: () = assert!(counter::PERSISTENT_ASSET_FAILED_REASON as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::ROOM_SURF_TR_SUBDIVISION_SUBMITTED as usize == COUNTER_COUNT - 1);
