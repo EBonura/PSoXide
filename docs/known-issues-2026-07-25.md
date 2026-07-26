@@ -261,6 +261,31 @@ yellow, un-subdivided roots red. Proximity narrows the suspects to code that onl
 runs near the camera: the TR subdivision band,
 `draw_near_clipped_cached_room_surface`, and near-plane extent clamping.
 
+## RESOLVED: menu music played an octave up (2026-07-25)
+
+Not a conversion bug. `CRT Lab Loop.wav` is a clean 44100 Hz / 16-bit / stereo
+source, 67.42 s, and the cook is a passthrough at unity speed.
+
+cortex_v1's Menu Music node carried `playback_speed_q12: 8192` in all three menu
+scenes. That is 2.0x, the exact maximum of the editor's Playback speed slider
+(`UI_MUSIC_PLAYBACK_SPEED_UNITY_Q12` is 4096). `cook_cdda_track_from_wav_at_speed`
+honoured it, resampling the track to 33.72 s, which plays back at 44.1 kHz as
+double speed, one octave up.
+
+Nothing in the codebase writes that field except the slider itself, and new
+music nodes are created at unity, so this was authored data rather than a
+regression: the slider had been dragged to its end.
+
+Set back to 4096 and re-cooked. The track is 67.43 s (the extra 1176 bytes is
+CD-DA sector padding) and its first 800,000 bytes are byte-identical to the
+source WAV's PCM, which at matching sample rates is what unity speed should
+produce.
+
+The project's `assets/audio/cdda/crt_lab_loop.track02.cdda` was deleted along
+with it: 23.7 MB, referenced nowhere, and at 8 bytes per source frame it was
+twice the correct size, so an artifact of some older path. The cooker reads the
+WAV, never that file.
+
 ## Unrelated, also open
 
 `cortex_v3` does not cook: `sector 1,13 East wall has invalid heights
