@@ -98,12 +98,12 @@ const fn tone_block(period: usize, flags: u8) -> [u8; BLOCK_BYTES] {
     block
 }
 
-/// Transmit `payload`, then leave the SPU looping it forever.
+/// Upload `payload` to SPU RAM, leaving it SILENT and ready.
 ///
 /// Returns the number of bits transmitted, or 0 if the stream would not fit in
 /// SPU RAM. Runs once, after the battery: it takes over voice 0 and ~290 KiB
 /// of SPU RAM, so any probe that owns sample memory must run before it.
-pub(crate) fn transmit(payload: &[u8]) -> u32 {
+pub(crate) fn prepare(payload: &[u8]) -> u32 {
     let total_bits = CALIBRATION_BLOCKS * 2 + 64 + 16 + 16 + payload.len() * 8 + 32;
     let bytes_needed = total_bits * BLOCK_BYTES;
     if SPU_BASE as usize + bytes_needed > 512 * 1024 {
@@ -154,7 +154,8 @@ pub(crate) fn transmit(payload: &[u8]) -> u32 {
         spu::upload_adpcm(spu::SpuAddr::new(addr), &stage[..staged * BLOCK_BYTES]);
     }
 
-    start_voice();
+    // Deliberately NOT keyed on. See stop()/set_rate().
+    stop();
     emitted as u32
 }
 
@@ -193,11 +194,13 @@ fn frame_bit(index: usize, payload: &[u8], crc: u32, total_bits: usize) -> bool 
 }
 
 /// Play the uploaded stream on voice 0, looping in hardware.
-fn start_voice() {
-    set_rate(0);
+/// Silence the readout.
+pub(crate) fn stop() {
+    spu::Voice::key_off(spu::Voice::V0.mask());
+    spu::Voice::V0.set_volume(spu::Volume::SILENCE, spu::Volume::SILENCE);
 }
 
-/// Re-key the transmission at `RATE_DIVISORS[index]`.
+/// Key the transmission at `RATE_DIVISORS[index]`.
 ///
 /// Operator-selectable so a chain that cannot decode the fast mode can be
 /// dropped to a slower one on the spot, instead of needing another burn.
@@ -210,10 +213,15 @@ pub(crate) fn set_rate(index: usize) {
     // 0x1000 plays at the native 44.1 kHz, so one block is exactly 28 output
     // samples. Lower values stretch every block proportionally.
     voice.set_pitch(spu::Pitch::raw(divisor));
-    voice.set_volume(spu::Volume::MAX, spu::Volume::MAX);
+    // A quarter scale, not full. These are square waves: at MAX they came out
+    // of the TV as a harsh screech loud enough to be alarming, and the decoder
+    // recovers the payload through a 20x gain range anyway, so the volume was
+    // buying nothing.
+    let level = spu::Volume::linear(1, 4);
+    voice.set_volume(level, level);
     // No envelope: an attack ramp would amplitude-modulate the first bits, and
     // a release would fade the loop out. The tone must stay flat.
     voice.set_adsr(spu::Adsr::passthrough());
-    spu::set_main_volume(spu::Volume::MAX, spu::Volume::MAX);
+    spu::set_main_volume(spu::Volume::HALF, spu::Volume::HALF);
     spu::Voice::key_on(voice.mask());
 }
