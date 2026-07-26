@@ -48,7 +48,7 @@ use std::sync::Arc;
 // `web_time::Instant` is a drop-in for `std::time::Instant`: on native it
 // re-exports the std type, and on wasm it reads the browser performance clock
 // instead of std's clock, which panics on wasm32-unknown-unknown.
-use web_time::Instant;
+use web_time::{Duration, Instant};
 
 #[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
@@ -211,6 +211,51 @@ fn main() {
     event_loop.spawn_app(app);
 }
 
+/// What a L3+R3 press resolved to.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FreelookChordAction {
+    /// Released quickly: switch between freecam and the game's own controls,
+    /// leaving the camera exactly where it is.
+    Toggle,
+    /// Held past the threshold: put the camera back at the game's viewpoint,
+    /// without changing which mode is active.
+    Reset,
+}
+
+/// Tap-versus-hold state for the L3+R3 chord.
+///
+/// Kept apart from the event loop because the interesting part is a four-way
+/// transition with one easy mistake in it: the release that ends a HOLD must
+/// not also register as a TAP, or every reset would silently flip the mode too.
+#[derive(Default)]
+struct FreelookChord {
+    down: bool,
+    hold_fired: bool,
+}
+
+impl FreelookChord {
+    /// Advance one frame. `hold_reached` is whether the current press has been
+    /// down at least as long as the hold threshold; the caller owns the clock.
+    fn update(&mut self, chord: bool, hold_reached: bool) -> Option<FreelookChordAction> {
+        let action = match (self.down, chord) {
+            // Still held: fire the reset once, the moment the threshold passes,
+            // so it is felt with the buttons still down rather than on release.
+            (true, true) if hold_reached && !self.hold_fired => {
+                self.hold_fired = true;
+                Some(FreelookChordAction::Reset)
+            }
+            // Released without ever reaching the threshold: a tap.
+            (true, false) if !self.hold_fired => Some(FreelookChordAction::Toggle),
+            _ => None,
+        };
+        if !chord {
+            self.hold_fired = false;
+        }
+        self.down = chord;
+        action
+    }
+}
+
 struct Shell {
     graphics: Option<Graphics>,
     state: AppState,
@@ -222,9 +267,10 @@ struct Shell {
     /// capture consuming events, Reset Controls -- clear one thing and
     /// can't miss a field.
     host_input: HostKeyboardInput,
-    /// Previous-frame state of the L3+R3 freelook chord, for rising-edge
-    /// toggle detection.
-    prev_freelook_chord: bool,
+    /// Tap-versus-hold tracking for the L3+R3 freecam chord.
+    freelook_chord: FreelookChord,
+    /// When the current L3+R3 press began. `None` while the chord is up.
+    freelook_chord_down_at: Option<Instant>,
     /// Whether to open the window in borderless-fullscreen mode.
     /// Decision is made at startup via CLI flag and then captured
     /// here; changing it at runtime would need a window recreation.
@@ -343,7 +389,8 @@ impl Shell {
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
             host_input: HostKeyboardInput::default(),
-            prev_freelook_chord: false,
+            freelook_chord: FreelookChord::default(),
+            freelook_chord_down_at: None,
             fullscreen,
             audio,
             input,
@@ -1219,22 +1266,49 @@ impl ApplicationHandler for Shell {
                     self.last_pad_activity = Instant::now();
                 }
 
-                // L3 + R3 chord toggles the twin-stick freelook camera on a
-                // rising edge (works from keyboard or pad). The toolbar EYE
-                // button toggles the same flag.
+                // L3 + R3 is two gestures, not one (works from keyboard or pad;
+                // the toolbar EYE button toggles the same flag):
+                //
+                //   TAP  -- switch between freecam and the game's own controls,
+                //           LEAVING THE CAMERA WHERE IT IS. Toggling used to
+                //           reset the view on the way out, which threw away the
+                //           framing you had just lined up and made the chord
+                //           unusable for glancing back and forth.
+                //   HOLD -- put the camera back at the game's own viewpoint,
+                //           without changing which mode you are in.
+                //
+                // The hold fires as soon as the threshold passes rather than on
+                // release, so the reset is felt while the buttons are still
+                // down, and the release that follows is not also read as a tap.
+                const FREELOOK_CHORD_HOLD: Duration = Duration::from_millis(400);
                 let chord = merged_mask & (button::L3 | button::R3) == (button::L3 | button::R3);
-                if chord && !self.prev_freelook_chord {
-                    self.state.freelook.enabled = !self.state.freelook.enabled;
-                    if !self.state.freelook.enabled {
-                        self.state.freelook = emulator_core::FreelookState::default();
-                    }
-                    self.state.status_message_set(if self.state.freelook.enabled {
-                        "Freelook ON - left stick move, right stick look, R2 boost (L3+R3 to exit)"
-                    } else {
-                        "Freelook off"
-                    });
+                if chord && self.freelook_chord_down_at.is_none() {
+                    self.freelook_chord_down_at = Some(Instant::now());
                 }
-                self.prev_freelook_chord = chord;
+                let hold_reached = self
+                    .freelook_chord_down_at
+                    .is_some_and(|t| t.elapsed() >= FREELOOK_CHORD_HOLD);
+                match self.freelook_chord.update(chord, hold_reached) {
+                    Some(FreelookChordAction::Toggle) => {
+                        self.state.freelook.enabled = !self.state.freelook.enabled;
+                        self.state.status_message_set(if self.state.freelook.enabled {
+                            "Freecam ON - pad drives the camera, game input paused (hold L3+R3 to reset)"
+                        } else {
+                            "Freecam off - pad returns to the game"
+                        });
+                    }
+                    Some(FreelookChordAction::Reset) => {
+                        let was_enabled = self.state.freelook.enabled;
+                        self.state.freelook = emulator_core::FreelookState::default();
+                        self.state.freelook.enabled = was_enabled;
+                        self.state
+                            .status_message_set("Freecam reset to the game camera");
+                    }
+                    None => {}
+                }
+                if !chord {
+                    self.freelook_chord_down_at = None;
+                }
 
                 // Feed the camera from the sticks while engaged; R2 boosts.
                 self.state.freelook_input = crate::app::FreelookInput {
@@ -1402,15 +1476,20 @@ impl ApplicationHandler for Shell {
                 // only the tail via `push_history`'s ring-buffer semantics.
                 if self.state.running {
                     // Feed the guest the merged mask + sticks computed above.
-                    // While freelook is engaged the sticks drive the camera
-                    // only, so the game sees them neutral (freecam-only).
-                    let (game_left, game_right) = if self.state.freelook.enabled {
-                        ((0.0, 0.0), (0.0, 0.0))
+                    // While freecam is engaged the pad belongs to the CAMERA,
+                    // so the guest sees a neutral controller: sticks centred
+                    // AND no buttons. Neutralising only the sticks left the
+                    // face and shoulder buttons live, so lining up a shot still
+                    // fired the weapon, opened menus, or walked the player off
+                    // the spot being framed. The chord itself is read from
+                    // `merged_mask` above, before this, so L3+R3 keeps working.
+                    let (game_mask, game_left, game_right) = if self.state.freelook.enabled {
+                        (0, (0.0, 0.0), (0.0, 0.0))
                     } else {
-                        (merged_left, merged_right)
+                        (merged_mask, merged_left, merged_right)
                     };
                     let live_pad_sample =
-                        Port1PadSample::from_host(merged_mask, game_right, game_left);
+                        Port1PadSample::from_host(game_mask, game_right, game_left);
                     for _ in 0..frames_to_run {
                         // Recording/replay happens at one authoritative video-
                         // frame port-1 boundary for emulator, editor and headless
@@ -2871,5 +2950,58 @@ mod tests {
         assert_eq!(cpu.min, egui::pos2(0.0, 0.0));
         assert_eq!(cpu.max.x, 256.0 / gfx::MAX_DISPLAY_WIDTH as f32);
         assert_eq!(cpu.max.y, 240.0 / gfx::MAX_DISPLAY_HEIGHT as f32);
+    }
+}
+
+#[cfg(test)]
+mod freelook_chord_tests {
+    use super::{FreelookChord, FreelookChordAction};
+
+    /// A quick press switches mode. Nothing fires while the buttons are still
+    /// down, so the mode does not flip until the user lets go.
+    #[test]
+    fn tap_toggles_on_release() {
+        let mut c = FreelookChord::default();
+        assert_eq!(c.update(true, false), None, "press alone does nothing");
+        assert_eq!(c.update(true, false), None, "still held, still nothing");
+        assert_eq!(c.update(false, false), Some(FreelookChordAction::Toggle));
+    }
+
+    /// The reset lands while the buttons are down, fires once however long the
+    /// hold lasts, and -- the bug this guards -- the release that ends it does
+    /// NOT also toggle the mode.
+    #[test]
+    fn hold_resets_once_and_release_does_not_toggle() {
+        let mut c = FreelookChord::default();
+        assert_eq!(c.update(true, false), None);
+        assert_eq!(c.update(true, true), Some(FreelookChordAction::Reset));
+        assert_eq!(c.update(true, true), None, "reset must not repeat");
+        assert_eq!(c.update(true, true), None);
+        assert_eq!(
+            c.update(false, true),
+            None,
+            "releasing after a hold must not be read as a tap"
+        );
+    }
+
+    /// State does not leak between presses: a hold followed by a tap gives a
+    /// reset and then a toggle, not two resets.
+    #[test]
+    fn a_tap_after_a_hold_still_toggles() {
+        let mut c = FreelookChord::default();
+        c.update(true, false);
+        assert_eq!(c.update(true, true), Some(FreelookChordAction::Reset));
+        c.update(false, true);
+        assert_eq!(c.update(true, false), None);
+        assert_eq!(c.update(false, false), Some(FreelookChordAction::Toggle));
+    }
+
+    /// An idle pad produces nothing at all.
+    #[test]
+    fn idle_chord_is_silent() {
+        let mut c = FreelookChord::default();
+        for _ in 0..4 {
+            assert_eq!(c.update(false, false), None);
+        }
     }
 }
