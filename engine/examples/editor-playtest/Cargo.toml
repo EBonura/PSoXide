@@ -61,6 +61,10 @@ vis-player-anchor = []
 # Opt-in until the pop-in behaviour passes an eyes-on gate.
 vis-draw-pruned = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
+# Diagnostic-only cadence for semantic A/B comparisons. Render exactly once
+# per two fixed simulation ticks even when wall-clock VBlanks have accumulated,
+# so faster and slower builds present the same guest states.
+lockstep-visuals = []
 # A/B candidate: project the nine unique points of a one-level subdivided
 # room quad once, instead of projecting four overlapping child quads.
 tr-subdivision-lattice = ["psx-engine/tr-subdivision-lattice"]

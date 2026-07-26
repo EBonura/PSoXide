@@ -22,6 +22,8 @@ pub(super) struct RoomSurfaceMicroProfile {
     whole_quads: u32,
     split_tris: u32,
     lighting_rejects: u32,
+    tr_subdivision_candidates: u32,
+    tr_subdivision_submitted: u32,
 }
 
 #[cfg(not(feature = "room-surface-profile"))]
@@ -193,6 +195,22 @@ impl RoomSurfaceMicroProfile {
     }
 
     #[inline(always)]
+    fn count_tr_subdivision_candidate(&mut self) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.tr_subdivision_candidates = self.tr_subdivision_candidates.saturating_add(1);
+        }
+    }
+
+    #[inline(always)]
+    fn count_tr_subdivision_submitted(&mut self) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.tr_subdivision_submitted = self.tr_subdivision_submitted.saturating_add(1);
+        }
+    }
+
+    #[inline(always)]
     fn emit(self) {
         #[cfg(feature = "room-surface-profile")]
         {
@@ -247,6 +265,14 @@ impl RoomSurfaceMicroProfile {
             telemetry::counter(
                 telemetry::counter::ROOM_SURF_LIGHTING_REJECTS,
                 self.lighting_rejects,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES,
+                self.tr_subdivision_candidates,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_TR_SUBDIVISION_SUBMITTED,
+                self.tr_subdivision_submitted,
             );
             telemetry::counter(
                 telemetry::counter::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES,
@@ -1192,7 +1218,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                if surface_options.tomb_raider_subdivision
+                let tomb_raider_subdivision = surface_options.tomb_raider_subdivision
                     && tomb_raider_projected_triangle_needs_subdivision(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
@@ -1200,7 +1226,11 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         surface.triangle_index as usize,
                         is_ceiling,
                         material.sidedness,
-                    )
+                    );
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
+                if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_triangle(
                         cached_vertices,
                         ids,
@@ -1216,6 +1246,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
@@ -1313,6 +1344,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
                 if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_quad(
                         cached_vertices,
@@ -1331,6 +1365,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
@@ -1428,7 +1463,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                if surface_options.tomb_raider_subdivision
+                let tomb_raider_subdivision = surface_options.tomb_raider_subdivision
                     && tomb_raider_projected_triangle_needs_subdivision(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
@@ -1436,7 +1471,11 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         surface.triangle_index as usize,
                         false,
                         wall_material.sidedness,
-                    )
+                    );
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
+                if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_triangle(
                         cached_vertices,
                         ids,
@@ -1452,6 +1491,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
@@ -1544,6 +1584,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
                 if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_quad(
                         cached_vertices,
@@ -1562,6 +1605,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
