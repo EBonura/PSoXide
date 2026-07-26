@@ -35,11 +35,37 @@ The console cost tracks head travel; PSoXide returns essentially two values
 regardless of distance. Any game whose streaming budget depends on seek cost is
 being modelled optimistically by one to two orders of magnitude.
 
+#### The seek data does not support a model yet
+
+Attempted 2026-07-26, not implemented. Four distances is too few, and they are
+non-monotonic: +128 sectors measures 361 ms while +512 measures 192 ms. Neither
+a linear nor a square-root fit through the endpoints gets within 2x of the
+middle points (both land ~0.2-0.5x at d=16 and d=128). No monotonic physical
+model reproduces this, and baking a non-monotonic table into the emulator would
+encode one disc's anomaly as hardware behaviour.
+
+What it needs: more seek distances, several repeats each, ideally on more than
+one disc, so an outlier is visible as an outlier. That is a guest-side change to
+records `0x90`-`0x93`, so it wants doing before the next burn rather than after.
+
 ### CD-ROM read: four times too SLOW
 
 Console 13.20 ms/sector single speed, 6.49 double, both within 1% of spec.
 PSoXide takes 53.5 ms/sector, so a data read costs 4x what it should. This is the
 opposite direction to the seek error, so the two do not cancel.
+
+The constants are NOT the problem: `CD_READ_TIME` is 451,584 cycles, exactly
+13.33 ms, and `sector_read_cycles()` halves it for double speed. Both are right.
+The 4x is somewhere in the DataReady scheduling. `cdrom.rs` pushes a due
+DataReady event out by `CD_READ_TIME / 2` whenever a CD IRQ is still pending
+unacknowledged, which is a plausible contributor but accounts for 1.5x at most on
+its own.
+
+Confounder to rule out first: the probe acknowledges INT1 without ever reading
+the sector data. Real software drains the sector; if the emulator's pacing
+depends on that, the 4x is partly the probe's own doing and the fix belongs in
+the guest. Settle this with emulator-side instrumentation of actual INT1
+deltas before changing any scheduling.
 
 ### CD-DA contention: no measurable effect, on either
 
