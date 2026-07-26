@@ -50,6 +50,7 @@ pub fn draw_layout(
         state.menu.draw(ctx, dt, menu_warning);
         burn::draw(ctx, state);
         draw_recording_indicator(ctx, state);
+        draw_freecam_indicator(ctx, state);
         draw_status_toast(ctx, state);
         return;
     }
@@ -81,6 +82,7 @@ pub fn draw_layout(
     state.menu.draw(ctx, dt, menu_warning);
     burn::draw(ctx, state);
     draw_recording_indicator(ctx, state);
+    draw_freecam_indicator(ctx, state);
     draw_status_toast(ctx, state);
 }
 
@@ -251,11 +253,15 @@ fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
     );
     let text = egui::Color32::from_rgba_premultiplied(235, 238, 242, (255.0 * alpha) as u8);
 
-    let toast_y = if state.input_recording_status().0 {
-        94.0
-    } else {
-        48.0
-    };
+    // Sit below whichever persistent indicators are up, so a toast never
+    // lands on top of the freecam or recording badge.
+    let mut toast_y = 48.0;
+    if state.input_recording_status().0 {
+        toast_y += 46.0;
+    }
+    if state.freelook.enabled {
+        toast_y += 46.0;
+    }
     egui::Area::new("status-toast".into())
         .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, toast_y))
         .order(egui::Order::Foreground)
@@ -270,6 +276,48 @@ fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
                     ui.add(
                         egui::Label::new(egui::RichText::new(msg).color(text).size(13.0)).wrap(),
                     );
+                });
+        });
+}
+
+/// Persistent freecam badge.
+///
+/// Freecam mutes the guest pad entirely, so without a standing indicator a
+/// forgotten freecam looks exactly like a hung game: buttons do nothing and
+/// nothing on screen says why. The toolbar EYE button already shows the state,
+/// but it is not always visible and it does not explain the muted controller.
+fn draw_freecam_indicator(ctx: &egui::Context, state: &AppState) {
+    if !state.freelook.enabled {
+        return;
+    }
+    let y = if state.input_recording_status().0 {
+        94.0
+    } else {
+        48.0
+    };
+    egui::Area::new("freecam-indicator".into())
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, y))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_premultiplied(12, 22, 30, 235))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 191, 230)))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0, 191, 230),
+                            crate::icons::EYE.to_string(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "FREECAM  game input paused · tap L3+R3 to exit · hold to reset",
+                            )
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                        );
+                    });
                 });
         });
 }
