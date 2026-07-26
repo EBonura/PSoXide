@@ -973,6 +973,9 @@ fn run_headless_launch(
     if args.cd_command_log.is_some() {
         bus.cdrom.enable_command_log(65_536);
     }
+    if std::env::var_os("PSOXIDE_DUMP_DMA_LL").is_some() {
+        bus.set_gpu_linked_list_log_enabled(true);
+    }
 
     if args.wireframe {
         bus.gpu.wireframe_enabled = true;
@@ -1065,7 +1068,7 @@ fn run_headless_launch(
             let mut writer = std::io::BufWriter::new(file);
             writeln!(
                 writer,
-                "route_tick,tape_frame,display_start_changed,commands,draws,fills,textured_tris,textured_quads,textured_rects,sky_quads,texture_windows,texture_window_zero,texture_window_changes,texture_window_redundant,gpu_cycles,dma_gpu_cycles,fill_cycles,textured_tri_cycles,textured_quad_cycles,textured_rect_cycles,other_cycles"
+                "route_tick,tape_frame,display_start_changed,frame_draw_words,frame_draw_hash,run_draw_words,run_draw_hash,commands,draws,fills,textured_tris,textured_quads,textured_rects,sky_quads,texture_windows,texture_window_zero,texture_window_changes,texture_window_redundant,gpu_cycles,dma_gpu_cycles,fill_cycles,textured_tri_cycles,textured_quad_cycles,textured_rect_cycles,other_cycles"
             )
             .map_err(|e| format!("write GPU stats log {}: {e}", path.display()))?;
             Some(writer)
@@ -1078,6 +1081,10 @@ fn run_headless_launch(
     let mut gpu_prev_timing = bus.gpu.gp0_timing_histogram();
     let mut gpu_prev_dma_timing = bus.gpu.gp0_dma_timing_histogram();
     let mut gpu_prev_texture_window = None;
+    let mut gpu_frame_draw_words = 0u64;
+    let mut gpu_frame_draw_hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut gpu_run_draw_words = 0u64;
+    let mut gpu_run_draw_hash = 0xcbf2_9ce4_8422_2325u64;
     let mut route_last_cpu_tick = cpu.tick();
     let mut route_last_bus_cycles = bus.cycles();
     let mut route_last_icache_profile = cpu.instruction_cache_profile();
@@ -1325,6 +1332,25 @@ fn run_headless_launch(
                 let mut texture_window_changes = 0u64;
                 let mut texture_window_redundant = 0u64;
                 for command in &commands {
+                    // Hash only commands that can affect the displayed framebuffer.
+                    // Texture uploads are intentionally excluded: their transfer
+                    // timing can move across a display flip without changing a draw.
+                    if matches!(command.opcode, 0x02 | 0x20..=0x7F | 0xE1..=0xE6) {
+                        for word in core::iter::once(command.fifo.len() as u32)
+                            .chain(command.fifo.iter().copied())
+                        {
+                            for byte in word.to_le_bytes() {
+                                gpu_frame_draw_hash ^= u64::from(byte);
+                                gpu_frame_draw_hash =
+                                    gpu_frame_draw_hash.wrapping_mul(0x0000_0100_0000_01b3);
+                                gpu_run_draw_hash ^= u64::from(byte);
+                                gpu_run_draw_hash =
+                                    gpu_run_draw_hash.wrapping_mul(0x0000_0100_0000_01b3);
+                            }
+                            gpu_frame_draw_words = gpu_frame_draw_words.saturating_add(1);
+                            gpu_run_draw_words = gpu_run_draw_words.saturating_add(1);
+                        }
+                    }
                     if matches!(command.opcode, 0x20..=0x7F) {
                         draws += 1;
                     }
@@ -1379,11 +1405,15 @@ fn run_headless_launch(
                 let other_cycles = gpu_cycles.saturating_sub(classified_cycles);
                 writeln!(
                     writer,
-                    "{route_ticks},{tape_cursor},{display_start_changed},{},{draws},{fills},{textured_tris},{textured_quads},{textured_rects},{sky_quads},{texture_windows},{texture_window_zero},{texture_window_changes},{texture_window_redundant},{gpu_cycles},{dma_gpu_cycles},{fill_cycles},{textured_tri_cycles},{textured_quad_cycles},{textured_rect_cycles},{other_cycles}",
+                    "{route_ticks},{tape_cursor},{display_start_changed},{gpu_frame_draw_words},0x{gpu_frame_draw_hash:016x},{gpu_run_draw_words},0x{gpu_run_draw_hash:016x},{},{draws},{fills},{textured_tris},{textured_quads},{textured_rects},{sky_quads},{texture_windows},{texture_window_zero},{texture_window_changes},{texture_window_redundant},{gpu_cycles},{dma_gpu_cycles},{fill_cycles},{textured_tri_cycles},{textured_quad_cycles},{textured_rect_cycles},{other_cycles}",
                     commands.len(),
                 )
                 .map_err(|e| e.to_string())?;
                 gpu_stats_last_display_start = display_start;
+                if display_start_changed != 0 {
+                    gpu_frame_draw_words = 0;
+                    gpu_frame_draw_hash = 0xcbf2_9ce4_8422_2325;
+                }
             }
         }
         if current_guest_frames != observed_guest_frames {
@@ -1560,6 +1590,21 @@ fn run_headless_launch(
                 "[cli] CD command log → {} ({} commands)",
                 path.display(),
                 bus.cdrom.command_log().len()
+            );
+        }
+    }
+    if let Some(path) = std::env::var_os("PSOXIDE_DUMP_DMA_LL") {
+        let mut out = String::from("transfer,address,header\n");
+        for &(transfer, address, header) in bus.gpu_linked_list_log() {
+            out.push_str(&format!("{transfer},{address:#08X},{header:#010X}\n"));
+        }
+        std::fs::write(&path, out)
+            .map_err(|e| format!("write GPU linked-list log {}: {e}", path.to_string_lossy()))?;
+        if emit_summary {
+            eprintln!(
+                "[cli] GPU linked-list log → {} ({} nodes)",
+                path.to_string_lossy(),
+                bus.gpu_linked_list_log().len()
             );
         }
     }
