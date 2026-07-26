@@ -106,6 +106,11 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.5: Sweeps aimed at two findings the first full capture could not settle.
+//       Ten seek distances plus two backward seeks, because four forward
+//       distances came back non-monotonic and no fit reached the middle
+//       points. Twelve SIO setup delays, because the console answered at 0,
+//       fell silent at 128 and answered again at 384.
 // v1.4: The capture is frozen when taken. Paging previously REBUILT the whole
 //       payload, and some observations are live (the pad poll is refreshed
 //       every frame), so each page carried a different payload while only the
@@ -130,9 +135,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 4;
+const SUITE_VERSION_MINOR: u8 = 5;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.4";
+const SUITE_VERSION: &str = "HWTEST v1.5";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -148,6 +153,11 @@ const PROBE_VARIANT_COUNT: usize = 5;
 /// to find what timing a strict original pad (SCPH-1200) needs. `setup_spins` is
 /// a delay after asserting the select line; `interbyte_spins` is a fixed gap
 /// after each byte. Both are bounded STAT reads, no `/ACK`/CTRL machinery.
+/// Setup-delay values swept by records 0xD0.., in SIO spin units.
+const SIO_SETUP_SWEEP: [u32; 12] = [
+    0, 64, 128, 192, 256, 320, 448, 512, 640, 896, 1024, 1536,
+];
+
 const PROBE_VARIANTS: [(&str, u32, u32); PROBE_VARIANT_COUNT] = [
     ("SETUP 0", 0, 0),
     ("SETUP 128", 128, 0),
@@ -507,7 +517,7 @@ struct ScanReport {
     runs: u8,
 }
 
-const TIMING_RECORD_COUNT: usize = 144;
+const TIMING_RECORD_COUNT: usize = 176;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = 9;
 const PRECISION_VALUE_COUNT: usize = 192;
 
@@ -3151,6 +3161,53 @@ fn run_timing_scan() -> TimingReport {
         sample_timing(0x9C, 8, || cd_read_with_audio(false, 8)),
     );
     push_timing_record(&mut records, &mut next, sample_timing(0x9D, 1, cd_play_start));
+    // Seek sweep. Four distances proved too few to model: the console measured
+    // +128 slower than +512, and no monotonic fit came within 2x of the middle
+    // points. Ten distances with the same five repeats each make an outlier
+    // visible AS an outlier rather than as the shape of the curve.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC0, 2, || cd_seek_distance(2)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC1, 4, || cd_seek_distance(4)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC2, 8, || cd_seek_distance(8)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC3, 32, || cd_seek_distance(32)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC4, 64, || cd_seek_distance(64)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC5, 256, || cd_seek_distance(256)),
+    );
+    // Backward seeks at the same distances. A drive settles differently
+    // approaching from outside, and every existing record seeks forward only,
+    // so a direction asymmetry would currently be invisible.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC6, 64, || cd_seek_backward(64)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC7, 256, || cd_seek_backward(256)),
+    );
     push_timing_record(
         &mut records,
         &mut next,
@@ -3337,6 +3394,22 @@ fn run_timing_scan() -> TimingReport {
         &mut next,
         sample_timing(0xB9, 1, || timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)),
     );
+    // Setup-delay sweep. The console answered at setup 0, gave NO reply at 128,
+    // and answered again at 384: non-monotonic, so the threshold cannot be read
+    // off four points. Twelve evenly spaced delays bracket where a real pad
+    // starts replying, which is the SCPH-1200 problem stated as a measurement.
+    let mut sweep = 0usize;
+    while sweep < SIO_SETUP_SWEEP.len() {
+        let setup = SIO_SETUP_SWEEP[sweep];
+        push_timing_record(
+            &mut records,
+            &mut next,
+            sample_timing(0xD0 + sweep as u8, (setup / 8) as u16, move || {
+                timed_pad_poll(setup, 0)
+            }),
+        );
+        sweep += 1;
+    }
     push_timing_record(
         &mut records,
         &mut next,
@@ -4075,6 +4148,19 @@ fn cd_park(lba: u32) -> bool {
     cd_clock_reset();
     cdrom::try_set_loc_lba(lba, CD_SPINS).is_some()
         && cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[])
+}
+
+/// Seek `distance` sectors BACKWARD onto the parked origin, timing only the
+/// seek. Parks beyond the target so the head approaches from the far side.
+fn cd_seek_backward(distance: u32) -> u16 {
+    let origin = CD_TEST_LBA + distance;
+    if !cd_park(origin) {
+        return CD_FAILED;
+    }
+    if cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none() {
+        return CD_FAILED;
+    }
+    cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[]))
 }
 
 /// Seek `distance` sectors away from the parked origin and time only the seek.
