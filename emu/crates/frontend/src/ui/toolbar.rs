@@ -360,18 +360,20 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
     if ui
         .add(fl_btn)
         .on_hover_text(
-            "Freelook camera (or L3+R3 on a pad) - left stick move, right stick look, R2 boost",
+            "Freecam (or tap L3+R3 on a pad) - left stick move, right stick look, R2 boost. \
+             Hold L3+R3 to reset the camera. Game input is paused while it is on.",
         )
         .clicked()
     {
+        // Switching modes deliberately KEEPS the camera where it is, matching
+        // the pad chord. Resetting on the way out threw away the framing you
+        // had just lined up, so glancing back at the game and returning meant
+        // setting the shot up again.
         state.freelook.enabled = !state.freelook.enabled;
-        if !state.freelook.enabled {
-            state.freelook = emulator_core::FreelookState::default();
-        }
         state.status_message_set(if state.freelook.enabled {
-            "Freelook ON - left stick move, right stick look, R2 boost (L3+R3 to exit)"
+            "Freecam ON - pad drives the camera, game input paused (hold L3+R3 to reset)"
         } else {
-            "Freelook off"
+            "Freecam off - pad returns to the game"
         });
     }
     // Wireframe mode lives on the GPU, not a frontend panel -- we
