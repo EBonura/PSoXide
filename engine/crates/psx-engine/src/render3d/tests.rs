@@ -1305,7 +1305,7 @@ fn prepared_depth_quad_splits_before_ps1_extent_rejection() {
         uv_words,
         colors,
         material,
-        options,
+        &options,
         prepared,
     );
 
@@ -1350,14 +1350,44 @@ fn adaptive_quad_packet_count_with_profile(
         pass.submit_adaptive_textured_gouraud_view_quad_uv_words(
             &mut packets,
             positions,
+            None,
+            false,
+            None,
             uv_words,
             colors,
             projection,
             material,
-            options,
+            &options,
         )
     };
     (packets.len(), stats)
+}
+
+#[cfg(feature = "tr-subdivision-lattice")]
+#[test]
+fn adaptive_lattice_root_projection_reuse_is_exact() {
+    let projection = WorldProjection::new(160, 120, 256, 16);
+    let vertices = [
+        ViewVertex::new(-300, -200, 2000),
+        ViewVertex::new(0, -180, 2100),
+        ViewVertex::new(300, -160, 2200),
+        ViewVertex::new(-280, 0, 2300),
+        ViewVertex::new(0, 20, 2400),
+        ViewVertex::new(280, 40, 2500),
+        ViewVertex::new(-260, 200, 2600),
+        ViewVertex::new(0, 220, 2700),
+        ViewVertex::new(260, 240, 2800),
+    ];
+    load_adaptive_view_projection_gte(projection);
+    let projected =
+        project_adaptive_view_lattice_gte(vertices, projection, None).expect("valid lattice");
+    let root = [projected[0], projected[2], projected[6], projected[8]];
+
+    load_adaptive_view_projection_gte(projection);
+    let reused = project_adaptive_view_lattice_gte(vertices, projection, Some(root))
+        .expect("valid reused lattice");
+
+    assert_eq!(reused, projected);
 }
 
 #[test]
@@ -1477,7 +1507,7 @@ fn adaptive_triangle_packet_count(depth: i32) -> (usize, WorldRenderStats) {
             colors,
             projection,
             material,
-            options,
+            &options,
         )
     };
     (packets.len(), stats)
@@ -1592,7 +1622,7 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
         [0, 1, 2, 3],
         first_colors,
         material.textured_gouraud_packet_material(),
-        options,
+        &options,
         prepared,
     );
     let packed_colors = (
@@ -1602,8 +1632,13 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
         packet.color3,
     );
     let first_v0 = packet.v0;
-    let warmed =
-        pass.try_submit_warmed_textured_gouraud_quad(&mut packet, second, false, options, prepared);
+    let warmed = pass.try_submit_warmed_textured_gouraud_quad(
+        &mut packet,
+        second,
+        false,
+        &options,
+        prepared,
+    );
 
     assert_eq!(valid, 1);
     assert!(warmed.is_some());
