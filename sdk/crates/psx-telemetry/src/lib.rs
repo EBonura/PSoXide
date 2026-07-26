@@ -658,11 +658,19 @@ pub mod counter {
 
     /// TR subdivision candidates that successfully emitted geometry.
     pub const ROOM_SURF_TR_SUBDIVISION_SUBMITTED: u16 = 239;
+
+    /// Primitive packets emitted by room surface draws, excluding water,
+    /// props, actors, and other scene passes.
+    pub const ROOM_SURFACE_PACKETS: u16 = 240;
+
+    /// World commands emitted by room surface draws, excluding water, props,
+    /// actors, and other scene passes.
+    pub const ROOM_SURFACE_COMMANDS: u16 = 241;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 240;
+pub const COUNTER_COUNT: usize = 242;
 
-const _: () = assert!(counter::ROOM_SURF_TR_SUBDIVISION_SUBMITTED as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::ROOM_SURFACE_COMMANDS as usize == COUNTER_COUNT - 1);
