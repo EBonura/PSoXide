@@ -1031,19 +1031,20 @@ fn run_headless_launch(
             let mut writer = std::io::BufWriter::new(file);
             writeln!(
                 writer,
-                "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed,port1_polls"
+                "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed,port1_polls,icache_refill_events_delta,icache_refill_words_delta,icache_refill_stall_cycles_delta"
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
             let area = bus.gpu.display_area();
             writeln!(
                 writer,
-                "0,0,{},{},0,0,{},{},{},{},0",
+                "0,0,{},{},0,0,{},{},{},{},0,{},0,0,0",
                 cpu.tick(),
                 bus.cycles(),
                 area.x,
                 area.y,
                 area.width,
-                area.height
+                area.height,
+                bus.port1_completed_polls(),
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
             Some(writer)
@@ -1079,6 +1080,7 @@ fn run_headless_launch(
     let mut gpu_prev_texture_window = None;
     let mut route_last_cpu_tick = cpu.tick();
     let mut route_last_bus_cycles = bus.cycles();
+    let mut route_last_icache_profile = cpu.instruction_cache_profile();
     if args.input_tape_delay_ticks == 0 && !tape_poll_bound {
         if let Some(samples) = tape_samples.as_ref() {
             samples[tape_cursor].apply_to_bus(&mut bus);
@@ -1272,21 +1274,32 @@ fn run_headless_launch(
                 let display_start_changed = u8::from(display_start != route_last_display_start);
                 let cpu_tick = cpu.tick();
                 let bus_cycles = bus.cycles();
+                let icache_profile = cpu.instruction_cache_profile();
                 writeln!(
                     writer,
-                    "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed},{}",
+                    "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed},{},{},{},{}",
                     cpu_tick.saturating_sub(route_last_cpu_tick),
                     bus_cycles.saturating_sub(route_last_bus_cycles),
                     area.x,
                     area.y,
                     area.width,
                     area.height,
-                    bus.port1_completed_polls()
+                    bus.port1_completed_polls(),
+                    icache_profile
+                        .refill_events
+                        .saturating_sub(route_last_icache_profile.refill_events),
+                    icache_profile
+                        .refill_words
+                        .saturating_sub(route_last_icache_profile.refill_words),
+                    icache_profile
+                        .refill_stall_cycles
+                        .saturating_sub(route_last_icache_profile.refill_stall_cycles),
                 )
                 .map_err(|e| e.to_string())?;
                 route_last_display_start = display_start;
                 route_last_cpu_tick = cpu_tick;
                 route_last_bus_cycles = bus_cycles;
+                route_last_icache_profile = icache_profile;
             }
             if let Some(writer) = gpu_frame_stats_log.as_mut() {
                 let commands = bus.gpu.drain_completed_cmd_log();
