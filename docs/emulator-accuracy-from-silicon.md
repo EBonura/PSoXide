@@ -7,6 +7,83 @@ rather than argued about.
 A gap only belongs here once it has been observed on hardware. Suspicions from
 reading code belong in the relevant subsystem doc instead.
 
+## The first complete capture (2026-07-26)
+
+`docs/hardware-refs/px7-silicon-2026-07-26.txt`, HWTEST v1.4, recovered from a
+console recording via `tools/hwtest-video-qr.py` and CRC-valid. 158 values differ
+from PSoXide. Compare with `make hwtest-silicon SILICON=<that file>`.
+
+The harness validates itself on this capture: console single-speed reads measure
+13.20 ms/sector against a 13.33 ms spec, and double-speed 6.49 against 6.67. The
+CD numbers below are therefore trustworthy in absolute terms, not just relative.
+
+### GPU rasterisation is pixel-exact
+
+All 22 bit-exact raster hashes match silicon, every primitive family and edge
+case. Whatever else differs, the rasterizer draws the right pixels.
+
+### CD-ROM seek: far too fast, and distance-independent
+
+| Seek | Console | PSoXide |
+|---|---|---|
+| +1 sector | 181 hblanks (12 ms) | 12 |
+| +16 | 1239 (79 ms) | 13 |
+| +128 | 5679 (361 ms) | 761 |
+| +512 | 3022 (192 ms) | 763 |
+
+The console cost tracks head travel; PSoXide returns essentially two values
+regardless of distance. Any game whose streaming budget depends on seek cost is
+being modelled optimistically by one to two orders of magnitude.
+
+### CD-ROM read: four times too SLOW
+
+Console 13.20 ms/sector single speed, 6.49 double, both within 1% of spec.
+PSoXide takes 53.5 ms/sector, so a data read costs 4x what it should. This is the
+opposite direction to the seek error, so the two do not cancel.
+
+### CD-DA contention: no measurable effect, on either
+
+`0x9B` (read with audio playing) against `0x9C` (audio stopped) measures 1647
+against 1657 hblanks on console: no contention at this granularity. A negative
+result, and worth recording as such, since the premise of the probe was that
+hardware would show a penalty here.
+
+### GPU fill: the emulator rasterises on the CPU's timeline
+
+Console fills are 3x to 80x faster than PSoXide for small primitives, and
+SLOWER for large ones (`gpu_fill_rect_mono_16x32`: console 24021, PSoXide
+13804). The two are not measuring the same thing. Hardware absorbs packets into
+the FIFO and draws in the background, so the CPU-side interval reflects
+submission until the FIFO backs up; PSoXide appears to rasterise during the GP0
+write, putting draw cost on the CPU's clock.
+
+`gpu_fill_quad_flat_4x64` matches almost exactly (9987 against 10114) because at
+that size the console genuinely blocks, which is consistent with this reading.
+
+This is the data that was missing to model GPU timing at all, and it says the
+current model overstates CPU cost for small draws and understates it for large.
+
+### SIO: one pad pacing does not work on hardware at all
+
+| Variant | Console | PSoXide |
+|---|---|---|
+| 0 | 7516 | 375 |
+| 1 | **no response** | 1391 |
+| 2 | 9587 | 3439 |
+| 3 | 12304 | 6521 |
+
+Console polls take 2x to 20x longer, and variant 1 gets no valid reply at all
+while PSoXide answers happily. That is the SCPH-1200 setup-delay family of
+problem, now a standing measurement rather than a session of guesswork.
+
+### MDEC
+
+Table uploads cost the console about 1.6x what PSoXide charges (99 against 66
+cycles for a 16-word luma table). Decode is roughly linear on console (4205 for
+one macroblock, 7463 for two) and wildly non-linear in PSoXide (3119, then
+39374), which points at the emulator's lazy decode-on-read rather than at
+hardware.
+
 ## SPU: an all-zero ADSR does not decay
 
 **Status:** open. **Found:** 2026-07-26, console recording, HWTEST v1.2 disc.
