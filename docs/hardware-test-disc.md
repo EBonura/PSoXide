@@ -228,27 +228,32 @@ Boot, watch a bar, scan five QR codes, then a menu. That is the whole disc.
    showed a black screen for tens of seconds and looked dead.
 2. **The capture pages appear by themselves.** No keypress. Left/Right pages
    through all five QR symbols; the header reads `PX7 CAPTURE  PAGE 01/05`.
-3. **TRIANGLE opens the menu.** From there:
-   - `RERUN STARTUP TESTS` does exactly what boot does and lands back on the
-     capture pages, so a re-run and a fresh boot are indistinguishable.
-   - `VIEW CAPTURE (QR PAGES)` returns to the capture.
-   - `RESULTS: ...` per-section conformance detail.
-   - `SCAN: ...` the CPU/GTE/SPU sweeps.
-   - `PROBE: ...` the controller probe and the tier-2 audio probes.
+3. **START opens the main menu**, from any screen, and it is printed on every
+   screen so it does not have to be remembered. Two levels, each fitting on
+   screen without scrolling:
 
-   Up/Down moves the cursor, Cross runs the selection, TRIANGLE returns here
-   from anywhere.
+   | Root | Contains |
+   |---|---|
+   | `RERUN STARTUP TESTS` | Exactly what boot runs, returning to the capture pages, so a re-run and a fresh boot are indistinguishable |
+   | `VIEW CAPTURE (QR PAGES)` | Back to the five QR symbols |
+   | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
+   | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
+   | `TARGETED PROBES` | Controller port, and the PA1-PA5 audio probes |
+   | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
 
-**The disc is silent unless you ask.** SQUARE steps the audio readout: off,
-then each of the four tone rates, then off again. Off is the default and the
-menu shows the current state. Auto-playing it meant the console screeched harsh
+   Up/Down moves, Cross runs, START backs out one level and closes the menu
+   from the root.
+
+**The disc is silent unless you ask.** The `AUDIO READOUT` menu row, or SQUARE
+as a shortcut from any screen, steps the tone: off, then each of the four rates,
+then off again. Off is the default and the menu row shows the current state. Auto-playing it meant the console screeched harsh
 square waves at full volume the moment it booted, which is alarming and useless
 to anyone not recording at that instant.
 
 ### Recording a capture
 
 Record video **and** audio from before power-on. Let the bar finish. Scan the
-five pages. Then press SQUARE and keep recording at least 15 seconds: one
+five pages. Then start the audio readout and keep recording at least 15 seconds: one
 repetition of the audio payload is ~13.6 s. If it will not decode, press SQUARE
 again for a slower, more robust rate; the decoder detects which was used.
 
