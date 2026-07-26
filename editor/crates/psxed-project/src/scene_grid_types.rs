@@ -2586,6 +2586,55 @@ pub struct GridWalls {
 }
 
 impl GridWalls {
+    /// Drop exact duplicate wall segments, keeping the first of each run.
+    ///
+    /// A duplicate here is byte-identical: same heights, material, solidity and
+    /// dropped corner, on the same edge. Two such walls occupy the same plane,
+    /// so the second is invisible and costs a full surface to draw -- cortex_v3
+    /// carried 30 of them across 185 authored segments. The cooker only rejects
+    /// the DIFFERENT case, where two sectors each claim the same physical edge
+    /// (`DuplicatePhysicalWall`); a list that repeats itself passes straight
+    /// through into the room cache.
+    ///
+    /// Order is preserved so ids and paint order stay stable. Returns how many
+    /// segments were removed.
+    pub fn dedupe_exact(&mut self) -> usize {
+        let mut removed = 0;
+        for direction in GridDirection::ALL {
+            let faces = self.get_mut(direction);
+            let mut kept: Vec<GridVerticalFace> = Vec::with_capacity(faces.len());
+            for face in faces.drain(..) {
+                if kept.contains(&face) {
+                    removed += 1;
+                } else {
+                    kept.push(face);
+                }
+            }
+            *faces = kept;
+        }
+        removed
+    }
+
+    /// Exact duplicate wall segments, without modifying anything.
+    ///
+    /// Lets the editor show the count on a button before the user commits to
+    /// deleting, and lets a test assert the scan and the removal agree.
+    pub fn duplicate_count(&self) -> usize {
+        let mut total = 0;
+        for direction in GridDirection::ALL {
+            let faces = self.get(direction);
+            let mut seen: Vec<&GridVerticalFace> = Vec::with_capacity(faces.len());
+            for face in faces {
+                if seen.contains(&face) {
+                    total += 1;
+                } else {
+                    seen.push(face);
+                }
+            }
+        }
+        total
+    }
+
     /// Immutable walls for one direction.
     pub fn get(&self, direction: GridDirection) -> &[GridVerticalFace] {
         match direction {
@@ -3004,5 +3053,68 @@ mod material_uv_motion_tests {
         assert_eq!(layer.texture_mode, MaterialTextureMode::Generated);
         assert_eq!(layer.generated.noise, noise);
         assert!(layer.legacy_texture.is_none());
+    }
+}
+
+#[cfg(test)]
+mod wall_dedupe_tests {
+    use super::*;
+
+    fn wall(h: i32, material: Option<ResourceId>) -> GridVerticalFace {
+        GridVerticalFace::with_heights([0, 0, h, h], material)
+    }
+
+    /// The cortex_v3 case: the same segment repeated on one edge. Only exact
+    /// repeats go; the first copy and the ordering survive.
+    #[test]
+    fn exact_repeats_collapse_to_the_first() {
+        let mut walls = GridWalls::default();
+        let a = wall(1024, None);
+        let b = wall(2048, None);
+        walls.east = vec![a.clone(), a.clone(), b.clone(), a.clone()];
+
+        assert_eq!(walls.duplicate_count(), 2);
+        assert_eq!(walls.dedupe_exact(), 2);
+        assert_eq!(walls.east, vec![a, b], "first copy and order preserved");
+        assert_eq!(walls.duplicate_count(), 0, "a second pass finds nothing");
+    }
+
+    /// Walls that differ in ANY authored field are distinct surfaces and must
+    /// survive: same edge, different height, material, solidity or geometry.
+    #[test]
+    fn near_misses_are_left_alone() {
+        let a = wall(1024, None);
+        for variant in [
+            wall(2048, None),
+            wall(1024, Some(ResourceId(7))),
+            GridVerticalFace {
+                solid: false,
+                ..a.clone()
+            },
+            GridVerticalFace {
+                dropped_corner: Some(WallCorner::TL),
+                ..a.clone()
+            },
+        ] {
+            let mut walls = GridWalls::default();
+            walls.north = vec![a.clone(), variant];
+            assert_eq!(walls.dedupe_exact(), 0, "distinct walls must be kept");
+            assert_eq!(walls.north.len(), 2);
+        }
+    }
+
+    /// Each edge is its own list: the same segment on North and on East is two
+    /// different physical walls, not a duplicate.
+    #[test]
+    fn the_same_segment_on_two_edges_is_not_a_duplicate() {
+        let mut walls = GridWalls::default();
+        let a = wall(1024, None);
+        walls.north = vec![a.clone()];
+        walls.east = vec![a.clone()];
+        walls.west = vec![a.clone(), a];
+        assert_eq!(walls.dedupe_exact(), 1, "only the repeat within west goes");
+        assert_eq!(walls.north.len(), 1);
+        assert_eq!(walls.east.len(), 1);
+        assert_eq!(walls.west.len(), 1);
     }
 }
