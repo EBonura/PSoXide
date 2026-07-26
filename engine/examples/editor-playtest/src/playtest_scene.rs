@@ -310,6 +310,10 @@ impl Scene for Playtest {
             let room_range_culled_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
+            #[cfg(feature = "room-surface-profile")]
+            let mut room_surface_packets = 0u32;
+            #[cfg(feature = "room-surface-profile")]
+            let mut room_surface_commands = 0u32;
 
             // Live entity poses: instances bound to game entities
             // render where the entity runtime moved them (phase 3).
@@ -379,6 +383,10 @@ impl Scene for Playtest {
                     fog_far: room_record.fog_far,
                     lights: room_light_slice(LIGHTS, active.index),
                 };
+                #[cfg(feature = "room-surface-profile")]
+                let room_packet_start = primitive_packets.len();
+                #[cfg(feature = "room-surface-profile")]
+                let room_command_start = world.command_len();
                 telemetry::stage_begin(telemetry::stage::ROOM);
                 #[cfg(feature = "world-grid-visible")]
                 {
@@ -725,6 +733,15 @@ impl Scene for Playtest {
                     }
                 }
                 telemetry::stage_end(telemetry::stage::ROOM);
+                #[cfg(feature = "room-surface-profile")]
+                {
+                    room_surface_packets = room_surface_packets.saturating_add(
+                        primitive_packets.len().saturating_sub(room_packet_start) as u32,
+                    );
+                    room_surface_commands = room_surface_commands.saturating_add(
+                        world.command_len().saturating_sub(room_command_start) as u32,
+                    );
+                }
                 draw_water(
                     active.index,
                     &room_camera,
@@ -1132,6 +1149,17 @@ impl Scene for Playtest {
                 telemetry::counter::MODEL_INSTANCE_DRAWS,
                 total_instance_stats.draws as u32,
             );
+            #[cfg(feature = "room-surface-profile")]
+            {
+                telemetry::counter(
+                    telemetry::counter::ROOM_SURFACE_PACKETS,
+                    room_surface_packets,
+                );
+                telemetry::counter(
+                    telemetry::counter::ROOM_SURFACE_COMMANDS,
+                    room_surface_commands,
+                );
+            }
             telemetry::counter(
                 telemetry::counter::MODEL_INSTANCE_BOUNDS_TESTS,
                 total_instance_stats.bounds_tests as u32,
