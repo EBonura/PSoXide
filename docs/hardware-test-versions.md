@@ -30,6 +30,23 @@ header.
 
 ## History
 
+### v1.4 (2026-07-26, schema PX7)
+
+The capture is frozen when it is taken. **This is the fix that makes multi-page
+QR capture possible at all.**
+
+Paging previously called `encode_capture`, which rebuilt the entire payload from
+current state. Some observations are live: `results[PAD_POLL_TEST_INDEX]` is
+refreshed from the controller every frame in `update`. So page 1's QR encoded
+one payload, page 5's encoded another, and the whole-binary CRC stored in page 5
+described only page 5's version. Every page decoded cleanly and reconstruction
+always failed, which is exactly what three console captures did.
+
+Paging now re-renders the QR from the frozen payload (`PhotoCapture::render_page`)
+and only a genuinely new measurement re-encodes. Verified headlessly by paging
+with pad pulses and reconstructing from pages rendered at different times: CRC
+valid.
+
 ### v1.3 (2026-07-26, schema PX7)
 
 Audio readout holds its level for the whole payload. No record changed meaning;
