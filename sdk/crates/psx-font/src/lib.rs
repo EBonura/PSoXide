@@ -1134,8 +1134,89 @@ impl FontAtlas {
 // Tests (host-side -- pure data-transform checks)
 // ======================================================================
 
+// ======================================================================
+// TextSink -- one text interface for UI code
+// ======================================================================
+
+/// The minimum a widget needs from a text renderer: draw a run at a position
+/// in a colour, and measure it.
+///
+/// UI code written against this works with any renderer -- [`FontAtlas`], a
+/// scaled bitmap font, or a game's own atlas -- instead of being written twice
+/// because two renderers happen to have different inherent methods. That is the
+/// situation this exists to prevent: a caller with a list, a menu or a dialog to
+/// draw should not care which one is behind it.
+///
+/// Coordinates are screen pixels with the origin top-left, matching the rest of
+/// the SDK's immediate-mode drawing.
+pub trait TextSink {
+    /// Draw `text` with its top-left corner at `(x, y)`.
+    fn draw(&self, x: i16, y: i16, text: &str, tint: (u8, u8, u8));
+
+    /// Width of `text` in screen pixels, using the same metrics `draw` will.
+    fn width(&self, text: &str) -> i16;
+
+    /// Baseline-to-baseline distance for stacked rows.
+    fn line_height(&self) -> i16;
+
+    /// Draw `text` centred on `x`. Provided so every caller does not repeat the
+    /// half-width arithmetic, and so a renderer with non-integer metrics can
+    /// override the rounding.
+    fn draw_centered(&self, x: i16, y: i16, text: &str, tint: (u8, u8, u8)) {
+        self.draw(x - self.width(text) / 2, y, text, tint);
+    }
+}
+
+impl TextSink for FontAtlas {
+    fn draw(&self, x: i16, y: i16, text: &str, tint: (u8, u8, u8)) {
+        FontAtlas::draw_text(self, x, y, text, tint);
+    }
+
+    fn width(&self, text: &str) -> i16 {
+        FontAtlas::text_width(self, text) as i16
+    }
+
+    fn line_height(&self) -> i16 {
+        self.font().line_height as i16
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn centered_text_is_symmetric_about_the_anchor() {
+        // A stub renderer keeps the contract test independent of any atlas
+        // upload, which needs hardware.
+        struct Fixed(i16);
+        impl super::TextSink for Fixed {
+            fn draw(&self, _x: i16, _y: i16, _t: &str, _c: (u8, u8, u8)) {}
+            fn width(&self, text: &str) -> i16 {
+                self.0 * text.len() as i16
+            }
+            fn line_height(&self) -> i16 {
+                8
+            }
+        }
+        struct Spy(core::cell::Cell<i16>);
+        impl super::TextSink for Spy {
+            fn draw(&self, x: i16, _y: i16, _t: &str, _c: (u8, u8, u8)) {
+                self.0.set(x);
+            }
+            fn width(&self, text: &str) -> i16 {
+                4 * text.len() as i16
+            }
+            fn line_height(&self) -> i16 {
+                8
+            }
+        }
+        let f = Fixed(4);
+        assert_eq!(super::TextSink::width(&f, "abcd"), 16);
+        let spy = Spy(core::cell::Cell::new(-1));
+        spy.draw_centered(160, 0, "abcd", (0, 0, 0));
+        // 4 glyphs * 4 px = 16 wide, so centred on 160 starts at 152.
+        assert_eq!(spy.0.get(), 152);
+    }
+
     use super::*;
 
     /// Synthetic font: two 8×2 glyphs, LSB-first, for bit-unpacking
