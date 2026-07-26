@@ -98,7 +98,7 @@ const fn tone_block(period: usize, flags: u8) -> [u8; BLOCK_BYTES] {
     block
 }
 
-/// Upload `payload` to SPU RAM, leaving it SILENT and ready.
+/// Upload `payload` to SPU RAM and start transmitting at the fastest rate.
 ///
 /// Returns the number of bits transmitted, or 0 if the stream would not fit in
 /// SPU RAM. Runs once, after the battery: it takes over voice 0 and ~290 KiB
@@ -154,8 +154,12 @@ pub(crate) fn prepare(payload: &[u8]) -> u32 {
         spu::upload_adpcm(spu::SpuAddr::new(addr), &stage[..staged * BLOCK_BYTES]);
     }
 
-    // Deliberately NOT keyed on. See stop()/set_rate().
-    stop();
+    // On by default. The readout is the whole reason the disc can hand a
+    // payload back without photographing five symbols, and leaving it off cost
+    // a console session: the operator has no reason to know a silent disc is
+    // withholding anything. The earlier problem was VOLUME, not existence, and
+    // that is fixed in set_rate.
+    set_rate(0);
     emitted as u32
 }
 
