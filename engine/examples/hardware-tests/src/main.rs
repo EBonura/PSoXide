@@ -106,6 +106,10 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.2: Audio readout on by default. Off-by-default cost a console session:
+//       the operator has no reason to know a silent disc is withholding the
+//       payload, and the QR route then lost a symbol, which costs the whole
+//       capture. Volume stays at the reduced level.
 // v1.1: Operator flow. Boot runs the battery behind a visible progress bar,
 //       then lands on the capture pages; a main menu (TRIANGLE) reruns the
 //       startup tests or opens results, scans and probes; the audio readout is
@@ -117,9 +121,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 1;
+const SUITE_VERSION_MINOR: u8 = 2;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.1";
+const SUITE_VERSION: &str = "HWTEST v1.2";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -1576,8 +1580,8 @@ struct HardwareTests {
     /// frame while in the controller probe. Used to find which setup/inter-byte
     /// timing wakes a strict original pad.
     probe_variants: [psx_pad::RawPoll; PROBE_VARIANT_COUNT],
-    /// Index into `audio_link::RATE_DIVISORS` for the readout tone rate.
-    /// Zero means off, so the disc is silent unless asked.
+    /// Readout tone rate: 0 is off, otherwise `RATE_DIVISORS[audio_rate - 1]`.
+    /// Starts at the fastest rate so a recording always carries the payload.
     audio_rate: usize,
     /// Selected row on the current menu page.
     menu_cursor: usize,
@@ -1712,8 +1716,10 @@ impl HardwareTests {
         self.page = 0;
     }
 
-    /// Step the audio readout: off, then each rate, then off again. Off is the
-    /// default so the disc is silent unless the operator asks for the tone.
+    /// Step the audio readout: each rate, then off, then back round. It starts
+    /// on, so a recording carries the payload without anyone remembering to
+    /// enable it; the cycle is for dropping to a slower, more robust rate when
+    /// a capture chain cannot decode the fastest one.
     fn cycle_audio_readout(&mut self) {
         self.audio_rate = (self.audio_rate + 1) % (audio_link::RATE_DIVISORS.len() + 1);
         if self.audio_rate == 0 {
@@ -1812,9 +1818,9 @@ impl Scene for HardwareTests {
         // both alarming and useless to anyone not recording at that moment.
         // SQUARE starts it when the operator is ready.
         let bits = audio_link::prepare(self.timing_capture.binary());
-        tty::print("hardware-tests: audio-link ready bits=");
+        tty::print("hardware-tests: audio-link transmitting bits=");
         tty_print_dec_u16(bits as u16);
-        tty::println(" (press SQUARE to transmit)");
+        tty::println(" (SQUARE changes rate / off)");
         draw_init_progress(1, 1, (96, 240, 128));
     }
 
