@@ -73,6 +73,10 @@ Result flags:
 - `--counter-log <csv>`: per-frame telemetry counters (room masks, stream stats, camera pose). Used for runtime diagnosis (see `docs/floors-plan.md`).
 - `--dump-guest-profile`: aggregate stage/GTE summary to stdout.
 - `--dump-hw <ppm>` and `--dump-hash`: final frame image plus vram/display hashes. Look at the frame to confirm gameplay rendered, not menu or sky-only.
+- `--pc-sample-callsite-log <csv>`: out-of-band PC, `$ra`, `$sp+20`, and
+  `$sp+36` samples. The two stack words recover callers through the standard
+  compiler-builtins wrapper and its inner 16-byte frame, so time inside
+  `memcpy`/`memset` can be attributed without changing guest timing.
 
 Gotchas:
 - `--input-tape` cannot combine with `--hold-forward` or `--hold-run`.
