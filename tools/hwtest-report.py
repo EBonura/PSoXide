@@ -265,6 +265,10 @@ class ScanSummary:
 class Capture:
     schema: str
     version: int
+    # Suite version: what the record ids MEAN. (0, 0) for PX5/PX6, which
+    # carried no such field.
+    suite_major: int
+    suite_minor: int
     conformance_run: int
     timing_run: int
     conformance_digest: int
@@ -290,7 +294,7 @@ PX6_BINARY_LEN = 1_733
 PX6_PAGE_COUNT = 3
 # PX7: explicit per-record ids, a median column, and 128 record slots.
 PX7_PRECISION_COUNT = 192
-PX7_BINARY_LEN = 2_637
+PX7_BINARY_LEN = 2_639
 PX7_PAGE_COUNT = 5
 PX7_RECORD_SLOTS = 144
 PX7_RECORD_UNUSED = 0xFF
@@ -374,13 +378,23 @@ def parse_capture(payloads: list[str]) -> Capture:
     expected_version = {"PX5": 1, "PX6": 2, "PX7": 3}[schema]
     if version != expected_version:
         raise ValueError(f"unsupported {schema} binary version {version}")
-    conformance_run = binary[5]
-    timing_run = binary[6]
-    test_count = binary[7]
-    timing_count = binary[8]
-    memory_count = binary[9]
-    status_bits = binary[10]
-    scan_count = binary[11]
+    # PX7 inserted the suite version after the schema version, so every later
+    # header field shifts by two bytes.
+    if schema == "PX7":
+        suite_major = binary[5]
+        suite_minor = binary[6]
+        head = 7
+    else:
+        suite_major = 0
+        suite_minor = 0
+        head = 5
+    conformance_run = binary[head]
+    timing_run = binary[head + 1]
+    test_count = binary[head + 2]
+    timing_count = binary[head + 3]
+    memory_count = binary[head + 4]
+    status_bits = binary[head + 5]
+    scan_count = binary[head + 6]
     expected_records = PX7_RECORD_SLOTS if schema == "PX7" else len(RECORD_IDS)
     expected_shape = (
         PX5_TEST_COUNT,
@@ -392,10 +406,11 @@ def parse_capture(payloads: list[str]) -> Capture:
     if (test_count, timing_count, memory_count, status_bits, scan_count) != expected_shape:
         raise ValueError(f"{schema} binary shape does not match schema version {version}")
 
+    digest_offset = head + 7
     conformance_digest, gte_digest, timing_digest, timing_aux = struct.unpack_from(
-        "<IIII", binary, 12
+        "<IIII", binary, digest_offset
     )
-    offset = 28
+    offset = digest_offset + 16
     scans: list[ScanSummary] = []
     for _ in range(scan_count):
         status, items, digest, aux, run = struct.unpack_from("<BH I I B", binary, offset)
@@ -451,6 +466,8 @@ def parse_capture(payloads: list[str]) -> Capture:
     return Capture(
         schema,
         version,
+        suite_major,
+        suite_minor,
         conformance_run,
         timing_run,
         conformance_digest,
@@ -496,7 +513,8 @@ def print_report(
     drift: list[str] = []
     page_count = page_count_for(capture.schema)
     print(
-        f"# schema={capture.schema} pages={page_count} run={capture.timing_run:02X} "
+        f"# schema={capture.schema} suite=v{capture.suite_major}.{capture.suite_minor} "
+        f"pages={page_count} run={capture.timing_run:02X} "
         f"digest={capture.timing_digest:08X} records={len(capture.records)} "
         f"binary_crc={capture.binary_crc:08X}"
     )
@@ -721,6 +739,11 @@ def main() -> int:
         help="optional PX5/PX6 payload file to compare against",
     )
     parser.add_argument(
+        "--allow-suite-mismatch",
+        action="store_true",
+        help="compare captures from different suite versions anyway (unsafe)",
+    )
+    parser.add_argument(
         "--fail-on-change",
         action="store_true",
         help="exit non-zero if any value moved against --baseline (CI gate)",
@@ -736,6 +759,26 @@ def main() -> int:
         )
         if baseline is not None and baseline.schema != capture.schema:
             raise ValueError("baseline and capture schemas differ")
+        if baseline is not None and not args.allow_suite_mismatch:
+            here = (capture.suite_major, capture.suite_minor)
+            there = (baseline.suite_major, baseline.suite_minor)
+            # A MAJOR difference means a record id can have been redefined, so
+            # the diff would compare two different measurements under one name.
+            # That is worse than no diff, so it fails rather than warns.
+            if here[0] != there[0]:
+                raise ValueError(
+                    f"suite version mismatch: capture v{here[0]}.{here[1]} vs "
+                    f"baseline v{there[0]}.{there[1]}. Record meanings may differ "
+                    "across a MAJOR bump; re-baseline, or pass "
+                    "--allow-suite-mismatch if you know they are comparable."
+                )
+            if here != there:
+                print(
+                    f"# note: capture v{here[0]}.{here[1]} vs baseline "
+                    f"v{there[0]}.{there[1]}; shared records remain comparable "
+                    "across a MINOR bump",
+                    file=sys.stderr,
+                )
         return print_report(capture, baseline, args.fail_on_change)
     except (OSError, UnicodeError, ValueError) as exc:
         print(f"hwtest-report: {exc}", file=sys.stderr)

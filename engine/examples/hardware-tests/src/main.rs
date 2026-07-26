@@ -91,7 +91,29 @@ unsafe extern "C" {
     fn __hwtest_icache_entry_w2();
 }
 
-const SUITE_VERSION: &str = "HWTEST v0.18";
+// Suite version, written into every payload so a capture is self-identifying.
+//
+// The transport schema (PX7) and the suite version are different things: the
+// schema says how bytes are laid out, the suite version says what a record id
+// MEANS. Comparing a capture from one suite version against a baseline from
+// another is the trap this exists to prevent, because record 0xA0 can be
+// redefined while the byte layout stays identical.
+//
+// MAJOR: bump when an existing record's meaning changes -- a probe redefined,
+//        a clock swapped, sample semantics altered. Captures across a MAJOR
+//        boundary are NOT comparable.
+// MINOR: bump when records are only added, or a bug is fixed that leaves every
+//        existing record measuring the same thing. Captures remain comparable
+//        for the records they share.
+//
+// v1.0: PX7. CD/CD-DA/GPU/MDEC/SIO batteries, interrupt-masked sampling,
+//       median column, explicit record ids, raster hashes, audio readout.
+//       Supersedes the v0.18 suite, whose records used a different sampling
+//       method and cannot be compared against these.
+const SUITE_VERSION_MAJOR: u8 = 1;
+const SUITE_VERSION_MINOR: u8 = 0;
+/// Display form. Keep in step with the two constants above.
+const SUITE_VERSION: &str = "HWTEST v1.0";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
