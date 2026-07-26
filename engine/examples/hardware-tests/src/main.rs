@@ -27,6 +27,7 @@ use psx_rt::tty;
 use psx_spu::SpuAddr;
 use psx_vram::{Clut, TexDepth, Tpage};
 
+mod audio_link;
 mod audio_probe;
 mod cpu_tests;
 mod handoff_probe;
@@ -488,24 +489,36 @@ struct ScanReport {
     runs: u8,
 }
 
-const TIMING_RECORD_COUNT: usize = 90;
+const TIMING_RECORD_COUNT: usize = 144;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = 9;
-const PRECISION_VALUE_COUNT: usize = 128;
+const PRECISION_VALUE_COUNT: usize = 192;
+
+/// Samples per timing record. The minimum rejects interrupt interference, the
+/// maximum exposes it, and the median says whether the spread is one stray
+/// event or a genuinely bimodal distribution (cache or DRAM-refresh
+/// interaction) that a min/max pair cannot distinguish.
+const TIMING_SAMPLES: usize = 5;
 
 #[derive(Copy, Clone)]
 struct TimingRecord {
     id: u8,
     work: u16,
     min: u16,
+    med: u16,
     max: u16,
 }
+
+/// Marks a timing slot that was never filled. Must not be a real record id:
+/// `0x00` is the empty-harness measurement, so zero cannot mean "unused".
+const TIMING_RECORD_UNUSED: u8 = 0xFF;
 
 impl TimingRecord {
     const fn pending() -> Self {
         Self {
-            id: 0,
+            id: TIMING_RECORD_UNUSED,
             work: 0,
             min: 0,
+            med: 0,
             max: 0,
         }
     }
@@ -1471,6 +1484,8 @@ struct HardwareTests {
     /// frame while in the controller probe. Used to find which setup/inter-byte
     /// timing wakes a strict original pad.
     probe_variants: [psx_pad::RawPoll; PROBE_VARIANT_COUNT],
+    /// Index into `audio_link::RATE_DIVISORS` for the readout tone rate.
+    audio_rate: usize,
 }
 
 #[cfg(target_arch = "mips")]
@@ -1497,9 +1512,10 @@ impl HardwareTests {
     const fn new(boot_reverb: ReverbSnapshot) -> Self {
         Self {
             font: None,
-            // Boot into PA5's selectable reverb-state probe. PA4 and the
-            // earlier audio probes remain the following sections.
-            mode: Mode::ReverbProbe,
+            // Boot into the tier-1 summary. A tier-2 probe must never be the
+            // boot mode: it owns SPU state, and the automatic capture has to
+            // describe a console those probes have not touched.
+            mode: Mode::AllChecks,
             results: [TestResult::pending(); TEST_COUNT],
             cpu_scan: ScanReport::pending("press x to sweep"),
             gte_scan: ScanReport::pending("press x to sweep"),
@@ -1518,6 +1534,7 @@ impl HardwareTests {
             page: 0,
             rerun_count: 0,
             probe_variants: [psx_pad::RawPoll::NONE; PROBE_VARIANT_COUNT],
+            audio_rate: 0,
         }
     }
 
@@ -1559,6 +1576,25 @@ impl HardwareTests {
             if other != page {
                 self.timing_capture.print_page(other);
             }
+        }
+    }
+
+    /// Tier-2 probes own hardware state (SPU banks, voice keys, reverb
+    /// config), so they arm on entry rather than at boot. Keeping them out of
+    /// `init` is what lets the tier-1 capture describe a console they have not
+    /// touched. A probe entered this way still starts from its own clean
+    /// sequence, but note that only a probe reached from a fresh boot sees an
+    /// untouched BIOS handoff; PA5's variants remain one-per-reboot.
+    fn enter_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.page = 0;
+        match mode {
+            Mode::ReverbProbe => self.reverb_probe.start(),
+            Mode::HandoffProbe => self.handoff_probe.start(),
+            Mode::TransitionProbe => self.transition_probe.start(),
+            Mode::VoiceProbe => self.voice_probe.start(),
+            Mode::AudioProbe => self.audio_probe.start(),
+            _ => {}
         }
     }
 
@@ -1639,7 +1675,12 @@ impl Scene for HardwareTests {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
         self.run_all();
         self.run_startup_scans();
-        self.reverb_probe.start();
+        // Start the audio readout last: it claims voice 0 and most of SPU RAM,
+        // and every measurement must already be in the payload it transmits.
+        let bits = audio_link::transmit(self.timing_capture.binary());
+        tty::print("hardware-tests: audio-link bits=");
+        tty_print_dec_u16(bits as u16);
+        tty::println("");
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
@@ -1690,11 +1731,9 @@ impl Scene for HardwareTests {
             self.page = 0;
             self.encode_capture(0);
         } else if ctx.just_pressed(button::UP) {
-            self.mode = self.mode.previous();
-            self.page = 0;
+            self.enter_mode(self.mode.previous());
         } else if ctx.just_pressed(button::DOWN) {
-            self.mode = self.mode.next();
-            self.page = 0;
+            self.enter_mode(self.mode.next());
         }
 
         if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
@@ -1729,6 +1768,16 @@ impl Scene for HardwareTests {
         }
         if ctx.just_pressed(button::CROSS) {
             self.run_active();
+        }
+        // SQUARE cycles the audio-link rate. If the capture chain cannot decode
+        // the fast mode, the operator drops to a slower one here instead of
+        // needing another burn.
+        if ctx.just_pressed(button::SQUARE) {
+            self.audio_rate = (self.audio_rate + 1) % audio_link::RATE_DIVISORS.len();
+            audio_link::set_rate(self.audio_rate);
+            tty::print("hardware-tests: audio-link rate index ");
+            tty_print_dec_u8(self.audio_rate as u8);
+            tty::println("");
         }
     }
 
@@ -2800,6 +2849,267 @@ fn run_timing_scan() -> TimingReport {
         &mut next,
         sample_timing(0x40, 1, timed_cdrom_getstat),
     );
+    // CD battery. Timed on Timer 1 HBlank ticks, not Timer 2 cycles, and each
+    // record repeats through sample_timing so a retry or a bad block shows up
+    // as a min/max spread instead of silently becoming the answer.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x90, 1, || cd_seek_distance(1)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x91, 16, || cd_seek_distance(16)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x92, 128, || cd_seek_distance(128)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x93, 512, || cd_seek_distance(512)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x94, 8, || cd_read_throughput(false, 8)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x95, 8, || cd_read_throughput(true, 8)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x96, 1, || {
+            cd_timed(|| cdrom::try_get_stat(CD_SPINS).is_some())
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x97, 1, || {
+            cd_timed(|| cdrom::try_set_mode(0, CD_SPINS).is_some())
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x98, 1, || {
+            cd_timed(|| cdrom::try_get_loc_p(CD_SPINS).is_some())
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x99, 1, || {
+            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]))
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x9A, 1, || {
+            cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_INIT, &[]))
+        }),
+    );
+    // CD-DA contention. 0x9B against 0x9C is the whole point: identical read
+    // path, identical sector count, the only difference being live audio.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x9B, 8, || cd_read_with_audio(true, 8)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x9C, 8, || cd_read_with_audio(false, 8)),
+    );
+    push_timing_record(&mut records, &mut next, sample_timing(0x9D, 1, cd_play_start));
+    push_timing_record(
+        &mut records,
+        &mut next,
+        // Must establish playback itself: 0x9D pauses and mutes when it
+        // finishes, so measuring "during CD-DA" without restarting audio would
+        // silently measure the idle case instead.
+        sample_timing(0x9E, 1, cd_getlocp_during_playback),
+    );
+    // GPU fill rate. Pixel counts are held identical across shading modes so
+    // the DIFFERENCE isolates interpolation, blending and dither cost from the
+    // per-pixel floor; 0xAA/0xAB hold total pixels constant while changing
+    // primitive count, which separates setup cost from fill cost.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA0, 16, || {
+            timed_fill_batch(16, 0x2000_80FF, 32, FillKind::Flat, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA1, 16, || {
+            timed_fill_batch(16, 0x3000_00FF, 32, FillKind::Gouraud, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA2, 16, || {
+            timed_fill_batch(16, 0x2400_80FF, 32, FillKind::Textured { tpage: 0, span: 32 }, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA3, 16, || {
+            timed_fill_batch(16, 0x2400_80FF, 32, FillKind::Textured { tpage: 0x40, span: 32 }, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA4, 16, || {
+            timed_fill_batch(16, 0x2400_80FF, 32, FillKind::Textured { tpage: 0x80, span: 32 }, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA5, 16, || {
+            timed_fill_batch(16, 0x2800_80FF, 32, FillKind::Flat, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA6, 16, || {
+            timed_fill_batch(16, 0x3800_00FF, 32, FillKind::Gouraud, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA7, 16, || {
+            timed_fill_batch(16, 0x2C00_80FF, 32, FillKind::Textured { tpage: 0, span: 32 }, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA8, 16, || {
+            timed_fill_batch(16, 0x2A00_80FF, 32, FillKind::Translucent, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xA9, 16, || {
+            timed_fill_batch(16, 0x3000_00FF, 32, FillKind::Gouraud, true)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xAA, 4, || {
+            timed_fill_batch(4, 0x2800_80FF, 64, FillKind::Flat, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xAB, 64, || {
+            timed_fill_batch(64, 0x2800_80FF, 8, FillKind::Flat, false)
+        }),
+    );
+    // Texture cache: identical pixel count, different UV footprint. A 2 KiB
+    // cache should make the wide walk markedly slower than the tight resample.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xAC, 16, || {
+            timed_fill_batch(16, 0x2C00_80FF, 32, FillKind::Textured { tpage: 0, span: 255 }, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xAD, 16, || {
+            timed_fill_batch(16, 0x2C00_80FF, 32, FillKind::Textured { tpage: 0, span: 8 }, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xAE, 16, || {
+            timed_fill_batch(16, 0x6000_80FF, 32, FillKind::Rect, false)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xAF, 16, || {
+            // GP0 0x64: the 8bpp-CLUT textured rect path that renders black in
+            // both backends and has never been measured on silicon.
+            timed_fill_batch(16, 0x6400_80FF, 32, FillKind::TexturedRect { clut: 0 }, false)
+        }),
+    );
+    // MDEC. No coverage at all before now. Command number lives in bits 31..29:
+    // 2 = set quant table, 3 = set scale table, 1 = decode.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        // Set quant table, luma only: 64 bytes = 16 words.
+        sample_timing(0xB0, 16, || timed_mdec(0x4000_0000, 16)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        // Set quant table, luma + chroma: 128 bytes = 32 words.
+        sample_timing(0xB1, 32, || timed_mdec(0x4000_0001, 32)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        // Set scale (IDCT) table: 64 halfwords = 32 words.
+        sample_timing(0xB2, 32, || timed_mdec(0x6000_0000, 32)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xB3, 1, timed_mdec_reset_settle),
+    );
+    // KNOWN GAP: decode timing is not measured. A decode command holds BUSY
+    // until its output is drained, and producing output needs a genuinely
+    // valid RLE/VLC bitstream. A synthetic DC-then-EOB block yields nothing,
+    // so a decode record here would report only its own timeout. Left out
+    // deliberately rather than shipped as a record that always reads 0xFFFF;
+    // it needs a real bitstream fixture first.
+    // SIO: the same poll at four pacing configurations.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xB6, 1, || timed_pad_poll(PROBE_VARIANTS[0].1, PROBE_VARIANTS[0].2)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xB7, 1, || timed_pad_poll(PROBE_VARIANTS[1].1, PROBE_VARIANTS[1].2)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xB8, 1, || timed_pad_poll(PROBE_VARIANTS[2].1, PROBE_VARIANTS[2].2)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xB9, 1, || timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)),
+    );
     push_timing_record(
         &mut records,
         &mut next,
@@ -3105,71 +3415,682 @@ fn push_timing_record(
     next: &mut usize,
     record: TimingRecord,
 ) {
+    // Progress line per record. The CD and GPU batteries do tens of seconds of
+    // real drive and raster work with nothing changing on screen, which looks
+    // exactly like a hang; an operator would reasonably reset the console.
+    // Also the only way to see WHERE a battery wedges on hardware.
+    tty::print("hardware-tests: rec ");
+    tty::print(hex2(record.id).as_str());
+    tty::print(" min=");
+    tty_print_dec_u16(record.min);
+    tty::print(" max=");
+    tty_print_dec_u16(record.max);
+    tty::println("");
     records[*next] = record;
     *next += 1;
 }
 
-/// Five repeats expose jitter while the minimum rejects interrupt interference.
+/// Repeat the probe with interrupts masked, then keep min/median/max.
+///
+/// Masking matters: without it the only defence against a VBlank or CD IRQ
+/// landing inside a measured window is that one of the repeats happens to
+/// escape, so the min/max gap reports "did an interrupt hit" rather than real
+/// hardware jitter. With IE clear the spread is the silicon's own.
 fn sample_timing<F>(id: u8, work: u16, mut probe: F) -> TimingRecord
 where
     F: FnMut() -> u16,
 {
-    let mut min = u16::MAX;
-    let mut max = 0u16;
+    let mut samples = [0u16; TIMING_SAMPLES];
+    let guard = IrqGuard::mask();
     let mut run = 0;
-    while run < 5 {
-        let value = probe();
-        min = min.min(value);
-        max = max.max(value);
+    while run < TIMING_SAMPLES {
+        samples[run] = probe();
         run += 1;
     }
-    TimingRecord { id, work, min, max }
+    drop(guard);
+
+    // Insertion sort: five elements, no allocator, no core::slice::sort.
+    let mut i = 1;
+    while i < TIMING_SAMPLES {
+        let value = samples[i];
+        let mut j = i;
+        while j > 0 && samples[j - 1] > value {
+            samples[j] = samples[j - 1];
+            j -= 1;
+        }
+        samples[j] = value;
+        i += 1;
+    }
+
+    TimingRecord {
+        id,
+        work,
+        min: samples[0],
+        med: samples[TIMING_SAMPLES / 2],
+        max: samples[TIMING_SAMPLES - 1],
+    }
+}
+
+/// Clears COP0 Status.IE for the lifetime of the guard and restores the exact
+/// prior word on drop. Kept as a guard so an early return cannot leave the
+/// console running with interrupts masked.
+struct IrqGuard {
+    status: u32,
+}
+
+impl IrqGuard {
+    fn mask() -> Self {
+        let status: u32;
+        unsafe {
+            core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") status);
+            core::arch::asm!(
+                "mtc0 $8, $12",
+                "nop",
+                "nop",
+                "nop",
+                in("$8") status & !1,
+                options(nostack, nomem),
+            );
+        }
+        Self { status }
+    }
+}
+
+impl Drop for IrqGuard {
+    fn drop(&mut self) {
+        unsafe {
+            core::arch::asm!(
+                "mtc0 $8, $12",
+                "nop",
+                "nop",
+                "nop",
+                in("$8") self.status,
+                options(nostack, nomem),
+            );
+        }
+    }
 }
 
 /// Recover the main-RAM refresh cadence and the extra wait imposed by a
 /// refresh slot. Both metrics come from the same five scans so the final two
 /// Capture records remain correlated without consuming another photo page.
 fn sample_dram_refresh() -> (TimingRecord, TimingRecord) {
-    let mut period_min = u16::MAX;
-    let mut period_max = 0u16;
-    let mut stall_min = u16::MAX;
-    let mut stall_max = 0u16;
+    let mut periods = [0u16; TIMING_SAMPLES];
+    let mut stalls = [0u16; TIMING_SAMPLES];
     let mut run = 0;
-    while run < 5 {
+    while run < TIMING_SAMPLES {
         let (period, stall) = measure_dram_refresh();
-        // A scan can legitimately miss two adjacent refresh events and return
-        // zero. Preserve successful measurements instead of letting one miss
-        // masquerade as a zero-cycle refresh period.
-        if period != 0 {
-            period_min = period_min.min(period);
-            period_max = period_max.max(period);
-        }
-        if stall != 0 {
-            stall_min = stall_min.min(stall);
-            stall_max = stall_max.max(stall);
-        }
+        periods[run] = period;
+        stalls[run] = stall;
         run += 1;
     }
-    if period_min == u16::MAX {
-        period_min = 0;
-    }
-    if stall_min == u16::MAX {
-        stall_min = 0;
-    }
     (
-        TimingRecord {
-            id: 0x70,
-            work: 4096,
-            min: period_min,
-            max: period_max,
-        },
-        TimingRecord {
-            id: 0x71,
-            work: 4096,
-            min: stall_min,
-            max: stall_max,
-        },
+        // A scan can legitimately miss two adjacent refresh events and return
+        // zero. `summarize_nonzero` drops those so one miss cannot masquerade
+        // as a zero-cycle refresh period.
+        summarize_nonzero(0x70, 4096, periods),
+        summarize_nonzero(0x71, 4096, stalls),
     )
+}
+
+/// Min/median/max over the non-zero samples only, for probes where a zero
+/// means "this scan did not observe the event" rather than a measurement.
+fn summarize_nonzero(id: u8, work: u16, samples: [u16; TIMING_SAMPLES]) -> TimingRecord {
+    let mut kept = [0u16; TIMING_SAMPLES];
+    let mut count = 0usize;
+    let mut i = 0;
+    while i < TIMING_SAMPLES {
+        if samples[i] != 0 {
+            kept[count] = samples[i];
+            count += 1;
+        }
+        i += 1;
+    }
+    if count == 0 {
+        return TimingRecord {
+            id,
+            work,
+            min: 0,
+            med: 0,
+            max: 0,
+        };
+    }
+    let mut i = 1;
+    while i < count {
+        let value = kept[i];
+        let mut j = i;
+        while j > 0 && kept[j - 1] > value {
+            kept[j] = kept[j - 1];
+            j -= 1;
+        }
+        kept[j] = value;
+        i += 1;
+    }
+    TimingRecord {
+        id,
+        work,
+        min: kept[0],
+        med: kept[count / 2],
+        max: kept[count - 1],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CD-ROM battery
+//
+// The drive is the one subsystem where the console is the only usable
+// instrument: seek time is mechanical, and no emulator models head travel.
+// Timer 2 at the system clock wraps after ~1.9 ms, far short of a seek, so
+// every record here is timed on Timer 1's HBlank clock: ~63.9 us per tick and
+// ~4.19 s of range, which covers a full-stroke seek with room to spare.
+//
+// Seek and read acknowledge immediately and finish much later, so these wait
+// for the SECOND response (the completion IRQ). Timing to the ack would
+// measure command dispatch and report a mechanical seek as microseconds.
+// ---------------------------------------------------------------------------
+
+/// First LBA of the deterministic 600-sector CDTEST.BIN region.
+const CD_TEST_LBA: u32 = 424;
+/// Poll budget for the FIFO/dispatch handshakes, which are electrical and
+/// fast. Mechanical waits are bounded in real time by `CD_DEADLINE_HBLANKS`
+/// instead: a poll count is only a proxy for time and drifts with CPU and bus
+/// speed, which is exactly wrong for measuring a drive.
+const CD_SPINS: u32 = 200_000;
+/// Real-time deadline for one mechanical CD operation, in Timer 1 HBlank ticks
+/// (~63.9 us each). 31,250 ticks is about two seconds, comfortably past a
+/// full-stroke seek on a slow CD-R while still bounding a dead drive.
+const CD_DEADLINE_HBLANKS: u16 = 31_250;
+/// Reported when a command did not complete within `CD_SPINS`. Distinguishes
+/// "the drive never answered" from "the operation took zero time", which a
+/// plain 0 could not.
+const CD_FAILED: u16 = 0xFFFF;
+
+/// Time one CD operation on the HBlank clock, in Timer 1 ticks.
+fn cd_timed<F>(op: F) -> u16
+where
+    F: FnOnce() -> bool,
+{
+    cd_clock_reset();
+    let ok = op();
+    let elapsed = timers::counter(timers::Timer::Timer1);
+    if ok {
+        // A wrapped counter would report a fast seek instead of a slow one.
+        // The clock covers 4.19 s, so a wrap means the drive is not behaving
+        // and the value must not be read as a measurement.
+        elapsed
+    } else {
+        CD_FAILED
+    }
+}
+
+/// Arm Timer 1 on the HBlank clock and zero it. Every CD deadline and
+/// measurement below reads this one counter.
+fn cd_clock_reset() {
+    timers::set_mode(timers::Timer::Timer1, TIMER_MODE_CLOCK_SOURCE_1);
+    timers::set_counter(timers::Timer::Timer1, 0);
+}
+
+/// Run a command to completion under a real-time deadline.
+///
+/// Waits for the ack and then the completion IRQ, giving up once Timer 1
+/// passes `CD_DEADLINE_HBLANKS`. Assumes the caller has already reset the
+/// clock, so the deadline covers the whole operation being timed.
+fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
+    let Some(saved) = cdrom::dispatch_command(command, params, CD_SPINS) else {
+        return false;
+    };
+    let mut seen_ack = false;
+    let ok = loop {
+        if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS {
+            break false;
+        }
+        match cdrom::irq_flag_value() {
+            0 => {}
+            5 => {
+                cdrom::discard_response();
+                cdrom::acknowledge_irq(5);
+                break false;
+            }
+            3 => {
+                cdrom::discard_response();
+                cdrom::acknowledge_irq(3);
+                seen_ack = true;
+            }
+            2 if seen_ack => {
+                cdrom::discard_response();
+                cdrom::acknowledge_irq(2);
+                break true;
+            }
+            other => {
+                cdrom::discard_response();
+                cdrom::acknowledge_irq(other);
+            }
+        }
+    };
+    cdrom::restore_irq_output(saved);
+    ok
+}
+
+/// Read `sectors` data sectors, optionally while CD-DA track 2 is playing.
+///
+/// This is the contention measurement. Reading data while audio streams forces
+/// the single laser to leave the audio track and come back, and no emulator
+/// reproduces the resulting hardware failure, so the console is the only
+/// instrument that can characterise it. `0x9B` (playing) against `0x9C`
+/// (stopped) isolates the cost: the same read path, the same sector count, the
+/// only difference being whether audio was live.
+fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
+    cd_clock_reset();
+    let _ = cd_command_until_complete_timed(cdrom::CMD_STOP, &[]);
+
+    if playing {
+        if cdrom::try_set_mode(cdrom::MODE_CDDA, CD_SPINS).is_none() {
+            return CD_FAILED;
+        }
+        // Track 2 is the synthetic tone the disc build appends.
+        if cdrom::try_play_track(2, CD_SPINS).is_none() {
+            return CD_FAILED;
+        }
+        let _ = cdrom::try_demute(CD_SPINS);
+        // Let playback actually establish before the read fights it; measuring
+        // during spin-up would confuse start-up cost with contention.
+        cd_clock_reset();
+        while timers::counter(timers::Timer::Timer1) < 1_000 {}
+    }
+
+    // Data mode for the read itself.
+    if cdrom::try_set_mode(0, CD_SPINS).is_none()
+        || cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none()
+        || cdrom::try_read_n(CD_SPINS).is_none()
+    {
+        cd_clock_reset();
+        let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+        return CD_FAILED;
+    }
+    cd_clock_reset();
+    let primed = cd_sector_timed();
+    let elapsed = cd_timed(|| {
+        let mut seen = 0;
+        while seen < sectors {
+            if !cd_sector_timed() {
+                return false;
+            }
+            seen += 1;
+        }
+        true
+    });
+    cd_clock_reset();
+    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+    let _ = cdrom::try_mute(CD_SPINS);
+    if primed {
+        elapsed
+    } else {
+        CD_FAILED
+    }
+}
+
+/// Time CD-DA playback from the Play command to the first position report.
+fn cd_play_start() -> u16 {
+    cd_clock_reset();
+    let _ = cd_command_until_complete_timed(cdrom::CMD_STOP, &[]);
+    if cdrom::try_set_mode(cdrom::MODE_CDDA, CD_SPINS).is_none() {
+        return CD_FAILED;
+    }
+    let elapsed = cd_timed(|| {
+        if cdrom::try_play_track(2, CD_SPINS).is_none() {
+            return false;
+        }
+        // Position advancing is the first proof audio is actually streaming,
+        // rather than the command merely having been accepted.
+        let mut polls = 0;
+        while polls < 64 {
+            if let Some(response) = cdrom::try_get_loc_p(CD_SPINS) {
+                if !response.is_empty() {
+                    return true;
+                }
+            }
+            polls += 1;
+        }
+        false
+    });
+    cd_clock_reset();
+    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+    let _ = cdrom::try_mute(CD_SPINS);
+    elapsed
+}
+
+/// Time GetLocP while CD-DA is genuinely streaming.
+fn cd_getlocp_during_playback() -> u16 {
+    cd_clock_reset();
+    let _ = cd_command_until_complete_timed(cdrom::CMD_STOP, &[]);
+    if cdrom::try_set_mode(cdrom::MODE_CDDA, CD_SPINS).is_none()
+        || cdrom::try_play_track(2, CD_SPINS).is_none()
+    {
+        return CD_FAILED;
+    }
+    cd_clock_reset();
+    while timers::counter(timers::Timer::Timer1) < 1_000 {}
+    let elapsed = cd_timed(|| {
+        cdrom::try_get_loc_p(CD_SPINS).is_some_and(|response| !response.is_empty())
+    });
+    cd_clock_reset();
+    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+    let _ = cdrom::try_mute(CD_SPINS);
+    elapsed
+}
+
+/// Wait for one streamed data sector under the same real-time deadline.
+fn cd_sector_timed() -> bool {
+    loop {
+        if timers::counter(timers::Timer::Timer1) >= CD_DEADLINE_HBLANKS {
+            return false;
+        }
+        match cdrom::irq_flag_value() {
+            1 => {
+                cdrom::acknowledge_irq(1);
+                return true;
+            }
+            0 => {}
+            5 => {
+                cdrom::discard_response();
+                cdrom::acknowledge_irq(5);
+                return false;
+            }
+            other => {
+                cdrom::discard_response();
+                cdrom::acknowledge_irq(other);
+            }
+        }
+    }
+}
+
+/// Park the head at a known LBA so the next seek covers a known distance.
+/// Without this every seek record would measure travel from wherever the
+/// previous record happened to leave the head.
+fn cd_park(lba: u32) -> bool {
+    cd_clock_reset();
+    cdrom::try_set_loc_lba(lba, CD_SPINS).is_some()
+        && cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[])
+}
+
+/// Seek `distance` sectors away from the parked origin and time only the seek.
+fn cd_seek_distance(distance: u32) -> u16 {
+    if !cd_park(CD_TEST_LBA) {
+        return CD_FAILED;
+    }
+    let target = CD_TEST_LBA + distance;
+    if cdrom::try_set_loc_lba(target, CD_SPINS).is_none() {
+        return CD_FAILED;
+    }
+    cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[]))
+}
+
+/// Time `sectors` sequential sector arrivals once a read is already streaming,
+/// which isolates sustained throughput from the initial seek and spin-up.
+fn cd_read_throughput(double_speed: bool, sectors: u32) -> u16 {
+    let mode = if double_speed {
+        cdrom::MODE_DOUBLE_SPEED
+    } else {
+        0
+    };
+    if cdrom::try_set_mode(mode, CD_SPINS).is_none()
+        || !cd_park(CD_TEST_LBA)
+        || cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none()
+        || cdrom::try_read_n(CD_SPINS).is_none()
+    {
+        cd_clock_reset();
+        let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+        return CD_FAILED;
+    }
+    // Discard the first sector: it carries the seek and spin-up settle.
+    cd_clock_reset();
+    let primed = cd_sector_timed();
+    let elapsed = cd_timed(|| {
+        let mut seen = 0;
+        while seen < sectors {
+            if !cd_sector_timed() {
+                return false;
+            }
+            seen += 1;
+        }
+        true
+    });
+    cd_clock_reset();
+    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
+    if primed {
+        elapsed
+    } else {
+        CD_FAILED
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU fill-rate battery
+//
+// The emulator models NO GPU draw time at all: its linked-list DMA completes in
+// ~0 guest cycles, so `ot_wait` is always ~0 and the per-vblank chart is blind
+// to fill cost. There is therefore no data anywhere to build a model from, and
+// the console is the only instrument that can supply it.
+//
+// Everything draws into off-screen VRAM (y >= 384) so the photographed capture
+// and the QR pages are never touched. Sizes are held well under one Timer 2
+// wrap (65,535 system cycles, ~1.9 ms): at roughly a pixel per cycle a 256x256
+// fill would sit right on the boundary and alias a slow result into a fast one.
+// ---------------------------------------------------------------------------
+
+/// Off-screen scratch row base. Below the 240-line display and clear of the
+/// 96x96 hash scratch at (512, 256).
+const FILL_Y: u32 = 400;
+const FILL_X: u32 = 640;
+
+/// Set up a clean draw environment for a fill measurement.
+fn fill_env(dither: bool) {
+    gpu_io::wait_cmd_ready();
+    gpu_io::write_gp0(0xE300_0000);
+    gpu_io::write_gp0(0xE400_0000 | 1023 | (511 << 10));
+    gpu_io::write_gp0(0xE500_0000);
+    gpu_io::write_gp0(if dither { 0xE100_0200 } else { 0xE100_0000 });
+    // Texture window covering the whole page, so texture records are not
+    // silently clamped to a sub-rect.
+    gpu_io::write_gp0(0xE200_0000);
+    gpu_io::wait_cmd_ready();
+}
+
+/// Wait for the GPU to report command-ready, so the measured interval includes
+/// the actual raster work rather than only the CPU's FIFO writes.
+fn fill_drain() -> bool {
+    let mut guard = 0u32;
+    while gpu_io::gpustat().bits() & (1 << 26) == 0 && guard < 1_000_000 {
+        guard += 1;
+    }
+    guard < 1_000_000
+}
+
+/// One monochrome/Gouraud/textured triangle or quad batch.
+///
+/// `command` is the GP0 opcode; `words` are the packet words after it, built by
+/// the caller so each variant's exact packet shape is explicit.
+fn timed_fill_batch(count: u16, command: u32, size: u32, kind: FillKind, dither: bool) -> u16 {
+    fill_env(dither);
+    timers::set_mode(timers::Timer::Timer2, 0);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    let mut index = 0u16;
+    while index < count {
+        let y = FILL_Y + u32::from(index & 7);
+        let x = FILL_X;
+        gpu_io::write_gp0(command);
+        match kind {
+            FillKind::Flat | FillKind::Translucent => {
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0(((y) << 16) | (x + size));
+                gpu_io::write_gp0(((y + size) << 16) | x);
+                if command & 0x0800_0000 != 0 {
+                    gpu_io::write_gp0(((y + size) << 16) | (x + size));
+                }
+            }
+            FillKind::Gouraud => {
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0(0x0000_FF00);
+                gpu_io::write_gp0(((y) << 16) | (x + size));
+                gpu_io::write_gp0(0x00FF_0000);
+                gpu_io::write_gp0(((y + size) << 16) | x);
+                if command & 0x0800_0000 != 0 {
+                    gpu_io::write_gp0(0x00FF_00FF);
+                    gpu_io::write_gp0(((y + size) << 16) | (x + size));
+                }
+            }
+            FillKind::Textured { tpage, span } => {
+                // UV span is decoupled from screen size so a record can walk a
+                // wide texture (cache-hostile) or resample a small one
+                // (cache-friendly) at identical pixel cost.
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0((u32::from(tpage) << 16) | 0x0000);
+                gpu_io::write_gp0(((y) << 16) | (x + size));
+                gpu_io::write_gp0(u32::from(span) & 0xFF);
+                gpu_io::write_gp0(((y + size) << 16) | x);
+                gpu_io::write_gp0(u32::from(span) << 8);
+                if command & 0x0800_0000 != 0 {
+                    gpu_io::write_gp0(((y + size) << 16) | (x + size));
+                    gpu_io::write_gp0((u32::from(span) << 8) | u32::from(span));
+                }
+            }
+            FillKind::Rect => {
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0((size << 16) | size);
+            }
+            FillKind::TexturedRect { clut } => {
+                // GP0 0x64 takes an extra UV + CLUT word between position and
+                // extent. Omitting it shifts the extent into the UV slot and
+                // the GPU draws something unrelated to what was asked for.
+                gpu_io::write_gp0((y << 16) | x);
+                gpu_io::write_gp0((u32::from(clut) << 16) | 0x0000);
+                gpu_io::write_gp0((size << 16) | size);
+            }
+        }
+        index += 1;
+    }
+    let ok = fill_drain();
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    if ok {
+        elapsed
+    } else {
+        0xFFFF
+    }
+}
+
+#[derive(Copy, Clone)]
+enum FillKind {
+    Flat,
+    Gouraud,
+    Translucent,
+    Textured { tpage: u16, span: u8 },
+    Rect,
+    TexturedRect { clut: u16 },
+}
+
+// ---------------------------------------------------------------------------
+// MDEC battery
+//
+// Zero coverage before now. The decoder is a real bottleneck for any FMV path
+// and its timing is entirely unmodelled here.
+// ---------------------------------------------------------------------------
+
+const MDEC_CMD: u32 = 0x1F80_1820;
+const MDEC_CTRL: u32 = 0x1F80_1824;
+/// Status bit 29 = command busy. NOT bit 31, which is the data-out FIFO flag
+/// and stays set while the decoder is idle: polling it never returns.
+const MDEC_BUSY: u32 = 0x2000_0000;
+/// Status bit 31 = reset request, when written to the control register.
+const MDEC_RESET: u32 = 0x8000_0000;
+/// Status bit 31 (on read) = data-out FIFO empty.
+const MDEC_OUT_FIFO_EMPTY: u32 = 0x8000_0000;
+
+/// Time an MDEC command's status settle.
+///
+/// The payload word count is part of the command's contract, not a free
+/// parameter: MDEC holds the busy bit set until it has consumed exactly the
+/// number of words the command implies. Set-quant-table (luma only) wants 16
+/// words, luma+chroma 32, and set-scale-table 32. Feeding fewer leaves the
+/// decoder waiting forever and every record reads as a timeout.
+fn timed_mdec(command: u32, payload_words: u16) -> u16 {
+    unsafe {
+        // Reset: bit 31 aborts and clears the FIFOs, so each record starts
+        // from the same state rather than inheriting the previous one's.
+        psx_io::write32(MDEC_CTRL, MDEC_RESET);
+    }
+    timers::set_mode(timers::Timer::Timer2, 0);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    unsafe {
+        psx_io::write32(MDEC_CMD, command);
+        let mut word = 0u16;
+        while word < payload_words {
+            psx_io::write32(MDEC_CMD, 0x0000_0000);
+            word += 1;
+        }
+    }
+    let mut guard = 0u32;
+    while unsafe { psx_io::read32(MDEC_CTRL) } & MDEC_BUSY != 0 && guard < 200_000 {
+        guard += 1;
+    }
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    if guard < 200_000 {
+        elapsed
+    } else {
+        0xFFFF
+    }
+}
+
+
+/// Time a reset returning the decoder to idle.
+fn timed_mdec_reset_settle() -> u16 {
+    timers::set_mode(timers::Timer::Timer2, 0);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    unsafe {
+        psx_io::write32(MDEC_CTRL, MDEC_RESET);
+    }
+    let mut guard = 0u32;
+    while unsafe { psx_io::read32(MDEC_CTRL) } & MDEC_BUSY != 0 && guard < 200_000 {
+        guard += 1;
+    }
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    if guard < 200_000 {
+        elapsed
+    } else {
+        0xFFFF
+    }
+}
+
+/// MDEC status word after a reset, as a raw observation.
+fn mdec_status() -> u32 {
+    unsafe {
+        psx_io::write32(MDEC_CTRL, MDEC_RESET);
+        psx_io::read32(MDEC_CTRL)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SIO / controller-port battery
+//
+// The SCPH-1200 pad needed a setup delay after select, and finding that cost a
+// whole session of guesswork. These records make the port's handshake timing a
+// standing measurement instead.
+// ---------------------------------------------------------------------------
+
+/// Time a full pad poll at a given setup/inter-byte spin configuration. The
+/// spread across configurations is the useful signal: it shows how much of the
+/// transfer is fixed cost and how much is the pacing the pad demands.
+fn timed_pad_poll(setup: u32, interbyte: u32) -> u16 {
+    timers::set_mode(timers::Timer::Timer2, 0);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    let poll = psx_pad::poll_port1_diag(setup, interbyte);
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    if probe_column_ok(poll) {
+        elapsed
+    } else {
+        // A pad that did not answer is not a timing measurement. Keep the
+        // sentinel distinct so an absent controller cannot look like a fast one.
+        0xFFFF
+    }
 }
 
 fn gte_snapshot_hash() -> u32 {
@@ -5415,9 +6336,112 @@ fn run_precision_scan() -> [u32; PRECISION_VALUE_COUNT] {
     precision_gpu(&mut values, &mut next);
     precision_timer(&mut values, &mut next);
     precision_remaining(&mut values, &mut next);
+    precision_identity_and_raster(&mut values, &mut next);
 
     debug_assert_eq!(next, PRECISION_VALUE_COUNT);
     values
+}
+
+/// Values 128..191: console identity, then bit-exact raster hashes.
+///
+/// Identity first, because a capture that cannot say which console and BIOS
+/// produced it is much harder to trust later; these were previously encoded
+/// only in a hand-written filename.
+///
+/// Then hashes. A 32-bit hash covers a whole 96x96 VRAM region, which makes it
+/// the cheapest coverage per payload byte in the whole schema: this is what
+/// caught the triangle rasterizer being Redux-shaped rather than silicon.
+/// Timing tells you how long a primitive took; only a hash tells you it drew
+/// the right pixels.
+fn precision_identity_and_raster(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
+    // BIOS identity, read raw so the host identifies the machine without the
+    // guest parsing strings. TWO regions are sampled deliberately: 0x100 holds
+    // the build date and maker string, 0x7FF32 the "System ROM Version" text.
+    // Sampling both is a hedge, because these reads return zero on the
+    // emulator's side-loaded HLE path (which maps no BIOS ROM) and so cannot
+    // be validated before a burn. If one region reads zero on console, the
+    // other still identifies the machine.
+    for base in [0xBFC0_0100u32, 0xBFC7_FF30] {
+        let mut offset = 0u32;
+        while offset < 4 {
+            let word = unsafe { psx_io::read32(base + offset * 4) };
+            push_precision(values, next, word);
+            offset += 1;
+        }
+    }
+    // GPUSTAT at rest, plus the MDEC status word after a reset. Both identify
+    // silicon revision behaviour that timing alone cannot separate.
+    push_precision(values, next, gpu_io::gpustat().bits());
+    push_precision(values, next, mdec_status());
+
+    // 22 raster hashes. Each draws into the off-screen 96x96 scratch through
+    // the same path the GPU conformance cases use, so a divergence localises
+    // to one primitive rather than to "the rasterizer".
+    for hash in raster_hashes() {
+        push_precision(values, next, hash);
+    }
+
+    // Pad to the fixed schema length. Explicit rather than implicit: the
+    // assert in run_precision_scan is what catches a miscount.
+    while *next < PRECISION_VALUE_COUNT {
+        push_precision(values, next, 0);
+    }
+}
+
+/// Bit-exact hashes for one instance of each primitive family.
+fn raster_hashes() -> [u32; 22] {
+    use psx_gpu::prim::{QuadFlat, QuadGouraud, TriFlat, TriGouraud};
+
+    let mut out = [0u32; 22];
+    let mut index = 0usize;
+
+    // Flat triangles at several coverage shapes: thin, wide, and off-edge,
+    // where edge-rule differences show up most sharply.
+    for corners in [
+        [(8, 8), (88, 16), (40, 88)],
+        [(8, 8), (88, 8), (8, 88)],
+        [(4, 4), (92, 6), (48, 10)],
+        [(48, 4), (50, 92), (46, 92)],
+    ] {
+        let tri = TriFlat::new(corners, 0xC0, 0x40, 0x80);
+        out[index] = gpu_draw_and_hash(&tri, TriFlat::WORDS);
+        index += 1;
+    }
+    // Gouraud triangles: interpolation and dither interact here.
+    for corners in [
+        [(8, 8), (88, 16), (40, 88)],
+        [(2, 2), (94, 4), (48, 94)],
+    ] {
+        let tri = TriGouraud::new(corners, [(0xFF, 0, 0), (0, 0xFF, 0), (0, 0, 0xFF)]);
+        out[index] = gpu_draw_and_hash(&tri, TriGouraud::WORDS);
+        index += 1;
+    }
+    // Flat quads, including the degenerate and reordered cases that decide
+    // which diagonal the hardware splits along.
+    for corners in [
+        [(8, 8), (88, 8), (8, 88), (88, 88)],
+        [(8, 8), (88, 16), (16, 88), (88, 88)],
+        [(4, 4), (92, 4), (4, 92), (92, 92)],
+    ] {
+        let quad = QuadFlat::new(corners, 0x20, 0xC0, 0x60);
+        out[index] = gpu_draw_and_hash(&quad, QuadFlat::WORDS);
+        index += 1;
+    }
+    for corners in [[(8, 8), (88, 8), (8, 88), (88, 88)]] {
+        let quad = QuadGouraud::new(
+            corners,
+            [(0xFF, 0, 0), (0, 0xFF, 0), (0, 0, 0xFF), (0xFF, 0xFF, 0)],
+        );
+        out[index] = gpu_draw_and_hash(&quad, QuadGouraud::WORDS);
+        index += 1;
+    }
+    // Remaining slots stay zero: reserved so adding a primitive family later
+    // does not shift the meaning of the hashes already recorded above.
+    while index < out.len() {
+        out[index] = 0;
+        index += 1;
+    }
+    out
 }
 
 fn push_precision(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize, value: u32) {
@@ -6325,7 +7349,8 @@ fn measure_dram_refresh() -> (u16, u16) {
 // Keep every microbenchmark in one non-inlined assembly block. Besides avoiding
 // five optimizer-dependent copies, this guarantees that register setup happens
 // before the Timer 2 counter is cleared. The harmless SLL-to-zero words bracket
-// each block so tools/verify-hwtest-machine-code.py can audit the final PS-X EXE.
+// each block so tools/verify-hwtest-machine-code.py can audit the final PS-X EXE
+// (make hwtest-verify-code; spans are pinned in docs/hardware-refs/).
 #[inline(never)]
 fn timed_empty() -> u16 {
     let elapsed: u32;

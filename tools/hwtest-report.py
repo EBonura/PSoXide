@@ -2,7 +2,9 @@
 """Validate and assemble PSoXide hardware-test photo payloads.
 
 PX5 is the original dense two-page capture. PX6 adds a third page containing
-128 fixed-order raw precision values while retaining every PX5 field.
+128 fixed-order raw precision values while retaining every PX5 field. PX7 adds
+a fourth page, a per-record median, and explicit record ids so a probe can be
+added without shifting the meaning of every later record.
 """
 
 from __future__ import annotations
@@ -107,7 +109,56 @@ LABELS = {
     0x6F: "gpu_line_gouraud_256x8",
     0x70: "dram_refresh_period_cycles",
     0x71: "dram_refresh_stall_cycles",
+    # CD battery. Unlike every record above, these are Timer 1 HBLANK ticks
+    # (~63.9 us each), not Timer 2 system-clock cycles: a seek is orders of
+    # magnitude too slow for a 16-bit counter at the system clock.
+    0x90: "cd_seek_1_sector_hblanks",
+    0x91: "cd_seek_16_sectors_hblanks",
+    0x92: "cd_seek_128_sectors_hblanks",
+    0x93: "cd_seek_512_sectors_hblanks",
+    0x94: "cd_read_8_sectors_single_hblanks",
+    0x95: "cd_read_8_sectors_double_hblanks",
+    0x96: "cd_getstat_hblanks",
+    0x97: "cd_setmode_hblanks",
+    0x98: "cd_getlocp_hblanks",
+    0x99: "cd_pause_complete_hblanks",
+    0x9A: "cd_init_complete_hblanks",
+    0x9B: "cd_read_8_sectors_WITH_cdda_hblanks",
+    0x9C: "cd_read_8_sectors_no_cdda_hblanks",
+    0x9D: "cd_cdda_play_start_hblanks",
+    0x9E: "cd_getlocp_during_cdda_hblanks",
+    # GPU fill rate, Timer 2 system cycles. Identical pixel counts across
+    # shading modes, so differences isolate interpolation/blend/dither cost.
+    0xA0: "gpu_fill_tri_flat_16x32",
+    0xA1: "gpu_fill_tri_gouraud_16x32",
+    0xA2: "gpu_fill_tri_tex4_16x32",
+    0xA3: "gpu_fill_tri_tex8_16x32",
+    0xA4: "gpu_fill_tri_tex15_16x32",
+    0xA5: "gpu_fill_quad_flat_16x32",
+    0xA6: "gpu_fill_quad_gouraud_16x32",
+    0xA7: "gpu_fill_quad_tex4_16x32",
+    0xA8: "gpu_fill_tri_translucent_16x32",
+    0xA9: "gpu_fill_tri_gouraud_dithered_16x32",
+    0xAA: "gpu_fill_quad_flat_4x64",
+    0xAB: "gpu_fill_quad_flat_64x8",
+    0xAC: "gpu_fill_quad_tex_uvspan255",
+    0xAD: "gpu_fill_quad_tex_uvspan8",
+    0xAE: "gpu_fill_rect_mono_16x32",
+    0xAF: "gpu_fill_rect_tex8clut_16x32",
+    # MDEC, Timer 2 system cycles.
+    0xB0: "mdec_quant_table_luma_16w",
+    0xB1: "mdec_quant_table_luma_chroma_32w",
+    0xB2: "mdec_scale_table_32w",
+    0xB3: "mdec_reset_settle",
+    # SIO pad poll at four setup/inter-byte pacings.
+    0xB6: "sio_pad_poll_variant0",
+    0xB7: "sio_pad_poll_variant1",
+    0xB8: "sio_pad_poll_variant2",
+    0xB9: "sio_pad_poll_variant3",
 }
+
+# Records timed on Timer 1's HBlank clock rather than Timer 2's system clock.
+HBLANK_RECORDS = frozenset(range(0x90, 0x9F))
 
 GTE_SETTLE_FIRST_CASE = 116
 GTE_SETTLE_CASE_COUNT = 22
@@ -154,6 +205,26 @@ WORK_BY_ID = {
     0x6F: 2056,
     0x70: 4096,
     0x71: 4096,
+    0x90: 1,
+    0x91: 16,
+    0x92: 128,
+    0x93: 512,
+    0x94: 8,
+    0x95: 8,
+    **{record_id: 1 for record_id in range(0x96, 0x9B)},
+    0x9B: 8,
+    0x9C: 8,
+    0x9D: 1,
+    0x9E: 1,
+    **{record_id: 16 for record_id in range(0xA0, 0xAA)},
+    0xAA: 4,
+    0xAB: 64,
+    **{record_id: 16 for record_id in range(0xAC, 0xB0)},
+    0xB0: 16,
+    0xB1: 32,
+    0xB2: 32,
+    0xB3: 1,
+    **{record_id: 1 for record_id in range(0xB6, 0xBA)},
 }
 RECORD_IDS = tuple(WORK_BY_ID)
 
@@ -164,6 +235,8 @@ class Record:
     work: int
     minimum: int
     maximum: int
+    # PX7 only. PX5/PX6 kept no median, so -1 means "schema carried none".
+    median: int = -1
 
 
 @dataclass(frozen=True)
@@ -211,19 +284,34 @@ PX5_PAGE_COUNT = 2
 PX6_PRECISION_COUNT = 128
 PX6_BINARY_LEN = 1_733
 PX6_PAGE_COUNT = 3
+# PX7: explicit per-record ids, a median column, and 128 record slots.
+PX7_PRECISION_COUNT = 192
+PX7_BINARY_LEN = 2_637
+PX7_PAGE_COUNT = 5
+PX7_RECORD_SLOTS = 144
+PX7_RECORD_UNUSED = 0xFF
+SCHEMAS = ("PX5", "PX6", "PX7")
 STATUS_LABELS = {0: "PENDING", 1: "PASS", 2: "FAIL", 3: "WARN", 4: "INFO"}
+
+
+def page_count_for(schema: str) -> int:
+    return {"PX5": PX5_PAGE_COUNT, "PX6": PX6_PAGE_COUNT, "PX7": PX7_PAGE_COUNT}[schema]
+
+
+def binary_len_for(schema: str) -> int:
+    return {"PX5": PX5_BINARY_LEN, "PX6": PX6_BINARY_LEN, "PX7": PX7_BINARY_LEN}[schema]
 
 
 def parse_capture_page(payload: str) -> CapturePage:
     payload = payload.strip()
-    if not payload.startswith(("PX5/", "PX6/")):
-        raise ValueError("not a PX5/PX6 hardware payload")
+    if not payload.startswith(tuple(f"{name}/" for name in SCHEMAS)):
+        raise ValueError("not a PX5/PX6/PX7 hardware payload")
     try:
         body, claimed_crc = payload.rsplit("/C:", 1)
         marker, page_field, chunk = body.split("/", 2)
     except ValueError as exc:
         raise ValueError("malformed capture page") from exc
-    if marker not in ("PX5", "PX6") or len(page_field) != 4 or not chunk:
+    if marker not in SCHEMAS or len(page_field) != 4 or not chunk:
         raise ValueError("malformed capture page header")
     actual_crc = binascii.crc32(chunk.encode("ascii")) & 0xFFFF_FFFF
     if int(claimed_crc, 16) != actual_crc:
@@ -243,13 +331,13 @@ def parse_capture_page(payload: str) -> CapturePage:
 def parse_capture(payloads: list[str]) -> Capture:
     pages = [parse_capture_page(payload) for payload in payloads]
     if not pages:
-        raise ValueError("no PX5/PX6 payloads found")
+        raise ValueError("no PX5/PX6/PX7 payloads found")
     schemas = {page.schema for page in pages}
     if len(schemas) != 1:
-        raise ValueError("capture mixes PX5 and PX6 pages")
+        raise ValueError("capture mixes schema versions")
     schema = schemas.pop()
-    page_count = PX5_PAGE_COUNT if schema == "PX5" else PX6_PAGE_COUNT
-    binary_len = PX5_BINARY_LEN if schema == "PX5" else PX6_BINARY_LEN
+    page_count = page_count_for(schema)
+    binary_len = binary_len_for(schema)
     totals = {page.total for page in pages}
     if totals != {page_count}:
         raise ValueError(f"{schema} must declare exactly {page_count} pages")
@@ -279,7 +367,7 @@ def parse_capture(payloads: list[str]) -> Capture:
     if binary[:4] != f"{schema}B".encode("ascii"):
         raise ValueError(f"{schema} binary magic mismatch")
     version = binary[4]
-    expected_version = 1 if schema == "PX5" else 2
+    expected_version = {"PX5": 1, "PX6": 2, "PX7": 3}[schema]
     if version != expected_version:
         raise ValueError(f"unsupported {schema} binary version {version}")
     conformance_run = binary[5]
@@ -289,9 +377,10 @@ def parse_capture(payloads: list[str]) -> Capture:
     memory_count = binary[9]
     status_bits = binary[10]
     scan_count = binary[11]
+    expected_records = PX7_RECORD_SLOTS if schema == "PX7" else len(RECORD_IDS)
     expected_shape = (
         PX5_TEST_COUNT,
-        len(RECORD_IDS),
+        expected_records,
         9,
         PX5_STATUS_BITS,
         PX5_SCAN_COUNT,
@@ -327,14 +416,29 @@ def parse_capture(payloads: list[str]) -> Capture:
         statuses.append(status)
 
     records: list[Record] = []
-    for record_id in RECORD_IDS:
-        minimum, maximum = struct.unpack_from("<HH", binary, offset)
-        offset += 4
-        records.append(Record(record_id, WORK_BY_ID[record_id], minimum, maximum))
+    if schema == "PX7":
+        # Ids are explicit, so an unfilled slot is skipped rather than
+        # shifting every later record's meaning.
+        for _ in range(PX7_RECORD_SLOTS):
+            record_id, minimum, median, maximum = struct.unpack_from("<BHHH", binary, offset)
+            offset += 7
+            if record_id == PX7_RECORD_UNUSED:
+                continue
+            records.append(
+                Record(record_id, WORK_BY_ID.get(record_id, 0), minimum, maximum, median)
+            )
+    else:
+        for record_id in RECORD_IDS:
+            minimum, maximum = struct.unpack_from("<HH", binary, offset)
+            offset += 4
+            records.append(Record(record_id, WORK_BY_ID[record_id], minimum, maximum))
     memory_control = struct.unpack_from(f"<{memory_count}I", binary, offset)
     offset += memory_count * 4
     precision: tuple[int, ...] = ()
-    if schema == "PX6":
+    if schema == "PX7":
+        precision = struct.unpack_from(f"<{PX7_PRECISION_COUNT}I", binary, offset)
+        offset += PX7_PRECISION_COUNT * 4
+    elif schema == "PX6":
         precision = struct.unpack_from(f"<{PX6_PRECISION_COUNT}I", binary, offset)
         offset += PX6_PRECISION_COUNT * 4
     if offset != len(binary) - 4:
@@ -363,14 +467,14 @@ def payloads_from_paths(paths: list[str]) -> list[str]:
     def from_text(text: str) -> list[str]:
         found: list[str] = []
         for line in text.splitlines():
-            positions = [p for p in (line.find("PX5/"), line.find("PX6/")) if p >= 0]
+            positions = [p for p in (line.find(f"{n}/") for n in SCHEMAS) if p >= 0]
             if positions:
                 found.append(line[min(positions):].split()[0])
         return found
 
     payloads: list[str] = []
     for value in paths:
-        if value.startswith(("PX5/", "PX6/")):
+        if value.startswith(tuple(f"{n}/" for n in SCHEMAS)):
             payloads.append(value)
             continue
         text = pathlib.Path(value).read_text(encoding="utf-8")
@@ -380,8 +484,13 @@ def payloads_from_paths(paths: list[str]) -> list[str]:
     return payloads
 
 
-def print_report(capture: Capture, baseline: Capture | None) -> int:
-    page_count = PX5_PAGE_COUNT if capture.schema == "PX5" else PX6_PAGE_COUNT
+def print_report(
+    capture: Capture, baseline: Capture | None, fail_on_change: bool = False
+) -> int:
+    # Every baseline difference lands here so the summary can name what moved
+    # instead of only reporting that something did.
+    drift: list[str] = []
+    page_count = page_count_for(capture.schema)
     print(
         f"# schema={capture.schema} pages={page_count} run={capture.timing_run:02X} "
         f"digest={capture.timing_digest:08X} records={len(capture.records)} "
@@ -402,9 +511,12 @@ def print_report(capture: Capture, baseline: Capture | None) -> int:
         if baseline is not None:
             prior = baseline.observations[index]
             row += f",0x{prior:08X},{int(prior != observed)}"
+            if prior != observed:
+                drift.append(f"case {index}: 0x{prior:08X} -> 0x{observed:08X}")
         print(row)
 
-    columns = "id,label,work,min,max,jitter"
+    has_median = any(record.median >= 0 for record in capture.records)
+    columns = "id,label,work,min,max,jitter" + (",median" if has_median else "")
     if baseline is not None:
         columns += ",baseline_min,delta_min"
     print(columns)
@@ -415,12 +527,20 @@ def print_report(capture: Capture, baseline: Capture | None) -> int:
     )
     for record in capture.records:
         row = (
-            f"{record.record_id:02X},{LABELS[record.record_id]},{record.work},"
-            f"{record.minimum},{record.maximum},{record.maximum - record.minimum}"
+            f"{record.record_id:02X},{LABELS.get(record.record_id, 'unlabelled')},"
+            f"{record.work},{record.minimum},{record.maximum},"
+            f"{record.maximum - record.minimum}"
         )
+        if has_median:
+            row += f",{record.median}"
         if baseline_records is not None:
             prior = baseline_records[record.record_id]
             row += f",{prior.minimum},{record.minimum - prior.minimum:+d}"
+            if prior.minimum != record.minimum:
+                drift.append(
+                    f"timing {record.record_id:02X} ({LABELS.get(record.record_id, 'unlabelled')}): "
+                    f"min {prior.minimum} -> {record.minimum}"
+                )
         print(row)
 
     scan_names = ("cpu", "gte", "spu")
@@ -459,6 +579,8 @@ def print_report(capture: Capture, baseline: Capture | None) -> int:
             if baseline_precision:
                 prior = baseline_precision[index]
                 row += f",0x{prior:08X},{int(prior != value)}"
+                if prior != value:
+                    drift.append(f"precision {index:03d} ({label}): 0x{prior:08X} -> 0x{value:08X}")
             print(row)
     settle = capture.observations[
         GTE_SETTLE_FIRST_CASE : GTE_SETTLE_FIRST_CASE + GTE_SETTLE_CASE_COUNT
@@ -485,6 +607,17 @@ def print_report(capture: Capture, baseline: Capture | None) -> int:
                 for offset, (value, prior) in enumerate(zip(settle, baseline_settle))
             )
         )
+    if baseline is not None:
+        print(f"# drift={len(drift)}")
+        for entry in drift:
+            print(f"# drift: {entry}")
+        if drift and fail_on_change:
+            print(
+                f"FAIL: {len(drift)} value(s) moved against the baseline. "
+                "Re-baseline deliberately with `make hwtest-baseline` if this is intended.",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 
@@ -561,7 +694,20 @@ def precision_label(index: int) -> str:
         return "gte_rtpt_e_then_nclip_c_sequence"
     if index == 127:
         return "gte_nclip_a_after_c_sequence"
-    raise ValueError(f"unknown PX6 precision index {index}")
+    # PX7 additions: console identity, then bit-exact raster hashes.
+    if 128 <= index <= 131:
+        return f"bios_date_word_{index - 128:02d}"
+    if 132 <= index <= 135:
+        return f"bios_version_word_{index - 132:02d}"
+    if index == 136:
+        return "gpustat_at_rest"
+    if index == 137:
+        return "mdec_status_after_reset"
+    if 138 <= index <= 159:
+        return f"raster_hash_{index - 138:02d}"
+    if 160 <= index < PX7_PRECISION_COUNT:
+        return f"reserved_{index:03d}"
+    raise ValueError(f"unknown precision index {index}")
 
 
 def main() -> int:
@@ -569,6 +715,11 @@ def main() -> int:
     parser.add_argument(
         "--baseline",
         help="optional PX5/PX6 payload file to compare against",
+    )
+    parser.add_argument(
+        "--fail-on-change",
+        action="store_true",
+        help="exit non-zero if any value moved against --baseline (CI gate)",
     )
     parser.add_argument("payload_or_file", nargs="*")
     args = parser.parse_args()
@@ -581,7 +732,7 @@ def main() -> int:
         )
         if baseline is not None and baseline.schema != capture.schema:
             raise ValueError("baseline and capture schemas differ")
-        return print_report(capture, baseline)
+        return print_report(capture, baseline, args.fail_on_change)
     except (OSError, UnicodeError, ValueError) as exc:
         print(f"hwtest-report: {exc}", file=sys.stderr)
         return 2
