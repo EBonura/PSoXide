@@ -110,6 +110,70 @@ one macroblock, 7463 for two) and wildly non-linear in PSoXide (3119, then
 39374), which points at the emulator's lazy decode-on-read rather than at
 hardware.
 
+## SIO: the pad's setup delay is not modelled at all
+
+**Status:** open, fully characterised. **Found:** 2026-07-26, HWTEST v1.5 capture
+(`docs/hardware-refs/px7-silicon-v1.5-2026-07-26.txt`).
+
+A twelve-point sweep of the setup delay between selecting the controller and
+clocking the first byte. The console has a hard threshold; PSoXide has none.
+
+| Setup spins | Console | PSoXide |
+|---:|---|---|
+| 0 | **no reply** | 378 |
+| 64 | **no reply** | 891 |
+| 128 | **no reply** | 1403 |
+| 192 | 8587 | 1915 |
+| 256 | 8771 | 2432 |
+| 512 | 10541 | 4475 |
+| 1024 | 14077 | 8571 |
+| 1536 | 17615 | 12667 |
+
+Two separate defects. PSoXide **answers a poll that real hardware ignores** at
+every delay below 192 spins, so guest code with too short a setup delay works in
+the emulator and fails silently on a console. And once the pad does reply, the
+console takes 2-5x longer per poll than PSoXide charges.
+
+This is the SCPH-1200 controller problem, previously a remembered anecdote that
+cost a debugging session, now bracketed to between 128 and 192 spins. The SDK's
+`DEFAULT_SETUP_SPINS = 1024` is safely above it, and now demonstrably so rather
+than by luck.
+
+One caveat: an earlier capture saw setup 0 reply once. The boundary is not
+perfectly repeatable, which is expected of a physical handshake, but everything
+below 192 failed in the sweep run.
+
+## CD seek is variance-dominated, not distance-dominated
+
+**Status:** closed as "do not model as f(distance)". **Found:** 2026-07-26.
+
+Ten distances, five repeats each, min/median/max retained:
+
+| Distance | min | median | max |
+|---:|---:|---:|---:|
+| 1 | 11.3 ms | 11.5 | 12.6 |
+| 4 | 51.2 | 51.4 | 51.6 |
+| 8 | 104.9 | 105.1 | 117.9 |
+| 16 | 104.5 | 104.7 | 105.3 |
+| 32 | 289.3 | 289.4 | **552.8** |
+| 64 | 159.7 | 173.6 | 318.1 |
+| 128 | 137.3 | 137.6 | 137.7 |
+| 256 | 90.7 | 91.1 | 91.6 |
+| 512 | 151.8 | **310.2** | 310.5 |
+
+Still non-monotonic with ten points, and now the reason is visible: the spread
+within one distance (32 sectors ranges 289 to 553 ms) is larger than the spread
+between distances. Seek cost here is dominated by rotational position and head
+settling, not by how far the head travels. Backward seeks confirm it, differing
+from forward in opposite directions at 64 and 256 sectors.
+
+**Consequence:** the earlier plan to replace `SEEK_SECOND_RESPONSE_CYCLES` with a
+distance model was wrong, and would have encoded noise. The defensible change is
+to keep a constant and raise it: PSoXide's 53 ms sits below almost every console
+sample, whose typical cost is 100-300 ms. That is a one-line change with a
+measured target, and it wants checking against game boot paths since seeks
+getting several times slower can expose timeouts.
+
 ## SPU: an all-zero ADSR does not decay
 
 **Status:** open. **Found:** 2026-07-26, console recording, HWTEST v1.2 disc.
