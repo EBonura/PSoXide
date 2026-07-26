@@ -257,16 +257,24 @@ pub(crate) fn draw_capture_page(font: &FontAtlas, capture: &PhotoCapture, page: 
         hex2(CAPTURE_PAGE_COUNT as u8).as_str(),
         (232, 236, 244),
     );
-    font.draw_text(0, 10, "PAGE", (140, 160, 190));
+    // Labels are abbreviated so the navigation hint fits on the same line.
+    // START opening the menu has to be visible somewhere the operator is
+    // already looking, and this screen is where they spend the whole capture.
+    // Positions assume the 8px advance this font actually has. Labels are
+    // abbreviated so the navigation hint fits on the same line: START opening
+    // the menu has to be visible where the operator is already looking, and
+    // this is the screen they spend the whole capture on.
+    font.draw_text(0, 10, "PG", (140, 160, 190));
     font.draw_text(
-        40,
+        20,
         10,
         hex8(capture.page_crc(page)).digits(),
         (96, 240, 128),
     );
-    font.draw_text(120, 10, "FULL", (140, 160, 190));
-    font.draw_text(160, 10, hex8(capture.binary_crc).digits(), (96, 240, 128));
-    font.draw_text(240, 10, "L/R PAGE", (150, 170, 200));
+    font.draw_text(88, 10, "ALL", (140, 160, 190));
+    font.draw_text(116, 10, hex8(capture.binary_crc).digits(), (96, 240, 128));
+    font.draw_text(186, 10, "L/R", (150, 170, 200));
+    font.draw_text(216, 10, "START MENU", (255, 232, 128));
 
     if capture.qr_size as usize != QR_SIZE {
         font.draw_text(80, 112, "QR ENCODE FAILED", (255, 96, 96));
