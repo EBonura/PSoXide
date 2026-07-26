@@ -135,6 +135,33 @@ gate on both projects and reduces the targeted cell-selection work.
 
 ## Rejected engine changes
 
+### R4/R4a: precompute lattice attributes or remove leaf copies
+
+Two variants tested the proposed one-level TR lattice data rewrite. A full
+residency pool stored the five midpoint UV/RGB attributes per eligible surface,
+costing 57,344 bytes at the existing room/surface limits. It preserved output
+but increased cortex_v3 mean render work by 14,110 cycles versus the frozen
+baseline (17,420 versus V0), with effective FPS unchanged at 14.03. A smaller
+variant kept the existing attributes but addressed child leaves by lattice
+index instead of copying four compact vertices; it increased mean render work
+by 3,903 cycles versus the frozen baseline.
+
+Both variants were removed. On this MIPS target the added helper/argument and
+resident-memory traffic costs more than the five midpoint interpolations or
+four small leaf copies they replace.
+
+### R5: packet template copy/patch to remove an arena double-write
+
+The proposed double-write does not exist in optimized MIPS code. Disassembly
+of `submit_textured_gouraud_quad_leaf_uv_words_prepared_depth` shows the packet
+words written directly to the address computed from the primitive arena. Its
+72-byte stack frame holds saved registers and scalar spills; no temporary
+`QuadTexturedGouraud` is materialized and copied. The 832-byte function has 208
+instructions, one call (command insertion), and one direct sequence of packet
+stores. Replacing the constructor with explicit reserve-and-patch code would
+only restate code LLVM already emits, so R5 is rejected without perturbing the
+runtime.
+
 ### R8: retain TR identity GTE state across surfaces
 
 Hoisting the identity projection load out of each Tomb Raider subdivision
@@ -160,8 +187,9 @@ each submission.
 | R1 | Surface-level zero-fog warm-path gate | rejected | safe form: v3 14.03→14.36 FPS, but 1/927 transient hashes changed; packet-fast form changed 734/927 |
 | R2 | `#[inline(never)]` hot dispatcher leaves | rejected | v3 14.03→13.67 FPS, render mean +4.3%, I-cache stalls +1.7%; 534/927 lockstep hashes changed |
 | R3 | Residency-built `SurfaceDrawRecord` + option variants | queued | Remove static per-surface interpretation |
-| R4 | Residency-built lattice UV/RGB attributes | queued | Test after M1 corrected the upper bound |
-| R5 | Packet template copy/patch; remove arena double-write | queued | Must preserve packet bytes and OT slots |
+| R4 | Residency-built lattice UV/RGB attributes | rejected | +57 KB RAM; v3 render mean +14,110 cycles vs frozen baseline; 14.03 FPS unchanged |
+| R4a | Address lattice leaves by index instead of copying four vertices | rejected | v3 render mean +3,903 cycles vs frozen baseline; 14.03 FPS unchanged |
+| R5 | Packet template copy/patch; remove arena double-write | rejected | MIPS codegen already emits the 14 packet words directly into the arena; no temporary packet copy exists |
 | R6 | Offline whole-subdivision proof + runtime demotion | queued | No topology or threshold change |
 | R7 | Fully cooked render clusters / packet-ready primitives | queued | RAM/code/stream budget gated |
 | R8 | Retain TR identity GTE state across room surfaces | rejected | unsafe variants changed 1–38/1,047 v1 frames; exact variant regressed v1 render mean by 2,302 cycles |
