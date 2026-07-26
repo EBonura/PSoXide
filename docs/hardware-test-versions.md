@@ -30,6 +30,26 @@ header.
 
 ## History
 
+### v1.5 (2026-07-26, schema PX7)
+
+Two sweeps, added to settle findings the first complete capture raised but could
+not answer. Records only added, so v1.4 captures stay comparable.
+
+- **Seek sweep** (`0xC0`-`0xC5`) fills in 2, 4, 8, 32, 64 and 256 sectors between
+  the four original distances, which came back non-monotonic (+128 measured 361
+  ms against +512 at 192 ms) and defeated both a linear and a square-root fit.
+  Ten distances make an outlier visible as an outlier rather than as the shape
+  of the curve.
+- **Backward seeks** (`0xC6`, `0xC7`) at 64 and 256 sectors. Every existing seek
+  record approaches from below, so a direction asymmetry would be invisible.
+- **SIO setup-delay sweep** (`0xD0`-`0xDB`), twelve delays from 0 to 1536. The
+  console answered at setup 0, gave no reply at 128, and answered again at 384;
+  a threshold cannot be read off that, and this is the SCPH-1200 pad problem
+  stated as a measurement.
+
+Record slots raised 144 to 176, which still fits five QR pages (3,820 of 4,140
+characters).
+
 ### v1.4 (2026-07-26, schema PX7)
 
 The capture is frozen when it is taken. **This is the fix that makes multi-page
