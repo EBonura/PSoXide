@@ -235,6 +235,38 @@ without spending a cortex_v3 run. Any eventual compiled record must encode
 the few decisions compactly in the record itself, not indirect through a
 copied `WorldSurfaceOptions` table.
 
+### R10a: defer the forced-split options copy
+
+After R10, the largest named `memcpy` caller was a 68-byte
+`WorldSurfaceOptions` clone before projected-quad hardware-extent checks. A
+lazy form evaluated the identical safety predicate from the scalar edge
+threshold and constructed the forced-split options only on the fallback.
+Disassembly confirmed that the copy moved off the common accepted-quad path.
+
+It helped cortex_v3 lockstep by 6,610 render cycles but hurt cortex_v1 by
+856 cycles, increased its I-cache stalls by 1,002, and changed one of 1,044
+common visual checkpoints (with two cadence-set replacements). Its ordinary
+cortex_v1 run also fell 26.99→26.78 FPS. The change was removed; this is
+another measured instance where adding a branch/code-layout change around a
+large by-value options object is not an engine-wide win on the 4 KiB
+direct-mapped instruction cache.
+
+### R11/R11b: avoid the full portal-result reset
+
+The second-largest named post-R10 `memcpy` caller was
+`PortalVisibilityResult::clear`: every camera refresh copied the complete
+fixed-capacity `EMPTY` result, including 64 frustum and 32 frontier slots.
+R11 reset only counts and statistics, relying on every declared reader being
+count-bounded. It changed two cortex_v1 lockstep images, proving that this
+logical contract is not strong enough for an exact engine change.
+
+R11b restored every previously exposed prefix slot to its exact sentinel
+before zeroing the counts, preserving the original full-pool invariant because
+all never-used tails begin empty. It saved 2,072 mean render cycles and 2,651
+I-cache stall cycles in cortex_v1 lockstep, but still changed one of 1,046
+common images. Both forms were removed. The portal result keeps its full reset
+until the implicit state/layout sensitivity is isolated separately.
+
 ### R6: offline whole-subdivision proof is not currently sound
 
 The proposed `WHOLE` classification requires a conservative minimum
@@ -316,6 +348,25 @@ checkpoint after crossing a deadline, with no mismatching common image.
 |---|---:|---:|---:|---:|
 | cortex_v1 | 25.97→26.28 | 128,321→118,072 (lockstep) | 71.4%→73.9% | 174,334→171,976 |
 | cortex_v3 | 15.09→15.38 | 138,437→125,478 (lockstep) | 0.2%→0.5% | 357,343→348,665 |
+
+### R10: borrow the world pass at flush
+
+Return-address profiling resolved the largest remaining `memcpy` caller to
+`Playtest::render`: consuming `WorldRenderPass<2048>` by value at
+`flush(self)` made LLVM copy the entire 8,212-byte pass into a second stack
+slot. The payload was almost entirely its two 2,048-entry ordering arrays.
+`flush(&mut self)` removes that copy without changing the pass, command,
+packet, or ordering-table representation. MIPS disassembly confirms the
+8,212-byte `memcpy` is gone and the renderer body shrank by 12 bytes.
+
+| Project | FPS | Mean render | p95 render | Render periods <=2 VBlanks | Visual proof |
+|---|---:|---:|---:|---:|---|
+| cortex_v1 | 26.28→26.99 | 770,832→742,800 | 1,100,178→1,069,593 | 73.9%→79.2% | 1,046 / 1,046 exact |
+| cortex_v3 | 15.38→15.71 | 1,394,974→1,364,086 | 1,979,163→1,953,348 | 0.5%→0.7% | 925 / 925 exact |
+
+The controlled lockstep deltas are nearly project-independent:
+29,735 cycles per visual in cortex_v1 and 29,725 in cortex_v3. This is an
+engine-wide structural win rather than a workload-specific shortcut.
 
 ### V1: carry portal window and far plane into the all-cells fallback
 
@@ -427,6 +478,9 @@ of the win without changing data layout or packet identity.
 | T1b | Skip settled unchanged residency reconciliation | rejected | update -2,397 cycles/tick, but render +5,714, I-cache +5,116, and 1/1,046 hashes changed |
 | T1c | Decode only the selected collision floor triangle | accepted | v1 25.58→25.97 FPS; v3 14.25→15.09 FPS; all common lockstep images exact |
 | T1d | Use header-only sector probes for character wall checks | accepted | v1 25.97→26.28 FPS; v3 15.09→15.38 FPS; all common lockstep images exact |
+| R10 | Borrow `WorldRenderPass` during flush instead of copying 8,212 bytes | accepted | v1/v3 lockstep render -29,735/-29,725 cycles; all 1,971 hashes exact |
+| R10a | Lazily build forced-split options after the quad extent check | rejected | v3 render -6,610, but v1 render +856, I-cache +1,002, and 1/1,044 common hashes changed |
+| R11/R11b | Logical-only or used-prefix portal-result reset | rejected | prefix form saved 2,072 render cycles in v1 but changed 1/1,046 common images; count-only changed 2 |
 | T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
