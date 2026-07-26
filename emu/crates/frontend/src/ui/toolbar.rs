@@ -354,8 +354,8 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
         "Toggle debug sidebar",
         &mut state.panels.debug_sidebar,
     );
-    // Freelook camera toggle. Resets the pose on disable so re-enabling
-    // starts centred on the game's own camera.
+    // Freecam toggle. Switching KEEPS the pose, so you can look back at the
+    // game and return to the shot you had. Hold L3+R3 on a pad to recentre.
     let fl_btn = toggle_button(icons::EYE, state.freelook.enabled);
     if ui
         .add(fl_btn)
