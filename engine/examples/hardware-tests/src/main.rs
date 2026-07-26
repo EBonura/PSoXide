@@ -3083,12 +3083,18 @@ fn run_timing_scan() -> TimingReport {
         &mut next,
         sample_timing(0xB3, 1, timed_mdec_reset_settle),
     );
-    // KNOWN GAP: decode timing is not measured. A decode command holds BUSY
-    // until its output is drained, and producing output needs a genuinely
-    // valid RLE/VLC bitstream. A synthetic DC-then-EOB block yields nothing,
-    // so a decode record here would report only its own timeout. Left out
-    // deliberately rather than shipped as a record that always reads 0xFFFF;
-    // it needs a real bitstream fixture first.
+    // Decode-to-drained for one and four colour macroblocks. Two points, so
+    // the host can separate per-macroblock cost from command setup.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xB4, 1, || timed_mdec_decode(1)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xB5, 2, || timed_mdec_decode(2)),
+    );
     // SIO: the same poll at four pacing configurations.
     push_timing_record(
         &mut records,
@@ -4040,6 +4046,94 @@ fn timed_mdec(command: u32, payload_words: u16) -> u16 {
     }
 }
 
+
+/// One minimal MDEC block, packed as the two halfwords the decoder consumes.
+///
+/// Low halfword is the block head: bits 15..10 the quantisation scale, bits
+/// 9..0 a signed 10-bit DC coefficient. High halfword is `0xFE00`, whose
+/// run-length field of 63 overflows the coefficient index and so terminates
+/// the block. Two halfwords is therefore a complete, valid block.
+const MDEC_BLOCK_DC_EOB: u32 = 0xFE00_2040;
+/// Blocks per colour macroblock: Cr, Cb, then four luma.
+const MDEC_BLOCKS_PER_MACROBLOCK: u16 = 6;
+/// Output words per 24-bit macroblock: 16x16 pixels at 3 bytes each.
+const MDEC_WORDS_PER_MACROBLOCK: u32 = 16 * 16 * 3 / 4;
+
+/// Decode `macroblocks` colour macroblocks and time decode-to-drained.
+///
+/// Draining is part of the measurement, not overhead: MDEC holds BUSY set until
+/// its output has been read, and decode-to-drained is the interval that governs
+/// FMV throughput. It is also the only way the command completes at all.
+fn timed_mdec_decode(macroblocks: u16) -> u16 {
+    mdec_load_tables();
+    let words = macroblocks * MDEC_BLOCKS_PER_MACROBLOCK;
+    // Command 1, 24-bit output depth (bits 28..27 = 2), parameter words in the
+    // low half.
+    let command = 0x2000_0000 | (2 << 27) | u32::from(words);
+    let expected_out = u32::from(macroblocks) * MDEC_WORDS_PER_MACROBLOCK;
+
+    timers::set_mode(timers::Timer::Timer2, 0);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    unsafe {
+        psx_io::write32(MDEC_CMD, command);
+        let mut word = 0u16;
+        while word < words {
+            psx_io::write32(MDEC_CMD, MDEC_BLOCK_DC_EOB);
+            word += 1;
+        }
+    }
+
+    // Stop on EITHER termination, because the two disagree.
+    //
+    // Real hardware clears BUSY once the decode finishes and its output has
+    // been read. PSoXide only re-evaluates BUSY when the last parameter word
+    // arrives, and output is already queued by then, so BUSY stays set forever
+    // and a busy-only wait never returns. Draining the expected pixel count is
+    // what terminates in emulation; the BUSY check is what terminates, sooner,
+    // on silicon. Accepting both makes the same record valid on each.
+    let mut guard = 0u32;
+    let mut drained = 0u32;
+    while guard < 400_000 && drained < expected_out {
+        let status = unsafe { psx_io::read32(MDEC_CTRL) };
+        if status & MDEC_OUT_FIFO_EMPTY == 0 {
+            let _ = unsafe { psx_io::read32(MDEC_CMD) };
+            drained += 1;
+            continue;
+        }
+        if status & MDEC_BUSY == 0 {
+            break;
+        }
+        guard += 1;
+    }
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    // A full macroblock of pixels is the floor for calling this a decode rather
+    // than a timeout wearing the costume of a fast one.
+    if drained >= MDEC_WORDS_PER_MACROBLOCK {
+        elapsed
+    } else {
+        0xFFFF
+    }
+}
+
+/// Upload a flat quant table and a scale table so a decode has defined inputs
+/// regardless of which record ran before it.
+fn mdec_load_tables() {
+    unsafe {
+        psx_io::write32(MDEC_CTRL, MDEC_RESET);
+        psx_io::write32(MDEC_CMD, 0x4000_0001);
+        let mut word = 0;
+        while word < 32 {
+            psx_io::write32(MDEC_CMD, 0x1010_1010);
+            word += 1;
+        }
+        psx_io::write32(MDEC_CMD, 0x6000_0000);
+        word = 0;
+        while word < 32 {
+            psx_io::write32(MDEC_CMD, 0x0000_1000);
+            word += 1;
+        }
+    }
+}
 
 /// Time a reset returning the decoder to idle.
 fn timed_mdec_reset_settle() -> u16 {
