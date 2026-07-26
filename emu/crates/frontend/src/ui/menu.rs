@@ -400,11 +400,10 @@ impl MenuState {
             // has neither, so the category is dropped there.
             #[cfg(not(target_arch = "wasm32"))]
             build_projects_category(&[]),
-            // On web these two desktop-only features are shown greyed (a single
-            // "not available" row) instead of dropped, so the gap is explained
-            // rather than silent.
-            #[cfg(target_arch = "wasm32")]
-            disabled_category("Projects", icons::LAYERS),
+            // Projects is dropped outright on web rather than shown greyed:
+            // it is filesystem-backed and can never work there, so a permanent
+            // "not available" row is a dead entry the user has to skip past on
+            // every visit. Examples carry the web build instead.
             // The Editor category is the entry point into the host editor
             // workspace; it is absent in emulator-only builds.
             #[cfg(feature = "editor")]
