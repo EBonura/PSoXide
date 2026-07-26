@@ -426,8 +426,13 @@ impl Adsr {
         }
     }
 
-    /// Silent / "no envelope" -- voice stays at key-on volume until
-    /// key-off. Useful as a placeholder while iterating.
+    /// All-zero ADSR.
+    ///
+    /// This does NOT hold the voice at key-on volume, despite being the
+    /// obvious "no envelope" choice: zero means sustain level 0, so on real
+    /// hardware the envelope decays to silence shortly after key-on. Verified
+    /// on console, where a held tone faded out after ~3 seconds. Use
+    /// [`Adsr::sample`] for a level that holds.
     pub const fn passthrough() -> Self {
         Self { lower: 0, upper: 0 }
     }

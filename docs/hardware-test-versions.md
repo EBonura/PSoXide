@@ -30,6 +30,20 @@ header.
 
 ## History
 
+### v1.3 (2026-07-26, schema PX7)
+
+Audio readout holds its level for the whole payload. No record changed meaning;
+baseline re-pinned because the binary changed.
+
+v1.2 keyed the readout voice with `Adsr::passthrough()`, an all-zero ADSR. Zero
+means sustain level 0, so on hardware the envelope decays to silence shortly
+after key-on: a console recording carried about 3 seconds of a 13.6 second
+payload, twice, and neither repetition was complete. PSoXide holds the level
+indefinitely for the same configuration, so no amount of emulator testing could
+have shown it. See `emulator-accuracy-from-silicon.md`.
+
+The disc now uses `Adsr::sample()`: instant attack, sustain level maximum.
+
 ### v1.2 (2026-07-26, schema PX7)
 
 Audio readout on by default. No record changed meaning; the baseline was
