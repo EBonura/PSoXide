@@ -18,7 +18,10 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 
 def integer_rows(path: Path) -> list[dict[str, int]]:
-    return [{key: int(value) for key, value in row.items()} for row in read_csv(path)]
+    # Older route logs can have a short initial row while the first pad poll is
+    # still being assembled. DictReader represents the absent trailing field
+    # as None; it is semantically the same as the counter's zero initial value.
+    return [{key: int(value or 0) for key, value in row.items()} for row in read_csv(path)]
 
 
 def percentile(values: list[int], fraction: float) -> int:
