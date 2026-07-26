@@ -1686,6 +1686,19 @@ impl EditorWorkspace {
             }
         });
         ui.menu_button("Tools", |ui| {
+            if ui
+                .button("Remove Duplicate Walls")
+                .on_hover_text(
+                    "Delete every wall segment that is byte-identical to another on the same \
+                     edge. Two of them sit in one plane, so the second can never be seen and \
+                     still costs a full room surface to draw. Undoable.",
+                )
+                .clicked()
+            {
+                self.remove_duplicate_walls();
+                ui.close_menu();
+            }
+            ui.separator();
             if ui.button("Build Project").clicked() {
                 self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
                 ui.close_menu();
