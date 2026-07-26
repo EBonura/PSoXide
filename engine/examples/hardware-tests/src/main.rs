@@ -504,42 +504,92 @@ const PRECISION_VALUE_COUNT: usize = 192;
 /// interaction) that a min/max pair cannot distinguish.
 const TIMING_SAMPLES: usize = 5;
 
+/// Which menu page is showing.
+///
+/// Two levels rather than one flat list: 21 reachable modes do not fit on a
+/// 240-line display, and a scrolling list means paging past eleven result
+/// sections to reach the probes. Every page here fits on screen at once.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum MenuPage {
+    Root,
+    Results,
+    Scans,
+    Probes,
+}
+
 /// What a menu row does when chosen.
 #[derive(Copy, Clone)]
 enum MenuAction {
     /// Re-run exactly what boot runs: conformance, scans, timing battery.
     RerunStartup,
     Open(Mode),
+    Submenu(MenuPage),
+    Back,
+    /// Step the audio readout: off, each rate, off again.
+    CycleAudio,
 }
 
-/// The main menu, in the order it is displayed. Grouped by kind and prefixed,
-/// so an operator can find a thing without knowing the internal mode order.
-const MENU: [(&str, MenuAction); 22] = [
+const ROOT_MENU: [(&str, MenuAction); 6] = [
     ("RERUN STARTUP TESTS", MenuAction::RerunStartup),
     ("VIEW CAPTURE (QR PAGES)", MenuAction::Open(Mode::TimingScan)),
-    ("RESULTS: ALL CHECKS", MenuAction::Open(Mode::AllChecks)),
-    ("RESULTS: CPU", MenuAction::Open(Mode::CpuChecks)),
-    ("RESULTS: RAM", MenuAction::Open(Mode::MemoryChecks)),
-    ("RESULTS: IRQ", MenuAction::Open(Mode::IrqChecks)),
-    ("RESULTS: DMA", MenuAction::Open(Mode::DmaChecks)),
-    ("RESULTS: TIMERS", MenuAction::Open(Mode::TimerChecks)),
-    ("RESULTS: GPU", MenuAction::Open(Mode::GpuChecks)),
-    ("RESULTS: GTE", MenuAction::Open(Mode::GteChecks)),
-    ("RESULTS: SPU", MenuAction::Open(Mode::SpuChecks)),
-    ("RESULTS: CDROM", MenuAction::Open(Mode::CdromChecks)),
-    ("RESULTS: SIO", MenuAction::Open(Mode::SioChecks)),
-    ("SCAN: CPU SWEEP", MenuAction::Open(Mode::CpuScan)),
-    ("SCAN: GTE SWEEP", MenuAction::Open(Mode::GteScan)),
-    ("SCAN: SPU MAP", MenuAction::Open(Mode::SpuScan)),
-    ("PROBE: CONTROLLER", MenuAction::Open(Mode::ControllerProbe)),
-    ("PROBE: HL REVERB STATE", MenuAction::Open(Mode::ReverbProbe)),
-    ("PROBE: HL VOICE HANDOFF", MenuAction::Open(Mode::HandoffProbe)),
-    ("PROBE: HL BANK TRANSITION", MenuAction::Open(Mode::TransitionProbe)),
-    ("PROBE: HL VOICE BANK", MenuAction::Open(Mode::VoiceProbe)),
-    ("PROBE: CD/SPU AUDIO", MenuAction::Open(Mode::AudioProbe)),
+    ("RESULTS BY SECTION", MenuAction::Submenu(MenuPage::Results)),
+    ("HARDWARE SCANS", MenuAction::Submenu(MenuPage::Scans)),
+    ("TARGETED PROBES", MenuAction::Submenu(MenuPage::Probes)),
+    // Listed, not just bound to SQUARE: an operator cannot discover a hidden
+    // button, and this is the control they need while recording.
+    ("AUDIO READOUT", MenuAction::CycleAudio),
 ];
-/// Menu rows visible at once; the window scrolls with the cursor.
-const MENU_WINDOW: usize = 15;
+
+const RESULTS_MENU: [(&str, MenuAction); 12] = [
+    ("ALL CHECKS", MenuAction::Open(Mode::AllChecks)),
+    ("CPU", MenuAction::Open(Mode::CpuChecks)),
+    ("RAM", MenuAction::Open(Mode::MemoryChecks)),
+    ("IRQ", MenuAction::Open(Mode::IrqChecks)),
+    ("DMA", MenuAction::Open(Mode::DmaChecks)),
+    ("TIMERS", MenuAction::Open(Mode::TimerChecks)),
+    ("GPU", MenuAction::Open(Mode::GpuChecks)),
+    ("GTE", MenuAction::Open(Mode::GteChecks)),
+    ("SPU", MenuAction::Open(Mode::SpuChecks)),
+    ("CDROM", MenuAction::Open(Mode::CdromChecks)),
+    ("SIO", MenuAction::Open(Mode::SioChecks)),
+    ("BACK", MenuAction::Back),
+];
+
+const SCANS_MENU: [(&str, MenuAction); 4] = [
+    ("CPU SWEEP", MenuAction::Open(Mode::CpuScan)),
+    ("GTE SWEEP", MenuAction::Open(Mode::GteScan)),
+    ("SPU REGISTER MAP", MenuAction::Open(Mode::SpuScan)),
+    ("BACK", MenuAction::Back),
+];
+
+const PROBES_MENU: [(&str, MenuAction); 7] = [
+    ("CONTROLLER PORT", MenuAction::Open(Mode::ControllerProbe)),
+    ("HL REVERB STATE (PA5)", MenuAction::Open(Mode::ReverbProbe)),
+    ("HL VOICE HANDOFF (PA4)", MenuAction::Open(Mode::HandoffProbe)),
+    ("HL BANK TRANSITION (PA3)", MenuAction::Open(Mode::TransitionProbe)),
+    ("HL VOICE BANK (PA2)", MenuAction::Open(Mode::VoiceProbe)),
+    ("CD/SPU AUDIO (PA1)", MenuAction::Open(Mode::AudioProbe)),
+    ("BACK", MenuAction::Back),
+];
+
+const fn menu_entries(page: MenuPage) -> &'static [(&'static str, MenuAction)] {
+    match page {
+        MenuPage::Root => &ROOT_MENU,
+        MenuPage::Results => &RESULTS_MENU,
+        MenuPage::Scans => &SCANS_MENU,
+        MenuPage::Probes => &PROBES_MENU,
+    }
+}
+
+const fn menu_title(page: MenuPage) -> &'static str {
+    match page {
+        MenuPage::Root => "MAIN MENU",
+        MenuPage::Results => "RESULTS BY SECTION",
+        MenuPage::Scans => "HARDWARE SCANS",
+        MenuPage::Probes => "TARGETED PROBES",
+    }
+}
+
 
 #[derive(Copy, Clone)]
 struct TimingRecord {
@@ -1529,8 +1579,10 @@ struct HardwareTests {
     /// Index into `audio_link::RATE_DIVISORS` for the readout tone rate.
     /// Zero means off, so the disc is silent unless asked.
     audio_rate: usize,
-    /// Selected row in [`MENU`].
+    /// Selected row on the current menu page.
     menu_cursor: usize,
+    /// Which menu page is showing.
+    menu_page: MenuPage,
 }
 
 #[cfg(target_arch = "mips")]
@@ -1586,6 +1638,7 @@ impl HardwareTests {
             probe_variants: [psx_pad::RawPoll::NONE; PROBE_VARIANT_COUNT],
             audio_rate: 0,
             menu_cursor: 0,
+            menu_page: MenuPage::Root,
         }
     }
 
@@ -1649,6 +1702,28 @@ impl HardwareTests {
             Mode::VoiceProbe => self.voice_probe.start(),
             Mode::AudioProbe => self.audio_probe.start(),
             _ => {}
+        }
+    }
+
+    fn open_menu_page(&mut self, page: MenuPage) {
+        self.mode = Mode::Menu;
+        self.menu_page = page;
+        self.menu_cursor = 0;
+        self.page = 0;
+    }
+
+    /// Step the audio readout: off, then each rate, then off again. Off is the
+    /// default so the disc is silent unless the operator asks for the tone.
+    fn cycle_audio_readout(&mut self) {
+        self.audio_rate = (self.audio_rate + 1) % (audio_link::RATE_DIVISORS.len() + 1);
+        if self.audio_rate == 0 {
+            audio_link::stop();
+            tty::println("hardware-tests: audio-link off");
+        } else {
+            audio_link::set_rate(self.audio_rate - 1);
+            tty::print("hardware-tests: audio-link rate index ");
+            tty_print_dec_u8((self.audio_rate - 1) as u8);
+            tty::println("");
         }
     }
 
@@ -1787,14 +1862,25 @@ impl Scene for HardwareTests {
         }
 
         if matches!(self.mode, Mode::Menu) {
+            let entries = menu_entries(self.menu_page);
             if ctx.just_pressed(button::UP) {
-                self.menu_cursor = (self.menu_cursor + MENU.len() - 1) % MENU.len();
+                self.menu_cursor = (self.menu_cursor + entries.len() - 1) % entries.len();
             }
             if ctx.just_pressed(button::DOWN) {
-                self.menu_cursor = (self.menu_cursor + 1) % MENU.len();
+                self.menu_cursor = (self.menu_cursor + 1) % entries.len();
+            }
+            // START and TRIANGLE both back out one level, and leave the menu
+            // entirely from the root, so one button walks the whole way out.
+            if ctx.just_pressed(button::START) || ctx.just_pressed(button::TRIANGLE) {
+                if matches!(self.menu_page, MenuPage::Root) {
+                    self.enter_mode(Mode::TimingScan);
+                } else {
+                    self.open_menu_page(MenuPage::Root);
+                }
+                return;
             }
             if ctx.just_pressed(button::CROSS) {
-                match MENU[self.menu_cursor].1 {
+                match entries[self.menu_cursor].1 {
                     MenuAction::RerunStartup => {
                         // Same work boot does, and it lands back on the capture
                         // pages the same way, so a re-run and a fresh boot are
@@ -1804,21 +1890,19 @@ impl Scene for HardwareTests {
                         self.enter_mode(Mode::TimingScan);
                     }
                     MenuAction::Open(mode) => self.enter_mode(mode),
+                    MenuAction::Submenu(page) => self.open_menu_page(page),
+                    MenuAction::Back => self.open_menu_page(MenuPage::Root),
+                    MenuAction::CycleAudio => self.cycle_audio_readout(),
                 }
             }
             return;
         }
 
-        // TRIANGLE always returns to the menu, from any screen.
-        if ctx.just_pressed(button::TRIANGLE) {
-            self.mode = Mode::Menu;
-            self.page = 0;
+        // START opens the main menu from any screen. It is the one navigation
+        // button an operator needs to know, so it is printed on every screen.
+        if ctx.just_pressed(button::START) || ctx.just_pressed(button::TRIANGLE) {
+            self.open_menu_page(MenuPage::Root);
             return;
-        }
-        if ctx.just_pressed(button::START) {
-            self.mode = Mode::TimingScan;
-            self.page = 0;
-            self.encode_capture(0);
         }
 
         if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
@@ -1854,22 +1938,10 @@ impl Scene for HardwareTests {
         if ctx.just_pressed(button::CROSS) {
             self.run_active();
         }
-        // SQUARE steps the audio readout: off, then each rate, then off again.
-        // Off is the default and the first press is what starts it, so the disc
-        // is silent unless the operator wants the tone. If the capture chain
-        // cannot decode the fast rate, keep pressing for a slower, more robust
-        // one instead of needing another burn.
+        // SQUARE is the shortcut for the same thing the menu lists, so the
+        // rate can be changed without leaving the capture page mid-recording.
         if ctx.just_pressed(button::SQUARE) {
-            self.audio_rate = (self.audio_rate + 1) % (audio_link::RATE_DIVISORS.len() + 1);
-            if self.audio_rate == 0 {
-                audio_link::stop();
-                tty::println("hardware-tests: audio-link off");
-            } else {
-                audio_link::set_rate(self.audio_rate - 1);
-                tty::print("hardware-tests: audio-link rate index ");
-                tty_print_dec_u8((self.audio_rate - 1) as u8);
-                tty::println("");
-            }
+            self.cycle_audio_readout();
         }
     }
 
@@ -2000,57 +2072,45 @@ fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(224, 8, SUITE_VERSION, (112, 136, 170));
     font.draw_text(8, 18, "SECTION", (140, 160, 190));
     font.draw_text(72, 18, suite.mode.label(), (255, 232, 128));
-    font.draw_text(200, 18, "TRIANGLE MENU", (140, 160, 190));
+    font.draw_text(216, 18, "START MENU", (140, 160, 190));
 }
 
-/// The main menu: a windowed list with a cursor.
+/// The main menu. Every page fits on screen, so there is no scrolling.
 fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 6, "PS1 HARDWARE TESTS", (232, 236, 244));
-    font.draw_text(224, 6, SUITE_VERSION, (112, 136, 170));
-    font.draw_text(8, 18, "UP/DOWN SELECT   CROSS RUN", (140, 160, 190));
+    font.draw_text(232, 6, SUITE_VERSION, (112, 136, 170));
+    font.draw_text(8, 20, menu_title(suite.menu_page), (255, 232, 128));
 
-    // Scroll the window so the cursor stays inside it.
-    let first = if suite.menu_cursor < MENU_WINDOW / 2 {
-        0
-    } else if suite.menu_cursor + MENU_WINDOW / 2 >= MENU.len() {
-        MENU.len().saturating_sub(MENU_WINDOW)
-    } else {
-        suite.menu_cursor - MENU_WINDOW / 2
-    };
-
-    let mut y = 34i16;
-    let mut row = first;
-    while row < MENU.len() && row < first + MENU_WINDOW {
+    let entries = menu_entries(suite.menu_page);
+    let mut y = 40i16;
+    let mut row = 0usize;
+    while row < entries.len() {
         let selected = row == suite.menu_cursor;
-        font.draw_text(
-            10,
-            y,
-            if selected { ">" } else { " " },
-            (255, 232, 128),
-        );
-        font.draw_text(
-            22,
-            y,
-            MENU[row].0,
-            if selected {
-                (255, 232, 128)
+        if selected {
+            font.draw_text(10, y, ">", (255, 232, 128));
+        }
+        let colour = if selected {
+            (255, 232, 128)
+        } else {
+            (176, 190, 210)
+        };
+        font.draw_text(22, y, entries[row].0, colour);
+        // The audio row shows its own state inline, so the operator never has
+        // to guess whether the tone is currently playing.
+        if matches!(entries[row].1, MenuAction::CycleAudio) {
+            if suite.audio_rate == 0 {
+                font.draw_text(150, y, "OFF", (176, 190, 210));
             } else {
-                (176, 190, 210)
-            },
-        );
+                font.draw_text(150, y, "ON  RATE", (96, 240, 128));
+                font.draw_text(214, y, hex2((suite.audio_rate - 1) as u8).as_str(), (96, 240, 128));
+            }
+        }
         y += 12;
         row += 1;
     }
 
-    // Audio readout state belongs here: it is operator-facing, and its being
-    // silent by default is exactly the thing that needs saying out loud.
-    font.draw_text(8, 226, "SQUARE AUDIO READOUT:", (140, 160, 190));
-    if suite.audio_rate == 0 {
-        font.draw_text(184, 226, "OFF", (176, 190, 210));
-    } else {
-        font.draw_text(184, 226, "ON", (96, 240, 128));
-        font.draw_text(212, 226, hex2((suite.audio_rate - 1) as u8).as_str(), (96, 240, 128));
-    }
+    font.draw_text(8, 214, "UP/DOWN SELECT   CROSS RUN", (140, 160, 190));
+    font.draw_text(8, 226, "START BACK / CLOSE MENU", (140, 160, 190));
 }
 
 fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
