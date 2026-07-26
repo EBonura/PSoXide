@@ -6544,7 +6544,7 @@ fn fnv16_halfwords(hws: &[u16]) -> u32 {
 /// main RAM (channel 4, from-device, block-sync). Arms SPUCNT DMA-Read
 /// mode (bits 5..4 = 11) around the transfer, the read-side mirror of the
 /// SDK's DMA upload.
-fn spu_dma_read(addr: u32, out: &mut [u32]) {
+pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
     let words = out.len() as u32;
     let block_size: u32 = if words % 16 == 0 {
         16
