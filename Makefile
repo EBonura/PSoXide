@@ -534,7 +534,12 @@ hardware-tests:
 # The disc runs its whole tier-1 battery at boot and mirrors every PX6 page
 # to the debug TTY, so a capture needs no pad input and no QR scanning.
 HWTEST_CAPTURE  := build/hwtest-capture.log
-HWTEST_BASELINE := docs/hardware-refs/px7-emulator-2026-07-25.txt
+# Baselines are named by SUITE version, not by date: the suite version is what
+# determines whether two captures are comparable, and re-baselining the same
+# version should overwrite rather than accumulate files. The capture date lives
+# in the file header.
+HWTEST_SUITE := $(shell sed -n 's/^const SUITE_VERSION: &str = "HWTEST v\(.*\)";/\1/p' engine/examples/hardware-tests/src/main.rs)
+HWTEST_BASELINE := docs/hardware-refs/px7-emulator-v$(HWTEST_SUITE).txt
 HWTEST_STEPS    := 400000000
 
 # Always run a source-built emulator. `cargo run` guarantees that; invoking a
@@ -554,7 +559,7 @@ hwtest-capture: hardware-tests-disc
 		--steps $(HWTEST_STEPS) > ../$(HWTEST_CAPTURE)
 	@echo "captured $$(grep -c 'px7' $(HWTEST_CAPTURE)) PX7 pages -> $(HWTEST_CAPTURE)"
 
-HWTEST_CODE_BASELINE := docs/hardware-refs/hwtest-machine-code-2026-07-25.txt
+HWTEST_CODE_BASELINE := docs/hardware-refs/hwtest-machine-code-v$(HWTEST_SUITE).txt
 
 # Audit the linked EXE: the instructions between each probe's markers must be
 # the ones the source asked for, or its cycle count measures something else.
@@ -609,7 +614,7 @@ hwtest-baseline: hwtest-capture
 		echo "# git:       $$(git describe --always --dirty)"; \
 		echo "# guest exe: sha256:$$(shasum -a 256 $(EXAMPLE_OUT)/hardware-tests.exe | cut -c1-16)"; \
 		echo "# emulator:  frontend launch --steps $(HWTEST_STEPS) (no pad input)"; \
-		echo "# schema:    PX7, 4 pages"; \
+		echo "# schema:    PX7, 5 pages"; \
 		echo "#"; \
 		grep 'px7' $(HWTEST_CAPTURE) | sed 's/^hardware-tests: px7 //'; \
 	} > $(HWTEST_BASELINE)
