@@ -258,6 +258,8 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "room_surf_split_tris",
     "room_surf_tr_subdivision_candidates",
     "room_surf_tr_subdivision_submitted",
+    "room_surface_packets",
+    "room_surface_commands",
     "tri_primitives",
     "tri_primitive_remaining",
     "world_commands",
@@ -525,6 +527,8 @@ impl GuestProfileLog {
             &summary,
             c::ROOM_SURF_TR_SUBDIVISION_SUBMITTED
         ));
+        push!(counter_total(&summary, c::ROOM_SURFACE_PACKETS));
+        push!(counter_total(&summary, c::ROOM_SURFACE_COMMANDS));
         push!(counter_total(&summary, c::TRI_PRIMITIVES));
         push!(counter_latest(c::TRI_PRIMITIVE_REMAINING));
         push!(counter_total(&summary, c::WORLD_COMMANDS));
