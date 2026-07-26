@@ -150,6 +150,8 @@ LABELS = {
     0xB1: "mdec_quant_table_luma_chroma_32w",
     0xB2: "mdec_scale_table_32w",
     0xB3: "mdec_reset_settle",
+    0xB4: "mdec_decode_1_macroblock_24bpp",
+    0xB5: "mdec_decode_2_macroblocks_24bpp",
     # SIO pad poll at four setup/inter-byte pacings.
     0xB6: "sio_pad_poll_variant0",
     0xB7: "sio_pad_poll_variant1",
@@ -224,6 +226,8 @@ WORK_BY_ID = {
     0xB1: 32,
     0xB2: 32,
     0xB3: 1,
+    0xB4: 1,
+    0xB5: 2,
     **{record_id: 1 for record_id in range(0xB6, 0xBA)},
 }
 RECORD_IDS = tuple(WORK_BY_ID)

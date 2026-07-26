@@ -41,6 +41,11 @@ BIN_ZERO = 2
 # fixed floor would either reject a quiet capture entirely or admit noise in a
 # loud one.
 SILENCE_FRACTION = 0.10
+# The link's bit clock IS the console's 44.1 kHz sample rate. Capture chains
+# very often record at 48 kHz (OBS defaults to it), where a bit stops being a
+# whole number of samples and the tones no longer land on exact DFT bins.
+# Recordings are resampled to this rate before anything else.
+LINK_RATE = 44100
 
 
 def sliding_magnitudes(samples: np.ndarray, span: int) -> tuple[np.ndarray, np.ndarray]:
@@ -193,6 +198,20 @@ def vote_payload(frames: list[list[int]], length: int) -> bytes | None:
     return check_payload(voted, length)
 
 
+def resample_to_link_rate(samples: np.ndarray, rate: int) -> np.ndarray:
+    """Linear-resample a recording to the link's 44.1 kHz bit clock.
+
+    Linear interpolation is sufficient here because the decision is which of
+    two tones dominates a window, not a faithful waveform reconstruction, and
+    both tones sit far below Nyquist at any plausible capture rate.
+    """
+    if rate == LINK_RATE or samples.size == 0:
+        return samples
+    target = int(samples.size * LINK_RATE / rate)
+    positions = np.arange(target) * (rate / LINK_RATE)
+    return np.interp(positions, np.arange(samples.size), samples)
+
+
 def read_wav(path: pathlib.Path) -> tuple[np.ndarray, int]:
     with wave.open(str(path), "rb") as handle:
         if handle.getsampwidth() != 2:
@@ -238,9 +257,11 @@ def main() -> int:
     args = parser.parse_args()
 
     samples, rate = read_wav(pathlib.Path(args.wav))
-    if rate != 44100:
-        print(f"# warning: {rate} Hz recording; the link assumes 44100", file=sys.stderr)
-    print(f"# samples={samples.size} rate={rate} ({samples.size / max(rate, 1):.1f}s)")
+    duration = samples.size / max(rate, 1)
+    if rate != LINK_RATE:
+        print(f"# resampling {rate} Hz -> {LINK_RATE} Hz")
+        samples = resample_to_link_rate(samples, rate)
+    print(f"# samples={samples.size} rate={rate} ({duration:.1f}s)")
 
     for span in RATE_SAMPLES_PER_BIT:
         decoder = RateDecoder(samples, span)
