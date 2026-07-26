@@ -30,6 +30,21 @@ header.
 
 ## History
 
+### v1.1 (2026-07-26, schema PX7)
+
+Operator flow only; no record changed meaning, so v1.0 captures remain
+comparable for every record. The guest binary changed though, and timing records
+shift with code alignment, so the baseline was re-pinned.
+
+- Boot runs the battery behind a visible progress bar, then lands on the capture
+  pages by itself. Previously the battery ran with nothing on screen and progress
+  went only to the debug TTY, which does not exist on a console: the operator saw
+  a black screen for tens of seconds and reasonably concluded the disc was dead.
+- A main menu (TRIANGLE from anywhere) reruns the startup tests or opens results,
+  scans and probes, replacing a flat mode ring that had to be cycled blindly.
+- The audio readout is silent until SQUARE asks for it, and plays at a quarter
+  scale rather than full. It used to start automatically at maximum volume.
+
 ### v1.0 (2026-07-26, schema PX7)
 
 The suite became a measurement instrument rather than a conformance checker.
