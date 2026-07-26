@@ -244,18 +244,21 @@ Boot, watch a bar, scan five QR codes, then a menu. That is the whole disc.
    Up/Down moves, Cross runs, START backs out one level and closes the menu
    from the root.
 
-**The disc is silent unless you ask.** The `AUDIO READOUT` menu row, or SQUARE
-as a shortcut from any screen, steps the tone: off, then each of the four rates,
-then off again. Off is the default and the menu row shows the current state. Auto-playing it meant the console screeched harsh
+**The audio readout starts by itself**, at the fastest rate, once the battery
+finishes. That is deliberate: it is the only route that hands back a complete
+payload without photographing five symbols, and leaving it off cost a console
+session. The `AUDIO READOUT` menu row, or SQUARE from any screen, steps through
+the rates and off; the menu row shows the current state. Volume is reduced, so
+it is audible rather than alarming. Auto-playing it meant the console screeched harsh
 square waves at full volume the moment it booted, which is alarming and useless
 to anyone not recording at that instant.
 
 ### Recording a capture
 
-**Turn the audio readout on.** It is off by default, and the 2026-07-26 console
-run was recorded with it off, which left only the QR route. That route then lost
-a page: four of five symbols decoded from the video, and page 4 was unreadable in
-every frame it was displayed for. One unreadable symbol costs the whole capture,
+**The audio readout is already on** (since v1.2). The 2026-07-26 run predated
+that and was recorded with it off, leaving only the QR route, which then lost a
+page: four of five symbols decoded from the video and page 4 was unreadable in
+every frame it appeared in. One unreadable symbol costs the whole capture,
 because the payload is only valid complete.
 
 **Record at least three repetitions of the tone**, about 45 seconds. OBS encodes
@@ -271,7 +274,7 @@ requiring the whole-binary CRC to check out.
 
 
 Record video **and** audio from before power-on. Let the bar finish. Scan the
-five pages. Then start the audio readout and keep recording at least 15 seconds: one
+five pages. Then keep recording at least 15 seconds: one
 repetition of the audio payload is ~13.6 s. If it will not decode, press SQUARE
 again for a slower, more robust rate; the decoder detects which was used.
 
