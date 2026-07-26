@@ -106,6 +106,11 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.4: The capture is frozen when taken. Paging previously REBUILT the whole
+//       payload, and some observations are live (the pad poll is refreshed
+//       every frame), so each page carried a different payload while only the
+//       last page's CRC described its own bytes. No multi-page console capture
+//       could ever reconstruct. This is why three captures failed.
 // v1.3: Audio readout holds its level. v1.2 keyed the voice with an all-zero
 //       ADSR, which is sustain level 0, so on hardware the envelope decayed and
 //       a console capture carried ~3 seconds of a 13.6 second payload. The
@@ -125,9 +130,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 3;
+const SUITE_VERSION_MINOR: u8 = 4;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.3";
+const SUITE_VERSION: &str = "HWTEST v1.4";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -1929,7 +1934,7 @@ impl Scene for HardwareTests {
                 self.page - 1
             };
             if matches!(self.mode, Mode::TimingScan) {
-                self.encode_capture(self.page);
+                self.timing_capture.render_page(self.page);
             }
         }
         if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
@@ -1942,7 +1947,7 @@ impl Scene for HardwareTests {
             };
             self.page = (self.page + 1) % pages;
             if matches!(self.mode, Mode::TimingScan) {
-                self.encode_capture(self.page);
+                self.timing_capture.render_page(self.page);
             }
         }
         if ctx.just_pressed(button::CROSS) {

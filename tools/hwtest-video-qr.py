@@ -14,12 +14,10 @@ same page numbers, so combining a page 1 from one run with a page 3 from another
 produces a payload that fails its binary CRC. Every distinct chunk seen for a
 page is kept, and the combination satisfying the whole-binary CRC is written.
 
-LIMITATION: some symbols do not survive the capture chain. A 2026-07-26 console
-recording yielded four pages of five, with page 4 unreadable in every frame it
-was displayed for, at every preprocessing setting tried. When that happens the
-QR route cannot produce a complete capture, and the audio readout is the answer:
-it carries the whole payload continuously and needs no per-symbol luck. Use
-tools/hwtest-audio-decode.py on the recording's audio track.
+Install zxing-cpp (`pip install zxing-cpp`). OpenCV's detector is the fallback
+and is markedly weaker on a photographed CRT: on one console recording it read
+3 of 5 pages after minutes of preprocessing, while zxing read all 5 in twenty
+seconds from raw frames.
 """
 
 from __future__ import annotations
@@ -33,6 +31,38 @@ import sys
 
 import cv2
 import numpy as np
+
+try:
+    import zxingcpp
+except ImportError:  # pragma: no cover
+    zxingcpp = None
+
+
+def read_symbols(gray: np.ndarray) -> list[str]:
+    """Decode every QR in a frame.
+
+    zxing-cpp when available, because OpenCV's detector is markedly weaker on
+    a photographed CRT: on one console recording it read 3 of 5 pages after
+    four minutes of preprocessing variants, while zxing read all 5 in twenty
+    seconds from the raw frames.
+    """
+    if zxingcpp is not None:
+        found = [r.text for r in zxingcpp.read_barcodes(gray)]
+        if found:
+            return found
+        big = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
+        return [r.text for r in zxingcpp.read_barcodes(big)]
+    detector = cv2.QRCodeDetector()
+    out = []
+    for image in renderings(gray):
+        try:
+            data, _, _ = detector.detectAndDecode(image)
+        except cv2.error:
+            continue
+        if data:
+            out.append(data)
+            break
+    return out
 
 
 def renderings(gray: np.ndarray):
@@ -60,7 +90,6 @@ def renderings(gray: np.ndarray):
 
 def scan(video: pathlib.Path, verbose: bool = True) -> tuple[dict[int, set[str]], int | None]:
     capture = cv2.VideoCapture(str(video))
-    detector = cv2.QRCodeDetector()
     seen: dict[int, set[str]] = {}
     total_pages: int | None = None
     frame_no = 0
@@ -75,12 +104,8 @@ def scan(video: pathlib.Path, verbose: bool = True) -> tuple[dict[int, set[str]]
         # than paying for preprocessing on the progress bar or the menu.
         if gray.mean() < 25:
             continue
-        for image in renderings(gray):
-            try:
-                data, _, _ = detector.detectAndDecode(image)
-            except cv2.error:
-                continue
-            if not data or not data.startswith("PX7/"):
+        for data in read_symbols(gray):
+            if not data.startswith("PX7/"):
                 continue
             body, claimed = data.rsplit("/C:", 1)
             _, page_field, chunk = body.split("/", 2)
@@ -93,7 +118,6 @@ def scan(video: pathlib.Path, verbose: bool = True) -> tuple[dict[int, set[str]]
                 bucket.add(chunk)
                 if verbose:
                     print(f"page {number}/{total} at frame {frame_no}", flush=True)
-            break
 
     capture.release()
     if verbose:
@@ -147,8 +171,10 @@ def main() -> int:
     if chosen is None:
         print(
             "FAIL: every page decoded, but no combination satisfies the payload\n"
-            "      CRC. The recording probably spans several runs and no single\n"
-            "      run showed all pages.",
+            "      CRC. Either the recording spans several runs with no single\n"
+            "      run showing all pages, or it was made with a disc older than\n"
+            "      HWTEST v1.4, which rebuilt the payload on every page change so\n"
+            "      the pages never described one consistent capture.",
             file=sys.stderr,
         )
         return 1

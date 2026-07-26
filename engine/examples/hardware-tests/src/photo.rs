@@ -150,6 +150,19 @@ impl PhotoCapture {
         self.print_page(page);
     }
 
+    /// Re-render an already-encoded capture at a different page.
+    ///
+    /// Paging must NOT rebuild the payload. Some observations are live (the pad
+    /// poll is refreshed every frame from the controller), so re-encoding per
+    /// page gave each QR a different payload while only the last page's CRC
+    /// described the bytes it was computed over. A five-page capture could
+    /// therefore never reconstruct, which is exactly what console captures did:
+    /// every page decoded cleanly and the whole-binary CRC still failed.
+    pub(crate) fn render_page(&mut self, page: usize) {
+        self.encode_qr(page);
+        self.print_page(page);
+    }
+
     fn encode_qr(&mut self, page: usize) {
         let mut text = [0u8; QR_TEXT_MAX];
         let mut len = 0usize;
