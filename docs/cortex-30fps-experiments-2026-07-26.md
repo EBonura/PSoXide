@@ -513,6 +513,48 @@ The per-wedge scan was removed. The conservative union remains mandatory
 until a cooked cell mask can prove coverage against actual submitted
 geometry, not only a cell AABB and one clipped path.
 
+### V5: use the existing coarse-yaw visible-cell cache mode
+
+The default `vis-anchor-pvs-candidates` build caches the cooked PVS candidate
+set and performs the conservative camera/portal AABB checks during each draw.
+The already-implemented `vis-coarse-yaw` alternative was replayed unchanged to
+test whether an apparently unapplied visibility option could cache a tighter,
+pre-culled list.
+
+All 925 cortex_v3 lockstep hashes matched, but the actual workload did not
+change: 47.3 candidate cells, 26.6 drawn cells, and 93.3 surfaces per visual in
+both builds. The ordinary tape regressed mean render by 1,159 cycles and p95 by
+3,659 while gaining one cadence-quantized visual. The conservative blocker and
+safety rules retain the same cells, so this mode does not solve the density
+problem and is not made the default. The finer-yaw form (neither anchor nor
+coarse-yaw feature) was also replayed; it produced metrics exactly identical
+to R10 and the same 925 hashes.
+
+### G1: GPU timing and texture-window command census
+
+The normal R10 tapes show that the GPU is not the component missing the
+two-vblank target. Across gameplay visuals, cortex_v1 averages 621,664 GPU
+cycles and peaks at 928,430; cortex_v3 averages 713,238 and peaks at 878,670.
+The CPU render stage alone averages 742,800 and 1,364,086 cycles respectively,
+and the measured ordering-table wait is negligible. The GPU therefore finishes
+inside the CPU critical path even in cortex_v3.
+
+Texture-window commands are highly redundant in stream order, but too small to
+matter at this scale:
+
+| Project | Commands | Draws | Texture-window writes | Window changes | Redundant writes |
+|---|---:|---:|---:|---:|---:|
+| cortex_v1 | 691.2 | 350.2 | 337.0 | 19.4 | 317.7 |
+| cortex_v3 | 1,045.7 | 505.6 | 498.3 | 102.7 | 395.6 |
+
+Each redundant window is one GP0 data word attached to a packet. Even a
+zero-cost, final-order-aware suppression mechanism could remove only about 396
+words per cortex_v3 visual, while it would complicate the packet header and
+ordering-table ownership needed to prevent texture-state leakage. It cannot
+recover the roughly 350k CPU cycles still needed for a stable two-vblank
+cortex_v3 frame. Texture-window dedup is rejected by this hard upper bound;
+future GPU work is gated on contrary real-hardware evidence.
+
 ### R4/R4a: precompute lattice attributes or remove leaf copies
 
 Two variants tested the proposed one-level TR lattice data rewrite. A full
@@ -587,6 +629,7 @@ of the win without changing data layout or packet identity.
 | R8 | Retain TR identity GTE state across room surfaces | rejected | unsafe variants changed 1–38/1,047 v1 frames; exact variant regressed v1 render mean by 2,302 cycles |
 | V1 | Carry portal window + far plane through all-cells fallback | rejected | 926/926 hashes exact; v3 surfaces/FPS unchanged and render -55 cycles (noise) |
 | V2 | Per-wedge disjoint frustum rejection after conservative union | rejected | 61/926 v3 hashes changed; FPS 14.25→14.03 and mean render +19,402 cycles |
+| V5 | Existing coarse-yaw cached cell filtering | rejected | 925/925 hashes exact but cell/surface counts unchanged; normal v3 render +1.2k and p95 +3.7k |
 | V3 | Cooked variable-length portal-to-cell masks | queued | Debug proof against current frustum path |
 | T1 | Event-driven active-room field copies / borrowed slices | queued | Exact state and replay route |
 | T1a | Clear fallback materials only when current room is absent | rejected | update -105 cycles, but render +3,705 and I-cache +3,526; one presentation boundary shifted |
@@ -603,7 +646,7 @@ of the win without changing data layout or packet identity.
 | T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
-| G1 | GPU overdraw/timing census and silicon constraint | queued | No GPU reorder before hardware evidence |
+| G1 | GPU overdraw/timing census and texture-window dedup bound | diagnostic complete | v3 GPU mean/max 713k/879k cycles; ~396 redundant one-word writes cannot close a ~350k CPU-cycle gap |
 | P1 | VBlank/frame-pacing wait diagnosis | queued | Idle is not counted as recovered CPU work |
 | C1 | Cooker worst-view 30 FPS/RAM/packet validator | queued | Fit only after surviving engine changes |
 | H1 | Real-hardware timer, cadence, tear, seam, and near-plane sweep | queued | Mandatory final gate |
