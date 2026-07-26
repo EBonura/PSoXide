@@ -474,6 +474,7 @@ impl Scene for Playtest {
                     #[cfg(not(feature = "vis-full-active-chunks"))]
                     {
                         let player = self.motor.position();
+                        let portal_cell_window = self.portal_cell_window(active.index);
                         // The player's own room anchors its per-cell PVS at
                         // the player; a far room admitted by the portal walk
                         // anchors at the portal that admitted it (the
@@ -559,6 +560,7 @@ impl Scene for Playtest {
                                         cached_room_subdivision_mode(),
                                         cells,
                                         ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                        portal_cell_window,
                                         Some(prebuilt_room_quads_for(active.index)),
                                         &mut primitive_packets,
                                         &mut world,
