@@ -1683,27 +1683,7 @@ impl AppState {
             .collect();
         examples.extend(public_example_source_items(&built_examples));
 
-        // Baked-in examples, for builds with no source tree beside them. A
-        // downloaded binary resolves the examples directory to a path that only
-        // exists in the repo, so without this its Examples column is empty --
-        // which is exactly how the published build and the web build both
-        // shipped with nothing to run. Skipped when a real build of the same
-        // example was already scanned, so a source checkout keeps listing the
-        // one it just compiled rather than a stale baked copy.
-        for baked in bundled::DISCS {
-            if baked.kind != bundled::BundledKind::Exe
-                || built_examples.contains(&example_key(baked.title))
-            {
-                continue;
-            }
-            examples.push(MenuLibraryItem {
-                id: baked.id.to_string(),
-                title: baked.title.to_string(),
-                subtitle: baked.subtitle.to_string(),
-                burnable: false,
-                launchable: true,
-            });
-        }
+        merge_baked_examples(&mut examples, &built_examples);
 
         // Pass 3: stable alphabetical order per column.
         games.sort_by_key(|a| a.title.to_lowercase());
@@ -3371,6 +3351,49 @@ fn public_example_source_items(
     items
 }
 
+/// Fold the baked-in examples into a scanned Examples column.
+///
+/// Three cases, and the middle one is what shipped broken: a source checkout
+/// lists every known example, including ones it has not compiled, as a "not
+/// built" placeholder. Those placeholders are added AFTER `built` is collected,
+/// so keying only on `built` let a baked copy sit next to the placeholder for
+/// the same example and the row appeared twice. The web build has no source
+/// tree, hence no placeholders, which is why it looked fine there.
+///
+/// - A real local build wins; the baked copy is dropped, so a checkout runs
+///   what it just compiled rather than a stale bundled binary.
+/// - A "not built" placeholder is REPLACED by the baked copy, which is
+///   genuinely runnable.
+/// - Otherwise the baked copy is appended.
+fn merge_baked_examples(
+    examples: &mut Vec<MenuLibraryItem>,
+    built: &std::collections::HashSet<String>,
+) {
+    for baked in bundled::DISCS {
+        if baked.kind != bundled::BundledKind::Exe {
+            continue;
+        }
+        let key = example_key(baked.title);
+        if built.contains(&key) {
+            continue;
+        }
+        let item = MenuLibraryItem {
+            id: baked.id.to_string(),
+            title: baked.title.to_string(),
+            subtitle: baked.subtitle.to_string(),
+            burnable: false,
+            launchable: true,
+        };
+        match examples
+            .iter_mut()
+            .find(|entry| example_key(&entry.title) == key)
+        {
+            Some(placeholder) => *placeholder = item,
+            None => examples.push(item),
+        }
+    }
+}
+
 fn example_key(name: &str) -> String {
     name.to_ascii_lowercase()
 }
@@ -4096,5 +4119,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+}
+
+#[cfg(test)]
+mod baked_example_merge_tests {
+    use super::{bundled, example_key, merge_baked_examples, MenuLibraryItem};
+
+    fn item(title: &str, subtitle: &str, launchable: bool) -> MenuLibraryItem {
+        MenuLibraryItem {
+            id: format!("scanned:{title}"),
+            title: title.to_string(),
+            subtitle: subtitle.to_string(),
+            burnable: false,
+            launchable,
+        }
+    }
+
+    fn a_baked_example() -> &'static bundled::BundledDisc {
+        bundled::DISCS
+            .iter()
+            .find(|d| d.kind == bundled::BundledKind::Exe)
+            .expect("at least one baked example ships")
+    }
+
+    /// The shipped bug: a source checkout lists uncompiled examples as "not
+    /// built", and the baked copy was appended beside one instead of replacing
+    /// it, so the row showed twice.
+    #[test]
+    fn a_not_built_placeholder_is_replaced_not_duplicated() {
+        let baked = a_baked_example();
+        let mut examples = vec![item(baked.title, "not built", false)];
+        merge_baked_examples(&mut examples, &Default::default());
+
+        let matching: Vec<_> = examples
+            .iter()
+            .filter(|e| example_key(&e.title) == example_key(baked.title))
+            .collect();
+        assert_eq!(matching.len(), 1, "one row per example, got {examples:?}");
+        assert!(matching[0].launchable, "the surviving row must be runnable");
+        assert_eq!(matching[0].id, baked.id, "the baked copy should have won");
+    }
+
+    /// A real local build beats the bundled one, so a checkout runs what it
+    /// just compiled.
+    #[test]
+    fn a_local_build_wins_over_the_baked_copy() {
+        let baked = a_baked_example();
+        let mut examples = vec![item(baked.title, "EXE · 118 KiB", true)];
+        let built = std::iter::once(example_key(baked.title)).collect();
+        merge_baked_examples(&mut examples, &built);
+
+        let matching: Vec<_> = examples
+            .iter()
+            .filter(|e| example_key(&e.title) == example_key(baked.title))
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert!(
+            matching[0].id.starts_with("scanned:"),
+            "the scanned build should have been kept"
+        );
+    }
+
+    /// With nothing scanned at all -- the web build, and any download -- every
+    /// baked example is appended exactly once.
+    #[test]
+    fn an_empty_column_gets_each_baked_example_once() {
+        let mut examples = Vec::new();
+        merge_baked_examples(&mut examples, &Default::default());
+
+        let expected = bundled::DISCS
+            .iter()
+            .filter(|d| d.kind == bundled::BundledKind::Exe)
+            .count();
+        assert_eq!(examples.len(), expected);
+        let mut keys: Vec<_> = examples.iter().map(|e| example_key(&e.title)).collect();
+        keys.sort();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), before, "no example may appear twice");
     }
 }
