@@ -346,7 +346,12 @@ impl Shell {
         // A downloaded build has no projects directory yet. Copy the bundled
         // sample in once, before anything reads the project list. Failure is
         // non-fatal: starting with no sample beats refusing to start.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Seeding a sample *project* is an editor concern, so this needs the
+        // editor feature as well as a native target. Without the second gate a
+        // `--no-default-features` build -- the emulator-only configuration this
+        // crate documents as supported, and what hl-psx's regression harness
+        // uses -- failed to compile: psxed-project is an optional dependency.
+        #[cfg(all(not(target_arch = "wasm32"), feature = "editor"))]
         match psxed_project::ensure_projects_seeded() {
             Ok(true) => eprintln!(
                 "[projects] seeded sample project into {}",
