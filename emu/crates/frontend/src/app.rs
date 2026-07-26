@@ -193,9 +193,20 @@ enum EditorBuildCompletion {
 /// single-threaded, UI reads state in-place per frame.
 /// Discs baked into the web build. They appear in the menu (under Games) and
 /// boot via the no-BIOS HLE path; the first one auto-boots on page load.
-#[cfg(target_arch = "wasm32")]
 pub mod bundled {
-    /// One baked-in disc.
+    /// What a baked-in payload is, which decides both how it boots and which
+    /// menu column it lands in.
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    pub enum BundledKind {
+        /// A full disc image, booted through the no-BIOS HLE disc path. Games.
+        DiscBin,
+        /// A raw PSX-EXE, side-loaded. Examples and tests; roughly a tenth the
+        /// size of the equivalent disc, which is what makes bundling a set of
+        /// them affordable in the wasm payload.
+        Exe,
+    }
+
+    /// One baked-in payload.
     pub struct BundledDisc {
         /// Menu launch id; the `bundled:` prefix is how launch routing spots it.
         pub id: &'static str,
@@ -203,17 +214,166 @@ pub mod bundled {
         pub title: &'static str,
         /// Menu subtitle.
         pub subtitle: &'static str,
-        /// Raw disc-image bytes.
+        /// Disc image or PSX-EXE.
+        pub kind: BundledKind,
+        /// Raw payload bytes.
         pub bytes: &'static [u8],
     }
 
-    /// The baked-in discs in menu order. The first auto-boots on load.
-    pub static DISCS: &[BundledDisc] = &[BundledDisc {
-        id: "bundled:celeste",
-        title: "Celeste Classic Collection",
-        subtitle: "homebrew",
-        bytes: include_bytes!("../assets/celeste-collection.bin"),
-    }];
+    /// The baked-in payloads in menu order. The first auto-boots on load.
+    ///
+    /// Games hold shipped homebrew; examples hold the SDK/engine samples and
+    /// tests. They are separate columns in the menu, so a sample never shows up
+    /// beside a real game.
+    pub static DISCS: &[BundledDisc] = &[
+        BundledDisc {
+            id: "bundled:celeste",
+            title: "Celeste Classic Collection",
+            subtitle: "homebrew",
+            kind: BundledKind::DiscBin,
+            bytes: include_bytes!("../assets/celeste-collection.bin"),
+        },
+        BundledDisc {
+            id: "bundled:game-breakout",
+            title: "game-breakout",
+            subtitle: "sample game",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/game-breakout.exe"),
+        },
+        BundledDisc {
+            id: "bundled:game-invaders",
+            title: "game-invaders",
+            subtitle: "sample game",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/game-invaders.exe"),
+        },
+        BundledDisc {
+            id: "bundled:game-magikaaaaaarp-pong",
+            title: "game-magikaaaaaarp-pong",
+            subtitle: "sample game",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/game-magikaaaaaarp-pong.exe"),
+        },
+        BundledDisc {
+            id: "bundled:game-pong",
+            title: "game-pong",
+            subtitle: "sample game",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/game-pong.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-audio",
+            title: "hello-audio",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-audio.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-cdda",
+            title: "hello-cdda",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-cdda.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-engine",
+            title: "hello-engine",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-engine.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-gte",
+            title: "hello-gte",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-gte.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-input",
+            title: "hello-input",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-input.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-memcard",
+            title: "hello-memcard",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-memcard.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-ot",
+            title: "hello-ot",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-ot.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-pack",
+            title: "hello-pack",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-pack.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-tex",
+            title: "hello-tex",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-tex.exe"),
+        },
+        BundledDisc {
+            id: "bundled:hello-tri",
+            title: "hello-tri",
+            subtitle: "sample",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/hello-tri.exe"),
+        },
+        BundledDisc {
+            id: "bundled:showcase-3d",
+            title: "showcase-3d",
+            subtitle: "engine showcase",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/showcase-3d.exe"),
+        },
+        BundledDisc {
+            id: "bundled:showcase-fog",
+            title: "showcase-fog",
+            subtitle: "engine showcase",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/showcase-fog.exe"),
+        },
+        BundledDisc {
+            id: "bundled:showcase-lights",
+            title: "showcase-lights",
+            subtitle: "engine showcase",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/showcase-lights.exe"),
+        },
+        BundledDisc {
+            id: "bundled:showcase-model",
+            title: "showcase-model",
+            subtitle: "engine showcase",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/showcase-model.exe"),
+        },
+        BundledDisc {
+            id: "bundled:showcase-particles",
+            title: "showcase-particles",
+            subtitle: "engine showcase",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/showcase-particles.exe"),
+        },
+        BundledDisc {
+            id: "bundled:showcase-text",
+            title: "showcase-text",
+            subtitle: "engine showcase",
+            kind: BundledKind::Exe,
+            bytes: include_bytes!("../assets/examples/showcase-text.exe"),
+        },
+    ];
 
     /// Look up a baked-in disc by its menu launch id.
     pub fn find(id: &str) -> Option<&'static BundledDisc> {
@@ -1069,16 +1229,31 @@ impl AppState {
     /// path-qualified tokens because authored PSoXide discs can still
     /// share a PSX volume ID.
     pub fn launch_by_id(&mut self, id: &str) -> Result<(), String> {
-        // Baked-in web discs boot via the no-BIOS HLE path, not the library.
-        #[cfg(target_arch = "wasm32")]
+        // Baked-in payloads boot via the no-BIOS HLE path, not the library.
+        // Both targets: the download has no source tree, so its Examples come
+        // from here too.
         if let Some(disc) = bundled::find(id) {
-            self.boot_disc_bytes(disc.bytes.to_vec())?;
+            let kind = match disc.kind {
+                bundled::BundledKind::DiscBin => {
+                    self.boot_disc_bytes(disc.bytes.to_vec())?;
+                    GameKind::DiscBin
+                }
+                bundled::BundledKind::Exe => {
+                    self.boot_exe_bytes(disc.bytes.to_vec())?;
+                    GameKind::Exe
+                }
+            };
+            // Web-only bookkeeping for the "now playing" header; the native
+            // build tracks the current entry through the library instead.
+            #[cfg(target_arch = "wasm32")]
             self.set_web_current_game(
                 disc.id.to_string(),
                 disc.title.to_string(),
-                GameKind::DiscBin,
+                kind,
                 disc.bytes.len() as u64,
             );
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = kind;
             return Ok(());
         }
         // Web folder-scanned games: read the file's bytes asynchronously, then
@@ -1508,14 +1683,42 @@ impl AppState {
             .collect();
         examples.extend(public_example_source_items(&built_examples));
 
+        // Baked-in examples, for builds with no source tree beside them. A
+        // downloaded binary resolves the examples directory to a path that only
+        // exists in the repo, so without this its Examples column is empty --
+        // which is exactly how the published build and the web build both
+        // shipped with nothing to run. Skipped when a real build of the same
+        // example was already scanned, so a source checkout keeps listing the
+        // one it just compiled rather than a stale baked copy.
+        for baked in bundled::DISCS {
+            if baked.kind != bundled::BundledKind::Exe
+                || built_examples.contains(&example_key(baked.title))
+            {
+                continue;
+            }
+            examples.push(MenuLibraryItem {
+                id: baked.id.to_string(),
+                title: baked.title.to_string(),
+                subtitle: baked.subtitle.to_string(),
+                burnable: false,
+                launchable: true,
+            });
+        }
+
         // Pass 3: stable alphabetical order per column.
         games.sort_by_key(|a| a.title.to_lowercase());
         examples.sort_by_key(|a| a.title.to_lowercase());
         projects.sort_by_key(|a| a.title.to_lowercase());
-        // Web build: surface the baked-in discs (Celeste, ...) plus any games
-        // found by a folder scan, under Games.
+        // Web build: surface the baked-in payloads. A disc image is a shipped
+        // game and belongs under Games; a baked EXE is an SDK/engine sample and
+        // belongs under Examples, next to the ones a source tree would list.
+        // Baked disc images are shipped games; the EXEs were folded into
+        // Examples above, for both targets.
         #[cfg(target_arch = "wasm32")]
         for disc in bundled::DISCS {
+            if disc.kind != bundled::BundledKind::DiscBin {
+                continue;
+            }
             games.push(MenuLibraryItem {
                 id: disc.id.to_string(),
                 title: disc.title.to_string(),
@@ -1815,9 +2018,11 @@ impl AppState {
         Ok(())
     }
 
-    /// Web: side-load a homebrew PS-EXE via the no-BIOS HLE path, mirroring the
-    /// native `GameKind::Exe` branch.
-    #[cfg(target_arch = "wasm32")]
+    /// Side-load a homebrew PS-EXE from bytes via the no-BIOS HLE path,
+    /// mirroring the native `GameKind::Exe` branch.
+    ///
+    /// Both targets: a downloaded build boots its baked-in examples through
+    /// here, having no file on disk to point the library at.
     fn boot_exe_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
         let exe = Exe::parse(&bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
         let mut bus = Bus::new_without_bios();
@@ -1832,9 +2037,9 @@ impl AppState {
         Ok(())
     }
 
-    /// Web: common tail for an upload boot -- swap in the new machine, start
-    /// running, and close the menu so the game is visible.
-    #[cfg(target_arch = "wasm32")]
+    /// Common tail for a from-bytes boot: swap in the new machine, start
+    /// running, and close the menu so the game is visible. Nothing here is
+    /// web-specific; the native build reaches it through the baked-in examples.
     fn swap_in_booted(&mut self, bus: Bus, cpu: Cpu) {
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
