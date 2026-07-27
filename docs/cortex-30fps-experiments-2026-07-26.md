@@ -1794,6 +1794,30 @@ checkpoints. The strict image contract wins: all variants are removed. The
 captured baseline/candidate frame-622 images remain in the `/tmp/cortex-r57b-`
 and `/tmp/cortex-r61-` experiment directories for audit.
 
+### R62: CPU cross-product culling in bucketed model batches
+
+The two shipping bucketed model loops reload projected screen coordinates into
+the GTE and run the hardware-scheduled `NCLIP` backface test. R62 replaced it
+with the engine's algebraically equivalent two-product CPU cross test. All
+1,046 v1 lockstep images are exact, but MIPS-I multiply latency makes it
+decisively slower: render mean/p95/max move from
+761,999/1,084,937/1,209,753 to 783,350/1,112,064/1,232,309 cycles, I-cache
+stalls rise 169,555→170,977, and <=2-vblank periods fall 77.4%→75.0%.
+The change is removed before a v3 matrix.
+
+### R63: LLVM merge-functions aliases
+
+The architecture reviews identified the 35 KiB visible-cell renderer and its
+32 KiB all-cells twin as an I-cache risk. R63 enabled nightly rustc's
+`-Zmerge-functions=aliases` pass at the existing optimization level, allowing
+LLVM to alias byte-identical functions without a runtime trampoline.
+
+Both projects are byte-for-byte/performance no-ops: v1 remains a
+1,482,752-byte payload with all 1,046 hashes and every metric identical; v3
+remains 1,366,016 bytes with all 925 hashes and every metric identical. LLVM
+found no mergeable shipping functions, so the flag is not added to the
+Makefile.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1883,6 +1907,8 @@ and `/tmp/cortex-r61-` experiment directories for audit.
 | R59/R59b | Thread one prepacked material through the TR lattice children | rejected | -9.4k/-8.8k render mean, but both stored and recomputed forms change the same 512/925 v3 images; not a stale-material bug, so the ABI expansion is removed |
 | R60/R60b/R60c | Exact reduced constant quotient for ordering-table depth | rejected | Broad/TR-only forms save 6.5–8.8k v3 normal render cycles but regress v1 cadence; fog-only specialization leaves v1 bit-identical but adds 12 KiB, regresses v3 render +4.3k/I-cache +7.7k, and shifts one checkpoint |
 | R61/R61b/R61c | Exact reduced constant quotient for model/player depth | rejected | R61 improves v3 render -10.5k and v1 26.99→27.06 FPS, but changes one vblank-timed trail image; outlined/sentinel forms change two, so all fail the strict visual gate |
+| R62 | Replace scheduled model GTE NCLIP with the CPU cross product | rejected | 1,046/1,046 v1 images exact, but render mean +21.4k, p95 +27.1k, I-cache +1.4k, and <=2vb -2.4 points; removed before v3 |
+| R63 | Enable LLVM merge-functions aliases | no-op | v1/v3 payloads, all 1,971 lockstep hashes, and every reported metric are identical; compiler found no foldable shipping functions |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
