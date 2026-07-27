@@ -585,6 +585,68 @@ the shared transforms saved. cortex_v3 lockstep render rose
 925 hashes changed at guest frame 1626. The experiment was removed without a
 normal-mode run.
 
+### R17: reuse static packet payload by frame-arena slot
+
+R17 marked primitive-arena slots with their previous packet kind and, when a
+textured-gouraud quad returned to the same slot with the same material and UV
+payload, patched only dynamic positions and colours. This tests packet-template
+reuse without adding a persistent per-surface pool.
+
+The premise is invalid because arena slot identity is not stable across frames:
+culling and mixed packet types shift which surface owns a slot. cortex_v3
+lockstep changed 546 of 925 hashes, with the first mismatch at guest frame 216.
+It also regressed mean render work 1,416,120→1,436,933 cycles, p95
+2,002,178→2,027,968, maximum 2,259,241→2,291,672, and I-cache stalls
+321,902→333,863 per visual. The experiment was fully removed.
+
+The safe alternative—a persistent four-child packet template for every
+potentially split room surface—would require roughly 459 KiB in addition to the
+existing approximately 114 KiB root pool at current limits. Positions and
+colours would still be dynamic, as would midpoint projection, depth selection,
+and command insertion. Together with R5's proof that LLVM already writes packet
+words directly into their final arena addresses, this rejects frame-arena and
+resident full-packet caching for the current PS1 RAM budget.
+
+### R18: bypass model UV offset reconstruction when the offset is zero
+
+Both tapes use authored model UVs, so their per-instance UV offset is zero. R18
+added an inlined zero-offset branch around the three wrapping byte additions per
+face. All 925 cortex_v3 lockstep hashes matched, but mean render work rose
+1,416,120→1,418,486 cycles and p95 rose 2,002,178→2,002,398. I-cache stalls
+fell by 3,873 cycles per visual, but the added hot-loop control flow cost more
+than the arithmetic it removed. The experiment was reverted without normal-mode
+or cortex_v1 runs.
+
+### R19: const-specialize the authored-UV model batch
+
+R19 moved the R18 decision out of the face loop: the bucketed extent-safe batch
+was monomorphized for zero and non-zero UV offsets so the common authored path
+contained neither offset arithmetic nor a per-face branch. This is the best
+form of the UV-specialization proposal for the captured workloads.
+
+All 925 cortex_v3 lockstep hashes matched, but duplicating the already-large
+batch displaced hotter code from the 4 KiB I-cache. Mean render work rose
+1,416,120→1,423,710 cycles, p95 rose 2,002,178→2,012,782, and I-cache stalls
+rose 321,902→328,723 per visual. It was fully removed. R18 and R19 together
+close the zero-offset model-UV direction: neither a runtime branch nor
+compile-time duplication is profitable on this target.
+
+### P1: exact camera collision-solve memoization
+
+The camera already gathers its collision-room set only when a full,
+non-hash key changes and runs the spring-arm sweep every second tick. P1 added a
+monotonic collision-set revision and reused an interval solve only when that
+revision and every solver input—focus, yaw, pitch, height, distance, minimum
+distance, and margin—matched exactly.
+
+cortex_v3 lockstep kept all 925 hashes and reduced camera/update means by
+4,368/4,492 cycles per tick. cortex_v1's complete visual-hash sequence was also
+identical (one presentation checkpoint moved from guest frame 377 to 378), and
+camera/update fell 1,910/1,966 cycles per tick. However, delivered normal
+cortex_v1 cadence regressed 26.99→26.81 FPS and the two-vblank hit rate fell
+79.2%→77.5%; cortex_v3 improved only 15.71→15.79 FPS. Because both projects
+must improve, the memoization was removed despite its local CPU saving.
+
 ### R4/R4a: precompute lattice attributes or remove leaf copies
 
 Two variants tested the proposed one-level TR lattice data rewrite. A full
@@ -674,12 +736,15 @@ of the win without changing data layout or packet identity.
 | R14/R14b | GTE or exact batched CPU TR root transforms | rejected | GTE saved 40.7k but changed 820/925 images and primitive topology; exact batch regressed normal v3 render by 4.0k |
 | R15 | Explicitly outline cached-room TR entry leaves | rejected | all v3 metrics exactly equal to R10 and 925/925 hashes exact; compiler already outlines them |
 | R16 | Cache exact CPU view vertices by room vertex id | rejected | +645 v3 lockstep render cycles, +3,117 I-cache stalls, +52 KiB scratch, and 1/925 hashes changed |
+| R17 | Reuse static quad payload by frame-arena slot | rejected | 546/925 v3 hashes changed; render +20,813 and I-cache +11,961 cycles because arena slot ownership is unstable |
+| R18 | Skip model UV reconstruction for zero offsets | rejected | 925/925 hashes exact, but v3 lockstep render +2,366 cycles despite I-cache -3,873 |
+| R19 | Const-specialize authored model UV batches | rejected | 925/925 hashes exact, but v3 lockstep render +7,590 and I-cache +6,822 cycles |
 | T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
 | E8 | Record/template optimization for prop tail | diagnostic narrowed | image cards cost 5 cycles; v3 tail is ~40k box + ~88k cylinder, so card templates are irrelevant |
 | G1 | GPU overdraw/timing census and texture-window dedup bound | diagnostic complete | v3 GPU mean/max 713k/879k cycles; ~396 redundant one-word writes cannot close a ~350k CPU-cycle gap |
-| P1 | VBlank/frame-pacing wait diagnosis | queued | Idle is not counted as recovered CPU work |
+| P1 | Exact camera collision-solve memoization | rejected | exact visual sequence and lower camera CPU in both; normal v1 cadence regressed 26.99→26.81 FPS and <=2vb 79.2%→77.5% |
 | C1 | Cooker worst-view 30 FPS/RAM/packet validator | queued | Fit only after surviving engine changes |
 | H1 | Real-hardware timer, cadence, tear, seam, and near-plane sweep | queued | Mandatory final gate |
 
