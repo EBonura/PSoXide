@@ -307,6 +307,23 @@ larger version of the same data traffic. The record idea may be revisited only
 if a new representation removes packet/subdivision work, not merely static
 interpretation.
 
+### R7 disposition: cooked render clusters are rejected by constituents
+
+The proposed cluster architecture is the union of five separable mechanisms:
+outlined leaves (R2), static surface records/options (R3), cooked lattice
+attributes (R4/R4a), packet copy/patch templates (R5), and offline
+subdivision demotion (R6). Each mechanism was tested independently so its
+effect could not be hidden by a large rewrite. The exact variants either
+regressed or compiled to the existing behavior; the only large cycle win,
+offline/GTE demotion, lacked the camera-volume proof and changed hundreds of
+images.
+
+There is therefore no measured positive constituent to justify adding the
+proposed 57–90 KiB fixed arenas and another streamed representation. R7 is
+closed by decomposition. A future cluster format needs a new primitive
+submission algorithm with an independently measured win; repackaging the
+rejected R2–R6 mechanisms together is not an experiment.
+
 ### R10a: defer the forced-split options copy
 
 After R10, the largest named `memcpy` caller was a 68-byte
@@ -764,6 +781,29 @@ and 576 changed display hashes. Because the frozen R10 disc reruns exactly,
 these are candidate-induced differences, not replay noise. The prefix buffers
 were removed before normal or cortex_v3 runs.
 
+### R24: initialize only the used collision-room prefix
+
+The remaining 60 Hz bulk-copy group initialized six 80-byte
+`CharacterCollisionRoom` entries before gathering a cursor-bounded prefix,
+then copied a complete six-entry camera cache. R24 used `MaybeUninit` only
+inside the collector, exposed only the initialized prefix, and updated only
+the used persistent entries. The collector's writes and every consumer's
+count bound were explicit.
+
+cortex_v3 kept all 925 lockstep images and improved `sim_collision`
+11,574→9,475 cycles/tick and total update 119,503→117,113. Code-layout effects
+raised render 1,416,120→1,418,078 and I-cache stalls
+321,902→323,445, leaving total frame work about 1,540 cycles lower.
+cortex_v1 improved more: `sim_collision` 12,590→9,764, update
+126,231→123,500, render 765,819→764,257, and I-cache stalls
+171,812→169,599. However, guest frame 576 changed, so the candidate was
+removed.
+
+Together with T1a/T1b, R11/R11b, R12/R12b, R21, and R22, this closes the
+review's broad event-driven/prefix-copy suggestion: every identified large
+tail has now been measured, and every locally faster form changed at least one
+presentation checkpoint or regressed the complete frame.
+
 ### R23: borrow cached-quad aggregates across the outlined submit boundary
 
 PC attribution found a 68-byte `memcpy` in
@@ -850,13 +890,13 @@ of the win without changing data layout or packet identity.
 | R4a | Address lattice leaves by index instead of copying four vertices | rejected | v3 render mean +3,903 cycles vs frozen baseline; 14.03 FPS unchanged |
 | R5 | Packet template copy/patch; remove arena double-write | rejected | MIPS codegen already emits the 14 packet words directly into the arena; no temporary packet copy exists |
 | R6 | Offline whole-subdivision proof + runtime demotion | rejected pending camera-volume contract | Current legal cameras are not cooker-bounded; correct fallback classifies every unproved surface `SPLIT` |
-| R7 | Fully cooked render clusters / packet-ready primitives | queued | RAM/code/stream budget gated |
+| R7 | Fully cooked render clusters / packet-ready primitives | rejected by decomposition | R2–R6 independently cover every proposed constituent; none supplies an exact engine-wide win |
 | R8 | Retain TR identity GTE state across room surfaces | rejected | unsafe variants changed 1–38/1,047 v1 frames; exact variant regressed v1 render mean by 2,302 cycles |
 | V1 | Carry portal window + far plane through all-cells fallback | rejected | 926/926 hashes exact; v3 surfaces/FPS unchanged and render -55 cycles (noise) |
 | V2 | Per-wedge disjoint frustum rejection after conservative union | rejected | 61/926 v3 hashes changed; FPS 14.25→14.03 and mean render +19,402 cycles |
 | V5 | Existing coarse-yaw cached cell filtering | rejected | 925/925 hashes exact but cell/surface counts unchanged; normal v3 render +1.2k and p95 +3.7k |
 | V3 | Cooked variable-length portal-to-cell masks | rejected | v3 surfaces 93.3→93.1, render +6,266, p95 +12,229, I-cache +4,340; 13/925 images changed |
-| T1 | Event-driven active-room field copies / borrowed slices | queued | Exact state and replay route |
+| T1 | Event-driven active-room field copies / borrowed slices | rejected by decomposition | T1a/T1b and all attributed prefix/tail-copy variants R11/R12/R21/R22/R24 fail the full visual/performance gate |
 | T1a | Clear fallback materials only when current room is absent | rejected | update -105 cycles, but render +3,705 and I-cache +3,526; one presentation boundary shifted |
 | T1b | Skip settled unchanged residency reconciliation | rejected | update -2,397 cycles/tick, but render +5,714, I-cache +5,116, and 1/1,046 hashes changed |
 | T1c | Decode only the selected collision floor triangle | accepted | v1 25.58→25.97 FPS; v3 14.25→15.09 FPS; all common lockstep images exact |
@@ -878,6 +918,7 @@ of the win without changing data layout or packet identity.
 | R21 | Leave bucketed pass's unused linked-list arrays uninitialized | rejected | v3 -7,480 render cycles and exact; v1 -6,065 but 3/1,047 images changed, including 804 captured floor pixels |
 | R22 | Leave unwritten room-search array tails uninitialized | rejected | v1 update -2,004 and room-track -1,749 cycles/tick, but render +129 and 2/1,047 images changed |
 | R23 | Borrow cached-quad aggregate arguments | rejected | v3 render +6,385, p95 +9,799, I-cache +3,384 cycles; 512/925 images changed |
+| R24 | Initialize/copy only used collision-room prefixes | rejected | v1 update -2,731 and render -1,562 cycles, but 1/1,046 images changed; v3 exact but render +1,958 |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
