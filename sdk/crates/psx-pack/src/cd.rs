@@ -402,11 +402,15 @@ impl SectorReader {
     /// Seek to `lba` (Setloc with BCD MSF) and start a ReadN stream.
     /// [`prepare`](Self::prepare) must have succeeded first.
     ///
+    /// `lba` is relative to the start of this program's own disc image; on a
+    /// multi-program disc [`psx_io::disc_base`] shifts it to where that image
+    /// actually landed.
+    ///
     /// # Safety
     /// Same contract as [`prepare`](Self::prepare).
     pub unsafe fn start_read(&mut self, lba: u32) -> bool {
         unsafe {
-            let (m, s, f) = lba_to_bcd_msf(lba);
+            let (m, s, f) = lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba));
             if !self.send_command(CMD_SETLOC, &[m, s, f], IRQ_ACK, ACK_POLL) {
                 return false;
             }
