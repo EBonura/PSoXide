@@ -1,4 +1,4 @@
-# exe=build/examples/mipsel-sony-psx/release/hardware-tests.exe words=137728 probes=19
+# exe=build/examples/mipsel-sony-psx/release/hardware-tests.exe words=141312 probes=19
 probe,start,end,words,digest
 timed_empty,0x00000040,0x00000440,6,0x21bbd739
 timed_uncached_ram_read_once,0x00000640,0x00000a40,8,0x70477061

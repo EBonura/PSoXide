@@ -133,6 +133,19 @@ def main() -> int:
     drift: list[str] = []
     for name, start, end in probes:
         spans = find_span(words, start, end)
+        if len(spans) > 1 and baseline is not None:
+            # Marker words are legal instruction encodings, so unrelated code
+            # can coincidentally form a second start/end pair. When that
+            # happens, the span whose LENGTH matches the pinned one is the real
+            # block: a genuine edit to the measured block changes its digest,
+            # which is still caught, so this disambiguates without excusing
+            # drift.
+            prior = baseline.get(name)
+            if prior:
+                want = prior.split(",")[2]
+                sized = [s for s in spans if str(s[1] - s[0] - 1) == want]
+                if len(sized) == 1:
+                    spans = sized
         if len(spans) != 1:
             # An ambiguous or absent span means the audit cannot speak for this
             # block, which is a failure in its own right -- not something to

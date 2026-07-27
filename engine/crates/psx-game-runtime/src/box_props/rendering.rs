@@ -309,9 +309,13 @@ fn draw_generated_box_prop_surfaces<T, const OT_DEPTH: usize>(
             }
         };
         let material = face_texture.material;
-        let uvs = surface
-            .uv_q8
-            .map(|uv| box_prop_face_uv_at(prop.uvs[face], uv));
+        let uvs = if surface.flags & psx_level::box_prop_surface_flags::UV_BAKED != 0 {
+            surface.uv_q8.map(|uv| (uv[0], uv[1]))
+        } else {
+            surface
+                .uv_q8
+                .map(|uv| box_prop_face_uv_at(prop.uvs[face], uv))
+        };
         let opts = options
             .with_depth_policy(DepthPolicy::Average)
             .with_cull_mode(CullMode::None)

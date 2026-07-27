@@ -55,6 +55,15 @@ def main():
     ap.add_argument("--elf", required=True)
     ap.add_argument("--samples", required=True)
     ap.add_argument("--top", type=int, default=40)
+    ap.add_argument(
+        "--min-window-start",
+        type=int,
+        default=None,
+        help=(
+            "for --pc-sample-window-log CSVs, ignore buckets whose "
+            "window_start_tick is below this route tick"
+        ),
+    )
     args = ap.parse_args()
 
     addrs, names = load_symbols(args.elf)
@@ -65,6 +74,11 @@ def main():
     grand = 0
     with open(args.samples) as fh:
         for row in csv.DictReader(fh):
+            if args.min_window_start is not None:
+                if "window_start_tick" not in row:
+                    ap.error("--min-window-start requires a windowed PC sample CSV")
+                if int(row["window_start_tick"]) < args.min_window_start:
+                    continue
             pc = int(row["pc"], 16)
             n = int(row["samples"])
             grand += n

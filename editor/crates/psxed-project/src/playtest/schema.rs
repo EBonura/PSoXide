@@ -930,6 +930,8 @@ pub struct PlaytestCylinderPropSurface {
     pub vertices: [[i32; 3]; 4],
     pub center: [i32; 3],
     pub normal: [i32; 3],
+    /// Final cooked GPU UV coordinates; the field name is retained for
+    /// manifest/schema compatibility.
     pub uv_q8: [[u8; 2]; 4],
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
     pub material_slot: u8,
