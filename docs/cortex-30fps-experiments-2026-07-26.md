@@ -1818,6 +1818,27 @@ remains 1,366,016 bytes with all 925 hashes and every metric identical. LLVM
 found no mergeable shipping functions, so the flag is not added to the
 Makefile.
 
+### R64: LLVM hot/cold splitting
+
+R64 enabled LLVM's `--hot-cold-split` pass on the unchanged `-O3`, fat-LTO
+v3 build, allowing compiler-estimated cold fallback/error blocks to be
+outlined without manually choosing boundaries. The payload stays exactly
+1,366,016 bytes and all 925 hashes match, but lockstep render mean/max rise
+1,230,740→1,230,901 and 1,979,660→1,981,249 cycles, while I-cache stalls rise
+262,685→263,964. The flag is rejected before normal/v1 matrices.
+
+### R65: LLVM MIPS tail calls
+
+LLVM's MIPS backend keeps tail-call emission disabled by default. R65 enabled
+`--mips-tail-calls` to remove return hops in forwarding packet/render leaves.
+The payload sizes remain unchanged and the isolated CPU direction is good:
+v3 lockstep render improves 1,230,740→1,228,900 cycles with 925/925 hashes
+exact; v3 normal improves 1,197,458→1,194,953, though p95 regresses 5.6k.
+v1 lockstep improves 1.6k mean with lower I-cache stalls, but changes two
+checkpoints. Most importantly, v1 normal loses three delivered visuals:
+26.99→26.88 FPS, <=2-vblank periods 79.2%→78.0%, despite render mean improving
+1.4k. The flag is rejected.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1909,6 +1930,8 @@ Makefile.
 | R61/R61b/R61c | Exact reduced constant quotient for model/player depth | rejected | R61 improves v3 render -10.5k and v1 26.99→27.06 FPS, but changes one vblank-timed trail image; outlined/sentinel forms change two, so all fail the strict visual gate |
 | R62 | Replace scheduled model GTE NCLIP with the CPU cross product | rejected | 1,046/1,046 v1 images exact, but render mean +21.4k, p95 +27.1k, I-cache +1.4k, and <=2vb -2.4 points; removed before v3 |
 | R63 | Enable LLVM merge-functions aliases | no-op | v1/v3 payloads, all 1,971 lockstep hashes, and every reported metric are identical; compiler found no foldable shipping functions |
+| R64 | Enable LLVM hot/cold splitting | rejected | 925/925 v3 images exact and payload unchanged, but render mean +161/max +1.6k and I-cache +1.3k; no normal/v1 matrices |
+| R65 | Enable LLVM MIPS tail calls | rejected | v3 exact and render -2.5k normal; v1 render also improves, but normal cadence falls 26.99→26.88 FPS and two lockstep checkpoints change |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
