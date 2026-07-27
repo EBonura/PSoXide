@@ -1581,11 +1581,11 @@ pub struct TexturedModelRenderStats {
 pub struct WorldRenderPass<'a, 'ot, const OT_DEPTH: usize> {
     ot: &'a mut OtFrame<'ot, OT_DEPTH>,
     commands: &'a mut [WorldTriCommand],
-    slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
-    slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
     command_len: usize,
     next_order: u16,
     ordering: WorldCommandOrdering,
+    slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
+    slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
 }
 
 /// Scratch command for a Gouraud triangle render pass.
@@ -3460,13 +3460,15 @@ const BLENDED_VERTEX_CHUNK: usize = 32;
 /// The per-vertex arithmetic is identical to the slow path, so frames
 /// stay bit-exact.
 ///
-/// Caller guarantees every index in `chunk` is in range for `vertices`
-/// and `projected_vertices`, belongs to the part whose joint is
-/// `primary`, and passed [`model_vertex_uses_cpu_blend`].
+/// Caller guarantees `chunk_ptr` addresses at least `chunk_len` initialized
+/// `u16`s, every referenced index is in range for `vertices` and
+/// `projected_vertices`, belongs to the part whose joint is `primary`, and
+/// passed [`model_vertex_uses_cpu_blend`].
 #[cfg(not(feature = "vert-debug"))]
 #[allow(clippy::too_many_arguments)]
-fn flush_blended_model_vertex_chunk(
-    chunk: &[u16],
+unsafe fn flush_blended_model_vertex_chunk(
+    chunk_ptr: *const u16,
+    chunk_len: usize,
     vertices: &[ModelVertex],
     primary: JointViewTransform,
     joint_view_transforms: &[JointViewTransform],
@@ -3480,15 +3482,15 @@ fn flush_blended_model_vertex_chunk(
     min_y: &mut i16,
     max_y: &mut i16,
 ) {
-    let chunk = &chunk[..chunk.len().min(BLENDED_VERTEX_CHUNK)];
+    let chunk_len = chunk_len.min(BLENDED_VERTEX_CHUNK);
     let mut view_blend = [ViewVertex::ZERO; BLENDED_VERTEX_CHUNK];
     // Phase 1: primary-joint transforms while the caller's state is live.
     let mut slot = 0usize;
-    while slot < chunk.len() {
+    while slot < chunk_len {
         // SAFETY: the caller guarantees every chunk index is valid for the
-        // model vertex and projected-vertex slices; `slot < chunk.len()` and
+        // model vertex and projected-vertex slices; `slot < chunk_len` and
         // the local array is capped to `BLENDED_VERTEX_CHUNK` above.
-        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
         let a = scene::transform_vertex_scheduled(vertex.position);
         unsafe {
@@ -3499,8 +3501,8 @@ fn flush_blended_model_vertex_chunk(
     // Phase 2: secondary transforms, reloading only on joint1 change.
     let mut loaded_joint1 = u16::MAX;
     slot = 0;
-    while slot < chunk.len() {
-        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+    while slot < chunk_len {
+        let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
         if u16::from(vertex.joint1) != loaded_joint1 {
             let secondary = unsafe { *joint_view_transforms.get_unchecked(vertex.joint1 as usize) };
@@ -3519,8 +3521,8 @@ fn flush_blended_model_vertex_chunk(
     scene::load_rotation(&Mat3I16::IDENTITY);
     scene::load_translation(Vec3I32::ZERO);
     slot = 0;
-    while slot < chunk.len() {
-        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+    while slot < chunk_len {
+        let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let projected = project_gte_view_vertex_identity_loaded(
             unsafe { *view_blend.get_unchecked(slot) },
             projection,
