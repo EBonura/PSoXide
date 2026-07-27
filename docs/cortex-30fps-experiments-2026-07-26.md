@@ -1406,6 +1406,16 @@ the `-O2` lattice failure, a mathematically equivalent source shape is not
 sufficient evidence on the experimental MIPS-I backend. All forms were
 removed.
 
+### R44: trust root backface culling for TR lattice children
+
+R44 tested whether the cached-room root cull could replace four repeated child
+backface tests. This is valid only for a planar quad. The v1 gate immediately
+falsified that assumption: mean primitives rose 305.1→333.8, 794/1,046 common
+images changed, and final VRAM/display hashes differed. Authored sector quads
+can be warped by independently elevated corners, so bilinear children can have
+different projected winding even after the root's two authored triangles pass.
+The child culls are visually load-bearing and were restored without a v3 run.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1479,6 +1489,7 @@ removed.
 | R41 | Cook final CylinderProp UVs into the existing surface field | accepted | No layout/order change; v3 normal 15.86→16.00 FPS and render -21.6k, v1 render -2.9k; all v3 guest-frame hashes and all 1,047 ordered v1 checkpoint hashes exact |
 | R42 | Reuse accepted portal transforms for the far gate | rejected | v3 exact and normal 16.00→16.22 FPS, but v1 normal render +2.1k and <=2vb 79.2%→79.1% |
 | R43/R43b | Skip clamps for range-proven TR lattice UVs | rejected | v3 exact and normal render -7.5k/16.22 FPS, but one v1 image changes; fallback-limited form changes two |
+| R44 | Skip TR child culls after the cached root cull | rejected | Warped authored quads invalidate the planar proof; v1 primitives 305.1→333.8 and 794 images change |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
