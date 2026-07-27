@@ -310,6 +310,10 @@ impl Scene for Playtest {
             let room_range_culled_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
+            #[cfg(feature = "room-surface-profile")]
+            let mut room_surface_packets = 0u32;
+            #[cfg(feature = "room-surface-profile")]
+            let mut room_surface_commands = 0u32;
 
             // Live entity poses: instances bound to game entities
             // render where the entity runtime moved them (phase 3).
@@ -379,6 +383,10 @@ impl Scene for Playtest {
                     fog_far: room_record.fog_far,
                     lights: room_light_slice(LIGHTS, active.index),
                 };
+                #[cfg(feature = "room-surface-profile")]
+                let room_packet_start = primitive_packets.len();
+                #[cfg(feature = "room-surface-profile")]
+                let room_command_start = world.command_len();
                 telemetry::stage_begin(telemetry::stage::ROOM);
                 #[cfg(feature = "world-grid-visible")]
                 {
@@ -403,28 +411,33 @@ impl Scene for Playtest {
                                 let cell_scratch = cell_scratch_arena();
                                 let accepted_cell_indices = &mut cell_scratch.indices[..];
                                 let accepted_cell_depths = &mut cell_scratch.depths[..];
-                                draw_indexed_cached_room_vertex_lit_all_cells(
-                                    cached_cells,
-                                    cached_cell_vertices,
-                                    cached_vertices,
-                                    cached_surfaces,
-                                    projected_indices,
-                                    projected_vertices,
-                                    projected_depths,
-                                    accepted_cell_indices,
-                                    accepted_cell_depths,
-                                    materials,
+                                generated::draw_project_cached_room!(
                                     &lighting,
-                                    &room_camera,
-                                    room_options,
-                                    cached_room_depth_mode(),
-                                    cached_room_subdivision_mode(),
-                                    ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                    active.sector_size,
-                                    active.index == self.visibility.root,
-                                    Some(prebuilt_room_quads_for(active.index)),
-                                    &mut primitive_packets,
-                                    &mut world,
+                                    draw_indexed_cached_room_vertex_lit_all_cells,
+                                    [
+                                        cached_cells,
+                                        cached_cell_vertices,
+                                        cached_vertices,
+                                        cached_surfaces,
+                                        projected_indices,
+                                        projected_vertices,
+                                        projected_depths,
+                                        accepted_cell_indices,
+                                        accepted_cell_depths,
+                                        materials,
+                                    ],
+                                    [
+                                        &room_camera,
+                                        room_options,
+                                        cached_room_depth_mode(),
+                                        cached_room_subdivision_mode(),
+                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                        active.sector_size,
+                                        active.index == self.visibility.root,
+                                        Some(prebuilt_room_quads_for(active.index)),
+                                        &mut primitive_packets,
+                                        &mut world,
+                                    ]
                                 )
                             } else {
                                 room_uncached_draws = room_uncached_draws.saturating_add(1);
@@ -474,6 +487,7 @@ impl Scene for Playtest {
                     #[cfg(not(feature = "vis-full-active-chunks"))]
                     {
                         let player = self.motor.position();
+                        let portal_cell_window = self.portal_cell_window(active.index);
                         // The player's own room anchors its per-cell PVS at
                         // the player; a far room admitted by the portal walk
                         // anchors at the portal that admitted it (the
@@ -539,29 +553,35 @@ impl Scene for Playtest {
                                     let cell_scratch = cell_scratch_arena();
                                     let accepted_cell_indices = &mut cell_scratch.indices[..];
                                     let accepted_cell_depths = &mut cell_scratch.depths[..];
-                                    draw_indexed_cached_room_vertex_lit_visible_cells(
-                                        cached_cells,
-                                        cached_cell_vertices,
-                                        cached_vertices,
-                                        cached_surfaces,
-                                        projected_indices,
-                                        projected_vertices,
-                                        projected_depths,
-                                        accepted_cell_indices,
-                                        accepted_cell_depths,
-                                        active.depth,
-                                        active.sector_size,
-                                        materials,
+                                    generated::draw_project_cached_room!(
                                         &lighting,
-                                        &room_camera,
-                                        room_options,
-                                        cached_room_depth_mode(),
-                                        cached_room_subdivision_mode(),
-                                        cells,
-                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                        Some(prebuilt_room_quads_for(active.index)),
-                                        &mut primitive_packets,
-                                        &mut world,
+                                        draw_indexed_cached_room_vertex_lit_visible_cells,
+                                        [
+                                            cached_cells,
+                                            cached_cell_vertices,
+                                            cached_vertices,
+                                            cached_surfaces,
+                                            projected_indices,
+                                            projected_vertices,
+                                            projected_depths,
+                                            accepted_cell_indices,
+                                            accepted_cell_depths,
+                                            active.depth,
+                                            active.sector_size,
+                                            materials,
+                                        ],
+                                        [
+                                            &room_camera,
+                                            room_options,
+                                            cached_room_depth_mode(),
+                                            cached_room_subdivision_mode(),
+                                            cells,
+                                            ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                            portal_cell_window,
+                                            Some(prebuilt_room_quads_for(active.index)),
+                                            &mut primitive_packets,
+                                            &mut world,
+                                        ]
                                     )
                                 } else {
                                     room_uncached_draws = room_uncached_draws.saturating_add(1);
@@ -633,38 +653,43 @@ impl Scene for Playtest {
                                     let cell_scratch = cell_scratch_arena();
                                     let accepted_cell_indices = &mut cell_scratch.indices[..];
                                     let accepted_cell_depths = &mut cell_scratch.depths[..];
-                                    draw_indexed_cached_room_vertex_lit_all_cells(
-                                        cached_cells,
-                                        cached_cell_vertices,
-                                        cached_vertices,
-                                        cached_surfaces,
-                                        projected_indices,
-                                        projected_vertices,
-                                        projected_depths,
-                                        accepted_cell_indices,
-                                        accepted_cell_depths,
-                                        materials,
+                                    generated::draw_project_cached_room!(
                                         &lighting,
-                                        &room_camera,
-                                        room_options,
-                                        cached_room_depth_mode(),
-                                        cached_room_subdivision_mode(),
-                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                        active.sector_size,
-                                        // Lateral-cull cells in EVERY no-anchor
-                                        // fallback room, not just the root: the
-                                        // AABB test is the same conservative
-                                        // margin bound the root room already
-                                        // trusts, and 3-4 of ~5 drawn
-                                        // rooms take this path per frame. Cells
-                                        // it rejects are off-screen, so output
-                                        // pixels are unchanged; only the
-                                        // projection + surface walk for them is
-                                        // skipped.
-                                        true,
-                                        Some(prebuilt_room_quads_for(active.index)),
-                                        &mut primitive_packets,
-                                        &mut world,
+                                        draw_indexed_cached_room_vertex_lit_all_cells,
+                                        [
+                                            cached_cells,
+                                            cached_cell_vertices,
+                                            cached_vertices,
+                                            cached_surfaces,
+                                            projected_indices,
+                                            projected_vertices,
+                                            projected_depths,
+                                            accepted_cell_indices,
+                                            accepted_cell_depths,
+                                            materials,
+                                        ],
+                                        [
+                                            &room_camera,
+                                            room_options,
+                                            cached_room_depth_mode(),
+                                            cached_room_subdivision_mode(),
+                                            ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                            active.sector_size,
+                                            // Lateral-cull cells in EVERY no-anchor
+                                            // fallback room, not just the root: the
+                                            // AABB test is the same conservative
+                                            // margin bound the root room already
+                                            // trusts, and 3-4 of ~5 drawn
+                                            // rooms take this path per frame. Cells
+                                            // it rejects are off-screen, so output
+                                            // pixels are unchanged; only the
+                                            // projection + surface walk for them is
+                                            // skipped.
+                                            true,
+                                            Some(prebuilt_room_quads_for(active.index)),
+                                            &mut primitive_packets,
+                                            &mut world,
+                                        ]
                                     )
                                 } else {
                                     room_uncached_draws = room_uncached_draws.saturating_add(1);
@@ -723,6 +748,15 @@ impl Scene for Playtest {
                     }
                 }
                 telemetry::stage_end(telemetry::stage::ROOM);
+                #[cfg(feature = "room-surface-profile")]
+                {
+                    room_surface_packets = room_surface_packets.saturating_add(
+                        primitive_packets.len().saturating_sub(room_packet_start) as u32,
+                    );
+                    room_surface_commands = room_surface_commands.saturating_add(
+                        world.command_len().saturating_sub(room_command_start) as u32,
+                    );
+                }
                 draw_water(
                     active.index,
                     &room_camera,
@@ -756,7 +790,11 @@ impl Scene for Playtest {
                     &mut world,
                 );
                 box_prop_profile_end(telemetry::stage::BOX_PROPS);
-                psx_game_runtime::cylinder_props::draw_cylinder_props(
+                psx_game_runtime::cylinder_props::draw_cylinder_props::<
+                    _,
+                    OT_DEPTH,
+                    { !CYLINDER_PROPS.is_empty() },
+                >(
                     CYLINDER_PROPS,
                     CYLINDER_PROP_SURFACES,
                     active.index,
@@ -1130,6 +1168,17 @@ impl Scene for Playtest {
                 telemetry::counter::MODEL_INSTANCE_DRAWS,
                 total_instance_stats.draws as u32,
             );
+            #[cfg(feature = "room-surface-profile")]
+            {
+                telemetry::counter(
+                    telemetry::counter::ROOM_SURFACE_PACKETS,
+                    room_surface_packets,
+                );
+                telemetry::counter(
+                    telemetry::counter::ROOM_SURFACE_COMMANDS,
+                    room_surface_commands,
+                );
+            }
             telemetry::counter(
                 telemetry::counter::MODEL_INSTANCE_BOUNDS_TESTS,
                 total_instance_stats.bounds_tests as u32,

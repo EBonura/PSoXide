@@ -31,7 +31,11 @@ pub(crate) const RUNTIME_SCHEDULE: RuntimeScheduleConfig = RuntimeScheduleConfig
     // down"; the benchmark tape's 1,371 ticks consumed 2,157 vblanks).
     // The boot-backlog concern the cap addressed is handled upstream by
     // EngineClock::reset_origin after init.
-    max_fixed_ticks_before_visual: 0,
+    max_fixed_ticks_before_visual: if cfg!(feature = "lockstep-visuals") {
+        2
+    } else {
+        0
+    },
 };
 
 const _: () = assert!(
