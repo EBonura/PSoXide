@@ -68,13 +68,17 @@ pub(super) fn drain_pending_irqs(cd: &mut CdController, polls: &mut u32) {
 
 /// Seek to `lba` and start a ReadN stream (SetLoc + ReadN, both
 /// ack-polled).
+///
+/// `lba` is relative to the start of this game's own disc image; on a
+/// multi-program disc [`psx_io::disc_base`] shifts it to where that image
+/// actually landed.
 #[cfg(target_arch = "mips")]
 pub(super) fn start_cd_read_at_lba(
     cd: &mut CdController,
     lba: u32,
     polls: &mut u32,
 ) -> Result<(), u32> {
-    let (minute, second, frame) = lba_to_bcd_msf(lba);
+    let (minute, second, frame) = lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba));
     if !send_command(
         cd,
         CMD_SETLOC,
