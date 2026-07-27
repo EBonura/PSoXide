@@ -555,6 +555,36 @@ recover the roughly 350k CPU cycles still needed for a stable two-vblank
 cortex_v3 frame. Texture-window dedup is rejected by this hard upper bound;
 future GPU work is gated on contrary real-hardware evidence.
 
+### E8 diagnostic: decompose the prop-rendering tail
+
+The outer `image_props` stage is an aggregate over box, cylinder, arch,
+debris, shard, and image-card rendering. A diagnostic build with the existing
+`PSXO_PROFILE_BOX_PROPS=1` switch separates the named sub-stages. On the
+current cortex_v3 tape its 131,932-cycle mean comprises 40,406 cycles of box
+props, 1,873 of floor debris, 1,322 of shards, and only **5 cycles** of image
+cards. The cooked level has zero image-card and arch records, one box prop
+expanded to 34 surfaces, and six cylinder props expanded to 120 surfaces.
+The approximately 88k-cycle remainder is therefore the cylinder path.
+
+This falsifies the proposed image-card record/template optimization for this
+workload. The actionable prop target is cooked cylinder submission; its UV
+interpolation was already reduced by V4, while the fully cooked-UV R9 variant
+failed the strict painter/hash gate.
+
+### R16: cache exact CPU view vertices across subdivided surfaces
+
+The indexed renderer projects shared world vertices once, but adaptive
+subdivision transforms each surface's four roots to camera space again.
+R16 added a lazy exact-CPU view cache indexed by the existing room vertex id.
+It retained `WorldCamera::view_vertex` arithmetic (unlike the visually
+different GTE experiment) and therefore targeted only duplicate transforms.
+
+The additional 52 KiB scratch and per-reference validity checks cost more than
+the shared transforms saved. cortex_v3 lockstep render rose
+1,416,120→1,416,765 cycles, I-cache stalls rose 321,902→325,019, and one of
+925 hashes changed at guest frame 1626. The experiment was removed without a
+normal-mode run.
+
 ### R4/R4a: precompute lattice attributes or remove leaf copies
 
 Two variants tested the proposed one-level TR lattice data rewrite. A full
@@ -643,9 +673,11 @@ of the win without changing data layout or packet identity.
 | R13 | Const-specialize room depth/subdivision modes | rejected | v3 metrics exactly identical to R10; all 925 hashes exact, so LLVM already specializes them |
 | R14/R14b | GTE or exact batched CPU TR root transforms | rejected | GTE saved 40.7k but changed 820/925 images and primitive topology; exact batch regressed normal v3 render by 4.0k |
 | R15 | Explicitly outline cached-room TR entry leaves | rejected | all v3 metrics exactly equal to R10 and 925/925 hashes exact; compiler already outlines them |
+| R16 | Cache exact CPU view vertices by room vertex id | rejected | +645 v3 lockstep render cycles, +3,117 I-cache stalls, +52 KiB scratch, and 1/925 hashes changed |
 | T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
+| E8 | Record/template optimization for prop tail | diagnostic narrowed | image cards cost 5 cycles; v3 tail is ~40k box + ~88k cylinder, so card templates are irrelevant |
 | G1 | GPU overdraw/timing census and texture-window dedup bound | diagnostic complete | v3 GPU mean/max 713k/879k cycles; ~396 redundant one-word writes cannot close a ~350k CPU-cycle gap |
 | P1 | VBlank/frame-pacing wait diagnosis | queued | Idle is not counted as recovered CPU work |
 | C1 | Cooker worst-view 30 FPS/RAM/packet validator | queued | Fit only after surviving engine changes |
