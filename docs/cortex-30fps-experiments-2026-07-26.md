@@ -1178,6 +1178,25 @@ sites expanded the cortex_v3 executable from 1,349,632 to 1,490,944 bytes
 (+141,312), and the route immediately reported
 `PERSISTENT ASSET LOAD FAILED`. The candidate was reverted without a v1 run.
 
+### O1/O2/O3: target optimization-level and LTO sweep
+
+The PS1 has a 4 KiB direct-mapped instruction cache, so smaller whole-program
+code can outperform locally shorter `-O3` paths. Three clean cortex_v3
+lockstep builds tested that premise without source changes:
+
+| build | payload | mean / p95 render | I-cache stalls | primitives | visual result |
+|---|---:|---:|---:|---:|---|
+| baseline `-O3`, fat LTO | 1,349,632 B | 1,416,120 / 2,002,178 | 321,902 | 418.2 | 925/925 exact |
+| O1 `-O2`, fat LTO | 1,296,384 B | 1,414,921 / 2,016,323 | 326,957 | 366.9 | 820/925 changed |
+| O2 `-Os`, fat LTO | 1,171,456 B | 1,829,420 / 2,593,612 | 379,921 | 335.4 | 698 changed, 1 extra |
+| O3 `-O3`, thin LTO | 1,374,208 B | 1,465,921 / 2,058,163 | 344,639 | 418.2 | 58/925 changed |
+
+`-O2` and `-Os` remove emitted primitives and produce widespread missing
+geometry despite compiling the same safe source; they are unusable on the
+experimental MIPS-I backend. Thin LTO retains primitive counts but is slower,
+larger, and still changes output. The existing `-O3`, one-codegen-unit, fat-LTO
+profile remains the validated target configuration.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1238,6 +1257,9 @@ sites expanded the cortex_v3 executable from 1,349,632 to 1,490,944 bytes
 | R31/R31b | Force/hint inline the projected TR quad leaf | rejected/no-op | forced form saves 21.7k render cycles but changes 431/925 v3 hashes and GP0 words; ordinary hint is bit-for-bit baseline |
 | R32 | Force-inline cached baked-room fog shading | rejected | v3 exact and render -35.2k; v1 render -5.8k but one frame changes in a 135-pixel left-edge patch |
 | R33 | Force-inline projected split-safety predicate | rejected | focused tests pass, but v3 payload grows +141,312 B and persistent asset loading fails |
+| O1 | Whole program at `-O2` | rejected | -53,248 B, but 820/925 v3 images change and primitives fall 418.2→366.9 |
+| O2 | Whole program at `-Os` | rejected | -178,176 B, but render rises 29%, primitives fall to 335.4, and 698 images change |
+| O3 | Thin instead of fat LTO at `-O3` | rejected | +49.8k render cycles, +22.7k I-cache stalls, and 58/925 v3 images change |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
