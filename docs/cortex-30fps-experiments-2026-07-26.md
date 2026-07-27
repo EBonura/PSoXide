@@ -1648,6 +1648,39 @@ The v3 executable grows 2 KiB; the v1 payload remains exactly 1,482,752 bytes.
 The engine passes 269 unit tests plus its compile-time type guard, and runtime
 passes 63 unit and 5 policy tests. R56 is retained.
 
+### R57/R57b: cook final generated BoxProp UVs in-place
+
+Generated BoxProp surfaces stored face-relative Q8 coordinates even though the
+face UV rectangle and every surface coordinate are static. Runtime therefore
+performed two bilinear divisions for each of four vertices on every visible
+quad. R57 applied the same in-place cooker strategy accepted for cylinder
+surfaces in R41: the existing `uv_q8` bytes carry the exact final packet UV,
+so record size, field order, surface order, and packet order do not move.
+
+The raw semantic repurpose saved 6,194 v3 lockstep render cycles but failed one
+of 925 images at guest frame 1,816. An exact checkpoint capture localized the
+difference to three pixels inside a 7×9 region. The UV calculation itself is
+exhaustively equal for all 65,536 coordinate pairs over four asymmetric corner
+sets; the unsafe part was changing an existing record's meaning without a
+marker.
+
+R57b uses the record's reserved flag byte for
+`box_prop_surface_flags::UV_BAKED`. New cooked records select direct final UVs;
+older/unflagged records retain the exact legacy bilinear interpreter. This
+backward-compatible form removes the three-pixel divergence and performs
+better:
+
+| project / mode | R56 render mean / p95 / max | R57b render mean / p95 / max | FPS / visuals | <=2vb | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---:|---|
+| v1 lockstep | 761,999 / 1,084,937 / 1,209,753 | identical | fixed / 851 | 77.4%→77.4% | 169,555→169,555 | all common hashes and every metric identical |
+| v1 normal | 739,443 / 1,059,406 / 1,210,003 | identical | 26.99 / 766→766 | 79.2%→79.2% | 169,284→169,284 | every reported metric identical |
+| v3 lockstep | 1,241,193 / 1,654,498 / 1,997,640 | 1,230,740 / 1,638,902 / 1,979,660 | fixed / 821 | 4.1%→4.5% | 265,880→262,685 | 925/925 guest-frame exact |
+| v3 normal | 1,208,747 / 1,621,743 / 1,984,243 | 1,197,458 / 1,610,299 / 1,965,497 | 17.65→17.76 / 483→486 | 2.7%→3.1% | 289,192→286,097 | same lockstep workload |
+
+Payload sizes are unchanged. Runtime passes 63 unit and 5 policy tests; the
+cooker UV proof is exhaustive. R57b is retained and the unflagged raw form is
+removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1732,6 +1765,7 @@ passes 63 unit and 5 policy tests. R56 is retained.
 | R53 | Compile out the no-anchor/all-cells fallback | rejected | v3 payload -40,960 bytes and 925/925 exact only because the tape never enters it; normal FPS unchanged at 17.39 and <=2vb worsened 2.5%→2.3%; engine correctness still requires the fallback |
 | R54/R55 | Early missing-material cylinder reject / generated cylinder fog policy | rejected | Both were 925/925 exact, but render regressed +1.5k/+1.4k and I-cache +1.8k/+2.4k |
 | R56 | Fixed-policy static-prop quad submission leaf | accepted | v3 925/925 exact, normal 17.39→17.65 FPS, render mean -20.0k and p95 -24.8k; all 1,047 ordered v1 images exact and normal remains 26.99 FPS |
+| R57/R57b | Cook final generated BoxProp UVs into the existing field | accepted with explicit record flag | Raw repurpose changed three pixels in one v3 image; `UV_BAKED` form is 925/925 exact, normal 17.65→17.76 FPS, render mean -11.3k/p95 -11.4k, while v1 is bit-identical |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
