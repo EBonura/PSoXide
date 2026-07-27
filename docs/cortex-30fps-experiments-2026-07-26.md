@@ -1421,6 +1421,24 @@ screen-coordinate quantization can make a small child degenerate or reverse
 winding independently even for a planar source, so planarity does not remove
 the projected child-cull requirement.
 
+### R46/R46b: reject wholly off-screen TR lattice children
+
+R46 tested a conservative post-projection screen test on each of the four TR
+lattice children before packet construction. A child was omitted only when
+all four projected vertices lay strictly beyond the same viewport edge.
+cortex_v1 render improved 762,186→755,173 cycles, I-cache stalls fell
+168,921→162,532, primitives fell 305.1→300.0, and the two-vblank rate rose
+77.2%→78.6%.
+
+The visual gate failed: 223/1,047 ordered images changed in three movement
+spans. R46b repeated the experiment with the room visibility pass's 48-pixel
+guard band. It retained only about one third of the render saving
+(760,547 cycles and 303.2 primitives), yet changed the same 223 images. A
+route-tick screenshot at the first divergent checkpoint confirmed real wall
+geometry missing at the left edge rather than a cadence-only hash shift.
+Projected child bounds therefore cannot replace actual PS1 packet submission
+in this path; both forms were removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1495,6 +1513,7 @@ the projected child-cull requirement.
 | R42 | Reuse accepted portal transforms for the far gate | rejected | v3 exact and normal 16.00→16.22 FPS, but v1 normal render +2.1k and <=2vb 79.2%→79.1% |
 | R43/R43b | Skip clamps for range-proven TR lattice UVs | rejected | v3 exact and normal render -7.5k/16.22 FPS, but one v1 image changes; fallback-limited form changes two |
 | R44 | Skip TR child culls after the cached root cull | rejected | Warped authored quads invalidate the planar proof; v1 primitives 305.1→333.8 and 794 images change |
+| R46/R46b | Cull TR lattice children wholly beyond the viewport / 48px guard band | rejected | v1 render -7.0k/-1.6k and <=2vb +1.4/+1.3 points, but both forms change 223 images; captured wall geometry is genuinely missing |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
