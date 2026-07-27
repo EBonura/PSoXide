@@ -1054,6 +1054,43 @@ tests with 367 passes, 9 pre-existing starter-project expectation failures,
 and 1 ignored diagnostic; none of the failures touches the performance
 envelope or streamed-room accounting.
 
+## Final clean-source reproduction and hardware hand-off
+
+The accepted source at `7d7ace73` was rebuilt from a fresh cook of each
+project and replayed again after all rejected candidates had been removed.
+Every ordinary-mode metric reproduced the R10 baseline exactly. Both
+lockstep runs reproduced every captured image:
+
+| project / mode | effective FPS | render mean / p95 / max | periods <=2 VBlanks | lockstep hashes |
+|---|---:|---:|---:|---:|
+| cortex_v1 normal | 26.99 | 742,800 / 1,069,593 / 1,211,569 | 79.2% | n/a |
+| cortex_v3 normal | 15.71 | 1,364,086 / 1,953,348 / 2,267,126 | 0.9% | n/a |
+| cortex_v1 lockstep | 29.96 scheduled | 765,819 / 1,098,666 / 1,224,056 | 77.0% | 1,046 / 1,046 exact |
+| cortex_v3 lockstep | 29.98 scheduled | 1,416,120 / 2,002,178 / 2,259,241 | 1.2% | 925 / 925 exact |
+
+Hardware-safe CUE/BIN pairs were then built with the accepted engine feature
+set plus the on-screen presented-FPS/worst-gap overlay, and without emulator
+telemetry:
+
+`cd-stream-bench world-order-bucketed world-grid-visible ot-2048
+vis-anchor-pvs-candidates tr-subdivision-lattice fps-overlay`
+
+Both full poll-bound tapes complete on those exact disc images and the sampled
+screens show complete route geometry. The structural preburn checks pass
+(`SYSTEM.CNF`, `PSX.EXE`, `WORLD.PAK`, and `UI.PAK`; cortex_v1 also has its
+audio track). Artifact hashes:
+
+| project | burn image | SHA-256 |
+|---|---|---|
+| cortex_v1 | `editor/projects/cortex_v1/baked/cortex_v1.bin` | `1da8d36f57821dd16f6daef420c43a8749c1f8592a6b0c040227fb7b87eb0e6d` |
+| cortex_v3 | `editor/projects/cortex_v3/baked/cortex_v3.bin` | `010acdfe24a5c965906deab937a47b79ec1931a1a112385c40f91efdeb88a878` |
+
+The local overlay reads 24–30 FPS with worst gaps of 2–4 VBlanks along the
+cortex_v1 route and 14–17 FPS with worst gaps of 4–6 along cortex_v3. These
+are emulator observations, not silicon results. H1 remains open until the
+same images are run on a physical NTSC PlayStation through the portal seams,
+the point-blank near-plane views, and the heaviest combat/junction views.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1118,7 +1155,7 @@ envelope or streamed-room accounting.
 | S1 | Hoist pad/visibility work into present wait | rejected by dependency/contract | present spin is tear-free vblank quantisation; input and visibility depend on the next tick/post-update camera, and early polling changes latency |
 | S2 | Reduce authored sector size | rejected by contract/audit | `sector_size` is world scale, not cache granularity; changing 1,664/1,536 rescales geometry, collision, portals, and routes |
 | C1 | Cooker worst-view 30 FPS/RAM/packet validator | accepted, warning-only | v1/v3 observed maxima 73/551 and 183/639 stay below 390/771 and 364/728; both theoretical packet envelopes correctly warn above 1,536 |
-| H1 | Real-hardware timer, cadence, tear, seam, and near-plane sweep | queued | Mandatory final gate |
+| H1 | Real-hardware timer, cadence, tear, seam, and near-plane sweep | burn images prepared; awaiting silicon | Structural checks and full no-telemetry tape replays pass; mandatory final gate remains physical |
 
 Run `python3 tools/cortex_30fps_report.py <run-dir>...` for the standard table.
 Pass exactly two lockstep run directories plus `--compare-lockstep` to make any
