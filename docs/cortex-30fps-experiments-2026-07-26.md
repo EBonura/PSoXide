@@ -725,6 +725,22 @@ and 576 changed display hashes. Because the frozen R10 disc reruns exactly,
 these are candidate-induced differences, not replay noise. The prefix buffers
 were removed before normal or cortex_v3 runs.
 
+### R23: borrow cached-quad aggregates across the outlined submit boundary
+
+PC attribution found a 68-byte `memcpy` in
+`submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth`, the
+outlined common entry for cached room quads. R23 passed projected vertices,
+packed UV words, and colours by reference through that boundary, leaving
+packet order, depth, culling, splitting, and packet construction unchanged.
+All 269 `psx-engine` tests passed.
+
+The MIPS result was worse immediately. cortex_v3 lockstep mean render rose
+1,416,120→1,422,505 cycles, p95 rose 2,002,178→2,011,977, and I-cache stalls
+rose 321,902→325,286. It also changed 512 of 925 display hashes beginning at
+guest frame 216. The aggregate copy was therefore not a profitable redundant
+move under this ABI/code layout. The candidate was removed without spending a
+cortex_v1 run.
+
 ### R4/R4a: precompute lattice attributes or remove leaf copies
 
 Two variants tested the proposed one-level TR lattice data rewrite. A full
@@ -822,6 +838,7 @@ of the win without changing data layout or packet identity.
 | M8 | Attribute bulk-memory call sites with PC sampling | diagnostic complete | 6.13M samples; gameplay `memcpy` 5.52%, `memset` 4.51%; concrete callers identified |
 | R21 | Leave bucketed pass's unused linked-list arrays uninitialized | rejected | v3 -7,480 render cycles and exact; v1 -6,065 but 3/1,047 images changed, including 804 captured floor pixels |
 | R22 | Leave unwritten room-search array tails uninitialized | rejected | v1 update -2,004 and room-track -1,749 cycles/tick, but render +129 and 2/1,047 images changed |
+| R23 | Borrow cached-quad aggregate arguments | rejected | v3 render +6,385, p95 +9,799, I-cache +3,384 cycles; 512/925 images changed |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
