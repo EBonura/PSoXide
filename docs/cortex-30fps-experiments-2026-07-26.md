@@ -1703,6 +1703,69 @@ and cache regressions. Runtime's 63 unit and 5 policy tests plus all 270 engine
 tests and the compile-time type guard pass. R58 is removed without running the
 normal or v1 matrices because it fails the first lockstep performance gate.
 
+### R59/R59b: thread one prepacked material through the TR lattice
+
+Each of the four one-level TR lattice children rebuilt the same 16-byte
+textured-Gouraud packet material. R59 threaded the `WorldRenderMaterial`
+packet words through the lattice once; R59b recomputed the same words once
+from the texture at the caller to distinguish stale cached data from an ABI
+effect.
+
+Both variants produced the same 925 candidate hashes and kept surface,
+primitive, and payload counts unchanged, proving that the stored packet words
+were not stale. They reduced v3 lockstep render mean by 9.4k/8.8k cycles, but
+both changed 512/925 baseline images beginning at guest frame 216. The final
+frame differs at 39 pixels in the player/floor overlap region, consistent with
+the enlarged hot-function argument layout perturbing a painter-order boundary
+rather than changing geometry volume.
+
+| metric | R57b | R59 | R59b |
+|---|---:|---:|---:|
+| render mean | 1,230,740 | 1,221,374 | 1,221,909 |
+| render p95 | 1,638,902 | 1,626,717 | 1,628,564 |
+| render max | 1,979,660 | 1,970,453 | 1,968,161 |
+| I-cache stalls | 262,684.6 | 261,691.7 | 262,558.1 |
+| <=2-vblank periods | 4.5% | 5.7% | 5.7% |
+| visual hashes vs R57b | baseline | 413 exact / 512 changed | 413 exact / 512 changed |
+
+All 270 engine tests pass. The API/data-flow change is removed; packet
+material construction remains local to each canonical leaf.
+
+### R60/R60b/R60c: exact constant-ratio ordering-table depth
+
+The shipping depth map is `(depth - 64) * 2046 / 24936`. Reducing numerator
+and denominator by their GCD gives the exactly equivalent
+`(depth - 64) * 341 / 4156`; exhaustive comparison over and beyond the legal
+depth range confirms identical slots. This lets the MIPS compiler use a
+constant reciprocal instead of the generic variable divide.
+
+R60 selected that ratio in the generic depth mapper. It improved v3 normal
+render mean by 8.8k cycles, but expanded the generic path and changed v1's
+normal cadence from 26.99 to 26.88 FPS. R60b restricted the ratio to the four
+projected TR lattice children. That kept all lockstep images exact and improved
+v3 normal mean by 6.5k cycles, but v1 normal still fell to 26.78 FPS despite
+nearly neutral stage time.
+
+R60c const-specialized the R60b quotient behind the cooker-generated fog/TR
+entry. This makes v1 genuinely byte-for-byte identical, including its
+1,482,752-byte payload and all normal/lockstep metrics, but duplicates enough
+of the v3 TR emitter to lose the arithmetic saving:
+
+| form / project | payload | render mean / p95 / max | FPS / visuals | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---|
+| R57b v3 lockstep | 1,366,016 | 1,230,740 / 1,638,902 / 1,979,660 | fixed / 821 | 262,684.6 | baseline |
+| R60b v3 lockstep | 1,366,016 | 1,225,678 / 1,632,954 / 1,971,478 | fixed / 821 | 261,343.5 | 925/925 exact |
+| R60b v3 normal | 1,366,016 | 1,190,937 / 1,611,480 / 1,956,117 | 17.76 / 486 | 282,622.2 | same lockstep workload |
+| R60c v1 lockstep | 1,482,752 | identical to R57b | fixed / 851 | 169,555.1 | 1,046/1,046 exact |
+| R60c v1 normal | 1,482,752 | identical to R57b | 26.99 / 766 | 169,283.5 | every reported metric identical |
+| R60c v3 lockstep | 1,378,304 | 1,235,032 / 1,647,828 / 1,984,817 | fixed / 821 | 270,362.1 | 924 exact / 1 cadence-shifted |
+
+R60c is 12 KiB larger than R57b and regresses v3 mean render by 4.3k cycles
+and I-cache stalls by 7.7k. All three forms are removed. The useful conclusion
+is narrower than “constant division is faster”: on this MIPS-I binary, the
+call-site/code-layout cost dominates unless the exact quotient can replace an
+existing instruction sequence without adding a selector or monomorph.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1789,6 +1852,8 @@ normal or v1 matrices because it fails the first lockstep performance gate.
 | R56 | Fixed-policy static-prop quad submission leaf | accepted | v3 925/925 exact, normal 17.39→17.65 FPS, render mean -20.0k and p95 -24.8k; all 1,047 ordered v1 images exact and normal remains 26.99 FPS |
 | R57/R57b | Cook final generated BoxProp UVs into the existing field | accepted with explicit record flag | Raw repurpose changed three pixels in one v3 image; `UV_BAKED` form is 925/925 exact, normal 17.65→17.76 FPS, render mean -11.3k/p95 -11.4k, while v1 is bit-identical |
 | R58 | Reuse the fixed-policy static-prop quad leaf for generated BoxProps | rejected | 925/925 v3 hashes exact, but render mean +1.4k, p95 +4.4k, max +9.2k, and I-cache +3.7k; removed before normal/v1 matrices |
+| R59/R59b | Thread one prepacked material through the TR lattice children | rejected | -9.4k/-8.8k render mean, but both stored and recomputed forms change the same 512/925 v3 images; not a stale-material bug, so the ABI expansion is removed |
+| R60/R60b/R60c | Exact reduced constant quotient for ordering-table depth | rejected | Broad/TR-only forms save 6.5–8.8k v3 normal render cycles but regress v1 cadence; fog-only specialization leaves v1 bit-identical but adds 12 KiB, regresses v3 render +4.3k/I-cache +7.7k, and shifts one checkpoint |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
