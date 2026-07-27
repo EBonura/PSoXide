@@ -267,6 +267,25 @@ impl psx_engine::WorldSurfaceLighting for ProjectCachedRoomLighting<'_> {
     }
 
     #[inline(always)]
+    fn shade_prewarmed_baked_vertices(
+        &self,
+        sample: psx_engine::WorldSurfaceSample,
+        depths: Option<[i32; 4]>,
+    ) -> Option<[(u8, u8, u8); 4]> {
+        let vertex_rgb = sample.baked_vertex_rgb?;
+        if !self.lighting.fog_enabled || self.lighting.fog_far <= self.lighting.fog_near {
+            return Some(vertex_rgb);
+        }
+        let depths = depths?;
+        Some([
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[0], depths[0]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[1], depths[1]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[2], depths[2]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[3], depths[3]),
+        ])
+    }
+
+    #[inline(always)]
     fn uses_direct_baked_vertex_rgb(&self) -> bool {
         psx_engine::WorldSurfaceLighting::uses_direct_baked_vertex_rgb(self.lighting)
     }
@@ -298,7 +317,7 @@ macro_rules! draw_project_cached_room {
         [$($after:expr),* $(,)?]
     ) => {{
         let cached_lighting = $crate::generated::ProjectCachedRoomLighting::new($lighting);
-        $draw($($before,)* &cached_lighting, $($after,)*)
+        $draw($($before,)* &cached_lighting, true, $($after,)*)
     }};
 }
 pub(crate) use draw_project_cached_room;
@@ -322,7 +341,7 @@ macro_rules! draw_project_cached_room {
         [$($before:expr),* $(,)?],
         [$($after:expr),* $(,)?]
     ) => {
-        $draw($($before,)* $lighting, $($after,)*)
+        $draw($($before,)* $lighting, false, $($after,)*)
     };
 }
 pub(crate) use draw_project_cached_room;
