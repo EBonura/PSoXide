@@ -1333,6 +1333,47 @@ macro while the fog policy emits the forced-inline adapter. R39d is retained:
 it recovers R32's v3 win without changing the no-fog engine path or any
 lockstep pixel.
 
+### R40: one-multiply algebra for the exact fog blend
+
+R40 rewrote the exact per-channel blend from
+`(src * (256 - w) + fog * w) >> 8` to
+`src + ((fog - src) * w >> 8)`, retaining signed-floor semantics. A focused
+unit test proved equality over all source colours, fog colours, and weights.
+
+The smaller arithmetic expression was not a MIPS target win. cortex_v3
+lockstep remained 925/925 exact, but mean render rose
+1,388,595→1,389,288 cycles and I-cache stalls rose 315,805→319,701. Normal
+cadence lost two presented frames, dropping 15.86→15.79 FPS, while mean render
+also rose 837 cycles. The rewrite was removed.
+
+### R41: cook final CylinderProp UVs in-place
+
+T3 established that removing the runtime cylinder bilinear transform is worth
+about 30k cycles, but its new record field/layout changed transient painter
+behaviour. R41 keeps the existing record sizes, field order, surface order,
+packet order, and draw path. The cooker now writes each surface's final GPU UV
+into the existing `uv_q8` storage, and the runtime consumes that field
+directly. The per-prop corner UV array remains in place, so no ABI or record
+layout moves.
+
+An exhaustive host test compares the cooked result against the legacy runtime
+calculation for all 65,536 UV coordinates over four asymmetric corner sets.
+cortex_v3 then passed 925/925 guest-frame lockstep hashes exactly:
+
+| project / mode | R39d render mean / p95 / max | R41 render mean / p95 / max | FPS | <=2vb | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---:|---|
+| v3 lockstep | 1,388,595 / 1,957,142 / 2,213,189 | 1,365,369 / 1,918,050 / 2,173,485 | fixed | 1.6%→2.3% | 315,805→309,859 | 925/925 guest-frame exact |
+| v3 normal | 1,341,277 / 1,899,026 / 2,212,330 | 1,319,726 / 1,875,509 / 2,176,939 | 15.86→16.00 | 1.2%→1.6% | 340,381→334,958 | same workload; +4 presented visuals |
+| v1 lockstep | 765,819 / 1,098,666 / 1,224,056 | 762,186 / 1,089,330 / 1,210,193 | fixed | 77.0%→77.2% | 171,812→168,921 | all 1,047 ordered checkpoint hashes exact; two arrive one guest frame earlier |
+| v1 normal | 742,800 / 1,069,593 / 1,211,569 | 739,898 / 1,064,039 / 1,211,472 | 26.99→26.99 | 79.2%→79.2% | 170,679→168,349 | same workload and delivered-frame count |
+
+The strict guest-frame keyed comparator reports two missing/two extra v1
+entries at frames 374–376. Direct checkpoint-sequence comparison proves all
+1,047 hashes identical in the same order; 1,045 carry the same guest frame and
+two are presented one frame earlier because the optimized render completes
+sooner. This is cadence improvement, not a pixel or geometry difference. R41
+is retained.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1402,8 +1443,10 @@ lockstep pixel.
 | R37/R37b | GTE DPCS baked-room fog blend | rejected | Both forms are pixel-exact; bounded form saves 1.5k v3 render and 0.9k normal-v1 render, but v1 FPS 26.99→26.81 and <=2vb 79.2%→77.5% |
 | R38 | Reuse the persistent root packet as one TR leaf | rejected by decomposition | v3 fog makes leaf RGB frame-dependent; at most one allocation disappears while all packet stores remain, and only no-fog v1 can retain a static leaf payload |
 | R39–R39d | Project-specialize the cached-room baked-fog leaf | accepted as cooker-generated R39d | v3 normal 15.71→15.86 FPS, render mean -22.8k, p95 -54.3k, I-cache -6.1k; v1 normal and lockstep metrics are identical, with 1,046/1,046 v1 and 925/925 v3 hashes exact |
+| R40 | One-multiply exact fog algebra | rejected | 925/925 v3 lockstep hashes exact, but render mean +693 cycles, I-cache +3.9k, and normal cadence loses two visuals |
+| R41 | Cook final CylinderProp UVs into the existing surface field | accepted | No layout/order change; v3 normal 15.86→16.00 FPS and render -21.6k, v1 render -2.9k; all v3 guest-frame hashes and all 1,047 ordered v1 checkpoint hashes exact |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
-| T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
+| T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
 | E8 | Record/template optimization for prop tail | diagnostic narrowed | image cards cost 5 cycles; v3 tail is ~40k box + ~88k cylinder, so card templates are irrelevant |
 | G1 | GPU overdraw/timing census and texture-window dedup bound | diagnostic complete | v3 GPU mean/max 713k/879k cycles; ~396 redundant one-word writes cannot close a ~350k CPU-cycle gap |
