@@ -1582,6 +1582,30 @@ The v3 executable grows 4 KiB; v1 remains exactly 1,482,752 bytes because its
 generated capability flag is literal `false` and LLVM removes the branch.
 R52 is retained.
 
+### R53: compile out the conservative all-cells fallback
+
+The fourth architecture review proposed proving that the no-anchor/all-cells
+renderer is unreachable and removing its 32--40 KiB compiled twin. Both R52
+tapes report exactly zero `room_vis_fallback_draws`, so R53 measured the
+optimistic upper bound by compiling that branch out of cortex_v3. This is a
+diagnostic only: the general engine still requires the branch when a room has
+no usable portal anchor, its PVS is missing or incomplete, or a streamed room
+has cached surfaces but no resident uncached render data. The last case is the
+contract that prevents the earlier arch-door black-room regression.
+
+The lockstep executable shrank 40,960 bytes and all 925 ordered images remained
+exact, as expected from the zero fallback count. The CPU result was mixed:
+render mean improved 1,259,533→1,257,373 cycles and I-cache stalls fell
+275,957→270,209, but p95 regressed 1,677,268→1,683,996 cycles. Normal cadence
+remained exactly 476 visuals / 17.39 FPS, while the two-vblank share worsened
+2.5%→2.3%; render mean/p95/max changed from
+1,228,756/1,646,499/2,020,644 to
+1,224,666/1,644,236/2,003,265.
+
+The experiment therefore supplies neither the required engine-wide
+unreachability proof nor a cadence improvement. The diagnostic feature and
+silent-omission branch were removed; the conservative fallback remains.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1663,6 +1687,7 @@ R52 is retained.
 | R50/R50b | Select black/general fog once per prop quad | rejected | Broad form grows v1 2 KiB and drops to 26.78 FPS; arch/cylinder-only form preserves v1 cadence but regresses v3 render +2.6k and I-cache +3.3k |
 | R51 | Shade and patch prewarmed static room packets under generated fog policy | accepted | v3 925/925 exact, normal 16.30→17.32 FPS, render mean -78.0k and p95 -209.6k; v1 payload and every measured metric bit-identical |
 | R52 | Specialize fogged TR entry while retaining the canonical emitter | accepted; packet reconstruction rejected | Canonical form: v3 925/925 exact, normal 17.32→17.39 FPS, render mean -9.7k and p95 -12.8k; v1 payload/metrics identical. Packed-child form saved ~60k lockstep cycles but changed 461 images and was removed |
+| R53 | Compile out the no-anchor/all-cells fallback | rejected | v3 payload -40,960 bytes and 925/925 exact only because the tape never enters it; normal FPS unchanged at 17.39 and <=2vb worsened 2.5%→2.3%; engine correctness still requires the fallback |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
