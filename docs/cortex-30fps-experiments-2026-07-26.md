@@ -967,6 +967,61 @@ layout moved cost elsewhere: `room_project` rose 21,350→23,674, total render
 rose 1,416,120→1,417,586, and I-cache stalls rose
 321,902→326,413 per visual. The candidate was removed without a cortex_v1 run.
 
+### R27: compile linked-list slot scratch out of bucketed passes
+
+Fresh call-site sampling reconfirmed a 4,102-byte `memset` while constructing
+each visual frame's `WorldRenderPass`. R27 replaced the two inline OT-sized
+arrays with zero-sized storage under an explicit bucketed-only engine feature,
+so this was a structural removal rather than R21's uninitialised-state
+shortcut. The ordinary engine build retained its existing linked/sorted
+storage and all 269 engine tests passed; the bucketed-feature test also passed.
+
+cortex_v3 lockstep kept all 925 hashes and reduced mean render
+1,416,120→1,411,040 cycles. cortex_v1's 1,047 presented image hashes were also
+identical in sequence; the faster build tagged one identical image at guest
+frame 378 instead of 377 because it crossed the telemetry marker earlier.
+However, the normal pacing gate rejected it: cortex_v1 mean render improved
+742,800→738,056, yet delivered FPS fell 26.99→26.88 and two-vblank periods
+fell 79.2%→78.0%. The smaller code image changed direct-mapped I-cache/vblank
+phase enough to lose three delivered visuals. The candidate was removed.
+
+### S2: smaller world sectors
+
+The reviews' “smaller sectors” suggestion is not an engine cache-granularity
+knob in this format. `sector_size` is the authored world-space scale used by
+room geometry, collision, portals, cameras, fog/subdivision distances, and
+route coordinates (1,664 in cortex_v1 and 1,536 in cortex_v3). Changing it
+rescales the level and changes the image and gameplay; subdividing the
+*render/culling* cells while retaining authored geometry would instead require
+a new conservative spatial index and can increase duplicate references.
+
+The existing cooker already emits per-cell PVS bitsets at the authored cell
+granularity, and V3 directly tested finer portal-to-cell admission without a
+useful reduction. A sector-size mutation therefore violates the
+visual-preservation contract and is rejected without an invalid A/B. A future
+independent render-cluster index is covered by R7 and remains rejected by its
+measured constituent costs.
+
+### R28: initialize only the used blended-model index prefix
+
+Call-site attribution found a 64-byte clear for the blended-vertex chunk in
+every model part. R28 represented the chunk as `MaybeUninit<u16>` elements,
+wrote each element before advancing the cursor, and exposed only the proven
+initialized prefix. All 269 engine tests passed. Both lockstep tapes were
+pixel-exact: cortex_v3 matched 925/925 hashes and cortex_v1 matched all 1,046
+comparable hashes with no missing or extra frames.
+
+The render work improved consistently. cortex_v3 lockstep mean/p95/max fell
+1,416,120/2,002,178/2,259,241→
+1,405,633/1,988,983/2,244,613, and I-cache stalls fell 5,751 per visual.
+cortex_v1 fell 765,819→758,528 mean with 3,281 fewer I-cache stalls.
+Normal cortex_v3 improved 15.71→15.75 FPS and mean render by 9,111 cycles.
+Normal cortex_v1, however, fell 26.99→26.88 FPS and two-vblank periods fell
+79.2%→78.0%, even though mean render improved 7,033 cycles. Whole-route
+accounting showed the saved render time becoming idle `present` wait, but the
+phase change still lost three delivered visuals. Because both projects must
+improve under the delivered-cadence gate, the candidate was removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1020,6 +1075,8 @@ rose 1,416,120→1,417,586, and I-cache stalls rose
 | R24 | Initialize/copy only used collision-room prefixes | rejected | v1 update -2,731 and render -1,562 cycles, but 1/1,046 images changed; v3 exact but render +1,958 |
 | R25 | Hoist invariant cylinder surface options | rejected | 925/925 v3 hashes exact, but render +1,908 and I-cache +1,839 cycles |
 | R26 | Prepared exact room-fog quotient | rejected | depth prep -1,034 cycles, but total render +1,466 and I-cache +4,511; 925/925 hashes exact |
+| R27 | Compile linked-list slot scratch out of bucketed passes | rejected | all v1/v3 presented images exact and render -4.7k/-5.1k, but normal v1 FPS 26.99→26.88 and <=2vb 79.2%→78.0% |
+| R28 | Initialize only the used blended-model index prefix | rejected | exact hashes and v3 15.71→15.75 FPS, but normal v1 fell 26.99→26.88 FPS despite render -7.0k |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
@@ -1027,6 +1084,7 @@ rose 1,416,120→1,417,586, and I-cache stalls rose
 | G1 | GPU overdraw/timing census and texture-window dedup bound | diagnostic complete | v3 GPU mean/max 713k/879k cycles; ~396 redundant one-word writes cannot close a ~350k CPU-cycle gap |
 | P1 | Exact camera collision-solve memoization | rejected | exact visual sequence and lower camera CPU in both; normal v1 cadence regressed 26.99→26.81 FPS and <=2vb 79.2%→77.5% |
 | S1 | Hoist pad/visibility work into present wait | rejected by dependency/contract | present spin is tear-free vblank quantisation; input and visibility depend on the next tick/post-update camera, and early polling changes latency |
+| S2 | Reduce authored sector size | rejected by contract/audit | `sector_size` is world scale, not cache granularity; changing 1,664/1,536 rescales geometry, collision, portals, and routes |
 | C1 | Cooker worst-view 30 FPS/RAM/packet validator | queued | Fit only after surviving engine changes |
 | H1 | Real-hardware timer, cadence, tear, seam, and near-plane sweep | queued | Mandatory final gate |
 
