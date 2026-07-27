@@ -1400,9 +1400,11 @@ cortex_v3 passed 925/925 hashes while lockstep render improved
 The full engine gate rejected it: cortex_v1 changed one real image at guest
 frame 862. R43b restored clamps on the hardware-extent fallback and kept the
 shortcut only for proven-safe roots, but changed two v1 images and erased the
-render saving. As with the `-O2` lattice failure, a mathematically equivalent
-source shape is not sufficient evidence on the experimental MIPS-I backend.
-Both forms were removed.
+render saving. A third form explicitly masked both coordinates to packet bytes;
+LLVM produced the same payload and the same frame-862 failure as R43. As with
+the `-O2` lattice failure, a mathematically equivalent source shape is not
+sufficient evidence on the experimental MIPS-I backend. All forms were
+removed.
 
 ## Candidate matrix
 
