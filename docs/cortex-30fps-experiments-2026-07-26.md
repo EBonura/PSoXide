@@ -1439,6 +1439,23 @@ geometry missing at the left edge rather than a cadence-only hash shift.
 Projected child bounds therefore cannot replace actual PS1 packet submission
 in this path; both forms were removed.
 
+### R47: deduplicate adjacent texture-window commands during OT linking
+
+R47 tested the review's redundant GP0(E2) observation without reordering any
+primitive. During the existing reverse OT-bucket link, a later textured packet
+omitted its E2 word only when the immediately preceding packet in that same
+bucket set the identical texture window. The first packet in every bucket
+retained E2, and geometry, depth slots, and painter order were unchanged.
+
+The experiment removed about 405 GP0 words and 196 texture-window writes per
+drawing tick, but the MIPS state checks cost more than the DMA traffic they
+saved. cortex_v3 lockstep render regressed 1,365,369→1,381,962 cycles, I-cache
+stalls rose 309,859→312,075, and the two-vblank rate fell 2.3%→1.5%. The
+lockstep visual gate also failed 620/925 images, so the linked-list rewrite was
+removed. This closes texture-window dedup as a route to the missing CPU budget:
+even a zero-overhead implementation can save only the already-bounded GPU/DMA
+state words, not the roughly 350k CPU cycles still required.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1514,6 +1531,7 @@ in this path; both forms were removed.
 | R43/R43b | Skip clamps for range-proven TR lattice UVs | rejected | v3 exact and normal render -7.5k/16.22 FPS, but one v1 image changes; fallback-limited form changes two |
 | R44 | Skip TR child culls after the cached root cull | rejected | Warped authored quads invalidate the planar proof; v1 primitives 305.1→333.8 and 794 images change |
 | R46/R46b | Cull TR lattice children wholly beyond the viewport / 48px guard band | rejected | v1 render -7.0k/-1.6k and <=2vb +1.4/+1.3 points, but both forms change 223 images; captured wall geometry is genuinely missing |
+| R47 | Deduplicate adjacent texture-window E2 words while linking OT buckets | rejected | ~405 GP0 words/~196 E2 writes removed per draw tick, but v3 render +16.6k, I-cache +2.2k, <=2vb -0.8 points, and 620 images change |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
