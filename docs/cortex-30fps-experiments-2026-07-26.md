@@ -1149,6 +1149,35 @@ baseline target layout: payload size, every measured cycle statistic, I-cache
 stalls, and all 925 image hashes were exactly unchanged. The no-op hint was also
 removed.
 
+### R32: force-inline cached baked-room fog shading
+
+Gameplay-only PC sampling attributes 1.21% of samples to
+`RuntimeRoomLighting::shade_cached_baked_vertices`, despite its ordinary inline
+hint. R32 forced that four-vertex fog path to inline. All 68 runtime tests and
+policy experiments passed. cortex_v3 then matched all 925 lockstep images while
+mean/p95/max render fell
+1,416,120/2,002,178/2,259,241→
+1,380,942/1,939,881/2,203,474 cycles, I-cache stalls fell
+321,902→318,070, and two-vblank periods rose 1.2%→2.1%.
+
+cortex_v1 also became cheaper (765,819→760,047 mean render and
+171,812→167,841 I-cache stalls), but failed the exact visual gate. Its ordered
+sequence matched 1,046/1,047 images; guest frame 552 differed, and one
+presentation checkpoint moved from guest frame 376 to 375. A targeted
+frame-552 dump localized the real image difference to 135 pixels in the
+extreme-left `(0..31, 112..126)` screen patch. Adjacent frames were exact.
+Because the output change is real, no normal-mode benchmark was run and the
+inline force was removed.
+
+### R33: force-inline the projected split-safety predicate
+
+The compact `projected_triangle_can_skip_split` predicate accounts for 0.75% of
+gameplay PC samples and has several world/model callers. R33 forced it inline
+after all 55 focused renderer tests passed. On the MIPS target those many call
+sites expanded the cortex_v3 executable from 1,349,632 to 1,490,944 bytes
+(+141,312), and the route immediately reported
+`PERSISTENT ASSET LOAD FAILED`. The candidate was reverted without a v1 run.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1207,6 +1236,8 @@ removed.
 | R29 | Remove dense-room identity-index scratch writes | rejected | v3 exact and render -7.3k; v1 render -3.4k but 1/1,046 hashes changed by one pixel for one frame |
 | R30 | Share visible/all-cell surface-emission tail | rejected | engine tests pass, but v3 payload grows +96,256 B and persistent asset loading fails |
 | R31/R31b | Force/hint inline the projected TR quad leaf | rejected/no-op | forced form saves 21.7k render cycles but changes 431/925 v3 hashes and GP0 words; ordinary hint is bit-for-bit baseline |
+| R32 | Force-inline cached baked-room fog shading | rejected | v3 exact and render -35.2k; v1 render -5.8k but one frame changes in a 135-pixel left-edge patch |
+| R33 | Force-inline projected split-safety predicate | rejected | focused tests pass, but v3 payload grows +141,312 B and persistent asset loading fails |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
