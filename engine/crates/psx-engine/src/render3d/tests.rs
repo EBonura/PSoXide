@@ -1183,6 +1183,81 @@ fn prescreened_gouraud_honors_quality_split_max_edge() {
 }
 
 #[test]
+fn static_prop_quad_leaf_matches_generic_packet_and_depth() {
+    let material = TextureMaterial::opaque(2, 4, (128, 96, 64));
+    let verts = [
+        ProjectedVertex::new(8, 4, 100),
+        ProjectedVertex::new(32, 6, 120),
+        ProjectedVertex::new(30, 36, 140),
+        ProjectedVertex::new(10, 34, 160),
+    ];
+    let uvs = [(3, 5), (17, 7), (19, 29), (5, 27)];
+    let colors = [(128, 96, 64), (80, 120, 160), (32, 48, 96), (160, 128, 96)];
+    let base_options = WorldSurfaceOptions::new(DepthBand::new(1, 6), DepthRange::new(0, 1000))
+        .with_depth_bias(13);
+    let generic_options = base_options
+        .with_depth_policy(DepthPolicy::Average)
+        .with_cull_mode(CullMode::None)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(0);
+
+    let mut regular_ot_storage = OrderingTable::<8>::new();
+    let mut regular_ot = OtFrame::begin(&mut regular_ot_storage);
+    let mut regular_scratch = crate::PrimitivePacketScratch::<2>::ZERO;
+    let mut regular_packets = crate::PrimitivePacketArena::new(&mut regular_scratch);
+    let mut regular_commands = [WorldTriCommand::EMPTY; 2];
+    let regular = {
+        let mut pass = WorldRenderPass::new(&mut regular_ot, &mut regular_commands);
+        pass.submit_textured_gouraud_quad_prescreened_u8(
+            &mut regular_packets,
+            &verts,
+            &uvs,
+            &colors,
+            material,
+            generic_options,
+        )
+    };
+
+    let mut leaf_ot_storage = OrderingTable::<8>::new();
+    let mut leaf_ot = OtFrame::begin(&mut leaf_ot_storage);
+    let mut leaf_scratch = crate::PrimitivePacketScratch::<2>::ZERO;
+    let mut leaf_packets = crate::PrimitivePacketArena::new(&mut leaf_scratch);
+    let mut leaf_commands = [WorldTriCommand::EMPTY; 2];
+    let leaf = {
+        let mut pass = WorldRenderPass::new(&mut leaf_ot, &mut leaf_commands);
+        pass.submit_static_prop_textured_gouraud_quad_prescreened_u8(
+            &mut leaf_packets,
+            &verts,
+            &uvs,
+            &colors,
+            material,
+            &base_options,
+        )
+    };
+
+    assert_eq!(regular.submitted_triangles, leaf.submitted_triangles);
+    assert_eq!(regular.split_triangles, leaf.split_triangles);
+    assert_eq!(regular_packets.len(), leaf_packets.len());
+    assert_eq!(regular_commands[0].slot, leaf_commands[0].slot);
+    assert_eq!(regular_commands[0].depth, leaf_commands[0].depth);
+    assert_eq!(
+        regular_commands[0].render_layer,
+        leaf_commands[0].render_layer
+    );
+    assert_eq!(regular_commands[0].words, leaf_commands[0].words);
+
+    let packet_words = usize::from(regular_commands[0].words) + 1;
+    // SAFETY: both command pointers reference live packet-arena slots and
+    // `words + 1` includes the packet tag followed by the declared GP0 words.
+    let regular_words =
+        unsafe { core::slice::from_raw_parts(regular_commands[0].packet_ptr, packet_words) };
+    let leaf_words =
+        unsafe { core::slice::from_raw_parts(leaf_commands[0].packet_ptr, packet_words) };
+    assert_eq!(regular_words, leaf_words);
+}
+
+#[test]
 fn prepared_depth_gouraud_submit_matches_fixed_depth_leaf() {
     const ZERO: TriTexturedGouraud = TriTexturedGouraud::new(
         [(0, 0), (0, 0), (0, 0)],

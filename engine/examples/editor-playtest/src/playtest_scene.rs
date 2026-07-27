@@ -790,7 +790,11 @@ impl Scene for Playtest {
                     &mut world,
                 );
                 box_prop_profile_end(telemetry::stage::BOX_PROPS);
-                psx_game_runtime::cylinder_props::draw_cylinder_props(
+                psx_game_runtime::cylinder_props::draw_cylinder_props::<
+                    _,
+                    OT_DEPTH,
+                    { !CYLINDER_PROPS.is_empty() },
+                >(
                     CYLINDER_PROPS,
                     CYLINDER_PROP_SURFACES,
                     active.index,
