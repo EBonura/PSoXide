@@ -157,10 +157,32 @@ LABELS = {
     0xB7: "sio_pad_poll_variant1",
     0xB8: "sio_pad_poll_variant2",
     0xB9: "sio_pad_poll_variant3",
+    # Seek sweep: the four original distances were too few and non-monotonic.
+    0xC0: "cd_seek_2_sectors_hblanks",
+    0xC1: "cd_seek_4_sectors_hblanks",
+    0xC2: "cd_seek_8_sectors_hblanks",
+    0xC3: "cd_seek_32_sectors_hblanks",
+    0xC4: "cd_seek_64_sectors_hblanks",
+    0xC5: "cd_seek_256_sectors_hblanks",
+    0xC6: "cd_seek_BACK_64_sectors_hblanks",
+    0xC7: "cd_seek_BACK_256_sectors_hblanks",
+    # SIO setup-delay sweep, bracketing where a real pad starts replying.
+    0xD0: "sio_setup_0",
+    0xD1: "sio_setup_64",
+    0xD2: "sio_setup_128",
+    0xD3: "sio_setup_192",
+    0xD4: "sio_setup_256",
+    0xD5: "sio_setup_320",
+    0xD6: "sio_setup_448",
+    0xD7: "sio_setup_512",
+    0xD8: "sio_setup_640",
+    0xD9: "sio_setup_896",
+    0xDA: "sio_setup_1024",
+    0xDB: "sio_setup_1536",
 }
 
 # Records timed on Timer 1's HBlank clock rather than Timer 2's system clock.
-HBLANK_RECORDS = frozenset(range(0x90, 0x9F))
+HBLANK_RECORDS = frozenset(range(0x90, 0x9F)) | frozenset(range(0xC0, 0xC8))
 
 GTE_SETTLE_FIRST_CASE = 116
 GTE_SETTLE_CASE_COUNT = 22
@@ -229,6 +251,8 @@ WORK_BY_ID = {
     0xB4: 1,
     0xB5: 2,
     **{record_id: 1 for record_id in range(0xB6, 0xBA)},
+    0xC0: 2, 0xC1: 4, 0xC2: 8, 0xC3: 32, 0xC4: 64, 0xC5: 256, 0xC6: 64, 0xC7: 256,
+    **{record_id: 0 for record_id in range(0xD0, 0xDC)},
 }
 RECORD_IDS = tuple(WORK_BY_ID)
 
@@ -294,9 +318,9 @@ PX6_BINARY_LEN = 1_733
 PX6_PAGE_COUNT = 3
 # PX7: explicit per-record ids, a median column, and 128 record slots.
 PX7_PRECISION_COUNT = 192
-PX7_BINARY_LEN = 2_639
+PX7_BINARY_LEN = 2_863
 PX7_PAGE_COUNT = 5
-PX7_RECORD_SLOTS = 144
+PX7_RECORD_SLOTS = 176
 PX7_RECORD_UNUSED = 0xFF
 SCHEMAS = ("PX5", "PX6", "PX7")
 STATUS_LABELS = {0: "PENDING", 1: "PASS", 2: "FAIL", 3: "WARN", 4: "INFO"}

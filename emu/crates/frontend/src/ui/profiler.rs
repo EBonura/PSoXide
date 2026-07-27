@@ -205,6 +205,14 @@ const PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
         counter::ROOM_SUBMIT_FALLBACK_CYCLES,
         "submit_fallback_cyc_v",
     ),
+    (
+        counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES,
+        "surf_tr_candidates_v",
+    ),
+    (
+        counter::ROOM_SURF_TR_SUBDIVISION_SUBMITTED,
+        "surf_tr_submitted_v",
+    ),
     (counter::ROOM_SUBMIT_HW_SAFE_CALLS, "submit_hw_calls_v"),
     (
         counter::ROOM_SUBMIT_FALLBACK_CALLS,

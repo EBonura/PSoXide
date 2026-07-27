@@ -98,7 +98,7 @@ const fn tone_block(period: usize, flags: u8) -> [u8; BLOCK_BYTES] {
     block
 }
 
-/// Upload `payload` to SPU RAM, leaving it SILENT and ready.
+/// Upload `payload` to SPU RAM and start transmitting at the fastest rate.
 ///
 /// Returns the number of bits transmitted, or 0 if the stream would not fit in
 /// SPU RAM. Runs once, after the battery: it takes over voice 0 and ~290 KiB
@@ -154,9 +154,59 @@ pub(crate) fn prepare(payload: &[u8]) -> u32 {
         spu::upload_adpcm(spu::SpuAddr::new(addr), &stage[..staged * BLOCK_BYTES]);
     }
 
-    // Deliberately NOT keyed on. See stop()/set_rate().
-    stop();
-    emitted as u32
+    // Verify the stream actually survived in SPU RAM before playing it. A
+    // console capture stopped 13% in, which the emulator cannot reproduce, so
+    // the disc has to be able to say whether the upload SURVIVED rather than
+    // leaving that to be inferred from a failed decode.
+    let verified = verify_upload(addr_end(total_bits));
+
+    // On by default. The readout is the whole reason the disc can hand a
+    // payload back without photographing five symbols, and leaving it off cost
+    // a console session: the operator has no reason to know a silent disc is
+    // withholding anything. The earlier problem was VOLUME, not existence, and
+    // that is fixed in set_rate.
+    set_rate(0);
+    // Diagnostic, NOT a gate. SPU DMA readback is documented in this repo as
+    // unreliable as an oracle (its unstable read mode corrupts FIFO
+    // boundaries), and gating on it made the emulator report a failed upload
+    // for a stream that was demonstrably fine. The flag rides in the high bit
+    // so the screen can show a suspected truncation without suppressing a
+    // transmission that may well be good.
+    if verified {
+        emitted as u32
+    } else {
+        emitted as u32 | 0x8000_0000
+    }
+}
+
+/// Byte address one past the uploaded stream.
+const fn addr_end(total_bits: usize) -> u32 {
+    SPU_BASE + (total_bits * BLOCK_BYTES) as u32
+}
+
+/// Read back the last block of the uploaded stream and check it is the block
+/// that was written.
+///
+/// The final block is the one carrying the end/repeat flags, and it sits at the
+/// far end of the stream: if anything reclaims SPU RAM partway through, this is
+/// what goes missing. Checking it distinguishes "upload truncated or clobbered"
+/// from "modulation wrong", which a silent recording alone cannot.
+fn verify_upload(end: u32) -> bool {
+    let expected = tone_block(PERIOD_ZERO, 0x03);
+    let mut got = [0u32; 4];
+    crate::spu_dma_read(end - BLOCK_BYTES as u32, &mut got);
+    let mut byte = 0usize;
+    while byte < BLOCK_BYTES {
+        let word = got[byte / 4];
+        let lane = (word >> ((byte % 4) * 8)) as u8;
+        // Flags and shift must match; the tone nibbles are checked too, since
+        // reverb scribble would disturb them as readily.
+        if lane != expected[byte] {
+            return false;
+        }
+        byte += 1;
+    }
+    true
 }
 
 /// Value of frame bit `index`, MSB first within each byte.
@@ -219,9 +269,15 @@ pub(crate) fn set_rate(index: usize) {
     // buying nothing.
     let level = spu::Volume::linear(1, 4);
     voice.set_volume(level, level);
-    // No envelope: an attack ramp would amplitude-modulate the first bits, and
-    // a release would fade the loop out. The tone must stay flat.
-    voice.set_adsr(spu::Adsr::passthrough());
+    // Adsr::sample(): instant attack, sustain level MAX, so the level holds
+    // flat for as long as the voice plays.
+    //
+    // NOT passthrough(). That is all-zeroes, which means sustain level 0, and
+    // on real hardware the envelope therefore decays to silence shortly after
+    // key-on: a console recording carried only ~3 seconds of a 13.6 second
+    // payload before fading out. PSoXide does not model that decay and looped
+    // happily, so the emulator could not have caught this.
+    voice.set_adsr(spu::Adsr::sample());
     spu::set_main_volume(spu::Volume::HALF, spu::Volume::HALF);
     spu::Voice::key_on(voice.mask());
 }

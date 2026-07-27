@@ -635,7 +635,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             // vert-debug probe build keeps the per-vertex path so the
             // explosion probe observes every intermediate stage.
             #[cfg(not(feature = "vert-debug"))]
-            let mut blended_chunk = [0u16; BLENDED_VERTEX_CHUNK];
+            let mut blended_chunk = MaybeUninit::<[u16; BLENDED_VERTEX_CHUNK]>::uninit();
+            #[cfg(not(feature = "vert-debug"))]
+            let blended_chunk_ptr = blended_chunk.as_mut_ptr().cast::<u16>();
             #[cfg(not(feature = "vert-debug"))]
             let mut blended_len = 0usize;
             while global_index < part_end {
@@ -668,24 +670,36 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     }
                     #[cfg(not(feature = "vert-debug"))]
                     {
-                        blended_chunk[blended_len] = global_index as u16;
+                        // SAFETY: `blended_len` is reset at the fixed capacity
+                        // below and incremented once per write.
+                        unsafe {
+                            blended_chunk_ptr
+                                .add(blended_len)
+                                .write(global_index as u16);
+                        }
                         blended_len += 1;
                         if blended_len == BLENDED_VERTEX_CHUNK {
-                            flush_blended_model_vertex_chunk(
-                                &blended_chunk,
-                                vertices,
-                                primary,
-                                joint_view_transforms,
-                                camera.projection,
-                                near_z,
-                                projected_vertices,
-                                &mut all_projected_vertices_in_front,
-                                &mut all_projected_vertices_inside_hw_bounds,
-                                &mut projected_min_x,
-                                &mut projected_max_x,
-                                &mut projected_min_y,
-                                &mut projected_max_y,
-                            );
+                            // SAFETY: every entry is written before
+                            // `blended_len` advances; this branch is a full
+                            // initialized chunk.
+                            unsafe {
+                                flush_blended_model_vertex_chunk(
+                                    blended_chunk_ptr,
+                                    blended_len,
+                                    vertices,
+                                    primary,
+                                    joint_view_transforms,
+                                    camera.projection,
+                                    near_z,
+                                    projected_vertices,
+                                    &mut all_projected_vertices_in_front,
+                                    &mut all_projected_vertices_inside_hw_bounds,
+                                    &mut projected_min_x,
+                                    &mut projected_max_x,
+                                    &mut projected_min_y,
+                                    &mut projected_max_y,
+                                );
+                            }
                             blended_len = 0;
                         }
                     }
@@ -766,21 +780,26 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
             #[cfg(not(feature = "vert-debug"))]
             if blended_len > 0 {
-                flush_blended_model_vertex_chunk(
-                    &blended_chunk[..blended_len],
-                    vertices,
-                    primary,
-                    joint_view_transforms,
-                    camera.projection,
-                    near_z,
-                    projected_vertices,
-                    &mut all_projected_vertices_in_front,
-                    &mut all_projected_vertices_inside_hw_bounds,
-                    &mut projected_min_x,
-                    &mut projected_max_x,
-                    &mut projected_min_y,
-                    &mut projected_max_y,
-                );
+                // SAFETY: only entries written by the blended-vertex branch
+                // contribute to `blended_len`.
+                unsafe {
+                    flush_blended_model_vertex_chunk(
+                        blended_chunk_ptr,
+                        blended_len,
+                        vertices,
+                        primary,
+                        joint_view_transforms,
+                        camera.projection,
+                        near_z,
+                        projected_vertices,
+                        &mut all_projected_vertices_in_front,
+                        &mut all_projected_vertices_inside_hw_bounds,
+                        &mut projected_min_x,
+                        &mut projected_max_x,
+                        &mut projected_min_y,
+                        &mut projected_max_y,
+                    );
+                }
             }
 
             part_index += 1;
