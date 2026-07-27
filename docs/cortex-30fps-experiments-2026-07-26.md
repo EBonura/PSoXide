@@ -1203,6 +1203,57 @@ experimental MIPS-I backend. Thin LTO retains primitive counts but is slower,
 larger, and still changes output. The existing `-O3`, one-codegen-unit, fat-LTO
 profile remains the validated target configuration.
 
+### R34: localise the `-O2` geometry divergence
+
+Guest-frame-aligned GPU census corrected the initial aggregate diagnosis.
+Disabling the caller-owned prebuilt quad pool at `-O2` changed only 1/925
+images and left textured-triangle and textured-quad counts identical at every
+common tape frame; the apparent primitive recovery was only the arena counter
+starting to include packets that the prebuilt pool normally owns.
+
+`room-surface-profile` then found the actual boundary. Both O3 and O2 identify
+18.1 TR subdivision candidates per visual, but O3 successfully submits 18.0
+while O2 submits only 7.0. The rejected candidates fall back to their authored
+root quad, which removes about 41 generated textured quads per aligned gameplay
+frame. Fixed 64-instruction delays both after and before the identity RT/TR
+control-register load changed no submission result, rejecting both CTC2 settle
+and preceding-operation drain as causes.
+
+Finally, compiling with default features disabled so the old recursive TR path
+really replaced the 3x3 lattice restored 18.0 submissions and 418.2 arena
+primitives, but render mean rose to 1,703,801 cycles, I-cache stalls to 392,835,
+and 715/925 images still differed from the O3 lattice reference. The divergence
+is therefore an optimization-sensitive miscompile inside the experimental
+MIPS-I lattice path, not portal visibility, packet lifetime, or OT/DMA loss.
+The clean O3 lattice build remains the only validated configuration.
+
+### R35: overlap lattice RTPT batches
+
+R35 replaced the blocking two/three RTPT sequence with `rtpt_kick`/`read`,
+converting one projected row while the next GTE batch was in flight. The
+topology, inputs, GTE operations, packet counts, and ordering were unchanged,
+and all ten focused Tomb Raider renderer tests passed.
+
+The full cortex_v3 lockstep gate rejected it: mean render rose
+1,416,120→1,417,257 cycles, I-cache stalls rose 321,902→322,977, and 171/925
+images changed despite the same 418.2 primitive mean. The shorter inter-op
+schedule is not bit-neutral on the measured GTE model, so the pipeline was
+removed.
+
+### R36: prepared-depth baked-fog hook
+
+The indexed renderer already proves that fog is active and prepares four fog
+weights before asking `RuntimeRoomLighting` to shade baked RGB, but the generic
+hook rechecks the fog state and unwraps an optional depth array. R36 added an
+explicit prepared-depth trait hook whose runtime implementation performed only
+the four existing blends.
+
+All 40 focused world-render tests and the runtime lighting test passed, and all
+925 cortex_v3 lockstep images matched. The smaller source operation was not a
+target win: mean render rose 1,416,120→1,416,825 cycles and I-cache stalls rose
+321,902→322,487. The extra trait/code shape outweighed the redundant branches,
+so it was restored before v1 or normal-mode runs.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1266,6 +1317,9 @@ profile remains the validated target configuration.
 | O1 | Whole program at `-O2` | rejected | -53,248 B, but 820/925 v3 images change and primitives fall 418.2→366.9 |
 | O2 | Whole program at `-Os` | rejected | -178,176 B, but render rises 29%, primitives fall to 335.4, and 698 images change |
 | O3 | Thin instead of fat LTO at `-O3` | rejected | +49.8k render cycles, +22.7k I-cache stalls, and 58/925 v3 images change |
+| R34 | Localise `-O2` geometry divergence | diagnostic complete | Prebuilt pool and OT/DMA falsified; O2 detects 18.1 TR candidates but submits 7.0. Recursive TR restores 18.0 at +146k cycles and still changes 715/925 images; experimental lattice miscompile |
+| R35 | Overlap consecutive lattice RTPT batches | rejected | Same primitive count, but render +1,137 cycles, I-cache +1,075, and 171/925 v3 images changed |
+| R36 | Prepared-depth baked-fog trait hook | rejected | 925/925 v3 hashes exact, but render +705 cycles and I-cache +585 |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
