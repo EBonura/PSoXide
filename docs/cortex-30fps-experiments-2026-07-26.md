@@ -289,6 +289,24 @@ without spending a cortex_v3 run. Any eventual compiled record must encode
 the few decisions compactly in the record itself, not indirect through a
 copied `WorldSurfaceOptions` table.
 
+### R3 disposition: do not build the proposed full record pool
+
+The warmed surface profile falsifies the proposal's stated cost model.
+`cached_surface_kind` plus material resolution cost 37,404 diagnostic cycles,
+while packet/subdivision submission cost 369,391 of the 917,896-cycle room
+surface stage. The three independently shippable parts of the proposed
+`SurfaceDrawRecord` were then measured: option borrowing catastrophically
+regressed cortex_v1 (R3a), residency-cached classification added RAM for no
+speedup (R3b), and the option-variant table regressed render by 58,801 cycles
+(R3c). Outlining the leaves separately also regressed 4.3% (R2).
+
+Building the full 16-byte record and 32-KiB fixed pool would combine four
+already-failed mechanisms while leaving the measured dominant submission
+work intact. R3 is therefore rejected by decomposition rather than landing a
+larger version of the same data traffic. The record idea may be revisited only
+if a new representation removes packet/subdivision work, not merely static
+interpretation.
+
 ### R10a: defer the forced-split options copy
 
 After R10, the largest named `memcpy` caller was a 68-byte
@@ -529,6 +547,27 @@ safety rules retain the same cells, so this mode does not solve the density
 problem and is not made the default. The finer-yaw form (neither anchor nor
 coarse-yaw feature) was also replayed; it produced metrics exactly identical
 to R10 and the same 925 hashes.
+
+### V3: cooked variable-length portal-to-cell masks
+
+A cooker-side existential interval sweep projected each complete source-room
+camera volume through every directed portal toward destination cached-cell
+AABBs. The complete candidate used variable-length destination masks, outward
+slack, a four-sector camera-volume expansion, multi-path OR at runtime, and
+fail-open handling for root, overlap, capped, or malformed paths. The existing
+PVS, camera frustum, and portal rectangle remained downstream. cortex_v3's 12
+directed portals retained 211/225 portal/cell pairs; cortex_v1 retained
+370/409. The masks were therefore only 6.2% and 9.5% selective before
+multi-path union.
+
+The cooker/schema/runtime candidate passed all 310 `psx-level` and
+`psx-engine` tests but failed the replay gate. cortex_v3 lockstep surfaces
+moved only 93.3→93.1 per visual, while mean render regressed
+1,416,120→1,422,386 cycles, p95 regressed 2,002,178→2,014,407, and I-cache
+stalls rose 321,902→326,242. Thirteen of 925 images changed beginning at guest
+frame 926. The current engine has no formal camera-volume contract strong
+enough to prove those rejected cells unreachable, so the entire format and
+runtime path were removed.
 
 ### G1: GPU timing and texture-window command census
 
@@ -803,7 +842,7 @@ of the win without changing data layout or packet identity.
 | V0 | Reuse cell AABB `half_y` across frustum/portal tests | accepted | v1/v3 render mean -0.18%/-0.24%; all 1,974 lockstep hashes and final VRAM exact |
 | R1 | Surface-level zero-fog warm-path gate | rejected after five shapes | best exact-v3 form: 14.25→14.40 FPS, but 2/1,046 v1 hashes changed; exact-v1 form changed 1/925 v3 hashes |
 | R2 | `#[inline(never)]` hot dispatcher leaves | rejected | v3 14.03→13.67 FPS, render mean +4.3%, I-cache stalls +1.7%; 534/927 lockstep hashes changed |
-| R3 | Residency-built `SurfaceDrawRecord` + option variants | queued | Remove static per-surface interpretation |
+| R3 | Residency-built `SurfaceDrawRecord` + option variants | rejected by decomposition | Classification is 37.4k vs submission 369.4k; R2/R3a/R3b/R3c all regress or produce no speedup |
 | R3a | Borrow per-cell options in the surface loop | rejected | exact visuals; v3 render -7,842 cycles, but v1 +113,760 cycles and 25.58→22.15 FPS |
 | R3b | Cache surface kind and dynamic-material class at residency | rejected | 925/925 v3 hashes exact; FPS unchanged, mean render +1,239 cycles for +2 KiB pool RAM |
 | R3c | Six-entry per-cell option table | rejected | v1 render +58,801 cycles, p95 +65,530, I-cache +15,612; 1/1,046 hashes changed |
@@ -816,7 +855,7 @@ of the win without changing data layout or packet identity.
 | V1 | Carry portal window + far plane through all-cells fallback | rejected | 926/926 hashes exact; v3 surfaces/FPS unchanged and render -55 cycles (noise) |
 | V2 | Per-wedge disjoint frustum rejection after conservative union | rejected | 61/926 v3 hashes changed; FPS 14.25→14.03 and mean render +19,402 cycles |
 | V5 | Existing coarse-yaw cached cell filtering | rejected | 925/925 hashes exact but cell/surface counts unchanged; normal v3 render +1.2k and p95 +3.7k |
-| V3 | Cooked variable-length portal-to-cell masks | queued | Debug proof against current frustum path |
+| V3 | Cooked variable-length portal-to-cell masks | rejected | v3 surfaces 93.3→93.1, render +6,266, p95 +12,229, I-cache +4,340; 13/925 images changed |
 | T1 | Event-driven active-room field copies / borrowed slices | queued | Exact state and replay route |
 | T1a | Clear fallback materials only when current room is absent | rejected | update -105 cycles, but render +3,705 and I-cache +3,526; one presentation boundary shifted |
 | T1b | Skip settled unchanged residency reconciliation | rejected | update -2,397 cycles/tick, but render +5,714, I-cache +5,116, and 1/1,046 hashes changed |
