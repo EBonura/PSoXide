@@ -2150,7 +2150,7 @@ pub struct LevelCylinderPropSurfaceRecord {
     pub center: [i32; 3],
     /// Precomputed unnormalised outward normal.
     pub normal: [i32; 3],
-    /// UVs relative to the selected texture extent (`0..=255`).
+    /// Final cooked GPU UV coordinates for this surface.
     pub uv_q8: [[u8; 2]; 4],
     /// Per-vertex baked static light base.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
