@@ -1606,6 +1606,48 @@ The experiment therefore supplies neither the required engine-wide
 unreachability proof nor a cadence improvement. The diagnostic feature and
 silent-omission branch were removed; the conservative fallback remains.
 
+### R54/R55: cylinder interpretation and generated fog policy
+
+R54 moved the missing-material rejection ahead of the cylinder surface-facing
+dot product. The transformation is side-effect-free and all 925 v3 lockstep
+images remained exact, but MIPS code layout regressed render mean by 1,472
+cycles and I-cache stalls by 1,831. R54 was removed.
+
+R55 passed the cooker's no-fog/general-fog/black-fog proof into cylinder
+shading, allowing black-only projects to remove the identically-zero fog
+product. It also remained 925/925 exact, but render mean rose 1,362 cycles and
+I-cache stalls rose 2,373. Cylinder fog arithmetic is too small a share of the
+stage to repay another monomorphized path, so R55 was removed.
+
+### R56: fixed-policy static-prop quad submission leaf
+
+Cooked cylinder quads always use average depth, no post-projection culling,
+material-derived layering, and hardware-only splitting. The generic path still
+constructed and interpreted a complete `WorldSurfaceOptions` value for every
+visible surface. R56 adds a compact engine leaf for that fixed policy. The
+hardware-safe case computes the average depth and emits the exact existing
+packet directly; an oversized quad falls back to the unchanged general
+splitter. Projection, fog, UVs, colours, packet winding, depth mapping, OT
+order, and the PS1 coordinate-extent guard are unchanged.
+
+The leaf is const-gated by whether the generated project contains any cylinder
+records. The ungated prototype changed one v1 image through code-layout
+perturbation despite v1 having no cylinders. With the false monomorph selected
+for that project, all 1,047 v1 checkpoint images are identical in identical
+order; only two identical checkpoints move one guest frame later
+(373→374 and 375→376).
+
+| project / mode | R52 render mean / p95 / max | R56 render mean / p95 / max | FPS / visuals | <=2vb | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---:|---|
+| v1 lockstep | 762,186 / 1,089,330 / 1,210,193 | 761,999 / 1,084,937 / 1,209,753 | fixed / 851 | 77.2%→77.4% | 168,921→169,555 | all 1,047 ordered images exact; two cadence shifts |
+| v1 normal | 739,898 / 1,064,039 / 1,211,472 | 739,443 / 1,059,406 / 1,210,003 | 26.99 / 766→766 | 79.2%→79.2% | 168,349→169,284 | lockstep-equivalent workload |
+| v3 lockstep | 1,259,533 / 1,677,268 / 2,033,236 | 1,241,193 / 1,654,498 / 1,997,640 | fixed / 821 | 3.8%→4.1% | 275,957→265,880 | 925/925 guest-frame exact |
+| v3 normal | 1,228,756 / 1,646,499 / 2,020,644 | 1,208,747 / 1,621,743 / 1,984,243 | 17.39→17.65 / 476→483 | 2.5%→2.7% | 299,998→289,192 | same lockstep workload |
+
+The v3 executable grows 2 KiB; the v1 payload remains exactly 1,482,752 bytes.
+The engine passes 269 unit tests plus its compile-time type guard, and runtime
+passes 63 unit and 5 policy tests. R56 is retained.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1688,6 +1730,8 @@ silent-omission branch were removed; the conservative fallback remains.
 | R51 | Shade and patch prewarmed static room packets under generated fog policy | accepted | v3 925/925 exact, normal 16.30→17.32 FPS, render mean -78.0k and p95 -209.6k; v1 payload and every measured metric bit-identical |
 | R52 | Specialize fogged TR entry while retaining the canonical emitter | accepted; packet reconstruction rejected | Canonical form: v3 925/925 exact, normal 17.32→17.39 FPS, render mean -9.7k and p95 -12.8k; v1 payload/metrics identical. Packed-child form saved ~60k lockstep cycles but changed 461 images and was removed |
 | R53 | Compile out the no-anchor/all-cells fallback | rejected | v3 payload -40,960 bytes and 925/925 exact only because the tape never enters it; normal FPS unchanged at 17.39 and <=2vb worsened 2.5%→2.3%; engine correctness still requires the fallback |
+| R54/R55 | Early missing-material cylinder reject / generated cylinder fog policy | rejected | Both were 925/925 exact, but render regressed +1.5k/+1.4k and I-cache +1.8k/+2.4k |
+| R56 | Fixed-policy static-prop quad submission leaf | accepted | v3 925/925 exact, normal 17.39→17.65 FPS, render mean -20.0k and p95 -24.8k; all 1,047 ordered v1 images exact and normal remains 26.99 FPS |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
