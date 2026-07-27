@@ -647,6 +647,52 @@ cortex_v1 cadence regressed 26.99→26.81 FPS and the two-vblank hit rate fell
 79.2%→77.5%; cortex_v3 improved only 15.71→15.79 FPS. Because both projects
 must improve, the memoization was removed despite its local CPU saving.
 
+### E4b: gate the duplicated front-of-player room setup
+
+The second placed-model pass reconstructs room camera, options, and lighting
+for every visible room. E4b skipped that setup when the cooked room owned no
+model instance; both current projects contain only one placed instance, so this
+is the narrowest exact form of the reviewers' pass-2 deduplication proposal.
+
+It reduced cortex_v1 lockstep render work 765,819→761,269 cycles, p95
+1,098,666→1,096,046, maximum 1,224,056→1,218,560, and I-cache stalls
+171,812→169,292. However, guest frame 584 produced a unique changed display
+hash. The otherwise empty calls therefore participate in queued-frame or packet
+history that static room membership does not capture. The gate was removed
+without v3 or normal-cadence runs.
+
+### T2: spread active-room construction across ticks
+
+The proposed crossing-spike scheduler is already the shipping implementation.
+`RuntimeScheduleConfig::active_job_builds_per_tick` is `1`, and
+`ActiveRoomWindow::step_job` stops after one accepted room build. Streaming
+residency is pumped separately; a blocked build stops rather than skipping
+ahead, and the completed window is published only by `finish_job`.
+
+R10 stage correlation also falsifies this as the cortex_v3 frame-time cause.
+Only 100 of 1,856 lockstep rows performed active-window work, its mean across
+the run was 381 cycles, and its maximum was 68,742. None of the eight most
+expensive cortex_v3 gameplay frames performed an active-window build. Those
+frames instead spent 1.08–1.55 million cycles in `room_surface_draw`, with the
+model tail reaching about 190,000 cycles in the other peak region. Increasing
+the per-tick build count would concentrate work; reducing it below one cannot
+make forward progress. No code change is warranted.
+
+### R20: place the TR lattice in PS1 scratchpad RAM
+
+R20 placed only the 216-byte nine-vertex one-level subdivision lattice at
+`0x1f800000`, leaving projection, packets, topology, and host behavior
+unchanged. This directly tested the proposed typed-scratchpad staging without
+attempting a risky stack switch or DMA access.
+
+The scratchpad is not private renderer storage under the current runtime
+contract: 223 of 1,046 cortex_v1 lockstep hashes changed from the start of
+gameplay geometry. It also produced no speedup—mean render moved
+765,819→765,859 cycles—and increased I-cache stalls
+171,812→175,859 per visual. The experiment was removed before v3 or normal
+replay. Scratchpad work remains closed until the runtime can explicitly own and
+test a region across interrupts and all SDK subsystems.
+
 ### R4/R4a: precompute lattice attributes or remove leaf copies
 
 Two variants tested the proposed one-level TR lattice data rewrite. A full
@@ -739,7 +785,9 @@ of the win without changing data layout or packet identity.
 | R17 | Reuse static quad payload by frame-arena slot | rejected | 546/925 v3 hashes changed; render +20,813 and I-cache +11,961 cycles because arena slot ownership is unstable |
 | R18 | Skip model UV reconstruction for zero offsets | rejected | 925/925 hashes exact, but v3 lockstep render +2,366 cycles despite I-cache -3,873 |
 | R19 | Const-specialize authored model UV batches | rejected | 925/925 hashes exact, but v3 lockstep render +7,590 and I-cache +6,822 cycles |
-| T2 | Spread active-window crossing spikes across ticks | queued | No delayed visible residency |
+| E4b | Skip pass-2 room setup for rooms with no model instance | rejected | v1 render -4,550 cycles, but guest frame 584 changed uniquely |
+| R20 | Stage the nine-vertex TR lattice in PS1 scratchpad | rejected | 223/1,046 v1 hashes changed; render +40 and I-cache +4,048 cycles |
+| T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
 | E8 | Record/template optimization for prop tail | diagnostic narrowed | image cards cost 5 cycles; v3 tail is ~40k box + ~88k cylinder, so card templates are irrelevant |
