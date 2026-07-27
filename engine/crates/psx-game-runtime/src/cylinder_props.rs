@@ -111,9 +111,7 @@ pub fn draw_cylinder_props<T, const OT_DEPTH: usize>(
                     .with_material_layer(material)
                     .with_textured_triangle_splitting(true)
                     .with_textured_triangle_max_edge(0);
-                let uvs = surface
-                    .uv_q8
-                    .map(|uv| cylinder_prop_uv_at(prop.uvs[slot], uv));
+                let uvs = surface.uv_q8.map(|uv| (uv[0], uv[1]));
                 if surface.vertex_count == 3 {
                     let _ = world.submit_textured_world_triangle(
                         triangles,
@@ -136,9 +134,7 @@ pub fn draw_cylinder_props<T, const OT_DEPTH: usize>(
                 lighting.apply_fog_at_depth(surface.baked_vertex_rgb[2], projected[2].sz),
                 lighting.apply_fog_at_depth(surface.baked_vertex_rgb[3], projected[3].sz),
             ];
-            let uvs = surface
-                .uv_q8
-                .map(|uv| cylinder_prop_uv_at(prop.uvs[slot], uv));
+            let uvs = surface.uv_q8.map(|uv| (uv[0], uv[1]));
             let opts = options
                 .with_depth_policy(DepthPolicy::Average)
                 .with_cull_mode(CullMode::None)
@@ -216,120 +212,4 @@ fn surface_front_facing(camera: &WorldCamera, surface: &LevelCylinderPropSurface
         .saturating_add(surface.normal[1].saturating_mul(vy))
         .saturating_add(surface.normal[2].saturating_mul(vz))
         > 0
-}
-
-fn cylinder_prop_uv_at(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> (u8, u8) {
-    let u8_u = uv_q8[0];
-    let u8_v = uv_q8[1];
-    if u8_v == 0 {
-        return (
-            lerp_u8_q8(corners[0].0, corners[1].0, u8_u),
-            lerp_u8_q8(corners[0].1, corners[1].1, u8_u),
-        );
-    }
-    if u8_v == 255 {
-        return (
-            lerp_u8_q8(corners[3].0, corners[2].0, u8_u),
-            lerp_u8_q8(corners[3].1, corners[2].1, u8_u),
-        );
-    }
-    if u8_u == 0 {
-        return (
-            lerp_u8_q8(corners[0].0, corners[3].0, u8_v),
-            lerp_u8_q8(corners[0].1, corners[3].1, u8_v),
-        );
-    }
-    if u8_u == 255 {
-        return (
-            lerp_u8_q8(corners[1].0, corners[2].0, u8_v),
-            lerp_u8_q8(corners[1].1, corners[2].1, u8_v),
-        );
-    }
-
-    let u = u32::from(uv_q8[0]);
-    let v = u32::from(uv_q8[1]);
-    let inv_u = 255 - u;
-    let inv_v = 255 - v;
-    let interpolate = |axis: usize| {
-        let values = if axis == 0 {
-            [
-                u32::from(corners[0].0),
-                u32::from(corners[1].0),
-                u32::from(corners[2].0),
-                u32::from(corners[3].0),
-            ]
-        } else {
-            [
-                u32::from(corners[0].1),
-                u32::from(corners[1].1),
-                u32::from(corners[2].1),
-                u32::from(corners[3].1),
-            ]
-        };
-        let top = values[0] * inv_u + values[1] * u;
-        let bottom = values[3] * inv_u + values[2] * u;
-        ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
-    };
-    (interpolate(0), interpolate(1))
-}
-
-#[inline(always)]
-fn lerp_u8_q8(a: u8, b: u8, t: u8) -> u8 {
-    let t = u32::from(t);
-    let value = u32::from(a) * (255 - t) + u32::from(b) * t;
-    ((value + 127) / 255).min(255) as u8
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn reference_uv_at(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> (u8, u8) {
-        let u = u32::from(uv_q8[0]);
-        let v = u32::from(uv_q8[1]);
-        let inv_u = 255 - u;
-        let inv_v = 255 - v;
-        let interpolate = |axis: usize| {
-            let values = if axis == 0 {
-                [
-                    u32::from(corners[0].0),
-                    u32::from(corners[1].0),
-                    u32::from(corners[2].0),
-                    u32::from(corners[3].0),
-                ]
-            } else {
-                [
-                    u32::from(corners[0].1),
-                    u32::from(corners[1].1),
-                    u32::from(corners[2].1),
-                    u32::from(corners[3].1),
-                ]
-            };
-            let top = values[0] * inv_u + values[1] * u;
-            let bottom = values[3] * inv_u + values[2] * u;
-            ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
-        };
-        (interpolate(0), interpolate(1))
-    }
-
-    #[test]
-    fn cylinder_uv_edge_shortcuts_match_bilinear_reference() {
-        let corner_sets = [
-            [(0, 0), (255, 0), (255, 255), (0, 255)],
-            [(17, 231), (244, 7), (193, 161), (58, 99)],
-            [(255, 255), (0, 255), (0, 0), (255, 0)],
-            [(3, 251), (127, 129), (239, 11), (61, 197)],
-        ];
-        for corners in corner_sets {
-            for t in 0..=255u8 {
-                for uv in [[t, 0], [t, 255], [0, t], [255, t]] {
-                    assert_eq!(
-                        cylinder_prop_uv_at(corners, uv),
-                        reference_uv_at(corners, uv),
-                        "corners={corners:?} uv={uv:?}"
-                    );
-                }
-            }
-        }
-    }
 }
