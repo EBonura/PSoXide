@@ -1847,6 +1847,32 @@ payloads, all 1,971 lockstep hashes, route cadence, stage distributions, and
 I-cache stalls are identical. The backend already emits the same schedule (or
 declines this pass for MIPS-I), so the flag is not retained.
 
+### R67: LLVM machine software pipeliner
+
+R67 enabled `--enable-pipeliner` on the unchanged MIPS-I v3 lockstep build.
+The 1,366,016-byte payload, all 925 visual hashes, route cadence, every stage
+distribution, and I-cache stalls are exactly identical to R57b. LLVM either
+finds no legal modulo-scheduled loops in the shipping program or does not run
+this pass for the target, so the flag is not retained and the byte-identical
+v1 matrix is unnecessary.
+
+### R68: LLVM converging pre-RA scheduler
+
+R68 selected LLVM's standard converging machine scheduler before register
+allocation instead of the MIPS backend's default scheduler. It is another
+complete v3 no-op: payload size, all 925 hashes, render distribution, cadence,
+and I-cache stalls are identical to R57b. Together R66--R68 close the
+post-RA/pre-RA/software-pipeliner scheduler family without a retained flag.
+
+### R69: packed RGB midpoint arithmetic
+
+R69 replaced the three scalar widened RGB midpoint operations used by TR
+subdivision with one exact packed per-byte floor average. An exhaustive host
+test proved all 65,536 byte pairs equal. v3 lockstep render mean improved only
+1,230,740→1,229,027 cycles and I-cache stalls were effectively unchanged, but
+10/925 checkpoints changed beginning at guest frame 442. The 0.14% gain fails
+the strict visual gate, so both implementation and test were removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1941,6 +1967,9 @@ declines this pass for MIPS-I), so the flag is not retained.
 | R64 | Enable LLVM hot/cold splitting | rejected | 925/925 v3 images exact and payload unchanged, but render mean +161/max +1.6k and I-cache +1.3k; no normal/v1 matrices |
 | R65 | Enable LLVM MIPS tail calls | rejected | v3 exact and render -2.5k normal; v1 render also improves, but normal cadence falls 26.99→26.88 FPS and two lockstep checkpoints change |
 | R66 | Enable LLVM post-RA machine scheduling | no-op | v1/v3 payloads, all 1,971 hashes, and every measured metric are identical |
+| R67 | Enable LLVM machine software pipelining | no-op | v3 payload, all 925 hashes, and every measured metric are identical; no emitted-code effect |
+| R68 | Select LLVM's converging pre-RA scheduler | no-op | v3 payload, all 925 hashes, and every measured metric are identical |
+| R69 | Exact packed RGB midpoint for TR subdivision | rejected | exhaustive scalar equivalence and render -1.7k, but 10/925 v3 checkpoints change; removed |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
