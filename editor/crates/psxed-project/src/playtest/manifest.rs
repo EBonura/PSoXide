@@ -175,10 +175,13 @@ fn write_aligned_asset_bytes_static(out: &mut String, static_name: &str, include
     let _ = writeln!(out, "}};");
 }
 
-fn write_cached_room_lighting_policy(out: &mut String, has_room_fog: bool) {
+fn write_cached_room_lighting_policy(
+    out: &mut String,
+    has_room_fog: bool,
+    all_room_fog_is_black: bool,
+) {
     if has_room_fog {
-        out.push_str(
-            r#"
+        let source = r#"
 #[repr(transparent)]
 pub struct ProjectCachedRoomLighting<'a> {
     lighting: &'a super::RuntimeRoomLighting,
@@ -300,8 +303,15 @@ macro_rules! draw_project_cached_room {
 }
 pub(crate) use draw_project_cached_room;
 
-"#,
-        );
+"#;
+        if all_room_fog_is_black {
+            out.push_str(&source.replace(
+                "self.lighting.apply_vertex_fog_weight",
+                "psx_game_runtime::room_lighting::apply_black_room_fog_weight",
+            ));
+        } else {
+            out.push_str(source);
+        }
     } else {
         out.push_str(
             r#"
@@ -325,13 +335,15 @@ pub(crate) use draw_project_cached_room;
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
-    write_cached_room_lighting_policy(
-        &mut out,
-        package
-            .rooms
-            .iter()
-            .any(|room| room.flags & psx_level::room_flags::FOG_ENABLED != 0),
-    );
+    let has_room_fog = package
+        .rooms
+        .iter()
+        .any(|room| room.flags & psx_level::room_flags::FOG_ENABLED != 0);
+    let all_room_fog_is_black = has_room_fog
+        && package.rooms.iter().all(|room| {
+            room.flags & psx_level::room_flags::FOG_ENABLED == 0 || room.fog_rgb == [0, 0, 0]
+        });
+    write_cached_room_lighting_policy(&mut out, has_room_fog, all_room_fog_is_black);
     let world_pack_toc = world_pack_toc(package);
     let world_pack_max_chunk_bytes = world_pack_toc
         .iter()
