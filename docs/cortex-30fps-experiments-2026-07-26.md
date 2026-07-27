@@ -1022,6 +1022,38 @@ accounting showed the saved render time becoming idle `present` wait, but the
 phase change still lost three delivered visuals. Because both projects must
 improve under the delivered-cadence gate, the candidate was removed.
 
+### C1: warning-only cooker performance envelope
+
+The cooker now computes a camera-independent upper envelope from the data it
+actually emits: the maximum surfaces in any single-room PVS, the sum of the
+heaviest `visible_chunk_limit` room PVS sets, the corresponding authored
+triangle and prop-surface pressure, and the heaviest
+`resident_chunk_limit` streamed payload/sector footprint. It also reports the
+fixed one-level TR packet pressure before any hardware-extent fallback and
+compares that planning figure with the 1,536-packet runtime arena. The
+calculation is warning-only because combining the heaviest rooms ignores
+portal reachability and is intentionally conservative.
+
+Both projects cook successfully with the new report:
+
+| project | visible rooms | single-room PVS surfaces | room-surface envelope | authored-triangle envelope | TR+prop pre-HW packets | resident payload / stream |
+|---|---:|---:|---:|---:|---:|---:|
+| cortex_v1 | 6 | 138 | 390 | 771 | 2,015 | 48,432 / 53,248 B |
+| cortex_v3 | 6 | 79 | 364 | 728 | 1,974 | 34,784 / 38,912 B |
+
+The frozen lockstep tapes stay below the predicted envelopes: cortex_v1's
+surface/primitive maxima are 73/551, and cortex_v3's are 183/639. The
+predictor therefore passes its predeclared soundness check on both routes.
+Both conservative pre-hardware packet figures exceed 1,536, so neither project
+can yet claim an all-theoretical-views packet guarantee; the cooker says so
+explicitly and requires recorded-view/hardware validation rather than silently
+certifying the content.
+
+The new focused unit test passes. The full `psxed-project` run executes 377
+tests with 367 passes, 9 pre-existing starter-project expectation failures,
+and 1 ignored diagnostic; none of the failures touches the performance
+envelope or streamed-room accounting.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1085,7 +1117,7 @@ improve under the delivered-cadence gate, the candidate was removed.
 | P1 | Exact camera collision-solve memoization | rejected | exact visual sequence and lower camera CPU in both; normal v1 cadence regressed 26.99→26.81 FPS and <=2vb 79.2%→77.5% |
 | S1 | Hoist pad/visibility work into present wait | rejected by dependency/contract | present spin is tear-free vblank quantisation; input and visibility depend on the next tick/post-update camera, and early polling changes latency |
 | S2 | Reduce authored sector size | rejected by contract/audit | `sector_size` is world scale, not cache granularity; changing 1,664/1,536 rescales geometry, collision, portals, and routes |
-| C1 | Cooker worst-view 30 FPS/RAM/packet validator | queued | Fit only after surviving engine changes |
+| C1 | Cooker worst-view 30 FPS/RAM/packet validator | accepted, warning-only | v1/v3 observed maxima 73/551 and 183/639 stay below 390/771 and 364/728; both theoretical packet envelopes correctly warn above 1,536 |
 | H1 | Real-hardware timer, cadence, tear, seam, and near-plane sweep | queued | Mandatory final gate |
 
 Run `python3 tools/cortex_30fps_report.py <run-dir>...` for the standard table.
