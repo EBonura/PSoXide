@@ -1775,6 +1775,65 @@ impl EditorWorkspace {
         }
     }
 
+    /// Delete every EXACT duplicate wall segment in the active scene.
+    ///
+    /// A duplicate is byte-identical to one already on the same edge: same
+    /// heights, material, UV transform, solidity and dropped corner. Two of
+    /// them occupy one plane, so the second can never be seen and costs a full
+    /// room surface to draw. The cooker only rejects the different case, where
+    /// two neighbouring sectors each claim one physical edge; a list that
+    /// repeats itself passes straight through into the room cache. cortex_v3
+    /// carried 30 across 185 authored segments.
+    ///
+    /// Counts first so the status line can say nothing was found without
+    /// spending an undo step on a no-op.
+    pub(crate) fn remove_duplicate_walls(&mut self) {
+        let room_ids: Vec<_> = self
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .collect();
+
+        let mut found = 0usize;
+        for &id in &room_ids {
+            if let Some(node) = self.project.active_scene().node(id) {
+                if let NodeKind::Room { grid } = &node.kind {
+                    found += grid.duplicate_wall_count_all_floors();
+                }
+            }
+        }
+        if found == 0 {
+            self.status = "No duplicate walls found".to_string();
+            return;
+        }
+
+        self.push_undo();
+        let mut removed = 0usize;
+        let mut rooms_touched = 0usize;
+        for &id in &room_ids {
+            let Some(node) = self.project.active_scene_mut().node_mut(id) else {
+                continue;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                continue;
+            };
+            let n = grid.dedupe_duplicate_walls_all_floors();
+            if n > 0 {
+                removed += n;
+                rooms_touched += 1;
+            }
+        }
+        self.status = format!(
+            "Removed {removed} duplicate wall segment{} from {rooms_touched} room{}",
+            if removed == 1 { "" } else { "s" },
+            if rooms_touched == 1 { "" } else { "s" },
+        );
+        self.mark_dirty();
+    }
+
     /// Snapshot the current project before a discrete mutation.
     /// Call once per user action -- paint click, place, add/delete
     /// node, etc -- so each undo step matches one author intent.

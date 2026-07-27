@@ -131,6 +131,39 @@ impl Playtest {
         self.visibility.draws_room(index)
     }
 
+    /// Conservative component-wise union of every clipped portal path that
+    /// reaches `room`. Never return the first aperture alone: rooms may be
+    /// visible through multiple disjoint paths.
+    pub(super) fn portal_cell_window(&self, room: RoomIndex) -> Option<PortalCellWindow> {
+        if room == self.visibility.root {
+            return None;
+        }
+        let mut union: Option<PortalCellWindow> = None;
+        for frustum in self.visibility.result.frustums[..self
+            .visibility
+            .result
+            .frustum_count
+            .min(self.visibility.result.frustums.len())]
+            .iter()
+            .copied()
+        {
+            if frustum.room != room {
+                continue;
+            }
+            let path = PortalCellWindow::new(
+                frustum.left_tan_q12,
+                frustum.right_tan_q12,
+                frustum.min_y_tan_q12,
+                frustum.max_y_tan_q12,
+            );
+            union = Some(match union {
+                None => path,
+                Some(window) => window.union(path),
+            });
+        }
+        union
+    }
+
     pub(super) fn emit_portal_visibility_counters(&self) {
         let stats = self.visibility.result.stats;
         telemetry::counter(

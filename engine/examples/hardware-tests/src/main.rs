@@ -106,6 +106,24 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.5: Sweeps aimed at two findings the first full capture could not settle.
+//       Ten seek distances plus two backward seeks, because four forward
+//       distances came back non-monotonic and no fit reached the middle
+//       points. Twelve SIO setup delays, because the console answered at 0,
+//       fell silent at 128 and answered again at 384.
+// v1.4: The capture is frozen when taken. Paging previously REBUILT the whole
+//       payload, and some observations are live (the pad poll is refreshed
+//       every frame), so each page carried a different payload while only the
+//       last page's CRC described its own bytes. No multi-page console capture
+//       could ever reconstruct. This is why three captures failed.
+// v1.3: Audio readout holds its level. v1.2 keyed the voice with an all-zero
+//       ADSR, which is sustain level 0, so on hardware the envelope decayed and
+//       a console capture carried ~3 seconds of a 13.6 second payload. The
+//       emulator does not model that decay, so only silicon could show it.
+// v1.2: Audio readout on by default. Off-by-default cost a console session:
+//       the operator has no reason to know a silent disc is withholding the
+//       payload, and the QR route then lost a symbol, which costs the whole
+//       capture. Volume stays at the reduced level.
 // v1.1: Operator flow. Boot runs the battery behind a visible progress bar,
 //       then lands on the capture pages; a main menu (TRIANGLE) reruns the
 //       startup tests or opens results, scans and probes; the audio readout is
@@ -117,9 +135,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 1;
+const SUITE_VERSION_MINOR: u8 = 5;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.1";
+const SUITE_VERSION: &str = "HWTEST v1.5";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -135,6 +153,11 @@ const PROBE_VARIANT_COUNT: usize = 5;
 /// to find what timing a strict original pad (SCPH-1200) needs. `setup_spins` is
 /// a delay after asserting the select line; `interbyte_spins` is a fixed gap
 /// after each byte. Both are bounded STAT reads, no `/ACK`/CTRL machinery.
+/// Setup-delay values swept by records 0xD0.., in SIO spin units.
+const SIO_SETUP_SWEEP: [u32; 12] = [
+    0, 64, 128, 192, 256, 320, 448, 512, 640, 896, 1024, 1536,
+];
+
 const PROBE_VARIANTS: [(&str, u32, u32); PROBE_VARIANT_COUNT] = [
     ("SETUP 0", 0, 0),
     ("SETUP 128", 128, 0),
@@ -494,7 +517,7 @@ struct ScanReport {
     runs: u8,
 }
 
-const TIMING_RECORD_COUNT: usize = 144;
+const TIMING_RECORD_COUNT: usize = 176;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = 9;
 const PRECISION_VALUE_COUNT: usize = 192;
 
@@ -1576,8 +1599,8 @@ struct HardwareTests {
     /// frame while in the controller probe. Used to find which setup/inter-byte
     /// timing wakes a strict original pad.
     probe_variants: [psx_pad::RawPoll; PROBE_VARIANT_COUNT],
-    /// Index into `audio_link::RATE_DIVISORS` for the readout tone rate.
-    /// Zero means off, so the disc is silent unless asked.
+    /// Readout tone rate: 0 is off, otherwise `RATE_DIVISORS[audio_rate - 1]`.
+    /// Starts at the fastest rate so a recording always carries the payload.
     audio_rate: usize,
     /// Selected row on the current menu page.
     menu_cursor: usize,
@@ -1712,8 +1735,10 @@ impl HardwareTests {
         self.page = 0;
     }
 
-    /// Step the audio readout: off, then each rate, then off again. Off is the
-    /// default so the disc is silent unless the operator asks for the tone.
+    /// Step the audio readout: each rate, then off, then back round. It starts
+    /// on, so a recording carries the payload without anyone remembering to
+    /// enable it; the cycle is for dropping to a slower, more robust rate when
+    /// a capture chain cannot decode the fastest one.
     fn cycle_audio_readout(&mut self) {
         self.audio_rate = (self.audio_rate + 1) % (audio_link::RATE_DIVISORS.len() + 1);
         if self.audio_rate == 0 {
@@ -1812,9 +1837,9 @@ impl Scene for HardwareTests {
         // both alarming and useless to anyone not recording at that moment.
         // SQUARE starts it when the operator is ready.
         let bits = audio_link::prepare(self.timing_capture.binary());
-        tty::print("hardware-tests: audio-link ready bits=");
+        tty::print("hardware-tests: audio-link transmitting bits=");
         tty_print_dec_u16(bits as u16);
-        tty::println(" (press SQUARE to transmit)");
+        tty::println(" (SQUARE changes rate / off)");
         draw_init_progress(1, 1, (96, 240, 128));
     }
 
@@ -1919,7 +1944,7 @@ impl Scene for HardwareTests {
                 self.page - 1
             };
             if matches!(self.mode, Mode::TimingScan) {
-                self.encode_capture(self.page);
+                self.timing_capture.render_page(self.page);
             }
         }
         if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
@@ -1932,7 +1957,7 @@ impl Scene for HardwareTests {
             };
             self.page = (self.page + 1) % pages;
             if matches!(self.mode, Mode::TimingScan) {
-                self.encode_capture(self.page);
+                self.timing_capture.render_page(self.page);
             }
         }
         if ctx.just_pressed(button::CROSS) {
@@ -3136,6 +3161,53 @@ fn run_timing_scan() -> TimingReport {
         sample_timing(0x9C, 8, || cd_read_with_audio(false, 8)),
     );
     push_timing_record(&mut records, &mut next, sample_timing(0x9D, 1, cd_play_start));
+    // Seek sweep. Four distances proved too few to model: the console measured
+    // +128 slower than +512, and no monotonic fit came within 2x of the middle
+    // points. Ten distances with the same five repeats each make an outlier
+    // visible AS an outlier rather than as the shape of the curve.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC0, 2, || cd_seek_distance(2)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC1, 4, || cd_seek_distance(4)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC2, 8, || cd_seek_distance(8)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC3, 32, || cd_seek_distance(32)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC4, 64, || cd_seek_distance(64)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC5, 256, || cd_seek_distance(256)),
+    );
+    // Backward seeks at the same distances. A drive settles differently
+    // approaching from outside, and every existing record seeks forward only,
+    // so a direction asymmetry would currently be invisible.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC6, 64, || cd_seek_backward(64)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC7, 256, || cd_seek_backward(256)),
+    );
     push_timing_record(
         &mut records,
         &mut next,
@@ -3322,6 +3394,22 @@ fn run_timing_scan() -> TimingReport {
         &mut next,
         sample_timing(0xB9, 1, || timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)),
     );
+    // Setup-delay sweep. The console answered at setup 0, gave NO reply at 128,
+    // and answered again at 384: non-monotonic, so the threshold cannot be read
+    // off four points. Twelve evenly spaced delays bracket where a real pad
+    // starts replying, which is the SCPH-1200 problem stated as a measurement.
+    let mut sweep = 0usize;
+    while sweep < SIO_SETUP_SWEEP.len() {
+        let setup = SIO_SETUP_SWEEP[sweep];
+        push_timing_record(
+            &mut records,
+            &mut next,
+            sample_timing(0xD0 + sweep as u8, (setup / 8) as u16, move || {
+                timed_pad_poll(setup, 0)
+            }),
+        );
+        sweep += 1;
+    }
     push_timing_record(
         &mut records,
         &mut next,
@@ -4060,6 +4148,19 @@ fn cd_park(lba: u32) -> bool {
     cd_clock_reset();
     cdrom::try_set_loc_lba(lba, CD_SPINS).is_some()
         && cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[])
+}
+
+/// Seek `distance` sectors BACKWARD onto the parked origin, timing only the
+/// seek. Parks beyond the target so the head approaches from the far side.
+fn cd_seek_backward(distance: u32) -> u16 {
+    let origin = CD_TEST_LBA + distance;
+    if !cd_park(origin) {
+        return CD_FAILED;
+    }
+    if cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none() {
+        return CD_FAILED;
+    }
+    cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[]))
 }
 
 /// Seek `distance` sectors away from the parked origin and time only the seek.
@@ -6534,7 +6635,7 @@ fn fnv16_halfwords(hws: &[u16]) -> u32 {
 /// main RAM (channel 4, from-device, block-sync). Arms SPUCNT DMA-Read
 /// mode (bits 5..4 = 11) around the transfer, the read-side mirror of the
 /// SDK's DMA upload.
-fn spu_dma_read(addr: u32, out: &mut [u32]) {
+pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
     let words = out.len() as u32;
     let block_size: u32 = if words % 16 == 0 {
         16

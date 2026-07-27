@@ -878,6 +878,49 @@ impl WorldGrid {
         }
     }
 
+    /// Remove exact duplicate wall segments from every sector on THIS floor.
+    ///
+    /// Stacked floors are separate grids, so callers wanting a whole room must
+    /// walk `floor_count()`; [`WorldGrid::dedupe_duplicate_walls_all_floors`]
+    /// does that. Returns how many segments were removed.
+    pub fn dedupe_duplicate_walls(&mut self) -> usize {
+        let mut removed = 0;
+        for sector in self.sectors.iter_mut().flatten() {
+            removed += sector.walls.dedupe_exact();
+        }
+        removed
+    }
+
+    /// Exact duplicate wall segments on this floor, without modifying it.
+    pub fn duplicate_wall_count(&self) -> usize {
+        self.sectors
+            .iter()
+            .flatten()
+            .map(|sector| sector.walls.duplicate_count())
+            .sum()
+    }
+
+    /// [`WorldGrid::dedupe_duplicate_walls`] across this floor and every floor
+    /// stacked above it.
+    pub fn dedupe_duplicate_walls_all_floors(&mut self) -> usize {
+        let mut removed = self.dedupe_duplicate_walls();
+        for floor in self.floors_above.iter_mut() {
+            removed += floor.dedupe_duplicate_walls();
+        }
+        removed
+    }
+
+    /// [`WorldGrid::duplicate_wall_count`] across this floor and every floor
+    /// stacked above it.
+    pub fn duplicate_wall_count_all_floors(&self) -> usize {
+        self.duplicate_wall_count()
+            + self
+                .floors_above
+                .iter()
+                .map(|floor| floor.duplicate_wall_count())
+                .sum::<usize>()
+    }
+
     /// Mutable floor `i`.
     pub fn floor_mut(&mut self, i: usize) -> Option<&mut WorldGrid> {
         if i == 0 {
