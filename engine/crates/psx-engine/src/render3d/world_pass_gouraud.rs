@@ -1003,6 +1003,87 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    /// Submit a static prop quad with the fixed policy used by cooked box and
+    /// cylinder surfaces: average depth, no post-projection cull, hardware-only
+    /// splitting, and the material's natural render layer.
+    ///
+    /// The common hardware-safe path avoids constructing and interpreting a
+    /// complete [`WorldSurfaceOptions`] value per surface. Oversized quads
+    /// retain the general splitter, so this changes neither packet topology nor
+    /// the PS1 coordinate-extent safety contract.
+    pub fn submit_static_prop_textured_gouraud_quad_prescreened_u8<P>(
+        &mut self,
+        primitives: &mut P,
+        verts: &[ProjectedVertex; 4],
+        uvs: &[(u8, u8); 4],
+        colors: &[(u8, u8, u8); 4],
+        material: TextureMaterial,
+        base_options: &WorldSurfaceOptions,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        if !projected_quad_bounds_hw_extent_safe(verts) {
+            let options = (*base_options)
+                .with_depth_policy(DepthPolicy::Average)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
+            return self.submit_textured_gouraud_quad_prescreened_u8(
+                primitives, verts, uvs, colors, material, options,
+            );
+        }
+
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let depth_value = (verts[0].sz + verts[1].sz + verts[2].sz + verts[3].sz) / 4;
+        let depth = CameraDepth::new(depth_value.saturating_add(base_options.depth_bias));
+        let slot = base_options
+            .depth_band
+            .slot_depth::<OT_DEPTH>(base_options.depth_range, depth);
+        let packet_material = TexturedGouraudPacketMaterial::from_texture(material);
+        let quad_verts = [verts[1], verts[0], verts[2], verts[3]];
+        let quad_uvs = [uvs[1], uvs[0], uvs[2], uvs[3]];
+        let quad_colors = [colors[1], colors[0], colors[2], colors[3]];
+        let uv_words = [
+            model_uv_word(quad_uvs[0]),
+            model_uv_word(quad_uvs[1]),
+            model_uv_word(quad_uvs[2]),
+            model_uv_word(quad_uvs[3]),
+        ];
+        let Some(quad) =
+            primitives.push(QuadTexturedGouraud::with_packet_material_packed_uv_words(
+                [
+                    (quad_verts[0].sx, quad_verts[0].sy),
+                    (quad_verts[1].sx, quad_verts[1].sy),
+                    (quad_verts[2].sx, quad_verts[2].sy),
+                    (quad_verts[3].sx, quad_verts[3].sy),
+                ],
+                uv_words,
+                quad_colors,
+                packet_material,
+            ))
+        else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        self.push_command(
+            slot,
+            depth.raw(),
+            WorldRenderLayer::for_material(material),
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 2;
+        stats
+    }
+
     /// Submit a fixed-depth cached-room quad as one GP0(3Ch) packet when
     /// both hardware triangles are safe. Oversized packets are split through
     /// the normal triangle path so the real PS1 GPU cannot discard visible
