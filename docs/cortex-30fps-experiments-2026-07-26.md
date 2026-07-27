@@ -1091,6 +1091,64 @@ are emulator observations, not silicon results. H1 remains open until the
 same images are run on a physical NTSC PlayStation through the portal seams,
 the point-blank near-plane views, and the heaviest combat/junction views.
 
+### R29: remove dense-room identity-index scratch writes
+
+The current gameplay-only PC profile and disassembly exposed a dense cached-room
+loop that writes `projected_indices[index] = index` before projecting the same
+contiguous vertex cache directly. A source audit found no production caller
+reading the scratch after return, so R29 removed the loop and explicitly made
+post-draw scratch contents unspecified. All 269 engine tests plus the compile
+time guards passed after replacing one legacy assertion about this internal
+scratch state with the function's observable projected-vertex count.
+
+cortex_v3 passed the first full gate: all 925 hashes matched, mean render fell
+1,416,120→1,408,816 cycles, p95 fell 2,002,178→1,991,145, and I-cache stalls
+fell 321,902→318,288 per visual. cortex_v1 also became cheaper
+(765,819→762,387 mean render; 171,812→169,804 I-cache stalls), but failed exact
+visual equivalence at guest frame 592: 1,045/1,046 hashes matched. A targeted
+stop-and-dump reproduced the difference and localized it to exactly one display
+pixel at `(228, 148)`, changing RGB `(41,57,49)`→`(33,41,33)`; the immediately
+preceding and following images were exact. No ordinary-mode benchmark was run
+after that mandatory visual gate failed. The source and test contract were
+restored completely.
+
+### R30: share the visible/all-cell surface-emission tail
+
+The two cached-room entry points each contain the same surface-emission walk,
+and their baseline MIPS symbols are 38,212 and 32,840 bytes. R30 extracted that
+walk into one `#[inline(never)]` generic helper so both selection policies could
+reuse a single hot implementation. All 269 engine tests and compile-time guards
+passed.
+
+The target build invalidated the premise: cortex_v3's lockstep PSX-EXE payload
+grew 1,349,632→1,445,888 bytes (+96,256) instead of shrinking, and the replay
+reported `PERSISTENT ASSET LOAD FAILED` before completing the route. The large
+argument surface and generic monomorphization produced a worse target layout
+than LLVM's existing inlined/merged code. This is a hard RAM/layout failure, so
+the candidate was restored before any performance claim or v1 run.
+
+### R31/R31b: inline the one-level projected TR quad leaf
+
+The one-level lattice calls a separate 2.5 KiB projected-quad leaf four times
+per subdivided quad. R31 forced that leaf to inline. All 269 engine tests and
+compile-time guards passed, and the cortex_v3 target became materially cheaper:
+mean/p95/max render fell
+1,416,120/2,002,178/2,259,241→
+1,394,444/1,976,522/2,233,584 cycles, while I-cache stalls fell
+321,902→308,721 per visual.
+
+The output was not equivalent. Only 495/926 ordered image checkpoints matched;
+the strict guest-frame comparison reported 431/925 mismatches beginning at
+guest frame 386. Emulator-owned GP0 capture proved this was not merely a hash
+checkpoint phase shift: command counts and GPU cycle counts stayed identical,
+but command-word hashes first diverged at tape frame 2 and only 343/923
+presented command streams matched. The forced-inline candidate was rejected.
+
+R31b changed the force to an ordinary `#[inline]` hint. LLVM retained the
+baseline target layout: payload size, every measured cycle statistic, I-cache
+stalls, and all 925 image hashes were exactly unchanged. The no-op hint was also
+removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1146,6 +1204,9 @@ the point-blank near-plane views, and the heaviest combat/junction views.
 | R26 | Prepared exact room-fog quotient | rejected | depth prep -1,034 cycles, but total render +1,466 and I-cache +4,511; 925/925 hashes exact |
 | R27 | Compile linked-list slot scratch out of bucketed passes | rejected | all v1/v3 presented images exact and render -4.7k/-5.1k, but normal v1 FPS 26.99→26.88 and <=2vb 79.2%→78.0% |
 | R28 | Initialize only the used blended-model index prefix | rejected | exact hashes and v3 15.71→15.75 FPS, but normal v1 fell 26.99→26.88 FPS despite render -7.0k |
+| R29 | Remove dense-room identity-index scratch writes | rejected | v3 exact and render -7.3k; v1 render -3.4k but 1/1,046 hashes changed by one pixel for one frame |
+| R30 | Share visible/all-cell surface-emission tail | rejected | engine tests pass, but v3 payload grows +96,256 B and persistent asset loading fails |
+| R31/R31b | Force/hint inline the projected TR quad leaf | rejected/no-op | forced form saves 21.7k render cycles but changes 431/925 v3 hashes and GP0 words; ordinary hint is bit-for-bit baseline |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
