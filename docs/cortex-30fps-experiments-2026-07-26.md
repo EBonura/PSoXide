@@ -1548,6 +1548,40 @@ compile-time type guard; runtime passes 63 unit and 5 policy tests; cooker
 policy tests cover both capability values and general/black fog. R51 is
 retained as the new baseline.
 
+### R52: specialize fogged TR entry, retain the canonical emitter
+
+R51 deliberately returned fogged TR-subdivision candidates to the general
+surface path. R52 extends the same generated baked-fog capability to those
+static opaque, hardware-safe, one-level whole quads, but retains the existing
+`submit_adaptive_cached_room_quad` emitter. It skips the general lighting
+dispatch and duplicated surface decisions while preserving material lookup,
+winding, culling, camera-space threshold checks, lattice generation,
+underdraw, depth keys, and packet order.
+
+The more aggressive packet-reconstruction form was measured and rejected.
+Reusing the resident root packet's packed material for all four lattice
+children reduced v3 lockstep render mean/p95/max to
+1,211,596/1,624,400/1,962,251 cycles, but changed 461/925 images from guest
+frame 386 onward. Patching dynamic underdraw colours, restoring canonical
+material/cull/winding derivation, emitting the underdraw fresh, and adding the
+camera-space far-depth guard did not close the 459-image remainder. A
+standalone byte-for-byte child-plus-underdraw test passed, so the unsafe live
+packet-reconstruction branch was removed rather than weakening the visual
+gate.
+
+The reduced canonical-emitter form passes every control:
+
+| project / mode | R51 render mean / p95 / max | R52 render mean / p95 / max | FPS / visuals | <=2vb | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---:|---|
+| v1 lockstep | 762,186 / 1,089,330 / 1,210,193 | identical | fixed / 851 | 77.2%→77.2% | 168,921→168,921 | 1,046/1,046 guest-frame keys exact |
+| v1 normal | 739,898 / 1,064,039 / 1,211,472 | identical | 26.99 / 766→766 | 79.2%→79.2% | 168,349→168,349 | every reported metric identical |
+| v3 lockstep | 1,271,538 / 1,694,212 / 2,048,043 | 1,259,533 / 1,677,268 / 2,033,236 | fixed / 821 | 3.5%→3.8% | 288,528→275,957 | 925/925 exact |
+| v3 normal | 1,238,456 / 1,659,326 / 2,030,609 | 1,228,756 / 1,646,499 / 2,020,644 | 17.32→17.39 / 474→476 | 2.5%→2.5% | 308,777→299,998 | lockstep-equivalent workload |
+
+The v3 executable grows 4 KiB; v1 remains exactly 1,482,752 bytes because its
+generated capability flag is literal `false` and LLVM removes the branch.
+R52 is retained.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1628,6 +1662,7 @@ retained as the new baseline.
 | R49–R49c | Runtime-select exact black-fog arithmetic in the generic vertex blend | rejected | Direct form: v3 exact and render -12.9k, but v1 26.99→26.81 FPS; outlined form still regresses v1; packed test changes one v3 image |
 | R50/R50b | Select black/general fog once per prop quad | rejected | Broad form grows v1 2 KiB and drops to 26.78 FPS; arch/cylinder-only form preserves v1 cadence but regresses v3 render +2.6k and I-cache +3.3k |
 | R51 | Shade and patch prewarmed static room packets under generated fog policy | accepted | v3 925/925 exact, normal 16.30→17.32 FPS, render mean -78.0k and p95 -209.6k; v1 payload and every measured metric bit-identical |
+| R52 | Specialize fogged TR entry while retaining the canonical emitter | accepted; packet reconstruction rejected | Canonical form: v3 925/925 exact, normal 17.32→17.39 FPS, render mean -9.7k and p95 -12.8k; v1 payload/metrics identical. Packed-child form saved ~60k lockstep cycles but changed 461 images and was removed |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
