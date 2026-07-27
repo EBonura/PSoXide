@@ -913,6 +913,60 @@ of that engine's surface kinds, projection/subdivision branches, culling, and
 object work. Candidate changes must therefore pass both project tapes instead
 of being selected from a pooled slope.
 
+### R25: hoist invariant cylinder surface options
+
+The cylinder-prop loop reconstructed the same depth, cull, subdivision, and
+maximum-edge policy for every visible surface. R25 built that invariant portion
+once per draw and applied only the varying material inside the loop. All 68
+`psx-game-runtime` tests passed and all 925 cortex_v3 lockstep display hashes
+matched.
+
+The MIPS result regressed: mean render rose 1,416,120→1,418,028 cycles, p95
+rose 2,002,178→2,005,406, and I-cache stalls rose
+321,902→323,741 per visual. The compiler's original chained construction has
+better code layout/data flow on this target. The change was removed without
+spending a cortex_v1 run.
+
+### M11: gameplay-window PC attribution
+
+A normal cortex_v3 build was sampled every 64 retired instructions, entirely
+from the emulator, producing 6.13 million samples. Filtering the windowed
+capture from route tick 300 removes boot/menu work and leaves 5.09 million
+gameplay samples. `tools/pc_symbolize.py --min-window-start` now performs this
+filter reproducibly.
+
+The hottest gameplay symbols were the vblank-edge spin in `run_scheduled`
+(14.82%), model geometry submission (11.65%), the visible-cell room renderer
+(10.83%), `memcpy` (5.59%), `memset` (4.52%), cached-room TR quad submission
+(3.77%), TR quad leaves (3.13%), and SIO0 pad polling (2.09%). Portal visibility
+refresh was 0.25%. This independently confirms that portals are not looping
+and that the remaining render cost is ordinary geometry/model emission plus
+bulk memory traffic.
+
+The scheduler sample is idle presentation quantisation, not removable render
+work: the loop waits for the vblank IRQ before the framebuffer swap. Moving the
+next pad poll/update before that edge samples input up to one tick early and
+changes simulation/input latency; portal visibility also depends on the
+post-update camera. The suggested present-wait work hoist is therefore rejected
+under the visual/semantic-preservation contract. The SIO0 setup spin is also
+not optional: the documented SCPH-1200 silicon sweep fails at 384 spins and is
+clean at 768, while the engine's 1,024-spin default supplies the hardware
+margin. It remains in the 60 Hz input path.
+
+### R26: prepared exact room-fog quotient
+
+The PC profile showed integer divides in the fogged room vertex-depth loop.
+R26 prepared `floor(2^24 / fog_span)` once per room, then replaced each vertex
+divide with a multiply and a proven one-step correction. An exhaustive test
+over representative spans, including cortex_v1's 19,968 and cortex_v3's
+17,600, showed exact equality for every depth in each interval. All 333 engine
+and runtime tests passed and all 925 cortex_v3 lockstep hashes matched.
+
+The target stage improved (`room_depth_prep` 4,397→3,363 cycles), but code
+layout moved cost elsewhere: `room_project` rose 21,350→23,674, total render
+rose 1,416,120→1,417,586, and I-cache stalls rose
+321,902→326,413 per visual. The candidate was removed without a cortex_v1 run.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -959,16 +1013,20 @@ of being selected from a pooled slope.
 | M8 | Attribute bulk-memory call sites with PC sampling | diagnostic complete | 6.13M samples; gameplay `memcpy` 5.52%, `memset` 4.51%; concrete callers identified |
 | M9/J5 | Joint worst-20 render-tail attribution | diagnostic complete | room surfaces are 65.4%; room + props + models + player are 87.4%; no portal/streaming spike |
 | M10/J6 | Common v1/v3 surface/primitive cost model | rejected | pooled R² 0.8419 misses the >0.85 gate; project intercept/slopes materially improve fit |
+| M11 | Gameplay-only PC attribution | diagnostic complete | 5.09M samples: models 11.65%, room wrapper 10.83%, TR quad/leaves 6.90%, portal refresh 0.25% |
 | R21 | Leave bucketed pass's unused linked-list arrays uninitialized | rejected | v3 -7,480 render cycles and exact; v1 -6,065 but 3/1,047 images changed, including 804 captured floor pixels |
 | R22 | Leave unwritten room-search array tails uninitialized | rejected | v1 update -2,004 and room-track -1,749 cycles/tick, but render +129 and 2/1,047 images changed |
 | R23 | Borrow cached-quad aggregate arguments | rejected | v3 render +6,385, p95 +9,799, I-cache +3,384 cycles; 512/925 images changed |
 | R24 | Initialize/copy only used collision-room prefixes | rejected | v1 update -2,731 and render -1,562 cycles, but 1/1,046 images changed; v3 exact but render +1,958 |
+| R25 | Hoist invariant cylinder surface options | rejected | 925/925 v3 hashes exact, but render +1,908 and I-cache +1,839 cycles |
+| R26 | Prepared exact room-fog quotient | rejected | depth prep -1,034 cycles, but total render +1,466 and I-cache +4,511; 925/925 hashes exact |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
 | E8 | Record/template optimization for prop tail | diagnostic narrowed | image cards cost 5 cycles; v3 tail is ~40k box + ~88k cylinder, so card templates are irrelevant |
 | G1 | GPU overdraw/timing census and texture-window dedup bound | diagnostic complete | v3 GPU mean/max 713k/879k cycles; ~396 redundant one-word writes cannot close a ~350k CPU-cycle gap |
 | P1 | Exact camera collision-solve memoization | rejected | exact visual sequence and lower camera CPU in both; normal v1 cadence regressed 26.99→26.81 FPS and <=2vb 79.2%→77.5% |
+| S1 | Hoist pad/visibility work into present wait | rejected by dependency/contract | present spin is tear-free vblank quantisation; input and visibility depend on the next tick/post-update camera, and early polling changes latency |
 | C1 | Cooker worst-view 30 FPS/RAM/packet validator | queued | Fit only after surviving engine changes |
 | H1 | Real-hardware timer, cadence, tear, seam, and near-plane sweep | queued | Mandatory final gate |
 
