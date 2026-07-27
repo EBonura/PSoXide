@@ -1169,6 +1169,12 @@ extreme-left `(0..31, 112..126)` screen patch. Adjacent frames were exact.
 Because the output change is real, no normal-mode benchmark was run and the
 inline force was removed.
 
+R32b kept the fog computation forced-inline but routed the no-fog return through
+an outlined helper, attempting to preserve v1's call boundary. It retained most
+of the v3 gain (1,416,120→1,381,866 mean render and
+321,902→309,415 I-cache stalls), but changed 1/925 v3 images at guest frame
+1658. It was also removed before a v1 run.
+
 ### R33: force-inline the projected split-safety predicate
 
 The compact `projected_triangle_can_skip_split` predicate accounts for 0.75% of
@@ -1255,7 +1261,7 @@ profile remains the validated target configuration.
 | R29 | Remove dense-room identity-index scratch writes | rejected | v3 exact and render -7.3k; v1 render -3.4k but 1/1,046 hashes changed by one pixel for one frame |
 | R30 | Share visible/all-cell surface-emission tail | rejected | engine tests pass, but v3 payload grows +96,256 B and persistent asset loading fails |
 | R31/R31b | Force/hint inline the projected TR quad leaf | rejected/no-op | forced form saves 21.7k render cycles but changes 431/925 v3 hashes and GP0 words; ordinary hint is bit-for-bit baseline |
-| R32 | Force-inline cached baked-room fog shading | rejected | v3 exact and render -35.2k; v1 render -5.8k but one frame changes in a 135-pixel left-edge patch |
+| R32/R32b | Force-inline cached baked-room fog shading | rejected | R32: v3 exact and render -35.2k, but v1 changes one frame; outlined no-fog R32b changes 1/925 v3 frames |
 | R33 | Force-inline projected split-safety predicate | rejected | focused tests pass, but v3 payload grows +141,312 B and persistent asset loading fails |
 | O1 | Whole program at `-O2` | rejected | -53,248 B, but 820/925 v3 images change and primitives fall 418.2→366.9 |
 | O2 | Whole program at `-Os` | rejected | -178,176 B, but render rises 29%, primitives fall to 335.4, and 698 images change |
