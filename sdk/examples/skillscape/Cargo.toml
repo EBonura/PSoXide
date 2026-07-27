@@ -1,0 +1,29 @@
+[package]
+name    = "skillscape"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+# Examples live outside the sdk/ workspace so cargo doesn't try to
+# compile them for the host target when the user runs `cargo check`
+# from the repo root.
+[workspace]
+
+[[bin]]
+name = "skillscape"
+path = "src/main.rs"
+
+[profile.release]
+# No unwinder in no_std; abort on panic keeps the binary small and
+# doesn't require `libunwind` bits.
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-gpu  = { path = "../../crates/psx-gpu" }
+psx-rt   = { path = "../../crates/psx-rt" }
+psx-pad  = { path = "../../crates/psx-pad" }
+psx-font = { path = "../../crates/psx-font" }
+psx-vram = { path = "../../crates/psx-vram" }
+psx-mc   = { path = "../../crates/psx-mc" }

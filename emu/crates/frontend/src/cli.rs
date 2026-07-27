@@ -208,6 +208,18 @@ pub struct LaunchArgs {
     /// Override the configured BIOS for this headless launch.
     #[arg(long)]
     pub bios: Option<PathBuf>,
+    /// Attach a port-1 memory card backed by this host file for the
+    /// duration of the run (side-loaded `.exe` only). Missing/empty
+    /// file attaches a blank unformatted card; the card's contents are
+    /// written back to this path when the run ends, so repeated
+    /// invocations round-trip saves the same way a real console would.
+    #[arg(long)]
+    pub memcard: Option<PathBuf>,
+    /// Same as `--memcard`, but for the port-2 card slot -- lets a
+    /// headless run exercise dual-memory-card fallback logic (e.g. no
+    /// card in slot 1, a card in slot 2).
+    #[arg(long)]
+    pub memcard2: Option<PathBuf>,
     /// Mount a disc alongside a side-loaded executable without booting from
     /// that disc. This is useful for hardware probes and homebrew that use
     /// the HLE BIOS entry path but still exercise the CD-ROM controller.
@@ -802,6 +814,14 @@ fn run_headless_launch(
             // intercepted by HLE dispatch.
             bus.enable_hle_bios();
             attach_headless_playtest_pad(&mut bus, args.digital_pad);
+            if let Some(mc_path) = args.memcard.as_ref() {
+                let initial = std::fs::read(mc_path).unwrap_or_default();
+                bus.attach_memcard_port1(initial);
+            }
+            if let Some(mc_path) = args.memcard2.as_ref() {
+                let initial = std::fs::read(mc_path).unwrap_or_default();
+                bus.attach_memcard_port2(initial);
+            }
             if emit_summary {
                 eprintln!(
                     "[cli] side-loaded {} - entry=0x{:08x} payload={}B",
@@ -1652,6 +1672,17 @@ fn run_headless_launch(
         }
     }
 
+    if let Some(mc_path) = args.memcard.as_ref() {
+        if let Some(bytes) = bus.memcard_port1_snapshot() {
+            let _ = std::fs::write(mc_path, &bytes);
+        }
+    }
+    if let Some(mc_path) = args.memcard2.as_ref() {
+        if let Some(bytes) = bus.memcard_port2_snapshot() {
+            let _ = std::fs::write(mc_path, &bytes);
+        }
+    }
+
     let (display_hash, display_width, display_height, display_byte_len) = bus.gpu.display_hash();
     let (display_rgba, display_rgba_width, display_rgba_height) = bus.gpu.display_rgba8();
     Ok(HeadlessLaunchResult {
@@ -2148,6 +2179,8 @@ fn validation_launch_args(
         game_id: None,
         savestate: None,
         bios: None,
+        memcard: None,
+        memcard2: None,
         disc: None,
         steps: checkpoint.stop.steps,
         guest_frames: checkpoint.stop.guest_frames,

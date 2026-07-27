@@ -18,8 +18,16 @@
 //! ```
 //!
 //! Directory entry (128 bytes):
-//! `[0]` alloc state, `[4..8]` size LE, `[8..10]` next-block link LE,
-//! `[10..30]` NUL-terminated name, `[127]` XOR checksum of `[0..127)`.
+//! `[0]` alloc state, `[4..8]` size LE (the file's *total block allocation* in
+//! bytes -- `blocks * 8192`, not the payload length; the BIOS validates this
+//! against the block count and hides entries where it disagrees),
+//! `[8..10]` next-block link LE, `[10..30]` NUL-terminated name,
+//! `[127]` XOR checksum of `[0..127)`.
+//!
+//! `SC` title header, first frame of a file's first block: `[2..4]` icon
+//! display flag, u16 LE (`0x11` none, `0x12` one static frame, `0x13`
+//! two-frame animated), `[4..68]` title (Shift-JIS), `[0x60..0x80]` 16-colour
+//! CLUT.
 
 use crate::{
     Block, Card, Entry, Error, Result, CONTAINER_LEN, CONTAINER_MAGIC, DATA_BLOCKS,
@@ -44,11 +52,15 @@ fn is_free(state: u8) -> bool {
 }
 
 // Title (`SC`) header offsets within a file's first frame.
+// `icon_flag` is a u16 LE (0x11 none, 0x12 one static frame, 0x13 two-frame
+// animated) immediately followed by the title -- there is no separate
+// block-count field in the real format.
 const T_ICON_FLAG: usize = 2;
-const T_BLOCKS: usize = 3;
 const T_TITLE: usize = 4;
 const T_TITLE_LEN: usize = 64;
 const T_CLUT: usize = 0x60;
+/// One static icon frame (this driver always writes exactly one).
+const ICON_FLAG_STATIC: u16 = 0x12;
 
 const LINK_NONE: u16 = 0xFFFF;
 /// Payload frames in a file's first block (title + icon consume 2 frames).
@@ -57,6 +69,8 @@ const FIRST_BLOCK_FRAMES: usize = FRAMES_PER_BLOCK - 2;
 const FIRST_BLOCK_CAP: usize = FIRST_BLOCK_FRAMES * FRAME_SIZE; // 7936
 /// Payload bytes in a continuation block.
 const BLOCK_CAP: usize = FRAMES_PER_BLOCK * FRAME_SIZE; // 8192
+/// Bytes in one allocated block -- the unit the directory size field counts.
+const BLOCK_BYTES: usize = FRAMES_PER_BLOCK * FRAME_SIZE; // 8192
 
 /// XOR of a frame's first 127 bytes (the directory checksum).
 fn checksum(frame: &[u8; FRAME_SIZE]) -> u8 {
@@ -359,9 +373,22 @@ impl<B: Block> Card<B> {
     /// Write a save (uncompressed), overwriting any existing file of the same
     /// name. `name` is the BIOS file name (product code + label, <= 20 ASCII);
     /// `title` is the human-readable label shown by the card manager (<= 32
-    /// ASCII).
+    /// ASCII). Uses the generic placeholder icon; see [`Card::write_with_icon`]
+    /// for a game-specific one.
     pub fn write(&mut self, name: &str, title: &str, data: &[u8]) -> Result<()> {
-        self.write_inner(name, title, data, false, data.len() as u32)
+        self.write_inner(name, title, data, false, data.len() as u32, &Icon::default())
+    }
+
+    /// Like [`Card::write`], with a custom [`Icon`] shown in the card manager
+    /// instead of the generic placeholder.
+    pub fn write_with_icon(
+        &mut self,
+        name: &str,
+        title: &str,
+        data: &[u8],
+        icon: &Icon,
+    ) -> Result<()> {
+        self.write_inner(name, title, data, false, data.len() as u32, icon)
     }
 
     /// Write a save, compressing the payload with LZSS when it helps. `scratch`
@@ -375,11 +402,25 @@ impl<B: Block> Card<B> {
         data: &[u8],
         scratch: &mut [u8],
     ) -> Result<()> {
+        self.write_compressed_with_icon(name, title, data, scratch, &Icon::default())
+    }
+
+    /// Like [`Card::write_compressed`], with a custom [`Icon`] shown in the
+    /// card manager instead of the generic placeholder.
+    #[cfg(feature = "compress")]
+    pub fn write_compressed_with_icon(
+        &mut self,
+        name: &str,
+        title: &str,
+        data: &[u8],
+        scratch: &mut [u8],
+        icon: &Icon,
+    ) -> Result<()> {
         match crate::compress::compress(data, scratch) {
             Some(clen) if clen < data.len() => {
-                self.write_inner(name, title, &scratch[..clen], true, data.len() as u32)
+                self.write_inner(name, title, &scratch[..clen], true, data.len() as u32, icon)
             }
-            _ => self.write_inner(name, title, data, false, data.len() as u32),
+            _ => self.write_inner(name, title, data, false, data.len() as u32, icon),
         }
     }
 
@@ -390,6 +431,7 @@ impl<B: Block> Card<B> {
         stored: &[u8],
         compressed: bool,
         raw_len: u32,
+        icon: &Icon,
     ) -> Result<()> {
         let name = name.as_bytes();
         validate_name(name)?;
@@ -436,7 +478,7 @@ impl<B: Block> Card<B> {
         }
 
         // Title + icon frames in the first block.
-        self.write_title(phys[0], title, need as u8)?;
+        self.write_title(phys[0], title, icon)?;
 
         // Container header + payload across the chain.
         let mut hdr = [0u8; CONTAINER_LEN];
@@ -473,7 +515,10 @@ impl<B: Block> Card<B> {
             e[E_LINK] = link as u8;
             e[E_LINK + 1] = (link >> 8) as u8;
             if k == 0 {
-                write_u32(&mut e[E_SIZE..], total as u32);
+                // Real PS1 format: size is the block-aligned allocation, not
+                // the raw payload length (`total`) -- the BIOS validates this
+                // against the block count and hides entries where it disagrees.
+                write_u32(&mut e[E_SIZE..], (need * BLOCK_BYTES) as u32);
                 let n = name.len().min(MAX_NAME);
                 e[E_NAME..E_NAME + n].copy_from_slice(&name[..n]);
             }
@@ -482,20 +527,18 @@ impl<B: Block> Card<B> {
         Ok(())
     }
 
-    /// Write the `SC` title header + default icon into a file's first block.
-    fn write_title(&mut self, phys_block: u8, title: &str, blocks: u8) -> Result<()> {
+    /// Write the `SC` title header + icon into a file's first block.
+    fn write_title(&mut self, phys_block: u8, title: &str, icon: &Icon) -> Result<()> {
         let mut hdr = [0u8; FRAME_SIZE];
         hdr[0] = b'S';
         hdr[1] = b'C';
-        hdr[T_ICON_FLAG] = 0x11; // one icon frame
-        hdr[T_BLOCKS] = blocks;
+        hdr[T_ICON_FLAG..T_ICON_FLAG + 2].copy_from_slice(&ICON_FLAG_STATIC.to_le_bytes());
         // Title as Shift-JIS: ASCII is a single-byte subset, copied verbatim.
         let tb = title.as_bytes();
         let n = tb.len().min(T_TITLE_LEN);
         hdr[T_TITLE..T_TITLE + n].copy_from_slice(&tb[..n]);
         // Icon palette.
-        let clut = default_clut();
-        for (i, c) in clut.iter().enumerate() {
+        for (i, c) in icon.clut.iter().enumerate() {
             hdr[T_CLUT + i * 2] = *c as u8;
             hdr[T_CLUT + i * 2 + 1] = (*c >> 8) as u8;
         }
@@ -503,9 +546,7 @@ impl<B: Block> Card<B> {
         self.dev.write_frame(base, &hdr)?;
 
         // Icon pixels in the next frame.
-        let mut icon = [0u8; FRAME_SIZE];
-        default_icon(&mut icon);
-        self.dev.write_frame(base + 1, &icon)?;
+        self.dev.write_frame(base + 1, &icon.pixels)?;
         Ok(())
     }
 
@@ -613,8 +654,50 @@ fn copy_entry_name(entry: &[u8; FRAME_SIZE], out: &mut [u8; MAX_NAME + 1]) -> u8
 }
 
 // --------------------------------------------------------------------------
-// Default icon (a simple framed disk so saves are visible in the manager).
+// Save icon (16x16 4bpp + a 16-colour BGR555 palette).
 // --------------------------------------------------------------------------
+
+/// The pixel data + palette shown for a save in the card manager. Build a
+/// custom one with [`Icon::new`], or use [`Icon::default`] for a generic
+/// placeholder.
+#[derive(Copy, Clone)]
+pub struct Icon {
+    /// 16-entry BGR555 palette, index 0 unused (transparent).
+    pub clut: [u16; 16],
+    /// 16x16 pixels, 4bpp packed two-per-byte (low nibble = left pixel).
+    pub pixels: [u8; FRAME_SIZE],
+}
+
+impl Icon {
+    /// Build an icon from a palette and a 16x16 grid of palette indices
+    /// (0..16, row-major).
+    pub fn new(clut: [u16; 16], indices: &[[u8; 16]; 16]) -> Self {
+        let mut pixels = [0u8; FRAME_SIZE];
+        for (y, row) in indices.iter().enumerate() {
+            for (x, &idx) in row.iter().enumerate() {
+                let byte = (y * 16 + x) / 2;
+                if x & 1 == 0 {
+                    pixels[byte] = (pixels[byte] & 0xF0) | (idx & 0x0F);
+                } else {
+                    pixels[byte] = (pixels[byte] & 0x0F) | ((idx & 0x0F) << 4);
+                }
+            }
+        }
+        Icon { clut, pixels }
+    }
+}
+
+impl Default for Icon {
+    /// A generic bordered blue square with a yellow accent corner.
+    fn default() -> Self {
+        let mut pixels = [0u8; FRAME_SIZE];
+        default_icon(&mut pixels);
+        Icon {
+            clut: default_clut(),
+            pixels,
+        }
+    }
+}
 
 /// 16-entry BGR555 palette: transparent, frame, fill, accent.
 fn default_clut() -> [u16; 16] {

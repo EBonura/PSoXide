@@ -203,6 +203,35 @@ fn corrupt_stored_len_is_rejected_not_panicking() {
     assert_eq!(c.read(NAME, &mut buf), Err(Error::BadContainer));
 }
 
+#[test]
+fn on_card_bytes_match_the_real_bios_format() {
+    // These two fields are never read back by this driver (`read()` trusts
+    // the block chain + container header instead), so a regression here is
+    // invisible to every other test while still being real hardware breaks:
+    // a real BIOS validates the directory size field against the block
+    // count, and reads the icon flag as a u16 to know how to parse the
+    // header -- 216 or a corrupted flag value has been observed to make a
+    // save that reads back byte-perfect simply not show up in the BIOS's
+    // own memory-card manager.
+    let mut c = fresh();
+    c.write(NAME, "T", b"tiny payload").unwrap();
+    let image = *c.into_inner().image();
+
+    // Directory entry for the first (and only) allocated block: frame 1,
+    // i.e. bytes [128..256) of the image.
+    let dir = &image[128..256];
+    let size = u32::from_le_bytes(dir[4..8].try_into().unwrap());
+    assert_eq!(size, 8192, "directory size field must be block-aligned (blocks * 8192), not the payload length");
+
+    // "SC" header, first frame of block 1 (the file's first data block):
+    // bytes [8192..8320).
+    let hdr = &image[8192..8320];
+    assert_eq!(&hdr[0..2], b"SC");
+    let icon_flag = u16::from_le_bytes(hdr[2..4].try_into().unwrap());
+    assert_eq!(icon_flag, 0x12, "icon flag must be a clean u16 (one static frame), not corrupted by a block-count byte in its high byte");
+    assert_eq!(&hdr[4..4 + 1], b"T", "title must start right after the 2-byte icon flag");
+}
+
 fn blank_entry() -> Entry {
     Entry {
         name: [0; crate::MAX_NAME + 1],

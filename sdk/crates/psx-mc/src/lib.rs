@@ -54,10 +54,11 @@ pub mod compress;
 #[cfg(feature = "hw")]
 pub mod sio;
 
+pub use fs::Icon;
 pub use ram::RamCard;
 
 #[cfg(feature = "hw")]
-pub use sio::{HardwareCard, Slot};
+pub use sio::{AckMode, HardwareCard, ReadDiag, Slot, Timing};
 
 // --------------------------------------------------------------------------
 // Card geometry (fixed by the hardware).
