@@ -1456,6 +1456,30 @@ removed. This closes texture-window dedup as a route to the missing CPU budget:
 even a zero-overhead implementation can save only the already-bounded GPU/DMA
 state words, not the roughly 350k CPU cycles still required.
 
+### R48: cooker-generated exact black-fog blend
+
+Every fog-enabled cortex_v3 room uses black fog. R48 teaches the cooker to
+select an exact cached-room blend that removes the identically-zero
+`fog_channel * weight` term while retaining the generic path for projects with
+any non-black fog. The no-fog policy remains unchanged. A host test exhausts
+all 256 source-channel values and all 257 legal weights against the generic
+blend.
+
+cortex_v3 passed all 925 lockstep hashes exactly. The payload shrank 2,048
+bytes and lockstep render improved 1,365,369→1,361,860 cycles, p95
+1,918,050→1,907,798, and max 2,173,485→2,165,639. Normal cadence delivered
+eight additional frames, raising 16.00→16.30 FPS; render mean/p95/max improved
+1,319,726/1,875,509/2,176,939→1,316,440/1,868,878/2,163,493. The change does
+raise I-cache stalls by 2–4k and does not improve the two-vblank percentage,
+so it is a small content-policy win rather than the missing architecture
+breakthrough.
+
+cortex_v1 generated the identical no-fog binary: payload, all 1,046 common
+lockstep hashes, render distribution, normal delivered-frame count, FPS, and
+I-cache metrics are bit-for-bit R41. The runtime suite passes 63 unit tests and
+5 policy experiments; the cooker policy tests cover no-fog, general fog, and
+black fog. R48 is retained.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1532,6 +1556,7 @@ state words, not the roughly 350k CPU cycles still required.
 | R44 | Skip TR child culls after the cached root cull | rejected | Warped authored quads invalidate the planar proof; v1 primitives 305.1→333.8 and 794 images change |
 | R46/R46b | Cull TR lattice children wholly beyond the viewport / 48px guard band | rejected | v1 render -7.0k/-1.6k and <=2vb +1.4/+1.3 points, but both forms change 223 images; captured wall geometry is genuinely missing |
 | R47 | Deduplicate adjacent texture-window E2 words while linking OT buckets | rejected | ~405 GP0 words/~196 E2 writes removed per draw tick, but v3 render +16.6k, I-cache +2.2k, <=2vb -0.8 points, and 620 images change |
+| R48 | Cooker-generated exact black-fog blend | accepted | v3 925/925 exact, payload -2 KiB, normal 16.00→16.30 FPS and render -3.3k; v1 binary/metrics unchanged |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
