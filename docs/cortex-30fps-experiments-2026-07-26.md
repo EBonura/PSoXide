@@ -1909,6 +1909,66 @@ single-leaf bisections were then run against v1:
 Every isolated layout regresses v1, so the attractive v3-only broad form and
 all bisections are removed.
 
+### R73: keep initialized pass controls away from unused slot scratch
+
+The current PC profile attributed 3.62% of gameplay samples to `memset`.
+Return-address attribution split that total into its real callers. The largest
+render-side caller (0.71% of all samples) is a 4,102-byte clear while creating
+the bucketed `WorldRenderPass`. Disassembly showed that bucketed mode does not
+request this clear: LLVM coalesces the required zero stores for `command_len`
+and `next_order` with the adjacent undefined 4 KiB `slot_tails` field, choosing
+zero for those otherwise-unused bytes.
+
+R73 moved the initialized control fields ahead of both `MaybeUninit` slot
+arrays. This is a layout-only change, preserves every pass mode, removes the
+large clear, and leaves payload size unchanged. The emitted GPU frame-command
+hash sequence is exact in both projects. It also improves the isolated render
+section:
+
+| project/mode | render mean | render p95 | I-cache | end-to-end result |
+|---|---:|---:|---:|---|
+| v3 lockstep | 1,230,740→1,224,946 | 1,638,902→1,632,888 | 262,685→264,098 | same command sequence; one display checkpoint presents the next exact frame one route tick earlier |
+| v3 normal | 1,197,458→1,189,955 | 1,610,299→1,611,114 | 286,097→285,130 | 17.76 FPS unchanged; complete visual task only -299 cycles |
+| v1 lockstep | 761,999→756,042 | 1,084,937→1,078,881 | 169,555→169,090 | all 1,046 visual-frame hashes exact; one checkpoint moves guest frame 377→378 |
+| v1 normal | 739,443→732,041 | 1,059,406→1,052,617 | 169,284→169,120 | 26.99→26.85 FPS; <=2-vblank periods 79.2%→78.2% |
+
+The CPU work simply moves into presentation wait: v3 normal's complete visual
+task improves only 300 cycles, while v1's mean presentation section grows
+about 10k cycles and complete visual work grows about 3.5k. Since the normal
+v1 target regresses despite the attractive render micro-metric, the field
+layout was restored. The call-site attribution remains useful: the next
+meaningful `memset` target is the 64-byte blended-model chunk clear inside the
+current 14.17% model dispatcher, not the GPU/vblank-hidden pass setup.
+
+### R74/R75: eliminate model-index clear, then pair both sampled clears
+
+R74 changed the model projector's 32-entry blended-vertex index chunk from an
+eagerly zeroed `[u16; 32]` to `MaybeUninit<[u16; 32]>`. Every consumed entry
+was already overwritten before `blended_len` advanced; the flush now takes the
+initialized raw prefix explicitly. The existing 37-vertex seam test still
+matches the canonical per-vertex path. In isolation, v3 lockstep improved
+render mean 1,230,740→1,220,541 and I-cache 262,685→258,584 with 925/925
+hashes exact; normal cadence gained one visual (17.76→17.80 FPS). But v1
+normal fell 26.99→26.85 FPS and one lockstep display checkpoint changed, so
+R74 alone is rejected.
+
+R75 combines R74 with R73's pass-control field layout. This changes the
+critical-path phase enough that the two individually rejected clear removals
+become a cross-project win:
+
+| project/mode | FPS | render mean / p95 / max | <=2vb | I-cache | visual gate |
+|---|---:|---:|---:|---:|---|
+| v1 lockstep | 29.96→29.96 | 761,999/1,084,937/1,209,753→749,895/1,066,124/1,192,856 | 77.4%→78.6% | 169,555→167,856 | all 1,046 rendered-frame hashes exact in sequence; one checkpoint moves between guest frames 375/376 |
+| v1 normal | 26.99→27.06 | 739,443/1,059,406/1,210,003→729,685/1,045,742/1,194,125 | 79.2%→79.4% | 169,284→167,808 | final display and VRAM exact |
+| v3 lockstep | 29.98→29.98 | 1,230,740/1,638,902/1,979,660→1,214,469/1,620,612/1,955,975 | 4.5%→5.7% | 262,685→257,774 | 925/925 guest-frame hashes exact |
+| v3 normal | 17.76→17.87 | 1,197,458/1,610,299/1,965,497→1,182,859/1,587,696/1,852,751 | 3.1%→3.3% | 286,097→281,295 | final display and VRAM exact |
+
+The payload sizes remain 1,482,752 bytes (v1) and 1,366,016 bytes (v3).
+R75 is retained as an engine-wide, visual-preserving win. The lockstep report
+still flags v1's single guest-frame checkpoint relocation because it keys on
+guest frame rather than rendered-frame sequence; direct sequence comparison
+confirms there is no changed image.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -2009,6 +2069,9 @@ all bisections are removed.
 | R70 | Re-profile the current accepted build with PC samples | diagnostic complete | 8.26M gameplay samples: model dispatcher 14.17%, visible-room wrapper 12.97%, TR entry+leaf 8.49%, memcpy+memset 7.27%; portal refresh 0.16% |
 | R71 | Outline the hot packed/unclamped model batch | rejected | v3 925/925 exact and payload -2 KiB, but render +6.4k and I-cache +7.9k |
 | R72/R72b-d | Outline zero-count model fallback leaves | rejected | broad form wins v3 but changes two v1 checkpoints and regresses mean; every single-leaf v1 bisection regresses |
+| R73 | Reorder pass controls to eliminate a compiler-created 4 KiB bucketed-mode clear | rejected | exact GPU command sequence and render -6.0k/-7.5k for v1/v3, but the saving becomes GPU/vblank wait; v1 normal falls 26.99→26.85 FPS and <=2vb 79.2%→78.2% |
+| R74 | Leave overwritten blended-model index scratch uninitialized | rejected alone | v3 exact and 17.76→17.80 FPS, but v1 falls 26.99→26.85 FPS and shifts one display checkpoint |
+| R75 | Pair R73 pass layout with R74 initialized-prefix model scratch | accepted | rendered-frame sequence exact; v1 26.99→27.06 FPS, v3 17.76→17.87 FPS; render mean -9.8k/-14.6k and I-cache -1.5k/-4.8k |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
