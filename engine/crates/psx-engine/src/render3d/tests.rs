@@ -1851,21 +1851,24 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
     scene::load_translation(primary.translation);
     let indices: [u16; SEAM_VERTS] = core::array::from_fn(|i| i as u16);
     for chunk in indices.chunks(BLENDED_VERTEX_CHUNK) {
-        flush_blended_model_vertex_chunk(
-            chunk,
-            &vertices,
-            primary,
-            &joint_view_transforms,
-            projection,
-            near_z,
-            &mut actual,
-            &mut all_in_front,
-            &mut all_inside,
-            &mut min_x,
-            &mut max_x,
-            &mut min_y,
-            &mut max_y,
-        );
+        unsafe {
+            flush_blended_model_vertex_chunk(
+                chunk.as_ptr(),
+                chunk.len(),
+                &vertices,
+                primary,
+                &joint_view_transforms,
+                projection,
+                near_z,
+                &mut actual,
+                &mut all_in_front,
+                &mut all_inside,
+                &mut min_x,
+                &mut max_x,
+                &mut min_y,
+                &mut max_y,
+            );
+        }
     }
 
     assert_eq!(actual, expected);
