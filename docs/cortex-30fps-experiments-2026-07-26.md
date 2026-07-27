@@ -1839,6 +1839,14 @@ checkpoints. Most importantly, v1 normal loses three delivered visuals:
 26.99→26.88 FPS, <=2-vblank periods 79.2%→78.0%, despite render mean improving
 1.4k. The flag is rejected.
 
+### R66: LLVM post-register-allocation machine scheduler
+
+R66 enabled `--enable-post-misched` so LLVM could reschedule MIPS instructions
+after physical register assignment. Both projects are complete no-ops:
+payloads, all 1,971 lockstep hashes, route cadence, stage distributions, and
+I-cache stalls are identical. The backend already emits the same schedule (or
+declines this pass for MIPS-I), so the flag is not retained.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1932,6 +1940,7 @@ checkpoints. Most importantly, v1 normal loses three delivered visuals:
 | R63 | Enable LLVM merge-functions aliases | no-op | v1/v3 payloads, all 1,971 lockstep hashes, and every reported metric are identical; compiler found no foldable shipping functions |
 | R64 | Enable LLVM hot/cold splitting | rejected | 925/925 v3 images exact and payload unchanged, but render mean +161/max +1.6k and I-cache +1.3k; no normal/v1 matrices |
 | R65 | Enable LLVM MIPS tail calls | rejected | v3 exact and render -2.5k normal; v1 render also improves, but normal cadence falls 26.99→26.88 FPS and two lockstep checkpoints change |
+| R66 | Enable LLVM post-RA machine scheduling | no-op | v1/v3 payloads, all 1,971 hashes, and every measured metric are identical |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
