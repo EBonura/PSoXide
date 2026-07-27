@@ -902,6 +902,7 @@ fn cached_full_ceiling_faces_playable_interior() {
             (128, 128, 128),
         ))],
         &NoWorldSurfaceLighting,
+        false,
         &camera,
         options,
         CachedRoomDepthMode::FixedCell,
@@ -987,6 +988,7 @@ fn cached_surface_crossing_near_plane_keeps_visible_half() {
             (128, 128, 128),
         ))],
         &NoWorldSurfaceLighting,
+        false,
         &camera,
         WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096)),
         CachedRoomDepthMode::PerTriangle,
@@ -1260,6 +1262,7 @@ fn wall_submission_probe_pooled(
             (128, 128, 128),
         ))],
         &NoWorldSurfaceLighting,
+        false,
         &camera,
         WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 25_000))
             .with_adaptive_subdivision_sector_size(1664)

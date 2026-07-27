@@ -983,6 +983,20 @@ pub trait WorldSurfaceLighting {
         None
     }
 
+    /// Shade a prewarmed static packet from baked RGB without reconstructing
+    /// its immutable material.
+    ///
+    /// The default declines this path. Project-specialized lighting adapters
+    /// can opt in when their result depends only on baked RGB and prepared
+    /// vertex depths.
+    fn shade_prewarmed_baked_vertices(
+        &self,
+        _sample: WorldSurfaceSample,
+        _depths: Option<[i32; 4]>,
+    ) -> Option<[(u8, u8, u8); 4]> {
+        None
+    }
+
     /// Whether cached surfaces with baked RGB can be submitted with
     /// those colors directly. Static no-fog room lighting can return
     /// `true` because the cooker has already applied material tint and
