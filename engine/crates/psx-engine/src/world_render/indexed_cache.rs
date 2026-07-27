@@ -339,6 +339,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
+    shade_prewarmed_packets: bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     depth_mode: CachedRoomDepthMode,
@@ -583,6 +584,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         projected_depths,
                         use_vertex_depths,
                         use_direct_baked_rgb,
+                        shade_prewarmed_packets,
                         screen_bounds,
                         materials,
                         lighting,
@@ -623,6 +625,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     accepted_cell_depths: &mut [i32],
     materials: &[WorldRenderMaterial],
     lighting: &L,
+    shade_prewarmed_packets: bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     depth_mode: CachedRoomDepthMode,
@@ -787,6 +790,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                         projected_depths,
                         use_vertex_depths,
                         use_direct_baked_rgb,
+                        shade_prewarmed_packets,
                         screen_bounds,
                         materials,
                         lighting,
@@ -1055,6 +1059,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     projected_depths: &[i32],
     use_vertex_depths: bool,
     use_direct_baked_rgb: bool,
+    shade_prewarmed_packets: bool,
     screen_bounds: ProjectedScreenBounds,
     materials: &[WorldRenderMaterial],
     lighting: &L,
@@ -1104,6 +1109,34 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
         return 1;
     }
     profile.add_screen(RoomSurfaceMicroProfile::elapsed(screen_start));
+    #[cfg(not(feature = "room-surface-profile"))]
+    if shade_prewarmed_packets
+        && !use_direct_baked_rgb
+        && surface.has_baked_rgb()
+        && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX
+    {
+        if let Some((quad, valid)) = prebuilt.as_mut() {
+            let ready = **valid;
+            if ready & WARMED_ROOM_QUAD_READY != 0
+                && try_submit_shaded_encoded_warmed_room_quad(
+                    surface,
+                    projected,
+                    projected_metrics,
+                    vertex_depths,
+                    lighting,
+                    &options,
+                    submit_depths,
+                    depth_mode,
+                    subdivision_mode,
+                    quad,
+                    ready,
+                    world,
+                )
+            {
+                return 1;
+            }
+        }
+    }
     #[cfg(not(feature = "room-surface-profile"))]
     if use_direct_baked_rgb
         && surface.has_baked_rgb()
@@ -1765,6 +1798,21 @@ fn warmed_room_quad_packet_vertices_from_ready(
     }
 }
 
+#[inline(always)]
+fn warmed_room_quad_packet_colors_from_ready(
+    mut colors: [(u8, u8, u8); 4],
+    ready: u8,
+) -> [(u8, u8, u8); 4] {
+    if ready & WARMED_ROOM_QUAD_REVERSE_FRONT != 0 {
+        colors = reverse_quad_winding(colors);
+    }
+    if ready & WARMED_ROOM_QUAD_SPLIT_NE_SW != 0 {
+        [colors[0], colors[1], colors[3], colors[2]]
+    } else {
+        [colors[1], colors[0], colors[2], colors[3]]
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn try_submit_encoded_warmed_room_quad<const OT: usize>(
@@ -1855,6 +1903,76 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
         .try_submit_warmed_textured_gouraud_quad(
             quad,
             packet_verts,
+            projected_metrics.hardware_extent_safe()
+                && surface_options.textured_split_max_edge == 0,
+            &surface_options,
+            prepared_depth,
+        )
+        .is_some()
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn try_submit_shaded_encoded_warmed_room_quad<const OT: usize, L: WorldSurfaceLighting>(
+    surface: &CachedRoomSurface,
+    projected: [ProjectedVertex; 4],
+    projected_metrics: ProjectedQuadMetrics,
+    vertex_depths: Option<[i32; 4]>,
+    lighting: &L,
+    options: &WorldSurfaceOptions,
+    submit_depths: CachedRoomSubmitDepths,
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
+    quad: &mut QuadTexturedGouraud,
+    ready: u8,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> bool {
+    let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+    let surface_risky = cached_surface_risk_for_modes(
+        depth_mode,
+        subdivision_mode,
+        kind,
+        surface,
+        projected,
+        projected_metrics.depth_span(),
+    );
+    let use_triangle_depth =
+        cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+    let (surface_options, prepared_depth) = if use_triangle_depth {
+        (triangle_depth_options(*options), None)
+    } else if matches!(kind, WorldSurfaceKind::Wall { .. }) {
+        (*options, submit_depths.vertical)
+    } else {
+        (horizontal_depth_options(*options), submit_depths.horizontal)
+    };
+    let surface_options = cached_surface_subdivision_options(
+        surface_options,
+        subdivision_mode,
+        kind,
+        use_triangle_depth,
+        surface_risky,
+    );
+    if tomb_raider_warmed_quad_requires_dynamic_submit(&surface_options, projected) {
+        return false;
+    }
+    if encoded_warmed_room_quad_backface_culled(projected, ready) {
+        return true;
+    }
+    let Some(colors) =
+        lighting.shade_prewarmed_baked_vertices(surface.sample_without_center(), vertex_depths)
+    else {
+        return false;
+    };
+    let packet_verts = warmed_room_quad_packet_vertices_from_ready(projected, ready);
+    let packet_colors = warmed_room_quad_packet_colors_from_ready(colors, ready);
+    let prepared_depth = prepared_depth.unwrap_or_else(|| {
+        PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+    });
+    world
+        .try_submit_warmed_textured_gouraud_quad_with_colors(
+            quad,
+            packet_verts,
+            packet_colors,
             projected_metrics.hardware_extent_safe()
                 && surface_options.textured_split_max_edge == 0,
             &surface_options,
