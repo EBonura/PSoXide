@@ -1518,6 +1518,36 @@ render mean/p95/max rose by 2,572/1,634/6,577 cycles and I-cache stalls rose by
 generic specialization recovered its cycles. Both batching forms were
 removed.
 
+### R51: shade and patch prewarmed fogged room packets
+
+Static opaque whole room quads already own persistent packet skeletons whose
+material, UV, winding, split order, and texture state were prepared when the
+room became resident. The fogged path nevertheless reconstructed those
+immutable decisions before patching dynamic positions and colours. R51 adds a
+generated lighting capability that shades baked RGB without a material, then
+uses the packet's encoded orientation/transparency state to patch and queue it
+directly. TR candidates, animated/translucent materials, unsafe hardware
+extents, near clipping, and unproven lighting implementations retain the full
+fallback.
+
+The cooker passes a literal capability flag into the generic cached-room draw.
+No-fog projects pass `false`, so LLVM removes the new branch and helper
+monomorph entirely. cortex_v1 therefore keeps R48's 1,482,752-byte payload and
+every lockstep and normal metric bit-for-bit:
+
+| project / mode | R48 render mean / p95 / max | R51 render mean / p95 / max | FPS | <=2vb | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---:|---|
+| v1 lockstep | 762,186 / 1,089,330 / 1,210,193 | identical | fixed | 77.2%→77.2% | 168,921→168,921 | all 1,046 guest-frame keys exact |
+| v1 normal | 739,898 / 1,064,039 / 1,211,472 | identical | 26.99→26.99 | 79.2%→79.2% | 168,349→168,349 | every reported metric identical |
+| v3 lockstep | 1,361,860 / 1,907,798 / 2,165,639 | 1,271,538 / 1,694,212 / 2,048,043 | fixed | 2.2%→3.5% | 314,044→288,528 | 925/925 exact |
+| v3 normal | 1,316,440 / 1,868,878 / 2,163,493 | 1,238,456 / 1,659,326 / 2,030,609 | 16.30→17.32 | 1.3%→2.5% | 337,101→308,777 | same lockstep workload; +28 presented visuals |
+
+The fogged executable grows 6 KiB, but no persistent RAM, packet capacity, or
+streamed record changes. The engine suite passes 269 unit tests plus its
+compile-time type guard; runtime passes 63 unit and 5 policy tests; cooker
+policy tests cover both capability values and general/black fog. R51 is
+retained as the new baseline.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1597,6 +1627,7 @@ removed.
 | R48 | Cooker-generated exact black-fog blend | accepted | v3 925/925 exact, payload -2 KiB, normal 16.00→16.30 FPS and render -3.3k; v1 binary/metrics unchanged |
 | R49–R49c | Runtime-select exact black-fog arithmetic in the generic vertex blend | rejected | Direct form: v3 exact and render -12.9k, but v1 26.99→26.81 FPS; outlined form still regresses v1; packed test changes one v3 image |
 | R50/R50b | Select black/general fog once per prop quad | rejected | Broad form grows v1 2 KiB and drops to 26.78 FPS; arch/cylinder-only form preserves v1 cadence but regresses v3 render +2.6k and I-cache +3.3k |
+| R51 | Shade and patch prewarmed static room packets under generated fog policy | accepted | v3 925/925 exact, normal 16.30→17.32 FPS, render mean -78.0k and p95 -209.6k; v1 payload and every measured metric bit-identical |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
