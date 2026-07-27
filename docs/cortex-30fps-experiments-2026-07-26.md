@@ -1480,6 +1480,44 @@ I-cache metrics are bit-for-bit R41. The runtime suite passes 63 unit tests and
 5 policy experiments; the cooker policy tests cover no-fog, general fog, and
 black fog. R48 is retained.
 
+### R49–R49c: runtime-selected black-fog blend
+
+R49 extended R48's exact black-fog arithmetic to every runtime lighting call
+by checking the fog colour inside the generic per-vertex blend. cortex_v3
+passed all 925 lockstep hashes and improved lockstep render mean/p95/max by
+11,951/21,492/22,641 cycles, with 11,845 fewer I-cache stall cycles. Normal
+cadence gained one visual (16.30→16.33 FPS), render mean fell 12,920 cycles,
+and the two-vblank rate rose 1.3%→1.6%.
+
+That otherwise attractive form failed the shared-engine gate. cortex_v1's
+1,047 ordered lockstep images remained exact, but normal cadence lost five
+visuals (26.99→26.81 FPS), two-vblank periods fell 79.2%→78.1%, and I-cache
+stalls rose by 430 cycles per visual. Extracting the black leaf behind a
+non-inlined call (R49b) recovered cadence only to 26.95 FPS while regressing
+render mean by 2,882 cycles and I-cache stalls by 3,233.
+
+R49c compressed the three-channel zero test into one bitwise expression. It
+recovered the direct form's v3 CPU saving (render mean -12,538 and I-cache
+-12,418 versus R48), but grew the payload by 2 KiB and changed one transient
+lockstep image at guest frame 1,608. All three forms were removed. Black-fog
+selection must remain at a cooker-visible boundary; adding it to the shared
+per-vertex helper is not neutral for the no-fog engine path.
+
+### R50/R50b: quad-batched runtime fog selection
+
+R50 moved black/general fog selection above four vertex blends and used one
+quad helper for arch, cylinder, box, image, and water paths. The broad version
+grew cortex_v1 by 2 KiB and reduced normal cadence
+26.99→26.78 FPS, with two-vblank periods 79.2%→77.5% and I-cache stalls
+168,349→170,270 per visual.
+
+R50b limited the helper to arches and cylinders. cortex_v1 returned to 26.99
+FPS and 79.2% two-vblank periods, but cortex_v3 regressed below R48: lockstep
+render mean/p95/max rose by 2,572/1,634/6,577 cycles and I-cache stalls rose by
+3,264. The result also proves those two prop classes are not where R49's
+generic specialization recovered its cycles. Both batching forms were
+removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1557,6 +1595,8 @@ black fog. R48 is retained.
 | R46/R46b | Cull TR lattice children wholly beyond the viewport / 48px guard band | rejected | v1 render -7.0k/-1.6k and <=2vb +1.4/+1.3 points, but both forms change 223 images; captured wall geometry is genuinely missing |
 | R47 | Deduplicate adjacent texture-window E2 words while linking OT buckets | rejected | ~405 GP0 words/~196 E2 writes removed per draw tick, but v3 render +16.6k, I-cache +2.2k, <=2vb -0.8 points, and 620 images change |
 | R48 | Cooker-generated exact black-fog blend | accepted | v3 925/925 exact, payload -2 KiB, normal 16.00→16.30 FPS and render -3.3k; v1 binary/metrics unchanged |
+| R49–R49c | Runtime-select exact black-fog arithmetic in the generic vertex blend | rejected | Direct form: v3 exact and render -12.9k, but v1 26.99→26.81 FPS; outlined form still regresses v1; packed test changes one v3 image |
+| R50/R50b | Select black/general fog once per prop quad | rejected | Broad form grows v1 2 KiB and drops to 26.78 FPS; arch/cylinder-only form preserves v1 cadence but regresses v3 render +2.6k and I-cache +3.3k |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
