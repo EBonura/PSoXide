@@ -419,14 +419,15 @@ pub(crate) fn push_box_prop(
         let center = box_prop_surface_center(world_vertices);
         let normal = box_prop_surface_normal(world_vertices);
         let face = usize::from(quad.source_face).min(crate::BOX_PROP_FACE_COUNT - 1);
+        let baked_uv = quad.uv_q8.map(|uv| bake_prop_uv(cooked_uvs[face], uv));
         box_prop_surfaces.push(PlaytestBoxPropSurface {
             vertices: world_vertices,
             center,
             normal,
-            uv_q8: quad.uv_q8,
+            uv_q8: baked_uv,
             baked_vertex_rgb: [rgb_tuple(tint_rgb[face]); 4],
             source_face: face as u8,
-            flags: 0,
+            flags: psx_level::box_prop_surface_flags::UV_BAKED,
         });
     }
 
@@ -569,7 +570,7 @@ pub(crate) fn push_cylinder_prop(
             usize::from(surface.material_slot).min(crate::CYLINDER_PROP_MATERIAL_COUNT - 1);
         let baked_uv = surface
             .uv_q8
-            .map(|uv| bake_cylinder_prop_uv(cooked_uvs[material_slot], uv));
+            .map(|uv| bake_prop_uv(cooked_uvs[material_slot], uv));
         cylinder_prop_surfaces.push(PlaytestCylinderPropSurface {
             vertices: world_vertices,
             center,
@@ -621,7 +622,7 @@ pub(crate) fn push_cylinder_prop(
     true
 }
 
-fn bake_cylinder_prop_uv(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> [u8; 2] {
+fn bake_prop_uv(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> [u8; 2] {
     let u = u32::from(uv_q8[0]);
     let v = u32::from(uv_q8[1]);
     let inv_u = 255 - u;
@@ -650,8 +651,8 @@ fn bake_cylinder_prop_uv(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> [u8; 2] {
 }
 
 #[cfg(test)]
-mod cylinder_uv_tests {
-    use super::bake_cylinder_prop_uv;
+mod prop_uv_tests {
+    use super::bake_prop_uv;
 
     fn legacy_runtime_uv(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> [u8; 2] {
         let lerp = |a: u8, b: u8, t: u8| {
@@ -700,7 +701,7 @@ mod cylinder_uv_tests {
     }
 
     #[test]
-    fn cooked_cylinder_uv_matches_legacy_runtime_for_every_coordinate() {
+    fn cooked_prop_uv_matches_legacy_runtime_for_every_coordinate() {
         let corner_sets = [
             [(0, 0), (255, 0), (255, 255), (0, 255)],
             [(17, 231), (244, 7), (193, 161), (58, 99)],
@@ -712,7 +713,7 @@ mod cylinder_uv_tests {
                 for v in 0..=255u8 {
                     let uv = [u, v];
                     assert_eq!(
-                        bake_cylinder_prop_uv(corners, uv),
+                        bake_prop_uv(corners, uv),
                         legacy_runtime_uv(corners, uv),
                         "corners={corners:?} uv={uv:?}"
                     );
