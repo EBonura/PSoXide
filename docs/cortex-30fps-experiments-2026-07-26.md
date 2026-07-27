@@ -1873,6 +1873,42 @@ test proved all 65,536 byte pairs equal. v3 lockstep render mean improved only
 10/925 checkpoints changed beginning at guest frame 442. The 0.14% gain fails
 the strict visual gate, so both implementation and test were removed.
 
+### R70: current accepted-build PC attribution
+
+R70 rebuilt the unchanged R57b source with a linker map and sampled the guest
+PC every 64 retired instructions. The link-map side output does not alter the
+1,366,016-byte payload; the replay's final display/VRAM hashes and timing were
+identical. Filtering route windows before tick 300 leaves 8.26 million
+gameplay samples. The leading active symbols are the 60.5 KiB model submission
+dispatcher (14.17%), visible-cell room renderer (12.97%), scene render wrapper
+(7.54%), cached-room TR quad entry (4.65%), projected TR quad leaf (3.84%),
+`memcpy` (3.65%), and `memset` (3.62%). The vblank-edge wait is 17.94% idle;
+portal refresh is only 0.16%. This supersedes the pre-R39 M11 ranking.
+
+### R71/R72: model mega-function code layout
+
+R71 outlined the shipping packed/unclamped/extent-safe model batch once per
+model. It kept all 925 v3 images exact and reduced payload by 2 KiB, but the
+call boundary regressed render mean 1,230,740→1,237,158, p95
+1,638,902→1,649,492, and I-cache stalls 262,685→270,583.
+
+R72 kept that hot batch inline and outlined four per-face fallback leaves whose
+runtime counters are zero. The model dispatcher shrank 60.5→37.4 KiB and v3
+improved cleanly: payload -16 KiB, render mean/p95/max
+1,230,740/1,638,902/1,979,660→1,224,408/1,631,056/1,967,159, I-cache
+262,685→256,528, two-vblank periods 4.5%→5.6%, and 925/925 images exact.
+However, v1 render mean rose 2.3k and two checkpoints changed. Three
+single-leaf bisections were then run against v1:
+
+| variant | outlined leaf | v1 render mean | <=2vb | I-cache | visual result |
+|---|---|---:|---:|---:|---|
+| R72b | generic packed-fast | 761,999→764,574 | 77.4%→77.0% | 169,555→166,942 | 1,046/1,046 exact |
+| R72c | back-cull/in-front | 761,999→765,814 | 77.4%→76.9% | 169,555→171,964 | 1,046/1,046 exact |
+| R72d | back-cull/average/in-front | 761,999→766,937 | 77.4%→76.5% | 169,555→172,000 | 1,045/1,046 exact |
+
+Every isolated layout regresses v1, so the attractive v3-only broad form and
+all bisections are removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1970,6 +2006,9 @@ the strict visual gate, so both implementation and test were removed.
 | R67 | Enable LLVM machine software pipelining | no-op | v3 payload, all 925 hashes, and every measured metric are identical; no emitted-code effect |
 | R68 | Select LLVM's converging pre-RA scheduler | no-op | v3 payload, all 925 hashes, and every measured metric are identical |
 | R69 | Exact packed RGB midpoint for TR subdivision | rejected | exhaustive scalar equivalence and render -1.7k, but 10/925 v3 checkpoints change; removed |
+| R70 | Re-profile the current accepted build with PC samples | diagnostic complete | 8.26M gameplay samples: model dispatcher 14.17%, visible-room wrapper 12.97%, TR entry+leaf 8.49%, memcpy+memset 7.27%; portal refresh 0.16% |
+| R71 | Outline the hot packed/unclamped model batch | rejected | v3 925/925 exact and payload -2 KiB, but render +6.4k and I-cache +7.9k |
+| R72/R72b-d | Outline zero-count model fallback leaves | rejected | broad form wins v3 but changes two v1 checkpoints and regresses mean; every single-leaf v1 bisection regresses |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
