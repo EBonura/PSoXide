@@ -61,6 +61,13 @@ static PSX_EXE_REGION: [u8; 55] = *b"Sony Computer Entertainment Inc. for North 
 
 /// Entry point the PSX-EXE loader jumps to.
 ///
+/// The arguments are the MIPS ABI's first three registers as the loader left
+/// them. A BIOS boot leaves garbage there, which is why
+/// [`psx_io::disc_base::install`] gates on a magic value rather than trusting
+/// them; a multi-program loader passes
+/// (`HANDOFF_MAGIC`, disc LBA offset, CD-DA track base) so the SDK can find
+/// this program's data on a disc it does not own.
+///
 /// # Safety
 /// Called exactly once at boot by the loader. The caller must
 /// have set up a valid stack pointer before branching here -- the
@@ -69,7 +76,7 @@ static PSX_EXE_REGION: [u8; 55] = *b"Sony Computer Entertainment Inc. for North 
 #[cfg(target_arch = "mips")]
 #[no_mangle]
 #[link_section = ".text._start"]
-pub unsafe extern "C" fn _start() -> ! {
+pub unsafe extern "C" fn _start(a0: u32, a1: u32, a2: u32) -> ! {
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: start");
 
@@ -82,6 +89,10 @@ pub unsafe extern "C" fn _start() -> ! {
     }
     #[cfg(feature = "boot-trace")]
     tty::println("psx-rt: bss ok");
+
+    // After the zeroing, not before: the bases live in statics.
+    // SAFETY: once, at boot, before anything can observe them.
+    unsafe { psx_io::disc_base::install(a0, a1, a2) };
 
     #[cfg(feature = "alloc")]
     {
