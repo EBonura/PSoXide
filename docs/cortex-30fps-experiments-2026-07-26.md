@@ -1374,6 +1374,36 @@ two are presented one frame earlier because the optimized render completes
 sooner. This is cadence improvement, not a pixel or geometry difference. R41
 is retained.
 
+### R42: reuse portal view transforms for the far-distance gate
+
+The accepted portal clip transforms all four portal corners to view space, then
+the draw-distance gate transformed the same four corners again to find the
+nearest depth. R42 returned that nearest depth from the clip pass. All 925 v3
+and 1,046 v1 guest-frame lockstep hashes were exact. v3 lockstep render improved
+1,365,369→1,364,131 cycles, and normal cadence moved 16.00→16.22 FPS.
+
+The source/code-layout change did not generalize: v1 normal render regressed
+739,898→742,032 cycles and its two-vblank rate slipped 79.2%→79.1%. Because
+the target is both projects on one engine, the transform reuse was removed
+rather than project-specialized.
+
+### R43/R43b: omit provably redundant TR lattice UV clamps
+
+Every lattice UV starts as an unpacked `u8` corner and is produced only by
+integer midpoints, so it is mathematically confined to `0..=255`. R43 packed
+those coordinates directly instead of clamping all four UVs in every child
+leaf. The focused recursive-versus-lattice packet test remained bit-exact and
+cortex_v3 passed 925/925 hashes while lockstep render improved
+1,365,369→1,361,643 cycles. Normal v3 reached 16.22 FPS with mean render
+1,312,183.
+
+The full engine gate rejected it: cortex_v1 changed one real image at guest
+frame 862. R43b restored clamps on the hardware-extent fallback and kept the
+shortcut only for proven-safe roots, but changed two v1 images and erased the
+render saving. As with the `-O2` lattice failure, a mathematically equivalent
+source shape is not sufficient evidence on the experimental MIPS-I backend.
+Both forms were removed.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1445,6 +1475,8 @@ is retained.
 | R39–R39d | Project-specialize the cached-room baked-fog leaf | accepted as cooker-generated R39d | v3 normal 15.71→15.86 FPS, render mean -22.8k, p95 -54.3k, I-cache -6.1k; v1 normal and lockstep metrics are identical, with 1,046/1,046 v1 and 925/925 v3 hashes exact |
 | R40 | One-multiply exact fog algebra | rejected | 925/925 v3 lockstep hashes exact, but render mean +693 cycles, I-cache +3.9k, and normal cadence loses two visuals |
 | R41 | Cook final CylinderProp UVs into the existing surface field | accepted | No layout/order change; v3 normal 15.86→16.00 FPS and render -21.6k, v1 render -2.9k; all v3 guest-frame hashes and all 1,047 ordered v1 checkpoint hashes exact |
+| R42 | Reuse accepted portal transforms for the far gate | rejected | v3 exact and normal 16.00→16.22 FPS, but v1 normal render +2.1k and <=2vb 79.2%→79.1% |
+| R43/R43b | Skip clamps for range-proven TR lattice UVs | rejected | v3 exact and normal render -7.5k/16.22 FPS, but one v1 image changes; fallback-limited form changes two |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
