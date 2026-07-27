@@ -693,6 +693,38 @@ gameplay geometry. It also produced no speedup—mean render moved
 replay. Scratchpad work remains closed until the runtime can explicitly own and
 test a region across interrupts and all SDK subsystems.
 
+### M8/R21: attribute bulk memory and omit bucket-only slot scratch
+
+An untouched R10 cortex_v3 replay sampled the guest PC every 64 retired
+instructions (6,132,839 samples). During gameplay, `memcpy` and `memset`
+accounted for 5.52% and 4.51% of samples. Call-site unwinding identified a
+4,102-byte `memset` emitted while constructing every bucketed world pass.
+Bucketed submission stores its links in compact commands and never reads the
+pass's two inline 2,048-entry linked-list arrays.
+
+R21 constructed only the live pass fields and left those `MaybeUninit` arrays
+untouched. cortex_v3 kept all 925 lockstep hashes and reduced mean render
+1,416,120→1,408,640 cycles. cortex_v1 reduced mean render
+765,819→759,754 cycles and kept identical primitive/surface counts, but three
+of 1,047 visual images changed. A route-tick capture proved this was visible,
+not a hash-only artefact: 804 floor pixels differed at guest frame 456, while
+the adjacent frames were exact. A same-binary R10 rerun was bit-for-bit
+deterministic. The optimization was removed.
+
+### R22: do not clear unused room-search array tails
+
+The room-membership neighbour BFS initializes two 256-entry `RoomIndex`
+arrays to `0xffff` even though it writes and reads only their cursor-bounded
+prefixes. R22 replaced them with explicit `MaybeUninit` prefix buffers. All 68
+`psx-game-runtime` tests passed, and the intended stage improved:
+`sim_room_track` fell 7,553→5,804 cycles per tick and total update fell
+126,231→124,227 in cortex_v1 lockstep.
+
+The full frame did not improve: render rose 129 cycles, and guest frames 558
+and 576 changed display hashes. Because the frozen R10 disc reruns exactly,
+these are candidate-induced differences, not replay noise. The prefix buffers
+were removed before normal or cortex_v3 runs.
+
 ### R4/R4a: precompute lattice attributes or remove leaf copies
 
 Two variants tested the proposed one-level TR lattice data rewrite. A full
@@ -787,6 +819,9 @@ of the win without changing data layout or packet identity.
 | R19 | Const-specialize authored model UV batches | rejected | 925/925 hashes exact, but v3 lockstep render +7,590 and I-cache +6,822 cycles |
 | E4b | Skip pass-2 room setup for rooms with no model instance | rejected | v1 render -4,550 cycles, but guest frame 584 changed uniquely |
 | R20 | Stage the nine-vertex TR lattice in PS1 scratchpad | rejected | 223/1,046 v1 hashes changed; render +40 and I-cache +4,048 cycles |
+| M8 | Attribute bulk-memory call sites with PC sampling | diagnostic complete | 6.13M samples; gameplay `memcpy` 5.52%, `memset` 4.51%; concrete callers identified |
+| R21 | Leave bucketed pass's unused linked-list arrays uninitialized | rejected | v3 -7,480 render cycles and exact; v1 -6,065 but 3/1,047 images changed, including 804 captured floor pixels |
+| R22 | Leave unwritten room-search array tails uninitialized | rejected | v1 update -2,004 and room-track -1,749 cycles/tick, but render +129 and 2/1,047 images changed |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
