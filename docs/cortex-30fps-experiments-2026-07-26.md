@@ -1681,6 +1681,28 @@ Payload sizes are unchanged. Runtime passes 63 unit and 5 policy tests; the
 cooker UV proof is exhaustive. R57b is retained and the unflagged raw form is
 removed.
 
+### R58: reuse the static-prop quad leaf for generated BoxProps
+
+R56's fixed-policy leaf is profitable for the cylinder loop, so R58
+const-gated the same leaf for cooked BoxProp surfaces while preserving the
+generic legacy, debris, shard, and projection-fallback paths. The complete v3
+lockstep workload is visually exact, but the extra branch and larger leaf call
+regress the already compact generated-box path:
+
+| metric | R57b | R58 | delta |
+|---|---:|---:|---:|
+| render mean | 1,230,740 | 1,232,115 | +1,375 |
+| render p95 | 1,638,902 | 1,643,305 | +4,403 |
+| render max | 1,979,660 | 1,988,879 | +9,219 |
+| I-cache stalls | 262,684.6 | 266,348.7 | +3,664.1 |
+| <=2-vblank periods | 4.5% | 5.7% | +1.2 points |
+| visual hashes | baseline | 925/925 exact | no mismatch |
+
+The isolated two-vblank-period increase does not override the consistent CPU
+and cache regressions. Runtime's 63 unit and 5 policy tests plus all 270 engine
+tests and the compile-time type guard pass. R58 is removed without running the
+normal or v1 matrices because it fails the first lockstep performance gate.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1766,10 +1788,11 @@ removed.
 | R54/R55 | Early missing-material cylinder reject / generated cylinder fog policy | rejected | Both were 925/925 exact, but render regressed +1.5k/+1.4k and I-cache +1.8k/+2.4k |
 | R56 | Fixed-policy static-prop quad submission leaf | accepted | v3 925/925 exact, normal 17.39→17.65 FPS, render mean -20.0k and p95 -24.8k; all 1,047 ordered v1 images exact and normal remains 26.99 FPS |
 | R57/R57b | Cook final generated BoxProp UVs into the existing field | accepted with explicit record flag | Raw repurpose changed three pixels in one v3 image; `UV_BAKED` form is 925/925 exact, normal 17.65→17.76 FPS, render mean -11.3k/p95 -11.4k, while v1 is bit-identical |
+| R58 | Reuse the fixed-policy static-prop quad leaf for generated BoxProps | rejected | 925/925 v3 hashes exact, but render mean +1.4k, p95 +4.4k, max +9.2k, and I-cache +3.7k; removed before normal/v1 matrices |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
-| E8 | Record/template optimization for prop tail | diagnostic narrowed | image cards cost 5 cycles; v3 tail is ~40k box + ~88k cylinder, so card templates are irrelevant |
+| E8 | Record/template optimization for prop tail | completed through R56–R58 | image cards cost 5 cycles; cylinder leaf R56 and cooked BoxProp UV R57b are retained, while sharing the leaf with BoxProps in R58 regresses |
 | G1 | GPU overdraw/timing census and texture-window dedup bound | diagnostic complete | v3 GPU mean/max 713k/879k cycles; ~396 redundant one-word writes cannot close a ~350k CPU-cycle gap |
 | P1 | Exact camera collision-solve memoization | rejected | exact visual sequence and lower camera CPU in both; normal v1 cadence regressed 26.99→26.81 FPS and <=2vb 79.2%→77.5% |
 | S1 | Hoist pad/visibility work into present wait | rejected by dependency/contract | present spin is tear-free vblank quantisation; input and visibility depend on the next tick/post-update camera, and early polling changes latency |
