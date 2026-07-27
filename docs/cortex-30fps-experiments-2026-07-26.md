@@ -1766,6 +1766,34 @@ is narrower than “constant division is faster”: on this MIPS-I binary, the
 call-site/code-layout cost dominates unless the exact quotient can replace an
 existing instruction sequence without adding a selector or monomorph.
 
+### R61/R61b/R61c: exact constant-ratio model depth
+
+The player and placed-model batches use `PreparedModelDepthSlots`, separate
+from the room mapper tested in R60. R61 added the same exhaustively equal
+shipping ratio to this per-face mapper. It is a real cross-project CPU win:
+
+| project / mode | R57b render mean / p95 / max | R61 render mean / p95 / max | FPS / visuals | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---|
+| v3 lockstep | 1,230,740 / 1,638,902 / 1,979,660 | 1,220,715 / 1,630,564 / 1,967,729 | fixed / 821 | 262,685→264,049 | 925/925 exact |
+| v3 normal | 1,197,458 / 1,610,299 / 1,965,497 | 1,186,937 / 1,608,933 / 1,952,786 | 17.76 / 486→486 | 286,097→285,678 | same lockstep workload |
+| v1 lockstep | 761,999 / 1,084,937 / 1,209,753 | 748,034 / 1,060,980 / 1,187,113 | fixed / 851 | 169,555→166,808 | 1,045 exact / 1 changed |
+| v1 normal | 739,443 / 1,059,406 / 1,210,003 | 730,164 / 1,043,018 / 1,188,492 | 26.99→27.06 / 766→768 | 169,284→167,128 | strict lockstep gate failed |
+
+The single v1 difference is 580 pixels in the translucent cyan motion-trail
+actor at guest frame 622 (`x=24..88`, `y=157..179`); room geometry and the main
+player are unchanged, and the neighboring checkpoints are exact. The output
+slot itself is exhaustively equal for every depth from -128 through 25,128, so
+this is a vblank-time trail boundary exposed by the faster binary, not changed
+depth ordering.
+
+Two source shapes tried to remove the 2 KiB layout shift. R61b outlined the
+constant quotient once; it regressed v1 lockstep mean render by 12.1k cycles
+and changed two trail checkpoints. R61c encoded the ratio in the existing
+depth-mode sentinel byte; it saved 13.2k cycles but still changed two trail
+checkpoints. The strict image contract wins: all variants are removed. The
+captured baseline/candidate frame-622 images remain in the `/tmp/cortex-r57b-`
+and `/tmp/cortex-r61-` experiment directories for audit.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1854,6 +1882,7 @@ existing instruction sequence without adding a selector or monomorph.
 | R58 | Reuse the fixed-policy static-prop quad leaf for generated BoxProps | rejected | 925/925 v3 hashes exact, but render mean +1.4k, p95 +4.4k, max +9.2k, and I-cache +3.7k; removed before normal/v1 matrices |
 | R59/R59b | Thread one prepacked material through the TR lattice children | rejected | -9.4k/-8.8k render mean, but both stored and recomputed forms change the same 512/925 v3 images; not a stale-material bug, so the ABI expansion is removed |
 | R60/R60b/R60c | Exact reduced constant quotient for ordering-table depth | rejected | Broad/TR-only forms save 6.5–8.8k v3 normal render cycles but regress v1 cadence; fog-only specialization leaves v1 bit-identical but adds 12 KiB, regresses v3 render +4.3k/I-cache +7.7k, and shifts one checkpoint |
+| R61/R61b/R61c | Exact reduced constant quotient for model/player depth | rejected | R61 improves v3 render -10.5k and v1 26.99→27.06 FPS, but changes one vblank-timed trail image; outlined/sentinel forms change two, so all fail the strict visual gate |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Add a new cooked CylinderProp UV field | rejected; superseded by R41 | ~30k v3 render-cycle win, but the schema/layout rewrite changed transient painter ordering; R41 recovers the work in-place |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
