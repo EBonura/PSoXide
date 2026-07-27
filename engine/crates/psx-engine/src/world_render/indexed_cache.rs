@@ -1120,16 +1120,21 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             if ready & WARMED_ROOM_QUAD_READY != 0
                 && try_submit_shaded_encoded_warmed_room_quad(
                     surface,
+                    cached_vertices,
+                    ids,
                     projected,
                     projected_metrics,
                     vertex_depths,
+                    materials,
                     lighting,
+                    camera,
                     &options,
                     submit_depths,
                     depth_mode,
                     subdivision_mode,
                     quad,
                     ready,
+                    triangles,
                     world,
                 )
             {
@@ -1912,19 +1917,25 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(unused_variables)]
 #[inline(always)]
 fn try_submit_shaded_encoded_warmed_room_quad<const OT: usize, L: WorldSurfaceLighting>(
     surface: &CachedRoomSurface,
+    cached_vertices: &[WorldVertex],
+    ids: [u16; 4],
     projected: [ProjectedVertex; 4],
     projected_metrics: ProjectedQuadMetrics,
     vertex_depths: Option<[i32; 4]>,
+    materials: &[WorldRenderMaterial],
     lighting: &L,
+    camera: &WorldCamera,
     options: &WorldSurfaceOptions,
     submit_depths: CachedRoomSubmitDepths,
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
     quad: &mut QuadTexturedGouraud,
     ready: u8,
+    primitives: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> bool {
     let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
@@ -1953,6 +1964,73 @@ fn try_submit_shaded_encoded_warmed_room_quad<const OT: usize, L: WorldSurfaceLi
         surface_risky,
     );
     if tomb_raider_warmed_quad_requires_dynamic_submit(&surface_options, projected) {
+        // Fogged TR candidates cannot patch the authored root packet directly,
+        // but their generated lighting adapter can still shade baked RGB
+        // without the general surface-lighting path. Keep the canonical TR
+        // emitter so its camera-space depth checks, lattice, underdraw, and
+        // packet order remain the single source of truth.
+        #[cfg(feature = "tr-subdivision-lattice")]
+        if surface_options.tomb_raider_subdivision_profile.max_levels == 1
+            && !surface_options.tomb_raider_debug_subdivision_levels
+            && projected_metrics.hardware_extent_safe()
+        {
+            let Some(colors) = lighting
+                .shade_prewarmed_baked_vertices(surface.sample_without_center(), vertex_depths)
+            else {
+                return false;
+            };
+            let Some(&base_material) = materials.get(surface.material_slot as usize) else {
+                return false;
+            };
+            let (material, split, reverse_front) = match kind {
+                WorldSurfaceKind::Wall { direction } => (
+                    wall_material_for_direction(
+                        cached_uv_material(base_material),
+                        direction,
+                        surface.wall_faces_owner(),
+                    ),
+                    SPLIT_NW_SE,
+                    false,
+                ),
+                WorldSurfaceKind::Floor => {
+                    (cached_uv_material(base_material), surface.split, false)
+                }
+                WorldSurfaceKind::Ceiling => {
+                    (cached_uv_material(base_material), surface.split, true)
+                }
+            };
+            let projected_for_cull = if reverse_front {
+                reverse_quad_winding(projected)
+            } else {
+                projected
+            };
+            if projected_quad_backface_culled(
+                projected_for_cull,
+                material,
+                CullMode::Back,
+                split_triangles_runtime(split),
+            ) {
+                return true;
+            }
+            if submit_tomb_raider_cached_room_quad(
+                cached_vertices,
+                ids,
+                projected,
+                true,
+                camera,
+                surface.uv_words,
+                colors,
+                material,
+                &surface_options,
+                split,
+                reverse_front,
+                None,
+                primitives,
+                world,
+            ) {
+                return true;
+            }
+        }
         return false;
     }
     if encoded_warmed_room_quad_backface_culled(projected, ready) {
