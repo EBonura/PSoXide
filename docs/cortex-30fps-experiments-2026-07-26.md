@@ -1415,6 +1415,11 @@ images changed, and final VRAM/display hashes differed. Authored sector quads
 can be warped by independently elevated corners, so bilinear children can have
 different projected winding even after the root's two authored triangles pass.
 The child culls are visually load-bearing and were restored without a v3 run.
+A conservative follow-up limited the omission to flat horizontal quads and
+cardinal walls, but produced the same primitive and image changes. PS1
+screen-coordinate quantization can make a small child degenerate or reverse
+winding independently even for a planar source, so planarity does not remove
+the projected child-cull requirement.
 
 ## Candidate matrix
 
