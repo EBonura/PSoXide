@@ -19,7 +19,8 @@ use std::process::ExitCode;
 use psxed_project::{
     default_project_dir,
     playtest::{
-        build_package, cook_to_dir, default_generated_dir, streamed_room_chunk_memory_report,
+        build_package, cook_to_dir, default_generated_dir, playtest_performance_envelope,
+        streamed_room_chunk_memory_report,
     },
     NodeKind, ProjectDocument,
 };
@@ -203,6 +204,37 @@ fn main() -> ExitCode {
                             largest.sector_count,
                             largest.collision_bytes,
                             largest.render_cache_bytes,
+                        );
+                    }
+                }
+                match playtest_performance_envelope(&package) {
+                    Ok(envelope) => {
+                        const PACKET_CAPACITY: usize = 1536;
+                        let pre_hw_packets = envelope
+                            .tr_packets_before_hw_split
+                            .saturating_add(envelope.prop_surfaces);
+                        println!(
+                            "[cook-playtest] 30 FPS envelope: visible-rooms<={} single-room-PVS-surfaces<={} room-surfaces<={} authored-tris<={} TR+prop-packets-before-HW-split<={} resident-rooms<={} payload<={}B stream<={}B packet-capacity={}",
+                            envelope.visible_room_limit,
+                            envelope.max_single_room_pvs_surfaces,
+                            envelope.room_surfaces,
+                            envelope.authored_triangles,
+                            pre_hw_packets,
+                            envelope.resident_room_limit,
+                            envelope.resident_payload_bytes,
+                            envelope.resident_stream_bytes,
+                            PACKET_CAPACITY,
+                        );
+                        if pre_hw_packets > PACKET_CAPACITY {
+                            eprintln!(
+                                "[cook-playtest] warning: conservative TR+prop packet envelope {} exceeds runtime capacity {}; recorded-view validation is required",
+                                pre_hw_packets, PACKET_CAPACITY,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[cook-playtest] warning: could not build 30 FPS envelope: {error}"
                         );
                     }
                 }
