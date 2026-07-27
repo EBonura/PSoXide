@@ -1254,6 +1254,50 @@ target win: mean render rose 1,416,120→1,416,825 cycles and I-cache stalls ros
 321,902→322,487. The extra trait/code shape outweighed the redundant branches,
 so it was restored before v1 or normal-mode runs.
 
+### R37/R37b: GTE DPCS baked-room fog
+
+The CPU fog blend is exactly representable by the GTE's DPCS instruction:
+room weight `w` in `0..=256` maps to Q12 `IR0 = w * 16`, and an 8-bit fog
+channel maps to `FC = fog << 4`. A focused test checked all 257 weights over
+black, white, mixed, and channel-boundary inputs against the existing
+`(src * (256 - w) + fog * w) >> 8` expression.
+
+R37 ran four DPCS operations for every baked-RGB surface. It kept all 925 v3
+lockstep images exact but regressed mean render
+1,416,120→1,420,017 cycles and I-cache stalls 321,902→325,198. The existing
+CPU path already returns immediately at fog weights 0 and 256, so R37b limited
+DPCS to surfaces whose four weights were all strictly inside the fog ramp.
+R37b was also 925/925 exact in v3 and improved mean/p95/max render to
+1,414,637/1,987,688/2,243,950, but I-cache stalls rose to 323,036 and the
+two-vblank period rate slipped 1.2%→1.1%.
+
+The same-current-tape v1 control showed an identical 1,046-image sequence; one
+telemetry label moved from guest frame 376 to 375 while the image sequence did
+not move. Its lockstep render mean/p95 improved
+765,819/1,098,666→764,595/1,093,673. Normal cadence supplied the rejection:
+render improved 742,800→741,860, but delivered FPS fell 26.99→26.81 and
+two-vblank periods fell 79.2%→77.5%. The exact arithmetic win is too small to
+survive the direct-mapped I-cache/vblank phase on both projects, so both forms
+were fully removed.
+
+### R38: reuse one persistent TR leaf without more RAM
+
+The proposed zero-extra-RAM variant would repurpose each surface's existing
+persistent root quad as one subdivided leaf, leaving the other three leaves and
+the crack-cover root on the current arena path. The source audit closes this
+for the v3 bottleneck before implementation: a persistent packet is passed
+into the TR path only when `uses_direct_baked_vertex_rgb` is true. cortex_v3
+has fog enabled, so every leaf's four colours depend on current projected
+depth and its TR calls deliberately pass `None`.
+
+Repurposing the packet in v3 could therefore remove one arena allocation but
+could not remove any of the 14 packet-word writes or fog/UV work. R5 already
+proved that those words are written directly into arena storage—there is no
+temporary packet copy to eliminate. The only project able to retain a static
+leaf payload is the no-fog v1, so this shape cannot improve the primary v3
+cost and is rejected by a zero-saving upper bound rather than adding packet
+state transitions and a root/leaf validity mode.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1320,6 +1364,8 @@ so it was restored before v1 or normal-mode runs.
 | R34 | Localise `-O2` geometry divergence | diagnostic complete | Prebuilt pool and OT/DMA falsified; O2 detects 18.1 TR candidates but submits 7.0. Recursive TR restores 18.0 at +146k cycles and still changes 715/925 images; experimental lattice miscompile |
 | R35 | Overlap consecutive lattice RTPT batches | rejected | Same primitive count, but render +1,137 cycles, I-cache +1,075, and 171/925 v3 images changed |
 | R36 | Prepared-depth baked-fog trait hook | rejected | 925/925 v3 hashes exact, but render +705 cycles and I-cache +585 |
+| R37/R37b | GTE DPCS baked-room fog blend | rejected | Both forms are pixel-exact; bounded form saves 1.5k v3 render and 0.9k normal-v1 render, but v1 FPS 26.99→26.81 and <=2vb 79.2%→77.5% |
+| R38 | Reuse the persistent root packet as one TR leaf | rejected by decomposition | v3 fog makes leaf RGB frame-dependent; at most one allocation disappears while all packet stores remain, and only no-fog v1 can retain a static leaf payload |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
