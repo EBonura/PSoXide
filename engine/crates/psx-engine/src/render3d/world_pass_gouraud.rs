@@ -1867,6 +1867,53 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Some(stats)
     }
 
+    /// Patch dynamic colours into an otherwise prewarmed room packet.
+    #[inline(always)]
+    pub(crate) fn try_submit_warmed_textured_gouraud_quad_with_colors(
+        &mut self,
+        quad: &mut QuadTexturedGouraud,
+        verts: [ProjectedVertex; 4],
+        colors: [(u8, u8, u8); 4],
+        extent_safe: bool,
+        options: &WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> Option<WorldRenderStats> {
+        if !extent_safe {
+            let split_options = (*options).with_textured_triangle_splitting(true);
+            if !projected_triangle_can_skip_split([verts[0], verts[1], verts[2]], split_options)
+                || !projected_triangle_can_skip_split([verts[1], verts[2], verts[3]], split_options)
+            {
+                return None;
+            }
+        }
+
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return Some(stats);
+        }
+        quad.set_positions([
+            (verts[0].sx, verts[0].sy),
+            (verts[1].sx, verts[1].sy),
+            (verts[2].sx, verts[2].sy),
+            (verts[3].sx, verts[3].sy),
+        ]);
+        quad.set_colors(colors);
+        self.push_command(
+            prepared_depth.slot,
+            prepared_depth.depth,
+            if quad.color0_cmd & 0x0200_0000 != 0 {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        Some(stats)
+    }
+
     #[cfg(feature = "room-surface-profile")]
     #[allow(dead_code)]
     #[inline(always)]
