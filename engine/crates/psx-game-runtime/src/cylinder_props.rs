@@ -28,7 +28,7 @@ struct CylinderTextureRuntime {
 
 /// Draw all cooked CylinderProps in `current_room`.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_cylinder_props<T, const OT_DEPTH: usize>(
+pub fn draw_cylinder_props<T, const OT_DEPTH: usize, const USE_STATIC_PROP_QUAD_LEAF: bool>(
     props: &[LevelCylinderPropRecord],
     surfaces: &[LevelCylinderPropSurfaceRecord],
     current_room: RoomIndex,
@@ -135,13 +135,13 @@ pub fn draw_cylinder_props<T, const OT_DEPTH: usize>(
                 lighting.apply_fog_at_depth(surface.baked_vertex_rgb[3], projected[3].sz),
             ];
             let uvs = surface.uv_q8.map(|uv| (uv[0], uv[1]));
-            let opts = options
-                .with_depth_policy(DepthPolicy::Average)
-                .with_cull_mode(CullMode::None)
-                .with_material_layer(texture.material)
-                .with_textured_triangle_splitting(true)
-                .with_textured_triangle_max_edge(0);
             if surface.vertex_count == 3 {
+                let opts = options
+                    .with_depth_policy(DepthPolicy::Average)
+                    .with_cull_mode(CullMode::None)
+                    .with_material_layer(texture.material)
+                    .with_textured_triangle_splitting(true)
+                    .with_textured_triangle_max_edge(0);
                 let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
                     triangles,
                     [projected[0], projected[1], projected[2]],
@@ -150,7 +150,22 @@ pub fn draw_cylinder_props<T, const OT_DEPTH: usize>(
                     texture.material,
                     opts,
                 );
+            } else if USE_STATIC_PROP_QUAD_LEAF {
+                let _ = world.submit_static_prop_textured_gouraud_quad_prescreened_u8(
+                    triangles,
+                    &projected,
+                    &uvs,
+                    &colors,
+                    texture.material,
+                    &options,
+                );
             } else {
+                let opts = options
+                    .with_depth_policy(DepthPolicy::Average)
+                    .with_cull_mode(CullMode::None)
+                    .with_material_layer(texture.material)
+                    .with_textured_triangle_splitting(true)
+                    .with_textured_triangle_max_edge(0);
                 let _ = world.submit_textured_gouraud_quad_prescreened_u8(
                     triangles,
                     &projected,
