@@ -1298,6 +1298,41 @@ leaf payload is the no-fog v1, so this shape cannot improve the primary v3
 cost and is rejected by a zero-saving upper bound rather than adding packet
 state transitions and a root/leaf validity mode.
 
+### R39–R39d: project-specialized cached-room fog leaf
+
+R32 proved that forcing the baked-room fog leaf inline saves substantial work
+in fogged cortex_v3, but applying that code shape globally changed one
+cortex_v1 image. R39 moved the specialization boundary up to the generated
+project: a compile-time scan of `ROOMS` selects an inline cached-room lighting
+adapter only when the project contains authored room fog. Model, prop, and
+uncached room lighting retain the existing runtime type and call path.
+
+The first form instantiated a const-generic wrapper for no-fog projects.
+It was visually exact and made v1's render stages cheaper, but normal cadence
+lost three visual frames (26.99→26.88 FPS and 79.2%→78.0% two-vblank periods).
+R39b/R39c removed the no-fog wrapper at the call site. That restored normal
+cadence, but changing the adapter's source/codegen shape still changed the
+single recurrent v1 image at guest frame 584 despite an identical payload and
+otherwise identical metrics.
+
+R39d moved the boundary into cooker-generated Rust. A no-fog manifest emits a
+macro that expands directly to the original `RuntimeRoomLighting` call and
+contains no adapter type or specialization code. A fog-bearing manifest emits
+the inline adapter. This makes the v1 engine path genuinely identical while
+selecting the proven R32 leaf only for projects that need it:
+
+| project / mode | baseline render mean / p95 / max | R39b render mean / p95 / max | FPS | <=2vb | I-cache stalls | visual result |
+|---|---:|---:|---:|---:|---:|---|
+| v1 lockstep | 765,819 / 1,098,666 / 1,224,056 | identical | fixed | 77.0%→77.0% | 171,812→171,812 | 1,046/1,046 exact |
+| v1 normal | 742,800 / 1,069,593 / 1,211,569 | identical | 26.99→26.99 | 79.2%→79.2% | 170,679→170,679 | every reported metric identical |
+| v3 normal | 1,364,086 / 1,953,348 / 2,267,126 | 1,341,277 / 1,899,026 / 2,212,330 | 15.71→15.86 | 0.9%→1.2% | 346,461→340,381 | same workload; +4 presented visuals |
+| v3 lockstep | 1,416,120 / 2,002,178 / 2,259,241 | 1,388,595 / 1,957,142 / 2,213,189 | fixed | 1.2%→1.6% | 321,902→315,805 | 925/925 exact |
+
+Focused cooker tests prove that the no-fog policy emits only the direct-call
+macro while the fog policy emits the forced-inline adapter. R39d is retained:
+it recovers R32's v3 win without changing the no-fog engine path or any
+lockstep pixel.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -1366,6 +1401,7 @@ state transitions and a root/leaf validity mode.
 | R36 | Prepared-depth baked-fog trait hook | rejected | 925/925 v3 hashes exact, but render +705 cycles and I-cache +585 |
 | R37/R37b | GTE DPCS baked-room fog blend | rejected | Both forms are pixel-exact; bounded form saves 1.5k v3 render and 0.9k normal-v1 render, but v1 FPS 26.99→26.81 and <=2vb 79.2%→77.5% |
 | R38 | Reuse the persistent root packet as one TR leaf | rejected by decomposition | v3 fog makes leaf RGB frame-dependent; at most one allocation disappears while all packet stores remain, and only no-fog v1 can retain a static leaf payload |
+| R39–R39d | Project-specialize the cached-room baked-fog leaf | accepted as cooker-generated R39d | v3 normal 15.71→15.86 FPS, render mean -22.8k, p95 -54.3k, I-cache -6.1k; v1 normal and lockstep metrics are identical, with 1,046/1,046 v1 and 925/925 v3 hashes exact |
 | T2 | Spread active-window crossing spikes across ticks | already implemented; diagnostic complete | One accepted room build/tick; no active-window work in v3's eight worst gameplay frames |
 | T3 | Cook every cylinder-prop UV into the surface record | rejected | ~30k v3 render-cycle win, but schema/layout rewrite changed transient painter ordering |
 | V4 | Exact cylinder-prop UV edge shortcuts | accepted | v3 render mean -6,820 and I-cache -11,860; all 1,972 lockstep hashes exact |
