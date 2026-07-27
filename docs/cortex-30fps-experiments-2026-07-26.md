@@ -871,6 +871,48 @@ transient painter-order differences in the first lockstep comparison. The
 schema rewrite was removed in favour of V4, which captures a measurable part
 of the win without changing data layout or packet identity.
 
+### M9: joint render-tail attribution
+
+Sorting the R10 cortex_v3 normal capture by total render work avoids the
+invalid sum-of-independent-maxima argument in the architecture reviews. Across
+the twenty most expensive visual frames, mean render work was 2,057,263
+cycles. `room_surface_draw` contributed 1,345,219 cycles (65.4%);
+`image_props`, `model_instances`, and `player` brought the joint share to
+87.4%. The same frames averaged 152.1 considered room surfaces and 496.5
+triangle primitives.
+
+The largest frame (guest frame 717) cost 2,267,126 render cycles:
+1,385,262 room surfaces, 214,114 props, 183,649 models, and 187,533 player.
+The tail is therefore not a portal-loop or streaming spike. It is the
+simultaneous cost of the normal room-emission path and the three ordinary
+object paths. This confirms that sustained 30 FPS cannot be obtained by
+optimizing only a rare fallback or only average room work.
+
+### M10: pooled cortex_v1/cortex_v3 room-cost model
+
+Fresh R10 captures from the same engine commit were regressed using
+`room_surface_draw ~ room_surfaces_considered + tri_primitives`. The common
+1,196-frame fit was:
+
+```
+room_surface_draw = -200,823 + 6,858 * surfaces + 878 * primitives
+R² = 0.8419, RMSE = 113,562 cycles
+```
+
+This narrowly misses the review's predeclared R² > 0.85 acceptance threshold.
+Separate fits were materially different: cortex_v1 estimated 3,699 cycles per
+surface and 841 per primitive (R² 0.444), while cortex_v3 estimated 6,660 and
+534 (R² 0.697). Adding a project intercept raised R² to 0.8545; adding
+project-specific slopes raised it to 0.8642 and improved AIC by 176 points
+versus the common model. Surface/primitive correlation is low in each capture
+(0.078/0.118), so this is not merely two collinear counters exchanging weight.
+
+J6's proposed universal two-coefficient model is rejected. Both projects do
+run the same engine; the result says their routes exercise different mixtures
+of that engine's surface kinds, projection/subdivision branches, culling, and
+object work. Candidate changes must therefore pass both project tapes instead
+of being selected from a pooled slope.
+
 ## Candidate matrix
 
 | ID | Candidate | State | Acceptance / rejection evidence |
@@ -915,6 +957,8 @@ of the win without changing data layout or packet identity.
 | E4b | Skip pass-2 room setup for rooms with no model instance | rejected | v1 render -4,550 cycles, but guest frame 584 changed uniquely |
 | R20 | Stage the nine-vertex TR lattice in PS1 scratchpad | rejected | 223/1,046 v1 hashes changed; render +40 and I-cache +4,048 cycles |
 | M8 | Attribute bulk-memory call sites with PC sampling | diagnostic complete | 6.13M samples; gameplay `memcpy` 5.52%, `memset` 4.51%; concrete callers identified |
+| M9/J5 | Joint worst-20 render-tail attribution | diagnostic complete | room surfaces are 65.4%; room + props + models + player are 87.4%; no portal/streaming spike |
+| M10/J6 | Common v1/v3 surface/primitive cost model | rejected | pooled R² 0.8419 misses the >0.85 gate; project intercept/slopes materially improve fit |
 | R21 | Leave bucketed pass's unused linked-list arrays uninitialized | rejected | v3 -7,480 render cycles and exact; v1 -6,065 but 3/1,047 images changed, including 804 captured floor pixels |
 | R22 | Leave unwritten room-search array tails uninitialized | rejected | v1 update -2,004 and room-track -1,749 cycles/tick, but render +129 and 2/1,047 images changed |
 | R23 | Borrow cached-quad aggregate arguments | rejected | v3 render +6,385, p95 +9,799, I-cache +3,384 cycles; 512/925 images changed |
