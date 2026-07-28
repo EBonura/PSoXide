@@ -213,6 +213,11 @@ pub struct LaunchArgs {
     /// the HLE BIOS entry path but still exercise the CD-ROM controller.
     #[arg(long)]
     pub disc: Option<PathBuf>,
+    /// Load port 1's memory card from this 128 KiB `.mcd` file and persist any
+    /// writes back at the end of the headless run. A missing file starts as a
+    /// freshly formatted card. This makes cold-boot save tests reproducible.
+    #[arg(long, value_name = "PATH")]
+    pub memcard: Option<PathBuf>,
     /// Number of CPU instructions to retire before stopping.
     #[arg(long, default_value_t = 100_000_000)]
     pub steps: u64,
@@ -329,6 +334,13 @@ pub struct LaunchArgs {
     /// no guest telemetry code, RAM, or timing hooks are required.
     #[arg(long)]
     pub pc_sample_log: Option<PathBuf>,
+    /// Sample the guest program counter together with register $ra and the
+    /// words at `$sp + 20` and `$sp + 36`, then write aggregate callsite
+    /// counts. The latter recovers the caller through the standard 16-byte
+    /// compiler-builtins inner frame plus 20-byte wrapper save slot, attributing
+    /// memcpy/memset interiors without guest instrumentation.
+    #[arg(long)]
+    pub pc_sample_callsite_log: Option<PathBuf>,
     /// Write out-of-band PC samples grouped into route-tick windows. This
     /// identifies which guest code dominates individual slow gameplay spans
     /// instead of averaging menu, loading and gameplay into one profile.
@@ -924,6 +936,19 @@ fn run_headless_launch(
         bus.apply_scph_9902_profile();
     }
 
+    if let Some(path) = args.memcard.as_ref() {
+        let bytes = if path.exists() {
+            std::fs::read(path)
+                .map_err(|error| format!("read memory card {}: {error}", path.display()))?
+        } else {
+            Vec::new()
+        };
+        bus.attach_memcard_port1(bytes);
+        if emit_summary {
+            eprintln!("[cli] port-1 memory card → {}", path.display());
+        }
+    }
+
     if let Some(disc_path) = args.disc.as_ref() {
         if ext != "exe" {
             return Err("--disc can only be combined with an .exe launch path".to_string());
@@ -972,6 +997,9 @@ fn run_headless_launch(
 
     if args.cd_command_log.is_some() {
         bus.cdrom.enable_command_log(65_536);
+    }
+    if std::env::var_os("PSOXIDE_DUMP_DMA_LL").is_some() {
+        bus.set_gpu_linked_list_log_enabled(true);
     }
 
     if args.wireframe {
@@ -1031,19 +1059,20 @@ fn run_headless_launch(
             let mut writer = std::io::BufWriter::new(file);
             writeln!(
                 writer,
-                "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed,port1_polls"
+                "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed,port1_polls,icache_refill_events_delta,icache_refill_words_delta,icache_refill_stall_cycles_delta"
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
             let area = bus.gpu.display_area();
             writeln!(
                 writer,
-                "0,0,{},{},0,0,{},{},{},{},0",
+                "0,0,{},{},0,0,{},{},{},{},0,{},0,0,0",
                 cpu.tick(),
                 bus.cycles(),
                 area.x,
                 area.y,
                 area.width,
-                area.height
+                area.height,
+                bus.port1_completed_polls(),
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
             Some(writer)
@@ -1064,7 +1093,7 @@ fn run_headless_launch(
             let mut writer = std::io::BufWriter::new(file);
             writeln!(
                 writer,
-                "route_tick,tape_frame,display_start_changed,commands,draws,fills,textured_tris,textured_quads,textured_rects,sky_quads,texture_windows,texture_window_zero,texture_window_changes,texture_window_redundant,gpu_cycles,dma_gpu_cycles,fill_cycles,textured_tri_cycles,textured_quad_cycles,textured_rect_cycles,other_cycles"
+                "route_tick,tape_frame,display_start_changed,frame_draw_words,frame_draw_hash,run_draw_words,run_draw_hash,commands,draws,fills,textured_tris,textured_quads,textured_rects,sky_quads,texture_windows,texture_window_zero,texture_window_changes,texture_window_redundant,gpu_cycles,dma_gpu_cycles,fill_cycles,textured_tri_cycles,textured_quad_cycles,textured_rect_cycles,other_cycles"
             )
             .map_err(|e| format!("write GPU stats log {}: {e}", path.display()))?;
             Some(writer)
@@ -1077,8 +1106,13 @@ fn run_headless_launch(
     let mut gpu_prev_timing = bus.gpu.gp0_timing_histogram();
     let mut gpu_prev_dma_timing = bus.gpu.gp0_dma_timing_histogram();
     let mut gpu_prev_texture_window = None;
+    let mut gpu_frame_draw_words = 0u64;
+    let mut gpu_frame_draw_hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut gpu_run_draw_words = 0u64;
+    let mut gpu_run_draw_hash = 0xcbf2_9ce4_8422_2325u64;
     let mut route_last_cpu_tick = cpu.tick();
     let mut route_last_bus_cycles = bus.cycles();
+    let mut route_last_icache_profile = cpu.instruction_cache_profile();
     if args.input_tape_delay_ticks == 0 && !tape_poll_bound {
         if let Some(samples) = tape_samples.as_ref() {
             samples[tape_cursor].apply_to_bus(&mut bus);
@@ -1118,6 +1152,10 @@ fn run_headless_launch(
     let mut observed_counter_frames = observed_guest_frames;
     let mut profile_log = GuestProfileLog::new(args.profile_log.as_deref())?;
     let mut pc_samples = args.pc_sample_log.as_ref().map(|_| BTreeMap::new());
+    let mut pc_callsite_samples = args
+        .pc_sample_callsite_log
+        .as_ref()
+        .map(|_| BTreeMap::new());
     let mut pc_window_samples = args.pc_sample_window_log.as_ref().map(|_| BTreeMap::new());
     let pc_sample_interval = args.pc_sample_instructions.max(1);
     let pc_sample_window_ticks = args.pc_sample_window_ticks.max(1);
@@ -1132,6 +1170,28 @@ fn run_headless_launch(
         if i >= next_pc_sample {
             if let Some(samples) = pc_samples.as_mut() {
                 *samples.entry(cpu.pc()).or_insert(0u64) += 1;
+            }
+            if let Some(samples) = pc_callsite_samples.as_mut() {
+                let stack_offset = (cpu.gpr(29) as usize & 0x1f_ffff).saturating_add(20);
+                let stack_return_address = bus
+                    .ram()
+                    .get(stack_offset..stack_offset.saturating_add(4))
+                    .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                    .unwrap_or_default();
+                let inner_stack_offset = (cpu.gpr(29) as usize & 0x1f_ffff).saturating_add(36);
+                let inner_stack_return_address = bus
+                    .ram()
+                    .get(inner_stack_offset..inner_stack_offset.saturating_add(4))
+                    .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                    .unwrap_or_default();
+                *samples
+                    .entry((
+                        cpu.pc(),
+                        cpu.gpr(31),
+                        stack_return_address,
+                        inner_stack_return_address,
+                    ))
+                    .or_insert(0u64) += 1;
             }
             if let Some(samples) = pc_window_samples.as_mut() {
                 let window_start = route_ticks / pc_sample_window_ticks * pc_sample_window_ticks;
@@ -1272,21 +1332,32 @@ fn run_headless_launch(
                 let display_start_changed = u8::from(display_start != route_last_display_start);
                 let cpu_tick = cpu.tick();
                 let bus_cycles = bus.cycles();
+                let icache_profile = cpu.instruction_cache_profile();
                 writeln!(
                     writer,
-                    "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed},{}",
+                    "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed},{},{},{},{}",
                     cpu_tick.saturating_sub(route_last_cpu_tick),
                     bus_cycles.saturating_sub(route_last_bus_cycles),
                     area.x,
                     area.y,
                     area.width,
                     area.height,
-                    bus.port1_completed_polls()
+                    bus.port1_completed_polls(),
+                    icache_profile
+                        .refill_events
+                        .saturating_sub(route_last_icache_profile.refill_events),
+                    icache_profile
+                        .refill_words
+                        .saturating_sub(route_last_icache_profile.refill_words),
+                    icache_profile
+                        .refill_stall_cycles
+                        .saturating_sub(route_last_icache_profile.refill_stall_cycles),
                 )
                 .map_err(|e| e.to_string())?;
                 route_last_display_start = display_start;
                 route_last_cpu_tick = cpu_tick;
                 route_last_bus_cycles = bus_cycles;
+                route_last_icache_profile = icache_profile;
             }
             if let Some(writer) = gpu_frame_stats_log.as_mut() {
                 let commands = bus.gpu.drain_completed_cmd_log();
@@ -1312,6 +1383,25 @@ fn run_headless_launch(
                 let mut texture_window_changes = 0u64;
                 let mut texture_window_redundant = 0u64;
                 for command in &commands {
+                    // Hash only commands that can affect the displayed framebuffer.
+                    // Texture uploads are intentionally excluded: their transfer
+                    // timing can move across a display flip without changing a draw.
+                    if matches!(command.opcode, 0x02 | 0x20..=0x7F | 0xE1..=0xE6) {
+                        for word in core::iter::once(command.fifo.len() as u32)
+                            .chain(command.fifo.iter().copied())
+                        {
+                            for byte in word.to_le_bytes() {
+                                gpu_frame_draw_hash ^= u64::from(byte);
+                                gpu_frame_draw_hash =
+                                    gpu_frame_draw_hash.wrapping_mul(0x0000_0100_0000_01b3);
+                                gpu_run_draw_hash ^= u64::from(byte);
+                                gpu_run_draw_hash =
+                                    gpu_run_draw_hash.wrapping_mul(0x0000_0100_0000_01b3);
+                            }
+                            gpu_frame_draw_words = gpu_frame_draw_words.saturating_add(1);
+                            gpu_run_draw_words = gpu_run_draw_words.saturating_add(1);
+                        }
+                    }
                     if matches!(command.opcode, 0x20..=0x7F) {
                         draws += 1;
                     }
@@ -1366,11 +1456,15 @@ fn run_headless_launch(
                 let other_cycles = gpu_cycles.saturating_sub(classified_cycles);
                 writeln!(
                     writer,
-                    "{route_ticks},{tape_cursor},{display_start_changed},{},{draws},{fills},{textured_tris},{textured_quads},{textured_rects},{sky_quads},{texture_windows},{texture_window_zero},{texture_window_changes},{texture_window_redundant},{gpu_cycles},{dma_gpu_cycles},{fill_cycles},{textured_tri_cycles},{textured_quad_cycles},{textured_rect_cycles},{other_cycles}",
+                    "{route_ticks},{tape_cursor},{display_start_changed},{gpu_frame_draw_words},0x{gpu_frame_draw_hash:016x},{gpu_run_draw_words},0x{gpu_run_draw_hash:016x},{},{draws},{fills},{textured_tris},{textured_quads},{textured_rects},{sky_quads},{texture_windows},{texture_window_zero},{texture_window_changes},{texture_window_redundant},{gpu_cycles},{dma_gpu_cycles},{fill_cycles},{textured_tri_cycles},{textured_quad_cycles},{textured_rect_cycles},{other_cycles}",
                     commands.len(),
                 )
                 .map_err(|e| e.to_string())?;
                 gpu_stats_last_display_start = display_start;
+                if display_start_changed != 0 {
+                    gpu_frame_draw_words = 0;
+                    gpu_frame_draw_hash = 0xcbf2_9ce4_8422_2325;
+                }
             }
         }
         if current_guest_frames != observed_guest_frames {
@@ -1550,6 +1644,21 @@ fn run_headless_launch(
             );
         }
     }
+    if let Some(path) = std::env::var_os("PSOXIDE_DUMP_DMA_LL") {
+        let mut out = String::from("transfer,address,header\n");
+        for &(transfer, address, header) in bus.gpu_linked_list_log() {
+            out.push_str(&format!("{transfer},{address:#08X},{header:#010X}\n"));
+        }
+        std::fs::write(&path, out)
+            .map_err(|e| format!("write GPU linked-list log {}: {e}", path.to_string_lossy()))?;
+        if emit_summary {
+            eprintln!(
+                "[cli] GPU linked-list log → {} ({} nodes)",
+                path.to_string_lossy(),
+                bus.gpu_linked_list_log().len()
+            );
+        }
+    }
 
     if let Some(writer) = route_log.as_mut() {
         writer.flush().map_err(|e| e.to_string())?;
@@ -1560,6 +1669,21 @@ fn run_headless_launch(
             let total = samples.values().copied().sum::<u64>();
             eprintln!(
                 "[cli] PC samples → {} ({} samples, {} addresses)",
+                path.display(),
+                total,
+                samples.len()
+            );
+        }
+    }
+    if let (Some(path), Some(samples)) = (
+        args.pc_sample_callsite_log.as_ref(),
+        pc_callsite_samples.as_ref(),
+    ) {
+        write_pc_callsite_sample_log(path, samples)?;
+        if emit_summary {
+            let total = samples.values().copied().sum::<u64>();
+            eprintln!(
+                "[cli] PC callsite samples → {} ({} samples, {} pairs)",
                 path.display(),
                 total,
                 samples.len()
@@ -1691,6 +1815,28 @@ fn run_headless_launch(
             .map_err(|error| format!("write SPU RAM {}: {error}", path.display()))?;
         if emit_summary {
             eprintln!("[cli] SPU RAM → {}", path.display());
+        }
+    }
+
+    if let Some(path) = args.memcard.as_ref() {
+        if let Some(bytes) = bus.memcard_port1_snapshot() {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!("create memory-card directory {}: {error}", parent.display())
+                })?;
+            }
+            std::fs::write(path, &bytes)
+                .map_err(|error| format!("write memory card {}: {error}", path.display()))?;
+            if emit_summary {
+                eprintln!(
+                    "[cli] persisted port-1 memory card → {} ({} bytes)",
+                    path.display(),
+                    bytes.len()
+                );
+            }
         }
     }
 
@@ -2191,6 +2337,7 @@ fn validation_launch_args(
         savestate: None,
         bios: None,
         disc: None,
+        memcard: None,
         steps: checkpoint.stop.steps,
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
@@ -2216,6 +2363,7 @@ fn validation_launch_args(
         route_screenshot_dir: None,
         route_screenshot_interval: 3_000,
         pc_sample_log: None,
+        pc_sample_callsite_log: None,
         pc_sample_window_log: None,
         pc_sample_window_ticks: 300,
         pc_sample_instructions: 16_384,
@@ -3005,6 +3153,63 @@ fn write_pc_sample_log(path: &Path, samples: &BTreeMap<u32, u64>) -> Result<(), 
     writer.flush().map_err(|error| error.to_string())
 }
 
+fn write_pc_callsite_sample_log(
+    path: &Path,
+    samples: &BTreeMap<(u32, u32, u32, u32), u64>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let file = std::fs::File::create(path)
+        .map_err(|error| format!("create {}: {error}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    writeln!(
+        writer,
+        "pc,return_address,stack_return_address,inner_stack_return_address,samples,percent"
+    )
+    .map_err(|error| error.to_string())?;
+    let total = samples.values().copied().sum::<u64>();
+    let mut ranked = samples
+        .iter()
+        .map(
+            |(&(pc, return_address, stack_return_address, inner_stack_return_address), &count)| {
+                (
+                    pc,
+                    return_address,
+                    stack_return_address,
+                    inner_stack_return_address,
+                    count,
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(
+        |(pc_a, return_a, stack_a, inner_a, count_a),
+         (pc_b, return_b, stack_b, inner_b, count_b)| {
+            count_b
+                .cmp(count_a)
+                .then_with(|| pc_a.cmp(pc_b))
+                .then_with(|| return_a.cmp(return_b))
+                .then_with(|| stack_a.cmp(stack_b))
+                .then_with(|| inner_a.cmp(inner_b))
+        },
+    );
+    for (pc, return_address, stack_return_address, inner_stack_return_address, count) in ranked {
+        let percent = if total == 0 {
+            0.0
+        } else {
+            count as f64 * 100.0 / total as f64
+        };
+        writeln!(
+            writer,
+            "0x{pc:08x},0x{return_address:08x},0x{stack_return_address:08x},0x{inner_stack_return_address:08x},{count},{percent:.6}"
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
 fn write_pc_window_sample_log(
     path: &Path,
     samples: &BTreeMap<(u64, u32), u64>,
@@ -3151,5 +3356,22 @@ mod press_script_tests {
         assert!(parse_press_script("30:cross:0").is_err());
         assert!(parse_press_script("").is_err());
         assert!(parse_press_script("cross").is_err());
+    }
+
+    #[test]
+    fn callsite_sample_csv_keeps_both_stack_return_addresses() {
+        let path =
+            std::env::temp_dir().join(format!("psoxide-pc-callsites-{}.csv", std::process::id()));
+        let mut samples = BTreeMap::new();
+        samples.insert((0x800b_5608, 0x800b_622c, 0x800b_622c, 0x8009_4ce8), 3);
+        samples.insert((0x800b_560c, 0x800b_622c, 0x800b_622c, 0x8007_e5ec), 1);
+        write_pc_callsite_sample_log(&path, &samples).expect("write callsite CSV");
+        let csv = std::fs::read_to_string(&path).expect("read callsite CSV");
+        let _ = std::fs::remove_file(&path);
+        assert!(csv.starts_with(
+            "pc,return_address,stack_return_address,inner_stack_return_address,samples,percent\n"
+        ));
+        assert!(csv.contains("0x800b5608,0x800b622c,0x800b622c,0x80094ce8,3,75.000000"));
+        assert!(csv.contains("0x800b560c,0x800b622c,0x800b622c,0x8007e5ec,1,25.000000"));
     }
 }

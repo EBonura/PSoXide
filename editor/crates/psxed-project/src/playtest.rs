@@ -65,6 +65,7 @@ use crate::{
 mod assets;
 mod cook_ui;
 mod manifest;
+mod performance;
 mod schema;
 pub(crate) use cook_ui::*;
 mod cook_entities;
@@ -85,6 +86,7 @@ pub use manifest::{
     cook_to_dir, default_generated_dir, render_manifest_source, streamed_room_chunk_memory_report,
     write_cook_result, write_package,
 };
+pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
 
 #[cfg(test)]
