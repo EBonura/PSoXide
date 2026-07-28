@@ -458,6 +458,57 @@ fix is waiting on.
 The remaining 34% is genuinely unmeasured loop body. It should be instrumented
 before anyone optimises it, at ~21k/section of measurement cost.
 
+## Closing the attribution, and E6's independence (2026-07-28)
+
+Two counters close the partition: one around the per-cell setup, one around the
+whole `draw_indexed_cached_room_surface` call. Then
+`call - sum(inner sections)` is the surface body no counter reaches, and
+`stage - cell_setup - call` is the loop's own overhead.
+
+Instrumentation cost is now measured directly rather than extrapolated:
+profiled 807,881 against clean 638,166 is **169,715 over 10 sections, ~16,971
+each**. That needs no assumption about how often each section runs, unlike the
+earlier single-section deltas which ranged 9k to 21k depending on whether the
+section was per-surface or per-cell.
+
+Corrected against the clean 638,166 cyc/frame stage:
+
+| region | cyc/frame | share |
+| --- | ---: | ---: |
+| `submit` | 310,154 | **49%** |
+| surface body, untimed | ~220,755 | **35%** |
+| `projected` (GTE + depth prep) | 38,125 | 6% |
+| classification (material/lighting/backface/screen/kind) | 52,632 | 8% |
+| `options` | 18,514 | 3% |
+| per-cell setup | 12,346 | 2% |
+| loop overhead | ~0 | ~0% |
+
+**The loop is not the problem and neither is per-cell setup.** The 35% that no
+counter reached is inside the surface body, between the timed sections, in the
+same function family as `submit`. Together **submit plus that body is 83% of the
+stage**, and E6 rewrites both.
+
+### E6 does not need E5
+
+The doc sequences E5 → E6 because E6's templates were meant to hang off the
+records. Reading `submit_adaptive_cached_room_quad`, E6's three parts are all
+separable from `SurfaceDrawRecord`:
+
+* `LatticeAttrs` is a new prewarm-filled pool, parallel to records, not built on
+  them;
+* `copy_payload_from` children is internal to the submit arm;
+* the GTE-state hoist is a loop-level change.
+
+So **E6 can be done without paying for E5's 11%.**
+
+Two concrete items visible in that arm already:
+
+* four `camera.view_vertex(...)` calls per surface re-derive camera-space
+  positions the GTE computed during projection and discarded;
+* two more 80-byte `WorldSurfaceOptions` copies (`with_cull_mode` then
+  `with_material_layer`) that sit *inside* submit, so the 2.9% `options` counter
+  does not include them.
+
 ## Recommendations for the engine
 
 Current state: `render3d.rs` uses `adaptive_subdivision`, four-way splits

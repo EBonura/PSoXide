@@ -700,11 +700,20 @@ pub mod counter {
     /// lighting and submit sections, i.e. inside the ~48% of room_surface_draw
     /// that no existing counter attributed.
     pub const ROOM_SURF_OPTIONS_CYCLES: u16 = 250;
+
+    /// E2: per-cell setup ahead of the surface loop (tile depth options plus
+    /// the submit-depth table), charged once per accepted cell.
+    pub const ROOM_SURF_CELL_SETUP_CYCLES: u16 = 251;
+
+    /// E2: the whole per-surface draw call. `call - sum(inner sections)` is the
+    /// surface body no counter reaches; `stage - cell_setup - call` is the
+    /// loop's own overhead. Together these close the attribution.
+    pub const ROOM_SURF_CALL_CYCLES: u16 = 252;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 251;
+pub const COUNTER_COUNT: usize = 253;
 
-const _: () = assert!(counter::ROOM_SURF_OPTIONS_CYCLES as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::ROOM_SURF_CALL_CYCLES as usize == COUNTER_COUNT - 1);
