@@ -24,6 +24,62 @@ pub(super) struct RoomSurfaceMicroProfile {
     lighting_rejects: u32,
     tr_subdivision_candidates: u32,
     tr_subdivision_submitted: u32,
+    /// Warp probe: predicted affine texture error over the surfaces the
+    /// depth-band rule subdivided, and over the ones it left alone. Count,
+    /// sum and max (1/16 texel units) rather than buckets, so the mean and
+    /// the worst case both survive.
+    warp_subdivided: WarpStats,
+    warp_untouched: WarpStats,
+}
+
+/// Predicted-warp accumulator for one side of the subdivide/skip split.
+#[cfg(feature = "room-surface-profile")]
+#[derive(Copy, Clone, Debug, Default)]
+pub(super) struct WarpStats {
+    /// Surfaces observed.
+    count: u32,
+    /// Sum of predicted error, 1/16 texel units.
+    sum: u32,
+    /// Worst predicted error, 1/16 texel units.
+    max: u32,
+    /// Surfaces predicted to warp under one texel.
+    under_1tx: u32,
+}
+
+/// Predicted affine texture error for a surface, in 1/16 texel units.
+///
+/// This is the closed form measured in `docs/texture-warping-2026-07-27.md`:
+/// for an edge spanning `du` texels between depths `za` and `zb`, affine
+/// interpolation lands the screen midpoint off by
+/// `du * |zb - za| / (2 * (za + zb))` texels. That bench found the true
+/// worst-case error over the polygon runs ~2.4x the edge-midpoint value, so
+/// the result is scaled by 12/5 to be a bound rather than a sample.
+///
+/// Integer throughout, and ordered to stay inside i32: `dz <= zsum` always
+/// holds for positive depths, so the `dz << 8` ratio is bounded by 256.
+#[cfg(feature = "room-surface-profile")]
+fn predicted_warp_16ths(projected: [ProjectedVertex; 4], uv_words: [u16; 4]) -> u32 {
+    // Quad layout is v0,v1,v2,v3 -> triangles (0,1,2) and (1,2,3), i.e. a
+    // tl/tr/bl/br lattice. Check both axes on both sides; the surface's warp
+    // is the worst edge.
+    const EDGES: [(usize, usize); 4] = [(0, 1), (2, 3), (0, 2), (1, 3)];
+    let mut worst = 0u32;
+    for (a, b) in EDGES {
+        let (za, zb) = (projected[a].sz, projected[b].sz);
+        if za <= 0 || zb <= 0 {
+            continue; // behind the near plane; projection is meaningless here
+        }
+        let zsum = (za + zb) as u32;
+        let dz = (za - zb).unsigned_abs();
+        let (ua, va) = (uv_words[a] as u8, (uv_words[a] >> 8) as u8);
+        let (ub, vb) = (uv_words[b] as u8, (uv_words[b] >> 8) as u8);
+        let du = (ua.abs_diff(ub)).max(va.abs_diff(vb)) as u32;
+        // err * 16 = 8 * du * dz / zsum = du * ((dz << 8) / zsum) / 32
+        let ratio = (dz << 8) / zsum.max(1);
+        let err = (du * ratio) >> 5;
+        worst = worst.max(err * 12 / 5);
+    }
+    worst
 }
 
 #[cfg(not(feature = "room-surface-profile"))]
@@ -202,6 +258,34 @@ impl RoomSurfaceMicroProfile {
         }
     }
 
+    /// Warp probe: record what the closed form would have decided for this
+    /// surface, alongside what the depth-band rule actually did. Read-only;
+    /// it changes no geometry. The point is to find out, on real content,
+    /// how often the two disagree in each direction.
+    #[inline(always)]
+    fn count_warp(
+        &mut self,
+        _projected: [ProjectedVertex; 4],
+        _uv_words: [u16; 4],
+        _subdivided: bool,
+    ) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            let err = predicted_warp_16ths(_projected, _uv_words);
+            let stats = if _subdivided {
+                &mut self.warp_subdivided
+            } else {
+                &mut self.warp_untouched
+            };
+            stats.count = stats.count.saturating_add(1);
+            stats.sum = stats.sum.saturating_add(err);
+            stats.max = stats.max.max(err);
+            if err < 16 {
+                stats.under_1tx = stats.under_1tx.saturating_add(1);
+            }
+        }
+    }
+
     #[inline(always)]
     fn count_tr_subdivision_submitted(&mut self) {
         #[cfg(feature = "room-surface-profile")]
@@ -274,6 +358,21 @@ impl RoomSurfaceMicroProfile {
                 telemetry::counter::ROOM_SURF_TR_SUBDIVISION_SUBMITTED,
                 self.tr_subdivision_submitted,
             );
+            for (base, s) in [
+                (
+                    telemetry::counter::ROOM_SURF_WARP_SUBDIVIDED_COUNT,
+                    self.warp_subdivided,
+                ),
+                (
+                    telemetry::counter::ROOM_SURF_WARP_UNTOUCHED_COUNT,
+                    self.warp_untouched,
+                ),
+            ] {
+                telemetry::counter(base, s.count);
+                telemetry::counter(base + 1, s.sum);
+                telemetry::counter(base + 2, s.max);
+                telemetry::counter(base + 3, s.under_1tx);
+            }
             telemetry::counter(
                 telemetry::counter::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES,
                 self.submit_detail.hw_safe_test_cycles,
@@ -1269,6 +1368,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         is_ceiling,
                         material.sidedness,
                     );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
                 if tomb_raider_subdivision {
                     profile.count_tr_subdivision_candidate();
                 }
@@ -1314,6 +1414,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
                     );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
                 let projected_for_cull = if is_ceiling {
                     reverse_quad_winding(projected)
                 } else {
@@ -1514,6 +1615,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         false,
                         wall_material.sidedness,
                     );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
                 if tomb_raider_subdivision {
                     profile.count_tr_subdivision_candidate();
                 }
@@ -1559,6 +1661,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
                     );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_quad_backface_culled(
                     projected,
@@ -2837,4 +2940,66 @@ fn animated_cached_uv_words(
         let v = ((word >> 8) as u8).wrapping_add(offset_v);
         u16::from(u) | (u16::from(v) << 8)
     })
+}
+
+#[cfg(all(test, feature = "room-surface-profile"))]
+mod warp_probe_tests {
+    use super::*;
+
+    /// Build a quad lattice with the given per-vertex depths and UV span.
+    fn quad(depths: [i32; 4], uv: [(u8, u8); 4]) -> ([ProjectedVertex; 4], [u16; 4]) {
+        let mut p = [ProjectedVertex { sx: 0, sy: 0, sz: 0 }; 4];
+        let mut w = [0u16; 4];
+        for i in 0..4 {
+            p[i].sz = depths[i];
+            w[i] = uv[i].0 as u16 | ((uv[i].1 as u16) << 8);
+        }
+        (p, w)
+    }
+
+    /// The guest runs integer fixed-point; the bench that produced the rule
+    /// runs f64. Check the port agrees with the reference to within the
+    /// truncation we accepted, on a hard case (5:1 depth ratio, full UV span).
+    #[test]
+    fn integer_port_matches_the_float_closed_form() {
+        // tl/tr at depth 200, bl/br at 1000: depth varies down the surface.
+        let (p, w) = quad([200, 200, 1000, 1000], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        let got = predicted_warp_16ths(p, w);
+
+        // Reference: du * |zb-za| / (2*(za+zb)), calibrated x2.4, in 1/16ths.
+        let want = 63.0 * 800.0 / (2.0 * 1200.0) * 2.4 * 16.0;
+        let err = (got as f64 - want).abs() / want;
+        assert!(err < 0.02, "got {got}, want {want:.1} ({:.1}% off)", err * 100.0);
+    }
+
+    #[test]
+    fn constant_depth_surface_cannot_warp() {
+        let (p, w) = quad([500; 4], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        assert_eq!(predicted_warp_16ths(p, w), 0);
+    }
+
+    #[test]
+    fn error_is_proportional_to_uv_span() {
+        let full = quad([200, 200, 1000, 1000], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        let half = quad([200, 200, 1000, 1000], [(0, 0), (31, 0), (0, 31), (31, 31)]);
+        let (a, b) = (
+            predicted_warp_16ths(full.0, full.1),
+            predicted_warp_16ths(half.0, half.1),
+        );
+        // Halving the texture span on the surface halves the warp. This is the
+        // `uvhalf` control from the bench, which measured exactly that.
+        assert!(
+            (a as i32 - 2 * b as i32).abs() <= 16,
+            "full {a}, half {b}: not proportional"
+        );
+    }
+
+    #[test]
+    fn vertices_behind_the_near_plane_are_skipped_not_counted() {
+        let (p, w) = quad([-10, -10, 1000, 1000], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        // Only the two far vertices are valid, and they share a depth, so
+        // there is no usable edge and the probe must report nothing rather
+        // than a garbage ratio from a negative denominator.
+        assert_eq!(predicted_warp_16ths(p, w), 0);
+    }
 }
