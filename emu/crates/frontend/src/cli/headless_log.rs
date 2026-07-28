@@ -258,6 +258,16 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "room_surf_split_tris",
     "room_surf_tr_subdivision_candidates",
     "room_surf_tr_subdivision_submitted",
+    // Warp probe: predicted affine texture error vs what the depth-band rule
+    // actually did. See docs/texture-warping-2026-07-27.md.
+    "warp_subdivided_count",
+    "warp_subdivided_sum16",
+    "warp_subdivided_max16",
+    "warp_subdivided_under_1tx",
+    "warp_untouched_count",
+    "warp_untouched_sum16",
+    "warp_untouched_max16",
+    "warp_untouched_under_1tx",
     "room_surface_packets",
     "room_surface_commands",
     "tri_primitives",
@@ -527,6 +537,14 @@ impl GuestProfileLog {
             &summary,
             c::ROOM_SURF_TR_SUBDIVISION_SUBMITTED
         ));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_COUNT));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_SUM));
+        push!(counter_latest(c::ROOM_SURF_WARP_SUBDIVIDED_MAX));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_UNDER_1TX));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_COUNT));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_SUM));
+        push!(counter_latest(c::ROOM_SURF_WARP_UNTOUCHED_MAX));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX));
         push!(counter_total(&summary, c::ROOM_SURFACE_PACKETS));
         push!(counter_total(&summary, c::ROOM_SURFACE_COMMANDS));
         push!(counter_total(&summary, c::TRI_PRIMITIVES));
