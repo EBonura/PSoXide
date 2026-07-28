@@ -34,5 +34,6 @@ keeps the tools, so everything listed here is maintained.
 | `dma3_audit` | DMA channel 3 (CD-ROM) transfer audit. |
 | `bios_syscall_probe` | BIOS A/B/C-table call instrumentation. |
 | `smoke_draw` | Minimal first-instructions GPU smoke test. |
+| `texwarp` | Measures affine texture warping in **texels**, per pixel, against an analytic perspective-correct ground truth, and ranks every mitigation (subdivision schemes, diagonal choice, UV scale) by error per primitive. See [`docs/texture-warping-2026-07-27.md`](../../../../docs/texture-warping-2026-07-27.md). |
 
 Shared helpers live in [`support/`](support).

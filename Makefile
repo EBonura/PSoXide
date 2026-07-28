@@ -369,6 +369,18 @@ PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES ?= 80
 PROFILE_DEMO3_DISC_STREAM_FORWARD_GUEST_FRAMES ?= 1200
 PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS ?= 600000000
 PROFILE_DEMO3_DISC_STREAM_FORWARD_HW ?= /tmp/psoxide-demo3-disc-stream-forward-hw.ppm
+# Warp probe: read-only measurement of predicted affine texture error against
+# what the depth-band subdivision rule actually decided, on real content.
+# See docs/texture-warping-2026-07-27.md.
+WARP_PROBE_PROJECT ?= projects/cortex_v3/project.ron
+# Drop room-surface-profile for a clean A/B of stage timings: its per-stage
+# cycle counters are themselves ~30% of room_surface_draw.
+WARP_PROBE_FEATURES ?= cd-stream-bench room-surface-profile emulator-telemetry
+WARP_PROBE_GUEST_FRAMES ?= 1200
+WARP_PROBE_STEPS ?= 600000000
+WARP_PROBE_LOG ?= /tmp/psoxide-warp-probe.csv
+WARP_PROBE_HW ?= /tmp/psoxide-warp-probe-hw.ppm
+
 PROFILE_DEMO7_CAMERA_SWEEP_VISUAL_FRAMES ?= 240
 PROFILE_DEMO7_CAMERA_SWEEP_GUEST_FRAMES ?= 1600
 PROFILE_DEMO7_CAMERA_SWEEP_STEPS ?= 600000000
@@ -760,6 +772,32 @@ profile-demo7-camera-sweep:
 		--visual-hash-interval 30 \
 		--dump-hash \
 		--dump-guest-profile
+
+# Read-only: changes no geometry, emits counters only. Answers whether the
+# closed-form warp criterion would actually cut primitives on real rooms, or
+# whether cortex's content happens to make the depth-band rule good enough.
+probe-warp:
+	$(MAKE) cook-playtest PROJECT=$(WARP_PROBE_PROJECT)
+	$(MAKE) build-editor-playtest EDITOR_PLAYTEST_FEATURES="$(WARP_PROBE_FEATURES)"
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--volume PSOXIDE \
+		--cdtest-sectors 32 \
+		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
+		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
+		--embedded-playtest \
+		--guest-frames $(WARP_PROBE_GUEST_FRAMES) \
+		--steps $(WARP_PROBE_STEPS) \
+		--hold-forward \
+		--profile-log $(WARP_PROBE_LOG) \
+		--dump-hw $(WARP_PROBE_HW) \
+		--dump-hash
 
 # --- Content pipeline (host-side editor tooling) ------------------------
 
