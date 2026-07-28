@@ -24,6 +24,10 @@ pub(super) struct RoomSurfaceMicroProfile {
     lighting_rejects: u32,
     tr_subdivision_candidates: u32,
     tr_subdivision_submitted: u32,
+    /// E2: cycles spent rebuilding the per-surface `WorldSurfaceOptions`
+    /// variants. This work sits between the timed lighting and submit
+    /// sections, so it was inside the unattributed ~48% of the stage.
+    options_cycles: u32,
     /// Warp probe: predicted affine texture error over the surfaces the
     /// depth-band rule subdivided, and over the ones it left alone. Count,
     /// sum and max (1/16 texel units) rather than buckets, so the mean and
@@ -161,6 +165,14 @@ impl RoomSurfaceMicroProfile {
         #[cfg(feature = "room-surface-profile")]
         {
             self.lighting_cycles = self.lighting_cycles.saturating_add(_cycles);
+        }
+    }
+
+    #[inline(always)]
+    fn add_options(&mut self, _cycles: u32) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.options_cycles = self.options_cycles.saturating_add(_cycles);
         }
     }
 
@@ -323,6 +335,10 @@ impl RoomSurfaceMicroProfile {
             telemetry::counter(
                 telemetry::counter::ROOM_SURF_SUBMIT_CYCLES,
                 self.submit_cycles,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_OPTIONS_CYCLES,
+                self.options_cycles,
             );
             telemetry::counter(telemetry::counter::ROOM_SURF_PROFILED, self.profiled);
             telemetry::counter(
@@ -1315,6 +1331,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             );
             let use_triangle_depth =
                 cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+            let options_start = RoomSurfaceMicroProfile::cycle();
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -1327,6 +1344,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 use_triangle_depth,
                 surface_risky,
             );
+            profile.add_options(RoomSurfaceMicroProfile::elapsed(options_start));
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_split_triangle_backface_culled(
@@ -1562,6 +1580,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             );
             let use_triangle_depth =
                 cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+            let options_start = RoomSurfaceMicroProfile::cycle();
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -1574,6 +1593,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 use_triangle_depth,
                 surface_risky,
             );
+            profile.add_options(RoomSurfaceMicroProfile::elapsed(options_start));
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_split_triangle_backface_culled(
