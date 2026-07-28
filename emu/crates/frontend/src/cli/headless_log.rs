@@ -256,6 +256,23 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "room_projected_vertices",
     "room_surf_whole_quads",
     "room_surf_split_tris",
+    "room_surf_tr_subdivision_candidates",
+    "room_surf_tr_subdivision_submitted",
+    // Warp probe: predicted affine texture error vs what the depth-band rule
+    // actually did. See docs/texture-warping-2026-07-27.md.
+    "warp_subdivided_count",
+    "warp_subdivided_sum16",
+    "warp_subdivided_max16",
+    "warp_subdivided_under_1tx",
+    "warp_untouched_count",
+    "warp_untouched_sum16",
+    "warp_untouched_max16",
+    "warp_untouched_under_1tx",
+    "room_surf_options",
+    "room_surf_cell_setup",
+    "room_surf_call",
+    "room_surface_packets",
+    "room_surface_commands",
     "tri_primitives",
     "tri_primitive_remaining",
     "world_commands",
@@ -515,6 +532,27 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::ROOM_PROJECTED_VERTICES));
         push!(counter_total(&summary, c::ROOM_SURF_WHOLE_QUADS));
         push!(counter_total(&summary, c::ROOM_SURF_SPLIT_TRIS));
+        push!(counter_total(
+            &summary,
+            c::ROOM_SURF_TR_SUBDIVISION_CANDIDATES
+        ));
+        push!(counter_total(
+            &summary,
+            c::ROOM_SURF_TR_SUBDIVISION_SUBMITTED
+        ));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_COUNT));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_SUM));
+        push!(counter_latest(c::ROOM_SURF_WARP_SUBDIVIDED_MAX));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_UNDER_1TX));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_COUNT));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_SUM));
+        push!(counter_latest(c::ROOM_SURF_WARP_UNTOUCHED_MAX));
+        push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX));
+        push!(counter_total(&summary, c::ROOM_SURF_OPTIONS_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_CELL_SETUP_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_CALL_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURFACE_PACKETS));
+        push!(counter_total(&summary, c::ROOM_SURFACE_COMMANDS));
         push!(counter_total(&summary, c::TRI_PRIMITIVES));
         push!(counter_latest(c::TRI_PRIMITIVE_REMAINING));
         push!(counter_total(&summary, c::WORLD_COMMANDS));

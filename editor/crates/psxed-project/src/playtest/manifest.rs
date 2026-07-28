@@ -175,9 +175,194 @@ fn write_aligned_asset_bytes_static(out: &mut String, static_name: &str, include
     let _ = writeln!(out, "}};");
 }
 
+fn write_cached_room_lighting_policy(
+    out: &mut String,
+    has_room_fog: bool,
+    all_room_fog_is_black: bool,
+) {
+    if has_room_fog {
+        let source = r#"
+#[repr(transparent)]
+pub struct ProjectCachedRoomLighting<'a> {
+    lighting: &'a super::RuntimeRoomLighting,
+}
+
+impl<'a> ProjectCachedRoomLighting<'a> {
+    #[inline(always)]
+    pub const fn new(lighting: &'a super::RuntimeRoomLighting) -> Self {
+        Self { lighting }
+    }
+}
+
+impl psx_engine::WorldSurfaceLighting for ProjectCachedRoomLighting<'_> {
+    #[inline(always)]
+    fn shade(
+        &self,
+        sample: psx_engine::WorldSurfaceSample,
+        material: psx_engine::WorldRenderMaterial,
+    ) -> psx_engine::WorldRenderMaterial {
+        psx_engine::WorldSurfaceLighting::shade(self.lighting, sample, material)
+    }
+
+    #[inline(always)]
+    fn shade_vertex(
+        &self,
+        sample: psx_engine::WorldSurfaceSample,
+        vertex: psx_engine::RoomPoint,
+        material: psx_engine::WorldRenderMaterial,
+    ) -> (u8, u8, u8) {
+        psx_engine::WorldSurfaceLighting::shade_vertex(self.lighting, sample, vertex, material)
+    }
+
+    #[inline(always)]
+    fn shade_vertices(
+        &self,
+        sample: psx_engine::WorldSurfaceSample,
+        vertices: [psx_engine::WorldVertex; 4],
+        material: psx_engine::WorldRenderMaterial,
+    ) -> [(u8, u8, u8); 4] {
+        psx_engine::WorldSurfaceLighting::shade_vertices(
+            self.lighting,
+            sample,
+            vertices,
+            material,
+        )
+    }
+
+    #[inline(always)]
+    fn shade_vertices_with_depths(
+        &self,
+        sample: psx_engine::WorldSurfaceSample,
+        vertices: [psx_engine::WorldVertex; 4],
+        depths: [i32; 4],
+        material: psx_engine::WorldRenderMaterial,
+    ) -> [(u8, u8, u8); 4] {
+        psx_engine::WorldSurfaceLighting::shade_vertices_with_depths(
+            self.lighting,
+            sample,
+            vertices,
+            depths,
+            material,
+        )
+    }
+
+    #[inline(always)]
+    fn shade_cached_baked_vertices(
+        &self,
+        sample: psx_engine::WorldSurfaceSample,
+        depths: Option<[i32; 4]>,
+        _material: psx_engine::WorldRenderMaterial,
+    ) -> Option<[(u8, u8, u8); 4]> {
+        let vertex_rgb = sample.baked_vertex_rgb?;
+        if !self.lighting.fog_enabled || self.lighting.fog_far <= self.lighting.fog_near {
+            return Some(vertex_rgb);
+        }
+        let depths = depths?;
+        Some([
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[0], depths[0]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[1], depths[1]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[2], depths[2]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[3], depths[3]),
+        ])
+    }
+
+    #[inline(always)]
+    fn shade_prewarmed_baked_vertices(
+        &self,
+        sample: psx_engine::WorldSurfaceSample,
+        depths: Option<[i32; 4]>,
+    ) -> Option<[(u8, u8, u8); 4]> {
+        let vertex_rgb = sample.baked_vertex_rgb?;
+        if !self.lighting.fog_enabled || self.lighting.fog_far <= self.lighting.fog_near {
+            return Some(vertex_rgb);
+        }
+        let depths = depths?;
+        Some([
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[0], depths[0]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[1], depths[1]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[2], depths[2]),
+            self.lighting.apply_vertex_fog_weight(vertex_rgb[3], depths[3]),
+        ])
+    }
+
+    #[inline(always)]
+    fn uses_direct_baked_vertex_rgb(&self) -> bool {
+        psx_engine::WorldSurfaceLighting::uses_direct_baked_vertex_rgb(self.lighting)
+    }
+
+    #[inline(always)]
+    fn prepare_vertex_depth(&self, depth: i32) -> i32 {
+        psx_engine::WorldSurfaceLighting::prepare_vertex_depth(self.lighting, depth)
+    }
+
+    #[inline(always)]
+    fn uses_vertex_depths(&self) -> bool {
+        psx_engine::WorldSurfaceLighting::uses_vertex_depths(self.lighting)
+    }
+
+    #[inline(always)]
+    fn needs_surface_sample_center(&self, sample_has_baked_rgb: bool) -> bool {
+        psx_engine::WorldSurfaceLighting::needs_surface_sample_center(
+            self.lighting,
+            sample_has_baked_rgb,
+        )
+    }
+}
+
+macro_rules! draw_project_cached_room {
+    (
+        $lighting:expr,
+        $draw:path,
+        [$($before:expr),* $(,)?],
+        [$($after:expr),* $(,)?]
+    ) => {{
+        let cached_lighting = $crate::generated::ProjectCachedRoomLighting::new($lighting);
+        $draw($($before,)* &cached_lighting, true, $($after,)*)
+    }};
+}
+pub(crate) use draw_project_cached_room;
+
+"#;
+        if all_room_fog_is_black {
+            out.push_str(&source.replace(
+                "self.lighting.apply_vertex_fog_weight",
+                "psx_game_runtime::room_lighting::apply_black_room_fog_weight",
+            ));
+        } else {
+            out.push_str(source);
+        }
+    } else {
+        out.push_str(
+            r#"
+macro_rules! draw_project_cached_room {
+    (
+        $lighting:expr,
+        $draw:path,
+        [$($before:expr),* $(,)?],
+        [$($after:expr),* $(,)?]
+    ) => {
+        $draw($($before,)* $lighting, false, $($after,)*)
+    };
+}
+pub(crate) use draw_project_cached_room;
+
+"#,
+        );
+    }
+}
+
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
+    let has_room_fog = package
+        .rooms
+        .iter()
+        .any(|room| room.flags & psx_level::room_flags::FOG_ENABLED != 0);
+    let all_room_fog_is_black = has_room_fog
+        && package.rooms.iter().all(|room| {
+            room.flags & psx_level::room_flags::FOG_ENABLED == 0 || room.fog_rgb == [0, 0, 0]
+        });
+    write_cached_room_lighting_policy(&mut out, has_room_fog, all_room_fog_is_black);
     let world_pack_toc = world_pack_toc(package);
     let world_pack_max_chunk_bytes = world_pack_toc
         .iter()

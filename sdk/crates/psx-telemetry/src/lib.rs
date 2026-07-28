@@ -652,11 +652,68 @@ pub mod counter {
     /// read reached the drive, or one of the `asset_streaming` reason codes
     /// (100+) when it failed before any read was armed.
     pub const PERSISTENT_ASSET_FAILED_REASON: u16 = 237;
+
+    /// Room surfaces whose exact TR subdivision predicate passed.
+    pub const ROOM_SURF_TR_SUBDIVISION_CANDIDATES: u16 = 238;
+
+    /// TR subdivision candidates that successfully emitted geometry.
+    pub const ROOM_SURF_TR_SUBDIVISION_SUBMITTED: u16 = 239;
+
+    /// Primitive packets emitted by room surface draws, excluding water,
+    /// props, actors, and other scene passes.
+    pub const ROOM_SURFACE_PACKETS: u16 = 240;
+
+    /// World commands emitted by room surface draws, excluding water, props,
+    /// actors, and other scene passes.
+    pub const ROOM_SURFACE_COMMANDS: u16 = 241;
+
+    /// Warp probe (read-only diagnostic, `room-surface-profile` only).
+    ///
+    /// Room surfaces bucketed by the closed-form predicted affine texture
+    /// error from `docs/texture-warping-2026-07-27.md`, cross-tabbed against
+    /// what the depth-band subdivision rule actually decided. Buckets are
+    /// `<1`, `1..2`, `2..4` and `>=4` calibrated texels.
+    ///
+    /// Error is reported as count / sum / max in 1/16 texel units rather than
+    /// as buckets: a first run bucketed it and put 99% of surfaces in the
+    /// top bin, which answers nothing. Sum and count give the mean; max gives
+    /// the worst case. `..._UNDER_1TX` is the one bucket worth keeping, since
+    /// "subdivided a surface that could not warp" is wasted primitives.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_COUNT: u16 = 242;
+    /// Sum of predicted error over subdivided surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_SUM: u16 = 243;
+    /// Worst predicted error among subdivided surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_MAX: u16 = 244;
+    /// Subdivided surfaces predicted to warp under 1 texel: wasted work.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_UNDER_1TX: u16 = 245;
+    /// Surfaces the depth-band rule left as authored polygons.
+    pub const ROOM_SURF_WARP_UNTOUCHED_COUNT: u16 = 246;
+    /// Sum of predicted error over untouched surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_UNTOUCHED_SUM: u16 = 247;
+    /// Worst predicted error among untouched surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_UNTOUCHED_MAX: u16 = 248;
+    /// Untouched surfaces predicted to warp under 1 texel: correctly skipped.
+    pub const ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX: u16 = 249;
+
+    /// E2 (docs/engine-30fps-architecture-2026-07-26.md): cycles rebuilding the
+    /// per-surface `WorldSurfaceOptions` variants. This sits between the timed
+    /// lighting and submit sections, i.e. inside the ~48% of room_surface_draw
+    /// that no existing counter attributed.
+    pub const ROOM_SURF_OPTIONS_CYCLES: u16 = 250;
+
+    /// E2: per-cell setup ahead of the surface loop (tile depth options plus
+    /// the submit-depth table), charged once per accepted cell.
+    pub const ROOM_SURF_CELL_SETUP_CYCLES: u16 = 251;
+
+    /// E2: the whole per-surface draw call. `call - sum(inner sections)` is the
+    /// surface body no counter reaches; `stage - cell_setup - call` is the
+    /// loop's own overhead. Together these close the attribution.
+    pub const ROOM_SURF_CALL_CYCLES: u16 = 252;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 238;
+pub const COUNTER_COUNT: usize = 253;
 
-const _: () = assert!(counter::PERSISTENT_ASSET_FAILED_REASON as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::ROOM_SURF_CALL_CYCLES as usize == COUNTER_COUNT - 1);
