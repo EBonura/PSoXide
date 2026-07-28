@@ -482,6 +482,11 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         if !self.started || self.ready || self.failed {
             return false;
         }
+        // The session-lifetime asset read happens behind a loading screen, so
+        // there is nothing to stay responsive for and every reason to keep up
+        // with the drive: sectors that land between frames are stepped over,
+        // and the only evidence is a checksum failure later.
+        self.job.set_wait_for_sectors(true);
         self.job.poll_into(cd, &mut self.storage, max_sectors);
         self.finish_if_done()
     }
