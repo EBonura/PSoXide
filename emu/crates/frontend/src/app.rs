@@ -299,7 +299,7 @@ pub mod bundled {
         BundledDisc {
             id: "bundled:hello-memcard",
             title: "hello-memcard",
-            subtitle: "sample",
+            subtitle: "hardware diagnostic",
             kind: BundledKind::Exe,
             bytes: include_bytes!("../assets/examples/hello-memcard.exe"),
         },
