@@ -7,9 +7,14 @@ license = "GPL-2.0-or-later"
 
 [workspace]
 
+[lib]
+name = "hello_memcard_recovery"
+path = "src/recovery.rs"
+
 [[bin]]
 name = "hello-memcard"
 path = "src/main.rs"
+test = false
 
 [profile.release]
 panic = "abort"
@@ -22,3 +27,4 @@ psx-rt   = { path = "../../crates/psx-rt" }
 psx-font = { path = "../../crates/psx-font" }
 psx-vram = { path = "../../crates/psx-vram" }
 psx-mc   = { path = "../../crates/psx-mc", features = ["compress"] }
+psx-pad  = { path = "../../crates/psx-pad" }
