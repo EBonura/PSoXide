@@ -28,6 +28,14 @@ pub(super) struct RoomSurfaceMicroProfile {
     /// variants. This work sits between the timed lighting and submit
     /// sections, so it was inside the unattributed ~48% of the stage.
     options_cycles: u32,
+    /// E2: per-cell setup ahead of the surface loop (tile depth options plus
+    /// the submit-depth table). Charged once per accepted cell.
+    cell_setup_cycles: u32,
+    /// E2: the whole `draw_indexed_cached_room_surface` call. Subtracting the
+    /// inner timed sections leaves the part of the surface body that no
+    /// counter reaches; subtracting this and `cell_setup` from the stage
+    /// leaves the loop's own overhead.
+    surface_call_cycles: u32,
     /// Warp probe: predicted affine texture error over the surfaces the
     /// depth-band rule subdivided, and over the ones it left alone. Count,
     /// sum and max (1/16 texel units) rather than buckets, so the mean and
@@ -165,6 +173,22 @@ impl RoomSurfaceMicroProfile {
         #[cfg(feature = "room-surface-profile")]
         {
             self.lighting_cycles = self.lighting_cycles.saturating_add(_cycles);
+        }
+    }
+
+    #[inline(always)]
+    fn add_cell_setup(&mut self, _cycles: u32) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.cell_setup_cycles = self.cell_setup_cycles.saturating_add(_cycles);
+        }
+    }
+
+    #[inline(always)]
+    fn add_surface_call(&mut self, _cycles: u32) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.surface_call_cycles = self.surface_call_cycles.saturating_add(_cycles);
         }
     }
 
@@ -339,6 +363,14 @@ impl RoomSurfaceMicroProfile {
             telemetry::counter(
                 telemetry::counter::ROOM_SURF_OPTIONS_CYCLES,
                 self.options_cycles,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_CELL_SETUP_CYCLES,
+                self.cell_setup_cycles,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_CALL_CYCLES,
+                self.surface_call_cycles,
             );
             telemetry::counter(telemetry::counter::ROOM_SURF_PROFILED, self.profiled);
             telemetry::counter(
@@ -670,8 +702,10 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
             continue;
         };
+        let cell_setup_start = RoomSurfaceMicroProfile::cycle();
         let cell_options = tile_depth_options_from_depth(options, cell_depth);
         let submit_depths = CachedRoomSubmitDepths::from_cell_options::<OT>(cell_options);
+        surface_profile.add_cell_setup(RoomSurfaceMicroProfile::elapsed(cell_setup_start));
         let first = cell.surface_first as usize;
         let end = first
             .saturating_add(cell.surface_count as usize)
@@ -689,6 +723,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 },
                 None => None,
             };
+            let surface_call_start = RoomSurfaceMicroProfile::cycle();
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
@@ -713,6 +748,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         world,
                         &mut surface_profile,
                     ));
+            surface_profile.add_surface_call(RoomSurfaceMicroProfile::elapsed(surface_call_start));
             i += 1;
         }
     }
@@ -876,8 +912,10 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
         let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
             continue;
         };
+        let cell_setup_start = RoomSurfaceMicroProfile::cycle();
         let cell_options = tile_depth_options_from_depth(options, cell_depth);
         let submit_depths = CachedRoomSubmitDepths::from_cell_options::<OT>(cell_options);
+        surface_profile.add_cell_setup(RoomSurfaceMicroProfile::elapsed(cell_setup_start));
         let first = cell.surface_first as usize;
         let end = first
             .saturating_add(cell.surface_count as usize)
@@ -895,6 +933,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                 },
                 None => None,
             };
+            let surface_call_start = RoomSurfaceMicroProfile::cycle();
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
@@ -919,6 +958,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                         world,
                         &mut surface_profile,
                     ));
+            surface_profile.add_surface_call(RoomSurfaceMicroProfile::elapsed(surface_call_start));
             i += 1;
         }
     }
