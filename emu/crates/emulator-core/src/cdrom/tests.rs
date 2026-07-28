@@ -10,6 +10,15 @@ fn raw_sector(header: [u8; 4], subheader: [u8; 4], payload_fill: u8) -> Vec<u8> 
     raw
 }
 
+/// Play `track` and wait out the seek, leaving the drive actually producing
+/// audio. `cmd_play` on its own only starts the head moving: see
+/// [`super::timing::cdda_seek_cycles`].
+fn play_and_arrive(cd: &mut CdRom, track: u8) {
+    cd.cmd_play(&[track]);
+    let arrives = cd.cdda_seek_done_at.expect("Play arms a seek");
+    cd.tick(arrives + 1);
+}
+
 fn multitrack_disc_with_pregap() -> Disc {
     Disc::from_tracks(vec![
         psx_iso::Track {
@@ -804,12 +813,11 @@ fn play_track_param_seeks_to_requested_track_start() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(multitrack_disc_with_pregap()));
 
-    cd.cmd_play(&[0x02]);
-    cd.tick(10_000_000);
+    play_and_arrive(&mut cd, 0x02);
 
     assert_eq!(cd.read_lba, 12);
     assert_eq!(
-        cd.read8(BASE + 1) & drive_status_bit::PLAYING,
+        cd.drive_status & drive_status_bit::PLAYING,
         drive_status_bit::PLAYING
     );
 }
@@ -819,7 +827,7 @@ fn cdda_play_streams_pcm_samples() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(cdda_disc()));
 
-    cd.cmd_play(&[0x02]);
+    play_and_arrive(&mut cd, 0x02);
     cd.pump_cdda_samples(2);
 
     assert_eq!(cd.read_lba, 12);
@@ -832,7 +840,7 @@ fn cdda_play_advances_one_lba_per_sector_frame() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(cdda_disc()));
 
-    cd.cmd_play(&[0x02]);
+    play_and_arrive(&mut cd, 0x02);
     cd.pump_cdda_samples(CDDA_SAMPLES_PER_SECTOR);
 
     assert_eq!(cd.read_lba, 13);
@@ -845,7 +853,7 @@ fn cdda_play_stops_at_audio_track_end() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(cdda_disc()));
 
-    cd.cmd_play(&[0x02]);
+    play_and_arrive(&mut cd, 0x02);
     cd.pump_cdda_samples(CDDA_SAMPLES_PER_SECTOR * 2 + 1);
 
     assert_eq!(cd.read_lba, 14);
@@ -874,7 +882,12 @@ fn command_during_cdda_playback_acks_later_than_when_idle() {
     let mut playing = CdRom::new();
     playing.insert_disc(Some(cdda_disc()));
     playing.push_param(0x02);
-    playing.queue_command(0x03, 2_000); // Play track 2 -> sets PLAYING
+    // Play track 2. Play only arms a seek; the busy penalty models a
+    // controller actually streaming audio, so wait for the head to arrive
+    // before measuring it.
+    playing.queue_command(0x03, 2_000);
+    let arrives = playing.cdda_seek_done_at.expect("Play arms a seek");
+    playing.complete_cdda_seek(arrives);
     assert_ne!(playing.drive_status & drive_status_bit::PLAYING, 0);
     // The Play command itself was issued while idle, so its own ack is NOT
     // penalised (only commands during an already-playing drive are).
@@ -885,7 +898,7 @@ fn command_during_cdda_playback_acks_later_than_when_idle() {
         .expect("play ack pending");
     assert_eq!(play_ack.deadline, 2_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES);
 
-    playing.queue_command(0x01, 3_000); // GetStat while playing
+    playing.queue_command(0x01, arrives + 1_000); // GetStat while playing
     let busy_ack = playing
         .pending
         .iter()
@@ -893,7 +906,7 @@ fn command_during_cdda_playback_acks_later_than_when_idle() {
         .expect("playing GetStat ack pending");
     assert_eq!(
         busy_ack.deadline,
-        3_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + CDDA_BUSY_RESPONSE_CYCLES
+        arrives + 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + CDDA_BUSY_RESPONSE_CYCLES
     );
 }
 
@@ -1222,4 +1235,57 @@ fn count_pending_command_irq(cd: &CdRom, command: u8, irq: IrqType) -> usize {
                 )
         })
         .sum()
+}
+
+/// The bug this whole model exists for. A guest that polls GetStat after Play
+/// and reads "not playing" as "the track finished" restarts its music for as
+/// long as the seek lasts. With Play declaring the drive playing at once, the
+/// poll answered correctly by accident and no headless check could show it.
+///
+/// Costed a real one on the demo disc: menu music at the far end of a 660 MB
+/// disc, polled twice a second, restarting forever on hardware while every
+/// capture here looked perfect.
+#[test]
+fn play_reports_seeking_with_no_audio_until_the_head_arrives() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+
+    cd.cmd_play(&[0x02]);
+    let arrives = cd.cdda_seek_done_at.expect("Play arms a seek");
+
+    // On the way: seeking, NOT playing, and producing nothing.
+    cd.tick(arrives - 1);
+    assert_ne!(cd.drive_status & drive_status_bit::SEEKING, 0);
+    assert_eq!(cd.drive_status & drive_status_bit::PLAYING, 0);
+    cd.pump_cdda_samples(4);
+    assert!(
+        cd.drain_cd_audio().is_empty(),
+        "no audio before the head lands"
+    );
+
+    // Arrived: playing, not seeking, and audible.
+    cd.tick(arrives + 1);
+    assert_eq!(cd.drive_status & drive_status_bit::SEEKING, 0);
+    assert_ne!(cd.drive_status & drive_status_bit::PLAYING, 0);
+    cd.pump_cdda_samples(4);
+    assert_eq!(cd.drain_cd_audio().len(), 4);
+}
+
+/// Stopping a drive that is still on its way has to cancel the journey. Left
+/// armed, the abandoned Play would land later and start playing a track the
+/// guest already gave up on.
+#[test]
+fn stopping_mid_seek_cancels_the_journey() {
+    for stop in [CdRom::cmd_stop, CdRom::cmd_pause, CdRom::cmd_init] {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(cdda_disc()));
+        cd.cmd_play(&[0x02]);
+        let arrives = cd.cdda_seek_done_at.expect("Play arms a seek");
+
+        stop(&mut cd);
+        assert_eq!(cd.cdda_seek_done_at, None);
+
+        cd.tick(arrives + 1);
+        assert_eq!(cd.drive_status & drive_status_bit::PLAYING, 0);
+    }
 }
