@@ -2,8 +2,6 @@
 //! Recovery logic for the one malformed save created by the first hardware
 //! diagnostic disc. This intentionally lives in the diagnostic, not `psx-mc`.
 
-#![no_std]
-
 use psx_mc::{Block, Card, Error, Result, DATA_BLOCKS, FRAME_SIZE};
 
 const E_STATE: usize = 0;
