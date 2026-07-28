@@ -509,6 +509,37 @@ Two concrete items visible in that arm already:
   `with_material_layer`) that sit *inside* submit, so the 2.9% `options` counter
   does not include them.
 
+### E6 does not decompose into local fixes
+
+Before starting the rewrite, every item the architecture doc cites as F-1/E6
+evidence was traced in code to see whether any of it could be taken cheaply.
+None of it can. Emission is **2,277 cycles per packet, roughly 1,140
+instructions**, and that cost is spread thin rather than sitting in one place:
+
+| cited item | where it actually is | worth |
+| --- | --- | --- |
+| 80-byte `WorldSurfaceOptions` copies | `from_quad_average` takes it by value but is `#[inline(always)]` and reads 3 fields; LLVM should SROA the copy away | likely ~0 |
+| per-surface GTE state reload | `load_adaptive_view_projection_gte` is ~17 coprocessor writes once per surface | ~2.4k/frame, 0.4% |
+| leaf-vertex struct copies | the `leaf_vertices` temp array in the lattice loop, 4x4 vertices | ~22k/frame, ~3.5% |
+| midpoints + UV repacks | 5 `midpoint_textured_gouraud_view` per surface in the lattice | real, inside the lattice |
+| packet double-write | ~14 stores against 2,277 cyc/packet | tens of cycles |
+
+Nothing here is a lever. Reaching the doc's 500-700 cyc/packet target needs the
+structural change it always specified: `LatticeAttrs` precomputed at prewarm so
+midpoints and UV words are not rebuilt per frame, and template packets so the
+14-word build-then-write happens once instead of per child.
+
+**So E6 is a rewrite or it is nothing.** It should get a dedicated session with
+the `lockstep-visuals` hash gate held from the first commit. What this session
+contributes to it: the gate is proven working, the attribution says the target
+is 83% of the stage (submit plus the untimed surface body, which sit in the same
+function family), and E6 is confirmed independent of E5.
+
+The next measurement worth taking is inside the packet build itself, to split
+those ~1,140 instructions per packet into cull / depth-key / UV / packet-write /
+command-push. At ~17k per timed section that is one build cycle and it would aim
+the rewrite instead of guessing at it.
+
 ## Recommendations for the engine
 
 Current state: `render3d.rs` uses `adaptive_subdivision`, four-way splits
