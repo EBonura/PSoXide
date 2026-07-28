@@ -2690,6 +2690,22 @@ fn gen_fonts() -> Result<(), String> {
             }
             FontFormat::Ttf => parse_ttf_font(&vendor.join(entry.source), &mut entry)?,
         };
+        let collisions = colliding_letters(&entry, &glyphs);
+        if !collisions.is_empty() {
+            let report = collisions
+                .iter()
+                .map(|group| group.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "{}: letters rasterize to identical bitmaps at {}x{}: {report}.\n\
+                 A reader cannot tell them apart, so text in this font is wrong rather \n\
+                 than merely ugly. Either raise the cell size until the letterforms \n\
+                 separate, or drop the font: some display faces distinguish letters with \n\
+                 a notch a pixel or two wide and simply have no legible small size.",
+                entry.module, entry.width, entry.height
+            ));
+        }
         let module = emit_font_module(&entry, &glyphs);
         let path = out_dir.join(format!("{}.rs", entry.module));
         fs::write(&path, module).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -3028,7 +3044,7 @@ fn font_entries() -> Vec<FontEntry> {
             "Jura, rasterized from Google Fonts.",
         ),
     ] {
-        entries.push(font_entry(
+        let mut entry = font_entry(
             source,
             FontFormat::Ttf,
             module,
@@ -3039,10 +3055,39 @@ fn font_entries() -> Vec<FontEntry> {
             doc,
             0,
             0,
-        ));
+        );
+        if let Some((cell_w, cell_h, px)) = LARGE_CELL_TTF_FONTS
+            .iter()
+            .find(|(name, ..)| *name == module)
+            .map(|(_, w, h, px)| (*w, *h, *px))
+        {
+            entry.max_cell_w = cell_w;
+            entry.max_cell_h = cell_h;
+            entry.preferred_px = px;
+            // Never fall back below this: the whole point is that the small
+            // sizes are the broken ones.
+            entry.min_px = px;
+        }
+        entries.push(entry);
     }
     entries
 }
+
+/// Display faces that need a bigger cell than the default to stay readable.
+///
+/// Most of these TTFs survive a 16-pixel cell. A few tell letters apart with a
+/// notch one or two pixels wide at that size, which the rasterizer's coverage
+/// threshold then removes, leaving K, X and H as the same bitmap and turning
+/// `PRESS X` into `PRESS H`. Giving them room costs VRAM and rules them out
+/// for body text, but a large legible font beats a small wrong one.
+const LARGE_CELL_TTF_FONTS: &[(&str, usize, usize, f32)] = &[
+    ("kenney_future", 32, 28, 24.0),
+    ("kenney_future_narrow", 32, 28, 24.0),
+    // A variable font whose default instance is thin: at 16 pixels its
+    // horizontal bars fall under the coverage threshold and vanish, leaving E
+    // and L, F and I as bare stems.
+    ("jura", 32, 28, 26.0),
+];
 
 #[allow(clippy::too_many_arguments)]
 fn font_entry(
@@ -3174,6 +3219,37 @@ fn parse_ttf_font(path: &Path, entry: &mut FontEntry) -> Result<Vec<Vec<u8>>, St
     }
     entry.advances = Some(advances);
     Ok(glyphs)
+}
+
+
+/// Letters of the Latin alphabet that came out as the same bitmap.
+///
+/// A font is not merely ugly when this happens, it is wrong: `PRESS X` renders
+/// as `PRESS H` and no amount of squinting recovers it. Worth checking at
+/// generation time because the failure is invisible in the glyph table and only
+/// shows up as misspelled words on screen, a long way from here.
+///
+/// Only A-Z: punctuation and box-drawing glyphs legitimately repeat, and a
+/// font of pure block shapes has every reason to.
+fn colliding_letters(entry: &FontEntry, glyphs: &[Vec<u8>]) -> Vec<Vec<char>> {
+    use std::collections::BTreeMap;
+    let mut by_bitmap: BTreeMap<&[u8], Vec<char>> = BTreeMap::new();
+    for letter in 'A'..='Z' {
+        let Some(index) = (letter as u32).checked_sub(entry.first_cp) else {
+            continue;
+        };
+        let Some(glyph) = glyphs.get(index as usize) else {
+            continue;
+        };
+        if glyph.iter().all(|byte| *byte == 0) {
+            continue; // a font without letters at all is a different problem
+        }
+        by_bitmap.entry(glyph.as_slice()).or_default().push(letter);
+    }
+    by_bitmap
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .collect()
 }
 
 fn emit_font_module(entry: &FontEntry, glyphs: &[Vec<u8>]) -> String {
