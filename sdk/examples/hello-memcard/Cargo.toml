@@ -9,11 +9,11 @@ license = "GPL-2.0-or-later"
 
 [lib]
 name = "hello_memcard_recovery"
-path = "src/recovery.rs"
+path = "src/main.rs"
 
 [[bin]]
 name = "hello-memcard"
-path = "src/main.rs"
+path = "src/bin.rs"
 test = false
 
 [profile.release]
