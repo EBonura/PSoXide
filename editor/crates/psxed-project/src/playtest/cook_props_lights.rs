@@ -419,14 +419,15 @@ pub(crate) fn push_box_prop(
         let center = box_prop_surface_center(world_vertices);
         let normal = box_prop_surface_normal(world_vertices);
         let face = usize::from(quad.source_face).min(crate::BOX_PROP_FACE_COUNT - 1);
+        let baked_uv = quad.uv_q8.map(|uv| bake_prop_uv(cooked_uvs[face], uv));
         box_prop_surfaces.push(PlaytestBoxPropSurface {
             vertices: world_vertices,
             center,
             normal,
-            uv_q8: quad.uv_q8,
+            uv_q8: baked_uv,
             baked_vertex_rgb: [rgb_tuple(tint_rgb[face]); 4],
             source_face: face as u8,
-            flags: 0,
+            flags: psx_level::box_prop_surface_flags::UV_BAKED,
         });
     }
 
@@ -567,11 +568,14 @@ pub(crate) fn push_cylinder_prop(
         let normal = box_prop_surface_normal(world_vertices);
         let material_slot =
             usize::from(surface.material_slot).min(crate::CYLINDER_PROP_MATERIAL_COUNT - 1);
+        let baked_uv = surface
+            .uv_q8
+            .map(|uv| bake_prop_uv(cooked_uvs[material_slot], uv));
         cylinder_prop_surfaces.push(PlaytestCylinderPropSurface {
             vertices: world_vertices,
             center,
             normal,
-            uv_q8: surface.uv_q8,
+            uv_q8: baked_uv,
             baked_vertex_rgb: [rgb_tuple(tint_rgb[material_slot]); 4],
             material_slot: material_slot as u8,
             vertex_count: vertex_count as u8,
@@ -616,6 +620,107 @@ pub(crate) fn push_cylinder_prop(
         },
     });
     true
+}
+
+fn bake_prop_uv(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> [u8; 2] {
+    let u = u32::from(uv_q8[0]);
+    let v = u32::from(uv_q8[1]);
+    let inv_u = 255 - u;
+    let inv_v = 255 - v;
+    let interpolate = |axis: usize| {
+        let values = if axis == 0 {
+            [
+                u32::from(corners[0].0),
+                u32::from(corners[1].0),
+                u32::from(corners[2].0),
+                u32::from(corners[3].0),
+            ]
+        } else {
+            [
+                u32::from(corners[0].1),
+                u32::from(corners[1].1),
+                u32::from(corners[2].1),
+                u32::from(corners[3].1),
+            ]
+        };
+        let top = values[0] * inv_u + values[1] * u;
+        let bottom = values[3] * inv_u + values[2] * u;
+        ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
+    };
+    [interpolate(0), interpolate(1)]
+}
+
+#[cfg(test)]
+mod prop_uv_tests {
+    use super::bake_prop_uv;
+
+    fn legacy_runtime_uv(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> [u8; 2] {
+        let lerp = |a: u8, b: u8, t: u8| {
+            let t = u32::from(t);
+            ((u32::from(a) * (255 - t) + u32::from(b) * t + 127) / 255).min(255) as u8
+        };
+        let [u, v] = uv_q8;
+        if v == 0 {
+            return [
+                lerp(corners[0].0, corners[1].0, u),
+                lerp(corners[0].1, corners[1].1, u),
+            ];
+        }
+        if v == 255 {
+            return [
+                lerp(corners[3].0, corners[2].0, u),
+                lerp(corners[3].1, corners[2].1, u),
+            ];
+        }
+        if u == 0 {
+            return [
+                lerp(corners[0].0, corners[3].0, v),
+                lerp(corners[0].1, corners[3].1, v),
+            ];
+        }
+        if u == 255 {
+            return [
+                lerp(corners[1].0, corners[2].0, v),
+                lerp(corners[1].1, corners[2].1, v),
+            ];
+        }
+
+        let u = u32::from(u);
+        let v = u32::from(v);
+        let inv_u = 255 - u;
+        let inv_v = 255 - v;
+        let axis = |values: [u8; 4]| {
+            let top = u32::from(values[0]) * inv_u + u32::from(values[1]) * u;
+            let bottom = u32::from(values[3]) * inv_u + u32::from(values[2]) * u;
+            ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
+        };
+        [
+            axis([corners[0].0, corners[1].0, corners[2].0, corners[3].0]),
+            axis([corners[0].1, corners[1].1, corners[2].1, corners[3].1]),
+        ]
+    }
+
+    #[test]
+    fn cooked_prop_uv_matches_legacy_runtime_for_every_coordinate() {
+        let corner_sets = [
+            [(0, 0), (255, 0), (255, 255), (0, 255)],
+            [(17, 231), (244, 7), (193, 161), (58, 99)],
+            [(255, 255), (0, 255), (0, 0), (255, 0)],
+            [(3, 251), (127, 129), (239, 11), (61, 197)],
+        ];
+        for corners in corner_sets {
+            for u in 0..=255u8 {
+                for v in 0..=255u8 {
+                    let uv = [u, v];
+                    assert_eq!(
+                        bake_prop_uv(corners, uv),
+                        legacy_runtime_uv(corners, uv),
+                        "corners={corners:?} uv={uv:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

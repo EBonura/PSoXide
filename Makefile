@@ -369,6 +369,18 @@ PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES ?= 80
 PROFILE_DEMO3_DISC_STREAM_FORWARD_GUEST_FRAMES ?= 1200
 PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS ?= 600000000
 PROFILE_DEMO3_DISC_STREAM_FORWARD_HW ?= /tmp/psoxide-demo3-disc-stream-forward-hw.ppm
+# Warp probe: read-only measurement of predicted affine texture error against
+# what the depth-band subdivision rule actually decided, on real content.
+# See docs/texture-warping-2026-07-27.md.
+WARP_PROBE_PROJECT ?= projects/cortex_v3/project.ron
+# Drop room-surface-profile for a clean A/B of stage timings: its per-stage
+# cycle counters are themselves ~30% of room_surface_draw.
+WARP_PROBE_FEATURES ?= cd-stream-bench room-surface-profile emulator-telemetry
+WARP_PROBE_GUEST_FRAMES ?= 1200
+WARP_PROBE_STEPS ?= 600000000
+WARP_PROBE_LOG ?= /tmp/psoxide-warp-probe.csv
+WARP_PROBE_HW ?= /tmp/psoxide-warp-probe-hw.ppm
+
 PROFILE_DEMO7_CAMERA_SWEEP_VISUAL_FRAMES ?= 240
 PROFILE_DEMO7_CAMERA_SWEEP_GUEST_FRAMES ?= 1600
 PROFILE_DEMO7_CAMERA_SWEEP_STEPS ?= 600000000
@@ -395,9 +407,11 @@ hello-tri:
 hello-input:
 	cd sdk/examples/hello-input && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
-# psx-mc memory-card round-trip smoke test (format/write/read/verify + compressed).
+# Non-destructive memory-card hardware diagnostic (full scan + confirmed
+# write/read/power-cycle persistence test).
 hello-memcard:
 	cd sdk/examples/hello-memcard && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+	cp $(EXAMPLE_OUT)/hello-memcard.exe emu/crates/frontend/assets/examples/hello-memcard.exe
 
 # Software 64-bit integer correctness probe (signed __divdi3 is broken on-target;
 # unsigned works -- see the example's docs).
@@ -531,8 +545,9 @@ hardware-tests:
 	cd engine/examples/hardware-tests && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 # --- hardware-test capture pipeline -------------------------------------
-# The disc runs its whole tier-1 battery at boot and mirrors every PX6 page
-# to the debug TTY, so a capture needs no pad input and no QR scanning.
+# The disc now boots side-effect free into its main menu. Headless capture
+# selects "RUN ALL TESTS + CAPTURE" with a short Cross pulse, after which the
+# suite mirrors every PX7 page to the debug TTY without QR scanning.
 HWTEST_CAPTURE  := build/hwtest-capture.log
 # Baselines are named by SUITE version, not by date: the suite version is what
 # determines whether two captures are comparable, and re-baselining the same
@@ -556,7 +571,7 @@ hwtest-capture: hardware-tests-disc
 	cd emu && cargo run -q -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
-		--steps $(HWTEST_STEPS) > ../$(HWTEST_CAPTURE)
+		--steps $(HWTEST_STEPS) --pad-pulses '0x4000@25+3' > ../$(HWTEST_CAPTURE)
 	@echo "captured $$(grep -c 'px7' $(HWTEST_CAPTURE)) PX7 pages -> $(HWTEST_CAPTURE)"
 
 HWTEST_CODE_BASELINE := docs/hardware-refs/hwtest-machine-code-v$(HWTEST_SUITE).txt
@@ -586,7 +601,7 @@ hwtest-audio: hardware-tests-disc
 	cd emu && cargo run -q -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
-		--steps 1200000000 --pad-pulses '0x8000@1900+6' \
+		--steps 1200000000 --pad-pulses '0x4000@25+3,0x8000@1900+6' \
 		--dump-audio ../$(HWTEST_WAV) > /dev/null
 	python3 tools/hwtest-audio-decode.py $(HWTEST_WAV) --emit-pages $(HWTEST_AUDIO_PAGES)
 	python3 tools/hwtest-report.py $(HWTEST_AUDIO_PAGES) > /dev/null
@@ -614,7 +629,7 @@ hwtest-baseline: hwtest-capture
 		echo "# captured:  $$(date -u +%Y-%m-%d)"; \
 		echo "# git:       $$(git describe --always --dirty)"; \
 		echo "# guest exe: sha256:$$(shasum -a 256 $(EXAMPLE_OUT)/hardware-tests.exe | cut -c1-16)"; \
-		echo "# emulator:  frontend launch --steps $(HWTEST_STEPS) (no pad input)"; \
+		echo "# emulator:  frontend launch --steps $(HWTEST_STEPS) (menu Cross pulse)"; \
 		echo "# schema:    PX7, 5 pages"; \
 		echo "#"; \
 		grep 'px7' $(HWTEST_CAPTURE) | sed 's/^hardware-tests: px7 //'; \
@@ -758,6 +773,32 @@ profile-demo7-camera-sweep:
 		--visual-hash-interval 30 \
 		--dump-hash \
 		--dump-guest-profile
+
+# Read-only: changes no geometry, emits counters only. Answers whether the
+# closed-form warp criterion would actually cut primitives on real rooms, or
+# whether cortex's content happens to make the depth-band rule good enough.
+probe-warp:
+	$(MAKE) cook-playtest PROJECT=$(WARP_PROBE_PROJECT)
+	$(MAKE) build-editor-playtest EDITOR_PLAYTEST_FEATURES="$(WARP_PROBE_FEATURES)"
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--volume PSOXIDE \
+		--cdtest-sectors 32 \
+		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
+		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
+		--embedded-playtest \
+		--guest-frames $(WARP_PROBE_GUEST_FRAMES) \
+		--steps $(WARP_PROBE_STEPS) \
+		--hold-forward \
+		--profile-log $(WARP_PROBE_LOG) \
+		--dump-hw $(WARP_PROBE_HW) \
+		--dump-hash
 
 # --- Content pipeline (host-side editor tooling) ------------------------
 

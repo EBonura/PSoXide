@@ -214,16 +214,15 @@ impl RuntimeRoomLighting {
     #[inline]
     fn point_lights(&self) -> impl Iterator<Item = PointLightSample> + '_ {
         self.lights.iter().map(|light| {
-                debug_assert_eq!(light.room, self.room_index);
-                PointLightSample::from_rgb_intensity(
-                    [light.x, light.y, light.z],
-                    light.radius as i32,
-                    Rgb8::from_array(light.color),
-                    Q8::from_raw_u16(light.intensity_q8),
-                )
-            })
+            debug_assert_eq!(light.room, self.room_index);
+            PointLightSample::from_rgb_intensity(
+                [light.x, light.y, light.z],
+                light.radius as i32,
+                Rgb8::from_array(light.color),
+                Q8::from_raw_u16(light.intensity_q8),
+            )
+        })
     }
-
 
     /// Fog a baked vertex colour by `vertex`'s camera-view depth.
     #[inline]
@@ -394,6 +393,32 @@ fn apply_room_fog_weight(tint: (u8, u8, u8), fog_rgb: Rgb8, weight: i32) -> (u8,
     )
 }
 
+/// Apply the exact room-fog blend when the cooked fog colour is black.
+///
+/// The cooker selects this only for projects whose every fog-enabled room has
+/// `fog_rgb == [0, 0, 0]`. Removing the identically-zero fog product preserves
+/// the generic blend's integer arithmetic and endpoint behavior.
+#[inline(always)]
+pub fn apply_black_room_fog_weight(tint: (u8, u8, u8), weight: i32) -> (u8, u8, u8) {
+    if weight <= 0 {
+        return tint;
+    }
+    if weight >= 256 {
+        return (0, 0, 0);
+    }
+    let keep = 256 - weight;
+    (
+        black_fog_channel(tint.0, keep),
+        black_fog_channel(tint.1, keep),
+        black_fog_channel(tint.2, keep),
+    )
+}
+
+#[inline(always)]
+fn black_fog_channel(src: u8, keep: i32) -> u8 {
+    (((src as i32) * keep) >> 8) as u8
+}
+
 #[inline(always)]
 fn blend_channel(src: u8, fog: u8, keep: i32, weight: i32) -> u8 {
     (((src as i32) * keep + (fog as i32) * weight) >> 8) as u8
@@ -407,6 +432,18 @@ pub const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn black_fog_specialization_matches_generic_channel_exhaustively() {
+        for src in 0..=u8::MAX {
+            for weight in 0..=256 {
+                let specialized = apply_black_room_fog_weight((src, src, src), weight).0;
+                let generic =
+                    apply_room_fog_weight((src, src, src), Rgb8::from_array([0, 0, 0]), weight).0;
+                assert_eq!(specialized, generic, "src={src} weight={weight}");
+            }
+        }
+    }
 
     const TEST_LIGHTS: &[PointLightRecord] = &[
         PointLightRecord {

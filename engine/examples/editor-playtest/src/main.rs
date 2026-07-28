@@ -49,6 +49,7 @@ use psx_asset::{Animation, ModelPart, ModelVertex};
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 use psx_engine::draw_room_vertex_lit;
 use psx_engine::ui::UiTextureSlot;
+use psx_engine::world_render::PortalCellWindow;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
 #[cfg(feature = "world-grid-visible")]
@@ -978,7 +979,8 @@ fn main() -> ! {
         video_mode,
         visual_pacing: playtest_visual_pacing(video_mode),
         scheduler: SchedulerConfig::new()
-            .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual),
+            .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual)
+            .with_visual_lockstep(cfg!(feature = "lockstep-visuals")),
         loading_ui_scene: generated::LOADING_UI_SCENE,
         ..Config::default()
     };

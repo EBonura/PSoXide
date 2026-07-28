@@ -2,7 +2,9 @@
 //! Host tests for the filesystem, run against an in-memory [`RamCard`] so the
 //! whole directory/allocation/container logic is exercised without hardware.
 
-use crate::{Card, Entry, Error, RamCard, DATA_BLOCKS};
+use crate::{
+    Block, Card, Entry, Error, RamCard, SaveIcon, DATA_BLOCKS, FRAMES_PER_BLOCK, FRAME_SIZE,
+};
 
 const NAME: &str = "BASLUS-99999SHEET01";
 const NAME2: &str = "BASLUS-99999SHEET02";
@@ -17,6 +19,7 @@ fn fresh() -> Card<RamCard> {
 fn format_makes_a_valid_empty_card() {
     let mut c = fresh();
     assert!(c.is_formatted().unwrap());
+    c.validate_filesystem().unwrap();
     assert_eq!(c.free_blocks().unwrap(), DATA_BLOCKS);
     let mut list = [blank_entry(); 15];
     assert_eq!(c.list(&mut list).unwrap(), 0);
@@ -38,6 +41,62 @@ fn write_read_roundtrip() {
     let n = c.read(NAME, &mut buf).unwrap();
     assert_eq!(&buf[..n], data);
     assert_eq!(c.free_blocks().unwrap(), DATA_BLOCKS - 1);
+    c.validate_filesystem().unwrap();
+}
+
+#[test]
+fn directory_size_is_allocated_in_bios_block_units() {
+    let mut c = fresh();
+    c.write(NAME, "SMALL", b"x").unwrap();
+    let image = c.into_inner();
+    assert_eq!(directory_size(image.image(), 0), 0x2000);
+
+    let mut c = fresh();
+    c.write(NAME, "BIG", &[0x5a; 10_000]).unwrap();
+    let image = c.into_inner();
+    assert_eq!(directory_size(image.image(), 0), 0x4000);
+}
+
+#[test]
+fn strict_validation_rejects_payload_byte_size() {
+    let mut c = fresh();
+    c.write(NAME, "LEGACY", &[0x5a; 64]).unwrap();
+    let mut image = c.into_inner().image().to_vec();
+    set_directory_size(&mut image, 0, 16 + 64);
+
+    let mut c = Card::new(RamCard::from_image(&image).unwrap());
+    assert_eq!(c.validate_filesystem(), Err(Error::Corrupt));
+}
+
+#[test]
+fn custom_icon_is_written_in_native_frames() {
+    let mut c = fresh();
+    let mut palette = [0u16; 16];
+    palette[1] = 0x7fff;
+    palette[2] = 0x03e0;
+    let pixels = [0x21u8; FRAME_SIZE];
+    let icon = SaveIcon::new(palette, pixels);
+    c.write_with_icon(NAME, "ICON", b"x", &icon).unwrap();
+
+    let base = FRAMES_PER_BLOCK as u16;
+    let mut header = [0u8; FRAME_SIZE];
+    let mut stored_pixels = [0u8; FRAME_SIZE];
+    c.device().read_frame(base, &mut header).unwrap();
+    c.device().read_frame(base + 1, &mut stored_pixels).unwrap();
+    // Sony's save header stores these as two independent bytes:
+    // icon display type (0x11 = one frame), then allocated block count.
+    assert_eq!(header[2], 0x11);
+    assert_eq!(header[3], 0x01);
+    assert_eq!(&header[0x60..0x64], &[0x00, 0x00, 0xff, 0x7f]);
+    assert_eq!(stored_pixels, pixels);
+}
+
+#[test]
+fn filesystem_validation_rejects_bad_directory_checksum() {
+    let mut image = *fresh().into_inner().image();
+    image[FRAME_SIZE] ^= 1;
+    let mut c = Card::new(RamCard::from_image(&image).unwrap());
+    assert_eq!(c.validate_filesystem(), Err(Error::Corrupt));
 }
 
 #[test]
@@ -209,4 +268,17 @@ fn blank_entry() -> Entry {
         name_len: 0,
         blocks: 0,
     }
+}
+
+fn directory_size(image: &[u8], index: usize) -> u32 {
+    let at = (1 + index) * FRAME_SIZE + 4;
+    u32::from_le_bytes([image[at], image[at + 1], image[at + 2], image[at + 3]])
+}
+
+fn set_directory_size(image: &mut [u8], index: usize, size: usize) {
+    let base = (1 + index) * FRAME_SIZE;
+    image[base + 4..base + 8].copy_from_slice(&(size as u32).to_le_bytes());
+    image[base + 127] = image[base..base + 127]
+        .iter()
+        .fold(0u8, |checksum, byte| checksum ^ byte);
 }

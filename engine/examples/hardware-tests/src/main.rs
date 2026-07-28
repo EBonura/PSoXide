@@ -15,6 +15,7 @@ extern crate psx_rt;
 
 use core::ptr;
 
+use hello_memcard_recovery::Diagnostic as MemoryCardDiagnostic;
 use psx_engine::{button, App, Config, Ctx, Scene};
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{self as gpu, prim, Resolution, VideoMode};
@@ -106,6 +107,28 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.6: Menu-first boot and the shared memory-card hardware diagnostic. The
+//       record schema is unchanged, but linking the diagnostic moves timing
+//       code, so machine-code and emulator timing baselines are pinned to this
+//       binary rather than compared byte-for-byte with v1.5.
+// v1.5: Sweeps aimed at two findings the first full capture could not settle.
+//       Ten seek distances plus two backward seeks, because four forward
+//       distances came back non-monotonic and no fit reached the middle
+//       points. Twelve SIO setup delays, because the console answered at 0,
+//       fell silent at 128 and answered again at 384.
+// v1.4: The capture is frozen when taken. Paging previously REBUILT the whole
+//       payload, and some observations are live (the pad poll is refreshed
+//       every frame), so each page carried a different payload while only the
+//       last page's CRC described its own bytes. No multi-page console capture
+//       could ever reconstruct. This is why three captures failed.
+// v1.3: Audio readout holds its level. v1.2 keyed the voice with an all-zero
+//       ADSR, which is sustain level 0, so on hardware the envelope decayed and
+//       a console capture carried ~3 seconds of a 13.6 second payload. The
+//       emulator does not model that decay, so only silicon could show it.
+// v1.2: Audio readout on by default. Off-by-default cost a console session:
+//       the operator has no reason to know a silent disc is withholding the
+//       payload, and the QR route then lost a symbol, which costs the whole
+//       capture. Volume stays at the reduced level.
 // v1.1: Operator flow. Boot runs the battery behind a visible progress bar,
 //       then lands on the capture pages; a main menu (TRIANGLE) reruns the
 //       startup tests or opens results, scans and probes; the audio readout is
@@ -117,9 +140,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 1;
+const SUITE_VERSION_MINOR: u8 = 6;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.1";
+const SUITE_VERSION: &str = "HWTEST v1.6";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -135,6 +158,11 @@ const PROBE_VARIANT_COUNT: usize = 5;
 /// to find what timing a strict original pad (SCPH-1200) needs. `setup_spins` is
 /// a delay after asserting the select line; `interbyte_spins` is a fixed gap
 /// after each byte. Both are bounded STAT reads, no `/ACK`/CTRL machinery.
+/// Setup-delay values swept by records 0xD0.., in SIO spin units.
+const SIO_SETUP_SWEEP: [u32; 12] = [
+    0, 64, 128, 192, 256, 320, 448, 512, 640, 896, 1024, 1536,
+];
+
 const PROBE_VARIANTS: [(&str, u32, u32); PROBE_VARIANT_COUNT] = [
     ("SETUP 0", 0, 0),
     ("SETUP 128", 128, 0),
@@ -142,7 +170,6 @@ const PROBE_VARIANTS: [(&str, u32, u32); PROBE_VARIANT_COUNT] = [
     ("SETUP 768", 768, 0),
     ("SETUP 2K", 2048, 0),
 ];
-const MODE_COUNT: u8 = 21;
 const CHECK_MODES: [Mode; 11] = [
     Mode::AllChecks,
     Mode::CpuChecks,
@@ -190,8 +217,9 @@ enum Status {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
-    /// Main menu. Entered after the operator has scanned the capture pages.
+    /// Main menu. This is always the boot mode.
     Menu,
+    MemoryCard,
     ReverbProbe,
     HandoffProbe,
     TransitionProbe,
@@ -213,12 +241,17 @@ enum Mode {
     GteScan,
     SpuScan,
     TimingScan,
+    /// Flat video-level chart for a TV or capture card. Not a measurement:
+    /// the console is the instrument, the operator's display is what is
+    /// under test.
+    VideoLevels,
 }
 
 impl Mode {
     const fn label(self) -> &'static str {
         match self {
             Self::Menu => "MAIN MENU",
+            Self::MemoryCard => "MEMORY CARD",
             Self::ReverbProbe => "HL REVERB STATE",
             Self::HandoffProbe => "HL VOICE HANDOFF",
             Self::TransitionProbe => "HL BANK TRANSITION",
@@ -240,12 +273,14 @@ impl Mode {
             Self::GteScan => "GTE MATRIX",
             Self::SpuScan => "SPU MAP",
             Self::TimingScan => "TIMING MAP",
+            Self::VideoLevels => "VIDEO LEVELS",
         }
     }
 
     const fn hint(self) -> &'static str {
         match self {
             Self::Menu => "UP/DOWN SELECT  CROSS RUN",
+            Self::MemoryCard => "L/R PAGE  L1+R1+X GUARDED ACTION",
             Self::ReverbProbe
             | Self::HandoffProbe
             | Self::TransitionProbe
@@ -267,12 +302,14 @@ impl Mode {
             Self::GteScan => "X FINGERPRINT COP2 COMMAND MATRIX",
             Self::SpuScan => "X MAP SPU VOICE REG READBACK",
             Self::TimingScan => "L/R CAPTURE PAGE  X RESAMPLE TIMING",
+            Self::VideoLevels => "X NEXT FIELD  START MENU",
         }
     }
 
     const fn description(self) -> &'static str {
         match self {
-            Self::Menu => "STARTUP TESTS, RESULTS, SCANS AND PROBES",
+            Self::Menu => "SELECT A TEST - NOTHING RUNS UNTIL CHOSEN",
+            Self::MemoryCard => "NON-DESTRUCTIVE FULL-CARD READ/WRITE TEST",
             Self::ReverbProbe => "BIOS REVERB STATE + MAP DMA RESET VARIANTS QR",
             Self::HandoffProbe => "SELECTABLE MENU-VOICE SHUTDOWN + BANK SPLIT QR",
             Self::TransitionProbe => "EXACT FULL/LIGHT/MAP LIVE-BANK HANDOFF QR",
@@ -294,12 +331,14 @@ impl Mode {
             Self::GteScan => "EXPLORATORY RAW GTE COMMAND MATRIX",
             Self::SpuScan => "SPU REGISTER BEHAVIOUR FINGERPRINT",
             Self::TimingScan => "RELATIVE HARDWARE TIMING PROBE",
+            Self::VideoLevels => "GREY RAMP AND FLAT FIELDS FOR TV/CAPTURE",
         }
     }
 
     const fn aux_label(self) -> &'static str {
         match self {
             Self::Menu => "MENU",
+            Self::MemoryCard => "CARD",
             Self::ReverbProbe
             | Self::HandoffProbe
             | Self::TransitionProbe
@@ -321,6 +360,7 @@ impl Mode {
             Self::GteScan => "FLAG HITS",
             Self::SpuScan => "CHANGED",
             Self::TimingScan => "JITTER",
+            Self::VideoLevels => "FIELD",
         }
     }
 
@@ -331,6 +371,12 @@ impl Mode {
             // Menu is not a measurement section and never reaches a report,
             // so it takes a value outside the original range.
             Self::Menu => u8::MAX,
+            // Interactive diagnostic only; it is not part of the frozen
+            // conformance report schema.
+            Self::MemoryCard => u8::MAX - 2,
+            // Same reasoning as Menu: this draws a chart for the operator's
+            // display, it never produces a result row or a report.
+            Self::VideoLevels => u8::MAX - 1,
             Self::ReverbProbe => 0,
             Self::HandoffProbe => 1,
             Self::TransitionProbe => 2,
@@ -494,7 +540,7 @@ struct ScanReport {
     runs: u8,
 }
 
-const TIMING_RECORD_COUNT: usize = 144;
+const TIMING_RECORD_COUNT: usize = 176;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = 9;
 const PRECISION_VALUE_COUNT: usize = 192;
 
@@ -520,8 +566,8 @@ enum MenuPage {
 /// What a menu row does when chosen.
 #[derive(Copy, Clone)]
 enum MenuAction {
-    /// Re-run exactly what boot runs: conformance, scans, timing battery.
-    RerunStartup,
+    /// Run conformance, scans, timing battery, then build capture output.
+    RunFullSuite,
     Open(Mode),
     Submenu(MenuPage),
     Back,
@@ -529,12 +575,20 @@ enum MenuAction {
     CycleAudio,
 }
 
-const ROOT_MENU: [(&str, MenuAction); 6] = [
-    ("RERUN STARTUP TESTS", MenuAction::RerunStartup),
+const ROOT_MENU: [(&str, MenuAction); 8] = [
+    // Row 0 is pinned: `make hwtest-capture` selects it by firing CROSS at a
+    // fixed tick with the cursor still at its boot position. Move this row and
+    // the capture opens whatever took its place, which produces an empty log
+    // rather than a failure anyone would notice.
+    ("RUN ALL TESTS + CAPTURE", MenuAction::RunFullSuite),
+    ("MEMORY CARD (SAFE)", MenuAction::Open(Mode::MemoryCard)),
     ("VIEW CAPTURE (QR PAGES)", MenuAction::Open(Mode::TimingScan)),
     ("RESULTS BY SECTION", MenuAction::Submenu(MenuPage::Results)),
     ("HARDWARE SCANS", MenuAction::Submenu(MenuPage::Scans)),
     ("TARGETED PROBES", MenuAction::Submenu(MenuPage::Probes)),
+    // Root, not a submenu: this one is aimed at the capture rig rather than
+    // at the console, so an operator setting up a recording finds it first.
+    ("VIDEO LEVELS (TV/CAPTURE)", MenuAction::Open(Mode::VideoLevels)),
     // Listed, not just bound to SQUARE: an operator cannot discover a hidden
     // button, and this is the control they need while recording.
     ("AUDIO READOUT", MenuAction::CycleAudio),
@@ -1566,6 +1620,7 @@ struct HardwareTests {
     transition_probe: TransitionProbe,
     voice_probe: VoiceProbe,
     audio_probe: AudioProbe,
+    memory_card: MemoryCardDiagnostic,
     pass_count: u8,
     fail_count: u8,
     warn_count: u8,
@@ -1576,9 +1631,11 @@ struct HardwareTests {
     /// frame while in the controller probe. Used to find which setup/inter-byte
     /// timing wakes a strict original pad.
     probe_variants: [psx_pad::RawPoll; PROBE_VARIANT_COUNT],
-    /// Index into `audio_link::RATE_DIVISORS` for the readout tone rate.
-    /// Zero means off, so the disc is silent unless asked.
+    /// Readout tone rate: 0 is off, otherwise `RATE_DIVISORS[audio_rate - 1]`.
+    /// Starts at the fastest rate so a recording always carries the payload.
     audio_rate: usize,
+    /// The capture payload must exist before the audio readout can start.
+    audio_prepared: bool,
     /// Selected row on the current menu page.
     menu_cursor: usize,
     /// Which menu page is showing.
@@ -1606,18 +1663,13 @@ fn enable_cop2_for_diagnostics() {
 fn enable_cop2_for_diagnostics() {}
 
 impl HardwareTests {
-    const fn new(boot_reverb: ReverbSnapshot) -> Self {
+    fn new(boot_reverb: ReverbSnapshot) -> Self {
         Self {
             font: None,
-            // Boot into the QR capture pages. This disc exists to get values
-            // off a console, so the payload should be on screen the moment the
-            // battery finishes rather than behind a menu keypress. The mode
-            // menu is still reachable with Up/Down.
-            //
-            // A tier-2 probe must never be the boot mode either: it owns SPU
-            // state, and the automatic capture has to describe a console those
-            // probes have not touched.
-            mode: Mode::TimingScan,
+            // Boot is deliberately side-effect free. The operator chooses
+            // whether to run the long capture battery, a focused probe, or the
+            // memory-card diagnostic.
+            mode: Mode::Menu,
             results: [TestResult::pending(); TEST_COUNT],
             cpu_scan: ScanReport::pending("press x to sweep"),
             gte_scan: ScanReport::pending("press x to sweep"),
@@ -1629,6 +1681,7 @@ impl HardwareTests {
             transition_probe: TransitionProbe::new(),
             voice_probe: VoiceProbe::new(),
             audio_probe: AudioProbe::new(),
+            memory_card: MemoryCardDiagnostic::new(),
             pass_count: 0,
             fail_count: 0,
             warn_count: 0,
@@ -1637,6 +1690,7 @@ impl HardwareTests {
             rerun_count: 0,
             probe_variants: [psx_pad::RawPoll::NONE; PROBE_VARIANT_COUNT],
             audio_rate: 0,
+            audio_prepared: false,
             menu_cursor: 0,
             menu_page: MenuPage::Root,
         }
@@ -1668,6 +1722,26 @@ impl HardwareTests {
         print_scan_report(Mode::TimingScan, self.timing_scan.summary);
     }
 
+    fn prepare_audio_readout(&mut self) {
+        audio_link::stop();
+        self.audio_rate = 0;
+        let bits = audio_link::prepare(self.timing_capture.binary());
+        self.audio_prepared = true;
+        tty::print("hardware-tests: audio-link transmitting bits=");
+        tty_print_dec_u16(bits as u16);
+        tty::println(" (SQUARE changes rate / off)");
+    }
+
+    fn run_full_suite(&mut self) {
+        if self.audio_prepared {
+            audio_link::stop();
+            self.audio_rate = 0;
+        }
+        self.run_all();
+        self.run_startup_scans();
+        self.prepare_audio_readout();
+    }
+
     fn encode_capture(&mut self, page: usize) {
         self.timing_capture.encode(
             &self.timing_scan,
@@ -1696,6 +1770,7 @@ impl HardwareTests {
         self.mode = mode;
         self.page = 0;
         match mode {
+            Mode::MemoryCard => self.memory_card = MemoryCardDiagnostic::new(),
             Mode::ReverbProbe => self.reverb_probe.start(),
             Mode::HandoffProbe => self.handoff_probe.start(),
             Mode::TransitionProbe => self.transition_probe.start(),
@@ -1712,9 +1787,15 @@ impl HardwareTests {
         self.page = 0;
     }
 
-    /// Step the audio readout: off, then each rate, then off again. Off is the
-    /// default so the disc is silent unless the operator asks for the tone.
+    /// Step the audio readout: each rate, then off, then back round. It starts
+    /// on, so a recording carries the payload without anyone remembering to
+    /// enable it; the cycle is for dropping to a slower, more robust rate when
+    /// a capture chain cannot decode the fastest one.
     fn cycle_audio_readout(&mut self) {
+        if !self.audio_prepared {
+            tty::println("hardware-tests: audio-link unavailable until full capture runs");
+            return;
+        }
         self.audio_rate = (self.audio_rate + 1) % (audio_link::RATE_DIVISORS.len() + 1);
         if self.audio_rate == 0 {
             audio_link::stop();
@@ -1765,6 +1846,7 @@ impl HardwareTests {
             Mode::TransitionProbe => self.transition_probe.restart(),
             Mode::VoiceProbe => self.voice_probe.restart(),
             Mode::AudioProbe => self.audio_probe.restart(),
+            Mode::VideoLevels => self.page = (self.page + 1) % VIDEO_FIELDS.len(),
             _ => self.run_section(self.mode),
         }
     }
@@ -1802,27 +1884,35 @@ impl Scene for HardwareTests {
     fn init(&mut self, _ctx: &mut Ctx) {
         enable_cop2_for_diagnostics();
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
-        self.run_all();
-        self.run_startup_scans();
-        // Upload the audio readout last: it claims voice 0 and most of SPU RAM,
-        // and every measurement must already be in the payload it transmits.
-        //
-        // It is uploaded SILENT. Auto-playing it meant the console screeched
-        // harsh square waves at full volume the instant it booted, which is
-        // both alarming and useless to anyone not recording at that moment.
-        // SQUARE starts it when the operator is ready.
-        let bits = audio_link::prepare(self.timing_capture.binary());
-        tty::print("hardware-tests: audio-link ready bits=");
-        tty_print_dec_u16(bits as u16);
-        tty::println(" (press SQUARE to transmit)");
-        draw_init_progress(1, 1, (96, 240, 128));
+        tty::println("hardware-tests: main menu ready");
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
         self.results[PAD_POLL_TEST_INDEX] = pad_poll_result(ctx.pad);
         self.recount();
 
-        if matches!(self.mode, Mode::ReverbProbe) {
+        if matches!(self.mode, Mode::MemoryCard) {
+            // The engine's controller poll has fully completed before this
+            // card transaction starts. Pad and card share SIO0, but are never
+            // accessed concurrently.
+            self.memory_card.scan_step();
+            if ctx.just_pressed(button::START) || ctx.just_pressed(button::TRIANGLE) {
+                self.open_menu_page(MenuPage::Root);
+                return;
+            }
+            if ctx.just_pressed(button::LEFT) {
+                self.memory_card.page_left();
+            }
+            if ctx.just_pressed(button::RIGHT) {
+                self.memory_card.page_right();
+            }
+            self.memory_card.guarded_write(
+                ctx.is_held(button::L1),
+                ctx.is_held(button::R1),
+                ctx.just_pressed(button::CROSS),
+            );
+            return;
+        } else if matches!(self.mode, Mode::ReverbProbe) {
             let (realign, consume_input) = self.reverb_probe.update(ctx);
             if realign {
                 ctx.request_timing_realign();
@@ -1881,12 +1971,8 @@ impl Scene for HardwareTests {
             }
             if ctx.just_pressed(button::CROSS) {
                 match entries[self.menu_cursor].1 {
-                    MenuAction::RerunStartup => {
-                        // Same work boot does, and it lands back on the capture
-                        // pages the same way, so a re-run and a fresh boot are
-                        // indistinguishable to the operator.
-                        self.run_all();
-                        self.run_startup_scans();
+                    MenuAction::RunFullSuite => {
+                        self.run_full_suite();
                         self.enter_mode(Mode::TimingScan);
                     }
                     MenuAction::Open(mode) => self.enter_mode(mode),
@@ -1919,7 +2005,7 @@ impl Scene for HardwareTests {
                 self.page - 1
             };
             if matches!(self.mode, Mode::TimingScan) {
-                self.encode_capture(self.page);
+                self.timing_capture.render_page(self.page);
             }
         }
         if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
@@ -1932,7 +2018,7 @@ impl Scene for HardwareTests {
             };
             self.page = (self.page + 1) % pages;
             if matches!(self.mode, Mode::TimingScan) {
-                self.encode_capture(self.page);
+                self.timing_capture.render_page(self.page);
             }
         }
         if ctx.just_pressed(button::CROSS) {
@@ -1946,7 +2032,11 @@ impl Scene for HardwareTests {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        draw_test_pattern(ctx.sim_tick.as_u32());
+        // The video-levels page owns the whole framebuffer: the surround bars
+        // are lit pixels, and a level chart read next to them is worthless.
+        if !matches!(self.mode, Mode::VideoLevels | Mode::MemoryCard) {
+            draw_test_pattern(ctx.sim_tick.as_u32());
+        }
         // GPU line liveness cross only on the GPU section -- keeps the controller
         // probe and other focused screens clean.
         if matches!(self.mode, Mode::GpuChecks) {
@@ -1970,6 +2060,8 @@ impl Scene for HardwareTests {
                 | Mode::TransitionProbe
                 | Mode::VoiceProbe
                 | Mode::AudioProbe
+                | Mode::VideoLevels
+                | Mode::MemoryCard
         ) {
             draw_mode_menu(font, self);
         }
@@ -1990,6 +2082,8 @@ impl Scene for HardwareTests {
                 Mode::GteScan => draw_scan_report(font, self.mode, self.gte_scan),
                 Mode::SpuScan => draw_scan_report(font, self.mode, self.spu_scan),
                 Mode::TimingScan => photo::draw_capture_page(font, &self.timing_capture, self.page),
+                Mode::VideoLevels => draw_video_levels(font, self.page),
+                Mode::MemoryCard => self.memory_card.draw(font),
                 _ => {}
             }
         }
@@ -2098,7 +2192,9 @@ fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
         // The audio row shows its own state inline, so the operator never has
         // to guess whether the tone is currently playing.
         if matches!(entries[row].1, MenuAction::CycleAudio) {
-            if suite.audio_rate == 0 {
+            if !suite.audio_prepared {
+                font.draw_text(150, y, "RUN CAPTURE FIRST", (255, 216, 96));
+            } else if suite.audio_rate == 0 {
                 font.draw_text(150, y, "OFF", (176, 190, 210));
             } else {
                 font.draw_text(150, y, "ON  RATE", (96, 240, 128));
@@ -2778,6 +2874,101 @@ fn draw_gpu_line_probe() {
     gpu::draw_line_mono(312, 50, 272, 90, 80, 180, 255);
 }
 
+/// Pages of the video-levels screen. Page 0 is the chart; the rest are flat
+/// fields at a single code, which is what a capture card's histogram or a TV
+/// service menu actually wants to be pointed at.
+const VIDEO_FIELDS: [(&str, Option<u8>); 4] = [
+    ("CHART", None),
+    ("FLAT BLACK  CODE 00", Some(0)),
+    ("FLAT MID    CODE 16", Some(16)),
+    ("FLAT WHITE  CODE 31", Some(31)),
+];
+
+/// 5-bit framebuffer code to the 8-bit value a GP0 colour word needs to land
+/// on it exactly. The framebuffer is 15bpp and these primitives are flat (no
+/// dither), so 32 codes are all the DAC can emit; labelling anything in 8-bit
+/// units here would invent precision the console does not have.
+const fn code_rgb(code: u8) -> u8 {
+    code << 3
+}
+
+/// Separator colour for the chart. Dim enough not to shift how the near-black
+/// patches read, blue so it is never taken for a grey being judged.
+const GRID_BLUE: u8 = 96;
+
+/// Grey ramp and flat fields, for telling display gamma apart from clipped
+/// levels. Nothing here is measured on the console: the console is the known
+/// source and the operator's TV or capture chain is what is under test.
+///
+/// Read it as: bottom codes indistinguishable from each other = black crush
+/// somewhere in the chain (levels, a setup pedestal, a limited/full range
+/// mismatch). All codes distinct but the ramp sitting dark = display gamma,
+/// which is what a CRT is supposed to do and a monitor is not.
+fn draw_video_levels(font: &FontAtlas, page: usize) {
+    let (title, flat) = VIDEO_FIELDS[page % VIDEO_FIELDS.len()];
+    gpu::draw_rect_flat(0, 0, 320, 240, 0, 0, 0);
+
+    if let Some(code) = flat {
+        let v = code_rgb(code);
+        // Field stops short of the last text line so the label can be cropped
+        // out of a measurement without cropping the field itself.
+        gpu::draw_rect_flat(0, 0, 320, 222, v, v, v);
+        // The caption sits on the black surround, not on the field, so it
+        // stays legible at every field value and crops off cleanly.
+        let ink = (120, 120, 120);
+        font.draw_text(8, 228, title, ink);
+        font.draw_text(176, 228, "X NEXT  START MENU", ink);
+        return;
+    }
+
+    let label = (140, 160, 190);
+    let head = (232, 236, 244);
+    font.draw_text(8, 12, "VIDEO LEVELS", head);
+    font.draw_text(232, 12, SUITE_VERSION, label);
+
+    // Full 32-code ramp, one 8px bar per code, so nothing is interpolated away.
+    // The blue frame is not decoration: code 0 is the page background, so
+    // without it a display that crushes the bottom of the ramp looks exactly
+    // like one where the ramp did not draw. Blue rather than grey so it can
+    // never be mistaken for one of the patches being judged.
+    gpu::draw_rect_flat(30, 26, 260, 44, 0, 0, GRID_BLUE);
+    let mut code = 0u8;
+    while code < 32 {
+        let v = code_rgb(code);
+        gpu::draw_rect_flat(32 + (code as i16) * 8, 28, 8, 40, v, v, v);
+        code += 1;
+    }
+    font.draw_text(32, 70, "000", label);
+    font.draw_text(96, 70, "008", label);
+    font.draw_text(160, 70, "016", label);
+    font.draw_text(224, 70, "024", label);
+    font.draw_text(280, 70, "031", label);
+
+    draw_level_row(font, 86, "NEAR BLACK", 0, label);
+    draw_level_row(font, 146, "NEAR WHITE", 24, label);
+
+    font.draw_text(8, 206, "PATCHES ALL DISTINCT? IF NOT, LEVELS", label);
+    font.draw_text(8, 218, "X NEXT FIELD   START MENU", label);
+}
+
+/// Eight patches from `first` upward, labelled with their 5-bit code.
+fn draw_level_row(font: &FontAtlas, y: i16, title: &'static str, first: u8, label: (u8, u8, u8)) {
+    font.draw_text(8, y, title, label);
+    // Same reason as the ramp frame: the 2px gutters were already there, this
+    // only lights them, so every patch keeps a visible edge even when the
+    // display cannot separate its value from its neighbour's.
+    gpu::draw_rect_flat(30, y + 8, 258, 34, 0, 0, GRID_BLUE);
+    let mut step = 0u8;
+    while step < 8 {
+        let code = first + step;
+        let v = code_rgb(code);
+        let x = 32 + (step as i16) * 32;
+        gpu::draw_rect_flat(x, y + 10, 30, 30, v, v, v);
+        font.draw_text(x + 3, y + 44, dec3(code as u16).as_str(), label);
+        step += 1;
+    }
+}
+
 fn mix32(mut hash: u32, value: u32) -> u32 {
     hash ^= value;
     hash = hash.wrapping_mul(0x0100_0193);
@@ -3136,6 +3327,53 @@ fn run_timing_scan() -> TimingReport {
         sample_timing(0x9C, 8, || cd_read_with_audio(false, 8)),
     );
     push_timing_record(&mut records, &mut next, sample_timing(0x9D, 1, cd_play_start));
+    // Seek sweep. Four distances proved too few to model: the console measured
+    // +128 slower than +512, and no monotonic fit came within 2x of the middle
+    // points. Ten distances with the same five repeats each make an outlier
+    // visible AS an outlier rather than as the shape of the curve.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC0, 2, || cd_seek_distance(2)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC1, 4, || cd_seek_distance(4)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC2, 8, || cd_seek_distance(8)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC3, 32, || cd_seek_distance(32)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC4, 64, || cd_seek_distance(64)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC5, 256, || cd_seek_distance(256)),
+    );
+    // Backward seeks at the same distances. A drive settles differently
+    // approaching from outside, and every existing record seeks forward only,
+    // so a direction asymmetry would currently be invisible.
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC6, 64, || cd_seek_backward(64)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0xC7, 256, || cd_seek_backward(256)),
+    );
     push_timing_record(
         &mut records,
         &mut next,
@@ -3322,6 +3560,22 @@ fn run_timing_scan() -> TimingReport {
         &mut next,
         sample_timing(0xB9, 1, || timed_pad_poll(PROBE_VARIANTS[3].1, PROBE_VARIANTS[3].2)),
     );
+    // Setup-delay sweep. The console answered at setup 0, gave NO reply at 128,
+    // and answered again at 384: non-monotonic, so the threshold cannot be read
+    // off four points. Twelve evenly spaced delays bracket where a real pad
+    // starts replying, which is the SCPH-1200 problem stated as a measurement.
+    let mut sweep = 0usize;
+    while sweep < SIO_SETUP_SWEEP.len() {
+        let setup = SIO_SETUP_SWEEP[sweep];
+        push_timing_record(
+            &mut records,
+            &mut next,
+            sample_timing(0xD0 + sweep as u8, (setup / 8) as u16, move || {
+                timed_pad_poll(setup, 0)
+            }),
+        );
+        sweep += 1;
+    }
     push_timing_record(
         &mut records,
         &mut next,
@@ -4060,6 +4314,19 @@ fn cd_park(lba: u32) -> bool {
     cd_clock_reset();
     cdrom::try_set_loc_lba(lba, CD_SPINS).is_some()
         && cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[])
+}
+
+/// Seek `distance` sectors BACKWARD onto the parked origin, timing only the
+/// seek. Parks beyond the target so the head approaches from the far side.
+fn cd_seek_backward(distance: u32) -> u16 {
+    let origin = CD_TEST_LBA + distance;
+    if !cd_park(origin) {
+        return CD_FAILED;
+    }
+    if cdrom::try_set_loc_lba(CD_TEST_LBA, CD_SPINS).is_none() {
+        return CD_FAILED;
+    }
+    cd_timed(|| cd_command_until_complete_timed(cdrom::CMD_SEEKL, &[]))
 }
 
 /// Seek `distance` sectors away from the parked origin and time only the seek.
@@ -6534,7 +6801,7 @@ fn fnv16_halfwords(hws: &[u16]) -> u32 {
 /// main RAM (channel 4, from-device, block-sync). Arms SPUCNT DMA-Read
 /// mode (bits 5..4 = 11) around the transfer, the read-side mirror of the
 /// SDK's DMA upload.
-fn spu_dma_read(addr: u32, out: &mut [u32]) {
+pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
     let words = out.len() as u32;
     let block_size: u32 = if words % 16 == 0 {
         16

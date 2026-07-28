@@ -30,6 +30,72 @@ header.
 
 ## History
 
+### v1.5 (2026-07-26, schema PX7)
+
+Two sweeps, added to settle findings the first complete capture raised but could
+not answer. Records only added, so v1.4 captures stay comparable.
+
+- **Seek sweep** (`0xC0`-`0xC5`) fills in 2, 4, 8, 32, 64 and 256 sectors between
+  the four original distances, which came back non-monotonic (+128 measured 361
+  ms against +512 at 192 ms) and defeated both a linear and a square-root fit.
+  Ten distances make an outlier visible as an outlier rather than as the shape
+  of the curve.
+- **Backward seeks** (`0xC6`, `0xC7`) at 64 and 256 sectors. Every existing seek
+  record approaches from below, so a direction asymmetry would be invisible.
+- **SIO setup-delay sweep** (`0xD0`-`0xDB`), twelve delays from 0 to 1536. The
+  console answered at setup 0, gave no reply at 128, and answered again at 384;
+  a threshold cannot be read off that, and this is the SCPH-1200 pad problem
+  stated as a measurement.
+
+Record slots raised 144 to 176, which still fits five QR pages (3,820 of 4,140
+characters).
+
+### v1.4 (2026-07-26, schema PX7)
+
+The capture is frozen when it is taken. **This is the fix that makes multi-page
+QR capture possible at all.**
+
+Paging previously called `encode_capture`, which rebuilt the entire payload from
+current state. Some observations are live: `results[PAD_POLL_TEST_INDEX]` is
+refreshed from the controller every frame in `update`. So page 1's QR encoded
+one payload, page 5's encoded another, and the whole-binary CRC stored in page 5
+described only page 5's version. Every page decoded cleanly and reconstruction
+always failed, which is exactly what three console captures did.
+
+Paging now re-renders the QR from the frozen payload (`PhotoCapture::render_page`)
+and only a genuinely new measurement re-encodes. Verified headlessly by paging
+with pad pulses and reconstructing from pages rendered at different times: CRC
+valid.
+
+### v1.3 (2026-07-26, schema PX7)
+
+Audio readout holds its level for the whole payload. No record changed meaning;
+baseline re-pinned because the binary changed.
+
+v1.2 keyed the readout voice with `Adsr::passthrough()`, an all-zero ADSR. Zero
+means sustain level 0, so on hardware the envelope decays to silence shortly
+after key-on: a console recording carried about 3 seconds of a 13.6 second
+payload, twice, and neither repetition was complete. PSoXide holds the level
+indefinitely for the same configuration, so no amount of emulator testing could
+have shown it. See `emulator-accuracy-from-silicon.md`.
+
+The disc now uses `Adsr::sample()`: instant attack, sustain level maximum.
+
+### v1.2 (2026-07-26, schema PX7)
+
+Audio readout on by default. No record changed meaning; the baseline was
+re-pinned because the guest binary changed.
+
+Off-by-default cost a console session. The operator has no reason to know a
+silent disc is withholding the payload, and with the readout off the only route
+left was the QR pages, which then lost a symbol: four of five decoded from the
+recording and page 4 was unreadable in every frame it appeared in. One missing
+symbol costs the whole capture. The original complaint was the VOLUME, which
+v1.1 already fixed, not the readout existing.
+
+SQUARE still steps rate and off, for dropping to a slower rate when a chain
+cannot decode the fastest.
+
 ### v1.1 (2026-07-26, schema PX7)
 
 Operator flow only; no record changed meaning, so v1.0 captures remain

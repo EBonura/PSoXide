@@ -29,7 +29,7 @@ const QR_QUIET: i16 = 4;
 //   66-byte header (includes the suite version, not just the schema version)
 //   173 x u32 complete conformance observations
 //   173 x packed 3-bit statuses (65 bytes)
-//   144 x (u8 id, u16 minimum, u16 median, u16 maximum) timing records
+//   176 x (u8 id, u16 minimum, u16 median, u16 maximum) timing records
 //   9 x u32 memory-control registers
 //   192 x u32 raw precision values
 //   u32 CRC-32 over every preceding byte
@@ -39,8 +39,8 @@ const QR_QUIET: i16 = 4;
 // later record's meaning. With the median column and room for the CD battery
 // that is 2,269 bytes / 3,028 Base64 characters: a fourth page at the same
 // proven Version-20-L geometry (4 x 828 = 3,312 characters of capacity).
-const BINARY_LEN: usize = 2_639;
-const BASE64_LEN: usize = 3_520;
+const BINARY_LEN: usize = 2_863;
+const BASE64_LEN: usize = 3_820;
 
 pub(crate) struct PhotoCapture {
     /// The encoded binary, kept so the audio link can transmit the same bytes
@@ -147,6 +147,19 @@ impl PhotoCapture {
         self.binary = binary;
         self.encode_qr(page);
 
+        self.print_page(page);
+    }
+
+    /// Re-render an already-encoded capture at a different page.
+    ///
+    /// Paging must NOT rebuild the payload. Some observations are live (the pad
+    /// poll is refreshed every frame from the controller), so re-encoding per
+    /// page gave each QR a different payload while only the last page's CRC
+    /// described the bytes it was computed over. A five-page capture could
+    /// therefore never reconstruct, which is exactly what console captures did:
+    /// every page decoded cleanly and the whole-binary CRC still failed.
+    pub(crate) fn render_page(&mut self, page: usize) {
+        self.encode_qr(page);
         self.print_page(page);
     }
 

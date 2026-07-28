@@ -745,30 +745,18 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
     if sx < 0 || sz < 0 || sx >= room.width() as i32 || sz >= room.depth() as i32 {
         return None;
     }
-    let sector = room.sector(sx as u16, sz as u16)?;
-    if !sector.has_floor() {
-        return None;
-    }
     let local_x = (x - sx * s).clamp(0, s);
     let local_z = (z - sz * s).clamp(0, s);
-    let triangle = psx_asset::world_topology::horizontal_triangle_at_local(
-        sector.floor_split(),
-        local_x,
-        local_z,
-        s,
-    );
-    if !sector.floor_triangle_present(triangle) {
-        return None;
-    }
+    let sector = room.sector_floor_collision(sx as u16, sz as u16, local_x, local_z, s)?;
     let heights = triangle_heights_to_quad(
         sector.floor_heights(),
-        sector.floor_split(),
-        triangle,
-        sector.floor_triangle_heights(triangle),
+        sector.split(),
+        sector.triangle(),
+        sector.triangle_heights(),
     );
     Some(height_at_local(
         heights,
-        sector.floor_split(),
+        sector.split(),
         local_x,
         local_z,
         s,

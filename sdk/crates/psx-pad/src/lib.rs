@@ -317,15 +317,10 @@ impl RawPoll {
 // (`psx_hw::sio::sio0` is the single source of truth for these bits; the spin
 // budgets below are this driver's behavior, not layout, and stay local.)
 
-const CTRL_TXEN: u16 = sio0::ctrl::TXEN;
-const CTRL_JOYN: u16 = sio0::ctrl::DTR;
-const CTRL_RXEN: u16 = sio0::ctrl::RXEN;
 const CTRL_ACK: u16 = sio0::ctrl::ACK;
 /// We never take the CPU interrupt (the controller source stays masked in
 /// `I_MASK`; the runtime only unmasks VBlank), but see the layout doc: enabling
 /// this is what latches `STAT` bit 9 on the `/ACK` edge for polling.
-const CTRL_ACK_IRQ_EN: u16 = sio0::ctrl::ACK_IRQ_EN;
-const CTRL_SLOT_PORT2: u16 = sio0::ctrl::SLOT_PORT2;
 
 const STAT_TX_READY: u32 = sio0::stat::TX_READY;
 const STAT_RX_NOT_EMPTY: u32 = sio0::stat::RX_NOT_EMPTY;
@@ -643,7 +638,8 @@ fn decode_buttons(b0: u8, b1: u8) -> ButtonState {
     ButtonState::from_bits(!((b0 as u16) | ((b1 as u16) << 8)))
 }
 
-/// CTRL value held while a port is selected: JOYN asserted, TX/RX enabled, and
+/// CTRL value held while a port is selected: JOYN asserted, TX enabled, and
+/// normal receive supplied implicitly by the active `/CS`,
 /// (only when `ack_irq`) the DSR (`/ACK`) interrupt armed so STAT bit 9 latches
 /// each pulse. The default no-wait poll leaves the DSR IRQ off -- enabling it
 /// turned out to disturb real-hardware transfers (the official SCPH-1200 stopped
@@ -651,13 +647,7 @@ fn decode_buttons(b0: u8, b1: u8) -> ButtonState {
 /// ack-wait diagnostic only.
 #[inline]
 const fn active_ctrl(port2: bool, ack_irq: bool) -> u16 {
-    let slot = if port2 { CTRL_SLOT_PORT2 } else { 0 };
-    let base = slot | CTRL_TXEN | CTRL_RXEN | CTRL_JOYN;
-    if ack_irq {
-        base | CTRL_ACK_IRQ_EN
-    } else {
-        base
-    }
+    sio0::selected_ctrl(port2, ack_irq)
 }
 
 /// Select the requested controller port and prepare SIO0 for a new

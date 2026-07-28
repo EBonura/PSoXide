@@ -117,6 +117,7 @@ const NOISE_HI: u32 = 0x1F80_1D96;
 const REVERB_ENABLE_LO: u32 = 0x1F80_1D98;
 const REVERB_ENABLE_HI: u32 = 0x1F80_1D9A;
 const TRANSFER_ADDR: u32 = 0x1F80_1DA6;
+const REVERB_WORK_BASE: u32 = 0x1F80_1DA2;
 const TRANSFER_DATA: u32 = 0x1F80_1DA8;
 const TRANSFER_CTRL: u32 = 0x1F80_1DAC;
 const CD_VOL_LEFT: u32 = 0x1F80_1DB0;
@@ -165,6 +166,14 @@ pub fn init() {
     // PA5 on silicon measured 56.8 dB of suppression from these two writes.
     write_reg16(REVERB_VOL_LEFT, 0);
     write_reg16(REVERB_VOL_RIGHT, 0);
+    // Park the reverb work area at the very top of SPU RAM.
+    //
+    // The work area runs from mBASE upward to the end of RAM, so a BIOS-left
+    // base low in memory reserves most of SPU RAM for reverb and anything a
+    // game uploads above it shares memory with the reverb engine. Zeroing the
+    // volumes above silences reverb's OUTPUT but leaves that claim on memory,
+    // and nothing else here moves it.
+    write_reg16(REVERB_WORK_BASE, 0xFFFE);
     write_reg16(PITCH_MOD_LO, 0);
     write_reg16(PITCH_MOD_HI, 0);
     write_reg16(NOISE_LO, 0);
@@ -426,8 +435,13 @@ impl Adsr {
         }
     }
 
-    /// Silent / "no envelope" -- voice stays at key-on volume until
-    /// key-off. Useful as a placeholder while iterating.
+    /// All-zero ADSR.
+    ///
+    /// This does NOT hold the voice at key-on volume, despite being the
+    /// obvious "no envelope" choice: zero means sustain level 0, so on real
+    /// hardware the envelope decays to silence shortly after key-on. Verified
+    /// on console, where a held tone faded out after ~3 seconds. Use
+    /// [`Adsr::sample`] for a level that holds.
     pub const fn passthrough() -> Self {
         Self { lower: 0, upper: 0 }
     }

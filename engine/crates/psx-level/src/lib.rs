@@ -308,6 +308,14 @@ pub mod box_prop_flags {
     pub const BREAK_ON_MASK: u16 = BREAK_ON_WALK | BREAK_ON_RUN | BREAK_ON_ATTACK;
 }
 
+/// Cook-generated BoxProp surface flags.
+pub mod box_prop_surface_flags {
+    /// `uv_q8` contains final packet-space UVs instead of face-relative Q8
+    /// coordinates. Older records without this bit retain runtime bilinear
+    /// interpolation.
+    pub const UV_BAKED: u8 = 1 << 0;
+}
+
 /// Cylinder prop record flags.
 pub mod cylinder_prop_flags {
     /// Prop emits one static collision blocker for the character motor.
@@ -2101,13 +2109,14 @@ pub struct LevelBoxPropSurfaceRecord {
     pub center: [i32; 3],
     /// Precomputed unnormalised face normal, scaled down by the cooker.
     pub normal: [i32; 3],
-    /// UV coordinates relative to the selected texture's extent (`0..=255`).
+    /// Face-relative Q8 coordinates, or final packet-space UVs when
+    /// [`box_prop_surface_flags::UV_BAKED`] is set.
     pub uv_q8: [[u8; 2]; 4],
     /// Per-vertex baked static light base.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
     /// Material slot in BoxProp face order.
     pub source_face: u8,
-    /// Reserved flags.
+    /// Flags from [`box_prop_surface_flags`].
     pub flags: u8,
 }
 
@@ -2150,7 +2159,7 @@ pub struct LevelCylinderPropSurfaceRecord {
     pub center: [i32; 3],
     /// Precomputed unnormalised outward normal.
     pub normal: [i32; 3],
-    /// UVs relative to the selected texture extent (`0..=255`).
+    /// Final cooked GPU UV coordinates for this surface.
     pub uv_q8: [[u8; 2]; 4],
     /// Per-vertex baked static light base.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],

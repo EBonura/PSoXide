@@ -341,6 +341,67 @@ pub struct GridVisibility {
     pub screen_margin: i32,
 }
 
+/// Conservative union of every portal frustum that reaches one room.
+///
+/// A room can be reached through more than one portal path. Keeping the
+/// component-wise union prevents a later cell pass from treating the first
+/// doorway as the room's only aperture and deleting geometry visible through
+/// another path.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PortalCellWindow {
+    /// Inclusive left tangent in Q12 view-space units.
+    pub left_tan_q12: i32,
+    /// Inclusive right tangent in Q12 view-space units.
+    pub right_tan_q12: i32,
+    /// Inclusive lower tangent in Q12 view-space units.
+    pub min_y_tan_q12: i32,
+    /// Inclusive upper tangent in Q12 view-space units.
+    pub max_y_tan_q12: i32,
+}
+
+impl PortalCellWindow {
+    /// Construct one clipped tangent window.
+    pub const fn new(
+        left_tan_q12: i32,
+        right_tan_q12: i32,
+        min_y_tan_q12: i32,
+        max_y_tan_q12: i32,
+    ) -> Self {
+        Self {
+            left_tan_q12,
+            right_tan_q12,
+            min_y_tan_q12,
+            max_y_tan_q12,
+        }
+    }
+
+    /// Return the conservative component-wise union of two portal paths.
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            left_tan_q12: if self.left_tan_q12 < other.left_tan_q12 {
+                self.left_tan_q12
+            } else {
+                other.left_tan_q12
+            },
+            right_tan_q12: if self.right_tan_q12 > other.right_tan_q12 {
+                self.right_tan_q12
+            } else {
+                other.right_tan_q12
+            },
+            min_y_tan_q12: if self.min_y_tan_q12 < other.min_y_tan_q12 {
+                self.min_y_tan_q12
+            } else {
+                other.min_y_tan_q12
+            },
+            max_y_tan_q12: if self.max_y_tan_q12 > other.max_y_tan_q12 {
+                self.max_y_tan_q12
+            } else {
+                other.max_y_tan_q12
+            },
+        }
+    }
+}
+
 impl GridVisibility {
     /// Build a conservative grid visibility window around an anchor.
     pub const fn around(anchor: RoomPoint, radius_cells: u16) -> Self {
@@ -918,6 +979,20 @@ pub trait WorldSurfaceLighting {
         _sample: WorldSurfaceSample,
         _depths: Option<[i32; 4]>,
         _material: WorldRenderMaterial,
+    ) -> Option<[(u8, u8, u8); 4]> {
+        None
+    }
+
+    /// Shade a prewarmed static packet from baked RGB without reconstructing
+    /// its immutable material.
+    ///
+    /// The default declines this path. Project-specialized lighting adapters
+    /// can opt in when their result depends only on baked RGB and prepared
+    /// vertex depths.
+    fn shade_prewarmed_baked_vertices(
+        &self,
+        _sample: WorldSurfaceSample,
+        _depths: Option<[i32; 4]>,
     ) -> Option<[(u8, u8, u8); 4]> {
         None
     }
@@ -1852,6 +1927,31 @@ fn cell_aabb_lateral_visible_wide(
 
 impl CellFrustum {
     #[inline(always)]
+    fn cell_aabb_view_extents(self, half_x: i32, half_y: i32, half_z: i32) -> [i32; 3] {
+        let half_x = half_x.max(0);
+        let half_y = half_y.max(0);
+        let half_z = half_z.max(0);
+        let extent_fast = half_x <= 174_000 && half_y <= 174_000 && half_z <= 174_000;
+        if extent_fast {
+            let extent = |row: [i32; 3]| {
+                ((row[0] * half_x + row[1] * half_y + row[2] * half_z + 4095) >> 12)
+                    .saturating_add(2)
+            };
+            [
+                extent(self.view_abs[0]),
+                extent(self.view_abs[1]),
+                extent(self.view_abs[2]),
+            ]
+        } else {
+            [
+                cell_aabb_extent_wide(self.view_abs[0], half_x, half_y, half_z),
+                cell_aabb_extent_wide(self.view_abs[1], half_x, half_y, half_z),
+                cell_aabb_extent_wide(self.view_abs[2], half_x, half_y, half_z),
+            ]
+        }
+    }
+
+    #[inline(always)]
     pub(crate) fn new(
         camera: &WorldCamera,
         options: WorldSurfaceOptions,
@@ -1929,31 +2029,11 @@ impl CellFrustum {
         half_y: i32,
         half_z: i32,
     ) -> bool {
-        let half_x = half_x.max(0);
-        let half_y = half_y.max(0);
-        let half_z = half_z.max(0);
         // Each absolute Q12 basis coefficient is <= 4096. With all three
         // half-extents <= 174,000, their worst-case sum plus rounding is below
         // i32::MAX, so the common PS1-sized cell can avoid widened saturating
         // arithmetic. Unusually large authored cells retain the old path.
-        let extent_fast = half_x <= 174_000 && half_y <= 174_000 && half_z <= 174_000;
-        let [extent_x, extent_y, extent_z] = if extent_fast {
-            let extent = |row: [i32; 3]| {
-                ((row[0] * half_x + row[1] * half_y + row[2] * half_z + 4095) >> 12)
-                    .saturating_add(2)
-            };
-            [
-                extent(self.view_abs[0]),
-                extent(self.view_abs[1]),
-                extent(self.view_abs[2]),
-            ]
-        } else {
-            [
-                cell_aabb_extent_wide(self.view_abs[0], half_x, half_y, half_z),
-                cell_aabb_extent_wide(self.view_abs[1], half_x, half_y, half_z),
-                cell_aabb_extent_wide(self.view_abs[2], half_x, half_y, half_z),
-            ]
-        };
+        let [extent_x, extent_y, extent_z] = self.cell_aabb_view_extents(half_x, half_y, half_z);
         if view.z < self.near.saturating_sub(extent_z) || view.z > self.far.saturating_add(extent_z)
         {
             return false;
@@ -1986,6 +2066,48 @@ impl CellFrustum {
                 self.half_h,
             )
         }
+    }
+
+    /// Conservative AABB test against a clipped portal tangent window.
+    #[inline(always)]
+    pub(crate) fn cell_aabb_intersects_portal_window(
+        self,
+        view: ViewVertex,
+        half_x: i32,
+        half_y: i32,
+        half_z: i32,
+        window: PortalCellWindow,
+    ) -> bool {
+        let [extent_x, extent_y, extent_z] = self.cell_aabb_view_extents(half_x, half_y, half_z);
+        let x_support = |edge: i32| {
+            4096i32
+                .saturating_mul(extent_x)
+                .saturating_add(edge.saturating_abs().saturating_mul(extent_z))
+        };
+        let y_support = |edge: i32| {
+            4096i32
+                .saturating_mul(extent_y)
+                .saturating_add(edge.saturating_abs().saturating_mul(extent_z))
+        };
+        view.x
+            .saturating_mul(4096)
+            .saturating_sub(window.left_tan_q12.saturating_mul(view.z))
+            >= -x_support(window.left_tan_q12)
+            && window
+                .right_tan_q12
+                .saturating_mul(view.z)
+                .saturating_sub(view.x.saturating_mul(4096))
+                >= -x_support(window.right_tan_q12)
+            && view
+                .y
+                .saturating_mul(4096)
+                .saturating_sub(window.min_y_tan_q12.saturating_mul(view.z))
+                >= -y_support(window.min_y_tan_q12)
+            && window
+                .max_y_tan_q12
+                .saturating_mul(view.z)
+                .saturating_sub(view.y.saturating_mul(4096))
+                >= -y_support(window.max_y_tan_q12)
     }
 
     #[inline(always)]
@@ -2775,7 +2897,7 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
             quad_uv_words,
             quad_colors,
             material.texture,
-            opts,
+            &opts,
             prepared_depth,
         );
         #[cfg(not(feature = "room-surface-profile"))]

@@ -1903,6 +1903,62 @@ impl<'a> World<'a> {
         }
     }
 
+    /// Decode only the selected floor triangle needed by a collision query.
+    ///
+    /// Unlike [`Self::sector`], this does not materialize render materials,
+    /// UVs, ceiling data, or the unselected triangle.
+    pub fn sector_floor_collision(
+        &self,
+        x: u16,
+        z: u16,
+        local_x: i32,
+        local_z: i32,
+        sector_size: i32,
+    ) -> Option<WorldSectorFloorCollision> {
+        if x >= self.width || z >= self.depth || sector_size <= 0 {
+            return None;
+        }
+        let index = x as usize * self.depth as usize + z as usize;
+        let size = self.sector_record_size;
+        let base = index.checked_mul(size)?;
+        let end = base.checked_add(size)?;
+        let bytes = self.sectors.get(base..end)?;
+        let flags = bytes[0];
+        if flags & psxed_format::world::sector_flags::HAS_FLOOR == 0 {
+            return None;
+        }
+
+        let split = bytes[1];
+        let triangle =
+            world_topology::horizontal_triangle_at_local(split, local_x, local_z, sector_size);
+        let default_flags = default_horizontal_flags(
+            true,
+            flags & psxed_format::world::sector_flags::FLOOR_WALKABLE != 0,
+        );
+        let sector_index = u16::try_from(index).ok()?;
+        let (triangle_flags, override_heights) = self
+            .horizontal_collision_override(
+                sector_index,
+                psxed_format::world::horizontal_surface::FLOOR,
+                triangle,
+            )
+            .unwrap_or((default_flags, None));
+        if !horizontal_triangle_present(triangle_flags, triangle) {
+            return None;
+        }
+
+        let floor_heights = read_i32x4(bytes, 12);
+        let triangle_heights = override_heights
+            .unwrap_or_else(|| horizontal_triangle_heights(floor_heights, split, triangle));
+        Some(WorldSectorFloorCollision {
+            split,
+            triangle: triangle as u8,
+            walkable: horizontal_triangle_walkable(triangle_flags, triangle),
+            floor_heights,
+            triangle_heights,
+        })
+    }
+
     /// Sector record by flat `[x * depth + z]` index, including empty cells.
     pub fn sector_record(&self, index: usize) -> Option<WorldSector> {
         let size = self.sector_record_size;
@@ -1998,6 +2054,34 @@ impl<'a> World<'a> {
         }
         None
     }
+
+    fn horizontal_collision_override(
+        &self,
+        sector_index: u16,
+        surface: u8,
+        triangle: usize,
+    ) -> Option<(u8, Option<[i32; 3]>)> {
+        let size = self.horizontal_override_record_size;
+        let mut index = 0usize;
+        while index < self.horizontal_override_count as usize {
+            let base = index.checked_mul(size)?;
+            let bytes = self.horizontal_overrides.get(base..base + size)?;
+            if read_u16(bytes, 0) == sector_index && bytes[2] == surface {
+                let heights = (bytes.len() >= psxed_format::world::HorizontalOverrideRecord::SIZE)
+                    .then(|| {
+                        let offset = 24 + triangle.min(1) * 12;
+                        [
+                            read_i32(bytes, offset),
+                            read_i32(bytes, offset + 4),
+                            read_i32(bytes, offset + 8),
+                        ]
+                    });
+                return Some((bytes[3], heights));
+            }
+            index += 1;
+        }
+        None
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -2014,6 +2098,48 @@ pub struct WorldSectorCollisionProbe {
     flags: u8,
     first_wall: u16,
     wall_count: u16,
+}
+
+/// Minimal decoded floor triangle used by character and camera collision.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WorldSectorFloorCollision {
+    split: u8,
+    triangle: u8,
+    walkable: bool,
+    floor_heights: [i32; 4],
+    triangle_heights: [i32; 3],
+}
+
+impl WorldSectorFloorCollision {
+    /// Floor diagonal split id.
+    #[inline]
+    pub fn split(self) -> u8 {
+        self.split
+    }
+
+    /// Selected triangle index.
+    #[inline]
+    pub fn triangle(self) -> usize {
+        self.triangle as usize
+    }
+
+    /// Whether the selected floor triangle is walkable.
+    #[inline]
+    pub fn walkable(self) -> bool {
+        self.walkable
+    }
+
+    /// Floor corner heights `[NW, NE, SE, SW]`.
+    #[inline]
+    pub fn floor_heights(self) -> [i32; 4] {
+        self.floor_heights
+    }
+
+    /// Selected triangle heights in triangle-corner order.
+    #[inline]
+    pub fn triangle_heights(self) -> [i32; 3] {
+        self.triangle_heights
+    }
 }
 
 impl WorldSectorCollisionProbe {
