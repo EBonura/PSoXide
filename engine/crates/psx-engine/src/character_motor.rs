@@ -1571,14 +1571,10 @@ fn floor_probe(room: RoomCollision<'_, '_>, x: i32, z: i32, need_height: bool) -
     if sx < 0 || sz < 0 || sx >= room.width() as i32 || sz >= room.depth() as i32 {
         return None;
     }
-    let sector = room.sector(sx as u16, sz as u16)?;
-    if !sector.has_floor() {
-        return None;
-    }
     let local_x = (x - sx * s).clamp(0, s);
     let local_z = (z - sz * s).clamp(0, s);
-    let triangle = triangle_index_at_local(sector.floor_split(), local_x, local_z, s);
-    if !sector.floor_triangle_walkable(triangle) {
+    let sector = room.sector_floor_collision(sx as u16, sz as u16, local_x, local_z, s)?;
+    if !sector.walkable() {
         return None;
     }
     if !need_height {
@@ -1586,13 +1582,13 @@ fn floor_probe(room: RoomCollision<'_, '_>, x: i32, z: i32, need_height: bool) -
     }
     let heights = triangle_heights_to_quad(
         sector.floor_heights(),
-        sector.floor_split(),
-        triangle,
-        sector.floor_triangle_heights(triangle),
+        sector.split(),
+        sector.triangle(),
+        sector.triangle_heights(),
     );
     Some(height_at_local(
         heights,
-        sector.floor_split(),
+        sector.split(),
         local_x,
         local_z,
         s,
@@ -1610,10 +1606,6 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
 /// per-axis divides) for four of every five floor queries.
 fn floor_walkable_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> bool {
     floor_probe(room, x, z, false).is_some()
-}
-
-fn triangle_index_at_local(split: u8, local_x: i32, local_z: i32, sector: i32) -> usize {
-    psx_asset::world_topology::horizontal_triangle_at_local(split, local_x, local_z, sector)
 }
 
 fn body_hits_solid_wall(
@@ -1641,10 +1633,10 @@ fn body_hits_solid_wall(
     while sx <= max_sx && sx < room.width() as i32 {
         let mut sz = min_sz;
         while sz <= max_sz && sz < room.depth() as i32 {
-            if let Some(sector) = room.sector(sx as u16, sz as u16) {
+            if let Some(sector) = room.sector_probe(sx as u16, sz as u16) {
                 let mut i = 0;
                 while i < sector.wall_count() {
-                    if let Some(wall) = room.sector_wall(sector, i) {
+                    if let Some(wall) = room.sector_probe_wall(sector, i) {
                         if wall.solid()
                             && wall_blocks_body(position.y, height, wall.heights())
                             && circle_overlaps_wall_segment(

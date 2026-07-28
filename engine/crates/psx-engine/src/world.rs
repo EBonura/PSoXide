@@ -479,6 +479,53 @@ impl<'a> CompactCollisionRoom<'a> {
             })
     }
 
+    fn sector_floor_collision(
+        self,
+        x: u16,
+        z: u16,
+        local_x: i32,
+        local_z: i32,
+        sector_size: i32,
+    ) -> Option<SectorFloorCollision> {
+        if x >= self.width || z >= self.depth || sector_size <= 0 {
+            return None;
+        }
+        let index = (x as usize)
+            .checked_mul(self.depth as usize)?
+            .checked_add(z as usize)?;
+        let base = index.checked_mul(COMPACT_COLLISION_SECTOR_BYTES)?;
+        let bytes = self
+            .sectors
+            .get(base..base.checked_add(COMPACT_COLLISION_SECTOR_BYTES)?)?;
+        let flags = *bytes.first()?;
+        if flags & compact_collision_sector_flags::HAS_FLOOR == 0 {
+            return None;
+        }
+        let split = *bytes.get(1)?;
+        let triangle = psx_asset::world_topology::horizontal_triangle_at_local(
+            split,
+            local_x,
+            local_z,
+            sector_size,
+        );
+        let triangle_flags = *bytes.get(3)?;
+        if !horizontal_triangle_present(triangle_flags, triangle) {
+            return None;
+        }
+        let floor_heights = read_i32x4(bytes, 12)?;
+        let sector_index = u16::try_from(index).ok()?;
+        let triangle_heights = self
+            .height_override_triangle(sector_index, compact_collision_surface::FLOOR, triangle)
+            .unwrap_or_else(|| horizontal_triangle_heights(floor_heights, split, triangle));
+        Some(SectorFloorCollision {
+            split,
+            triangle: triangle as u8,
+            walkable: horizontal_triangle_walkable(triangle_flags, triangle),
+            floor_heights,
+            triangle_heights,
+        })
+    }
+
     fn sector_wall(
         self,
         sector: CompactSectorCollision,
@@ -589,6 +636,31 @@ impl<'a> CompactCollisionRoom<'a> {
                         read_i32(bytes, 20)?,
                         read_i32(bytes, 24)?,
                     ],
+                ]);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    fn height_override_triangle(
+        self,
+        sector_index: u16,
+        surface: u8,
+        triangle: usize,
+    ) -> Option<[i32; 3]> {
+        let mut index = 0usize;
+        while index < self.height_override_count as usize {
+            let base = index.checked_mul(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES)?;
+            let bytes = self
+                .height_overrides
+                .get(base..base.checked_add(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES)?)?;
+            if read_u16(bytes, 0)? == sector_index && *bytes.get(2)? == surface {
+                let offset = 4 + triangle.min(1) * 12;
+                return Some([
+                    read_i32(bytes, offset)?,
+                    read_i32(bytes, offset + 4)?,
+                    read_i32(bytes, offset + 8)?,
                 ]);
             }
             index += 1;
@@ -916,6 +988,31 @@ impl<'a, 'b> RoomCollision<'a, 'b> {
         }
     }
 
+    /// Selected floor triangle for a collision sample, without decoding
+    /// render-only sector fields.
+    pub fn sector_floor_collision(
+        self,
+        x: u16,
+        z: u16,
+        local_x: i32,
+        local_z: i32,
+        sector_size: i32,
+    ) -> Option<SectorFloorCollision> {
+        match self {
+            Self::Runtime(room) => room
+                .world()
+                .sector_floor_collision(x, z, local_x, local_z, sector_size)
+                .map(|sector| SectorFloorCollision {
+                    split: sector.split(),
+                    triangle: sector.triangle() as u8,
+                    walkable: sector.walkable(),
+                    floor_heights: sector.floor_heights(),
+                    triangle_heights: sector.triangle_heights(),
+                }),
+            Self::Compact(room) => room.sector_floor_collision(x, z, local_x, local_z, sector_size),
+        }
+    }
+
     /// Wall record by sector-local index, collision view.
     pub fn sector_wall(self, sector: SectorCollision, local_index: u16) -> Option<WallCollision> {
         match (self, sector) {
@@ -1204,6 +1301,43 @@ pub enum SectorCollisionProbe {
     Runtime(psx_asset::WorldSectorCollisionProbe),
     /// Probe decoded from a compact collision-only room.
     Compact(CompactSectorCollisionProbe),
+}
+
+/// Minimal selected floor triangle for collision interpolation.
+#[derive(Copy, Clone, Debug)]
+pub struct SectorFloorCollision {
+    split: u8,
+    triangle: u8,
+    walkable: bool,
+    floor_heights: [i32; 4],
+    triangle_heights: [i32; 3],
+}
+
+impl SectorFloorCollision {
+    /// Floor diagonal split id.
+    pub fn split(self) -> u8 {
+        self.split
+    }
+
+    /// Selected triangle index.
+    pub fn triangle(self) -> usize {
+        self.triangle as usize
+    }
+
+    /// Whether the selected floor triangle is walkable.
+    pub fn walkable(self) -> bool {
+        self.walkable
+    }
+
+    /// Floor corner heights `[NW, NE, SE, SW]`.
+    pub fn floor_heights(self) -> [i32; 4] {
+        self.floor_heights
+    }
+
+    /// Selected triangle heights in triangle-corner order.
+    pub fn triangle_heights(self) -> [i32; 3] {
+        self.triangle_heights
+    }
 }
 
 impl SectorCollisionProbe {
