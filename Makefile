@@ -545,8 +545,9 @@ hardware-tests:
 	cd engine/examples/hardware-tests && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 # --- hardware-test capture pipeline -------------------------------------
-# The disc runs its whole tier-1 battery at boot and mirrors every PX6 page
-# to the debug TTY, so a capture needs no pad input and no QR scanning.
+# The disc now boots side-effect free into its main menu. Headless capture
+# selects "RUN ALL TESTS + CAPTURE" with a short Cross pulse, after which the
+# suite mirrors every PX7 page to the debug TTY without QR scanning.
 HWTEST_CAPTURE  := build/hwtest-capture.log
 # Baselines are named by SUITE version, not by date: the suite version is what
 # determines whether two captures are comparable, and re-baselining the same
@@ -570,7 +571,7 @@ hwtest-capture: hardware-tests-disc
 	cd emu && cargo run -q -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
-		--steps $(HWTEST_STEPS) > ../$(HWTEST_CAPTURE)
+		--steps $(HWTEST_STEPS) --pad-pulses '0x4000@25+3' > ../$(HWTEST_CAPTURE)
 	@echo "captured $$(grep -c 'px7' $(HWTEST_CAPTURE)) PX7 pages -> $(HWTEST_CAPTURE)"
 
 HWTEST_CODE_BASELINE := docs/hardware-refs/hwtest-machine-code-v$(HWTEST_SUITE).txt
@@ -600,7 +601,7 @@ hwtest-audio: hardware-tests-disc
 	cd emu && cargo run -q -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
-		--steps 1200000000 --pad-pulses '0x8000@1900+6' \
+		--steps 1200000000 --pad-pulses '0x4000@25+3,0x8000@1900+6' \
 		--dump-audio ../$(HWTEST_WAV) > /dev/null
 	python3 tools/hwtest-audio-decode.py $(HWTEST_WAV) --emit-pages $(HWTEST_AUDIO_PAGES)
 	python3 tools/hwtest-report.py $(HWTEST_AUDIO_PAGES) > /dev/null
@@ -628,7 +629,7 @@ hwtest-baseline: hwtest-capture
 		echo "# captured:  $$(date -u +%Y-%m-%d)"; \
 		echo "# git:       $$(git describe --always --dirty)"; \
 		echo "# guest exe: sha256:$$(shasum -a 256 $(EXAMPLE_OUT)/hardware-tests.exe | cut -c1-16)"; \
-		echo "# emulator:  frontend launch --steps $(HWTEST_STEPS) (no pad input)"; \
+		echo "# emulator:  frontend launch --steps $(HWTEST_STEPS) (menu Cross pulse)"; \
 		echo "# schema:    PX7, 5 pages"; \
 		echo "#"; \
 		grep 'px7' $(HWTEST_CAPTURE) | sed 's/^hardware-tests: px7 //'; \

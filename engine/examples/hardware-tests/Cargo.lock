@@ -12,6 +12,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 name = "hardware-tests"
 version = "0.1.0"
 dependencies = [
+ "hello-memcard",
  "psx-asset",
  "psx-engine",
  "psx-font",
@@ -23,6 +24,18 @@ dependencies = [
  "psx-spu",
  "psx-vram",
  "qrcodegen-no-heap",
+]
+
+[[package]]
+name = "hello-memcard"
+version = "0.1.0"
+dependencies = [
+ "psx-font",
+ "psx-gpu",
+ "psx-mc",
+ "psx-pad",
+ "psx-rt",
+ "psx-vram",
 ]
 
 [[package]]
@@ -108,6 +121,14 @@ dependencies = [
 [[package]]
 name = "psx-math"
 version = "0.1.0"
+
+[[package]]
+name = "psx-mc"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+ "psx-io",
+]
 
 [[package]]
 name = "psx-pad"

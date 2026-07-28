@@ -8,21 +8,29 @@
 //! verifies it immediately, and leaves it to be found after a real power cycle.
 
 #![no_std]
-#![no_main]
 
 extern crate psx_rt;
 
-use hello_memcard_recovery::{exact_legacy_size_target, repair_exact_legacy_size};
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::FontAtlas;
+#[cfg(target_arch = "mips")]
+use psx_font::fonts::BASIC;
+#[cfg(target_arch = "mips")]
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_mc::{
     Block, Card, Entry, Error, HardwareCard, SaveIcon, Slot, TransportFault, TransportTrace,
     DATA_BLOCKS, FRAME_COUNT, FRAME_SIZE, MAX_NAME,
 };
+#[cfg(target_arch = "mips")]
 use psx_pad::{button, poll_port1, ButtonState};
+#[cfg(target_arch = "mips")]
 use psx_vram::{Clut, TexDepth, Tpage};
 
+mod recovery;
+pub use recovery::{exact_legacy_size_target, repair_exact_legacy_size};
+
+#[cfg(target_arch = "mips")]
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
+#[cfg(target_arch = "mips")]
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 // Deliberately unique and within the standard 20-byte BIOS filename limit.
@@ -70,7 +78,12 @@ enum WriteResult {
     Mismatch,
 }
 
-struct App {
+/// Reusable state machine for the non-destructive memory-card diagnostic.
+///
+/// The standalone example and the unified hardware-test suite both use this
+/// exact implementation, so their protocol, safety checks, and repair rules
+/// cannot drift apart.
+pub struct Diagnostic {
     card: Card<HardwareCard>,
     phase: Phase,
     scan_frame: u16,
@@ -90,8 +103,8 @@ struct App {
     page: u8,
 }
 
-impl App {
-    fn new() -> Self {
+impl Diagnostic {
+    pub fn new() -> Self {
         Self {
             card: Card::new(HardwareCard::new(Slot::One)),
             phase: Phase::Scan,
@@ -115,7 +128,7 @@ impl App {
 
     /// Read two frames per video frame: fast enough to finish in about nine
     /// seconds at 60 Hz without hiding the progress screen.
-    fn scan_step(&mut self) {
+    pub fn scan_step(&mut self) {
         if !matches!(self.phase, Phase::Scan | Phase::PreWriteScan) {
             return;
         }
@@ -412,17 +425,43 @@ impl App {
         }
         self.phase = Phase::Ready;
     }
+
+    pub fn page_left(&mut self) {
+        self.page = self.page.saturating_sub(1);
+    }
+
+    pub fn page_right(&mut self) {
+        self.page = (self.page + 1).min(2);
+    }
+
+    /// Attempt the guarded write/repair operation. Callers must pass the
+    /// deliberate L1+R1+Cross chord; a plain Cross can never write.
+    pub fn guarded_write(&mut self, l1: bool, r1: bool, cross_edge: bool) {
+        if l1 && r1 && cross_edge {
+            self.begin_write_test();
+        }
+    }
+
+    pub fn draw(&self, font: &FontAtlas) {
+        match self.page {
+            0 => draw_summary(font, self),
+            1 => draw_files(font, self),
+            _ => draw_transport(font, self),
+        }
+        draw_footer(font, self.page);
+    }
 }
 
-#[no_mangle]
-fn main() {
+/// Run the diagnostic as its original standalone burnable example.
+#[cfg(target_arch = "mips")]
+pub fn run_standalone() -> ! {
     gpu::init(VideoMode::Ntsc, Resolution::R320X240);
     let mut fb = FrameBuffer::new(320, 240);
     gpu::set_draw_area(0, 0, 319, 239);
     gpu::set_draw_offset(0, 0);
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
 
-    let mut app = App::new();
+    let mut app = Diagnostic::new();
     let mut previous = ButtonState::NONE;
 
     loop {
@@ -432,26 +471,20 @@ fn main() {
         // pad; the two devices share SIO0 and are never accessed concurrently.
         let current = poll_port1().buttons;
         if pressed(current, previous, button::LEFT) {
-            app.page = app.page.saturating_sub(1);
+            app.page_left();
         }
         if pressed(current, previous, button::RIGHT) {
-            app.page = (app.page + 1).min(2);
+            app.page_right();
         }
-        if pressed(current, previous, button::CROSS)
-            && current.is_held(button::L1)
-            && current.is_held(button::R1)
-        {
-            app.begin_write_test();
-        }
+        app.guarded_write(
+            current.is_held(button::L1),
+            current.is_held(button::R1),
+            pressed(current, previous, button::CROSS),
+        );
         previous = current;
 
         fb.clear(9, 11, 18);
-        match app.page {
-            0 => draw_summary(&font, &app),
-            1 => draw_files(&font, &app),
-            _ => draw_transport(&font, &app),
-        }
-        draw_footer(&font, app.page);
+        app.draw(&font);
 
         gpu::draw_sync();
         psx_rt::interrupts::wait_vblank();
@@ -459,7 +492,12 @@ fn main() {
     }
 }
 
-fn draw_summary(font: &FontAtlas, app: &App) {
+#[cfg(not(target_arch = "mips"))]
+pub fn run_standalone() -> ! {
+    panic!("the memory-card hardware diagnostic only runs on a PS1 target")
+}
+
+fn draw_summary(font: &FontAtlas, app: &Diagnostic) {
     font.draw_text(8, 6, "PSOXIDE MEMORY CARD HW TEST", WHITE);
     font.draw_text(8, 20, "SLOT 1 - NEVER FORMATS THE CARD", AMBER);
 
@@ -603,7 +641,7 @@ fn draw_summary(font: &FontAtlas, app: &App) {
     }
 }
 
-fn draw_files(font: &FontAtlas, app: &App) {
+fn draw_files(font: &FontAtlas, app: &Diagnostic) {
     font.draw_text(8, 6, "CARD DIRECTORY (READ ONLY)", WHITE);
     if app.phase != Phase::Ready || !app.formatted {
         font.draw_text(8, 30, "AVAILABLE AFTER A CLEAN FULL SCAN", AMBER);
@@ -630,7 +668,7 @@ fn draw_files(font: &FontAtlas, app: &App) {
     }
 }
 
-fn draw_transport(font: &FontAtlas, app: &App) {
+fn draw_transport(font: &FontAtlas, app: &Diagnostic) {
     font.draw_text(8, 6, "LAST SIO0 TRANSACTION", WHITE);
     let trace = if app.phase == Phase::Failed {
         app.first_fault
@@ -691,6 +729,7 @@ fn line(font: &FontAtlas, y: i16, text: &str, colour: (u8, u8, u8)) {
     font.draw_text(8, y, text, colour);
 }
 
+#[cfg(target_arch = "mips")]
 fn pressed(now: ButtonState, previous: ButtonState, mask: u16) -> bool {
     now.is_held(mask) && !previous.is_held(mask)
 }
