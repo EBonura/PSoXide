@@ -582,8 +582,11 @@ impl Playtest {
 
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
         let background_tick = self.streaming_jobs.background_tick(ctx);
+        // Every tick, not just background ticks. The controller steps over
+        // sectors that land while nobody is collecting, and this read is a
+        // loading screen with nothing to stay responsive for.
         #[cfg(feature = "cd-stream-bench")]
-        if background_tick && !self.step_persistent_model_assets() {
+        if !self.step_persistent_model_assets() {
             // The model pack and WORLD.PAK share one physical CD controller.
             // Finish the session-lifetime read before room residency can seek.
             return;

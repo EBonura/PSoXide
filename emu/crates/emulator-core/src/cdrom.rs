@@ -133,6 +133,9 @@ pub mod drive_status_bit {
 
 /// Depth of both FIFOs in the controller. Real hardware is 16 bytes
 /// for parameter / response, 2352 bytes for the sector data buffer.
+/// Sector buffers the CD controller holds, counting the one software is
+/// draining. A read that falls further behind than this loses sectors.
+const SECTOR_BUFFERS: usize = 8;
 const PARAM_FIFO_DEPTH: usize = 16;
 const RESPONSE_FIFO_DEPTH: usize = 16;
 const CDDA_BYTES_PER_SAMPLE: usize = 4;
@@ -371,6 +374,20 @@ pub struct CdRom {
     /// reads at `0x1F80_1802` or by DMA channel 3. Filled by each
     /// DataReady event during an active ReadN / ReadS.
     data_fifo: VecDeque<u8>,
+    /// Sectors that have arrived but which software has not started reading.
+    /// The controller holds a small ring of these; a read that falls further
+    /// behind than the ring is deep loses the oldest, which is how a guest
+    /// that services its CD interrupt too slowly ends up with a hole in its
+    /// stream instead of a stall. [`SECTOR_BUFFERS`] counts this plus the one
+    /// being drained through `data_fifo`.
+    waiting_sectors: VecDeque<(u32, Vec<u8>)>,
+    /// Sectors lost that way. Diagnostic only: the guest cannot see it, which
+    /// is precisely why it is worth counting.
+    dropped_sectors: u64,
+    /// Where on the disc the drive was the first and last time it lost one.
+    /// A count alone does not say which read fell behind; a range does.
+    dropped_lba_first: u32,
+    dropped_lba_last: u32,
     /// Redux's DRQSTS/data-ready latch (status bit 6). A fresh sector
     /// sets this even before software has armed a transfer via the
     /// request register; stray reads with no transfer armed clear it
@@ -402,6 +419,10 @@ pub struct CdRom {
     read_lba: u32,
     /// Sample cursor inside the current CD-DA sector.
     cdda_sample_index: usize,
+    /// Cycle at which an accepted Play finishes travelling to its track and
+    /// audio actually starts. `None` when the drive is not on its way
+    /// anywhere. See [`timing::cdda_seek_cycles`] for why this exists.
+    cdda_seek_done_at: Option<u64>,
     /// Redux tracks whether the drive has already completed a seek and
     /// uses that to pick the short 0x800-cycle SeekL/SeekP follow-up
     /// path on subsequent seeks.
@@ -517,6 +538,10 @@ impl CdRom {
             dbg_suppressed_submode_or: 0,
             disc: None,
             data_fifo: VecDeque::new(),
+            waiting_sectors: VecDeque::new(),
+            dropped_sectors: 0,
+            dropped_lba_first: 0,
+            dropped_lba_last: 0,
             data_fifo_ready: false,
             data_transfer_active: false,
             last_sector_header: [0; 4],
@@ -526,6 +551,7 @@ impl CdRom {
             read_rescheduled: false,
             read_lba: 0,
             cdda_sample_index: 0,
+            cdda_seek_done_at: None,
             seek_done: false,
             location_changed: false,
             // Power-on mode: double-speed, no XA, data-only 2048-byte
@@ -633,8 +659,16 @@ impl CdRom {
     }
 
     fn finish_cdda_playback(&mut self) {
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
+    }
+
+    /// Take the drive off CD-DA: both the playback and any seek still on its
+    /// way to a track. Anything that ends audio has to cancel the seek too,
+    /// or a Play abandoned mid-journey would still arrive and start playing.
+    fn halt_cdda(&mut self) {
+        self.drive_status &= !(drive_status_bit::PLAYING | drive_status_bit::SEEKING);
+        self.cdda_seek_done_at = None;
     }
 
     fn suppress_data_ready(&mut self) -> bool {
@@ -644,8 +678,41 @@ impl CdRom {
 
     fn clear_data_fifo(&mut self) {
         self.data_fifo.clear();
+        self.waiting_sectors.clear();
         self.data_fifo_ready = false;
         self.data_transfer_active = false;
+    }
+
+    /// Hand a freshly-read sector to software.
+    ///
+    /// The drive does not wait: sectors keep arriving at the read rate whether
+    /// or not the last one was collected. If software is still draining a
+    /// sector the new one queues behind it, and once the ring is full the
+    /// oldest is overwritten and simply lost. That silent loss is the whole
+    /// point of modelling this: a guest whose interrupt handler runs late
+    /// reads a stream with a hole in it, and nothing tells it so.
+    fn push_sector(&mut self, lba: u32, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if self.data_fifo.is_empty() && self.waiting_sectors.is_empty() {
+            self.data_fifo.extend(bytes);
+            self.data_fifo_ready = true;
+            return;
+        }
+        // One is in `data_fifo`, so the queue holds the rest of the ring.
+        while self.waiting_sectors.len() >= SECTOR_BUFFERS - 1 {
+            let (lost, _) = self
+                .waiting_sectors
+                .pop_front()
+                .expect("loop condition guarantees an element");
+            if self.dropped_sectors == 0 {
+                self.dropped_lba_first = lost;
+            }
+            self.dropped_lba_last = lost;
+            self.dropped_sectors = self.dropped_sectors.saturating_add(1);
+        }
+        self.waiting_sectors.push_back((lba, bytes));
     }
 
     fn pop_data_fifo_byte(&mut self) -> u8 {
@@ -656,10 +723,54 @@ impl CdRom {
 
         let byte = self.data_fifo.pop_front().unwrap_or(0);
         if self.data_fifo.is_empty() {
-            self.data_fifo_ready = false;
             self.data_transfer_active = false;
+            self.advance_to_next_sector();
         }
         byte
+    }
+
+    /// Promote whatever arrived while software was busy with the last sector.
+    ///
+    /// Both drains have to do this. Software reads a sector either through the
+    /// data port or, far more often, by pointing DMA3 at it, and if only one
+    /// of those advances the queue then the other stops collecting after its
+    /// first sector and everything behind it is dropped as overflow.
+    fn advance_to_next_sector(&mut self) {
+        match self.waiting_sectors.pop_front() {
+            Some((_, next)) => {
+                self.data_fifo.extend(next);
+                self.data_fifo_ready = true;
+            }
+            None => self.data_fifo_ready = false,
+        }
+    }
+
+    /// Point software at the newest sector as its interrupt is delivered, and
+    /// give up on everything that arrived behind it.
+    ///
+    /// This is the part that punishes a late handler. The controller does not
+    /// hand over a backlog to work through: when the interrupt finally reaches
+    /// the CPU, the read position is taken from wherever the decoder has got
+    /// to, so every sector that landed while the previous interrupt sat
+    /// unserviced is stepped over and never seen. Losing data therefore starts
+    /// as soon as software is one sector late, not once the ring is full.
+    fn snap_to_newest_sector(&mut self) {
+        let Some((newest_lba, newest)) = self.waiting_sectors.pop_back() else {
+            return;
+        };
+        while let Some((skipped, _)) = self.waiting_sectors.pop_front() {
+            if self.dropped_sectors == 0 {
+                self.dropped_lba_first = skipped;
+            }
+            self.dropped_lba_last = skipped;
+            self.dropped_sectors = self.dropped_sectors.saturating_add(1);
+        }
+        // The one software had not started on yet is stepped over too.
+        if !self.data_fifo.is_empty() {
+            self.data_fifo.clear();
+        }
+        self.data_fifo.extend(newest);
+        self.data_fifo_ready = true;
     }
 
     fn append_cd_audio_samples(&mut self, samples: &[(i16, i16)]) {
@@ -730,7 +841,7 @@ impl CdRom {
         self.lid_bootstrap_pending = false;
         self.reading = false;
         self.read_rescheduled = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.cd_audio.clear();
@@ -1300,7 +1411,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.reset_xa_stream();
         self.schedule_first_response(vec![self.stat_byte()]);
@@ -1319,7 +1430,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.reset_xa_stream();
         let ack_stat = self.stat_byte();
@@ -1376,7 +1487,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.reset_xa_stream();
@@ -1420,6 +1531,7 @@ impl CdRom {
             | drive_status_bit::SEEKING
             | drive_status_bit::ERROR
             | drive_status_bit::SEEK_ERROR);
+        self.cdda_seek_done_at = None;
         self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.reset_xa_stream();
@@ -1453,7 +1565,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.schedule_first_response(vec![self.stat_byte()]);
         // Redux's seek-complete interrupt clears STATUS_SEEK before
@@ -1485,7 +1597,13 @@ impl CdRom {
             return;
         }
         self.cancel_pending_data_ready_events();
-        self.drive_status &= !drive_status_bit::PLAYING;
+        // Starting a read resets the sector buffers. Anything the previous
+        // read left behind belongs to a position software has just moved away
+        // from, and handing it over would answer the new read with old data.
+        // The single-buffer model got this free by overwriting on every
+        // sector; a ring has to be told.
+        self.clear_data_fifo();
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.reading = true;
         self.read_rescheduled = false;
@@ -1542,14 +1660,12 @@ impl CdRom {
         self.read_lba = self.read_lba.wrapping_add(1);
         if let Some(disc) = self.disc.as_ref() {
             if let Some(raw) = disc.read_sector_raw(lba) {
-                // Match DuckStation: a data read (ReadN/ReadS) that advances
-                // into a Red Book audio track delivers no data and raises no
-                // DataReady. DuckStation logs "Skipping sector N as it is an
-                // audio sector and we're not playing"; the stream still
-                // advances so the caller schedules the next sector. Games keep
-                // their data in track 1, so this only bites a read that runs
-                // off the end of the data track -- matching it keeps PSoXide
-                // faithful to the higher-priority proxy.
+                // A data read (ReadN/ReadS) that advances into a Red Book
+                // audio track delivers no data and raises no DataReady: the
+                // sector is skipped because the drive is not playing it. The
+                // stream still advances, so the caller schedules the next
+                // sector. Games keep their data in track 1, so this only
+                // bites a read that runs off the end of the data track.
                 if disc.track_for_lba(lba).map(|track| track.track_type)
                     == Some(psx_iso::TrackType::Audio)
                 {
@@ -1617,20 +1733,16 @@ impl CdRom {
                     }
                 }
 
-                self.data_fifo.clear();
-                self.data_fifo_ready = false;
-                self.data_transfer_active = false;
                 let whole_sector = self.mode & 0x20 != 0;
                 let sector_mode = raw[15];
-                if whole_sector {
-                    self.data_fifo.extend(raw[12..12 + 2340].iter().copied());
+                let payload = if whole_sector {
+                    &raw[12..12 + 2340]
                 } else if sector_mode == 1 {
-                    self.data_fifo.extend(raw[16..16 + 2048].iter().copied());
+                    &raw[16..16 + 2048]
                 } else {
-                    self.data_fifo.extend(raw[24..24 + 2048].iter().copied());
-                }
-                self.data_fifo_ready = !self.data_fifo.is_empty();
-                self.data_transfer_active = false;
+                    &raw[24..24 + 2048]
+                };
+                self.push_sector(lba, payload.to_vec());
                 if suppress_data_ready {
                     return self.suppress_data_ready();
                 }
@@ -1788,6 +1900,10 @@ impl CdRom {
     /// track number (BCD); when absent, playback continues from
     /// the last SetLoc position.
     fn cmd_play(&mut self, params: &[u8]) {
+        // Where the head is now, before any of the branches below move it to
+        // the requested track. The distance between the two is what the seek
+        // costs.
+        let from_lba = self.read_lba;
         if !self.disc_present {
             let stat = self.stat_byte() | drive_status_bit::ERROR;
             self.schedule_error_response(vec![stat, 0x80]);
@@ -1830,8 +1946,32 @@ impl CdRom {
         self.clear_data_fifo();
         self.reset_xa_stream();
         self.cdda_sample_index = 0;
-        self.drive_status |= drive_status_bit::PLAYING;
+        // Play is a seek followed by playback, not playback. Until the head
+        // arrives the drive reports SEEKING with the playing bit CLEAR, and
+        // decodes no samples. Guest code that reads "not playing" as "the
+        // track finished" depends on this being modelled: without it every
+        // such poll answers correctly by accident.
+        self.drive_status &= !drive_status_bit::PLAYING;
+        self.drive_status |= drive_status_bit::SEEKING;
+        self.cdda_seek_done_at = Some(
+            self.scheduling_cycle
+                .saturating_add(cdda_seek_cycles(from_lba.abs_diff(self.read_lba))),
+        );
         self.schedule_first_response(vec![self.stat_byte()]);
+    }
+
+    /// Land an in-flight Play: the head has reached the track, so the drive
+    /// stops seeking and starts producing audio.
+    fn complete_cdda_seek(&mut self, cycles_now: u64) {
+        let Some(done_at) = self.cdda_seek_done_at else {
+            return;
+        };
+        if cycles_now < done_at {
+            return;
+        }
+        self.cdda_seek_done_at = None;
+        self.drive_status &= !drive_status_bit::SEEKING;
+        self.drive_status |= drive_status_bit::PLAYING;
     }
 
     fn cmd_test(&mut self, params: &[u8]) {
@@ -1904,6 +2044,7 @@ impl CdRom {
         let mut raised = false;
 
         self.tick_lid_state_machine(cycles_now);
+        self.complete_cdda_seek(cycles_now);
 
         while let Some(front) = self.pending.front() {
             // Redux's scheduled interrupt queue only dispatches when
@@ -1930,7 +2071,15 @@ impl CdRom {
             // load_next_sector re-entries to bury the emulator in
             // ISR dispatch cycles (16.7 cyc/step vs 2.4 baseline),
             // stranding a commercial title at the PlayStation splash.
-            if self.irq_flag != 0 {
+            //
+            // This holds COMMAND responses only. There is one response FIFO,
+            // so hardware will not overwrite a packet software has not read.
+            // Sector delivery is not like that: the disc is turning and the
+            // drive reads at its own rate whatever software is doing. Holding
+            // sectors here made a late interrupt handler cost nothing, when on
+            // silicon it costs the sectors that arrived meanwhile. Let
+            // DataReady through and let `push_sector` drop what overflows.
+            if self.irq_flag != 0 && front.irq != IrqType::DataReady {
                 // Bump the front event's deadline slightly so the
                 // next tick re-checks, rather than spinning on an
                 // already-due event every tick until the ack lands.
@@ -1943,14 +2092,10 @@ impl CdRom {
                 }
                 break;
             }
-            if front.irq == IrqType::DataReady && cdrom_irq_pending && !self.read_rescheduled {
-                if let Some(mut ev) = self.pending.pop_front() {
-                    ev.deadline = cycles_now.saturating_add(CD_READ_TIME / 2);
-                    self.insert_pending_event(ev);
-                }
-                self.read_rescheduled = true;
-                break;
-            }
+            // The same reasoning applies to the CPU's own interrupt line: a
+            // handler that has not run yet does not slow the disc down. The
+            // sector lands on time and takes its chances in the ring.
+            let _ = cdrom_irq_pending;
 
             let ev = self.pending.pop_front().unwrap();
 
@@ -1973,6 +2118,15 @@ impl CdRom {
             let mut should_raise_irq = true;
             if ev.irq == IrqType::DataReady {
                 should_raise_irq = self.load_next_sector();
+                // The sector has landed either way. Whether the CPU is told
+                // about it is a separate question: the interrupt line is still
+                // holding the previous, unacknowledged one, and hardware will
+                // not stack a second. The sector waits in the ring and its
+                // notification is simply never sent, which is exactly how a
+                // slow handler ends up stepping over data.
+                if self.irq_flag != 0 {
+                    should_raise_irq = false;
+                }
                 self.read_rescheduled = false;
                 if self.reading {
                     let delay = if self.location_changed {
@@ -2009,6 +2163,9 @@ impl CdRom {
             self.command_busy = false;
             // Raise IRQ. The flag-gate above already guaranteed
             // irq_flag was 0 on entry.
+            if ev.irq == IrqType::DataReady {
+                self.snap_to_newest_sector();
+            }
             self.irq_flag = ev.irq as u8;
             let ty = ev.irq as usize;
             if ty < self.irq_type_counts.len() {
@@ -2237,13 +2394,25 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
         self.data_fifo_pops = self.data_fifo_pops.saturating_add(1);
         let byte = self.data_fifo.pop_front().unwrap_or(0);
         if self.data_fifo.is_empty() {
-            self.data_fifo_ready = false;
             self.data_transfer_active = false;
+            self.advance_to_next_sector();
         }
         byte
     }
 
-    /// Number of bytes currently buffered in the data FIFO.
+    /// Sectors the controller read but software never collected, because it
+    /// fell further behind than the buffer ring is deep. Silent to the guest,
+    /// so surfacing it here is the only way anyone finds out.
+    pub fn dropped_sectors(&self) -> u64 {
+        self.dropped_sectors
+    }
+
+    /// Disc positions of the first and last loss, so the read responsible can
+    /// be identified from the pack layout.
+    pub fn dropped_lba_range(&self) -> (u32, u32) {
+        (self.dropped_lba_first, self.dropped_lba_last)
+    }
+
     pub fn data_fifo_len(&self) -> usize {
         self.data_fifo.len()
     }

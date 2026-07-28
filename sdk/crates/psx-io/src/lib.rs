@@ -16,6 +16,7 @@
 
 pub mod cdda;
 pub mod cdrom;
+pub mod disc_base;
 pub mod dma;
 pub mod gpu;
 pub mod gte;

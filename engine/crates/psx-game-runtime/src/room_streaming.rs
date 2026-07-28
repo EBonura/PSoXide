@@ -599,6 +599,16 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     /// Advance the in-flight load by up to `max_sectors` CD sectors directly
     /// into the game's sector-page pool, committing rooms as they complete.
     /// Returns whether any room became resident this call.
+    /// Whether this streamer may stay with the drive between sectors.
+    ///
+    /// True only while the game is still behind its loading screen: during
+    /// play the frame has to come back on time, and a room arriving a frame
+    /// late is better than a dropped frame. Off the loading screen the
+    /// opposite holds, because a sector missed there is data lost for good.
+    pub fn set_wait_for_sectors(&mut self, wait: bool) {
+        self.job.set_wait_for_sectors(wait);
+    }
+
     pub fn pump<const PAGES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,
