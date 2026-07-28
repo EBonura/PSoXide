@@ -402,6 +402,10 @@ pub struct CdRom {
     read_lba: u32,
     /// Sample cursor inside the current CD-DA sector.
     cdda_sample_index: usize,
+    /// Cycle at which an accepted Play finishes travelling to its track and
+    /// audio actually starts. `None` when the drive is not on its way
+    /// anywhere. See [`timing::cdda_seek_cycles`] for why this exists.
+    cdda_seek_done_at: Option<u64>,
     /// Redux tracks whether the drive has already completed a seek and
     /// uses that to pick the short 0x800-cycle SeekL/SeekP follow-up
     /// path on subsequent seeks.
@@ -526,6 +530,7 @@ impl CdRom {
             read_rescheduled: false,
             read_lba: 0,
             cdda_sample_index: 0,
+            cdda_seek_done_at: None,
             seek_done: false,
             location_changed: false,
             // Power-on mode: double-speed, no XA, data-only 2048-byte
@@ -633,8 +638,16 @@ impl CdRom {
     }
 
     fn finish_cdda_playback(&mut self) {
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
+    }
+
+    /// Take the drive off CD-DA: both the playback and any seek still on its
+    /// way to a track. Anything that ends audio has to cancel the seek too,
+    /// or a Play abandoned mid-journey would still arrive and start playing.
+    fn halt_cdda(&mut self) {
+        self.drive_status &= !(drive_status_bit::PLAYING | drive_status_bit::SEEKING);
+        self.cdda_seek_done_at = None;
     }
 
     fn suppress_data_ready(&mut self) -> bool {
@@ -730,7 +743,7 @@ impl CdRom {
         self.lid_bootstrap_pending = false;
         self.reading = false;
         self.read_rescheduled = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.cd_audio.clear();
@@ -1300,7 +1313,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.reset_xa_stream();
         self.schedule_first_response(vec![self.stat_byte()]);
@@ -1319,7 +1332,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.reset_xa_stream();
         let ack_stat = self.stat_byte();
@@ -1376,7 +1389,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.reset_xa_stream();
@@ -1420,6 +1433,7 @@ impl CdRom {
             | drive_status_bit::SEEKING
             | drive_status_bit::ERROR
             | drive_status_bit::SEEK_ERROR);
+        self.cdda_seek_done_at = None;
         self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.reset_xa_stream();
@@ -1453,7 +1467,7 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.schedule_first_response(vec![self.stat_byte()]);
         // Redux's seek-complete interrupt clears STATUS_SEEK before
@@ -1485,7 +1499,7 @@ impl CdRom {
             return;
         }
         self.cancel_pending_data_ready_events();
-        self.drive_status &= !drive_status_bit::PLAYING;
+        self.halt_cdda();
         self.cdda_sample_index = 0;
         self.reading = true;
         self.read_rescheduled = false;
@@ -1788,6 +1802,10 @@ impl CdRom {
     /// track number (BCD); when absent, playback continues from
     /// the last SetLoc position.
     fn cmd_play(&mut self, params: &[u8]) {
+        // Where the head is now, before any of the branches below move it to
+        // the requested track. The distance between the two is what the seek
+        // costs.
+        let from_lba = self.read_lba;
         if !self.disc_present {
             let stat = self.stat_byte() | drive_status_bit::ERROR;
             self.schedule_error_response(vec![stat, 0x80]);
@@ -1830,8 +1848,32 @@ impl CdRom {
         self.clear_data_fifo();
         self.reset_xa_stream();
         self.cdda_sample_index = 0;
-        self.drive_status |= drive_status_bit::PLAYING;
+        // Play is a seek followed by playback, not playback. Until the head
+        // arrives the drive reports SEEKING with the playing bit CLEAR, and
+        // decodes no samples. Guest code that reads "not playing" as "the
+        // track finished" depends on this being modelled: without it every
+        // such poll answers correctly by accident.
+        self.drive_status &= !drive_status_bit::PLAYING;
+        self.drive_status |= drive_status_bit::SEEKING;
+        self.cdda_seek_done_at = Some(
+            self.scheduling_cycle
+                .saturating_add(cdda_seek_cycles(from_lba.abs_diff(self.read_lba))),
+        );
         self.schedule_first_response(vec![self.stat_byte()]);
+    }
+
+    /// Land an in-flight Play: the head has reached the track, so the drive
+    /// stops seeking and starts producing audio.
+    fn complete_cdda_seek(&mut self, cycles_now: u64) {
+        let Some(done_at) = self.cdda_seek_done_at else {
+            return;
+        };
+        if cycles_now < done_at {
+            return;
+        }
+        self.cdda_seek_done_at = None;
+        self.drive_status &= !drive_status_bit::SEEKING;
+        self.drive_status |= drive_status_bit::PLAYING;
     }
 
     fn cmd_test(&mut self, params: &[u8]) {
@@ -1904,6 +1946,7 @@ impl CdRom {
         let mut raised = false;
 
         self.tick_lid_state_machine(cycles_now);
+        self.complete_cdda_seek(cycles_now);
 
         while let Some(front) = self.pending.front() {
             // Redux's scheduled interrupt queue only dispatches when

@@ -106,6 +106,12 @@ const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE;
 #[cfg(target_arch = "mips")]
 const CDDA_STATUS_PLAYING: u8 = 1 << 7;
+/// Set while the head is still travelling. Play is a seek followed by
+/// playback and the two bits are mutually exclusive, so a drive that has
+/// accepted Play and not yet arrived reports neither. Reading that as
+/// "finished" is how a track restarts itself for as long as the seek lasts.
+#[cfg(target_arch = "mips")]
+const CDDA_STATUS_SEEKING: u8 = 1 << 6;
 #[cfg(target_arch = "mips")]
 const CDDA_COMMAND_SPINS: u32 = 131_072;
 /// Spin budget for the in-playback loop-status poll. Tiny on purpose: a CD
@@ -512,7 +518,7 @@ fn flow_trace(message: &str) {
 fn flow_trace(_message: &str) {}
 
 /// Poll the drive's play state WITHOUT blocking the menu loop. Returns
-/// `Some(true)` if it definitely reports stopped (PLAYING bit clear),
+/// `Some(true)` if it definitely reports stopped (neither playing nor seeking),
 /// `Some(false)` if it reports playing, and `None` if it could not answer
 /// within the tiny [`CDDA_STATUS_SPINS`] budget (the controller busy streaming
 /// audio). The caller must read `None` as "assume still playing", never as
@@ -521,7 +527,7 @@ fn flow_trace(_message: &str) {}
 fn cdda_drive_stopped() -> Option<bool> {
     psx_io::cdrom::try_get_stat(CDDA_STATUS_SPINS)
         .and_then(|response| response.bytes().first().copied())
-        .map(|status| status & CDDA_STATUS_PLAYING == 0)
+        .map(|status| status & (CDDA_STATUS_PLAYING | CDDA_STATUS_SEEKING) == 0)
 }
 
 #[cfg(not(target_arch = "mips"))]
