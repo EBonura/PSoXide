@@ -1601,6 +1601,16 @@ fn run_headless_launch(
             "route-ticks={route_ticks}  port1-polls={}",
             bus.port1_completed_polls()
         );
+        // A guest that services its CD interrupt too late loses sectors and is
+        // told nothing about it, so it shows up as a stall or corrupt asset
+        // far from the cause. Report it whenever it happens.
+        let dropped = bus.cdrom_dropped_sectors();
+        if dropped > 0 {
+            let (first, last) = bus.cdrom_dropped_lba_range();
+            println!(
+                "cd-sectors-dropped={dropped}  lba {first}..{last}  (guest read the disc too slowly)"
+            );
+        }
         if std::env::var_os("PSOXIDE_TRACE_HLE_BIOS").is_some() {
             eprintln!(
                 "[hle-bios] sr={:08x} istat={:03x} imask={:03x} irq-high-steps={} irq-taken={}",

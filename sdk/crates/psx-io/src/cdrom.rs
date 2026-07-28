@@ -265,13 +265,21 @@ pub fn try_mute(spin_limit: u32) -> Option<Response> {
 }
 
 /// Start CD-DA playback at a 1-based track number.
+///
+/// The number is relative to this program's own tracks; on a multi-program
+/// disc [`crate::disc_base`] shifts it past whatever came before.
 pub fn play_track(track: u8) -> Response {
-    command(CMD_PLAY, &[bin_to_bcd(track)])
+    command(CMD_PLAY, &[bin_to_bcd(crate::disc_base::shift_track(track))])
 }
 
-/// Try to start CD-DA playback at a 1-based track number.
+/// Try to start CD-DA playback at a 1-based track number. Shifted like
+/// [`play_track`].
 pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
-    try_command(CMD_PLAY, &[bin_to_bcd(track)], spin_limit)
+    try_command(
+        CMD_PLAY,
+        &[bin_to_bcd(crate::disc_base::shift_track(track))],
+        spin_limit,
+    )
 }
 
 /// Pause CD-DA/read playback.
