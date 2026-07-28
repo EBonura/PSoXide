@@ -403,8 +403,8 @@ fn load_next_sector_mode1_uses_payload_after_header() {
 
 #[test]
 fn load_next_sector_skips_audio_track_during_data_read() {
-    // Match DuckStation: a data read (ReadN/ReadS) that advances into a Red
-    // Book audio track delivers no data and raises no DataReady.
+    // A data read (ReadN/ReadS) that advances into a Red Book audio track
+    // delivers no data and raises no DataReady.
     let mut cd = CdRom::new();
     cd.insert_disc(Some(cdda_disc()));
 
@@ -494,8 +494,11 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
     );
 }
 
+/// A handler that has not run yet does not slow the disc down. The sector is
+/// delivered on schedule with the CPU's CDROM interrupt line still pending,
+/// because the platter is turning either way.
 #[test]
-fn dataready_waits_once_when_cpu_cdrom_irq_is_still_pending() {
+fn dataready_arrives_on_schedule_even_with_the_cpu_irq_still_pending() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 4])));
     cd.scheduling_cycle = 1_000;
@@ -507,17 +510,44 @@ fn dataready_waits_once_when_cpu_cdrom_irq_is_still_pending() {
     cd.responses.clear();
 
     let first_due = ack_cycle + CD_READ_TIME + 1;
-    assert!(!cd.tick_with_irq_pending(first_due, true));
-    let delayed_deadline = cd
-        .pending
-        .iter()
-        .find(|ev| ev.irq == IrqType::DataReady)
-        .expect("DataReady should be delayed, not delivered")
-        .deadline;
-    assert_eq!(delayed_deadline, first_due + CD_READ_TIME / 2);
-
-    assert!(cd.tick_with_irq_pending(delayed_deadline + 1, true));
+    assert!(cd.tick_with_irq_pending(first_due, true));
     assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+}
+
+/// Software that never acknowledges keeps getting sectors read at it, and
+/// once the ring is full the oldest are lost. This is the failure the whole
+/// model exists to expose: nothing stalls, nothing errors, the stream just
+/// quietly develops a hole.
+#[test]
+fn a_handler_that_never_runs_loses_sectors_rather_than_stalling_the_drive() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    cd.scheduling_cycle = 1_000;
+
+    cd.cmd_read();
+    let ack_cycle = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(ack_cycle));
+    cd.irq_flag = 0;
+    cd.responses.clear();
+
+    // Never acknowledge and never read a byte, so the interrupt line stays
+    // held and the notifications stop, while the disc keeps turning.
+    let mut at = ack_cycle;
+    for _ in 0..(SECTOR_BUFFERS * 3) {
+        at += CD_READ_TIME + 1;
+        cd.tick_with_irq_pending(at, true);
+    }
+
+    assert!(cd.reading, "the drive keeps reading regardless");
+    assert!(
+        cd.dropped_sectors > 0,
+        "sectors should have been lost, none were"
+    );
+    assert!(
+        cd.waiting_sectors.len() <= SECTOR_BUFFERS - 1,
+        "the ring must stay bounded, held {}",
+        cd.waiting_sectors.len()
+    );
 }
 
 #[test]
