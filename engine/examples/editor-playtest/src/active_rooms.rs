@@ -476,6 +476,10 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     #[inline(never)]
     pub(super) fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
+        // Behind the loading screen the room read may wait for the sector
+        // already on its way; in play it must not, because the frame is due.
+        let loading = !self.initial_world_ready();
+        room_streams_arena().set_wait_for_sectors(loading);
         room_streams_arena().pump(
             cd_arena(),
             streamed_slots_arena_mut(),
