@@ -543,11 +543,17 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_COUNT));
         push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_SUM));
         push!(counter_latest(c::ROOM_SURF_WARP_SUBDIVIDED_MAX));
-        push!(counter_total(&summary, c::ROOM_SURF_WARP_SUBDIVIDED_UNDER_1TX));
+        push!(counter_total(
+            &summary,
+            c::ROOM_SURF_WARP_SUBDIVIDED_UNDER_1TX
+        ));
         push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_COUNT));
         push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_SUM));
         push!(counter_latest(c::ROOM_SURF_WARP_UNTOUCHED_MAX));
-        push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX));
+        push!(counter_total(
+            &summary,
+            c::ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX
+        ));
         push!(counter_total(&summary, c::ROOM_SURF_OPTIONS_CYCLES));
         push!(counter_total(&summary, c::ROOM_SURF_CELL_SETUP_CYCLES));
         push!(counter_total(&summary, c::ROOM_SURF_CALL_CYCLES));

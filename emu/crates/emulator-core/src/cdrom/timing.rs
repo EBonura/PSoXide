@@ -96,20 +96,21 @@ const MAX_SLED_LBA: u64 = 72 * 60 * 75; // 324,000
 /// Like [`CDDA_BUSY_RESPONSE_CYCLES`], a PSoXide faithfulness model rather
 /// than a Redux transcription: Redux acks Play and declares the drive playing
 /// at once, which makes every "has the track finished?" poll answer correctly
-/// by accident. A real drive, and DuckStation, seek first, reporting SEEKING
-/// with the playing bit CLEAR for the whole journey. Guest code that reads
-/// "not playing" as "track over" therefore passes in emulation and restarts
-/// its music on silicon.
+/// by accident. A real drive seeks first, reporting SEEKING with the playing
+/// bit CLEAR for the whole journey. Guest code that reads "not playing" as
+/// "track over" therefore passes in emulation and restarts its music on
+/// silicon.
 ///
-/// Three regimes, after DuckStation's `GetTicksForSeek` (`src/core/cdrom.cpp`)
-/// with its logarithmic terms linearised. The curve's exact shape matters far
-/// less than its order of magnitude: what a guest can observe is that a
-/// neighbouring track arrives within a frame or two while a cross-disc jump
-/// takes most of a second, which is the difference that changes behaviour.
+/// Three regimes, sized against the mech: a sector already under the head
+/// costs one revolution, a lens-only track costs tens of milliseconds, and
+/// moving the sled costs a fixed startup plus distance. The curve's exact
+/// shape matters far less than its order of magnitude, because what a guest
+/// can observe is that a neighbouring track arrives within a frame or two
+/// while a cross-disc jump takes most of a second.
 ///
-/// Deliberately free of DuckStation's per-seek jitter. That exists to shake
-/// loose games that livelock on identical seek times; determinism is worth
-/// more here, since the parity suites and every headless capture depend on it.
+/// Deliberately jitter-free. Varying the time would model a real mech more
+/// closely, but determinism is worth more here: the parity suites and every
+/// headless capture depend on the same disc giving the same run.
 pub(super) fn cdda_seek_cycles(lba_diff: u32) -> u64 {
     let diff = lba_diff as u64;
     if diff <= 8 {
