@@ -22,7 +22,7 @@
 //! `[10..30]` NUL-terminated name, `[127]` XOR checksum of `[0..127)`.
 
 use crate::{
-    Block, Card, Entry, Error, Result, CONTAINER_LEN, CONTAINER_MAGIC, DATA_BLOCKS,
+    Block, Card, Entry, Error, Result, SaveIcon, CONTAINER_LEN, CONTAINER_MAGIC, DATA_BLOCKS,
     FLAG_COMPRESSED, FRAMES_PER_BLOCK, FRAME_SIZE, MAX_NAME,
 };
 
@@ -224,6 +224,102 @@ impl<B: Block> Card<B> {
         Ok(f[0] == b'M' && f[1] == b'C')
     }
 
+    /// Validate the directory structure shared by strict validation and the
+    /// narrowly-scoped legacy-size repair path.
+    fn validate_structure(&mut self) -> Result<()> {
+        let mut header = [0u8; FRAME_SIZE];
+        self.dev.read_frame(0, &mut header)?;
+        if header[0] != b'M' || header[1] != b'C' {
+            return Err(Error::NotFormatted);
+        }
+        if checksum(&header) != header[E_CHK] {
+            return Err(Error::Corrupt);
+        }
+
+        let mut states = [0u8; DATA_BLOCKS];
+        let mut links = [LINK_NONE; DATA_BLOCKS];
+        for i in 0..DATA_BLOCKS {
+            let entry = self.read_dir(i)?;
+            if checksum(&entry) != entry[E_CHK] {
+                return Err(Error::Corrupt);
+            }
+            let state = entry[E_STATE];
+            if !is_free(state) && !matches!(state, ST_FIRST | ST_MIDDLE | ST_LAST) {
+                return Err(Error::Corrupt);
+            }
+            states[i] = state;
+            links[i] = u16::from_le_bytes([entry[E_LINK], entry[E_LINK + 1]]);
+        }
+
+        let mut visited = 0u16;
+        for first in 0..DATA_BLOCKS {
+            if states[first] != ST_FIRST {
+                continue;
+            }
+            let mut current = first;
+            let mut first_node = true;
+            loop {
+                let bit = 1u16 << current;
+                if visited & bit != 0 {
+                    return Err(Error::Corrupt);
+                }
+                visited |= bit;
+
+                let state = states[current];
+                if first_node {
+                    if state != ST_FIRST {
+                        return Err(Error::Corrupt);
+                    }
+                    first_node = false;
+                } else if !matches!(state, ST_MIDDLE | ST_LAST) {
+                    return Err(Error::Corrupt);
+                }
+
+                let link = links[current];
+                if state == ST_LAST || (state == ST_FIRST && link == LINK_NONE) {
+                    if link != LINK_NONE {
+                        return Err(Error::Corrupt);
+                    }
+                    break;
+                }
+                if link == LINK_NONE || link as usize >= DATA_BLOCKS {
+                    return Err(Error::Corrupt);
+                }
+                current = link as usize;
+            }
+        }
+
+        for i in 0..DATA_BLOCKS {
+            if matches!(states[i], ST_MIDDLE | ST_LAST) && visited & (1u16 << i) == 0 {
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the directory before a safety-critical write.
+    ///
+    /// This checks the `MC` header, every directory-sector checksum, every
+    /// allocation state and link, rejects loops/cross-links and orphan
+    /// continuation blocks, and requires each first entry's file size to
+    /// equal its allocated chain in 8 KiB units as required by the Sony BIOS.
+    /// It performs no writes.
+    pub fn validate_filesystem(&mut self) -> Result<()> {
+        self.validate_structure()?;
+        for first in 0..DATA_BLOCKS {
+            let entry = self.read_dir(first)?;
+            if entry[E_STATE] != ST_FIRST {
+                continue;
+            }
+            let chain = self.chain(first)?;
+            let expected = (chain.len * BLOCK_CAP) as u32;
+            if read_u32(&entry[E_SIZE..]) != expected {
+                return Err(Error::Corrupt);
+            }
+        }
+        Ok(())
+    }
+
     /// Lay down a fresh, empty directory (byte-identical to a BIOS format's
     /// system area). Data blocks are left as-is; the directory marks them free.
     pub fn format(&mut self) -> Result<()> {
@@ -361,7 +457,18 @@ impl<B: Block> Card<B> {
     /// `title` is the human-readable label shown by the card manager (<= 32
     /// ASCII).
     pub fn write(&mut self, name: &str, title: &str, data: &[u8]) -> Result<()> {
-        self.write_inner(name, title, data, false, data.len() as u32)
+        self.write_inner(name, title, data, false, data.len() as u32, None)
+    }
+
+    /// Write an uncompressed save with a caller-supplied native 16×16 icon.
+    pub fn write_with_icon(
+        &mut self,
+        name: &str,
+        title: &str,
+        data: &[u8],
+        icon: &SaveIcon,
+    ) -> Result<()> {
+        self.write_inner(name, title, data, false, data.len() as u32, Some(icon))
     }
 
     /// Write a save, compressing the payload with LZSS when it helps. `scratch`
@@ -377,9 +484,9 @@ impl<B: Block> Card<B> {
     ) -> Result<()> {
         match crate::compress::compress(data, scratch) {
             Some(clen) if clen < data.len() => {
-                self.write_inner(name, title, &scratch[..clen], true, data.len() as u32)
+                self.write_inner(name, title, &scratch[..clen], true, data.len() as u32, None)
             }
-            _ => self.write_inner(name, title, data, false, data.len() as u32),
+            _ => self.write_inner(name, title, data, false, data.len() as u32, None),
         }
     }
 
@@ -390,6 +497,7 @@ impl<B: Block> Card<B> {
         stored: &[u8],
         compressed: bool,
         raw_len: u32,
+        icon: Option<&SaveIcon>,
     ) -> Result<()> {
         let name = name.as_bytes();
         validate_name(name)?;
@@ -436,7 +544,7 @@ impl<B: Block> Card<B> {
         }
 
         // Title + icon frames in the first block.
-        self.write_title(phys[0], title, need as u8)?;
+        self.write_title(phys[0], title, need as u8, icon)?;
 
         // Container header + payload across the chain.
         let mut hdr = [0u8; CONTAINER_LEN];
@@ -473,7 +581,9 @@ impl<B: Block> Card<B> {
             e[E_LINK] = link as u8;
             e[E_LINK + 1] = (link >> 8) as u8;
             if k == 0 {
-                write_u32(&mut e[E_SIZE..], total as u32);
+                // Sony's directory field is allocated file size, not payload
+                // length: one 0x2000-byte unit for every linked card block.
+                write_u32(&mut e[E_SIZE..], (need * BLOCK_CAP) as u32);
                 let n = name.len().min(MAX_NAME);
                 e[E_NAME..E_NAME + n].copy_from_slice(&name[..n]);
             }
@@ -483,7 +593,13 @@ impl<B: Block> Card<B> {
     }
 
     /// Write the `SC` title header + default icon into a file's first block.
-    fn write_title(&mut self, phys_block: u8, title: &str, blocks: u8) -> Result<()> {
+    fn write_title(
+        &mut self,
+        phys_block: u8,
+        title: &str,
+        blocks: u8,
+        icon: Option<&SaveIcon>,
+    ) -> Result<()> {
         let mut hdr = [0u8; FRAME_SIZE];
         hdr[0] = b'S';
         hdr[1] = b'C';
@@ -494,7 +610,7 @@ impl<B: Block> Card<B> {
         let n = tb.len().min(T_TITLE_LEN);
         hdr[T_TITLE..T_TITLE + n].copy_from_slice(&tb[..n]);
         // Icon palette.
-        let clut = default_clut();
+        let clut = icon.map(|icon| icon.palette).unwrap_or_else(default_clut);
         for (i, c) in clut.iter().enumerate() {
             hdr[T_CLUT + i * 2] = *c as u8;
             hdr[T_CLUT + i * 2 + 1] = (*c >> 8) as u8;
@@ -503,9 +619,12 @@ impl<B: Block> Card<B> {
         self.dev.write_frame(base, &hdr)?;
 
         // Icon pixels in the next frame.
-        let mut icon = [0u8; FRAME_SIZE];
-        default_icon(&mut icon);
-        self.dev.write_frame(base + 1, &icon)?;
+        let mut pixels = [0u8; FRAME_SIZE];
+        match icon {
+            Some(icon) => pixels.copy_from_slice(&icon.pixels),
+            None => default_icon(&mut pixels),
+        }
+        self.dev.write_frame(base + 1, &pixels)?;
         Ok(())
     }
 

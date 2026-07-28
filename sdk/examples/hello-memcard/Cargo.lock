@@ -15,6 +15,7 @@ dependencies = [
  "psx-font",
  "psx-gpu",
  "psx-mc",
+ "psx-pad",
  "psx-rt",
  "psx-vram",
 ]
@@ -58,6 +59,14 @@ version = "0.1.0"
 
 [[package]]
 name = "psx-mc"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+ "psx-io",
+]
+
+[[package]]
+name = "psx-pad"
 version = "0.1.0"
 dependencies = [
  "psx-hw",

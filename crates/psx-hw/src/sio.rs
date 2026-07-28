@@ -26,8 +26,15 @@ pub mod sio0 {
         pub const TXEN: u16 = 1 << 0;
         /// `/JOYn` select (DTR) output: hold low to address the selected port.
         pub const DTR: u16 = 1 << 1;
-        /// RX enable (receive while selected).
-        pub const RXEN: u16 = 1 << 2;
+        /// Force one received byte even while `/CS` is high.
+        ///
+        /// This is not the normal SIO0 receive-enable bit: selected devices are
+        /// received with this bit clear, and hardware clears it after one byte.
+        /// The usual controller/card CTRL values are therefore `0x1003` and
+        /// `0x3003`, not `0x1007` and `0x3007`.
+        pub const FORCE_RX_ONCE: u16 = 1 << 2;
+        /// Backwards-compatible name for [`FORCE_RX_ONCE`].
+        pub const RXEN: u16 = FORCE_RX_ONCE;
         /// Write-1 to acknowledge / clear the latched SIO IRQ ([`super::stat::IRQ`]).
         pub const ACK: u16 = 1 << 4;
         /// Write-1 to reset the SIO port (registers back to defaults).
@@ -62,4 +69,34 @@ pub mod sio0 {
     pub const MODE_8N1: u16 = 0x000D;
     /// `JOY_BAUD` reload for the standard ~250 kHz controller/card clock.
     pub const BAUD_250KHZ: u16 = 0x0088;
+
+    /// Normal CTRL value while a controller or memory card is selected.
+    ///
+    /// Receiving is implicit while `/CS` is low. `CTRL.2` is deliberately not
+    /// set because it force-arms a one-shot receive and is not part of the
+    /// standard selected-port setup.
+    pub const fn selected_ctrl(port2: bool, ack_irq: bool) -> u16 {
+        let mut value = ctrl::TXEN | ctrl::DTR;
+        if ack_irq {
+            value |= ctrl::ACK_IRQ_EN;
+        }
+        if port2 {
+            value |= ctrl::SLOT_PORT2;
+        }
+        value
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn selected_port_values_match_retail_sio_setup() {
+            assert_eq!(selected_ctrl(false, true), 0x1003);
+            assert_eq!(selected_ctrl(true, true), 0x3003);
+            assert_eq!(selected_ctrl(false, false), 0x0003);
+            assert_eq!(selected_ctrl(true, false), 0x2003);
+            assert_eq!(selected_ctrl(false, true) & ctrl::FORCE_RX_ONCE, 0);
+        }
+    }
 }
