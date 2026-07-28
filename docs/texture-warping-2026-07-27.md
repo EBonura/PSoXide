@@ -380,6 +380,84 @@ slices of it do not substitute:
 The honest status is that the warping fix is still gated on F-1, and F-1 has not
 been made cheaper by this attempt.
 
+## E4 and the attribution of room_surface_draw (2026-07-28)
+
+### The gate
+
+A/B runs need `lockstep-visuals` (the `editor-playtest` feature that fixes the
+visual cadence). Without it a timing change makes the scheduler drop different
+frames, the runs end on different content, and the end-state hashes are not
+comparable. Baseline and E4 both produced `display=0x6aa47b4835e5f2e9`, so the
+gate works and every number below is from a byte-identical render.
+
+```bash
+make probe-warp WARP_PROBE_FEATURES="cd-stream-bench emulator-telemetry lockstep-visuals" \
+  WARP_PROBE_LOG=/tmp/a.csv
+```
+
+### E4: null, marginally negative
+
+Predicted −80 to −150k. `#[inline(never)]` on all four emit arms
+(`submit_tomb_raider_cached_room_{triangle,quad}` and the two
+`submit_*_cached_uv_words` arms, two of which were `inline(always)`):
+
+| | baseline | E4 | delta |
+| --- | ---: | ---: | ---: |
+| `room_surface_draw` | 638,166 | 642,500 | **+0.7%** |
+| `render` | 1,274,641 | 1,278,674 | +0.3% |
+| primitives | 478 | 478 | 0 |
+
+Reverted. With the container experiment above, that is **two independent
+refutations of the I-cache hypothesis**, one on the 35 KB container and one on
+the leaves. E1 (a direct I-cache stall counter) was supposed to run before E4
+precisely to catch this, and skipping it cost two build cycles.
+
+### Instrumentation overhead has to be subtracted
+
+Adding one timed section to `RoomSurfaceMicroProfile` moved the profiled stage
+from 768,232 to 789,447: **each timed section costs ~21,215 cyc/frame**. With 8
+sections that is ~169,722, and `789,447 - 169,722 = 619,726` against an
+independently measured clean-build 638,166, agreeing to 2.9%.
+
+So most of the "unattributed 48%" in a profiled run is the profiler. Any
+`room-surface-profile` number must have ~21k per section subtracted before it
+means anything.
+
+### Where room_surface_draw actually goes
+
+Corrected shares of the clean 638,166 cyc/frame stage, 68.9 surfaces and 136.1
+packets per frame:
+
+| region | cyc/frame | share | |
+| --- | ---: | ---: | --- |
+| `submit` | 309,937 | **48.6%** | **E6's target**, 2,277 cyc/packet |
+| unattributed | 216,399 | 33.9% | loop body, still unmeasured |
+| `projected` | 39,985 | 6.3% | GTE + depth prep, already known good |
+| `material` | 18,618 | 2.9% | E5 |
+| `options` | 18,523 | 2.9% | E5 |
+| `lighting` | 16,089 | 2.5% | E5 |
+| `backface` | 8,332 | 1.3% | E5 |
+| `screen` | 5,708 | 0.9% | E5 |
+| `kind` | 4,574 | 0.7% | E5 |
+
+### This resizes E5
+
+The architecture doc predicts E5 at −200 to −320k, which on a 638k stage would
+be 31 to 50% of it. **Everything E5 targets sums to 11%**, or 70k, and a perfect
+E5 cannot beat that. The doc oversized it by roughly 3 to 4x.
+
+The per-surface `WorldSurfaceOptions` rebuild specifically, which is what the
+`OptionVariantTable` would remove, is 269 cyc/surface and 2.9% of the stage. The
+four variants it selects between are all draw-invariant, so the table is easy,
+but it is worth under 3% and was left unbuilt on that basis.
+
+**E6 is the whole prize: 48.6% of the stage at 2,277 cycles per packet.** That
+is where the emission rewrite has to go, and it is the same lever the warping
+fix is waiting on.
+
+The remaining 34% is genuinely unmeasured loop body. It should be instrumented
+before anyone optimises it, at ~21k/section of measurement cost.
+
 ## Recommendations for the engine
 
 Current state: `render3d.rs` uses `tomb_raider_subdivision`, four-way splits

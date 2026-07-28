@@ -694,11 +694,17 @@ pub mod counter {
     pub const ROOM_SURF_WARP_UNTOUCHED_MAX: u16 = 248;
     /// Untouched surfaces predicted to warp under 1 texel: correctly skipped.
     pub const ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX: u16 = 249;
+
+    /// E2 (docs/engine-30fps-architecture-2026-07-26.md): cycles rebuilding the
+    /// per-surface `WorldSurfaceOptions` variants. This sits between the timed
+    /// lighting and submit sections, i.e. inside the ~48% of room_surface_draw
+    /// that no existing counter attributed.
+    pub const ROOM_SURF_OPTIONS_CYCLES: u16 = 250;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 250;
+pub const COUNTER_COUNT: usize = 251;
 
-const _: () = assert!(counter::ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::ROOM_SURF_OPTIONS_CYCLES as usize == COUNTER_COUNT - 1);

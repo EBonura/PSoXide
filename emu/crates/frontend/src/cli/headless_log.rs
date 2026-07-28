@@ -268,6 +268,7 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "warp_untouched_sum16",
     "warp_untouched_max16",
     "warp_untouched_under_1tx",
+    "room_surf_options",
     "room_surface_packets",
     "room_surface_commands",
     "tri_primitives",
@@ -545,6 +546,7 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_SUM));
         push!(counter_latest(c::ROOM_SURF_WARP_UNTOUCHED_MAX));
         push!(counter_total(&summary, c::ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX));
+        push!(counter_total(&summary, c::ROOM_SURF_OPTIONS_CYCLES));
         push!(counter_total(&summary, c::ROOM_SURFACE_PACKETS));
         push!(counter_total(&summary, c::ROOM_SURFACE_COMMANDS));
         push!(counter_total(&summary, c::TRI_PRIMITIVES));
