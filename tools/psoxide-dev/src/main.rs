@@ -2721,6 +2721,41 @@ fn gen_fonts() -> Result<(), String> {
     for entry in font_entries() {
         mod_rs.push_str(&format!("pub use {}::{};\n", entry.module, entry.prefix));
     }
+    // Fonts that live in the tree without a generator entry, kept by hand
+    // because their source is not a TTF we rasterize. Regenerating `mod.rs`
+    // from the entry list alone silently drops them, and the only symptom is a
+    // build break in whatever imported one.
+    let generated: Vec<String> = font_entries()
+        .iter()
+        .map(|entry| entry.module.to_string())
+        .collect();
+    let mut hand_written: Vec<(String, String)> = Vec::new();
+    for file in fs::read_dir(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))? {
+        let path = file.map_err(|e| e.to_string())?.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem == "mod" || generated.iter().any(|name| name == stem) {
+            continue;
+        }
+        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // The font itself, not the bitmap array that precedes it.
+        let Some(konst) = text.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("pub const ")?;
+            let (name, ty) = rest.split_once(": ")?;
+            ty.starts_with("BitmapFont").then(|| name.trim().to_string())
+        }) else {
+            continue;
+        };
+        hand_written.push((stem.to_string(), konst));
+    }
+    hand_written.sort();
+    if !hand_written.is_empty() {
+        mod_rs.push_str("\n// Hand-maintained fonts: no generator entry, kept as-is.\n");
+        for (module, konst) in &hand_written {
+            mod_rs.push_str(&format!("pub mod {module};\npub use {module}::{konst};\n"));
+        }
+    }
     fs::write(out_dir.join("mod.rs"), mod_rs).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -3073,6 +3108,15 @@ fn font_entries() -> Vec<FontEntry> {
     entries
 }
 
+/// Faces that cannot render readable words at any size, kept for display use.
+///
+/// Kenney Future draws H, K and X as one glyph separated by a few pixels of
+/// taper on the crossbar. That is still true at 120 pixels, so no cell size
+/// rescues it: a larger cell only makes the bitmaps differ byte-wise while a
+/// reader still sees `PRESS X TO CONTINUE` as `PRESS H TO CONTINUE`. Use them
+/// for a logo or a heading where the word is already known, never for prose.
+const DECORATIVE_FONTS: &[&str] = &["kenney_future", "kenney_future_narrow"];
+
 /// Display faces that need a bigger cell than the default to stay readable.
 ///
 /// Most of these TTFs survive a 16-pixel cell. A few tell letters apart with a
@@ -3081,8 +3125,6 @@ fn font_entries() -> Vec<FontEntry> {
 /// `PRESS X` into `PRESS H`. Giving them room costs VRAM and rules them out
 /// for body text, but a large legible font beats a small wrong one.
 const LARGE_CELL_TTF_FONTS: &[(&str, usize, usize, f32)] = &[
-    ("kenney_future", 32, 28, 24.0),
-    ("kenney_future_narrow", 32, 28, 24.0),
     // A variable font whose default instance is thin: at 16 pixels its
     // horizontal bars fall under the coverage threshold and vanish, leaving E
     // and L, F and I as bare stems.
@@ -3233,6 +3275,9 @@ fn parse_ttf_font(path: &Path, entry: &mut FontEntry) -> Result<Vec<Vec<u8>>, St
 /// font of pure block shapes has every reason to.
 fn colliding_letters(entry: &FontEntry, glyphs: &[Vec<u8>]) -> Vec<Vec<char>> {
     use std::collections::BTreeMap;
+    if DECORATIVE_FONTS.contains(&entry.module) {
+        return Vec::new();
+    }
     let mut by_bitmap: BTreeMap<&[u8], Vec<char>> = BTreeMap::new();
     for letter in 'A'..='Z' {
         let Some(index) = (letter as u32).checked_sub(entry.first_cp) else {
