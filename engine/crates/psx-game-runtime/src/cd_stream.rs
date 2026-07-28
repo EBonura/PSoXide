@@ -138,6 +138,10 @@ const EMPTY_PUMP_STALL_LIMIT: u32 = 256;
 #[cfg(target_arch = "mips")]
 const DATA_READY_BLOCKING_POLL_LIMIT: u32 = 1_000_000;
 const DMA_POLL_LIMIT: u32 = 65_536;
+/// Spins to wait for a sector already on its way. One arrives every 6.7 ms at
+/// double speed; this is well past that and far short of a hang.
+#[cfg(target_arch = "mips")]
+const SECTOR_ARRIVAL_SPIN_LIMIT: u32 = 200_000;
 const CLEANUP_POLL_LIMIT: u32 = 16_384;
 
 /// Owned CD-ROM controller driver state: the one-sector DMA bounce
@@ -265,6 +269,9 @@ pub struct WorldRoomSlotsReadJob<const N: usize> {
     group_end: u32,
     sector_offset: u32,
     empty_pumps: u32,
+    /// Whether this read may stay with the drive between sectors. See
+    /// [`WorldRoomSlotsRead::set_wait_for_sectors`].
+    wait_for_sectors: bool,
     world_pack_lba: u32,
     result: RoomChunkLoadResult,
     state: WorldRoomSlotsReadState,
@@ -291,6 +298,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             group_end: 0,
             sector_offset: 0,
             empty_pumps: 0,
+            wait_for_sectors: false,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
                 status: STATUS_OK,
@@ -318,6 +326,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             group_end: 0,
             sector_offset: 0,
             empty_pumps: 0,
+            wait_for_sectors: false,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
                 status: STATUS_OK,
@@ -403,6 +412,19 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
     /// Advance the armed read by up to `max_sectors` sectors, landing
     /// each chunk's unpadded bytes in `dst[slot]` and tracking per-chunk
     /// byte counts and running checksums.
+    /// Drain at the drive's rate rather than the frame's, for a load with
+    /// nothing to stay responsive for.
+    ///
+    /// The controller steps over sectors that arrive while software is away,
+    /// and a pump that returns the moment nothing is buffered is away for the
+    /// rest of the frame. At double speed a sector lands every 6.7 ms and a
+    /// frame is 16.7 ms, so returning early loses most of them. Waiting for
+    /// the one already on its way costs a bounded spin and keeps the stream
+    /// whole.
+    pub fn set_wait_for_sectors(&mut self, wait: bool) {
+        self.wait_for_sectors = wait;
+    }
+
     pub fn poll_into(
         &mut self,
         cd: &mut CdController,
@@ -450,13 +472,49 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                         self.empty_pumps = 0;
                     }
                     Ok(false) => {
-                        self.empty_pumps = self.empty_pumps.saturating_add(1);
-                        if self.empty_pumps > EMPTY_PUMP_STALL_LIMIT {
-                            self.fail_all(STATUS_DATA_TIMEOUT);
-                            cleanup_read_stream(cd, &mut polls);
-                            self.state = WorldRoomSlotsReadState::Done;
+                        // Nothing buffered yet. If this read may block, the
+                        // next sector is already on its way, so wait for it
+                        // rather than hand the frame back and let it land
+                        // unattended.
+                        if self.wait_for_sectors {
+                            let mut spins = 0u32;
+                            let mut landed = false;
+                            while spins < SECTOR_ARRIVAL_SPIN_LIMIT {
+                                spins += 1;
+                                match try_read_stream_sector(cd, &mut polls) {
+                                    Ok(true) => {
+                                        landed = true;
+                                        break;
+                                    }
+                                    Ok(false) => continue,
+                                    Err(status) => {
+                                        self.fail_all(status);
+                                        cleanup_read_stream(cd, &mut polls);
+                                        self.state = WorldRoomSlotsReadState::Done;
+                                        break;
+                                    }
+                                }
+                            }
+                            if landed {
+                                self.empty_pumps = 0;
+                            } else {
+                                self.empty_pumps = self.empty_pumps.saturating_add(1);
+                                if self.empty_pumps > EMPTY_PUMP_STALL_LIMIT {
+                                    self.fail_all(STATUS_DATA_TIMEOUT);
+                                    cleanup_read_stream(cd, &mut polls);
+                                    self.state = WorldRoomSlotsReadState::Done;
+                                }
+                                break;
+                            }
+                        } else {
+                            self.empty_pumps = self.empty_pumps.saturating_add(1);
+                            if self.empty_pumps > EMPTY_PUMP_STALL_LIMIT {
+                                self.fail_all(STATUS_DATA_TIMEOUT);
+                                cleanup_read_stream(cd, &mut polls);
+                                self.state = WorldRoomSlotsReadState::Done;
+                            }
+                            break;
                         }
-                        break;
                     }
                     Err(status) => {
                         self.fail_all(status);

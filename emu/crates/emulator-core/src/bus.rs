@@ -760,6 +760,17 @@ impl Bus {
     /// however long the game took to get there. Poll-bound input tapes
     /// (`PXITAPE2`) index off it so a replay follows the same route whatever
     /// the frame rate.
+    /// Sectors the CD controller read that software never collected. See
+    /// [`crate::cdrom::CdRom::dropped_sectors`].
+    pub fn cdrom_dropped_sectors(&self) -> u64 {
+        self.cdrom.dropped_sectors()
+    }
+
+    /// Disc positions of the first and last dropped sector.
+    pub fn cdrom_dropped_lba_range(&self) -> (u32, u32) {
+        self.cdrom.dropped_lba_range()
+    }
+
     pub fn port1_completed_polls(&self) -> u64 {
         self.sio0
             .port1()
