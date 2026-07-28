@@ -708,6 +708,20 @@ impl CdRom {
                 .expect("loop condition guarantees an element");
             if self.dropped_sectors == 0 {
                 self.dropped_lba_first = lost;
+                if std::env::var_os("PSOXIDE_TRACE_SECTOR_DROP").is_some() {
+                    eprintln!(
+                        "[drop] lba={lost} read_lba={} waiting={} reading={} mode=0x{:02X} \
+                         irq_flag={} fifo={} last_cmd=0x{:02X} scheduling_cycle={}",
+                        self.read_lba,
+                        self.waiting_sectors.len(),
+                        self.reading,
+                        self.mode,
+                        self.irq_flag,
+                        self.data_fifo.len(),
+                        self.last_command,
+                        self.scheduling_cycle,
+                    );
+                }
             }
             self.dropped_lba_last = lost;
             self.dropped_sectors = self.dropped_sectors.saturating_add(1);
@@ -761,6 +775,15 @@ impl CdRom {
         while let Some((skipped, _)) = self.waiting_sectors.pop_front() {
             if self.dropped_sectors == 0 {
                 self.dropped_lba_first = skipped;
+                if std::env::var_os("PSOXIDE_TRACE_SECTOR_DROP").is_some() {
+                    eprintln!(
+                        "[drop/snap] lba={skipped} newest={} backlog={} reading={} fifo={}",
+                        newest_lba,
+                        self.waiting_sectors.len() + 1,
+                        self.reading,
+                        self.data_fifo.len(),
+                    );
+                }
             }
             self.dropped_lba_last = skipped;
             self.dropped_sectors = self.dropped_sectors.saturating_add(1);
