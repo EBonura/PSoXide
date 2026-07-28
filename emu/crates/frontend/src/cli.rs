@@ -213,6 +213,11 @@ pub struct LaunchArgs {
     /// the HLE BIOS entry path but still exercise the CD-ROM controller.
     #[arg(long)]
     pub disc: Option<PathBuf>,
+    /// Load port 1's memory card from this 128 KiB `.mcd` file and persist any
+    /// writes back at the end of the headless run. A missing file starts as a
+    /// freshly formatted card. This makes cold-boot save tests reproducible.
+    #[arg(long, value_name = "PATH")]
+    pub memcard: Option<PathBuf>,
     /// Number of CPU instructions to retire before stopping.
     #[arg(long, default_value_t = 100_000_000)]
     pub steps: u64,
@@ -929,6 +934,19 @@ fn run_headless_launch(
 
     if args.scph_9902 {
         bus.apply_scph_9902_profile();
+    }
+
+    if let Some(path) = args.memcard.as_ref() {
+        let bytes = if path.exists() {
+            std::fs::read(path)
+                .map_err(|error| format!("read memory card {}: {error}", path.display()))?
+        } else {
+            Vec::new()
+        };
+        bus.attach_memcard_port1(bytes);
+        if emit_summary {
+            eprintln!("[cli] port-1 memory card → {}", path.display());
+        }
     }
 
     if let Some(disc_path) = args.disc.as_ref() {
@@ -1800,6 +1818,28 @@ fn run_headless_launch(
         }
     }
 
+    if let Some(path) = args.memcard.as_ref() {
+        if let Some(bytes) = bus.memcard_port1_snapshot() {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!("create memory-card directory {}: {error}", parent.display())
+                })?;
+            }
+            std::fs::write(path, &bytes)
+                .map_err(|error| format!("write memory card {}: {error}", path.display()))?;
+            if emit_summary {
+                eprintln!(
+                    "[cli] persisted port-1 memory card → {} ({} bytes)",
+                    path.display(),
+                    bytes.len()
+                );
+            }
+        }
+    }
+
     let (display_hash, display_width, display_height, display_byte_len) = bus.gpu.display_hash();
     let (display_rgba, display_rgba_width, display_rgba_height) = bus.gpu.display_rgba8();
     Ok(HeadlessLaunchResult {
@@ -2297,6 +2337,7 @@ fn validation_launch_args(
         savestate: None,
         bios: None,
         disc: None,
+        memcard: None,
         steps: checkpoint.stop.steps,
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,

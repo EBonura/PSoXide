@@ -57,7 +57,7 @@ pub mod sio;
 pub use ram::RamCard;
 
 #[cfg(feature = "hw")]
-pub use sio::{HardwareCard, Slot};
+pub use sio::{HardwareCard, Slot, TransportFault, TransportTrace};
 
 // --------------------------------------------------------------------------
 // Card geometry (fixed by the hardware).
@@ -77,6 +77,27 @@ pub const CARD_SIZE: usize = FRAME_COUNT * FRAME_SIZE;
 pub const DATA_BLOCKS: usize = BLOCK_COUNT - 1;
 /// Maximum file-name length (region+product code + name), excluding the NUL.
 pub const MAX_NAME: usize = 20;
+
+/// A native PS1 memory-card save icon.
+///
+/// The BIOS displays a 16×16, 4bpp indexed image. `pixels` contains two
+/// left-to-right pixels per byte (low nibble first); `palette` contains the 16
+/// BGR555 colours. This type represents one static icon frame.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SaveIcon {
+    /// Sixteen BGR555 palette entries. Palette index zero is conventionally
+    /// transparent.
+    pub palette: [u16; 16],
+    /// 16×16 pixels at 4bpp: exactly one 128-byte memory-card frame.
+    pub pixels: [u8; FRAME_SIZE],
+}
+
+impl SaveIcon {
+    /// Construct a static save icon from its native palette and packed pixels.
+    pub const fn new(palette: [u16; 16], pixels: [u8; FRAME_SIZE]) -> Self {
+        Self { palette, pixels }
+    }
+}
 
 // --------------------------------------------------------------------------
 // Errors.
