@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn cached_room_lighting_policy_emits_no_fog_passthrough() {
+    let mut source = String::new();
+    write_cached_room_lighting_policy(&mut source, false, false);
+
+    assert!(source.contains("macro_rules! draw_project_cached_room"));
+    assert!(source.contains("$draw($($before,)* $lighting, false, $($after,)*)"));
+    assert!(!source.contains("ProjectCachedRoomLighting"));
+}
+
+#[test]
+fn cached_room_lighting_policy_emits_fog_specialization() {
+    let mut source = String::new();
+    write_cached_room_lighting_policy(&mut source, true, false);
+
+    assert!(source.contains("pub struct ProjectCachedRoomLighting"));
+    assert!(source.contains("#[inline(always)]"));
+    assert!(source.contains("apply_vertex_fog_weight"));
+    assert!(source.contains("&cached_lighting, true"));
+    assert!(!source.contains("apply_black_room_fog_weight"));
+}
+
+#[test]
+fn cached_room_lighting_policy_specializes_black_fog() {
+    let mut source = String::new();
+    write_cached_room_lighting_policy(&mut source, true, true);
+
+    assert!(source.contains("pub struct ProjectCachedRoomLighting"));
+    assert!(source.contains("psx_game_runtime::room_lighting::apply_black_room_fog_weight"));
+    assert!(!source.contains("self.lighting.apply_vertex_fog_weight"));
+}
+
+#[test]
 fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
     let material = PlaytestModelMaterialOverride {
         texture_asset_index: None,

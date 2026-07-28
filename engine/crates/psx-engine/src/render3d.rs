@@ -1581,11 +1581,11 @@ pub struct TexturedModelRenderStats {
 pub struct WorldRenderPass<'a, 'ot, const OT_DEPTH: usize> {
     ot: &'a mut OtFrame<'ot, OT_DEPTH>,
     commands: &'a mut [WorldTriCommand],
-    slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
-    slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
     command_len: usize,
     next_order: u16,
     ordering: WorldCommandOrdering,
+    slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
+    slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
 }
 
 /// Scratch command for a Gouraud triangle render pass.
@@ -2080,12 +2080,48 @@ fn project_tomb_raider_view_quad_gte(
 fn project_tomb_raider_view_lattice_gte(
     vertices: [ViewVertex; 9],
     projection: WorldProjection,
+    root_projected: Option<[ProjectedVertex; 4]>,
 ) -> Option<[ProjectedVertex; 9]> {
     if vertices
         .iter()
         .any(|vertex| vertex.z <= 0 || vertex.z < projection.near_z)
     {
         return None;
+    }
+    if let Some(root) = root_projected {
+        let generated = [
+            tomb_raider_view_gte_input(vertices[1]),
+            tomb_raider_view_gte_input(vertices[3]),
+            tomb_raider_view_gte_input(vertices[4]),
+            tomb_raider_view_gte_input(vertices[5]),
+            tomb_raider_view_gte_input(vertices[7]),
+        ];
+        let [Some(top), Some(left), Some(center), Some(right), Some(bottom)] = generated else {
+            return Some([
+                root[0],
+                projection.project_view(vertices[1])?,
+                root[1],
+                projection.project_view(vertices[3])?,
+                projection.project_view(vertices[4])?,
+                projection.project_view(vertices[5])?,
+                root[2],
+                projection.project_view(vertices[7])?,
+                root[3],
+            ]);
+        };
+        let first = scene::project_triangle_scheduled(top, left, center);
+        let second = scene::project_triangle_scheduled(right, bottom, center);
+        return Some([
+            root[0],
+            tomb_raider_projected_option_from_gte(first[0], projection.near_z)?,
+            root[1],
+            tomb_raider_projected_option_from_gte(first[1], projection.near_z)?,
+            tomb_raider_projected_option_from_gte(first[2], projection.near_z)?,
+            tomb_raider_projected_option_from_gte(second[0], projection.near_z)?,
+            root[2],
+            tomb_raider_projected_option_from_gte(second[1], projection.near_z)?,
+            root[3],
+        ]);
     }
     let inputs = [
         tomb_raider_view_gte_input(vertices[0]),
@@ -3424,13 +3460,15 @@ const BLENDED_VERTEX_CHUNK: usize = 32;
 /// The per-vertex arithmetic is identical to the slow path, so frames
 /// stay bit-exact.
 ///
-/// Caller guarantees every index in `chunk` is in range for `vertices`
-/// and `projected_vertices`, belongs to the part whose joint is
-/// `primary`, and passed [`model_vertex_uses_cpu_blend`].
+/// Caller guarantees `chunk_ptr` addresses at least `chunk_len` initialized
+/// `u16`s, every referenced index is in range for `vertices` and
+/// `projected_vertices`, belongs to the part whose joint is `primary`, and
+/// passed [`model_vertex_uses_cpu_blend`].
 #[cfg(not(feature = "vert-debug"))]
 #[allow(clippy::too_many_arguments)]
-fn flush_blended_model_vertex_chunk(
-    chunk: &[u16],
+unsafe fn flush_blended_model_vertex_chunk(
+    chunk_ptr: *const u16,
+    chunk_len: usize,
     vertices: &[ModelVertex],
     primary: JointViewTransform,
     joint_view_transforms: &[JointViewTransform],
@@ -3444,15 +3482,15 @@ fn flush_blended_model_vertex_chunk(
     min_y: &mut i16,
     max_y: &mut i16,
 ) {
-    let chunk = &chunk[..chunk.len().min(BLENDED_VERTEX_CHUNK)];
+    let chunk_len = chunk_len.min(BLENDED_VERTEX_CHUNK);
     let mut view_blend = [ViewVertex::ZERO; BLENDED_VERTEX_CHUNK];
     // Phase 1: primary-joint transforms while the caller's state is live.
     let mut slot = 0usize;
-    while slot < chunk.len() {
+    while slot < chunk_len {
         // SAFETY: the caller guarantees every chunk index is valid for the
-        // model vertex and projected-vertex slices; `slot < chunk.len()` and
+        // model vertex and projected-vertex slices; `slot < chunk_len` and
         // the local array is capped to `BLENDED_VERTEX_CHUNK` above.
-        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
         let a = scene::transform_vertex_scheduled(vertex.position);
         unsafe {
@@ -3463,8 +3501,8 @@ fn flush_blended_model_vertex_chunk(
     // Phase 2: secondary transforms, reloading only on joint1 change.
     let mut loaded_joint1 = u16::MAX;
     slot = 0;
-    while slot < chunk.len() {
-        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+    while slot < chunk_len {
+        let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
         if u16::from(vertex.joint1) != loaded_joint1 {
             let secondary = unsafe { *joint_view_transforms.get_unchecked(vertex.joint1 as usize) };
@@ -3483,8 +3521,8 @@ fn flush_blended_model_vertex_chunk(
     scene::load_rotation(&Mat3I16::IDENTITY);
     scene::load_translation(Vec3I32::ZERO);
     slot = 0;
-    while slot < chunk.len() {
-        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+    while slot < chunk_len {
+        let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let projected = project_gte_view_vertex_identity_loaded(
             unsafe { *view_blend.get_unchecked(slot) },
             projection,
@@ -3796,7 +3834,7 @@ fn textured_gouraud_view_uv_word(vertex: TexturedGouraudViewVertex) -> u16 {
     (vertex.u.clamp(0, 255) as u16) | ((vertex.v.clamp(0, 255) as u16) << 8)
 }
 
-fn tomb_raider_quad_farthest_depth(vertices: [TexturedGouraudViewVertex; 4]) -> i32 {
+fn tomb_raider_quad_farthest_depth(vertices: &[TexturedGouraudViewVertex; 4]) -> i32 {
     vertices[0]
         .position
         .z
@@ -3805,7 +3843,7 @@ fn tomb_raider_quad_farthest_depth(vertices: [TexturedGouraudViewVertex; 4]) -> 
         .max(vertices[3].position.z)
 }
 
-fn tomb_raider_triangle_farthest_depth(vertices: [TexturedGouraudViewVertex; 3]) -> i32 {
+fn tomb_raider_triangle_farthest_depth(vertices: &[TexturedGouraudViewVertex; 3]) -> i32 {
     vertices[0]
         .position
         .z

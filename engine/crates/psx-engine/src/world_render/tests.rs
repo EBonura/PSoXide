@@ -1,5 +1,5 @@
-use super::*;
 use super::indexed_cache::cached_surface_subdivision_options;
+use super::*;
 use crate::Angle;
 use crate::PrimitiveArena;
 use crate::{DepthBand, DepthRange, ProjectedVertex, WorldProjection, Q12};
@@ -65,13 +65,13 @@ fn warmed_room_quad_defers_to_sector_scaled_tomb_raider_splitter() {
     ];
 
     assert!(tomb_raider_warmed_quad_requires_dynamic_submit(
-        options, near
+        &options, near
     ));
     assert!(!tomb_raider_warmed_quad_requires_dynamic_submit(
-        options, far
+        &options, far
     ));
     assert!(tomb_raider_warmed_quad_requires_dynamic_submit(
-        options.with_tomb_raider_subdivision_debug_levels(true),
+        &options.with_tomb_raider_subdivision_debug_levels(true),
         far,
     ));
 }
@@ -667,6 +667,48 @@ fn cell_frustum_aabb_rejects_flat_cell_retained_by_bounding_sphere() {
 }
 
 #[test]
+fn portal_cell_window_union_keeps_every_admitting_path() {
+    let left = PortalCellWindow::new(-4096, -1024, -2048, 2048);
+    let right = PortalCellWindow::new(1024, 4096, -1024, 3072);
+    assert_eq!(
+        left.union(right),
+        PortalCellWindow::new(-4096, 4096, -2048, 3072)
+    );
+
+    let camera = WorldCamera::from_basis(
+        WorldProjection::new(160, 120, 200, 40),
+        WorldVertex::ZERO,
+        Q12::ZERO,
+        Q12::ONE,
+        Q12::ZERO,
+        Q12::ONE,
+    );
+    let options = WorldSurfaceOptions::new(
+        crate::DepthBand::whole(),
+        crate::DepthRange::new(40, 10_000),
+    );
+    let frustum = CellFrustum::new(&camera, options, 0);
+    let narrow_left = PortalCellWindow::new(-4096, -2048, -2048, 2048);
+    let narrow_right = PortalCellWindow::new(2048, 4096, -2048, 2048);
+    let right_path_cell = ViewVertex::new(750, 0, 1_000);
+
+    assert!(!frustum.cell_aabb_intersects_portal_window(
+        right_path_cell,
+        100,
+        100,
+        100,
+        narrow_left,
+    ));
+    assert!(frustum.cell_aabb_intersects_portal_window(
+        right_path_cell,
+        100,
+        100,
+        100,
+        narrow_left.union(narrow_right),
+    ));
+}
+
+#[test]
 fn cell_frustum_aabb_fast_paths_match_widened_reference() {
     let camera = WorldCamera::from_basis(
         WorldProjection::new(160, 120, 320, 40),
@@ -860,12 +902,14 @@ fn cached_full_ceiling_faces_playable_interior() {
             (128, 128, 128),
         ))],
         &NoWorldSurfaceLighting,
+        false,
         &camera,
         options,
         CachedRoomDepthMode::FixedCell,
         CachedRoomSubdivisionMode::All,
         &visible_cells,
         0,
+        None,
         None,
         &mut triangles,
         &mut pass,
@@ -944,12 +988,14 @@ fn cached_surface_crossing_near_plane_keeps_visible_half() {
             (128, 128, 128),
         ))],
         &NoWorldSurfaceLighting,
+        false,
         &camera,
         WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096)),
         CachedRoomDepthMode::PerTriangle,
         CachedRoomSubdivisionMode::All,
         &[GridVisibleCell::new(0, 0, 0, 128)],
         0,
+        None,
         None,
         &mut triangles,
         &mut pass,
@@ -1216,6 +1262,7 @@ fn wall_submission_probe_pooled(
             (128, 128, 128),
         ))],
         &NoWorldSurfaceLighting,
+        false,
         &camera,
         WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 25_000))
             .with_tomb_raider_subdivision_sector_size(1664)
@@ -1225,6 +1272,7 @@ fn wall_submission_probe_pooled(
         CachedRoomSubdivisionMode::All,
         &[GridVisibleCell::new(0, 0, -half_extent, half_extent)],
         0,
+        None,
         warmed.then(|| (&mut prebuilt_quads[..], &mut prebuilt_valid[..])),
         &mut triangles,
         &mut pass,

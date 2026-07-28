@@ -12,7 +12,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         colors: [(u8, u8, u8); 3],
         projection: WorldProjection,
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
     ) -> WorldRenderStats {
         load_tomb_raider_view_projection_gte(projection);
         let vertices = [
@@ -20,27 +20,27 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             TexturedGouraudViewVertex::new(positions[1], uv_words[1], colors[1]),
             TexturedGouraudViewVertex::new(positions[2], uv_words[2], colors[2]),
         ];
-        let leaf_options = options
+        let leaf_options = (*options)
             .with_tomb_raider_subdivision(false)
             .with_textured_triangle_max_edge(0);
         let subdivision_profile = options.tomb_raider_subdivision_profile;
-        let root_depth = tomb_raider_triangle_farthest_depth(vertices);
+        let root_depth = tomb_raider_triangle_farthest_depth(&vertices);
         if root_depth >= subdivision_profile.far_depth {
             return self.submit_tomb_raider_textured_gouraud_view_triangle_leaf(
                 triangles,
-                vertices,
+                &vertices,
                 projection,
                 material,
-                leaf_options,
+                &leaf_options,
                 0,
             );
         }
         let mut stats = self.submit_tomb_raider_textured_gouraud_view_triangle_split(
             triangles,
-            vertices,
+            &vertices,
             projection,
             material,
-            leaf_options,
+            &leaf_options,
             0,
         );
         if !stats.primitive_overflow
@@ -48,16 +48,17 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             && !material.is_translucent()
             && root_depth >= subdivision_profile.underdraw_depth
         {
+            let underdraw_options = leaf_options.with_depth_bias(
+                leaf_options
+                    .depth_bias
+                    .saturating_add(subdivision_profile.underdraw_depth_bias),
+            );
             let underdraw = self.submit_tomb_raider_textured_gouraud_view_triangle_leaf(
                 triangles,
-                vertices,
+                &vertices,
                 projection,
                 material,
-                leaf_options.with_depth_bias(
-                    leaf_options
-                        .depth_bias
-                        .saturating_add(subdivision_profile.underdraw_depth_bias),
-                ),
+                &underdraw_options,
                 3,
             );
             merge_world_stats(&mut stats, underdraw);
@@ -69,10 +70,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn submit_tomb_raider_textured_gouraud_view_triangle_split(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
-        vertices: [TexturedGouraudViewVertex; 3],
+        vertices: &[TexturedGouraudViewVertex; 3],
         projection: WorldProjection,
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         split_level: u8,
     ) -> WorldRenderStats {
         let edge_01 = midpoint_textured_gouraud_view(vertices[0], vertices[1]);
@@ -90,7 +91,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         };
         let mut index = 0usize;
         while index < children.len() {
-            let child = children[index];
+            let child = &children[index];
             let next = if options.tomb_raider_subdivision_profile.max_levels
                 > split_level.saturating_add(1)
                 && tomb_raider_triangle_farthest_depth(child)
@@ -122,19 +123,16 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn submit_tomb_raider_textured_gouraud_view_triangle_leaf(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
-        mut vertices: [TexturedGouraudViewVertex; 3],
+        vertices: &[TexturedGouraudViewVertex; 3],
         projection: WorldProjection,
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         subdivision_level: u8,
     ) -> WorldRenderStats {
-        if options.tomb_raider_debug_subdivision_levels {
-            if let Some(color) = tomb_raider_debug_subdivision_color(subdivision_level) {
-                vertices[0].color = color;
-                vertices[1].color = color;
-                vertices[2].color = color;
-            }
-        }
+        let debug_color = options
+            .tomb_raider_debug_subdivision_levels
+            .then(|| tomb_raider_debug_subdivision_color(subdivision_level))
+            .flatten();
         if vertices
             .iter()
             .any(|vertex| vertex.position.z < projection.near_z)
@@ -151,10 +149,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     textured_gouraud_view_uv_word(vertices[1]),
                     textured_gouraud_view_uv_word(vertices[2]),
                 ],
-                [vertices[0].color, vertices[1].color, vertices[2].color],
+                [
+                    debug_color.unwrap_or(vertices[0].color),
+                    debug_color.unwrap_or(vertices[1].color),
+                    debug_color.unwrap_or(vertices[2].color),
+                ],
                 projection,
                 material,
-                options,
+                *options,
             );
         }
         let Some([a, b, c]) = project_tomb_raider_view_triangle_gte(
@@ -187,9 +189,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     vertices[2].v.clamp(0, 255) as u8,
                 ),
             ],
-            [vertices[0].color, vertices[1].color, vertices[2].color],
+            [
+                debug_color.unwrap_or(vertices[0].color),
+                debug_color.unwrap_or(vertices[1].color),
+                debug_color.unwrap_or(vertices[2].color),
+            ],
             material,
-            options,
+            *options,
         )
     }
 
@@ -205,11 +211,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         &mut self,
         primitives: &mut P,
         positions: [ViewVertex; 4],
+        _root_projected: Option<[ProjectedVertex; 4]>,
+        _root_extent_safe: bool,
+        mut _warmed_root: Option<&mut QuadTexturedGouraud>,
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
         projection: WorldProjection,
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
     ) -> WorldRenderStats
     where
         P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
@@ -221,18 +230,18 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             TexturedGouraudViewVertex::new(positions[2], uv_words[2], colors[2]),
             TexturedGouraudViewVertex::new(positions[3], uv_words[3], colors[3]),
         ];
-        let leaf_options = options
+        let leaf_options = (*options)
             .with_tomb_raider_subdivision(false)
             .with_textured_triangle_max_edge(0);
         let subdivision_profile = options.tomb_raider_subdivision_profile;
-        let root_depth = tomb_raider_quad_farthest_depth(vertices);
+        let root_depth = tomb_raider_quad_farthest_depth(&vertices);
         if root_depth >= subdivision_profile.far_depth {
             return self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
                 primitives,
-                vertices,
+                &vertices,
                 projection,
                 material,
-                leaf_options,
+                &leaf_options,
                 0,
             );
         }
@@ -240,38 +249,81 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if subdivision_profile.max_levels == 1 {
             let mut stats = self.submit_tomb_raider_textured_gouraud_view_quad_lattice(
                 primitives,
-                vertices,
+                &vertices,
+                _root_projected,
+                _root_extent_safe,
                 projection,
                 material,
-                leaf_options,
+                &leaf_options,
             );
             if !stats.primitive_overflow
                 && !stats.command_overflow
                 && !material.is_translucent()
                 && root_depth >= subdivision_profile.underdraw_depth
             {
-                let underdraw = self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
-                    primitives,
-                    vertices,
-                    projection,
-                    material,
-                    leaf_options.with_depth_bias(
-                        leaf_options
-                            .depth_bias
-                            .saturating_add(subdivision_profile.underdraw_depth_bias),
-                    ),
-                    3,
+                let underdraw_options = leaf_options.with_depth_bias(
+                    leaf_options
+                        .depth_bias
+                        .saturating_add(subdivision_profile.underdraw_depth_bias),
                 );
+                let underdraw = if let Some(root_projected) = _root_projected {
+                    if _root_extent_safe && !underdraw_options.tomb_raider_debug_subdivision_levels
+                    {
+                        if let Some(quad) = _warmed_root.as_deref_mut() {
+                            let prepared_depth = PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(
+                                underdraw_options,
+                                root_projected,
+                            );
+                            self.try_submit_warmed_textured_gouraud_quad(
+                                quad,
+                                root_projected,
+                                true,
+                                &underdraw_options,
+                                prepared_depth,
+                            )
+                            .unwrap_or_default()
+                        } else {
+                            self.submit_tomb_raider_textured_gouraud_projected_quad_leaf(
+                                primitives,
+                                &vertices,
+                                root_projected,
+                                material,
+                                &underdraw_options,
+                                true,
+                                3,
+                            )
+                        }
+                    } else {
+                        self.submit_tomb_raider_textured_gouraud_projected_quad_leaf(
+                            primitives,
+                            &vertices,
+                            root_projected,
+                            material,
+                            &underdraw_options,
+                            _root_extent_safe,
+                            3,
+                        )
+                    }
+                } else {
+                    self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
+                        primitives,
+                        &vertices,
+                        projection,
+                        material,
+                        &underdraw_options,
+                        3,
+                    )
+                };
                 merge_world_stats(&mut stats, underdraw);
             }
             return stats;
         }
         let mut stats = self.submit_tomb_raider_textured_gouraud_view_quad_split(
             primitives,
-            vertices,
+            &vertices,
             projection,
             material,
-            leaf_options,
+            &leaf_options,
             0,
         );
         if !stats.primitive_overflow
@@ -279,16 +331,17 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             && !material.is_translucent()
             && root_depth >= subdivision_profile.underdraw_depth
         {
+            let underdraw_options = leaf_options.with_depth_bias(
+                leaf_options
+                    .depth_bias
+                    .saturating_add(subdivision_profile.underdraw_depth_bias),
+            );
             let underdraw = self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
                 primitives,
-                vertices,
+                &vertices,
                 projection,
                 material,
-                leaf_options.with_depth_bias(
-                    leaf_options
-                        .depth_bias
-                        .saturating_add(subdivision_profile.underdraw_depth_bias),
-                ),
+                &underdraw_options,
                 3,
             );
             merge_world_stats(&mut stats, underdraw);
@@ -303,10 +356,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn submit_tomb_raider_textured_gouraud_view_quad_lattice<P>(
         &mut self,
         primitives: &mut P,
-        vertices: [TexturedGouraudViewVertex; 4],
+        vertices: &[TexturedGouraudViewVertex; 4],
+        root_projected: Option<[ProjectedVertex; 4]>,
+        root_extent_safe: bool,
         projection: WorldProjection,
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
     ) -> WorldRenderStats
     where
         P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
@@ -341,20 +396,15 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 lattice[8].position,
             ],
             projection,
+            root_projected,
         ) else {
             // Preserve the existing near-plane clipping behavior for the
             // uncommon quad that crosses the camera.
             return self.submit_tomb_raider_textured_gouraud_view_quad_split(
-                primitives,
-                vertices,
-                projection,
-                material,
-                options,
-                0,
+                primitives, vertices, projection, material, options, 0,
             );
         };
-        const LEAVES: [[usize; 4]; 4] =
-            [[0, 1, 3, 4], [1, 2, 4, 5], [3, 4, 6, 7], [4, 5, 7, 8]];
+        const LEAVES: [[usize; 4]; 4] = [[0, 1, 3, 4], [1, 2, 4, 5], [3, 4, 6, 7], [4, 5, 7, 8]];
         let mut stats = WorldRenderStats {
             split_triangles: 1,
             ..WorldRenderStats::default()
@@ -362,14 +412,15 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut leaf_index = 0usize;
         while leaf_index < LEAVES.len() {
             let ids = LEAVES[leaf_index];
+            let leaf_vertices = [
+                lattice[ids[0]],
+                lattice[ids[1]],
+                lattice[ids[2]],
+                lattice[ids[3]],
+            ];
             let next = self.submit_tomb_raider_textured_gouraud_projected_quad_leaf(
                 primitives,
-                [
-                    lattice[ids[0]],
-                    lattice[ids[1]],
-                    lattice[ids[2]],
-                    lattice[ids[3]],
-                ],
+                &leaf_vertices,
                 [
                     projected[ids[0]],
                     projected[ids[1]],
@@ -378,6 +429,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ],
                 material,
                 options,
+                root_extent_safe,
                 1,
             );
             merge_world_stats(&mut stats, next);
@@ -394,23 +446,20 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn submit_tomb_raider_textured_gouraud_projected_quad_leaf<P>(
         &mut self,
         primitives: &mut P,
-        mut vertices: [TexturedGouraudViewVertex; 4],
+        vertices: &[TexturedGouraudViewVertex; 4],
         projected: [ProjectedVertex; 4],
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
+        root_extent_safe: bool,
         subdivision_level: u8,
     ) -> WorldRenderStats
     where
         P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
     {
-        if options.tomb_raider_debug_subdivision_levels {
-            if let Some(color) = tomb_raider_debug_subdivision_color(subdivision_level) {
-                vertices[0].color = color;
-                vertices[1].color = color;
-                vertices[2].color = color;
-                vertices[3].color = color;
-            }
-        }
+        let debug_color = options
+            .tomb_raider_debug_subdivision_levels
+            .then(|| tomb_raider_debug_subdivision_color(subdivision_level))
+            .flatten();
         let [a, b, c, _d] = projected;
         if projected_culled([a, b, c], options.cull_mode) {
             return WorldRenderStats {
@@ -419,7 +468,28 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
         }
         let prepared_depth =
-            PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(options, projected);
+            PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(*options, projected);
+        if root_extent_safe {
+            return self.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
+                primitives,
+                projected,
+                [
+                    textured_gouraud_view_uv_word(vertices[0]),
+                    textured_gouraud_view_uv_word(vertices[1]),
+                    textured_gouraud_view_uv_word(vertices[2]),
+                    textured_gouraud_view_uv_word(vertices[3]),
+                ],
+                [
+                    debug_color.unwrap_or(vertices[0].color),
+                    debug_color.unwrap_or(vertices[1].color),
+                    debug_color.unwrap_or(vertices[2].color),
+                    debug_color.unwrap_or(vertices[3].color),
+                ],
+                material.textured_gouraud_packet_material(),
+                options,
+                prepared_depth,
+            );
+        }
         self.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
             primitives,
             None,
@@ -433,10 +503,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 textured_gouraud_view_uv_word(vertices[3]),
             ],
             [
-                vertices[0].color,
-                vertices[1].color,
-                vertices[2].color,
-                vertices[3].color,
+                debug_color.unwrap_or(vertices[0].color),
+                debug_color.unwrap_or(vertices[1].color),
+                debug_color.unwrap_or(vertices[2].color),
+                debug_color.unwrap_or(vertices[3].color),
             ],
             material,
             options,
@@ -448,10 +518,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn submit_tomb_raider_textured_gouraud_view_quad_split<P>(
         &mut self,
         primitives: &mut P,
-        vertices: [TexturedGouraudViewVertex; 4],
+        vertices: &[TexturedGouraudViewVertex; 4],
         projection: WorldProjection,
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         split_level: u8,
     ) -> WorldRenderStats
     where
@@ -476,7 +546,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         };
         let mut index = 0usize;
         while index < children.len() {
-            let child = children[index];
+            let child = &children[index];
             let next = if options.tomb_raider_subdivision_profile.max_levels
                 > split_level.saturating_add(1)
                 && tomb_raider_quad_farthest_depth(child)
@@ -508,23 +578,19 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn submit_tomb_raider_textured_gouraud_view_quad_leaf<P>(
         &mut self,
         primitives: &mut P,
-        mut vertices: [TexturedGouraudViewVertex; 4],
+        vertices: &[TexturedGouraudViewVertex; 4],
         projection: WorldProjection,
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         subdivision_level: u8,
     ) -> WorldRenderStats
     where
         P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
     {
-        if options.tomb_raider_debug_subdivision_levels {
-            if let Some(color) = tomb_raider_debug_subdivision_color(subdivision_level) {
-                vertices[0].color = color;
-                vertices[1].color = color;
-                vertices[2].color = color;
-                vertices[3].color = color;
-            }
-        }
+        let debug_color = options
+            .tomb_raider_debug_subdivision_levels
+            .then(|| tomb_raider_debug_subdivision_color(subdivision_level))
+            .flatten();
         if vertices
             .iter()
             .any(|vertex| vertex.position.z < projection.near_z)
@@ -541,10 +607,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     textured_gouraud_view_uv_word(vertices[1]),
                     textured_gouraud_view_uv_word(vertices[2]),
                 ],
-                [vertices[0].color, vertices[1].color, vertices[2].color],
+                [
+                    debug_color.unwrap_or(vertices[0].color),
+                    debug_color.unwrap_or(vertices[1].color),
+                    debug_color.unwrap_or(vertices[2].color),
+                ],
                 projection,
                 material,
-                options,
+                *options,
             );
             if !stats.primitive_overflow && !stats.command_overflow {
                 let next = self.submit_textured_gouraud_view_triangle_uv_words(
@@ -559,10 +629,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         textured_gouraud_view_uv_word(vertices[3]),
                         textured_gouraud_view_uv_word(vertices[2]),
                     ],
-                    [vertices[1].color, vertices[3].color, vertices[2].color],
+                    [
+                        debug_color.unwrap_or(vertices[1].color),
+                        debug_color.unwrap_or(vertices[3].color),
+                        debug_color.unwrap_or(vertices[2].color),
+                    ],
                     projection,
                     material,
-                    options,
+                    *options,
                 );
                 merge_world_stats(&mut stats, next);
             }
@@ -591,7 +665,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
         }
         let prepared_depth =
-            PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(options, projected);
+            PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(*options, projected);
         self.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
             primitives,
             None,
@@ -605,10 +679,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 textured_gouraud_view_uv_word(vertices[3]),
             ],
             [
-                vertices[0].color,
-                vertices[1].color,
-                vertices[2].color,
-                vertices[3].color,
+                debug_color.unwrap_or(vertices[0].color),
+                debug_color.unwrap_or(vertices[1].color),
+                debug_color.unwrap_or(vertices[2].color),
+                debug_color.unwrap_or(vertices[3].color),
             ],
             material,
             options,
@@ -929,6 +1003,87 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    /// Submit a static prop quad with the fixed policy used by cooked box and
+    /// cylinder surfaces: average depth, no post-projection cull, hardware-only
+    /// splitting, and the material's natural render layer.
+    ///
+    /// The common hardware-safe path avoids constructing and interpreting a
+    /// complete [`WorldSurfaceOptions`] value per surface. Oversized quads
+    /// retain the general splitter, so this changes neither packet topology nor
+    /// the PS1 coordinate-extent safety contract.
+    pub fn submit_static_prop_textured_gouraud_quad_prescreened_u8<P>(
+        &mut self,
+        primitives: &mut P,
+        verts: &[ProjectedVertex; 4],
+        uvs: &[(u8, u8); 4],
+        colors: &[(u8, u8, u8); 4],
+        material: TextureMaterial,
+        base_options: &WorldSurfaceOptions,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        if !projected_quad_bounds_hw_extent_safe(verts) {
+            let options = (*base_options)
+                .with_depth_policy(DepthPolicy::Average)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
+            return self.submit_textured_gouraud_quad_prescreened_u8(
+                primitives, verts, uvs, colors, material, options,
+            );
+        }
+
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let depth_value = (verts[0].sz + verts[1].sz + verts[2].sz + verts[3].sz) / 4;
+        let depth = CameraDepth::new(depth_value.saturating_add(base_options.depth_bias));
+        let slot = base_options
+            .depth_band
+            .slot_depth::<OT_DEPTH>(base_options.depth_range, depth);
+        let packet_material = TexturedGouraudPacketMaterial::from_texture(material);
+        let quad_verts = [verts[1], verts[0], verts[2], verts[3]];
+        let quad_uvs = [uvs[1], uvs[0], uvs[2], uvs[3]];
+        let quad_colors = [colors[1], colors[0], colors[2], colors[3]];
+        let uv_words = [
+            model_uv_word(quad_uvs[0]),
+            model_uv_word(quad_uvs[1]),
+            model_uv_word(quad_uvs[2]),
+            model_uv_word(quad_uvs[3]),
+        ];
+        let Some(quad) =
+            primitives.push(QuadTexturedGouraud::with_packet_material_packed_uv_words(
+                [
+                    (quad_verts[0].sx, quad_verts[0].sy),
+                    (quad_verts[1].sx, quad_verts[1].sy),
+                    (quad_verts[2].sx, quad_verts[2].sy),
+                    (quad_verts[3].sx, quad_verts[3].sy),
+                ],
+                uv_words,
+                quad_colors,
+                packet_material,
+            ))
+        else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        self.push_command(
+            slot,
+            depth.raw(),
+            WorldRenderLayer::for_material(material),
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 2;
+        stats
+    }
+
     /// Submit a fixed-depth cached-room quad as one GP0(3Ch) packet when
     /// both hardware triangles are safe. Oversized packets are split through
     /// the normal triangle path so the real PS1 GPU cannot discard visible
@@ -944,7 +1099,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
         material: TextureMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         prepared_depth: PreparedTriangleDepth,
     ) -> WorldRenderStats
     where
@@ -955,7 +1110,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // surface split.
         let first = [verts[0], verts[1], verts[2]];
         let second = [verts[1], verts[2], verts[3]];
-        let split_options = options.with_textured_triangle_splitting(true);
+        let split_options = (*options).with_textured_triangle_splitting(true);
         if !projected_triangle_can_skip_split(first, split_options)
             || !projected_triangle_can_skip_split(second, split_options)
         {
@@ -1643,7 +1798,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
         material: TexturedGouraudPacketMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         prepared_depth: PreparedTriangleDepth,
     ) -> WorldRenderStats {
         let mut stats = WorldRenderStats::default();
@@ -1706,7 +1861,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
         material: TexturedGouraudPacketMaterial,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         prepared_depth: PreparedTriangleDepth,
     ) -> WorldRenderStats {
         let mut stats = WorldRenderStats::default();
@@ -1755,11 +1910,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         quad: &mut QuadTexturedGouraud,
         verts: [ProjectedVertex; 4],
         extent_safe: bool,
-        options: WorldSurfaceOptions,
+        options: &WorldSurfaceOptions,
         prepared_depth: PreparedTriangleDepth,
     ) -> Option<WorldRenderStats> {
         if !extent_safe {
-            let split_options = options.with_textured_triangle_splitting(true);
+            let split_options = (*options).with_textured_triangle_splitting(true);
             if !projected_triangle_can_skip_split([verts[0], verts[1], verts[2]], split_options)
                 || !projected_triangle_can_skip_split([verts[1], verts[2], verts[3]], split_options)
             {
@@ -1778,6 +1933,53 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             (verts[2].sx, verts[2].sy),
             (verts[3].sx, verts[3].sy),
         ]);
+        self.push_command(
+            prepared_depth.slot,
+            prepared_depth.depth,
+            if quad.color0_cmd & 0x0200_0000 != 0 {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        Some(stats)
+    }
+
+    /// Patch dynamic colours into an otherwise prewarmed room packet.
+    #[inline(always)]
+    pub(crate) fn try_submit_warmed_textured_gouraud_quad_with_colors(
+        &mut self,
+        quad: &mut QuadTexturedGouraud,
+        verts: [ProjectedVertex; 4],
+        colors: [(u8, u8, u8); 4],
+        extent_safe: bool,
+        options: &WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> Option<WorldRenderStats> {
+        if !extent_safe {
+            let split_options = (*options).with_textured_triangle_splitting(true);
+            if !projected_triangle_can_skip_split([verts[0], verts[1], verts[2]], split_options)
+                || !projected_triangle_can_skip_split([verts[1], verts[2], verts[3]], split_options)
+            {
+                return None;
+            }
+        }
+
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return Some(stats);
+        }
+        quad.set_positions([
+            (verts[0].sx, verts[0].sy),
+            (verts[1].sx, verts[1].sy),
+            (verts[2].sx, verts[2].sy),
+            (verts[3].sx, verts[3].sy),
+        ]);
+        quad.set_colors(colors);
         self.push_command(
             prepared_depth.slot,
             prepared_depth.depth,
@@ -2114,10 +2316,12 @@ mod lattice_tests {
             let mut pass = WorldRenderPass::new(&mut lattice_ot, &mut lattice_commands);
             pass.submit_tomb_raider_textured_gouraud_view_quad_lattice(
                 &mut lattice_packets,
-                vertices,
+                &vertices,
+                None,
+                false,
                 projection,
                 material,
-                options,
+                &options,
             )
         };
 
@@ -2131,10 +2335,10 @@ mod lattice_tests {
             let mut pass = WorldRenderPass::new(&mut reference_ot, &mut reference_commands);
             pass.submit_tomb_raider_textured_gouraud_view_quad_split(
                 &mut reference_packets,
-                vertices,
+                &vertices,
                 projection,
                 material,
-                options,
+                &options,
                 0,
             )
         };
