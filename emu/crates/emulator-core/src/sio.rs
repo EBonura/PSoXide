@@ -41,6 +41,9 @@ mod ctrl_bit {
     /// the CPU "selects" the device at the start of a transfer; going
     /// low-to-high deselects and resets the device state machine.
     pub const JOYN_OUTPUT: u16 = sio0::ctrl::DTR;
+    /// SIO0-only one-shot receive override. Normal selected-port traffic keeps
+    /// this clear; hardware automatically clears it after one received byte.
+    pub const FORCE_RX_ONCE: u16 = sio0::ctrl::FORCE_RX_ONCE;
     /// Write-1 to acknowledge pending IRQ bits in STAT.
     pub const ACK: u16 = sio0::ctrl::ACK;
     /// Write-1 to soft-reset the port.
@@ -494,8 +497,10 @@ impl Sio0 {
             self.ack_input = false;
             self.ack_end_deadline = None;
         }
-        let (rx, ack, _device_present, ack_delay_ticks) = if self.ctrl & ctrl_bit::JOYN_OUTPUT != 0
-        {
+        let selected = self.ctrl & ctrl_bit::JOYN_OUTPUT != 0;
+        let force_rx_once = self.ctrl & ctrl_bit::FORCE_RX_ONCE != 0;
+        let receive_enabled = selected || force_rx_once;
+        let (rx, ack, _device_present, ack_delay_ticks) = if selected {
             // Slow original-controller timing: a byte clocked before the
             // previous byte's `/ACK` deadline arrives while the device is still
             // busy, so it misses the clock and the rest of the packet desyncs.
@@ -536,7 +541,12 @@ impl Sio0 {
         self.pending_ack = ack;
         self.pending_dsr_timeout = dsr_timeout;
         self.ack_delay_ticks = ack_delay_ticks;
-        self.rx = Some(rx);
+        self.rx = receive_enabled.then_some(rx);
+        if receive_enabled {
+            // SIO0 CTRL.2 is a force-receive strobe, not a persistent RX
+            // enable. Retail hardware clears it after exactly one byte.
+            self.ctrl &= !ctrl_bit::FORCE_RX_ONCE;
+        }
         self.transfer_busy = false;
         self.awaiting_ack = false;
         self.transfer_deadline = None;
@@ -700,11 +710,10 @@ mod tests {
 
     #[test]
     fn tx_fills_rx_with_ff_and_sets_stat_bit() {
-        // Test the no-device path explicitly -- with the default pad
-        // attached, TX 0x01 would select the pad and return the
-        // dummy select-byte response.
+        // With /CS high, CTRL.2 force-arms exactly one received byte.
         let mut sio = Sio0::new();
         sio.attach_port1(crate::pad::PortDevice::empty());
+        sio.write16(Sio0::BASE + 0xA, ctrl_bit::FORCE_RX_ONCE);
         sio.write8(Sio0::BASE, 0x01);
         sio.tick(DEFAULT_TRANSFER_TICKS);
         let s = sio.read32(Sio0::BASE + 0x4).unwrap();
@@ -713,6 +722,36 @@ mod tests {
         // Reading DATA consumes the RX slot.
         let s = sio.read32(Sio0::BASE + 0x4).unwrap();
         assert_eq!(s & 0x2, 0, "RX_NOT_EMPTY must be clear after DATA read");
+    }
+
+    #[test]
+    fn force_rx_is_one_shot_and_selected_receive_does_not_need_it() {
+        let mut sio = Sio0::new();
+        sio.attach_port1(crate::pad::PortDevice::empty());
+
+        sio.write16(Sio0::BASE + 0xA, ctrl_bit::FORCE_RX_ONCE);
+        sio.write8(Sio0::BASE, 0x00);
+        assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xFF);
+        assert_eq!(
+            sio.debug_ctrl() & ctrl_bit::FORCE_RX_ONCE,
+            0,
+            "hardware clears CTRL.2 after one received byte"
+        );
+
+        sio.write8(Sio0::BASE, 0x00);
+        assert_eq!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::RX_NOT_EMPTY,
+            0,
+            "a second byte is not received while /CS stays high"
+        );
+
+        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write8(Sio0::BASE, 0x00);
+        assert_ne!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::RX_NOT_EMPTY,
+            0,
+            "selected-port receiving works with CTRL.2 clear"
+        );
     }
 
     #[test]
@@ -745,7 +784,7 @@ mod tests {
         // Every bit except RESET (0x40); ACK must not be kept.
         sio.write16(Sio0::BASE + 0xA, 0x001F);
         assert_eq!(sio.ctrl & ctrl_bit::ACK, 0);
-        // Other low bits pass through (bits 0..3 are TXEN/DTR/RXEN/JOYN).
+        // Other low bits pass through (including SIO0's one-shot CTRL.2).
         assert_eq!(sio.ctrl & 0x000F, 0x000F);
     }
 
@@ -1036,7 +1075,7 @@ mod tests {
 
         let mut now = 0u64;
         // Match psx-pad's init sequence: ACK any stale IRQ, then
-        // assert JOYN with TX/RX enabled on port 1.
+        // assert JOYN with TX enabled; selected-port RX is implicit.
         sio.write16(Sio0::BASE + 0xA, ctrl_bit::ACK);
         sio.write16(
             Sio0::BASE + 0xA,
