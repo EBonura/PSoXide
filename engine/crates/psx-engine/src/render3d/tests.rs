@@ -1183,6 +1183,81 @@ fn prescreened_gouraud_honors_quality_split_max_edge() {
 }
 
 #[test]
+fn static_prop_quad_leaf_matches_generic_packet_and_depth() {
+    let material = TextureMaterial::opaque(2, 4, (128, 96, 64));
+    let verts = [
+        ProjectedVertex::new(8, 4, 100),
+        ProjectedVertex::new(32, 6, 120),
+        ProjectedVertex::new(30, 36, 140),
+        ProjectedVertex::new(10, 34, 160),
+    ];
+    let uvs = [(3, 5), (17, 7), (19, 29), (5, 27)];
+    let colors = [(128, 96, 64), (80, 120, 160), (32, 48, 96), (160, 128, 96)];
+    let base_options = WorldSurfaceOptions::new(DepthBand::new(1, 6), DepthRange::new(0, 1000))
+        .with_depth_bias(13);
+    let generic_options = base_options
+        .with_depth_policy(DepthPolicy::Average)
+        .with_cull_mode(CullMode::None)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(0);
+
+    let mut regular_ot_storage = OrderingTable::<8>::new();
+    let mut regular_ot = OtFrame::begin(&mut regular_ot_storage);
+    let mut regular_scratch = crate::PrimitivePacketScratch::<2>::ZERO;
+    let mut regular_packets = crate::PrimitivePacketArena::new(&mut regular_scratch);
+    let mut regular_commands = [WorldTriCommand::EMPTY; 2];
+    let regular = {
+        let mut pass = WorldRenderPass::new(&mut regular_ot, &mut regular_commands);
+        pass.submit_textured_gouraud_quad_prescreened_u8(
+            &mut regular_packets,
+            &verts,
+            &uvs,
+            &colors,
+            material,
+            generic_options,
+        )
+    };
+
+    let mut leaf_ot_storage = OrderingTable::<8>::new();
+    let mut leaf_ot = OtFrame::begin(&mut leaf_ot_storage);
+    let mut leaf_scratch = crate::PrimitivePacketScratch::<2>::ZERO;
+    let mut leaf_packets = crate::PrimitivePacketArena::new(&mut leaf_scratch);
+    let mut leaf_commands = [WorldTriCommand::EMPTY; 2];
+    let leaf = {
+        let mut pass = WorldRenderPass::new(&mut leaf_ot, &mut leaf_commands);
+        pass.submit_static_prop_textured_gouraud_quad_prescreened_u8(
+            &mut leaf_packets,
+            &verts,
+            &uvs,
+            &colors,
+            material,
+            &base_options,
+        )
+    };
+
+    assert_eq!(regular.submitted_triangles, leaf.submitted_triangles);
+    assert_eq!(regular.split_triangles, leaf.split_triangles);
+    assert_eq!(regular_packets.len(), leaf_packets.len());
+    assert_eq!(regular_commands[0].slot, leaf_commands[0].slot);
+    assert_eq!(regular_commands[0].depth, leaf_commands[0].depth);
+    assert_eq!(
+        regular_commands[0].render_layer,
+        leaf_commands[0].render_layer
+    );
+    assert_eq!(regular_commands[0].words, leaf_commands[0].words);
+
+    let packet_words = usize::from(regular_commands[0].words) + 1;
+    // SAFETY: both command pointers reference live packet-arena slots and
+    // `words + 1` includes the packet tag followed by the declared GP0 words.
+    let regular_words =
+        unsafe { core::slice::from_raw_parts(regular_commands[0].packet_ptr, packet_words) };
+    let leaf_words =
+        unsafe { core::slice::from_raw_parts(leaf_commands[0].packet_ptr, packet_words) };
+    assert_eq!(regular_words, leaf_words);
+}
+
+#[test]
 fn prepared_depth_gouraud_submit_matches_fixed_depth_leaf() {
     const ZERO: TriTexturedGouraud = TriTexturedGouraud::new(
         [(0, 0), (0, 0), (0, 0)],
@@ -1305,7 +1380,7 @@ fn prepared_depth_quad_splits_before_ps1_extent_rejection() {
         uv_words,
         colors,
         material,
-        options,
+        &options,
         prepared,
     );
 
@@ -1350,14 +1425,44 @@ fn tomb_raider_quad_packet_count_with_profile(
         pass.submit_tomb_raider_textured_gouraud_view_quad_uv_words(
             &mut packets,
             positions,
+            None,
+            false,
+            None,
             uv_words,
             colors,
             projection,
             material,
-            options,
+            &options,
         )
     };
     (packets.len(), stats)
+}
+
+#[cfg(feature = "tr-subdivision-lattice")]
+#[test]
+fn tomb_raider_lattice_root_projection_reuse_is_exact() {
+    let projection = WorldProjection::new(160, 120, 256, 16);
+    let vertices = [
+        ViewVertex::new(-300, -200, 2000),
+        ViewVertex::new(0, -180, 2100),
+        ViewVertex::new(300, -160, 2200),
+        ViewVertex::new(-280, 0, 2300),
+        ViewVertex::new(0, 20, 2400),
+        ViewVertex::new(280, 40, 2500),
+        ViewVertex::new(-260, 200, 2600),
+        ViewVertex::new(0, 220, 2700),
+        ViewVertex::new(260, 240, 2800),
+    ];
+    load_tomb_raider_view_projection_gte(projection);
+    let projected =
+        project_tomb_raider_view_lattice_gte(vertices, projection, None).expect("valid lattice");
+    let root = [projected[0], projected[2], projected[6], projected[8]];
+
+    load_tomb_raider_view_projection_gte(projection);
+    let reused = project_tomb_raider_view_lattice_gte(vertices, projection, Some(root))
+        .expect("valid reused lattice");
+
+    assert_eq!(reused, projected);
 }
 
 #[test]
@@ -1477,7 +1582,7 @@ fn tomb_raider_triangle_packet_count(depth: i32) -> (usize, WorldRenderStats) {
             colors,
             projection,
             material,
-            options,
+            &options,
         )
     };
     (packets.len(), stats)
@@ -1592,7 +1697,7 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
         [0, 1, 2, 3],
         first_colors,
         material.textured_gouraud_packet_material(),
-        options,
+        &options,
         prepared,
     );
     let packed_colors = (
@@ -1602,8 +1707,13 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
         packet.color3,
     );
     let first_v0 = packet.v0;
-    let warmed =
-        pass.try_submit_warmed_textured_gouraud_quad(&mut packet, second, false, options, prepared);
+    let warmed = pass.try_submit_warmed_textured_gouraud_quad(
+        &mut packet,
+        second,
+        false,
+        &options,
+        prepared,
+    );
 
     assert_eq!(valid, 1);
     assert!(warmed.is_some());
@@ -1741,21 +1851,24 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
     scene::load_translation(primary.translation);
     let indices: [u16; SEAM_VERTS] = core::array::from_fn(|i| i as u16);
     for chunk in indices.chunks(BLENDED_VERTEX_CHUNK) {
-        flush_blended_model_vertex_chunk(
-            chunk,
-            &vertices,
-            primary,
-            &joint_view_transforms,
-            projection,
-            near_z,
-            &mut actual,
-            &mut all_in_front,
-            &mut all_inside,
-            &mut min_x,
-            &mut max_x,
-            &mut min_y,
-            &mut max_y,
-        );
+        unsafe {
+            flush_blended_model_vertex_chunk(
+                chunk.as_ptr(),
+                chunk.len(),
+                &vertices,
+                primary,
+                &joint_view_transforms,
+                projection,
+                near_z,
+                &mut actual,
+                &mut all_in_front,
+                &mut all_inside,
+                &mut min_x,
+                &mut max_x,
+                &mut min_y,
+                &mut max_y,
+            );
+        }
     }
 
     assert_eq!(actual, expected);

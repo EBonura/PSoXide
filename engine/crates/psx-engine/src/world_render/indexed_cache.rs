@@ -22,6 +22,76 @@ pub(super) struct RoomSurfaceMicroProfile {
     whole_quads: u32,
     split_tris: u32,
     lighting_rejects: u32,
+    tr_subdivision_candidates: u32,
+    tr_subdivision_submitted: u32,
+    /// E2: cycles spent rebuilding the per-surface `WorldSurfaceOptions`
+    /// variants. This work sits between the timed lighting and submit
+    /// sections, so it was inside the unattributed ~48% of the stage.
+    options_cycles: u32,
+    /// E2: per-cell setup ahead of the surface loop (tile depth options plus
+    /// the submit-depth table). Charged once per accepted cell.
+    cell_setup_cycles: u32,
+    /// E2: the whole `draw_indexed_cached_room_surface` call. Subtracting the
+    /// inner timed sections leaves the part of the surface body that no
+    /// counter reaches; subtracting this and `cell_setup` from the stage
+    /// leaves the loop's own overhead.
+    surface_call_cycles: u32,
+    /// Warp probe: predicted affine texture error over the surfaces the
+    /// depth-band rule subdivided, and over the ones it left alone. Count,
+    /// sum and max (1/16 texel units) rather than buckets, so the mean and
+    /// the worst case both survive.
+    warp_subdivided: WarpStats,
+    warp_untouched: WarpStats,
+}
+
+/// Predicted-warp accumulator for one side of the subdivide/skip split.
+#[cfg(feature = "room-surface-profile")]
+#[derive(Copy, Clone, Debug, Default)]
+pub(super) struct WarpStats {
+    /// Surfaces observed.
+    count: u32,
+    /// Sum of predicted error, 1/16 texel units.
+    sum: u32,
+    /// Worst predicted error, 1/16 texel units.
+    max: u32,
+    /// Surfaces predicted to warp under one texel.
+    under_1tx: u32,
+}
+
+/// Predicted affine texture error for a surface, in 1/16 texel units.
+///
+/// This is the closed form measured in `docs/texture-warping-2026-07-27.md`:
+/// for an edge spanning `du` texels between depths `za` and `zb`, affine
+/// interpolation lands the screen midpoint off by
+/// `du * |zb - za| / (2 * (za + zb))` texels. That bench found the true
+/// worst-case error over the polygon runs ~2.4x the edge-midpoint value, so
+/// the result is scaled by 12/5 to be a bound rather than a sample.
+///
+/// Integer throughout, and ordered to stay inside i32: `dz <= zsum` always
+/// holds for positive depths, so the `dz << 8` ratio is bounded by 256.
+#[cfg(feature = "room-surface-profile")]
+fn predicted_warp_16ths(projected: [ProjectedVertex; 4], uv_words: [u16; 4]) -> u32 {
+    // Quad layout is v0,v1,v2,v3 -> triangles (0,1,2) and (1,2,3), i.e. a
+    // tl/tr/bl/br lattice. Check both axes on both sides; the surface's warp
+    // is the worst edge.
+    const EDGES: [(usize, usize); 4] = [(0, 1), (2, 3), (0, 2), (1, 3)];
+    let mut worst = 0u32;
+    for (a, b) in EDGES {
+        let (za, zb) = (projected[a].sz, projected[b].sz);
+        if za <= 0 || zb <= 0 {
+            continue; // behind the near plane; projection is meaningless here
+        }
+        let zsum = (za + zb) as u32;
+        let dz = (za - zb).unsigned_abs();
+        let (ua, va) = (uv_words[a] as u8, (uv_words[a] >> 8) as u8);
+        let (ub, vb) = (uv_words[b] as u8, (uv_words[b] >> 8) as u8);
+        let du = (ua.abs_diff(ub)).max(va.abs_diff(vb)) as u32;
+        // err * 16 = 8 * du * dz / zsum = du * ((dz << 8) / zsum) / 32
+        let ratio = (dz << 8) / zsum.max(1);
+        let err = (du * ratio) >> 5;
+        worst = worst.max(err * 12 / 5);
+    }
+    worst
 }
 
 #[cfg(not(feature = "room-surface-profile"))]
@@ -103,6 +173,30 @@ impl RoomSurfaceMicroProfile {
         #[cfg(feature = "room-surface-profile")]
         {
             self.lighting_cycles = self.lighting_cycles.saturating_add(_cycles);
+        }
+    }
+
+    #[inline(always)]
+    fn add_cell_setup(&mut self, _cycles: u32) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.cell_setup_cycles = self.cell_setup_cycles.saturating_add(_cycles);
+        }
+    }
+
+    #[inline(always)]
+    fn add_surface_call(&mut self, _cycles: u32) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.surface_call_cycles = self.surface_call_cycles.saturating_add(_cycles);
+        }
+    }
+
+    #[inline(always)]
+    fn add_options(&mut self, _cycles: u32) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.options_cycles = self.options_cycles.saturating_add(_cycles);
         }
     }
 
@@ -193,6 +287,50 @@ impl RoomSurfaceMicroProfile {
     }
 
     #[inline(always)]
+    fn count_tr_subdivision_candidate(&mut self) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.tr_subdivision_candidates = self.tr_subdivision_candidates.saturating_add(1);
+        }
+    }
+
+    /// Warp probe: record what the closed form would have decided for this
+    /// surface, alongside what the depth-band rule actually did. Read-only;
+    /// it changes no geometry. The point is to find out, on real content,
+    /// how often the two disagree in each direction.
+    #[inline(always)]
+    fn count_warp(
+        &mut self,
+        _projected: [ProjectedVertex; 4],
+        _uv_words: [u16; 4],
+        _subdivided: bool,
+    ) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            let err = predicted_warp_16ths(_projected, _uv_words);
+            let stats = if _subdivided {
+                &mut self.warp_subdivided
+            } else {
+                &mut self.warp_untouched
+            };
+            stats.count = stats.count.saturating_add(1);
+            stats.sum = stats.sum.saturating_add(err);
+            stats.max = stats.max.max(err);
+            if err < 16 {
+                stats.under_1tx = stats.under_1tx.saturating_add(1);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn count_tr_subdivision_submitted(&mut self) {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            self.tr_subdivision_submitted = self.tr_subdivision_submitted.saturating_add(1);
+        }
+    }
+
+    #[inline(always)]
     fn emit(self) {
         #[cfg(feature = "room-surface-profile")]
         {
@@ -222,6 +360,18 @@ impl RoomSurfaceMicroProfile {
                 telemetry::counter::ROOM_SURF_SUBMIT_CYCLES,
                 self.submit_cycles,
             );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_OPTIONS_CYCLES,
+                self.options_cycles,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_CELL_SETUP_CYCLES,
+                self.cell_setup_cycles,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_CALL_CYCLES,
+                self.surface_call_cycles,
+            );
             telemetry::counter(telemetry::counter::ROOM_SURF_PROFILED, self.profiled);
             telemetry::counter(
                 telemetry::counter::ROOM_SURF_MATERIAL_MISSES,
@@ -248,6 +398,29 @@ impl RoomSurfaceMicroProfile {
                 telemetry::counter::ROOM_SURF_LIGHTING_REJECTS,
                 self.lighting_rejects,
             );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_TR_SUBDIVISION_CANDIDATES,
+                self.tr_subdivision_candidates,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_SURF_TR_SUBDIVISION_SUBMITTED,
+                self.tr_subdivision_submitted,
+            );
+            for (base, s) in [
+                (
+                    telemetry::counter::ROOM_SURF_WARP_SUBDIVIDED_COUNT,
+                    self.warp_subdivided,
+                ),
+                (
+                    telemetry::counter::ROOM_SURF_WARP_UNTOUCHED_COUNT,
+                    self.warp_untouched,
+                ),
+            ] {
+                telemetry::counter(base, s.count);
+                telemetry::counter(base + 1, s.sum);
+                telemetry::counter(base + 2, s.max);
+                telemetry::counter(base + 3, s.under_1tx);
+            }
             telemetry::counter(
                 telemetry::counter::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES,
                 self.submit_detail.hw_safe_test_cycles,
@@ -313,12 +486,14 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
+    shade_prewarmed_packets: bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
     visible_cells: &[GridVisibleCell],
     screen_margin: i32,
+    portal_window: Option<PortalCellWindow>,
     mut prebuilt_pool: Option<(&mut [QuadTexturedGouraud], &mut [u8])>,
     triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
@@ -370,24 +545,25 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
 
         stats.cells_considered = stats.cells_considered.wrapping_add(1);
         cell_stage_begin(crate::telemetry::stage::CELL_DEPTH);
+        let visibility_center = WorldVertex::new(
+            cell.visibility_center[0],
+            cell.visibility_center[1],
+            cell.visibility_center[2],
+        );
+        let portal_view = portal_window.map(|_| loaded_camera.view_vertex(visibility_center));
+        let mut visibility_half_y = None;
         let cell_depth = if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_PRECULLED {
-            let visibility_center = WorldVertex::new(
-                cell.visibility_center[0],
-                cell.visibility_center[1],
-                cell.visibility_center[2],
-            );
-            loaded_camera.view_vertex(visibility_center).z
+            portal_view
+                .unwrap_or_else(|| loaded_camera.view_vertex(visibility_center))
+                .z
         } else if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_UNKNOWN {
-            let visibility_center = WorldVertex::new(
-                cell.visibility_center[0],
-                cell.visibility_center[1],
-                cell.visibility_center[2],
-            );
-            let visibility_view = loaded_camera.view_vertex(visibility_center);
+            let visibility_view =
+                portal_view.unwrap_or_else(|| loaded_camera.view_vertex(visibility_center));
             let half_y = cell.visibility_center[1]
                 .saturating_sub(cell.min_y)
                 .abs()
                 .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs());
+            visibility_half_y = Some(half_y);
             if !cell_frustum.cell_aabb_visible(visibility_view, cell_half_xz, half_y, cell_half_xz)
             {
                 stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
@@ -399,6 +575,27 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         } else {
             visible.camera_depth as i32
         };
+        if let Some(window) = portal_window {
+            let visibility_view =
+                portal_view.unwrap_or_else(|| loaded_camera.view_vertex(visibility_center));
+            let half_y = visibility_half_y.unwrap_or_else(|| {
+                cell.visibility_center[1]
+                    .saturating_sub(cell.min_y)
+                    .abs()
+                    .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs())
+            });
+            if !cell_frustum.cell_aabb_intersects_portal_window(
+                visibility_view,
+                cell_half_xz,
+                half_y,
+                cell_half_xz,
+                window,
+            ) {
+                stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
+                cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
+                continue;
+            }
+        }
         cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
 
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
@@ -505,8 +702,10 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
             continue;
         };
+        let cell_setup_start = RoomSurfaceMicroProfile::cycle();
         let cell_options = tile_depth_options_from_depth(options, cell_depth);
         let submit_depths = CachedRoomSubmitDepths::from_cell_options::<OT>(cell_options);
+        surface_profile.add_cell_setup(RoomSurfaceMicroProfile::elapsed(cell_setup_start));
         let first = cell.surface_first as usize;
         let end = first
             .saturating_add(cell.surface_count as usize)
@@ -524,6 +723,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 },
                 None => None,
             };
+            let surface_call_start = RoomSurfaceMicroProfile::cycle();
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
@@ -534,6 +734,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         projected_depths,
                         use_vertex_depths,
                         use_direct_baked_rgb,
+                        shade_prewarmed_packets,
                         screen_bounds,
                         materials,
                         lighting,
@@ -547,6 +748,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         world,
                         &mut surface_profile,
                     ));
+            surface_profile.add_surface_call(RoomSurfaceMicroProfile::elapsed(surface_call_start));
             i += 1;
         }
     }
@@ -574,6 +776,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     accepted_cell_depths: &mut [i32],
     materials: &[WorldRenderMaterial],
     lighting: &L,
+    shade_prewarmed_packets: bool,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     depth_mode: CachedRoomDepthMode,
@@ -709,8 +912,10 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
         let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
             continue;
         };
+        let cell_setup_start = RoomSurfaceMicroProfile::cycle();
         let cell_options = tile_depth_options_from_depth(options, cell_depth);
         let submit_depths = CachedRoomSubmitDepths::from_cell_options::<OT>(cell_options);
+        surface_profile.add_cell_setup(RoomSurfaceMicroProfile::elapsed(cell_setup_start));
         let first = cell.surface_first as usize;
         let end = first
             .saturating_add(cell.surface_count as usize)
@@ -728,6 +933,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                 },
                 None => None,
             };
+            let surface_call_start = RoomSurfaceMicroProfile::cycle();
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
@@ -738,6 +944,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                         projected_depths,
                         use_vertex_depths,
                         use_direct_baked_rgb,
+                        shade_prewarmed_packets,
                         screen_bounds,
                         materials,
                         lighting,
@@ -751,6 +958,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                         world,
                         &mut surface_profile,
                     ));
+            surface_profile.add_surface_call(RoomSurfaceMicroProfile::elapsed(surface_call_start));
             i += 1;
         }
     }
@@ -1006,6 +1214,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     projected_depths: &[i32],
     use_vertex_depths: bool,
     use_direct_baked_rgb: bool,
+    shade_prewarmed_packets: bool,
     screen_bounds: ProjectedScreenBounds,
     materials: &[WorldRenderMaterial],
     lighting: &L,
@@ -1056,6 +1265,39 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     }
     profile.add_screen(RoomSurfaceMicroProfile::elapsed(screen_start));
     #[cfg(not(feature = "room-surface-profile"))]
+    if shade_prewarmed_packets
+        && !use_direct_baked_rgb
+        && surface.has_baked_rgb()
+        && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX
+    {
+        if let Some((quad, valid)) = prebuilt.as_mut() {
+            let ready = **valid;
+            if ready & WARMED_ROOM_QUAD_READY != 0
+                && try_submit_shaded_encoded_warmed_room_quad(
+                    surface,
+                    cached_vertices,
+                    ids,
+                    projected,
+                    projected_metrics,
+                    vertex_depths,
+                    materials,
+                    lighting,
+                    camera,
+                    &options,
+                    submit_depths,
+                    depth_mode,
+                    subdivision_mode,
+                    quad,
+                    ready,
+                    triangles,
+                    world,
+                )
+            {
+                return 1;
+            }
+        }
+    }
+    #[cfg(not(feature = "room-surface-profile"))]
     if use_direct_baked_rgb
         && surface.has_baked_rgb()
         && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX
@@ -1065,14 +1307,19 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             if ready & WARMED_ROOM_QUAD_READY != 0
                 && try_submit_encoded_warmed_room_quad(
                     surface,
+                    cached_vertices,
+                    ids,
                     projected,
                     projected_metrics,
-                    options,
+                    materials,
+                    camera,
+                    &options,
                     submit_depths,
                     depth_mode,
                     subdivision_mode,
                     quad,
                     ready,
+                    triangles,
                     world,
                 )
             {
@@ -1124,6 +1371,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             );
             let use_triangle_depth =
                 cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+            let options_start = RoomSurfaceMicroProfile::cycle();
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -1136,6 +1384,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 use_triangle_depth,
                 surface_risky,
             );
+            profile.add_options(RoomSurfaceMicroProfile::elapsed(options_start));
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_split_triangle_backface_culled(
@@ -1168,7 +1417,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                if surface_options.tomb_raider_subdivision
+                let tomb_raider_subdivision = surface_options.tomb_raider_subdivision
                     && tomb_raider_projected_triangle_needs_subdivision(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
@@ -1176,7 +1425,12 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         surface.triangle_index as usize,
                         is_ceiling,
                         material.sidedness,
-                    )
+                    );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
+                if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_triangle(
                         cached_vertices,
                         ids,
@@ -1184,7 +1438,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         uv_words,
                         colors,
                         material,
-                        surface_options,
+                        &surface_options,
                         surface.split,
                         surface.triangle_index as usize,
                         is_ceiling,
@@ -1192,6 +1446,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
@@ -1217,6 +1472,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
                     );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
                 let projected_for_cull = if is_ceiling {
                     reverse_quad_winding(projected)
                 } else {
@@ -1255,7 +1511,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                                 packet_verts,
                                 projected_metrics.hardware_extent_safe()
                                     && surface_options.textured_split_max_edge == 0,
-                                surface_options,
+                                &surface_options,
                                 prepared_depth,
                             )
                             .is_some()
@@ -1289,21 +1545,28 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
                 if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_quad(
                         cached_vertices,
                         ids,
+                        projected,
+                        projected_metrics.hardware_extent_safe(),
                         camera,
                         uv_words,
                         colors,
                         material,
-                        surface_options,
+                        &surface_options,
                         surface.split,
                         is_ceiling,
+                        None,
                         triangles,
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
@@ -1357,6 +1620,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             );
             let use_triangle_depth =
                 cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+            let options_start = RoomSurfaceMicroProfile::cycle();
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -1369,6 +1633,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 use_triangle_depth,
                 surface_risky,
             );
+            profile.add_options(RoomSurfaceMicroProfile::elapsed(options_start));
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_split_triangle_backface_culled(
@@ -1401,7 +1666,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                if surface_options.tomb_raider_subdivision
+                let tomb_raider_subdivision = surface_options.tomb_raider_subdivision
                     && tomb_raider_projected_triangle_needs_subdivision(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
@@ -1409,7 +1674,12 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         surface.triangle_index as usize,
                         false,
                         wall_material.sidedness,
-                    )
+                    );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
+                if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_triangle(
                         cached_vertices,
                         ids,
@@ -1417,7 +1687,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         uv_words,
                         colors,
                         wall_material,
-                        surface_options,
+                        &surface_options,
                         surface.split,
                         surface.triangle_index as usize,
                         false,
@@ -1425,6 +1695,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
@@ -1450,6 +1721,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                         projected,
                         surface_options.tomb_raider_subdivision_profile,
                     );
+                profile.count_warp(projected, uv_words, tomb_raider_subdivision);
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_quad_backface_culled(
                     projected,
@@ -1483,7 +1755,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                                 packet_verts,
                                 projected_metrics.hardware_extent_safe()
                                     && surface_options.textured_split_max_edge == 0,
-                                surface_options,
+                                &surface_options,
                                 prepared_depth,
                             )
                             .is_some()
@@ -1517,21 +1789,28 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let colors = tomb_raider_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                if tomb_raider_subdivision {
+                    profile.count_tr_subdivision_candidate();
+                }
                 if tomb_raider_subdivision
                     && submit_tomb_raider_cached_room_quad(
                         cached_vertices,
                         ids,
+                        projected,
+                        projected_metrics.hardware_extent_safe(),
                         camera,
                         uv_words,
                         colors,
                         wall_material,
-                        surface_options,
+                        &surface_options,
                         SPLIT_NW_SE,
                         false,
+                        None,
                         triangles,
                         world,
                     )
                 {
+                    profile.count_tr_subdivision_submitted();
                     profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
                     return 1;
                 }
@@ -1687,18 +1966,38 @@ fn warmed_room_quad_packet_vertices_from_ready(
     }
 }
 
+#[inline(always)]
+fn warmed_room_quad_packet_colors_from_ready(
+    mut colors: [(u8, u8, u8); 4],
+    ready: u8,
+) -> [(u8, u8, u8); 4] {
+    if ready & WARMED_ROOM_QUAD_REVERSE_FRONT != 0 {
+        colors = reverse_quad_winding(colors);
+    }
+    if ready & WARMED_ROOM_QUAD_SPLIT_NE_SW != 0 {
+        [colors[0], colors[1], colors[3], colors[2]]
+    } else {
+        [colors[1], colors[0], colors[2], colors[3]]
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn try_submit_encoded_warmed_room_quad<const OT: usize>(
     surface: &CachedRoomSurface,
+    cached_vertices: &[WorldVertex],
+    ids: [u16; 4],
     projected: [ProjectedVertex; 4],
     projected_metrics: ProjectedQuadMetrics,
-    options: WorldSurfaceOptions,
+    materials: &[WorldRenderMaterial],
+    camera: &WorldCamera,
+    options: &WorldSurfaceOptions,
     submit_depths: CachedRoomSubmitDepths,
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
     quad: &mut QuadTexturedGouraud,
     ready: u8,
+    primitives: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> bool {
     if encoded_warmed_room_quad_backface_culled(projected, ready) {
@@ -1718,11 +2017,11 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
     let use_triangle_depth =
         cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
     let (surface_options, prepared_depth) = if use_triangle_depth {
-        (triangle_depth_options(options), None)
+        (triangle_depth_options(*options), None)
     } else if matches!(kind, WorldSurfaceKind::Wall { .. }) {
-        (options, submit_depths.vertical)
+        (*options, submit_depths.vertical)
     } else {
-        (horizontal_depth_options(options), submit_depths.horizontal)
+        (horizontal_depth_options(*options), submit_depths.horizontal)
     };
     let surface_options = cached_surface_subdivision_options(
         surface_options,
@@ -1731,8 +2030,39 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
         use_triangle_depth,
         surface_risky,
     );
-    if tomb_raider_warmed_quad_requires_dynamic_submit(surface_options, projected) {
-        return false;
+    if tomb_raider_warmed_quad_requires_dynamic_submit(&surface_options, projected) {
+        let Some(&base_material) = materials.get(surface.material_slot as usize) else {
+            return false;
+        };
+        let material = match kind {
+            WorldSurfaceKind::Wall { direction } => wall_material_for_direction(
+                cached_uv_material(base_material),
+                direction,
+                surface.wall_faces_owner(),
+            ),
+            WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
+                cached_uv_material(base_material)
+            }
+        };
+        return submit_tomb_raider_cached_room_quad(
+            cached_vertices,
+            ids,
+            projected,
+            projected_metrics.hardware_extent_safe(),
+            camera,
+            surface.uv_words,
+            surface.baked_vertex_rgb,
+            material,
+            &surface_options,
+            match kind {
+                WorldSurfaceKind::Wall { .. } => SPLIT_NW_SE,
+                WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => surface.split,
+            },
+            matches!(kind, WorldSurfaceKind::Ceiling),
+            Some(quad),
+            primitives,
+            world,
+        );
     }
     let prepared_depth = prepared_depth.unwrap_or_else(|| {
         PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
@@ -1743,7 +2073,150 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
             packet_verts,
             projected_metrics.hardware_extent_safe()
                 && surface_options.textured_split_max_edge == 0,
-            surface_options,
+            &surface_options,
+            prepared_depth,
+        )
+        .is_some()
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(unused_variables)]
+#[inline(always)]
+fn try_submit_shaded_encoded_warmed_room_quad<const OT: usize, L: WorldSurfaceLighting>(
+    surface: &CachedRoomSurface,
+    cached_vertices: &[WorldVertex],
+    ids: [u16; 4],
+    projected: [ProjectedVertex; 4],
+    projected_metrics: ProjectedQuadMetrics,
+    vertex_depths: Option<[i32; 4]>,
+    materials: &[WorldRenderMaterial],
+    lighting: &L,
+    camera: &WorldCamera,
+    options: &WorldSurfaceOptions,
+    submit_depths: CachedRoomSubmitDepths,
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
+    quad: &mut QuadTexturedGouraud,
+    ready: u8,
+    primitives: &mut impl RoomSurfaceSink,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> bool {
+    let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+    let surface_risky = cached_surface_risk_for_modes(
+        depth_mode,
+        subdivision_mode,
+        kind,
+        surface,
+        projected,
+        projected_metrics.depth_span(),
+    );
+    let use_triangle_depth =
+        cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+    let (surface_options, prepared_depth) = if use_triangle_depth {
+        (triangle_depth_options(*options), None)
+    } else if matches!(kind, WorldSurfaceKind::Wall { .. }) {
+        (*options, submit_depths.vertical)
+    } else {
+        (horizontal_depth_options(*options), submit_depths.horizontal)
+    };
+    let surface_options = cached_surface_subdivision_options(
+        surface_options,
+        subdivision_mode,
+        kind,
+        use_triangle_depth,
+        surface_risky,
+    );
+    if tomb_raider_warmed_quad_requires_dynamic_submit(&surface_options, projected) {
+        // Fogged TR candidates cannot patch the authored root packet directly,
+        // but their generated lighting adapter can still shade baked RGB
+        // without the general surface-lighting path. Keep the canonical TR
+        // emitter so its camera-space depth checks, lattice, underdraw, and
+        // packet order remain the single source of truth.
+        #[cfg(feature = "tr-subdivision-lattice")]
+        if surface_options.tomb_raider_subdivision_profile.max_levels == 1
+            && !surface_options.tomb_raider_debug_subdivision_levels
+            && projected_metrics.hardware_extent_safe()
+        {
+            let Some(colors) = lighting
+                .shade_prewarmed_baked_vertices(surface.sample_without_center(), vertex_depths)
+            else {
+                return false;
+            };
+            let Some(&base_material) = materials.get(surface.material_slot as usize) else {
+                return false;
+            };
+            let (material, split, reverse_front) = match kind {
+                WorldSurfaceKind::Wall { direction } => (
+                    wall_material_for_direction(
+                        cached_uv_material(base_material),
+                        direction,
+                        surface.wall_faces_owner(),
+                    ),
+                    SPLIT_NW_SE,
+                    false,
+                ),
+                WorldSurfaceKind::Floor => {
+                    (cached_uv_material(base_material), surface.split, false)
+                }
+                WorldSurfaceKind::Ceiling => {
+                    (cached_uv_material(base_material), surface.split, true)
+                }
+            };
+            let projected_for_cull = if reverse_front {
+                reverse_quad_winding(projected)
+            } else {
+                projected
+            };
+            if projected_quad_backface_culled(
+                projected_for_cull,
+                material,
+                CullMode::Back,
+                split_triangles_runtime(split),
+            ) {
+                return true;
+            }
+            if submit_tomb_raider_cached_room_quad(
+                cached_vertices,
+                ids,
+                projected,
+                true,
+                camera,
+                surface.uv_words,
+                colors,
+                material,
+                &surface_options,
+                split,
+                reverse_front,
+                None,
+                primitives,
+                world,
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if encoded_warmed_room_quad_backface_culled(projected, ready) {
+        return true;
+    }
+    let Some(colors) =
+        lighting.shade_prewarmed_baked_vertices(surface.sample_without_center(), vertex_depths)
+    else {
+        return false;
+    };
+    let packet_verts = warmed_room_quad_packet_vertices_from_ready(projected, ready);
+    let packet_colors = warmed_room_quad_packet_colors_from_ready(colors, ready);
+    let prepared_depth = prepared_depth.unwrap_or_else(|| {
+        PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+    });
+    world
+        .try_submit_warmed_textured_gouraud_quad_with_colors(
+            quad,
+            packet_verts,
+            packet_colors,
+            projected_metrics.hardware_extent_safe()
+                && surface_options.textured_split_max_edge == 0,
+            &surface_options,
             prepared_depth,
         )
         .is_some()
@@ -1866,12 +2339,10 @@ fn draw_near_clipped_cached_room_surface<const OT: usize, L: WorldSurfaceLightin
     let (material, reverse_front) = match kind {
         WorldSurfaceKind::Floor => (base_material, false),
         WorldSurfaceKind::Ceiling => (base_material, true),
-        WorldSurfaceKind::Wall { direction } => {
-            (
-                wall_material_for_direction(base_material, direction, surface.wall_faces_owner()),
-                false,
-            )
-        }
+        WorldSurfaceKind::Wall { direction } => (
+            wall_material_for_direction(base_material, direction, surface.wall_faces_owner()),
+            false,
+        ),
     };
     let opts = triangle_depth_options(options)
         .with_cull_mode(cull_for_sidedness(material.sidedness, CullMode::Back))
@@ -1960,7 +2431,7 @@ fn tomb_raider_debug_root_colors<const N: usize>(
 /// subdivision will not replace them with dynamically generated children.
 #[inline(always)]
 pub(super) fn tomb_raider_warmed_quad_requires_dynamic_submit(
-    options: WorldSurfaceOptions,
+    options: &WorldSurfaceOptions,
     projected: [ProjectedVertex; 4],
 ) -> bool {
     options.tomb_raider_debug_subdivision_levels
@@ -1999,7 +2470,7 @@ fn submit_tomb_raider_cached_room_triangle<const OT: usize>(
     uv_words: [u16; 4],
     colors: [(u8, u8, u8); 4],
     material: WorldRenderMaterial,
-    options: WorldSurfaceOptions,
+    options: &WorldSurfaceOptions,
     split: u8,
     triangle_index: usize,
     reverse_front: bool,
@@ -2018,7 +2489,7 @@ fn submit_tomb_raider_cached_room_triangle<const OT: usize>(
         camera.view_vertex(vertices[tri.1]),
         camera.view_vertex(vertices[tri.2]),
     ];
-    let options = options
+    let options = (*options)
         .with_cull_mode(cull_for_sidedness(material.sidedness, CullMode::Back))
         .with_material_layer(material.texture);
     let _ = world.submit_tomb_raider_textured_gouraud_view_triangle_uv_words(
@@ -2028,7 +2499,7 @@ fn submit_tomb_raider_cached_room_triangle<const OT: usize>(
         [colors[tri.0], colors[tri.1], colors[tri.2]],
         camera.projection,
         material.texture,
-        options,
+        &options,
     );
     true
 }
@@ -2037,13 +2508,16 @@ fn submit_tomb_raider_cached_room_triangle<const OT: usize>(
 fn submit_tomb_raider_cached_room_quad<const OT: usize>(
     cached_vertices: &[WorldVertex],
     ids: [u16; 4],
+    projected: [ProjectedVertex; 4],
+    root_extent_safe: bool,
     camera: &WorldCamera,
     uv_words: [u16; 4],
     colors: [(u8, u8, u8); 4],
     material: WorldRenderMaterial,
-    options: WorldSurfaceOptions,
+    options: &WorldSurfaceOptions,
     split: u8,
     reverse_front: bool,
+    warmed_root: Option<&mut QuadTexturedGouraud>,
     primitives: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> bool {
@@ -2058,21 +2532,26 @@ fn submit_tomb_raider_cached_room_quad<const OT: usize>(
     ];
     let packet_views =
         warmed_room_quad_packet_values(views, material.sidedness, split, reverse_front);
+    let packet_projected =
+        warmed_room_quad_packet_values(projected, material.sidedness, split, reverse_front);
     let packet_uv_words =
         warmed_room_quad_packet_values(uv_words, material.sidedness, split, reverse_front);
     let packet_colors =
         warmed_room_quad_packet_values(colors, material.sidedness, split, reverse_front);
-    let options = options
+    let options = (*options)
         .with_cull_mode(cull_for_sidedness(material.sidedness, CullMode::Back))
         .with_material_layer(material.texture);
     let stats = world.submit_tomb_raider_textured_gouraud_view_quad_uv_words(
         primitives,
         packet_views,
+        Some(packet_projected),
+        root_extent_safe,
+        warmed_root,
         packet_uv_words,
         packet_colors,
         camera.projection,
         material.texture,
-        options,
+        &options,
     );
     // The caller treats `true` as "this surface is drawn" and skips its own
     // whole-quad submit. Discarding these stats and returning `true`
@@ -2521,4 +3000,66 @@ fn animated_cached_uv_words(
         let v = ((word >> 8) as u8).wrapping_add(offset_v);
         u16::from(u) | (u16::from(v) << 8)
     })
+}
+
+#[cfg(all(test, feature = "room-surface-profile"))]
+mod warp_probe_tests {
+    use super::*;
+
+    /// Build a quad lattice with the given per-vertex depths and UV span.
+    fn quad(depths: [i32; 4], uv: [(u8, u8); 4]) -> ([ProjectedVertex; 4], [u16; 4]) {
+        let mut p = [ProjectedVertex { sx: 0, sy: 0, sz: 0 }; 4];
+        let mut w = [0u16; 4];
+        for i in 0..4 {
+            p[i].sz = depths[i];
+            w[i] = uv[i].0 as u16 | ((uv[i].1 as u16) << 8);
+        }
+        (p, w)
+    }
+
+    /// The guest runs integer fixed-point; the bench that produced the rule
+    /// runs f64. Check the port agrees with the reference to within the
+    /// truncation we accepted, on a hard case (5:1 depth ratio, full UV span).
+    #[test]
+    fn integer_port_matches_the_float_closed_form() {
+        // tl/tr at depth 200, bl/br at 1000: depth varies down the surface.
+        let (p, w) = quad([200, 200, 1000, 1000], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        let got = predicted_warp_16ths(p, w);
+
+        // Reference: du * |zb-za| / (2*(za+zb)), calibrated x2.4, in 1/16ths.
+        let want = 63.0 * 800.0 / (2.0 * 1200.0) * 2.4 * 16.0;
+        let err = (got as f64 - want).abs() / want;
+        assert!(err < 0.02, "got {got}, want {want:.1} ({:.1}% off)", err * 100.0);
+    }
+
+    #[test]
+    fn constant_depth_surface_cannot_warp() {
+        let (p, w) = quad([500; 4], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        assert_eq!(predicted_warp_16ths(p, w), 0);
+    }
+
+    #[test]
+    fn error_is_proportional_to_uv_span() {
+        let full = quad([200, 200, 1000, 1000], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        let half = quad([200, 200, 1000, 1000], [(0, 0), (31, 0), (0, 31), (31, 31)]);
+        let (a, b) = (
+            predicted_warp_16ths(full.0, full.1),
+            predicted_warp_16ths(half.0, half.1),
+        );
+        // Halving the texture span on the surface halves the warp. This is the
+        // `uvhalf` control from the bench, which measured exactly that.
+        assert!(
+            (a as i32 - 2 * b as i32).abs() <= 16,
+            "full {a}, half {b}: not proportional"
+        );
+    }
+
+    #[test]
+    fn vertices_behind_the_near_plane_are_skipped_not_counted() {
+        let (p, w) = quad([-10, -10, 1000, 1000], [(0, 0), (63, 0), (0, 63), (63, 63)]);
+        // Only the two far vertices are valid, and they share a depth, so
+        // there is no usable edge and the probe must report nothing rather
+        // than a garbage ratio from a negative denominator.
+        assert_eq!(predicted_warp_16ths(p, w), 0);
+    }
 }
