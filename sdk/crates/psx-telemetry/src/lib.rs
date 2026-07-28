@@ -666,11 +666,39 @@ pub mod counter {
     /// World commands emitted by room surface draws, excluding water, props,
     /// actors, and other scene passes.
     pub const ROOM_SURFACE_COMMANDS: u16 = 241;
+
+    /// Warp probe (read-only diagnostic, `room-surface-profile` only).
+    ///
+    /// Room surfaces bucketed by the closed-form predicted affine texture
+    /// error from `docs/texture-warping-2026-07-27.md`, cross-tabbed against
+    /// what the depth-band subdivision rule actually decided. Buckets are
+    /// `<1`, `1..2`, `2..4` and `>=4` calibrated texels.
+    ///
+    /// Error is reported as count / sum / max in 1/16 texel units rather than
+    /// as buckets: a first run bucketed it and put 99% of surfaces in the
+    /// top bin, which answers nothing. Sum and count give the mean; max gives
+    /// the worst case. `..._UNDER_1TX` is the one bucket worth keeping, since
+    /// "subdivided a surface that could not warp" is wasted primitives.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_COUNT: u16 = 242;
+    /// Sum of predicted error over subdivided surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_SUM: u16 = 243;
+    /// Worst predicted error among subdivided surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_MAX: u16 = 244;
+    /// Subdivided surfaces predicted to warp under 1 texel: wasted work.
+    pub const ROOM_SURF_WARP_SUBDIVIDED_UNDER_1TX: u16 = 245;
+    /// Surfaces the depth-band rule left as authored polygons.
+    pub const ROOM_SURF_WARP_UNTOUCHED_COUNT: u16 = 246;
+    /// Sum of predicted error over untouched surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_UNTOUCHED_SUM: u16 = 247;
+    /// Worst predicted error among untouched surfaces, 1/16 texel units.
+    pub const ROOM_SURF_WARP_UNTOUCHED_MAX: u16 = 248;
+    /// Untouched surfaces predicted to warp under 1 texel: correctly skipped.
+    pub const ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX: u16 = 249;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 242;
+pub const COUNTER_COUNT: usize = 250;
 
-const _: () = assert!(counter::ROOM_SURFACE_COMMANDS as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::ROOM_SURF_WARP_UNTOUCHED_UNDER_1TX as usize == COUNTER_COUNT - 1);
