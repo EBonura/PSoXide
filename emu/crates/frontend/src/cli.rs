@@ -218,6 +218,11 @@ pub struct LaunchArgs {
     /// freshly formatted card. This makes cold-boot save tests reproducible.
     #[arg(long, value_name = "PATH")]
     pub memcard: Option<PathBuf>,
+    /// Load port 2's memory card from this 128 KiB `.mcd` file and persist any
+    /// writes back at the end of the headless run. This complements
+    /// `--memcard` for dual-card, slot-2 fallback, and card-copy tests.
+    #[arg(long, value_name = "PATH")]
+    pub memcard2: Option<PathBuf>,
     /// Number of CPU instructions to retire before stopping.
     #[arg(long, default_value_t = 100_000_000)]
     pub steps: u64,
@@ -946,6 +951,19 @@ fn run_headless_launch(
         bus.attach_memcard_port1(bytes);
         if emit_summary {
             eprintln!("[cli] port-1 memory card → {}", path.display());
+        }
+    }
+
+    if let Some(path) = args.memcard2.as_ref() {
+        let bytes = if path.exists() {
+            std::fs::read(path)
+                .map_err(|error| format!("read memory card {}: {error}", path.display()))?
+        } else {
+            Vec::new()
+        };
+        bus.attach_memcard_port2(bytes);
+        if emit_summary {
+            eprintln!("[cli] port-2 memory card → {}", path.display());
         }
     }
 
@@ -1840,6 +1858,28 @@ fn run_headless_launch(
         }
     }
 
+    if let Some(path) = args.memcard2.as_ref() {
+        if let Some(bytes) = bus.memcard_port2_snapshot() {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!("create memory-card directory {}: {error}", parent.display())
+                })?;
+            }
+            std::fs::write(path, &bytes)
+                .map_err(|error| format!("write memory card {}: {error}", path.display()))?;
+            if emit_summary {
+                eprintln!(
+                    "[cli] persisted port-2 memory card → {} ({} bytes)",
+                    path.display(),
+                    bytes.len()
+                );
+            }
+        }
+    }
+
     let (display_hash, display_width, display_height, display_byte_len) = bus.gpu.display_hash();
     let (display_rgba, display_rgba_width, display_rgba_height) = bus.gpu.display_rgba8();
     Ok(HeadlessLaunchResult {
@@ -2338,6 +2378,7 @@ fn validation_launch_args(
         bios: None,
         disc: None,
         memcard: None,
+        memcard2: None,
         steps: checkpoint.stop.steps,
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
@@ -3334,6 +3375,27 @@ fn press_button_mask(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod press_script_tests {
     use super::*;
+
+    #[test]
+    fn launch_parses_independent_memory_cards_for_both_ports() {
+        let cli = Cli::try_parse_from([
+            "frontend",
+            "launch",
+            "--path",
+            "game.exe",
+            "--memcard",
+            "slot-1.mcd",
+            "--memcard2",
+            "slot-2.mcd",
+        ])
+        .expect("dual-card launch arguments");
+
+        let Some(Command::Launch(args)) = cli.command else {
+            panic!("expected launch command");
+        };
+        assert_eq!(args.memcard, Some(PathBuf::from("slot-1.mcd")));
+        assert_eq!(args.memcard2, Some(PathBuf::from("slot-2.mcd")));
+    }
 
     #[test]
     fn parses_ticks_buttons_and_optional_hold() {
