@@ -55,6 +55,9 @@ slice. The public tools are built around proving the full workflow end to end.
   shows the live framebuffer in the viewport.
 - **Disc tooling** - CUE/BIN builders and headless export of an authored project
   to a bootable image.
+- **Agent control** - an optional MCP server embedded in the running frontend,
+  so a coding agent can boot a disc, step it frame by frame, and read RAM and
+  VRAM while it runs (see [Agent control (MCP)](#agent-control-mcp)).
 
 Per-crate detail lives in each area's README (see [Repository
 layout](#repository-layout)).
@@ -204,6 +207,36 @@ make validate                     # exact-hash display/VRAM regression matrix
 The `Makefile` is the source of truth on Unix-like hosts; the per-area READMEs
 cover everything else.
 </details>
+
+## Agent control (MCP)
+
+The frontend can host an [MCP](https://modelcontextprotocol.io) server, built on
+the official `rmcp` SDK, so an agent drives the same emulator you are looking at
+rather than a headless copy of it. A screenshot is what the GPU just produced,
+and a RAM read is the state behind it.
+
+It is opt-in and native-only:
+
+```bash
+cargo run -p frontend --features mcp
+```
+
+The server starts with the GUI and serves streamable HTTP at `/mcp` on
+`127.0.0.1:7355`. Set `PSOXIDE_MCP_PORT` to move it. If the port cannot be
+bound the GUI still runs without it.
+
+Point your client at `http://127.0.0.1:7355/mcp`. The tools are:
+
+| Tool | Purpose |
+| --- | --- |
+| `load_game`, `reset` | boot a `.cue`/`.bin`/`.iso`/`.ccd` or PSX-EXE, reboot it |
+| `pause`, `resume`, `step` | stop, run, or advance N video frames while paused |
+| `screenshot`, `dump_vram` | PNG of the display output, PNG of all 1024x512 VRAM |
+| `read_ram`, `read_word`, `write_ram` | inspect and poke main RAM |
+| `toggle_wireframe`, `status` | render mode, and run state / PC / cycles / display |
+
+`step` works while paused, which is what makes a deterministic loop possible:
+pause, step a known number of frames, screenshot, compare.
 
 ## Provenance and licensing
 
