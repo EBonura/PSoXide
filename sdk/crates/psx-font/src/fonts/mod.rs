@@ -125,3 +125,7 @@ pub use aldrich::ALDRICH;
 pub use syncopate::SYNCOPATE;
 pub use share_tech_mono::SHARE_TECH_MONO;
 pub use jura::JURA;
+
+// Hand-maintained fonts: no generator entry, kept as-is.
+pub mod spleen_5x8;
+pub use spleen_5x8::SPLEEN_5X8;
