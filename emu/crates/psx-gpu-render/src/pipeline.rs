@@ -49,6 +49,7 @@ pub struct HwVertex {
 /// bit      24   SEMI_TRANS                    routed to a non-Opaque batch
 /// bit      25   TEX_OPAQUE_PASS               discard STP texels
 /// bit      26   TEX_SEMI_PASS                 keep only STP texels
+/// bit      27   DITHER                        GP0(E1) bit 9 was set
 /// ```
 ///
 /// Texture-window state deliberately lives in
@@ -60,6 +61,11 @@ pub mod flags {
     pub const SEMI_TRANS: u32 = 1 << 24;
     pub const TEX_OPAQUE_PASS: u32 = 1 << 25;
     pub const TEX_SEMI_PASS: u32 = 1 << 26;
+    /// GP0(E1) bit 9 (or the per-primitive tpage word's copy of it)
+    /// was set for this primitive. The fragment shader then applies
+    /// the 4x4 ordered dither and truncates to 15bpp, matching
+    /// `emulator-core`'s `dither_rgb` / `modulate_tint_dithered`.
+    pub const DITHER: u32 = 1 << 27;
 
     /// Pack tpage origin (in pixels) into the flag bits.
     /// `tpage_x` must be a multiple of 64 (PSX alignment),
@@ -391,11 +397,14 @@ impl HwPipeline {
     /// Set the texture-filter mode (0 nearest, 1 bilinear, 2 JINC2, 3 xBR).
     /// Cheap uniform write.
     pub fn set_filter_mode(&self, queue: &wgpu::Queue, mode: u32) {
-        queue.write_buffer(
-            &self.filter_buffer,
-            0,
-            bytemuck::cast_slice(&[mode, 0, 0, 0]),
-        );
+        queue.write_buffer(&self.filter_buffer, 0, bytemuck::cast_slice(&[mode]));
+    }
+
+    /// Publish the internal-resolution multiplier to `.y` of the same
+    /// uniform. The dither path needs it to recover the PSX-native
+    /// pixel coordinate from the S-times-denser fragment coordinate.
+    pub fn set_internal_scale(&self, queue: &wgpu::Queue, scale: u32) {
+        queue.write_buffer(&self.filter_buffer, 4, bytemuck::cast_slice(&[scale.max(1)]));
     }
 
     /// Mirror CPU VRAM into the GPU-side `R16Uint` texture used by

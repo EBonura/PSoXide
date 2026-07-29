@@ -230,6 +230,10 @@ impl HwRenderer {
     /// source texture as the command stream is replayed.
     pub fn render_frame(&mut self, gpu: &Gpu, cmd_log: &[GpuCmdLogEntry], vram_words: &[u16]) {
         self.sync_texture_from_vram(vram_words);
+        // The dither path maps fragments back to PSX-native pixels, so
+        // the shader needs the current internal scale.
+        self.pipeline
+            .set_internal_scale(&self.queue, self.target.scale());
 
         // Wireframe: edge strips draw with transparent interiors, so stale
         // edges would accumulate in this persistent target. Rebuild it from
@@ -873,6 +877,209 @@ mod tests {
             pixel_block(&renderer, psx_x, psx_y),
             vec![bgr15_to_rgba8(color); 4]
         );
+    }
+
+    /// Run one GP0 word stream through the CPU rasterizer with the
+    /// command log armed, then replay that same log through the HW
+    /// renderer at internal scale 1. Returns `(cpu_vram, renderer)`
+    /// so callers can compare the two backends pixel for pixel.
+    fn run_both_backends(
+        words: &[u32],
+        renderer: &mut HwRenderer,
+        seed: &[(u16, u16, u16)],
+    ) -> Vec<u16> {
+        let mut cpu = Gpu::new();
+        for &(x, y, v) in seed {
+            cpu.vram.set_pixel(x, y, v);
+        }
+        // render_frame wants VRAM as of the *start* of the log.
+        let start_vram = cpu.vram.words().to_vec();
+        cpu.enable_cmd_log();
+        for &w in words {
+            cpu.gp0_push(w);
+        }
+        renderer.render_frame(&cpu, &cpu.cmd_log, &start_vram);
+        cpu.vram.words().to_vec()
+    }
+
+    fn pack_xy(p: (i32, i32)) -> u32 {
+        ((p.0 as u32) & 0xFFFF) | (((p.1 as u32) & 0xFFFF) << 16)
+    }
+
+    /// GP0 word stream for one axis-aligned Gouraud quad over
+    /// `(8,8)..(40,40)`. Axis-aligned so both backends cover exactly
+    /// the same pixels -- a diagonal edge diverges on the fill rule,
+    /// which would drown out the colour comparison this exists to make.
+    fn gouraud_quad(colors: [u32; 4], dither: bool) -> Vec<u32> {
+        vec![
+            0xE300_0000,                      // draw area top-left (0,0)
+            0xE400_0000 | 1023 | (511 << 10), // draw area bottom-right
+            0xE500_0000,                      // draw offset (0,0)
+            0xE100_0000 | if dither { 0x200 } else { 0 }, // draw mode
+            0x3800_0000 | colors[0],          // Gouraud quad + vertex 0 colour
+            pack_xy((8, 8)),
+            colors[1],
+            pack_xy((40, 8)),
+            colors[2],
+            pack_xy((8, 40)),
+            colors[3],
+            pack_xy((40, 40)),
+        ]
+    }
+
+    /// Read the 32x32 quad interior from both backends as
+    /// `(cpu_rgba, hw_rgba)` pairs, in row-major order.
+    fn quad_interior(cpu_vram: &[u16], renderer: &HwRenderer) -> Vec<([u8; 4], [u8; 4])> {
+        let s = renderer.internal_scale();
+        let (_, _, rgba) = renderer.read_subrect_rgba8(8 * s, 8 * s, 32 * s, 32 * s);
+        (0..32u32)
+            .flat_map(|y| (0..32u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let want = cpu_vram[((y + 8) * VRAM_WIDTH + x + 8) as usize];
+                // Top-left sample of this PSX pixel's SxS target block.
+                let o = ((y * s * 32 * s) + x * s) * 4;
+                let got = &rgba[o as usize..][..4];
+                (bgr15_to_rgba8(want), [got[0], got[1], got[2], got[3]])
+            })
+            .collect()
+    }
+
+    fn at(i: usize) -> (usize, usize) {
+        (i % 32 + 8, i / 32 + 8)
+    }
+
+    /// GP0(E1) bit 9 dither must reach the HW fragment shader and
+    /// produce byte-identical output to the CPU rasterizer. Regression
+    /// guard: the flag used to stop at the translator, so `--dump-hw`
+    /// rendered flat 8-bit colour while `--dump-display` dithered.
+    ///
+    /// Flat vertex colours, so barycentric interpolation is exact and
+    /// every remaining difference is the dither itself. The pure black
+    /// and pure white cases pin the clamp: `dither_rgb` saturates at
+    /// 0 and 255 rather than wrapping, so those must come back flat.
+    #[test]
+    fn flat_gouraud_dither_matches_cpu_backend_exactly() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW dither test: no headless wgpu adapter");
+            return;
+        };
+        assert_eq!(renderer.internal_scale(), 1, "compares PSX-native pixels");
+
+        // (colour word, must the dither break it into >1 colour?)
+        // 0x00C08040 = R 0x40, G 0x80, B 0xC0 -- each channel sits off a
+        // 5-bit boundary, so every channel has dithering to do.
+        let cases = [
+            (0x00C0_8040u32, true),
+            (0x0008_0808, true), // near black, still straddling a 5-bit step
+            (0x00FF_FFFF, false), // white: +3 clamps back to 255
+            (0x0000_0000, false), // black: -4 clamps back to 0
+        ];
+        for (color, expect_pattern) in cases {
+            let cpu_vram = run_both_backends(&gouraud_quad([color; 4], true), &mut renderer, &[]);
+            let pixels = quad_interior(&cpu_vram, &renderer);
+            for (i, (want, got)) in pixels.iter().enumerate() {
+                let (x, y) = at(i);
+                assert_eq!(want, got, "colour {color:#08x}: CPU/HW divergence at ({x}, {y})");
+            }
+            let distinct: std::collections::HashSet<_> = pixels.iter().map(|(w, _)| *w).collect();
+            assert_eq!(
+                distinct.len() > 1,
+                expect_pattern,
+                "colour {color:#08x}: unexpected dither spread {distinct:?}"
+            );
+        }
+    }
+
+    /// The control the equality tests can't provide on their own: with
+    /// GP0(E1) bit 9 clear the quad must come back as one flat colour.
+    /// A shader that dithers unconditionally passes every other test
+    /// here and fails this one.
+    #[test]
+    fn dither_off_leaves_the_quad_flat() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW dither test: no headless wgpu adapter");
+            return;
+        };
+
+        let color = 0x00C0_8040;
+        let cpu_vram = run_both_backends(&gouraud_quad([color; 4], false), &mut renderer, &[]);
+        let pixels = quad_interior(&cpu_vram, &renderer);
+        let hw: std::collections::HashSet<_> = pixels.iter().map(|(_, g)| *g).collect();
+        let cpu: std::collections::HashSet<_> = pixels.iter().map(|(w, _)| *w).collect();
+        assert_eq!(cpu.len(), 1, "CPU reference is not flat: {cpu:?}");
+        assert_eq!(hw.len(), 1, "HW dithered with GP0(E1) bit 9 clear: {hw:?}");
+    }
+
+    /// The 4x4 matrix is indexed by PSX pixel, not by target pixel, so
+    /// at internal scale S every PSX pixel must still be one uniform
+    /// SxS block matching the CPU. Fails if the scale never reaches the
+    /// shader: the pattern would then vary inside each block.
+    #[test]
+    fn dither_pattern_follows_psx_pixels_at_internal_scale_2() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW dither test: no headless wgpu adapter");
+            return;
+        };
+        assert!(renderer.set_internal_scale(2, None));
+
+        let cpu_vram = run_both_backends(&gouraud_quad([0x00C0_8040; 4], true), &mut renderer, &[]);
+        let (_, _, rgba) = renderer.read_subrect_rgba8(16, 16, 64, 64);
+        for y in 0..32usize {
+            for x in 0..32usize {
+                let want = bgr15_to_rgba8(cpu_vram[((y + 8) * VRAM_WIDTH as usize + x + 8)]);
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let o = ((y * 2 + dy) * 64 + x * 2 + dx) * 4;
+                    let got = [rgba[o], rgba[o + 1], rgba[o + 2], rgba[o + 3]];
+                    assert_eq!(
+                        want,
+                        got,
+                        "scale-2 block ({}, {}) sub-pixel ({dx}, {dy}) diverges",
+                        x + 8,
+                        y + 8
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same path with a real gradient. The HW backend interpolates in
+    /// f32 where the CPU walks a fixed-point plane, and dither makes
+    /// that tolerance visible: a sub-LSB interpolation difference near a
+    /// 5-bit boundary flips the truncated channel. So this pins the
+    /// bound (one 5-bit step) rather than byte equality -- exactness on
+    /// a gradient needs the compute backend, not this rasterizer.
+    #[test]
+    fn gouraud_gradient_dither_stays_within_one_step_of_cpu() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW dither test: no headless wgpu adapter");
+            return;
+        };
+
+        let colors = [0x00C0_8040, 0x0080_40C0, 0x0040_C080, 0x00A0_60E0];
+        let cpu_vram = run_both_backends(&gouraud_quad(colors, true), &mut renderer, &[]);
+        let pixels = quad_interior(&cpu_vram, &renderer);
+
+        for (i, (want, got)) in pixels.iter().enumerate() {
+            let (x, y) = at(i);
+            for ch in 0..3 {
+                let steps = (want[ch] as i32 - got[ch] as i32).abs() / 8;
+                assert!(
+                    steps <= 1,
+                    "({x}, {y}) channel {ch} off by {steps} 5-bit steps: cpu {want:?} hw {got:?}"
+                );
+                // The one-step bound alone would also hold for an
+                // undithered image, so pin what only this path
+                // produces: a 15bpp display code. Skipping dither
+                // leaves the HW backend's full 8-bit gradient, which
+                // is not one.
+                let c5 = got[ch] >> 3;
+                assert_eq!(
+                    got[ch],
+                    (c5 << 3) | (c5 >> 2),
+                    "({x}, {y}) channel {ch} was not truncated to 15bpp: {got:?}"
+                );
+            }
+        }
     }
 
     fn load_batch_tape(path: &str) -> Vec<Vec<GpuCmdLogEntry>> {
