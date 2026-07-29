@@ -46,6 +46,11 @@ impl TranslatedFrame<'_> {
     }
 }
 
+/// The CPU's `RAW_TEXTURE_TINT` sentinel -- an 8-bit-per-channel
+/// tint of 0x80 is the identity for `modulate_tint`, and the CPU
+/// rasterizer reuses that value to mean "raw, don't dither".
+const IDENTITY_TINT: u32 = 0x0080_8080;
+
 pub struct Translator {
     interp: Interpreter,
     /// Frontend debug mode mirroring `Gpu::wireframe_enabled`.
@@ -126,6 +131,19 @@ impl Translator {
             BlendMode::Add => BlendKind::Add,
             BlendMode::Sub => BlendKind::Sub,
             BlendMode::AddQuarter => BlendKind::AddQuarter,
+        }
+    }
+
+    /// `fbits::DITHER` while GP0(E1) bit 9 is set, else 0. The CPU
+    /// rasterizer dithers Gouraud polygons, lines, and tint-modulated
+    /// textured polygons; flat monochrome primitives and raw-texture
+    /// primitives are never dithered, so those emitters don't call
+    /// this.
+    fn dither_flag(&self) -> u32 {
+        if self.interp.state.dither {
+            fbits::DITHER
+        } else {
+            0
         }
     }
 
@@ -309,8 +327,9 @@ impl Translator {
         let v2 = (v.0 + 1, v.1);
         let v3 = (v.0, v.1 + 1);
         let v4 = (v.0 + 1, v.1 + 1);
-        self.push_shaded_tri(v, c, v2, c, v3, c, 0, kind);
-        self.push_shaded_tri(v2, c, v4, c, v3, c, 0, kind);
+        let dither = self.dither_flag();
+        self.push_shaded_tri(v, c, v2, c, v3, c, dither, kind);
+        self.push_shaded_tri(v2, c, v4, c, v3, c, dither, kind);
     }
 
     // ----- GP0 lines (0x40..=0x5F) -----
@@ -320,8 +339,8 @@ impl Translator {
     /// segments plot one pixel, matching the silicon-coordinate DDA
     /// used by the CPU rasterizer.
     /// The CPU routes dithered mono lines through its shaded walker;
-    /// this backend has no dither anywhere, so the colours already
-    /// match and only the (absent) dither pattern differs.
+    /// this backend carries the same dither through `fbits::DITHER`,
+    /// so only the band-vs-Bresenham coverage differs.
     fn emit_mono_line(&mut self, cmd: u32, points: &[(i32, i32)]) {
         let color = mono_color_rgba8(cmd);
         let kind = self.blend_kind(cmd);
@@ -409,8 +428,9 @@ impl Translator {
         };
         let e0b = (e0.0 + ox, e0.1 + oy);
         let e1b = (e1.0 + ox, e1.1 + oy);
-        self.push_shaded_tri(e0, c0, e1, c1, e0b, c0, 0, kind);
-        self.push_shaded_tri(e1, c1, e1b, c1, e0b, c0, 0, kind);
+        let dither = self.dither_flag();
+        self.push_shaded_tri(e0, c0, e1, c1, e0b, c0, dither, kind);
+        self.push_shaded_tri(e1, c1, e1b, c1, e0b, c0, dither, kind);
     }
 
     // ----- Phase 2: textured tris + quads -----
@@ -420,7 +440,7 @@ impl Translator {
     fn emit_tex_tri(&mut self, cmd: u32, v: [(i32, i32); 3], uv: [(u8, u8); 3], clut: (u32, u32)) {
         let [v0, v1, v2] = v;
         let [uv0, uv1, uv2] = uv;
-        let prim_flags = self.tex_prim_flags(cmd, clut);
+        let prim_flags = self.tex_prim_flags(cmd, clut, true);
         let color = tex_tint(cmd);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
@@ -447,7 +467,7 @@ impl Translator {
     fn emit_tex_quad(&mut self, cmd: u32, v: [(i32, i32); 4], uv: [(u8, u8); 4], clut: (u32, u32)) {
         let [v0, v1, v2, v3] = v;
         let [uv0, uv1, uv2, uv3] = uv;
-        let prim_flags = self.tex_prim_flags(cmd, clut);
+        let prim_flags = self.tex_prim_flags(cmd, clut, true);
         let color = tex_tint(cmd);
         let kind = self.blend_kind(cmd);
 
@@ -483,7 +503,7 @@ impl Translator {
     /// Pack the per-primitive state setter bits + vertex flags
     /// `bits` into the format the shader expects. `clut` is in
     /// PSX VRAM pixels.
-    fn tex_prim_flags(&self, cmd: u32, clut: (u32, u32)) -> u32 {
+    fn tex_prim_flags(&self, cmd: u32, clut: (u32, u32), flat_tint: bool) -> u32 {
         let tp = &self.interp.state.tpage;
         let depth = tp.tex_depth;
         let mut flags = fbits::TEXTURED;
@@ -491,6 +511,15 @@ impl Translator {
         flags |= fbits::pack_clut(clut.0, clut.1);
         if is_raw_texture(cmd) {
             flags |= fbits::RAW_TEXTURE;
+        } else if !(flat_tint && cmd & 0x00FF_FFFF == IDENTITY_TINT) {
+            // Flat-tint prims: the CPU gates on
+            // `tint != RAW_TEXTURE_TINT`, and that sentinel is literally
+            // (0x80, 0x80, 0x80) -- so an identity-tinted non-raw prim
+            // takes the same undithered path a raw one does. Match it,
+            // or every unmodulated sprite dithers here and not there.
+            // Shaded-textured prims carry per-vertex tints and have no
+            // such sentinel: the CPU gates on `!raw && dither` alone.
+            flags |= self.dither_flag();
         }
         if is_semi_trans(cmd) {
             // Textured semi-transparency is split into an opaque
@@ -595,7 +624,7 @@ impl Translator {
         if self.wireframe {
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
         } else {
-            self.push_shaded_tri(v0, c0, v1, c1, v2, c2, 0, kind);
+            self.push_shaded_tri(v0, c0, v1, c1, v2, c2, self.dither_flag(), kind);
         }
     }
 
@@ -608,8 +637,9 @@ impl Translator {
             self.push_wire_tri(v1, c1, v3, c3, v2, c2, kind);
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
         } else {
-            self.push_shaded_tri(v1, c1, v3, c3, v2, c2, 0, kind);
-            self.push_shaded_tri(v0, c0, v1, c1, v2, c2, 0, kind);
+            let dither = self.dither_flag();
+            self.push_shaded_tri(v1, c1, v3, c3, v2, c2, dither, kind);
+            self.push_shaded_tri(v0, c0, v1, c1, v2, c2, dither, kind);
         }
     }
 
@@ -625,7 +655,7 @@ impl Translator {
         let [v0, v1, v2] = v;
         let [uv0, uv1, uv2] = uv;
         let [c0, c1, c2] = colors.map(mono_color_rgba8);
-        let prim_flags = self.tex_prim_flags(cmd, clut);
+        let prim_flags = self.tex_prim_flags(cmd, clut, false);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, BlendKind::Opaque);
@@ -658,7 +688,7 @@ impl Translator {
         let [v0, v1, v2, v3] = v;
         let [uv0, uv1, uv2, uv3] = uv;
         let [c0, c1, c2, c3] = colors.map(mono_color_rgba8);
-        let prim_flags = self.tex_prim_flags(cmd, clut);
+        let prim_flags = self.tex_prim_flags(cmd, clut, false);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
             self.push_wire_tri(v1, c1, v3, c3, v2, c2, BlendKind::Opaque);
@@ -867,7 +897,7 @@ impl Translator {
             return;
         }
         let color = tex_tint(cmd);
-        let prim_flags = self.tex_prim_flags(cmd, clut);
+        let prim_flags = self.tex_prim_flags(cmd, clut, true);
         let kind = self.blend_kind(cmd);
         // Sprite UV counters are 8-bit on PS1 and wrap per pixel.
         // Host-GPU interpolation cannot represent a 255→0 jump
@@ -980,6 +1010,119 @@ mod tests {
 
     fn uv(u: u8, v: u8, high: u16) -> u32 {
         u32::from(u) | (u32::from(v) << 8) | (u32::from(high) << 16)
+    }
+
+    /// GP0(E1) with dither on, then one primitive. Returns the flag
+    /// word every emitted vertex carries.
+    fn dithered_prim_flags(opcode: u8, fifo: Vec<u32>) -> u32 {
+        let log = [entry(0xE1, vec![0xE100_0200]), entry(opcode, fifo)];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+        assert!(frame.total() > 0, "primitive emitted nothing");
+        let flags = frame.vertices[0].flags;
+        for v in frame.vertices {
+            assert_eq!(v.flags, flags, "flags must be uniform across the prim");
+        }
+        flags
+    }
+
+    /// Which primitives inherit GP0(E1) bit 9. The CPU rasterizer's
+    /// rule is not "dither unless raw": for flat-tint textured prims it
+    /// gates on `tint != RAW_TEXTURE_TINT`, and that sentinel is the
+    /// identity tint 0x808080, so an unmodulated non-raw sprite skips
+    /// dither too. Shaded-textured prims have per-vertex tints and no
+    /// sentinel, so they gate on `!raw` alone. Getting this wrong
+    /// dithers (or fails to dither) whole classes of sprite against the
+    /// CPU backend.
+    #[test]
+    fn dither_flag_follows_the_cpu_per_primitive_rule() {
+        let tri = |tint: u32| vec![tint, xy(10, 10), xy(20, 10), xy(10, 20)];
+        let tex_tri = |cmd: u32| {
+            vec![
+                cmd,
+                xy(10, 10),
+                uv(0, 0, 0),
+                xy(20, 10),
+                uv(8, 0, 0),
+                xy(10, 20),
+                uv(0, 8, 0),
+            ]
+        };
+
+        // Gouraud + mono: colour-only prims. The CPU dithers the
+        // Gouraud walker and leaves flat mono on the undithered path.
+        assert_ne!(
+            dithered_prim_flags(0x30, vec![0x3040_8040, xy(10, 10), 0x00C0_40C0, xy(20, 10), 0x0080_C080, xy(10, 20)]) & fbits::DITHER,
+            0,
+            "Gouraud triangle must dither"
+        );
+        assert_eq!(
+            dithered_prim_flags(0x20, tri(0x2040_8040)) & fbits::DITHER,
+            0,
+            "flat mono triangle must not dither"
+        );
+
+        // Flat-tint textured: dither unless raw or identity-tinted.
+        assert_ne!(
+            dithered_prim_flags(0x24, tex_tri(0x2440_8040)) & fbits::DITHER,
+            0,
+            "tint-modulated textured triangle must dither"
+        );
+        assert_eq!(
+            dithered_prim_flags(0x24, tex_tri(0x2480_8080)) & fbits::DITHER,
+            0,
+            "identity tint hits the CPU's RAW_TEXTURE_TINT sentinel"
+        );
+        assert_eq!(
+            dithered_prim_flags(0x25, tex_tri(0x2540_8040)) & fbits::DITHER,
+            0,
+            "raw-texture triangle must not dither"
+        );
+
+        // Shaded-textured: no sentinel, so the identity tint still
+        // dithers; the raw bit still suppresses it.
+        let shaded_tex = |cmd: u32| {
+            vec![
+                cmd,
+                xy(10, 10),
+                uv(0, 0, 0),
+                0x0080_8080,
+                xy(20, 10),
+                uv(8, 0, 0),
+                0x0080_8080,
+                xy(10, 20),
+                uv(0, 8, 0),
+            ]
+        };
+        assert_ne!(
+            dithered_prim_flags(0x34, shaded_tex(0x3480_8080)) & fbits::DITHER,
+            0,
+            "shaded-textured triangle dithers even at the identity tint"
+        );
+        assert_eq!(
+            dithered_prim_flags(0x35, shaded_tex(0x3580_8080)) & fbits::DITHER,
+            0,
+            "raw shaded-textured triangle must not dither"
+        );
+    }
+
+    /// Without GP0(E1) bit 9 nothing carries the flag -- guards against
+    /// a fix that just turns dither on unconditionally.
+    #[test]
+    fn no_dither_flag_when_e1_bit_9_is_clear() {
+        let log = [
+            entry(0xE1, vec![0xE100_0000]),
+            entry(
+                0x30,
+                vec![0x3040_8040, xy(10, 10), 0x00C0_40C0, xy(20, 10), 0x0080_C080, xy(10, 20)],
+            ),
+        ];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+        assert!(frame.total() > 0);
+        for v in frame.vertices {
+            assert_eq!(v.flags & fbits::DITHER, 0);
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@
 //   bit      24   SEMI_TRANS
 //   bit      25   TEX_OPAQUE_PASS (discard STP texels)
 //   bit      26   TEX_SEMI_PASS   (keep only STP texels)
+//   bit      27   DITHER          (GP0(E1) bit 9 -- 4x4 ordered dither)
 //
 // `HwVertex::tex_window` packs GP0(E2) as four bytes:
 //   bits  0..=7   mask_x in pixels
@@ -32,7 +33,8 @@ const VRAM_H_F: f32 =  512.0;
 
 @group(0) @binding(0) var vram: texture_2d<u32>;
 // Texture filter in `.x`: 0 = nearest (PSX-native), 1 = bilinear. Global per
-// frame; set by the toolbar toggle.
+// frame; set by the toolbar toggle. `.y` holds the internal-resolution
+// multiplier S, used to map a fragment back to its PSX-native pixel.
 @group(0) @binding(1) var<uniform> u_texfilter: vec4<u32>;
 
 struct VertexIn {
@@ -91,6 +93,37 @@ const FLAG_TEXTURED:    u32 = 1u << 22u;
 const FLAG_RAW_TEXTURE: u32 = 1u << 23u;
 const FLAG_TEX_OPAQUE_PASS: u32 = 1u << 25u;
 const FLAG_TEX_SEMI_PASS:   u32 = 1u << 26u;
+const FLAG_DITHER:      u32 = 1u << 27u;
+
+// PSX-SPX signed 4x4 ordered-dither offsets, indexed by
+// `(y & 3) * 4 + (x & 3)` -- byte-for-byte the CPU rasterizer's
+// `DITHER_OFFSETS` (emulator-core gpu/blend.rs).
+const DITHER_OFFSETS = array<i32, 16>(
+    -4, 0, -3, 1,
+     2, -2, 3, -1,
+    -3, 1, -4, 0,
+     3, -1, 2, -2,
+);
+
+// Apply the ordered dither and truncate to 15bpp, then re-expand to
+// display codes the way `bgr15_to_rgb` does. `rgb` is in display-code
+// space (0..1 == 0..255); `frag` is the fragment's target-space
+// position, converted here to the PSX-native pixel the CPU indexes
+// the matrix by. Mirrors `dither_rgb`: add the signed offset to the
+// 8-bit channel, clamp to 0..=255, keep the high 5 bits.
+fn dither_to_bgr15(rgb: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    let scale = f32(max(u_texfilter.y, 1u));
+    let px = i32(floor(frag.x / scale));
+    let py = i32(floor(frag.y / scale));
+    let off = DITHER_OFFSETS[u32(py & 3) * 4u + u32(px & 3)];
+    var out: vec3<f32>;
+    for (var i = 0; i < 3; i++) {
+        let c8 = i32(round(rgb[i] * 255.0));
+        let c5 = u32(clamp(c8 + off, 0, 255) >> 3u);
+        out[i] = f32((c5 << 3u) | (c5 >> 2u)) / 255.0;
+    }
+    return out;
+}
 
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
@@ -200,13 +233,29 @@ fn sample_texel(flags: u32, uv8: vec2<u32>) -> u32 {
     return vram_load(tp.x + uv8.x, tp.y + uv8.y);
 }
 
-// PSX modulate: each channel = clamp(channel * tint * 2, 0..=1).
-// `RAW_TEXTURE` skips this and returns the texel verbatim.
+// PSX modulate, in the CPU rasterizer's integer semantics
+// (`modulate_tint_dithered`, emulator-core gpu/blend.rs):
+//
+//     c8 = min(tint8 * (t5 << 3) / 0x80, 255)     // truncating integer divide
+//
+// The float form this replaced (`tex * tint * 2`) is `tex * tint * 2/255`, and
+// 2/255 != 1/128, so it ran ~0.4% bright -- up to 2/255 off, which is enough to
+// flip a channel across a dither bucket boundary.
+//
+// `texel_rgb` arrives bit-replicated 5->8 (`bgr15_to_rgb`), but the CPU
+// modulates `t5 << 3`. `t8 - floor(t8 / 32) == t5 << 3` for every 5-bit code,
+// so undo the replication rather than re-quantising to 5 bits (which would
+// band the filtered-texture paths).
+//
+// `RAW_TEXTURE` skips all of this and returns the texel verbatim.
 fn modulate(texel_rgb: vec3<f32>, tint_rgba: vec4<f32>, raw: bool) -> vec3<f32> {
     if raw {
         return texel_rgb;
     }
-    return clamp(texel_rgb * tint_rgba.rgb * 2.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    let t8 = round(texel_rgb * 255.0);
+    let tex = t8 - floor(t8 / 32.0);
+    let tint = round(tint_rgba.rgb * 255.0);
+    return min(floor(tint * tex / 128.0), vec3<f32>(255.0)) / 255.0;
 }
 
 // One bilinear corner: premultiplied colour, coverage 0 on transparent texels
@@ -421,8 +470,13 @@ fn filter_xbr(flags: u32, tw: u32, uv: vec2<f32>) -> vec4<f32> {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let textured = (in.flags & FLAG_TEXTURED) != 0u;
+    let dither = (in.flags & FLAG_DITHER) != 0u;
     if !textured {
-        return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
+        var rgb = in.color.rgb;
+        if dither {
+            rgb = dither_to_bgr15(rgb, in.position.xy);
+        }
+        return vec4<f32>(srgb_to_linear(rgb), in.color.a);
     }
     let uv8 = apply_tex_window(page_uv(in.uv), in.tex_window);
     let texel = sample_texel(in.flags, uv8);
@@ -466,6 +520,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;
-    let rgb = modulate(tex_rgb, in.color, raw);
+    var rgb = modulate(tex_rgb, in.color, raw);
+    // Raw-texture primitives bypass the modulator on silicon and are
+    // never dithered; the translator already withholds FLAG_DITHER
+    // for them, so `raw` needs no second check here.
+    if dither {
+        rgb = dither_to_bgr15(rgb, in.position.xy);
+    }
     return vec4<f32>(srgb_to_linear(rgb), 1.0);
 }
