@@ -1082,6 +1082,119 @@ mod tests {
         }
     }
 
+    /// VRAM seed + GP0 stream for a row of 8x8 tint-modulated textured
+    /// quads (GP0 0x2C), one per `(texel, tint)` combo, at `y = 8` and
+    /// `x = 8 + k * 8`. Texture is 15bpp direct at tpage (512, 0), one
+    /// texel per combo.
+    ///
+    /// UV is constant across each quad, so both backends sample exactly
+    /// the same texel at every pixel and no UV-interpolation difference
+    /// can leak into what this measures: `modulate` plus the dither.
+    /// 8x8 walks the whole 4x4 dither matrix four times.
+    fn tinted_textured_quads(combos: &[(u16, u32)]) -> (Vec<(u16, u16, u16)>, Vec<u32>) {
+        const TEX_X: u16 = 512; // tpage x unit 8 * 64
+        const TPAGE: u32 = 8 | (2 << 7); // x unit 8, y 0, 15bpp direct
+        let seed = combos
+            .iter()
+            .enumerate()
+            .map(|(k, &(texel, _))| (TEX_X + k as u16, 0, texel))
+            .collect();
+        let mut words = vec![
+            0xE300_0000,                      // draw area top-left (0,0)
+            0xE400_0000 | 1023 | (511 << 10), // draw area bottom-right
+            0xE500_0000,                      // draw offset (0,0)
+            0xE100_0200,                      // draw mode: dither on
+        ];
+        for (k, &(_, tint)) in combos.iter().enumerate() {
+            let x0 = 8 + k as i32 * 8;
+            let uv = k as u32; // u = k, v = 0
+            words.extend_from_slice(&[
+                0x2C00_0000 | tint,
+                pack_xy((x0, 8)),
+                uv, // clut (unused at 15bpp) in the high half
+                pack_xy((x0 + 8, 8)),
+                uv | (TPAGE << 16),
+                pack_xy((x0, 16)),
+                uv,
+                pack_xy((x0 + 8, 16)),
+                uv,
+            ]);
+        }
+        (seed, words)
+    }
+
+    /// Tint-modulated textured prims with GP0(E1) dither on must match
+    /// the CPU rasterizer byte for byte.
+    ///
+    /// This is the case the shader's old float modulate could not hold:
+    /// it computed `tex * tint * 2/255` where the CPU computes
+    /// `tint * (t5 << 3) / 0x80`, i.e. `/128`. 2/255 != 1/128, so the HW
+    /// ran up to 2/255 bright -- invisible on its own, but the dither
+    /// adds -4..+3 before truncating to 5 bits, so a combo sitting near
+    /// a bucket edge flips the truncated channel and the pixel lands a
+    /// whole 5-bit step off.
+    #[test]
+    fn tinted_textured_quad_dither_matches_cpu_backend_exactly() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW modulate test: no headless wgpu adapter");
+            return;
+        };
+        assert_eq!(renderer.internal_scale(), 1, "compares PSX-native pixels");
+
+        let bgr15 = |r: u16, g: u16, b: u16| r | (g << 5) | (b << 10);
+        // Tint word packs `R | G << 8 | B << 16`. No combo may use the
+        // 0x808080 identity tint: the CPU treats it as the raw-texture
+        // sentinel and stops dithering.
+        let combos = [
+            (bgr15(31, 17, 9), 0x00C0_8040),
+            (bgr15(16, 16, 16), 0x00E3_9137),
+            (bgr15(5, 21, 30), 0x007F_01FF),
+            (bgr15(31, 31, 31), 0x00FF_FFFF), // clamps at 255 pre-dither
+            (bgr15(1, 2, 3), 0x0080_817F),
+            (bgr15(24, 12, 6), 0x0033_2211),
+            (bgr15(9, 18, 27), 0x00A5_5AC3),
+            (bgr15(30, 15, 7), 0x0040_7E81),
+        ];
+
+        let (seed, words) = tinted_textured_quads(&combos);
+        let cpu_vram = run_both_backends(&words, &mut renderer, &seed);
+        let w = combos.len() as u32 * 8;
+        let (_, _, rgba) = renderer.read_subrect_rgba8(8, 8, w, 8);
+
+        let mut spread = 0usize;
+        for (k, (texel, tint)) in combos.iter().enumerate() {
+            let mut distinct = std::collections::HashSet::new();
+            for y in 0..8u32 {
+                for x in 0..8u32 {
+                    let px = 8 + k as u32 * 8 + x;
+                    let py = 8 + y;
+                    let want = bgr15_to_rgba8(cpu_vram[(py * VRAM_WIDTH + px) as usize]);
+                    let o = ((y * w + px - 8) * 4) as usize;
+                    let got = [rgba[o], rgba[o + 1], rgba[o + 2], rgba[o + 3]];
+                    assert_eq!(
+                        want, got,
+                        "texel {texel:#06x} x tint {tint:#08x}: CPU/HW divergence at ({px}, {py})"
+                    );
+                    distinct.insert(want);
+                }
+            }
+            assert_ne!(
+                distinct.iter().copied().collect::<Vec<_>>(),
+                vec![[0, 0, 0, 255]],
+                "texel {texel:#06x} x tint {tint:#08x}: quad never drew"
+            );
+            spread += usize::from(distinct.len() > 1);
+        }
+        // Without a real dither spread the equality above would also
+        // hold for a shader that never dithers at all. Only the
+        // saturating white x white combo is legitimately flat.
+        assert!(
+            spread >= combos.len() - 1,
+            "dither spread only {spread}/{} combos",
+            combos.len()
+        );
+    }
+
     fn load_batch_tape(path: &str) -> Vec<Vec<GpuCmdLogEntry>> {
         let data = std::fs::read(path).expect("batch tape");
         let mut batches = Vec::new();
