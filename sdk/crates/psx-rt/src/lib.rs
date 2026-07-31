@@ -2,10 +2,10 @@
 //! PS1 bare-metal runtime.
 //!
 //! Provides the `_start` entry point that the PSX-EXE loader jumps to,
-//! a panic handler, BIOS syscall trampolines, and optional heap
-//! initialisation. Homebrew crates depend on this crate to get a
-//! working `main()` environment without thinking about linker
-//! symbols or cache-flushing.
+//! a panic handler, direct i-cache control, a BIOS TTY debug
+//! trampoline, and optional heap initialisation. Homebrew crates
+//! depend on this crate to get a working `main()` environment without
+//! thinking about linker symbols or cache-flushing.
 //!
 //! # Entry sequence
 //!
@@ -31,6 +31,7 @@ mod builtins;
 
 #[cfg(target_arch = "mips")]
 pub mod bios;
+pub mod cache;
 #[cfg(target_arch = "mips")]
 pub mod interrupts;
 #[cfg(target_arch = "mips")]
