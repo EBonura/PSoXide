@@ -44,11 +44,36 @@ pub fn gpuread() -> u32 {
 /// normal command.
 #[inline]
 pub fn wait_cmd_ready() {
-    while !gpustat().contains(GpuStat::READY_CMD) {}
+    wait_ready(GpuStat::READY_CMD);
+}
+
+/// Spin budget for one GPUSTAT ready-wait. Long enough for the slowest
+/// legitimate primitive, short enough that a stuck GPU hands control
+/// back well inside a frame.
+pub const READY_SPINS: u32 = 500_000;
+
+/// Bounded ready-wait with recovery.
+///
+/// A GPU left mid-command never re-asserts its ready bits, so a bare
+/// `while !ready {}` hangs forever. That is not hypothetical: aborting a
+/// wedged linked-list DMA (see `psx_io::dma::abort`) stops the walker
+/// partway through a packet, and the GPU then sits waiting for command
+/// words that will never arrive. On timeout, GP1(01h) resets the command
+/// buffer, which is the documented way to discard that partial command
+/// and make the GPU accept work again.
+fn wait_ready(flag: GpuStat) {
+    let mut spins = 0u32;
+    while !gpustat().contains(flag) {
+        if spins >= READY_SPINS {
+            write_gp1(0x0100_0000);
+            return;
+        }
+        spins += 1;
+    }
 }
 
 /// Spin until the GPU can start a DMA block transfer.
 #[inline]
 pub fn wait_dma_ready() {
-    while !gpustat().contains(GpuStat::READY_DMA_RECV) {}
+    wait_ready(GpuStat::READY_DMA_RECV);
 }
