@@ -138,10 +138,17 @@ pub fn enable_channel(ch: Channel) {
 /// terminator at the first transfer and then predecessor pointers.
 ///
 /// Convenience wrapper: sets up MADR/BCR/CHCR and blocks until done.
-pub fn clear_ordering_table(buf: *mut u32, words: u16) {
+pub fn clear_ordering_table(buf: *mut u32, words: u16) -> bool {
     if words == 0 {
-        return;
+        return true;
     }
+    // Abort whatever the channel was doing before arming it. On silicon a
+    // transfer that never completes leaves START latched, and a write to
+    // CHCR while the channel is still busy is ignored: one stuck kick
+    // then poisons every later transfer on that channel, which is how a
+    // single wedge turned into "the DMA moves nothing, forever" across
+    // the CD reader, the ordering-table clear, and the boot uploads.
+    abort(Channel::Otc);
     enable_channel(Channel::Otc);
     let last = unsafe { buf.add(words as usize - 1) };
     set_madr(Channel::Otc, last as u32);
@@ -151,5 +158,37 @@ pub fn clear_ordering_table(buf: *mut u32, words: u16) {
         Channel::Otc,
         CHCR_STEP_BACKWARD | CHCR_SYNC_MANUAL | CHCR_START | CHCR_TRIGGER,
     );
-    while is_busy(Channel::Otc) {}
+    let done = wait_done(Channel::Otc, DEFAULT_DMA_SPINS);
+    if !done {
+        // Leave the controller usable for the next caller rather than
+        // handing back a channel that will swallow its kick.
+        abort(Channel::Otc);
+    }
+    done
+}
+
+/// Spin budget for one DMA completion wait. Comfortably longer than the
+/// largest legitimate transfer (a full-screen VRAM upload) and short
+/// enough that a wedged channel returns control inside a frame.
+pub const DEFAULT_DMA_SPINS: u32 = 500_000;
+
+/// Force `ch` out of any in-flight transfer by clearing CHCR. Silicon
+/// treats dropping the START bit as an abort request; the channel is
+/// safe to re-arm afterwards.
+pub fn abort(ch: Channel) {
+    set_chcr(ch, 0);
+}
+
+/// Bounded completion wait. `false` means the channel was still busy
+/// when the budget ran out, i.e. the transfer is wedged and the caller
+/// must not assume its data landed.
+pub fn wait_done(ch: Channel, spins: u32) -> bool {
+    let mut waited = 0u32;
+    while is_busy(ch) {
+        if waited >= spins {
+            return false;
+        }
+        waited += 1;
+    }
+    true
 }

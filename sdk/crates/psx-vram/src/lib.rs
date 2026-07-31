@@ -1026,8 +1026,11 @@ fn copy_to_vram_header(rect: VramRect) {
     // GP0 over this same channel when streaming code uploads from a
     // fixed update. Interleaving header words (or reprogramming the
     // channel for the block-DMA path) mid-walk corrupts the command
-    // stream, so drain the channel first.
-    while dma::is_busy(Channel::Gpu) {}
+    // stream, so drain the channel first. Bounded: a wedged walk must
+    // not take the upload (or the boot that needs it) down with it.
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+        dma::abort(Channel::Gpu);
+    }
     wait_cmd_ready();
     write_gp0(gp0::COPY_CPU_TO_VRAM);
     write_gp0(pack_xy(rect.x, rect.y));
@@ -1072,7 +1075,12 @@ pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
         Channel::Gpu,
         dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
     );
-    while dma::is_busy(Channel::Gpu) {}
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+        dma::abort(Channel::Gpu);
+        // The GP0(A0) header is already out and the payload did not
+        // land, so VRAM holds a partial upload either way; report it.
+        return false;
+    }
     true
 }
 
