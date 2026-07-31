@@ -6,7 +6,7 @@
 
 use crate::{BitOrder, BitmapFont};
 
-/// IBM VGA 8x16 BIOS console font.
+/// IBM PC VGA 8x16 console font (PC BIOS lineage, unrelated to the PS1 BIOS).
 ///
 /// 8x16 pixels per glyph, 1 bit per pixel, MSB = leftmost.
 pub const BASIC_8X16_BITMAP: [u8; 2048] = [

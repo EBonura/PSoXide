@@ -26,7 +26,7 @@ the editor and emulator share one simulation.
 | [`psx-fx`](crates/psx-fx) | Arcade-style visual effects: particle pools, screen shake, deterministic RNG. |
 | [`psx-asset`](crates/psx-asset) | Runtime parsers for cooked-asset blobs. Consumes `psxed-format` layouts produced by the editor. |
 | [`psx-cache`](crates/psx-cache) | Generic no_std slot cache: keyed residency pool with LRU eviction and pinning. |
-| [`psx-mc`](crates/psx-mc) | Memory-card driver: SIO0 transport, BIOS-compatible filesystem, optional LZSS compression. |
+| [`psx-mc`](crates/psx-mc) | Memory-card driver: SIO0 transport, on-card filesystem format interoperable with the console's card manager, optional LZSS compression. |
 | [`psx-osk`](crates/psx-osk) | On-screen keyboard for pad-driven text entry: QWERTY/symbols pages, shift, PS4-style boxed keys. |
 | [`psx-pack`](crates/psx-pack) | Guest-side WORLD.PAK parsing + in-place HLZC/LZ4 decompression (reader half of `psx-iso`). |
 | [`psx-telemetry`](crates/psx-telemetry) | Shared guest/host telemetry id tables for the emulator profiling hooks. |
