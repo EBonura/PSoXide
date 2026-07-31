@@ -129,10 +129,30 @@ enum Wait {
 /// [`load_chunk_decompressed`] on top. The raw sequence is:
 /// `prepare()` then `start_read(lba)` then N x `read_sector(&mut buf)` then
 /// `stop()`.
+/// `diag()` cause byte: the drive raised INT5; the snapshot carries the
+/// error response's status and error-code bytes.
+#[cfg(target_arch = "mips")]
+pub const DIAG_CD_ERROR: u8 = 0x05;
+/// `diag()` cause byte: the wait spun out; the snapshot carries the raw
+/// `CD_STATUS` register and the last IRQ flag seen.
+#[cfg(target_arch = "mips")]
+pub const DIAG_TIMEOUT: u8 = 0xFF;
+/// `diag()` cause byte: the parameter FIFO never freed up.
+#[cfg(target_arch = "mips")]
+pub const DIAG_PARAM_STUCK: u8 = 0xFE;
+/// `diag()` command byte standing in for a `read_sector` wait (ReadN is
+/// streaming; no command byte is in flight).
+#[cfg(target_arch = "mips")]
+pub const DIAG_SITE_READ: u8 = 0xD0;
+
 #[cfg(target_arch = "mips")]
 pub struct SectorReader {
     prepared: bool,
     discard: [u32; SECTOR_WORDS],
+    /// Last failure snapshot: `[cause, status, command, flag-or-error]`.
+    /// Written on every failure path so a caller with only a screen to
+    /// print on (the demo-disc loader) can say what the drive did.
+    diag: [u8; 4],
 }
 
 #[cfg(target_arch = "mips")]
@@ -143,7 +163,18 @@ impl SectorReader {
         SectorReader {
             prepared: false,
             discard: [0; SECTOR_WORDS],
+            diag: [0; 4],
         }
+    }
+
+    /// The last failure snapshot packed big-endian:
+    /// `cause<<24 | status<<16 | command<<8 | flag_or_error`. Zero when
+    /// nothing has failed yet. Causes are the `DIAG_*` constants; for
+    /// [`DIAG_CD_ERROR`] the status/flag bytes are the INT5 response pair,
+    /// otherwise status is the raw `CD_STATUS` register at failure and the
+    /// low byte is the last IRQ flag seen.
+    pub fn diag(&self) -> u32 {
+        u32::from_be_bytes(self.diag)
     }
 
     // --- register helpers (exact hl-psx port) ---
@@ -325,6 +356,8 @@ impl SectorReader {
             self.wr_index(0);
             for &p in params {
                 if !self.wait_param_room() {
+                    self.wr_index(0);
+                    self.diag = [DIAG_PARAM_STUCK, psx_io::read8(CD_STATUS), command, 0];
                     self.set_irq_enable(saved);
                     self.wr_index(0);
                     return false;
@@ -339,11 +372,23 @@ impl SectorReader {
                     true
                 }
                 Wait::CdError => {
+                    // Capture the INT5 response pair (status, error code)
+                    // before the drain throws it away.
+                    self.wr_index(0);
+                    let r0 = psx_io::read8(CD_RESPONSE);
+                    let r1 = psx_io::read8(CD_RESPONSE);
+                    self.diag = [DIAG_CD_ERROR, r0, command, r1];
                     self.drain_responses();
                     self.ack_all();
                     false
                 }
-                Wait::Timeout => false,
+                Wait::Timeout => {
+                    self.wr_index(0);
+                    let status = psx_io::read8(CD_STATUS);
+                    let flag = self.irq_flag();
+                    self.diag = [DIAG_TIMEOUT, status, command, flag];
+                    false
+                }
             };
             self.set_irq_enable(saved);
             self.wr_index(0);
@@ -433,7 +478,20 @@ impl SectorReader {
         unsafe {
             match self.wait_irq(IRQ_DATA_READY, DATA_POLL) {
                 Wait::Matched => {}
-                _ => {
+                Wait::CdError => {
+                    self.wr_index(0);
+                    let r0 = psx_io::read8(CD_RESPONSE);
+                    let r1 = psx_io::read8(CD_RESPONSE);
+                    self.diag = [DIAG_CD_ERROR, r0, DIAG_SITE_READ, r1];
+                    self.drain_responses();
+                    self.ack_all();
+                    return false;
+                }
+                Wait::Timeout => {
+                    self.wr_index(0);
+                    let status = psx_io::read8(CD_STATUS);
+                    let flag = self.irq_flag();
+                    self.diag = [DIAG_TIMEOUT, status, DIAG_SITE_READ, flag];
                     self.drain_responses();
                     self.ack_all();
                     return false;
