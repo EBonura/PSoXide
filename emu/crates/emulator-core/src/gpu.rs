@@ -295,6 +295,28 @@ pub struct Gpu {
     /// it. While non-zero GPUSTAT's command/DMA-ready bits are clear,
     /// so command submission is paced by the real GPU throughput.
     busy_credit: u64,
+    /// Virtual GP0 FIFO occupancy for the overflow diagnostic: CPU
+    /// stores that arrived while the GPU was busy, reset whenever a
+    /// store finds it idle. The stall model paces every write, so
+    /// in-model nothing is ever lost; on silicon nocash documents a
+    /// 16-word FIFO that LOSES data on overflow (the demo-disc fail
+    /// panel's garbage rectangles are consistent with that). Until the
+    /// hardware-tests suite settles stall-vs-drop on a real console,
+    /// this counts the writes that WOULD be lost under the drop model.
+    /// Diagnostic bookkeeping -- excluded from save states.
+    #[serde(skip)]
+    gp0_burst_words: u32,
+    /// Total CPU GP0 words beyond the virtual FIFO depth. Surfaced in
+    /// the frontend's exit diagnostics; nonzero means the guest bursts
+    /// unpaced GP0 writes and may desync on hardware.
+    #[serde(skip)]
+    gp0_overflow_count: u64,
+    /// `PSOXIDE_STRICT_GP0_FIFO=1`: experimentally DROP overflowing
+    /// words (and skip their stall) the way nocash describes silicon,
+    /// so headless runs reproduce the garbage a real console shows.
+    /// Cached at construction; excluded from save states.
+    #[serde(skip)]
+    gp0_fifo_strict: bool,
     /// Remaining queue prefix through the most recently accepted
     /// DMA-sourced command. CPU rendering leaves GPUSTAT.28 ready;
     /// DMA rendering clears it until this prefix drains.
@@ -522,6 +544,9 @@ impl Gpu {
             current_cmd_index: 0,
             busy_credit: 0,
             dma_busy_credit: 0,
+            gp0_burst_words: 0,
+            gp0_overflow_count: 0,
+            gp0_fifo_strict: std::env::var_os("PSOXIDE_STRICT_GP0_FIFO").is_some(),
             display_start_x: 0,
             display_start_y: 0,
             display_width: 320,
@@ -1122,6 +1147,49 @@ impl Gpu {
         self.busy_credit.min(u64::from(u32::MAX)) as u32
     }
 
+    /// The real GP0 FIFO is this many words deep.
+    pub const GP0_FIFO_DEPTH: u32 = 16;
+
+    /// Record one architectural (CPU) GP0 store arriving, BEFORE its
+    /// stall is applied. Returns `false` when the word should be dropped
+    /// (strict mode only): the guest burst more than a FIFO's worth of
+    /// words at a busy GPU, which nocash documents as data loss on
+    /// silicon. The default (non-strict) model keeps the calibrated
+    /// stall pacing and only counts the would-be losses, so existing
+    /// goldens are unaffected while unpaced guests still fail visibly
+    /// in the exit diagnostics. Conservative approximation: occupancy
+    /// resets whenever a store finds the GPU idle, and per-packet
+    /// drains inside a continuous busy burst are not modelled.
+    pub(crate) fn note_cpu_gp0_arrival(&mut self) -> bool {
+        if !self.is_busy() {
+            self.gp0_burst_words = 0;
+            return true;
+        }
+        self.gp0_burst_words = self.gp0_burst_words.saturating_add(1);
+        if self.gp0_burst_words <= Self::GP0_FIFO_DEPTH {
+            return true;
+        }
+        if self.gp0_overflow_count == 0
+            && std::env::var_os("PSOXIDE_TRACE_GP0_OVERFLOW").is_some()
+        {
+            eprintln!(
+                "[gpu] GP0 burst exceeded the {}-word FIFO while busy; \
+                 silicon may lose these words (further overflows counted \
+                 silently)",
+                Self::GP0_FIFO_DEPTH
+            );
+        }
+        self.gp0_overflow_count += 1;
+        !self.gp0_fifo_strict
+    }
+
+    /// CPU GP0 words that arrived beyond the virtual FIFO depth while
+    /// the GPU was busy. Nonzero means the guest bursts unpaced GP0
+    /// writes and may desync on real hardware.
+    pub fn gp0_overflow_count(&self) -> u64 {
+        self.gp0_overflow_count
+    }
+
     fn is_dma_busy(&self) -> bool {
         self.dma_busy_credit > 0
     }
@@ -1596,6 +1664,20 @@ impl Gpu {
                 self.drawing_start_raw = 0;
                 self.drawing_end_raw = 0;
                 self.drawing_offset_raw = 0;
+                // The DECODED clip rectangle and draw offset too, not just
+                // their readback latches: GP1(00h) = GP0(E1h..E6h) = 0, so
+                // on silicon a draw issued before the next E3/E4 clips to
+                // the single pixel at the origin. Keeping the previous
+                // (usually wide-open) area let FrameBuffer-less guests
+                // render headless while painting nothing on hardware,
+                // which is exactly what the demo-disc IRQ probe did on a
+                // real console until it set its area explicitly.
+                self.draw_area_left = 0;
+                self.draw_area_top = 0;
+                self.draw_area_right = 0;
+                self.draw_area_bottom = 0;
+                self.draw_offset_x = 0;
+                self.draw_offset_y = 0;
                 self.gpuread_latch = 0x400;
             }
             // GP1 0x01 -- Reset command buffer. This aborts a partial GP0
