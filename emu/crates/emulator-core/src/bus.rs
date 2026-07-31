@@ -1565,7 +1565,36 @@ impl Bus {
     /// transfer was still in-flight (start bit set, awaiting its
     /// scheduled completion), a sweep re-runs it and schedules a
     /// second target that overwrites the first.
+    /// Channels named by `PSOXIDE_WEDGE_DMA` (a bitmask, decimal or
+    /// `0x`-prefixed) latch busy forever instead of transferring, the way
+    /// a real controller does when a kick never completes.
+    ///
+    /// Modelling ideal hardware is what let three separate guest hangs
+    /// reach burned discs: the emulator's DMA always completes, so a
+    /// `while is_busy {}` that hangs a console runs clean here. With this
+    /// set, a headless run reproduces the wedge instead.
+    fn dma_wedge_mask() -> u8 {
+        static MASK: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *MASK.get_or_init(|| {
+            let Ok(raw) = std::env::var("PSOXIDE_WEDGE_DMA") else {
+                return 0;
+            };
+            let raw = raw.trim();
+            let parsed = match raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+                Some(hex) => u8::from_str_radix(hex, 16),
+                None => raw.parse::<u8>(),
+            };
+            parsed.unwrap_or(0)
+        })
+    }
+
     fn run_dma_channel(&mut self, ch: usize) {
+        if Self::dma_wedge_mask() & (1 << ch) != 0 {
+            // No transfer, no scheduled completion: CHCR keeps its START
+            // bit, so `is_busy` stays true and any later kick on this
+            // channel is ignored, exactly like the silicon failure.
+            return;
+        }
         // Each channel: run the transfer now (so memory / GPU state is
         // up-to-date for any immediate follow-up reads), but defer the
         // CHCR start-bit clear and DMA IRQ raise to the channel's
