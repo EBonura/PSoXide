@@ -1038,11 +1038,29 @@ impl CdRom {
     /// A handful of commands use the parameter FIFO for arguments
     /// (SetLoc MSF, SetMode, Test sub-op). The parameters are drained
     /// inline by the handler.
+    /// `PSOXIDE_WEDGE_CD=1`: the drive accepts every command and never
+    /// answers. Companion to the DMA and GPU injectors, for the same
+    /// reason: the emulator's drive always responds, so guest code whose
+    /// deadlines or retry logic are wrong still passes headless and only
+    /// fails on a console, which costs a burned disc to discover.
+    fn cd_wedged() -> bool {
+        static WEDGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *WEDGED.get_or_init(|| std::env::var_os("PSOXIDE_WEDGE_CD").is_some())
+    }
+
     fn queue_command(&mut self, command: u8, now: u64) {
         self.commands_dispatched += 1;
         self.last_command = command;
         if (command as usize) < self.command_hist.len() {
             self.command_hist[command as usize] += 1;
+        }
+        if Self::cd_wedged() {
+            // Accepted, never acknowledged: no response bytes, no IRQ, and
+            // the controller stays busy. Every guest wait must reach its own
+            // deadline and move on.
+            self.responses.clear();
+            self.command_busy = true;
+            return;
         }
         // Real hardware exposes only one live response packet. A new
         // command drops any unread bytes from the prior packet instead
