@@ -1136,7 +1136,20 @@ impl Gpu {
     /// Is the GPU currently "busy"? Used to gate GPUSTAT ready
     /// bits 26 + 28.
     pub fn is_busy(&self) -> bool {
+        if Self::gpu_wedged() {
+            return true;
+        }
         self.busy_credit > 0
+    }
+
+    /// `PSOXIDE_WEDGE_GPU=1` holds the GPUSTAT ready bits low forever,
+    /// reproducing a GPU left waiting for the rest of a command (what an
+    /// aborted mid-packet linked-list walk does on silicon). Guest code
+    /// that spins on `wait_cmd_ready` / `draw_sync` without a bound then
+    /// hangs headless instead of only on a console.
+    fn gpu_wedged() -> bool {
+        static WEDGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *WEDGED.get_or_init(|| std::env::var_os("PSOXIDE_WEDGE_GPU").is_some())
     }
 
     /// CPU stall applied when an architectural store targets GP0 while the
