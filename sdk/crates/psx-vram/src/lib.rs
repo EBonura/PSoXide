@@ -961,10 +961,13 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
         "upload_16bpp: odd pixel count ({expected}) not supported - caller should round up",
     );
 
-    if try_dma_copy_to_vram(rect, pixels.as_ptr() as *const u32) {
-        return;
-    }
-    // FIFO fallback: two halfwords per 32-bit word, low half first.
+    // FIFO path by default: the CL2 silicon probes showed this console's
+    // DMA controller can latch a channel busy-forever while moving
+    // nothing, and an upload that wedges freezes boot with no diagnostic
+    // (the unbounded busy-wait in the DMA path). The FIFO loop is a
+    // boot-time cost nobody measures; callers that trust their DMA can
+    // opt in via `dma_copy_to_vram`.
+    // Two halfwords per 32-bit word, low half first.
     // During GP0(0xA0) image transfer the GPU is waiting for data,
     // not normal commands; DuckStation clears READY_CMD in this
     // state, so stream payload words without polling command-ready.
@@ -1001,10 +1004,8 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
         "upload_bytes: byte count must be a positive multiple of 4"
     );
 
-    if try_dma_copy_to_vram(rect, bytes.as_ptr() as *const u32) {
-        return;
-    }
-    // FIFO fallback: two halfwords per word, low half first -- matches
+    // FIFO path by default; see upload_16bpp for the silicon rationale.
+    // Two halfwords per word, low half first -- matches
     // upload_16bpp's packing convention. See upload_16bpp: image payload
     // writes must not wait on the normal command-ready bit.
     copy_to_vram_header(rect);
@@ -1043,7 +1044,11 @@ fn copy_to_vram_header(rect: VramRect) {
 /// DMA controller is word-addressed, so a non-word-aligned `src` (or an
 /// odd halfword row stride) can't be DMA'd and takes the FIFO path. This
 /// mirrors PsyQ's `LoadImage`: `BS = words-per-row`, `BA = rows`.
-fn try_dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
+/// Opt-in DMA upload. No longer the default: on real hardware the DMA
+/// controller can wedge a channel busy-forever (CL2 probe, 2026-07-31),
+/// and this function's completion wait would then spin unboundedly.
+/// Callers who opt in accept that risk on their own boot path.
+pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
     if (src as usize) % 4 != 0 || rect.w % 2 != 0 || rect.w == 0 || rect.h == 0 {
         return false;
     }
