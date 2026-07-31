@@ -4055,6 +4055,30 @@ fn scan_heartbeat() {
     }
 }
 
+/// Paint the id of the record being measured as eight bit-cells under the
+/// progress bar, most significant bit first: bright yellow = 1, dark = 0.
+///
+/// The bar moves 1.5 px per record, so a photo of a frozen screen only
+/// narrows a hang down to "roughly record 18". This row names the exact
+/// record instead. Same immediate GP0 fill-rects as the bar, both buffer
+/// halves, cell width 16 because GP0(02h) snaps X and width to 16.
+fn draw_record_id(id: u8) {
+    for buffer_y in [212u32, 452] {
+        for bit in 0..8u32 {
+            let rgb = if id & (0x80 >> bit) != 0 {
+                0x0040_E0FF // (255, 224, 64) bright yellow
+            } else {
+                0x0020_2020
+            };
+            gpu_io::wait_cmd_ready();
+            gpu_io::write_gp0(0x0200_0000 | rgb);
+            gpu_io::write_gp0((buffer_y << 16) | (32 + bit * 16));
+            gpu_io::write_gp0((8u32 << 16) | 16);
+        }
+    }
+    gpu_io::wait_cmd_ready();
+}
+
 /// Draw a progress bar straight into the visible framebuffer.
 ///
 /// The whole battery runs inside `Scene::init`, before the engine has drawn a
@@ -4113,6 +4137,10 @@ fn scan_aborted() -> bool {
     unsafe { core::ptr::read_volatile(&raw const SCAN_ABORT) }
 }
 
+// inline(never): with every instantiation inlined, run_timing_scan grows
+// past the +-128 KiB reach of a MIPS PC16 branch and the build dies with
+// "out of range PC16 fixup".
+#[inline(never)]
 fn sample_timing<F>(id: u8, work: u16, mut probe: F) -> TimingRecord
 where
     F: FnMut() -> u16,
@@ -4122,6 +4150,7 @@ where
     if scan_aborted() {
         return TimingRecord::pending();
     }
+    draw_record_id(id);
     let mut samples = [0u16; TIMING_SAMPLES];
     let guard = IrqGuard::mask();
     let mut run = 0;
@@ -4129,6 +4158,17 @@ where
         samples[run] = probe();
         run += 1;
         scan_heartbeat();
+        // The pad driver polls SIO0 directly and never takes the CPU
+        // interrupt, so it works under the IrqGuard. Checking between
+        // samples (not just between records) means START still skips a
+        // record whose probe is slow or stuck mid-measurement; the guard's
+        // Drop restores SR on the early return.
+        let pad = psx_pad::poll_port1().buttons;
+        if pad.is_held(button::START) || pad.is_held(button::TRIANGLE) {
+            unsafe { core::ptr::write_volatile(&raw mut SCAN_ABORT, true) };
+            tty::println("hardware-tests: timing scan aborted by operator");
+            return TimingRecord::pending();
+        }
     }
     drop(guard);
 
