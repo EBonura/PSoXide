@@ -138,6 +138,80 @@ impl Default for CddaStarter {
     }
 }
 
+/// Track-end detection that survives real drive behaviour.
+///
+/// The naive check ("GetStat shows neither playing nor seeking N times in
+/// a row, so the track ended") advances spuriously on hardware: after a
+/// Stop-then-Play restart the drive reports status `0x00` for one to two
+/// seconds while the motor stops and re-spins, before the seek even
+/// engages. An emulator answers instantly and never shows that window,
+/// which is how the bug reached a burned disc.
+///
+/// This detector only ARMS once it has seen the drive actually playing the
+/// current track; call [`rearm`](Self::rearm) whenever a new Play
+/// handshake begins. Feed it every GetStat poll; it answers `true` exactly
+/// once per genuine end of track.
+#[derive(Copy, Clone, Debug)]
+pub struct CddaEndDetector {
+    armed: bool,
+    quiet_polls: u8,
+    threshold: u8,
+}
+
+impl CddaEndDetector {
+    /// `threshold` is how many consecutive quiet polls mean "ended".
+    pub const fn new(threshold: u8) -> Self {
+        Self {
+            armed: false,
+            quiet_polls: 0,
+            threshold,
+        }
+    }
+
+    /// A new Play handshake is starting: disarm until the drive is seen
+    /// playing again, so its stop/spin-up window cannot read as an end.
+    pub fn rearm(&mut self) {
+        self.armed = false;
+        self.quiet_polls = 0;
+    }
+
+    /// Feed one GetStat status byte (`None` for a command timeout).
+    /// Returns `true` when the current track has genuinely ended, once;
+    /// the detector disarms itself for the caller's restart.
+    pub fn poll(&mut self, status: Option<u8>) -> bool {
+        let Some(status) = status else {
+            self.quiet_polls = 0;
+            return false;
+        };
+        if status & cdrom::STAT_PLAYING != 0 {
+            self.armed = true;
+            self.quiet_polls = 0;
+            return false;
+        }
+        let quiet = status & (cdrom::STAT_PLAYING | cdrom::STAT_SEEKING) == 0;
+        if !(self.armed && quiet) {
+            self.quiet_polls = 0;
+            return false;
+        }
+        self.quiet_polls += 1;
+        if self.quiet_polls >= self.threshold {
+            self.rearm();
+            return true;
+        }
+        false
+    }
+
+    /// Whether the drive has been seen playing the current track.
+    pub fn armed(&self) -> bool {
+        self.armed
+    }
+
+    /// Consecutive quiet polls so far, for debug overlays.
+    pub fn quiet_polls(&self) -> u8 {
+        self.quiet_polls
+    }
+}
+
 /// Readings within this of the prediction are noise; ignore them.
 const DEADBAND_MS: i32 = 5;
 /// A single reading farther out than this is a suspected jitter spike (or a
@@ -330,5 +404,45 @@ mod tests {
     fn stopped_clock_reads_zero() {
         let mut c = CddaClock::new(60);
         assert_eq!(c.tick(100), 0);
+    }
+
+    /// The exact sequence the demo-disc debug burn photographed: after a
+    /// skip the drive reports 00 00 (motor transition), then seeks, then
+    /// plays. An unarmed detector must sit through all of it.
+    #[test]
+    fn spin_up_window_is_not_an_end_of_track() {
+        let mut d = CddaEndDetector::new(3);
+        d.rearm();
+        for s in [0x00, 0x00, 0x00, 0x00, 0x42, 0x42, 0x82] {
+            assert!(!d.poll(Some(s)), "advanced on status {s:#04x}");
+        }
+        assert!(d.armed());
+    }
+
+    #[test]
+    fn a_real_end_fires_once_after_the_threshold() {
+        let mut d = CddaEndDetector::new(3);
+        d.rearm();
+        assert!(!d.poll(Some(0x82)));
+        assert!(!d.poll(Some(0x02)));
+        assert!(!d.poll(Some(0x02)));
+        assert!(d.poll(Some(0x02)), "third quiet poll after playing");
+        // Disarmed for the restart: more quiet polls stay silent.
+        assert!(!d.poll(Some(0x02)));
+        assert!(!d.poll(Some(0x02)));
+        assert!(!d.poll(Some(0x02)));
+    }
+
+    #[test]
+    fn timeouts_and_seeks_reset_the_quiet_streak() {
+        let mut d = CddaEndDetector::new(2);
+        d.rearm();
+        assert!(!d.poll(Some(0x82)));
+        assert!(!d.poll(Some(0x02)));
+        assert!(!d.poll(None), "timeout must not count as quiet");
+        assert!(!d.poll(Some(0x02)));
+        assert!(!d.poll(Some(0x42)), "a seek is activity, not quiet");
+        assert!(!d.poll(Some(0x02)));
+        assert!(d.poll(Some(0x02)));
     }
 }

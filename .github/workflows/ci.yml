@@ -66,6 +66,8 @@ jobs:
           cargo fmt --all -- --check
           (cd engine && cargo fmt --all -- --check)
           (cd sdk && cargo fmt --all -- --check)
+      - name: mfc0 load-delay hazard check (gating; this bug shipped twice)
+        run: python3 tools/check_mfc0.py sdk engine emu
       - name: make check
         run: make check
       - name: make test
