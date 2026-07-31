@@ -169,7 +169,8 @@ pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
 /// Block until the GPU has drained its command queue.
 #[inline]
 pub fn draw_sync() {
-    while !gpustat().contains(GpuStat::READY_DMA_RECV) {}
+    // Same bounded-with-recovery contract as `psx_io::gpu::wait_cmd_ready`.
+    psx_io::gpu::wait_dma_ready();
 }
 
 /// Configure Timer 1 as an HBlank-counting scanline counter.
@@ -562,6 +563,10 @@ pub fn submit_linked_list_async(head: *const u32) {
     // that was never going to finish.
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
         dma::abort(Channel::Gpu);
+        // The walker stopped mid-packet, so the GPU is still waiting for
+        // the rest of a command. Discard it or every later ready-wait
+        // blocks on a GPU that can never become ready.
+        write_gp1(0x0100_0000);
     }
 
     // Make sure the GPU's DMA direction is CPU→GP0 before we kick off the
@@ -588,6 +593,7 @@ pub fn submit_linked_list_async(head: *const u32) {
 pub fn submit_linked_list_wait() {
     if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
         dma::abort(Channel::Gpu);
+        write_gp1(0x0100_0000);
     }
 }
 
