@@ -440,6 +440,16 @@ impl SectorReader {
                 self.ack_all();
                 self.prepared = true;
             }
+            // Purge whatever the previous tenant left in the data FIFO by
+            // dropping BFRD (Request register, index 0: 0 = reset the data
+            // FIFO). The demo-disc chain loader's header read came back
+            // with shifted bytes on silicon (magic mismatch, identical
+            // every attempt) after the menu's earlier disc reads; leftover
+            // FIFO bytes are the only state that survives the IRQ drain
+            // above, and an emulator FIFO never holds any, which is why
+            // this cannot reproduce headless.
+            self.wr_index(0);
+            psx_io::write8(CD_IRQ, 0x00);
             self.send_command(CMD_SETMODE, &[CD_MODE_DOUBLE_SPEED_2048], IRQ_ACK, ACK_POLL)
         }
     }
