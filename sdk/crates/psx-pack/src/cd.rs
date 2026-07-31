@@ -64,6 +64,9 @@ const CD_STATUS: u32 = CD_BASE;
 const CD_RESPONSE: u32 = CD_BASE + 1;
 #[cfg(target_arch = "mips")]
 const CD_PARAM: u32 = CD_BASE + 2;
+/// Same port, read side: index-0 reads pop the data FIFO one byte at a time.
+#[cfg(target_arch = "mips")]
+const CD_DATA: u32 = CD_BASE + 2;
 #[cfg(target_arch = "mips")]
 const CD_IRQ: u32 = CD_BASE + 3;
 
@@ -104,8 +107,6 @@ const ACK_POLL: u32 = 16_384;
 const PARAM_POLL: u32 = 16_384;
 #[cfg(target_arch = "mips")]
 const DATA_POLL: u32 = 4_000_000;
-#[cfg(target_arch = "mips")]
-const DMA_POLL: u32 = 65_536;
 #[cfg(target_arch = "mips")]
 const CLEANUP_POLL: u32 = 16_384;
 
@@ -268,6 +269,18 @@ impl SectorReader {
         false
     }
 
+    /// Move one sector from the drive's buffer into RAM.
+    ///
+    /// This used to be a chopping-burst DMA on channel 3 (the hl-psx
+    /// recipe). The CL1/CL2 silicon probes convicted that path on real
+    /// hardware: the transfer is a state-dependent lottery, and the
+    /// channel can latch its start bit and stay busy forever while
+    /// moving nothing, which read as all-zero sectors everywhere the
+    /// reader is used. PIO is the recipe the same probes proved
+    /// byte-perfect on silicon: arm BFRD, wait until the data FIFO
+    /// actually reports data, then pop all 2048 bytes. ~1.3 ms slower
+    /// per sector than a working DMA, which no SectorReader user
+    /// notices, and it cannot wedge the DMA controller.
     unsafe fn dma_read_sector(&mut self, buffer: *mut u32) {
         unsafe {
             // Arm the data transfer (BFRD).
@@ -275,16 +288,23 @@ impl SectorReader {
             psx_io::write8(CD_IRQ, 0x80);
             self.wr_index(0);
         }
-        psx_io::dma::set_madr(psx_io::dma::Channel::Cdrom, buffer as u32);
-        psx_io::dma::set_bcr_manual(psx_io::dma::Channel::Cdrom, SECTOR_WORDS as u16);
-        // BIOS-style burst control word; the emulator models its completion
-        // at Redux's quarter-rate CD DMA cadence.
-        psx_io::dma::set_chcr(psx_io::dma::Channel::Cdrom, 0x1140_0100);
+        // The FIFO fills shortly after BFRD; the bound covers a slow
+        // drive without letting a dead one hang the caller.
         let mut i = 0;
-        while psx_io::dma::is_busy(psx_io::dma::Channel::Cdrom) && i < DMA_POLL {
+        while !unsafe { self.data_fifo_ready() } && i < DATA_POLL {
             i += 1;
         }
-        psx_io::irq::ack(1 << psx_io::irq::source::DMA);
+        for word_index in 0..SECTOR_WORDS {
+            let b0 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            let b1 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            let b2 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            let b3 = unsafe { psx_io::read8(CD_DATA) } as u32;
+            unsafe {
+                buffer
+                    .add(word_index)
+                    .write_volatile((b3 << 24) | (b2 << 16) | (b1 << 8) | b0)
+            };
+        }
     }
 
     /// Clear an IRQ we were not waiting for. A stale `DataReady` must have its
