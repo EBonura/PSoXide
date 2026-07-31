@@ -1,7 +1,8 @@
 # psx-mc
 
 A PlayStation 1 memory-card driver for the PSoXide SDK: SIO0 transport, the
-standard BIOS-compatible filesystem, and optional save compression. `no_std`,
+standard on-card filesystem format (interoperable with the console's card
+manager), and optional save compression. `no_std`,
 allocation-free.
 
 ## Layers
