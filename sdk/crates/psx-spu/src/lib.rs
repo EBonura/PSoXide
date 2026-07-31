@@ -691,7 +691,9 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
         Channel::Spu,
         dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
     );
-    while dma::is_busy(Channel::Spu) {}
+    if !dma::wait_done(Channel::Spu, dma::DEFAULT_DMA_SPINS) {
+        dma::abort(Channel::Spu);
+    }
 
     // Return to Stop transfer-mode.
     write_reg16(SPUCNT, spucnt);

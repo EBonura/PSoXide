@@ -7640,10 +7640,12 @@ fn test_gpu_draw_area_command() -> TestResult {
 
 fn test_gpu_dma_direction_after_otc() -> TestResult {
     static mut OT: [u32; 4] = [0; 4];
-    dma::clear_ordering_table((&raw mut OT) as *mut u32, 4);
+    // The helper is bounded now, so a wedged OTC channel reports instead
+    // of hanging the battery; bit 2 carries whether it completed.
+    let cleared = dma::clear_ordering_table((&raw mut OT) as *mut u32, 4);
     gpu_io::write_gp1(0x0400_0000 | 2);
-    let observed = (gpu_io::gpustat().bits() >> 29) & 0b11;
-    expect_eq(2, observed, "dma dir")
+    let observed = ((gpu_io::gpustat().bits() >> 29) & 0b11) | ((cleared as u32) << 2);
+    expect_eq(0b110, observed, "dma dir | otc done")
 }
 
 fn test_gpu_dma_direction_mode_latch() -> TestResult {
