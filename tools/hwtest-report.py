@@ -580,13 +580,19 @@ def print_report(
         if has_median:
             row += f",{record.median}"
         if baseline_records is not None:
-            prior = baseline_records[record.record_id]
-            row += f",{prior.minimum},{record.minimum - prior.minimum:+d}"
-            if prior.minimum != record.minimum:
-                drift.append(
-                    f"timing {record.record_id:02X} ({LABELS.get(record.record_id, 'unlabelled')}): "
-                    f"min {prior.minimum} -> {record.minimum}"
-                )
+            prior = baseline_records.get(record.record_id)
+            if prior is None:
+                # The operator can skip the rest of the timing scan (START),
+                # leaving later records absent from a silicon capture. That
+                # is a partial capture, not corruption: compare what exists.
+                row += ",absent,n/a"
+            else:
+                row += f",{prior.minimum},{record.minimum - prior.minimum:+d}"
+                if prior.minimum != record.minimum:
+                    drift.append(
+                        f"timing {record.record_id:02X} ({LABELS.get(record.record_id, 'unlabelled')}): "
+                        f"min {prior.minimum} -> {record.minimum}"
+                    )
         print(row)
 
     scan_names = ("cpu", "gte", "spu")
