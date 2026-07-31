@@ -29,6 +29,7 @@ use psx_spu::SpuAddr;
 use psx_vram::{Clut, TexDepth, Tpage};
 
 mod audio_link;
+mod cd_chain_probe;
 mod audio_probe;
 mod cpu_tests;
 mod handoff_probe;
@@ -38,6 +39,7 @@ mod transition_probe;
 mod voice_probe;
 use audio_probe::AudioProbe;
 use cpu_tests::*;
+use cd_chain_probe::CdChainProbe;
 use handoff_probe::HandoffProbe;
 use photo::PhotoCapture;
 use reverb_probe::{ReverbProbe, ReverbSnapshot};
@@ -222,6 +224,7 @@ enum Mode {
     MemoryCard,
     ReverbProbe,
     HandoffProbe,
+    CdChainProbe,
     TransitionProbe,
     VoiceProbe,
     AudioProbe,
@@ -254,6 +257,7 @@ impl Mode {
             Self::MemoryCard => "MEMORY CARD",
             Self::ReverbProbe => "HL REVERB STATE",
             Self::HandoffProbe => "HL VOICE HANDOFF",
+            Self::CdChainProbe => "CD CHAIN-LOAD",
             Self::TransitionProbe => "HL BANK TRANSITION",
             Self::VoiceProbe => "HL VOICE BANK",
             Self::AudioProbe => "CD/SPU AUDIO",
@@ -283,6 +287,7 @@ impl Mode {
             Self::MemoryCard => "L/R PAGE  L1+R1+X GUARDED ACTION",
             Self::ReverbProbe
             | Self::HandoffProbe
+            | Self::CdChainProbe
             | Self::TransitionProbe
             | Self::VoiceProbe
             | Self::AudioProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
@@ -312,6 +317,7 @@ impl Mode {
             Self::MemoryCard => "NON-DESTRUCTIVE FULL-CARD READ/WRITE TEST",
             Self::ReverbProbe => "BIOS REVERB STATE + MAP DMA RESET VARIANTS QR",
             Self::HandoffProbe => "SELECTABLE MENU-VOICE SHUTDOWN + BANK SPLIT QR",
+            Self::CdChainProbe => "CHAIN-LOAD CD READ MATRIX QR (CL1)",
             Self::TransitionProbe => "EXACT FULL/LIGHT/MAP LIVE-BANK HANDOFF QR",
             Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
@@ -341,6 +347,7 @@ impl Mode {
             Self::MemoryCard => "CARD",
             Self::ReverbProbe
             | Self::HandoffProbe
+            | Self::CdChainProbe
             | Self::TransitionProbe
             | Self::VoiceProbe
             | Self::AudioProbe => "CAPTURE",
@@ -374,6 +381,9 @@ impl Mode {
             // Interactive diagnostic only; it is not part of the frozen
             // conformance report schema.
             Self::MemoryCard => u8::MAX - 2,
+            // Interactive diagnostic like MemoryCard: never part of the
+            // frozen conformance report schema.
+            Self::CdChainProbe => u8::MAX - 3,
             // Same reasoning as Menu: this draws a chart for the operator's
             // display, it never produces a result row or a report.
             Self::VideoLevels => u8::MAX - 1,
@@ -616,7 +626,8 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
     ("BACK", MenuAction::Back),
 ];
 
-const PROBES_MENU: [(&str, MenuAction); 7] = [
+const PROBES_MENU: [(&str, MenuAction); 8] = [
+    ("CD CHAIN-LOAD (CL1)", MenuAction::Open(Mode::CdChainProbe)),
     ("CONTROLLER PORT", MenuAction::Open(Mode::ControllerProbe)),
     ("HL REVERB STATE (PA5)", MenuAction::Open(Mode::ReverbProbe)),
     ("HL VOICE HANDOFF (PA4)", MenuAction::Open(Mode::HandoffProbe)),
@@ -1617,6 +1628,7 @@ struct HardwareTests {
     timing_capture: PhotoCapture,
     reverb_probe: ReverbProbe,
     handoff_probe: HandoffProbe,
+    cd_chain_probe: CdChainProbe,
     transition_probe: TransitionProbe,
     voice_probe: VoiceProbe,
     audio_probe: AudioProbe,
@@ -1678,6 +1690,7 @@ impl HardwareTests {
             timing_capture: PhotoCapture::new(),
             reverb_probe: ReverbProbe::new(boot_reverb),
             handoff_probe: HandoffProbe::new(),
+            cd_chain_probe: CdChainProbe::new(),
             transition_probe: TransitionProbe::new(),
             voice_probe: VoiceProbe::new(),
             audio_probe: AudioProbe::new(),
@@ -1773,6 +1786,7 @@ impl HardwareTests {
             Mode::MemoryCard => self.memory_card = MemoryCardDiagnostic::new(),
             Mode::ReverbProbe => self.reverb_probe.start(),
             Mode::HandoffProbe => self.handoff_probe.start(),
+            Mode::CdChainProbe => self.cd_chain_probe.start(),
             Mode::TransitionProbe => self.transition_probe.start(),
             Mode::VoiceProbe => self.voice_probe.start(),
             Mode::AudioProbe => self.audio_probe.start(),
@@ -1843,6 +1857,7 @@ impl HardwareTests {
             }
             Mode::ReverbProbe => self.reverb_probe.restart(),
             Mode::HandoffProbe => self.handoff_probe.restart(),
+            Mode::CdChainProbe => self.cd_chain_probe.restart(),
             Mode::TransitionProbe => self.transition_probe.restart(),
             Mode::VoiceProbe => self.voice_probe.restart(),
             Mode::AudioProbe => self.audio_probe.restart(),
@@ -1922,6 +1937,14 @@ impl Scene for HardwareTests {
             }
         } else if matches!(self.mode, Mode::HandoffProbe) {
             let (realign, consume_input) = self.handoff_probe.update(ctx);
+            if realign {
+                ctx.request_timing_realign();
+            }
+            if consume_input {
+                return;
+            }
+        } else if matches!(self.mode, Mode::CdChainProbe) {
+            let (realign, consume_input) = self.cd_chain_probe.update(ctx);
             if realign {
                 ctx.request_timing_realign();
             }
@@ -2074,6 +2097,7 @@ impl Scene for HardwareTests {
             match self.mode {
                 Mode::ReverbProbe => self.reverb_probe.draw(font),
                 Mode::HandoffProbe => self.handoff_probe.draw(font),
+                Mode::CdChainProbe => self.cd_chain_probe.draw(font),
                 Mode::TransitionProbe => self.transition_probe.draw(font),
                 Mode::VoiceProbe => self.voice_probe.draw(font),
                 Mode::AudioProbe => self.audio_probe.draw(font),
