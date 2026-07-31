@@ -437,22 +437,24 @@ fn load_next_sector_sets_ready_latch_but_leaves_transfer_disarmed() {
 }
 
 #[test]
-fn sector_read_cycles_match_redux_initial_and_stream_cadence() {
+fn sector_read_cycles_match_calibrated_initial_and_redux_stream_cadence() {
     let mut cd = CdRom::new();
-    // Default mode = 0x80 → double-speed.
-    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME);
+    // Default mode = 0x80 → double-speed. Initial carries the extra half
+    // frame of rotational alignment measured on the console (records
+    // 0x94/0x95); the steady cadence stays Redux's rotation-locked rate.
+    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME * 3 / 2);
     assert_eq!(cd.sector_read_cycles(), CD_READ_TIME / 2);
     // Flipping bit 7 off via SetMode gives single-speed (2×).
     cd.cmd_setmode(&[0x00]);
-    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME * 2);
+    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME * 3);
     assert_eq!(cd.sector_read_cycles(), CD_READ_TIME);
     // Setting other bits without bit 7 stays single-speed.
     cd.cmd_setmode(&[0x60]);
-    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME * 2);
+    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME * 3);
     assert_eq!(cd.sector_read_cycles(), CD_READ_TIME);
     // Back to double-speed when bit 7 returns.
     cd.cmd_setmode(&[0x80]);
-    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME);
+    assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME * 3 / 2);
     assert_eq!(cd.sector_read_cycles(), CD_READ_TIME / 2);
 }
 
@@ -477,12 +479,12 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
         .expect("first DataReady scheduled from ACK fire time");
     assert_eq!(
         first_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2
     );
     cd.irq_flag = 0;
     cd.responses.clear();
 
-    assert!(cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1));
+    assert!(cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1));
     let next_data_ready = cd
         .pending
         .iter()
@@ -490,7 +492,7 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
         .expect("steady DataReady scheduled");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
     );
 }
 
@@ -509,7 +511,7 @@ fn dataready_arrives_on_schedule_even_with_the_cpu_irq_still_pending() {
     cd.irq_flag = 0;
     cd.responses.clear();
 
-    let first_due = ack_cycle + CD_READ_TIME + 1;
+    let first_due = ack_cycle + CD_READ_TIME * 3 / 2 + 1;
     assert!(cd.tick_with_irq_pending(first_due, true));
     assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
 }
@@ -568,7 +570,7 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
     cd.responses.clear();
 
     assert!(
-        !cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1),
+        !cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1),
         "Redux suppresses DataReady IRQs for STRSND XA audio sectors"
     );
     assert_eq!(cd.irq_flag, 0);
@@ -585,7 +587,7 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
         .expect("suppressed audio sector should still chain the read stream");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
     );
 }
 
@@ -630,9 +632,13 @@ fn pause_on_spun_up_drive_uses_short_followup_delay() {
 }
 
 #[test]
-fn seek_command_uses_short_followup_after_drive_has_seeked_once() {
+fn seek_command_charges_the_measured_mech_curve() {
     let mut cd = CdRom::new();
+    // Even with a prior seek done, silicon answers SeekL along the measured
+    // distance curve (record 0x90: ~11 ms for a 1-sector hop, no free path).
     cd.seek_done = true;
+    cd.read_lba = 200;
+    cd.setloc_msf = (0x00, 0x02, 0x16);
     cd.scheduling_cycle = 1_000;
 
     cd.cmd_seek();
@@ -644,7 +650,16 @@ fn seek_command_uses_short_followup_after_drive_has_seeked_once() {
         .iter()
         .find(|ev| ev.irq == IrqType::Complete)
         .expect("seek completion chained off ACK");
-    assert_eq!(seek_complete.deadline, ack_deadline + 1 + 0x800);
+    let target = msf_to_lba(0x00, 0x02, 0x16);
+    assert_eq!(
+        seek_complete.deadline,
+        ack_deadline + 1 + seek_cycles(target.abs_diff(200))
+    );
+    assert_eq!(cd.read_lba, target, "seek commits the head position");
+    assert!(
+        !cd.setloc_pending,
+        "a following read must not charge the same journey twice"
+    );
 }
 
 #[test]
@@ -694,11 +709,17 @@ fn read_command_cancels_old_stream_and_rearms_first_sector() {
         .expect("ReadN ACK present");
     let followup = ack.followup.as_ref().expect("first sector chained off ACK");
     assert_eq!(followup.irq, IrqType::DataReady);
-    assert_eq!(followup.delay, cd.initial_sector_read_cycles());
+    // The pending SetLoc moved the head from LBA 0 to the target, so the
+    // first sector carries the measured travel cost on top of the ordinary
+    // first-sector delay.
+    assert_eq!(
+        followup.delay,
+        cd.initial_sector_read_cycles() + seek_cycles(msf_to_lba(0x00, 0x02, 0x16))
+    );
 }
 
 #[test]
-fn relocated_read_stretches_second_sector_gap() {
+fn relocated_read_charges_travel_on_first_sector_then_streams_at_cadence() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
     cd.scheduling_cycle = 1_000;
@@ -711,7 +732,11 @@ fn relocated_read_stretches_second_sector_gap() {
     assert!(cd.tick(ack_deadline + 1));
     cd.irq_flag = 0;
 
-    let first_sector_deadline = ack_deadline + 1 + CD_READ_TIME;
+    // Head travel (measured curve) lands on the FIRST sector; once sectors
+    // stream, silicon delivers them at the plain frame cadence (records
+    // 0x94/0x95), with no long-gap cliff on the second sector.
+    let travel = seek_cycles(msf_to_lba(0x00, 0x02, 0x16));
+    let first_sector_deadline = ack_deadline + 1 + CD_READ_TIME * 3 / 2 + travel;
     assert!(cd.tick(first_sector_deadline + 1));
     let next_sector = cd
         .pending
@@ -720,11 +745,11 @@ fn relocated_read_stretches_second_sector_gap() {
         .expect("read stream should continue after first sector");
     assert_eq!(
         next_sector.deadline,
-        first_sector_deadline + 1 + (CD_READ_TIME / 2) * 30
+        first_sector_deadline + 1 + CD_READ_TIME / 2
     );
     assert!(
         !cd.location_changed,
-        "the long-gap latch should clear once it has stretched one sector"
+        "the travel latch should clear once the stream is running"
     );
 }
 
