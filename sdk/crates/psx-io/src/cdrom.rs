@@ -562,10 +562,14 @@ fn drain_response_fifo() {
     let _ = read_response_fifo();
 }
 
+/// Spin budget for the blocking parameter-FIFO wait. The controller
+/// frees a slot in microseconds; this is purely a hang guard.
+const PARAM_ROOM_SPINS: u32 = 131_072;
+
 fn wait_param_room() {
-    while read_status() & STATUS_PARAM_NOT_FULL == 0 {
-        core::hint::spin_loop();
-    }
+    // Bounded like every other hardware wait in the SDK: a controller
+    // that never frees the parameter FIFO must not hang the caller.
+    let _ = wait_param_room_bounded(PARAM_ROOM_SPINS);
 }
 
 fn wait_param_room_bounded(mut spins: u32) -> bool {
