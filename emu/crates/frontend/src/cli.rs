@@ -1611,6 +1611,16 @@ fn run_headless_launch(
                 "cd-sectors-dropped={dropped}  lba {first}..{last}  (guest read the disc too slowly)"
             );
         }
+        // Same shape of trap on the GPU side: a guest that bursts GP0
+        // words at a busy GPU renders fine under the emulator's stall
+        // pacing but can lose words to the real 16-word FIFO. Nonzero
+        // here means "this code may draw garbage on silicon".
+        let gp0_overflows = bus.gpu.gp0_overflow_count();
+        if gp0_overflows > 0 {
+            println!(
+                "gp0-fifo-overflows={gp0_overflows}  (unpaced GP0 burst; silicon may lose these words)"
+            );
+        }
         if std::env::var_os("PSOXIDE_TRACE_HLE_BIOS").is_some() {
             eprintln!(
                 "[hle-bios] sr={:08x} istat={:03x} imask={:03x} irq-high-steps={} irq-taken={}",

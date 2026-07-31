@@ -2610,3 +2610,59 @@ fn wireframe_erase_restores_background_not_black() {
         "untouched region was 0 before wireframe and stays 0"
     );
 }
+
+/// GP1(00h) is spec-equivalent to GP0(E1h..E6h)=0: the DECODED clip
+/// rectangle and draw offset must reset, not just their readback
+/// latches. The demo-disc IRQ probe painted nothing on a real console
+/// because the emulator used to keep the previous wide-open area.
+#[test]
+fn gp1_reset_zeroes_the_decoded_draw_area_and_offset() {
+    let mut gpu = Gpu::new();
+    gpu.gp0_push(0x60FF_FFFF); // monochrome rect, white
+    gpu.gp0_push(0x0010_0010); // at (16,16)
+    gpu.gp0_push(0x0001_0001); // 1x1
+    assert_ne!(gpu.vram.get_pixel(16, 16), 0, "pre-reset draw must land");
+
+    gpu.apply_gp1_display(0x0000_0000); // GP1(00h) reset
+    gpu.gp0_push(0x60FF_FFFF);
+    gpu.gp0_push(0x0020_0020); // (32,32)
+    gpu.gp0_push(0x0001_0001);
+    assert_eq!(
+        gpu.vram.get_pixel(32, 32),
+        0,
+        "after GP1(00h) the clip rect is the origin pixel; this draw must vanish"
+    );
+
+    gpu.gp0_push(0xE300_0000); // draw area top-left (0,0)
+    gpu.gp0_push(0xE400_0000 | (511 << 10) | 1023); // bottom-right, full VRAM
+    gpu.gp0_push(0x60FF_FFFF);
+    gpu.gp0_push(0x0030_0030); // (48,48)
+    gpu.gp0_push(0x0001_0001);
+    assert_ne!(
+        gpu.vram.get_pixel(48, 48),
+        0,
+        "an explicit E3/E4 after the reset draws again"
+    );
+}
+
+/// The GP0 overflow diagnostic counts CPU words that arrive past the
+/// 16-word FIFO while the GPU is busy, and resets its occupancy the
+/// moment a write finds the GPU idle. Non-strict mode never rejects.
+#[test]
+fn unpaced_gp0_bursts_past_the_fifo_are_counted() {
+    let mut gpu = Gpu::new();
+    assert!(gpu.note_cpu_gp0_arrival(), "idle GPU accepts");
+    gpu.charge_busy(1_000_000);
+    for word in 0..Gpu::GP0_FIFO_DEPTH {
+        assert!(gpu.note_cpu_gp0_arrival(), "word {word} fits the FIFO");
+    }
+    assert_eq!(gpu.gp0_overflow_count(), 0);
+    assert!(gpu.note_cpu_gp0_arrival(), "non-strict mode still accepts");
+    assert_eq!(gpu.gp0_overflow_count(), 1);
+
+    gpu.decay_busy(2_000_000);
+    assert!(gpu.note_cpu_gp0_arrival());
+    gpu.charge_busy(10);
+    assert!(gpu.note_cpu_gp0_arrival(), "occupancy reset after an idle write");
+    assert_eq!(gpu.gp0_overflow_count(), 1, "no new overflow after the reset");
+}

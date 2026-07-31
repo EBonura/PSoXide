@@ -2649,6 +2649,11 @@ impl Bus {
             self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
         }
         if to_physical(virt) == crate::gpu::GP0_ADDR {
+            if !self.gpu.note_cpu_gp0_arrival() {
+                // Strict-FIFO mode: silicon loses the word outright, and a
+                // lost word stalls nothing.
+                return;
+            }
             let stall = self.gpu.cpu_gp0_write_stall();
             self.add_cycles(stall);
         }
