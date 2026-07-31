@@ -421,7 +421,7 @@ pub struct CdRom {
     cdda_sample_index: usize,
     /// Cycle at which an accepted Play finishes travelling to its track and
     /// audio actually starts. `None` when the drive is not on its way
-    /// anywhere. See [`timing::cdda_seek_cycles`] for why this exists.
+    /// anywhere. See [`timing::seek_cycles`] for why this exists.
     cdda_seek_done_at: Option<u64>,
     /// Redux tracks whether the drive has already completed a seek and
     /// uses that to pick the short 0x800-cycle SeekL/SeekP follow-up
@@ -1422,13 +1422,15 @@ impl CdRom {
     }
 
     /// Delay from a ReadN/ReadS command to the first DataReady event.
-    /// Redux uses one full CD frame at double-speed here, then switches
-    /// to half-frame cadence for the chained stream.
+    /// Redux uses one full CD frame at double-speed here; the console
+    /// (records 0x94/0x95) shows one more frame period of rotational
+    /// alignment before the first sector at both speeds, so charge 1.5
+    /// frames double / 3 frames single ahead of the chained stream.
     fn initial_sector_read_cycles(&self) -> u64 {
         if self.mode & 0x80 != 0 {
-            CD_READ_TIME
+            CD_READ_TIME * 3 / 2
         } else {
-            CD_READ_TIME * 2
+            CD_READ_TIME * 3
         }
     }
 
@@ -1615,11 +1617,19 @@ impl CdRom {
         // done. Returning SEEK here makes the license boot path think
         // the drive is still unsettled.
         let stat = self.stat_byte() & !drive_status_bit::SEEKING;
-        let delay = if self.seek_done {
-            0x800
-        } else {
-            SEEK_SECOND_RESPONSE_CYCLES
+        // Charge the measured mech curve for the actual head travel. The
+        // console answers SeekL in ~11 ms even for a 1-sector hop (record
+        // 0x90), so there is no free repeat-seek path; the old
+        // seek_done-gated 0x800 quick ack made records 0x90/0x91 read as
+        // instant where silicon takes 11-79 ms. The head moves: commit the
+        // target so a following ReadN does not charge the journey twice.
+        let target_lba = {
+            let (m, s, f) = self.setloc_msf;
+            msf_to_lba(m, s, f)
         };
+        let delay = seek_cycles(target_lba.abs_diff(self.read_lba));
+        self.read_lba = target_lba;
+        self.setloc_pending = false;
         self.schedule_second_response(vec![stat], delay);
         self.seek_done = true;
     }
@@ -1651,9 +1661,19 @@ impl CdRom {
         self.seek_done = true;
         self.xa_first_sector = 1;
         self.schedule_first_response(vec![self.stat_byte()]);
+        // A pending SetLoc means the head still has to travel before the
+        // first sector can stream. Charge the measured mech curve for that
+        // distance up front, on top of the ordinary first-sector delay.
+        // (The old model instead multiplied the SECOND sector's delay by a
+        // flat 30, i.e. ~400 ms at single speed regardless of distance;
+        // the console delivers 8 sectors of a near re-seek in ~105 ms,
+        // records 0x94/0x95.)
+        let mut travel = 0;
         if self.setloc_pending {
             let (m, s, f) = self.setloc_msf;
-            self.read_lba = msf_to_lba(m, s, f);
+            let target = msf_to_lba(m, s, f);
+            travel = seek_cycles(target.abs_diff(self.read_lba));
+            self.read_lba = target;
             self.setloc_pending = false;
             self.location_changed = true;
         } else if self.read_lba == 0 {
@@ -1670,7 +1690,7 @@ impl CdRom {
         self.chain_followup(
             IrqType::DataReady,
             vec![self.stat_byte()],
-            self.initial_sector_read_cycles(),
+            self.initial_sector_read_cycles().saturating_add(travel),
         );
     }
 
@@ -1996,7 +2016,7 @@ impl CdRom {
         self.drive_status |= drive_status_bit::SEEKING;
         self.cdda_seek_done_at = Some(
             self.scheduling_cycle
-                .saturating_add(cdda_seek_cycles(from_lba.abs_diff(self.read_lba))),
+                .saturating_add(seek_cycles(from_lba.abs_diff(self.read_lba))),
         );
         self.schedule_first_response(vec![self.stat_byte()]);
     }
@@ -2170,13 +2190,14 @@ impl CdRom {
                 }
                 self.read_rescheduled = false;
                 if self.reading {
-                    let delay = if self.location_changed {
-                        self.location_changed = false;
-                        self.sector_read_cycles().saturating_mul(30)
-                    } else {
-                        self.sector_read_cycles()
-                    };
-                    self.schedule_sector_event_at(cycles_now, delay);
+                    // The head-travel cost of a moved SetLoc is charged on
+                    // the FIRST sector (see cmd_read); once sectors stream,
+                    // silicon delivers them at the nominal frame cadence
+                    // (records 0x94/0x95: 8 sectors in ~105 ms single /
+                    // ~52 ms double, first included). The old flat x30 here
+                    // put a ~400 ms cliff on the second sector instead.
+                    self.location_changed = false;
+                    self.schedule_sector_event_at(cycles_now, self.sector_read_cycles());
                 }
             }
             if !should_raise_irq {
