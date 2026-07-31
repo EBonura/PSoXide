@@ -1743,6 +1743,7 @@ impl HardwareTests {
     }
 
     fn run_startup_scans(&mut self) {
+        unsafe { core::ptr::write_volatile(&raw mut SCAN_ABORT, false) };
         self.draw_running_label(TEST_COUNT, "scan", "cpu sweep");
         self.cpu_scan = run_cpu_scan();
         print_scan_report(Mode::CpuScan, self.cpu_scan);
@@ -1752,7 +1753,7 @@ impl HardwareTests {
         self.draw_running_label(TEST_COUNT, "scan", "spu map");
         self.spu_scan = run_spu_scan();
         print_scan_report(Mode::SpuScan, self.spu_scan);
-        self.draw_running_label(TEST_COUNT, "scan", "timing map");
+        self.draw_running_label(TEST_COUNT, "scan", "timing map  START SKIPS");
         self.timing_scan = run_timing_scan();
         self.encode_capture(0);
         print_scan_report(Mode::TimingScan, self.timing_scan.summary);
@@ -2050,16 +2051,21 @@ impl Scene for HardwareTests {
                 self.menu_cursor = (self.menu_cursor + 1) % entries.len();
             }
             if matches!(entries[self.menu_cursor].1, MenuAction::RunFromIndex) {
-                let step = if ctx.is_held(button::L1) || ctx.is_held(button::R1) {
-                    10
-                } else {
-                    1
-                };
+                // L1/R1 step by ten on their own. They used to be modifiers
+                // held with LEFT/RIGHT, which is not what the row says, so
+                // pressing them did nothing and the label was a lie.
+                let last = TEST_COUNT as u16 - 1;
                 if ctx.just_pressed(button::LEFT) {
-                    self.resume_index = self.resume_index.saturating_sub(step);
+                    self.resume_index = self.resume_index.saturating_sub(1);
                 }
                 if ctx.just_pressed(button::RIGHT) {
-                    self.resume_index = (self.resume_index + step).min(TEST_COUNT as u16 - 1);
+                    self.resume_index = (self.resume_index + 1).min(last);
+                }
+                if ctx.just_pressed(button::L1) {
+                    self.resume_index = self.resume_index.saturating_sub(10);
+                }
+                if ctx.just_pressed(button::R1) {
+                    self.resume_index = (self.resume_index + 10).min(last);
                 }
             }
             // START and TRIANGLE both back out one level, and leave the menu
@@ -2302,8 +2308,8 @@ fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
         // The audio row shows its own state inline, so the operator never has
         // to guess whether the tone is currently playing.
         if matches!(entries[row].1, MenuAction::RunFromIndex) {
-            font.draw_text(196, y, dec3(suite.resume_index).as_str(), (255, 232, 128));
-            font.draw_text(228, y, "L/R +-10", (140, 160, 190));
+            font.draw_text(180, y, dec3(suite.resume_index).as_str(), (255, 232, 128));
+            font.draw_text(212, y, "<> 1  L1R1 10", (140, 160, 190));
         }
         if matches!(entries[row].1, MenuAction::CycleAudio) {
             if !suite.audio_prepared {
@@ -4005,6 +4011,17 @@ fn push_timing_record(
     records[*next] = record;
     *next += 1;
     draw_init_progress(*next, TIMING_RECORD_COUNT, (80, 200, 255));
+    // Between records the console is briefly ours again: let START or
+    // TRIANGLE skip the rest of the scan. Remaining records stay pending
+    // and the capture still encodes, so a stalled drive costs the timing
+    // envelopes instead of the whole session.
+    if !scan_aborted() {
+        let pad = psx_pad::poll_port1().buttons;
+        if pad.is_held(button::START) || pad.is_held(button::TRIANGLE) {
+            unsafe { core::ptr::write_volatile(&raw mut SCAN_ABORT, true) };
+            tty::println("hardware-tests: timing scan aborted by operator");
+        }
+    }
 }
 
 /// Draw a progress bar straight into the visible framebuffer.
@@ -4053,10 +4070,27 @@ fn draw_init_progress(done: usize, total: usize, colour: (u8, u8, u8)) {
 /// landing inside a measured window is that one of the repeats happens to
 /// escape, so the min/max gap reports "did an interrupt hit" rather than real
 /// hardware jitter. With IE clear the spread is the silicon's own.
+/// Set by [`push_timing_record`] when the operator asks to move on.
+/// The CD records in this scan are mechanical: four seek distances and
+/// the read-throughput probes, five samples each, every one bounded by a
+/// two-second deadline. On a drive that never answers, that is minutes
+/// of an apparently frozen console, which is indistinguishable from the
+/// hangs we have been chasing all evening.
+static mut SCAN_ABORT: bool = false;
+
+fn scan_aborted() -> bool {
+    unsafe { core::ptr::read_volatile(&raw const SCAN_ABORT) }
+}
+
 fn sample_timing<F>(id: u8, work: u16, mut probe: F) -> TimingRecord
 where
     F: FnMut() -> u16,
 {
+    // Checked here rather than at the push, because the measurement runs
+    // as the push's argument: this is the only place that can skip it.
+    if scan_aborted() {
+        return TimingRecord::pending();
+    }
     let mut samples = [0u16; TIMING_SAMPLES];
     let guard = IrqGuard::mask();
     let mut run = 0;
