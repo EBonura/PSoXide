@@ -556,7 +556,13 @@ pub fn submit_linked_list_async(head: *const u32) {
     // channel 2's request handshake can queue the next list behind that work,
     // which is how PsyQ/PSn00bSDK keep the GPU fed. Only the DMA channel and
     // the list's backing storage must be free before starting another walk.
-    while dma::is_busy(Channel::Gpu) {}
+    //
+    // Bounded: a wedged channel (see `dma::abort`) would otherwise hang
+    // the frame loop forever. Aborting costs at most the tail of a walk
+    // that was never going to finish.
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+        dma::abort(Channel::Gpu);
+    }
 
     // Make sure the GPU's DMA direction is CPU→GP0 before we kick off the
     // walker. `gpu::init` sets this, but games occasionally re-route DMA for
@@ -580,7 +586,9 @@ pub fn submit_linked_list_async(head: *const u32) {
 /// cost from CPU build cost.
 #[inline]
 pub fn submit_linked_list_wait() {
-    while dma::is_busy(Channel::Gpu) {}
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_DMA_SPINS) {
+        dma::abort(Channel::Gpu);
+    }
 }
 
 /// Submit a linked-list chain starting at `head` to GPU GP0 via

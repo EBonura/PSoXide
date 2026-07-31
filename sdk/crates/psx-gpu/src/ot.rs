@@ -62,9 +62,11 @@ impl<const N: usize> OrderingTable<N> {
     /// controller wedges, this spins forever inside the DMA wait.
     #[cfg(target_arch = "mips")]
     pub fn clear_via_otc_dma(&mut self) {
-        if N <= u16::MAX as usize {
-            psx_io::dma::clear_ordering_table(self.entries.as_mut_ptr(), N as u16);
-        } else {
+        let cleared = N <= u16::MAX as usize
+            && psx_io::dma::clear_ordering_table(self.entries.as_mut_ptr(), N as u16);
+        if !cleared {
+            // Wedged channel or an over-large table: the CPU path always
+            // produces a valid chain, so never hand back a stale one.
             self.clear_software();
         }
     }
