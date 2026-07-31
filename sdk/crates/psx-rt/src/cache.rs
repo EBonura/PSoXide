@@ -13,9 +13,14 @@
 //!    disabled, so stores hit cache tags instead of memory,
 //! 4. store once per 16-byte line across the 4 KiB cache, clearing
 //!    every line's tag,
-//! 5. restore the normal cache-control value (`0x1E988`, the state a
-//!    booted console runs with -- the same constant the BIOS restores)
-//!    and the caller's SR.
+//! 5. drop isolation first (SR = 0, interrupts still off), THEN restore
+//!    the normal cache-control value (`0x1E988`, the state a booted
+//!    console runs with -- the same constant the BIOS restores), then
+//!    the caller's SR. The order matches the BIOS routine exactly: with
+//!    IsC still set, whether a store reaches the CPU-internal
+//!    cache-control port or is swallowed by the isolated cache is
+//!    undocumented, and a swallowed restore would leave the console in
+//!    tag-test mode with the scratchpad unmapped.
 //!
 //! The emulator models isolated tag-test stores and the cache-control
 //! port, so this path is exercised identically in emulation and on
@@ -50,6 +55,9 @@ __psx_rt_flush_i_cache:
     sw    $zero, 0($9)
     addiu $9, $9, 0x0010
     bne   $9, $11, .Lpsx_rt_flush_line
+    nop
+    mtc0  $zero, $12
+    nop
     nop
     lui   $9, 0x0001
     ori   $9, $9, 0xe988
