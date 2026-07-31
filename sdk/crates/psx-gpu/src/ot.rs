@@ -49,16 +49,22 @@ impl<const N: usize> OrderingTable<N> {
     /// to the slot below. Submission starts at `[N-1]` so the
     /// DMA walker visits `[N-1] → [N-2] → … → [0] → end`.
     pub fn clear(&mut self) {
-        #[cfg(target_arch = "mips")]
-        {
-            if N <= u16::MAX as usize {
-                psx_io::dma::clear_ordering_table(self.entries.as_mut_ptr(), N as u16);
-            } else {
-                self.clear_software();
-            }
-        }
-        #[cfg(not(target_arch = "mips"))]
-        {
+        // CPU clear by default: the OTC DMA is one of the channels the
+        // CL2 silicon probes showed can wedge busy-forever on real
+        // hardware, and a wedged boot-time clear freezes the engine at
+        // its first frame with no diagnostic. N stores per frame is a
+        // measurable but small cost; callers that trust their DMA can
+        // opt back in via [`Self::clear_via_otc_dma`].
+        self.clear_software();
+    }
+
+    /// Opt-in OTC DMA clear (the pre-CL2 default). On hardware whose DMA
+    /// controller wedges, this spins forever inside the DMA wait.
+    #[cfg(target_arch = "mips")]
+    pub fn clear_via_otc_dma(&mut self) {
+        if N <= u16::MAX as usize {
+            psx_io::dma::clear_ordering_table(self.entries.as_mut_ptr(), N as u16);
+        } else {
             self.clear_software();
         }
     }
