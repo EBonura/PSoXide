@@ -36,6 +36,22 @@ __psx_rt_exception_handler:
     sw    $27, 0x1070($26)
 
 1:
+    mfc0  $27, $13
+    nop
+    andi  $27, $27, 0x007c
+    beqz  $27, 2f
+    nop
+    lui   $26, %hi(__psx_rt_fault_count)
+    lw    $27, %lo(__psx_rt_fault_count)($26)
+    nop
+    addiu $27, $27, 1
+    sw    $27, %lo(__psx_rt_fault_count)($26)
+    mfc0  $26, $14
+    nop
+    addiu $26, $26, 4
+    jr    $26
+    .word 0x42000010
+2:
     mfc0  $26, $14
     nop
     jr    $26
@@ -47,6 +63,18 @@ __psx_rt_exception_handler:
 /// Monotonic VBlank IRQ count.
 #[no_mangle]
 pub static mut __psx_rt_vblank_count: u32 = 0;
+
+/// Count of exceptions that were NOT interrupts: bus errors, address
+/// errors, reserved instructions.
+///
+/// The handler used to return straight to EPC for these, which
+/// re-executes the faulting instruction and loops forever: a silent
+/// freeze with no diagnostic, indistinguishable from a hung spin. It now
+/// steps over the faulting instruction and counts it here, so a bad
+/// access costs one wrong value instead of the whole program, and the
+/// count says it happened.
+#[no_mangle]
+pub static mut __psx_rt_fault_count: u32 = 0;
 
 /// Set once [`install_vblank_counter`] has run, so [`wait_vblank`] can
 /// install lazily without resetting a counter the game is already using.
@@ -89,6 +117,13 @@ pub fn install_vblank_counter() {
 /// Install and enable the VBlank counter interrupt path.
 #[cfg(not(target_arch = "mips"))]
 pub fn install_vblank_counter() {}
+
+/// Unexpected exceptions survived so far. Non-zero means some access
+/// faulted and was stepped over; the value it read or wrote is garbage.
+#[inline]
+pub fn fault_count() -> u32 {
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_count) }
+}
 
 /// Current monotonic VBlank count.
 #[inline]

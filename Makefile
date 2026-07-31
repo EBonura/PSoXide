@@ -666,21 +666,6 @@ hardware-tests-disc: hardware-tests $(HWTEST_CDDA)
 		--cdtest-sectors 600 \
 		--cdda-track ../../$(HWTEST_CDDA)
 
-# CL1 standalone: the chain-load CD read matrix on the launcher's proven
-# raw-SDK stack (the engine-hosted copy is blocked by the engine's own
-# silicon boot hang). Same CDTEST region and tone track as the hardware
-# test disc; the probe's CDTEST_LBA constant must match this layout.
-cd-chain-probe:
-	cd sdk/examples/cd-chain-probe && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
-
-cd-chain-probe-disc: cd-chain-probe $(HWTEST_CDDA)
-	cd tools/mkisopsx && cargo run --release -- \
-		--exe ../../$(EXAMPLE_OUT)/cd-chain-probe.exe \
-		--out ../../$(EXAMPLE_OUT)/cd-chain-probe.bin \
-		--volume PSOXIDE \
-		--cdtest-sectors 600 \
-		--cdda-track ../../$(HWTEST_CDDA)
-
 $(foreach example,$(DATA_DISC_EXAMPLES),$(eval $(call build_data_disc,$(example))))
 
 # Cook a project into editor-playtest/generated/. With no

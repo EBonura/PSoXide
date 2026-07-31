@@ -317,7 +317,7 @@ impl Mode {
             Self::MemoryCard => "NON-DESTRUCTIVE FULL-CARD READ/WRITE TEST",
             Self::ReverbProbe => "BIOS REVERB STATE + MAP DMA RESET VARIANTS QR",
             Self::HandoffProbe => "SELECTABLE MENU-VOICE SHUTDOWN + BANK SPLIT QR",
-            Self::CdChainProbe => "CHAIN-LOAD CD READ MATRIX QR (CL1)",
+            Self::CdChainProbe => "CD READ MECHANISM MATRIX QR (CL2)",
             Self::TransitionProbe => "EXACT FULL/LIGHT/MAP LIVE-BANK HANDOFF QR",
             Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
@@ -583,9 +583,11 @@ enum MenuAction {
     Back,
     /// Step the audio readout: off, each rate, off again.
     CycleAudio,
+    /// Run the conformance battery starting at `resume_index`.
+    RunFromIndex,
 }
 
-const ROOT_MENU: [(&str, MenuAction); 8] = [
+const ROOT_MENU: [(&str, MenuAction); 9] = [
     // Row 0 is pinned: `make hwtest-capture` selects it by firing CROSS at a
     // fixed tick with the cursor still at its boot position. Move this row and
     // the capture opens whatever took its place, which produces an empty log
@@ -602,6 +604,11 @@ const ROOT_MENU: [(&str, MenuAction); 8] = [
     // Listed, not just bound to SQUARE: an operator cannot discover a hidden
     // button, and this is the control they need while recording.
     ("AUDIO READOUT", MenuAction::CycleAudio),
+    // A test that hangs the console used to cost a fresh burn to get past.
+    // LEFT/RIGHT pick a start index, CROSS runs the battery from there, so
+    // the operator power-cycles, resumes past the offender, and keeps
+    // enumerating the rest in one session.
+    ("RESUME FROM TEST", MenuAction::RunFromIndex),
 ];
 
 const RESULTS_MENU: [(&str, MenuAction); 12] = [
@@ -627,7 +634,7 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
 ];
 
 const PROBES_MENU: [(&str, MenuAction); 8] = [
-    ("CD CHAIN-LOAD (CL1)", MenuAction::Open(Mode::CdChainProbe)),
+    ("CD READ MECHANISM (CL2)", MenuAction::Open(Mode::CdChainProbe)),
     ("CONTROLLER PORT", MenuAction::Open(Mode::ControllerProbe)),
     ("HL REVERB STATE (PA5)", MenuAction::Open(Mode::ReverbProbe)),
     ("HL VOICE HANDOFF (PA4)", MenuAction::Open(Mode::HandoffProbe)),
@@ -1650,6 +1657,8 @@ struct HardwareTests {
     audio_prepared: bool,
     /// Selected row on the current menu page.
     menu_cursor: usize,
+    /// First conformance test the next RESUME FROM TEST run executes.
+    resume_index: u16,
     /// Which menu page is showing.
     menu_page: MenuPage,
 }
@@ -1705,17 +1714,22 @@ impl HardwareTests {
             audio_rate: 0,
             audio_prepared: false,
             menu_cursor: 0,
+            resume_index: 0,
             menu_page: MenuPage::Root,
         }
     }
 
     fn run_all(&mut self) {
-        for (index, spec) in TESTS.iter().enumerate() {
+        self.run_all_from(0);
+    }
+
+    fn run_all_from(&mut self, start: usize) {
+        for (index, spec) in TESTS.iter().enumerate().skip(start) {
             // Name the test BEFORE it runs, on screen and on the TTY: each
             // body is fully blocking, so when one hangs on silicon (the
             // first full-suite run after the DMA-free boot froze at ~10%
             // with an anonymous bar) the frozen frame identifies it.
-            self.draw_running_label(spec.group, spec.name);
+            self.draw_running_label(index, spec.group, spec.name);
             self.results[index] = (spec.run)();
             // Green while conformance runs, blue while the timing battery does;
             // the operator can tell which phase is slow.
@@ -1729,16 +1743,16 @@ impl HardwareTests {
     }
 
     fn run_startup_scans(&mut self) {
-        self.draw_running_label("scan", "cpu sweep");
+        self.draw_running_label(TEST_COUNT, "scan", "cpu sweep");
         self.cpu_scan = run_cpu_scan();
         print_scan_report(Mode::CpuScan, self.cpu_scan);
-        self.draw_running_label("scan", "gte matrix");
+        self.draw_running_label(TEST_COUNT, "scan", "gte matrix");
         self.gte_scan = run_gte_scan();
         print_scan_report(Mode::GteScan, self.gte_scan);
-        self.draw_running_label("scan", "spu map");
+        self.draw_running_label(TEST_COUNT, "scan", "spu map");
         self.spu_scan = run_spu_scan();
         print_scan_report(Mode::SpuScan, self.spu_scan);
-        self.draw_running_label("scan", "timing map");
+        self.draw_running_label(TEST_COUNT, "scan", "timing map");
         self.timing_scan = run_timing_scan();
         self.encode_capture(0);
         print_scan_report(Mode::TimingScan, self.timing_scan.summary);
@@ -1748,8 +1762,10 @@ impl HardwareTests {
     /// framebuffers (the battery blocks the frame loop, so only absolute
     /// VRAM writes stay visible), and mirror it to the TTY. The strip is
     /// cleared with the same absolute-coordinate fill the bar uses.
-    fn draw_running_label(&mut self, group: &str, name: &str) {
+    fn draw_running_label(&mut self, index: usize, group: &str, name: &str) {
         tty::print("hardware-tests: run ");
+        tty::print(dec3(index as u16).as_str());
+        tty::print(" ");
         tty::print(group);
         tty::print(": ");
         tty::println(name);
@@ -1764,9 +1780,17 @@ impl HardwareTests {
         }
         gpu::set_draw_area(0, 0, 1023, 511);
         gpu::set_draw_offset(0, 0);
-        let mut label = [0u8; 40];
+        let mut label = [0u8; 44];
         let mut n = 0usize;
-        for &part in &[b"RUN " as &[u8], group.as_bytes(), b": ", name.as_bytes()] {
+        let index_text = dec3(index as u16);
+        for &part in &[
+            b"RUN " as &[u8],
+            index_text.as_str().as_bytes(),
+            b" ",
+            group.as_bytes(),
+            b": ",
+            name.as_bytes(),
+        ] {
             let take = part.len().min(label.len() - n);
             label[n..n + take].copy_from_slice(&part[..take]);
             n += take;
@@ -2025,6 +2049,19 @@ impl Scene for HardwareTests {
             if ctx.just_pressed(button::DOWN) {
                 self.menu_cursor = (self.menu_cursor + 1) % entries.len();
             }
+            if matches!(entries[self.menu_cursor].1, MenuAction::RunFromIndex) {
+                let step = if ctx.is_held(button::L1) || ctx.is_held(button::R1) {
+                    10
+                } else {
+                    1
+                };
+                if ctx.just_pressed(button::LEFT) {
+                    self.resume_index = self.resume_index.saturating_sub(step);
+                }
+                if ctx.just_pressed(button::RIGHT) {
+                    self.resume_index = (self.resume_index + step).min(TEST_COUNT as u16 - 1);
+                }
+            }
             // START and TRIANGLE both back out one level, and leave the menu
             // entirely from the root, so one button walks the whole way out.
             if ctx.just_pressed(button::START) || ctx.just_pressed(button::TRIANGLE) {
@@ -2045,6 +2082,12 @@ impl Scene for HardwareTests {
                     MenuAction::Submenu(page) => self.open_menu_page(page),
                     MenuAction::Back => self.open_menu_page(MenuPage::Root),
                     MenuAction::CycleAudio => self.cycle_audio_readout(),
+                    MenuAction::RunFromIndex => {
+                        self.run_all_from(self.resume_index as usize);
+                        self.run_startup_scans();
+                        self.prepare_audio_readout();
+                        self.enter_mode(Mode::TimingScan);
+                    }
                 }
             }
             return;
@@ -2258,6 +2301,10 @@ fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
         font.draw_text(22, y, entries[row].0, colour);
         // The audio row shows its own state inline, so the operator never has
         // to guess whether the tone is currently playing.
+        if matches!(entries[row].1, MenuAction::RunFromIndex) {
+            font.draw_text(196, y, dec3(suite.resume_index).as_str(), (255, 232, 128));
+            font.draw_text(228, y, "L/R +-10", (140, 160, 190));
+        }
         if matches!(entries[row].1, MenuAction::CycleAudio) {
             if !suite.audio_prepared {
                 font.draw_text(150, y, "RUN CAPTURE FIRST", (255, 216, 96));
