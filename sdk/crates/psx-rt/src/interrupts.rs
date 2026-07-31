@@ -74,7 +74,7 @@ pub fn install_vblank_counter() {
         let handler = __psx_rt_exception_handler as *const () as usize as u32;
         core::ptr::write_volatile(EXCEPTION_VECTOR, J_OPCODE | ((handler >> 2) & 0x03ff_ffff));
         core::ptr::write_volatile(EXCEPTION_VECTOR.add(1), 0);
-        crate::bios::flush_cache();
+        crate::cache::flush_i_cache();
 
         core::ptr::write_volatile(&raw mut __psx_rt_vblank_count, 0);
         irq::ack(1 << irq::source::VBLANK);
