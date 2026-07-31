@@ -8376,27 +8376,9 @@ fn timed_divu_mflo() -> u16 {
 }
 
 fn flush_icache_without_irq() {
-    let status: u32;
-    unsafe {
-        core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") status);
-        core::arch::asm!(
-            "mtc0 $8, $12",
-            "nop",
-            "nop",
-            "nop",
-            in("$8") status & !1,
-            options(nostack, nomem),
-        );
-        psx_rt::bios::bios_flush_cache();
-        core::arch::asm!(
-            "mtc0 $8, $12",
-            "nop",
-            "nop",
-            "nop",
-            in("$8") status,
-            options(nostack, nomem),
-        );
-    }
+    // flush_i_cache disables interrupts internally for the isolated
+    // sequence, so no SR dance is needed around it.
+    psx_rt::cache::flush_i_cache();
 }
 
 /// Execute a timing wrapper through its KSEG1 alias. Cache probes must not run
