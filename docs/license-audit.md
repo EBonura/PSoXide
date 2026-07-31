@@ -1,6 +1,6 @@
 # PSoXide License And Provenance Audit
 
-Audit date: 2026-04-29 (last revised 2026-06-11).
+Audit date: 2026-04-29 (last revised 2026-07-31).
 
 Scope: repository source, checked-in binary assets, generated artifacts,
 third-party references, and public README media.
@@ -208,6 +208,58 @@ alternate-registry sources. The `advisories` and `bans` checks are left at
 crate's yanked/advisory status changing upstream should not break an
 unrelated change's CI, and duplicate transitive versions carry no licensing
 risk.
+
+### BIOS independence and Sony-material re-audit (2026-07-31)
+
+A full re-audit (source, complete git history, disc tooling, emulator,
+SDK/runtime) confirmed: no Sony code, no BIOS image, and no
+BIOS-extracted data anywhere in the repository or its history. No
+BIOS-sized blob was ever committed; the only binaries in history are
+project-built discs, a spectrum data file, and the public-domain IBM
+PC VGA font. Findings and the follow-up changes:
+
+- **Runtime BIOS surface reduced to debug output only.** The engine
+  boot path used to make one BIOS service call, `A(44h) FlushCache`,
+  after patching the exception vector. `psx-rt` now performs the
+  documented isolate-and-tag-clear i-cache flush itself
+  (`sdk/crates/psx-rt/src/cache.rs`, written from nocash PSX-SPX
+  cache-control documentation), and the six unused BIOS trampolines
+  (puts, the event functions, std_out_putchar) were deleted. The one
+  remaining BIOS entry point is `A(3Ch) putchar`, reached only from
+  panic/debug TTY output and kept deliberately as the canonical PS1
+  debug channel; nothing on the frame or boot path calls the BIOS.
+  Verified in emulation (display and VRAM hashes of five SDK examples
+  bit-identical before/after); the on-silicon check rides the next
+  hardware-tests run, since the test disc now uses the same routine.
+- **Disc system area ships nothing from Sony.** `mkisopsx` zero-fills
+  sectors 0..15 and contains no license or logo data. The only
+  injection path is the explicit user opt-in (`--system-area` /
+  `PSOXIDE_SYSTEM_AREA`), which nothing in the repo, Makefile, or CI
+  uses.
+- **PSX-EXE region marker.** `psx-rt` writes the conventional header
+  string "Sony Computer Entertainment Inc. for North America area"
+  into the EXE header region field (offset 4Ch). This is the one
+  Sony-authored string in shipped artifacts: a functional
+  interoperability field, not code or creative content. The BIOS does
+  not verify it, so swapping in neutral text is possible; that swap
+  is optional and would want a real-console boot check first.
+  Decision open.
+- **BIOS-output PNGs in git history.** The four milestone PNGs removed
+  from tracking on 2026-04-30 remain retrievable from git history on
+  any clone. Removing them for good needs a history rewrite
+  (`git filter-repo` plus a force push that breaks existing clones).
+  Decision open.
+- **SPU reverb preset values.** `emulator-core/src/spu.rs` carries the
+  32-word "Space Echo" reverb register preset (plus two single-word
+  hardware-observed constants in `cpu.rs`), captured from the
+  author's console and documented in nocash PSX-SPX. Hardware
+  register state, not copied code; reviewed and accepted.
+- **Wording cleanups.** "BIOS-compatible filesystem" (psx-mc) and
+  "IBM VGA BIOS console font" (psx-font) read as PS1-BIOS-derived at
+  a glance; both were reworded (card-manager interoperability and PC
+  BIOS lineage respectively). The license-string literals in the
+  emulator's region-detection tests are matching fixtures for discs
+  the user supplies, never written to any artifact.
 
 ## Outstanding Blockers
 
