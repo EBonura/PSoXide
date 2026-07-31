@@ -4024,6 +4024,37 @@ fn push_timing_record(
     }
 }
 
+/// Blink a marker beside the progress bar once per timing sample.
+///
+/// Ten of this scan's records are mechanical CD work -- four seek
+/// distances, two throughput probes and four command round trips -- at
+/// five samples each and a two-second deadline apiece. The bar only
+/// advances once per record, so the screen can sit motionless for ten
+/// seconds at a time, which is exactly what every hang we chased
+/// tonight looked like. This makes slow and stuck different pictures.
+fn scan_heartbeat() {
+    static mut PHASE: u32 = 0;
+    let phase = unsafe {
+        let next = core::ptr::read_volatile(&raw const PHASE).wrapping_add(1);
+        core::ptr::write_volatile(&raw mut PHASE, next);
+        next
+    };
+    let rgb = if phase & 1 == 0 {
+        0x0020_2020
+    } else {
+        0x00FF_E040
+    };
+    gpu_io::wait_cmd_ready();
+    // Absolute VRAM coordinates, like the bar: the battery blocks the
+    // frame loop, so ordinary draws would land in the hidden buffer.
+    // GP0(02h) snaps X and width to 16, hence the aligned geometry.
+    for buffer_y in [200u32, 440] {
+        gpu_io::write_gp0(0x0200_0000 | rgb);
+        gpu_io::write_gp0((buffer_y << 16) | 304);
+        gpu_io::write_gp0((8u32 << 16) | 16);
+    }
+}
+
 /// Draw a progress bar straight into the visible framebuffer.
 ///
 /// The whole battery runs inside `Scene::init`, before the engine has drawn a
@@ -4097,6 +4128,7 @@ where
     while run < TIMING_SAMPLES {
         samples[run] = probe();
         run += 1;
+        scan_heartbeat();
     }
     drop(guard);
 
