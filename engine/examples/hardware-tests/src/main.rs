@@ -4849,23 +4849,67 @@ fn test_irq_gpu_ack_path() -> TestResult {
     TestResult::info(0x0F, observed, "racy fifo")
 }
 
+/// One bounded OTC kick: force-stop the channel, arm it with `chcr`,
+/// wait with a spin cap, then verify and scrub the chain. Returns
+/// (completed, chain_correct). Never hangs, even on a wedging channel.
+fn otc_kick_bounded(ptr: *mut u32, words: u16, chcr: u32, delay: bool) -> (bool, bool) {
+    // Clear a possibly-wedged START from the previous variant; on
+    // silicon clearing bit 24 requests an abort.
+    dma::set_chcr(dma::Channel::Otc, 0);
+    for _ in 0..1_000u32 {
+        unsafe { core::ptr::read_volatile(psx_io::dma::DPCR as *const u32) };
+    }
+    dma::enable_channel(dma::Channel::Otc);
+    if delay {
+        for _ in 0..10_000u32 {
+            unsafe { core::ptr::read_volatile(psx_io::dma::DPCR as *const u32) };
+        }
+    }
+    let last = unsafe { ptr.add(words as usize - 1) };
+    dma::set_madr(dma::Channel::Otc, last as u32);
+    dma::set_bcr_manual(dma::Channel::Otc, words);
+    dma::set_chcr(dma::Channel::Otc, chcr);
+    let mut spins = 0u32;
+    while dma::is_busy(dma::Channel::Otc) && spins < 200_000 {
+        spins += 1;
+    }
+    let done = !dma::is_busy(dma::Channel::Otc);
+    let mut ok = unsafe { ptr::read_volatile(ptr) } == 0x00FF_FFFF;
+    for i in 1..words as usize {
+        let expected = unsafe { ptr.add(i - 1) } as u32 & 0x00FF_FFFF;
+        ok &= unsafe { ptr::read_volatile(ptr.add(i)) } == expected;
+    }
+    for i in 0..words as usize {
+        unsafe { core::ptr::write_volatile(ptr.add(i), 0xDEAD_BEEF) };
+    }
+    (done, ok)
+}
+
 fn test_dma_otc_clear() -> TestResult {
     static mut OT: [u32; 8] = [0; 8];
-    unsafe {
-        let ptr = (&raw mut OT) as *mut u32;
-        dma::clear_ordering_table(ptr, 8);
-        let mut observed = 0u32;
-        if ptr::read_volatile(ptr) == 0x00FF_FFFF {
-            observed |= 1;
-        }
-        for i in 1..8 {
-            let expected = ptr.add(i - 1) as u32 & 0x00FF_FFFF;
-            if ptr::read_volatile(ptr.add(i)) == expected {
-                observed |= 1 << i;
-            }
-        }
-        expect_eq(0xFF, observed, "otc")
+    // The SDK helper's unbounded wait hung this test on real silicon
+    // (the same channel-6 wedge that froze the engine's boot), so the
+    // kick is open-coded with a spin cap per CHCR variant and the
+    // channel is force-stopped between attempts. `observed` packs
+    // (completed, chain-correct) pairs per variant, low bits first:
+    //   V0 canonical trigger+start (0x11000002)
+    //   V1 start only, no trigger  (0x01000002)
+    //   V2 canonical after a settle delay past the DPCR enable
+    // On a healthy machine every pair reads 11; a wedge reports the
+    // exact surviving variant instead of hanging the battery.
+    let ptr = (&raw mut OT) as *mut u32;
+    let variants: [(u32, bool); 3] = [
+        (0x1100_0002, false),
+        (0x0100_0002, false),
+        (0x1100_0002, true),
+    ];
+    let mut observed = 0u32;
+    for (index, (chcr, delay)) in variants.iter().enumerate() {
+        let (done, ok) = otc_kick_bounded(ptr, 8, *chcr, *delay);
+        observed |= (done as u32) << (index * 2);
+        observed |= (ok as u32) << (index * 2 + 1);
     }
+    expect_eq(0x3F, observed, "otc variants (done,ok) pairs")
 }
 
 fn test_dma_channel_register_roundtrip() -> TestResult {
