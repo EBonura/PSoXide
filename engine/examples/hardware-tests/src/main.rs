@@ -109,6 +109,12 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.7: The CD-DA contention pair (0x9B/0x9C) normalises with PAUSE instead
+//       of STOP. The 2026-07-31 console run proved STOP+respin grinds the
+//       mech for minutes right after the contention read; with the motor
+//       kept up, 0x9C measures the read it always claimed to measure
+//       instead of a spin-up. Also: the scan draws the in-flight record id
+//       as bit-cells, and START skips mid-record.
 // v1.6: Menu-first boot and the shared memory-card hardware diagnostic. The
 //       record schema is unchanged, but linking the diagnostic moves timing
 //       code, so machine-code and emulator timing baselines are pinned to this
@@ -144,7 +150,7 @@ unsafe extern "C" {
 const SUITE_VERSION_MAJOR: u8 = 1;
 const SUITE_VERSION_MINOR: u8 = 6;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.6";
+const SUITE_VERSION: &str = "HWTEST v1.7";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -4404,7 +4410,13 @@ fn cd_command_until_complete_timed(command: u8, params: &[u8]) -> bool {
 /// only difference being whether audio was live.
 fn cd_read_with_audio(playing: bool, sectors: u32) -> u16 {
     cd_clock_reset();
-    let _ = cd_command_until_complete_timed(cdrom::CMD_STOP, &[]);
+    // PAUSE, not STOP: both guarantee "no audio" for the quiet arm, but
+    // STOP drops the motor, and every sample then forces a spin-up on a
+    // mech record 0x9B just seek-thrashed. On the 2026-07-31 console run
+    // that ground record 0x9C into minutes of apparent freeze (the
+    // operator had to START-skip); with the motor kept spinning the
+    // ReadN starts like any other.
+    let _ = cd_command_until_complete_timed(cdrom::CMD_PAUSE, &[]);
 
     if playing {
         if cdrom::try_set_mode(cdrom::MODE_CDDA, CD_SPINS).is_none() {
