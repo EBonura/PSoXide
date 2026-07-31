@@ -86,6 +86,19 @@ impl CddaStarter {
         self.step == StartStep::Done
     }
 
+    /// Which handshake step is pending, for on-screen diagnostics:
+    /// 0 SetMode, 1 Demute, 2 Play, 3 Done. Note that Done means Play was
+    /// ACCEPTED, not that the head has arrived; the drive may still be
+    /// seeking when this reads 3.
+    pub fn step_code(&self) -> u8 {
+        match self.step {
+            StartStep::SetMode => 0,
+            StartStep::Demute => 1,
+            StartStep::Play => 2,
+            StartStep::Done => 3,
+        }
+    }
+
     /// Drive one attempt if due. Returns true exactly once, on the tick the
     /// Play command is accepted. Safe to keep calling afterwards (no-op).
     pub fn tick(&mut self, now_tick: u32, track: u8) -> bool {
