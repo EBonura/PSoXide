@@ -200,6 +200,15 @@ pub fn try_wait_data_sector(spin_limit: u32) -> bool {
     }
 }
 
+/// GetStat status-byte bits. The drive sets at most one of the three
+/// activity bits at a time; between activities (stopping, spinning up
+/// before a seek engages) it reports NONE of them for a second or two on
+/// real hardware, a window emulators currently skip past.
+pub const STAT_PLAYING: u8 = 0x80;
+pub const STAT_SEEKING: u8 = 0x40;
+pub const STAT_READING: u8 = 0x20;
+pub const STAT_MOTOR_ON: u8 = 0x02;
+
 /// Get the CD-ROM drive status byte.
 pub fn get_stat() -> Response {
     command(CMD_GETSTAT, &[])
@@ -306,8 +315,49 @@ pub fn stop() -> Response {
 }
 
 /// Try to stop the CD-ROM motor/playback.
+///
+/// **This returns when the command is ACCEPTED, not when the drive is
+/// done.** On real hardware the motor then winds down for one to two
+/// seconds, during which GetStat reports no activity bits and data-read
+/// commands fail; an emulator answers instantly and hides the window
+/// (proven by a demo-disc burn whose every chain-load died this way). If
+/// data reads follow, either call [`stop_and_settle`], or better, keep the
+/// drive spun up with [`try_pause_until_complete`].
 pub fn try_stop(spin_limit: u32) -> Option<Response> {
     try_command(CMD_STOP, &[], spin_limit)
+}
+
+/// Stop playback and wait until the drive has genuinely gone quiet:
+/// GetStat reporting neither playing nor seeking on two consecutive polls,
+/// with a short pause between polls. Bounded by `max_polls` so a wedged
+/// drive cannot hang the caller; returns whether the drive settled.
+///
+/// This is the safe prelude to issuing data-read commands after CD-DA.
+/// [`try_pause_until_complete`] is the faster choice when the next reads
+/// are imminent, since it keeps the motor spinning.
+pub fn stop_and_settle(spin_limit: u32, max_polls: u32) -> bool {
+    let _ = try_stop(spin_limit);
+    let mut settled = 0u8;
+    for _ in 0..max_polls {
+        // Pace the polls: on silicon each takes real time anyway, but an
+        // emulator answers instantly and would burn the poll budget in
+        // microseconds. Volatile MMIO reads cannot be optimized out.
+        for _ in 0..20_000u32 {
+            unsafe { core::ptr::read_volatile(0x1F80_1800 as *const u8) };
+        }
+        let quiet = match try_get_stat(spin_limit) {
+            Some(r) => r
+                .bytes()
+                .first()
+                .is_some_and(|s| s & (STAT_PLAYING | STAT_SEEKING) == 0),
+            None => false,
+        };
+        settled = if quiet { settled + 1 } else { 0 };
+        if settled >= 2 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Convert binary `0..=99` to BCD for CD-ROM command parameters.
