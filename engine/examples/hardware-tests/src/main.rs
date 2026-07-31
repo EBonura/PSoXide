@@ -1711,6 +1711,11 @@ impl HardwareTests {
 
     fn run_all(&mut self) {
         for (index, spec) in TESTS.iter().enumerate() {
+            // Name the test BEFORE it runs, on screen and on the TTY: each
+            // body is fully blocking, so when one hangs on silicon (the
+            // first full-suite run after the DMA-free boot froze at ~10%
+            // with an anonymous bar) the frozen frame identifies it.
+            self.draw_running_label(spec.group, spec.name);
             self.results[index] = (spec.run)();
             // Green while conformance runs, blue while the timing battery does;
             // the operator can tell which phase is slow.
@@ -1724,15 +1729,53 @@ impl HardwareTests {
     }
 
     fn run_startup_scans(&mut self) {
+        self.draw_running_label("scan", "cpu sweep");
         self.cpu_scan = run_cpu_scan();
         print_scan_report(Mode::CpuScan, self.cpu_scan);
+        self.draw_running_label("scan", "gte matrix");
         self.gte_scan = run_gte_scan();
         print_scan_report(Mode::GteScan, self.gte_scan);
+        self.draw_running_label("scan", "spu map");
         self.spu_scan = run_spu_scan();
         print_scan_report(Mode::SpuScan, self.spu_scan);
+        self.draw_running_label("scan", "timing map");
         self.timing_scan = run_timing_scan();
         self.encode_capture(0);
         print_scan_report(Mode::TimingScan, self.timing_scan.summary);
+    }
+
+    /// Paint "RUN <group>: <name>" just above the progress bar in BOTH
+    /// framebuffers (the battery blocks the frame loop, so only absolute
+    /// VRAM writes stay visible), and mirror it to the TTY. The strip is
+    /// cleared with the same absolute-coordinate fill the bar uses.
+    fn draw_running_label(&mut self, group: &str, name: &str) {
+        tty::print("hardware-tests: run ");
+        tty::print(group);
+        tty::print(": ");
+        tty::println(name);
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
+        gpu_io::wait_cmd_ready();
+        for buffer_y in [184u32, 424] {
+            gpu_io::write_gp0(0x0200_0000); // fill, black
+            gpu_io::write_gp0((buffer_y << 16) | 16);
+            gpu_io::write_gp0((12u32 << 16) | 288);
+        }
+        gpu::set_draw_area(0, 0, 1023, 511);
+        gpu::set_draw_offset(0, 0);
+        let mut label = [0u8; 40];
+        let mut n = 0usize;
+        for &part in &[b"RUN " as &[u8], group.as_bytes(), b": ", name.as_bytes()] {
+            let take = part.len().min(label.len() - n);
+            label[n..n + take].copy_from_slice(&part[..take]);
+            n += take;
+        }
+        // SAFETY: assembled from ASCII string literals and spec names.
+        let text = unsafe { core::str::from_utf8_unchecked(&label[..n]) };
+        font.draw_text(24, 186, text, (255, 216, 96));
+        font.draw_text(24, 426, text, (255, 216, 96));
+        gpu::draw_sync();
     }
 
     fn prepare_audio_readout(&mut self) {
