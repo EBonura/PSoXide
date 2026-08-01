@@ -36,6 +36,7 @@ pub(super) fn draw_player_equipment<
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
+    blend: Option<PlayerAnimBlend>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -60,6 +61,7 @@ pub(super) fn draw_player_equipment<
         character.action_speed(anim_action),
         character.action_frame_range(anim_action),
     );
+    let blend_from = super::player_pose_blend(character, character_model, clips, blend, video_hz);
     let character_anchor = model_clip_anchor(tables, character_model, clip_local);
     let reference_anchor = model_clip_anchor(
         tables,
@@ -109,6 +111,7 @@ pub(super) fn draw_player_equipment<
             character_model,
             character_anim,
             character_phase,
+            blend_from,
             character_origin,
             character_model_rotation,
             character_local_to_world,
@@ -150,6 +153,7 @@ pub(super) fn draw_player_equipment<
                         weapon_model,
                         anim,
                         phase,
+                        None,
                         *camera,
                         origin,
                         weapon_rotation,
@@ -209,16 +213,21 @@ fn attachment_socket_pose(
     _model: RuntimeModelAsset,
     animation: Animation<'static>,
     phase_q12: u32,
+    blend_from: Option<ModelPoseBlend<'static>>,
     origin: WorldVertex,
     instance_rotation: Mat3I16,
     local_to_world: LocalToWorldScale,
     pose_translation: ModelPoseTranslation,
     socket: &LevelModelSocketRecord,
 ) -> Option<AttachmentPose> {
-    let pose = apply_model_pose_translation(
-        animation.pose_looped_q12(phase_q12, socket.joint)?,
-        pose_translation,
-    );
+    let raw_pose = animation.pose_looped_q12(phase_q12, socket.joint)?;
+    // The socket must ride the same crossfaded pose the body renders
+    // with, or the held weapon visibly detaches from the hand mid-blend.
+    let raw_pose = match &blend_from {
+        Some(blend) => blend.blend_toward(raw_pose, u16::from(socket.joint)),
+        None => raw_pose,
+    };
+    let pose = apply_model_pose_translation(raw_pose, pose_translation);
     let joint = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
     Some(compose_socket_pose(
         joint,

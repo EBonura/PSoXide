@@ -241,6 +241,14 @@ fn yaw_q12_from_basis(sin_yaw: i32, cos_yaw: i32) -> u16 {
     (angle & 0x0fff) as u16
 }
 
+/// Locomotion crossfade window in sim ticks (60 Hz): long enough to
+/// soften idle/walk/run cuts, short enough that matrix-lerp shrink
+/// stays invisible.
+const PLAYER_ANIM_BLEND_LOCOMOTION_TICKS: u32 = 8;
+/// Attack/action crossfade window in sim ticks: snappier so combat
+/// startup frames are not softened away.
+const PLAYER_ANIM_BLEND_ACTION_TICKS: u32 = 4;
+
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
     /// when the manifest had at least one room and its bytes
@@ -303,6 +311,10 @@ struct Playtest {
     /// locomotion input is ignored and the current action clip
     /// plays from start to finish.
     anim_lock_until_tick: SimTick,
+    /// Active clip-transition crossfade: outgoing state, its frozen
+    /// clip-local tick, and the switch tick the blend ramps from.
+    /// Cleared on init/respawn; expires by elapsed ticks at render.
+    anim_blend_from: Option<(PlayerAnim, u32, SimTick)>,
     /// Breakable box-prop state (broken bits, derived data, falls,
     /// break bursts), owned by `psx_game_runtime::box_props` since the
     /// phase-2 carve.
@@ -551,6 +563,7 @@ impl Playtest {
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
         self.anim_state = PlayerAnim::Idle;
+        self.anim_blend_from = None;
         self.box_props.init();
         self.orbit_yaw = CAMERA_START_YAW;
         self.orbit_radius = CAMERA_START_RADIUS;

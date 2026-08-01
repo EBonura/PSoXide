@@ -59,6 +59,22 @@ pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
     matches!(anim, PlayerAnim::LightAttack | PlayerAnim::HeavyAttack)
 }
 
+/// Player clip-transition crossfade, resolved per frame by the caller.
+///
+/// The outgoing animation state is frozen at `local_tick` (its
+/// clip-local tick at the switch moment); `alpha_q12` is the Q12
+/// weight of the INCOMING clip this frame. The renderer shows the
+/// pure incoming clip at `1 << 12` and the frozen outgoing pose at 0.
+#[derive(Copy, Clone, Debug)]
+pub struct PlayerAnimBlend {
+    /// Outgoing animation state at the switch.
+    pub anim: PlayerAnim,
+    /// Outgoing clip's frozen clip-local tick.
+    pub local_tick: u32,
+    /// Q12 weight of the incoming clip.
+    pub alpha_q12: u16,
+}
+
 /// Runtime view of the cooked LevelCharacterRecord -- the same
 /// fields, decoded into runtime-friendly types. Resolved once
 /// at init time so per-frame movement / animation / camera code

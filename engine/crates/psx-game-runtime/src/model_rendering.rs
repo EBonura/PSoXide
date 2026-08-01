@@ -8,7 +8,7 @@
 //! example's VRAM atlas uploader as a closure until its glue fully
 //! migrates.
 
-use psx_asset::{Animation, Model, ModelPart, ModelVertex};
+use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
     apply_model_pose_translation, compute_joint_world_transform, telemetry, Angle, CullMode,
     DepthPolicy, JointViewTransform, JointWorldTransform, LocalToWorldScale, Mat3I16,
@@ -31,7 +31,7 @@ use psx_level::{
 };
 use psx_math::int32::{clamp_i16, square_i32_saturating};
 
-use crate::character::{PlayerAnim, RuntimeCharacter};
+use crate::character::{PlayerAnim, PlayerAnimBlend, RuntimeCharacter};
 use crate::room_cache::ActiveRuntimeRoom;
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::{vram_slot_texture_size_u8, VramSlot};
@@ -755,6 +755,41 @@ pub struct PlayerModelDrawStats {
 /// model path.
 #[allow(clippy::too_many_arguments)]
 #[inline]
+/// Resolve a crossfade spec into a pose-blend source against this
+/// model's clip table.
+///
+/// `None` when there is no blend, the blend has saturated, or the
+/// outgoing clip is missing from the loaded set (a missing clip
+/// degrades to a hard cut, never a corrupt pose).
+pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
+    character: RuntimeCharacter,
+    runtime_model: RuntimeModelAsset,
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    blend: Option<PlayerAnimBlend>,
+    video_hz: VideoHz,
+) -> Option<ModelPoseBlend<'static>> {
+    let blend = blend?;
+    if blend.alpha_q12 >= 1 << 12 {
+        return None;
+    }
+    let action = blend.anim.action();
+    let clip_local = character.clip_for(blend.anim);
+    let anim = runtime_model.clip(clips, clip_local)?;
+    let phase = animation_phase_at_tick_q12(
+        anim,
+        blend.local_tick,
+        video_hz,
+        character.action_loops(action),
+        character.action_speed(action),
+        character.action_frame_range(action),
+    );
+    anim.looped_pose_sample_q12(phase)
+        .map(|sample| ModelPoseBlend {
+            sample,
+            alpha_q12: blend.alpha_q12,
+        })
+}
+
 pub fn draw_player<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,
@@ -780,6 +815,7 @@ pub fn draw_player<
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
+    blend: Option<PlayerAnimBlend>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -808,6 +844,7 @@ pub fn draw_player<
         character.action_speed(anim_action),
         character.action_frame_range(anim_action),
     );
+    let blend_from = player_pose_blend(character, runtime_model, clips, blend, video_hz);
     let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
     let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
     let reference_anchor =
@@ -901,6 +938,7 @@ pub fn draw_player<
         runtime_model,
         anim,
         phase,
+        blend_from,
         *camera,
         origin,
         model_rotation,
@@ -935,6 +973,7 @@ fn submit_runtime_model_predecoded<
     runtime_model: RuntimeModelAsset,
     anim: Animation<'static>,
     phase: u32,
+    blend_from: Option<ModelPoseBlend<'static>>,
     camera: WorldCamera,
     origin: WorldVertex,
     rotation: Mat3I16,
@@ -977,6 +1016,7 @@ fn submit_runtime_model_predecoded<
             options,
             faces,
             geometry,
+            blend_from,
         )
     } else {
         world.submit_textured_model_primary_joints_predecoded_geometry_faces_layered(
@@ -996,6 +1036,7 @@ fn submit_runtime_model_predecoded<
             options,
             faces,
             geometry,
+            blend_from,
         )
     };
     if profile_enabled {
@@ -1073,6 +1114,7 @@ pub fn draw_player_equipment<
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: SimTick,
+    blend: Option<PlayerAnimBlend>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -1106,6 +1148,7 @@ pub fn draw_player_equipment<
         anim_action,
         clip_local,
         anim_start_tick,
+        blend,
         elapsed_tick,
         video_hz,
         camera,
