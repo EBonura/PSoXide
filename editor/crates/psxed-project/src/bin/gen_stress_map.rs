@@ -27,7 +27,7 @@ use psxed_project::{
     ProjectDocument, WorldGrid,
 };
 
-const WALL_TOP: i32 = 2048;
+const WALL_TOP: i32 = 6144;
 
 struct Args {
     pattern: String,
@@ -165,9 +165,9 @@ fn run(args: &Args) -> Result<(), String> {
             seams
         }
     };
-    // The cook does not consume spawn yaw (only model-instance visual_yaw,
-    // cook_entities.rs:1834) and the character faces -Z; spawn at the far
-    // +Z end so --hold-forward walks the full run.
+    // Spawn at the far +Z end facing -Z (the cook consumes the spawn
+    // node's Y rotation now, playtest.rs yaw_from_degrees) so
+    // --hold-forward walks the full run.
     let spawn_world = match args.pattern.as_str() {
         "corridor" => [(args.width / 2) as f32 + 0.5, args.length as f32 - 1.5],
         _ => [(args.size / 2) as f32 + 0.5, args.size as f32 - 1.5],
@@ -209,9 +209,9 @@ fn run(args: &Args) -> Result<(), String> {
     });
     if let Some(node) = scene.node_mut(spawn_id) {
         node.transform.translation = [spawn_editor[0], 0.0, spawn_editor[1]];
-        // Yaw 0 faces -Z; the run line extends +Z, so face the player down
-        // the corridor for --hold-forward.
-        node.transform.rotation_degrees = [0.0, 180.0, 0.0];
+        // Yaw 0 faces -Z; the spawn sits at the far +Z end, so face the
+        // player straight down the corridor for --hold-forward.
+        node.transform.rotation_degrees = [0.0, 0.0, 0.0];
         // The starter defines several Characters; the cook refuses to
         // auto-pick, so wire the player profile explicitly.
         if let NodeKind::SpawnPoint { character, .. } = &mut node.kind {
