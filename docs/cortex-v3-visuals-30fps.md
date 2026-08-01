@@ -127,3 +127,32 @@ C. **Performance** (separate lever, same campaign): tape replay shows render
 Session scratchpad holds `cortex_v3-vblank.csv`, `cortex_v3-counters.csv`,
 `cortex_v3-portal-debug.log`, and frame dumps. `tools/vblank_chart.py` no
 longer exists; `tools/cortex_30fps_report.py` is the current summariser.
+
+## Synthetic corridor harness (2026-08-01, Manny's idea)
+
+`gen-stress-map corridor` (fixed: spawn faces down the run, WALL_TOP 6144
+so the play camera stays inside) reproduces the void bug in a CLOSED map,
+deterministically, with zero authored-map ambiguity:
+
+```sh
+cd editor && cargo run --release -p psxed-project --bin gen-stress-map -- \
+  corridor --out projects/vis_corridor --length 96 --width 6 --portal-every 8 --doors-every 8
+# cook + disc as usual, then: launch --hold-forward
+```
+
+Walking the corridor, every room cycle shows three phases in the counters
+(and on screen as sky-blue void through the doorway ahead):
+- ~230 frames: NEXT room visible + active + window-held, but emits ZERO
+  surfaces (drawn mask excludes it). Void where the room should be.
+- ~40 frames near the seam: both rooms draw.
+- ~50 frames before the crossing: the CURRENT room stops drawing.
+
+The reconcile pass logs prove the window slides correctly the whole run.
+So the defect is in the per-room surface emission for non-current rooms:
+the visible-cell selection (portal cell windows / GridVisibility caps /
+cell depth clamps) produces an empty set for a plainly visible room, and
+recovers only within ~4600 units of its seam. NEXT: instrument the cell
+selection for the room-ahead in this corridor (cell window values, cell
+count accepted, depth clamp) and fix; the corridor is the red test.
+Bottom-left cortex_v3 void: separately confirmed NOT culling (force-draw
+probe) — area absent from cook output; awaiting Manny's map confirmation.
