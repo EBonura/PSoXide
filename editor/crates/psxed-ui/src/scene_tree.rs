@@ -1519,6 +1519,7 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 letter_spacing: default_ui_letter_spacing(),
                 color: [220, 226, 240],
                 gradient: None,
+                effect: UiImageEffect::None,
             },
         ),
         (
