@@ -201,6 +201,16 @@ impl Playtest {
                 self.clear_visible_cell_caches();
             }
         }
+        if RECONCILE_DEBUG_LOGS && (result.built > 0 || result.freed > 0 || !result.converged) {
+            debug_log_reconcile_pass(
+                current_index,
+                desired_count,
+                result.built,
+                result.freed,
+                result.converged,
+                self.active_room_mask(),
+            );
+        }
         if RECONCILE_DEBUG_LOGS {
             for (label, room) in [
                 ("stale", result.freed_stale_room),
