@@ -395,34 +395,39 @@ pub struct Adsr {
 }
 
 impl Adsr {
-    /// Reasonable generic tone envelope -- fast attack, short decay
-    /// to half-sustain, mid-long release. Audible and "square-ish."
+    /// Generic sustained-tone envelope: instant attack to full, hold at
+    /// max sustain until [`Voice::key_off`], then an exponential release
+    /// (~100ms). The right default for melodies and held notes.
+    ///
+    /// The original version packed "attack shift 0x7F" into ADSR1's
+    /// 5-bit attack-shift field (bits 14-10); the overflow encoded
+    /// attack shift 31 + step 3 -- the slowest envelope the hardware
+    /// can express, so the voice never rose above the noise floor.
+    /// Layout per PSX-SPX: ADSR1 = [15 atk mode][14-10 atk shift]
+    /// [9-8 atk step][7-4 decay shift][3-0 sustain level]; ADSR2 =
+    /// [15 sus mode][14 sus dir][12-8 sus shift][7-6 sus step]
+    /// [5 rel mode][4-0 rel shift].
     pub const fn default_tone() -> Self {
-        // Attack shift = 0x7F (~0.5s to full), decay shift = 0xA,
-        // sustain level = 0xF (max), release shift = 0x10 (~0.1s).
-        // Sustain mode = increase-linear at rate 0x7F (hold at
-        // target). Values pulled from a known-good PSX homebrew
-        // envelope; fine-tune per instrument in your game.
         Self {
-            // Linear attack, shift=0x7F, decay shift=0xA, sustain
-            // level=0xF → lower word bits.
-            lower: (0x7F << 8) | (0xA << 4) | 0xF,
-            // Linear release, release shift=0x10 → upper word bits
-            // (rest zero = sustain direction increase / mode linear).
-            upper: 0x10 | (0x7F << 6),
+            // Linear attack, shift 0, step 0 (instant); no decay;
+            // sustain level 0xF (max).
+            lower: 0x000F,
+            // Sustain holds (linear increase, capped at max);
+            // exponential release, shift 7.
+            upper: 0x0027,
         }
     }
 
-    /// Very short percussive envelope -- for blips, UI clicks, hit
-    /// SFX. Snappy attack, almost immediate release.
+    /// Percussive one-shot -- blips, UI clicks, hit SFX. Instant attack
+    /// to full, then a snappy exponential fade in the sustain phase
+    /// (~150ms), so the voice silences itself without a key_off.
     pub const fn percussive() -> Self {
         Self {
-            // Attack shift = 0x20 (fast), decay shift = 0x8,
-            // sustain = 0x0 (silence after decay).
-            lower: (0x20 << 8) | (0x8 << 4),
-            // Release shift = 0x10, hold on sustain (direction =
-            // decrease, mode = exponential).
-            upper: 0x10 | (1 << 14) | (1 << 15),
+            // Instant attack, no decay, sustain level max.
+            lower: 0x000F,
+            // Sustain: exponential decrease, shift 6 (the self-fade);
+            // exponential release, shift 5.
+            upper: 0xC625,
         }
     }
 
