@@ -3232,6 +3232,7 @@ fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
         UiNodeKind::Button { .. } => "LevelUiNodeKind::Button",
         UiNodeKind::Slider { .. } => "LevelUiNodeKind::Slider",
         UiNodeKind::Music { .. } => "LevelUiNodeKind::Music",
+        UiNodeKind::Timer { .. } => "LevelUiNodeKind::Timer",
     }
 }
 

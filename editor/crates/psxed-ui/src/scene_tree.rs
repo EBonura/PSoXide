@@ -1585,6 +1585,14 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 loop_track: false,
             },
         ),
+        (
+            "Timer",
+            UiNodeKind::Timer {
+                millis: 3000,
+                skippable: true,
+                action: UiAction::default(),
+            },
+        ),
     ]
 }
 
@@ -1598,6 +1606,7 @@ pub(crate) fn ui_node_kind_icon(kind: &str) -> char {
         "Bar" => icons::BLEND,
         "Button" => icons::POINTER,
         "Slider" => icons::WAYPOINT,
+        "Timer" => icons::POINTER,
         "Music" => icons::AUDIO_LINES,
         _ => icons::CIRCLE_DOT,
     }

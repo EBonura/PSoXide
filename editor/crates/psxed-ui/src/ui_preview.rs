@@ -224,7 +224,7 @@ pub(crate) fn draw_ui_scene_preview(
         };
         match &node.kind {
             UiNodeKind::Canvas { .. } => {}
-            UiNodeKind::Music { .. } => {}
+            UiNodeKind::Music { .. } | UiNodeKind::Timer { .. } => {}
             UiNodeKind::Group { .. } => {
                 if let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size) {
                     draw_ui_preview_quad_stroke(

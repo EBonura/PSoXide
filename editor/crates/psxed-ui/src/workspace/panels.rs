@@ -1525,6 +1525,48 @@ impl EditorWorkspace {
                     },
                 );
             }
+            UiNodeKind::Timer {
+                millis,
+                skippable,
+                action,
+            } => {
+                inspector_section(ui, "ui-timer", icons::POINTER, "Timer", true, |ui| {
+                    // Author in seconds; the field stores integer milliseconds.
+                    let mut seconds = *millis as f32 / 1000.0;
+                    let response = inspector_property_row(ui, "Seconds", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut seconds)
+                                .range(0.1..=600.0)
+                                .speed(0.1)
+                                .fixed_decimals(1),
+                        )
+                        .changed()
+                    });
+                    if response {
+                        *millis = (seconds * 1000.0).round().clamp(100.0, 600_000.0) as u32;
+                        changed = true;
+                    }
+                    changed |= ui
+                        .checkbox(skippable, "Cross skips the wait")
+                        .changed();
+                });
+                inspector_section(
+                    ui,
+                    "ui-timer-action",
+                    icons::POINTER,
+                    "Interaction",
+                    true,
+                    |ui| {
+                        changed |= draw_ui_action_editor(
+                            ui,
+                            action,
+                            &state_options,
+                            &scene_options,
+                            &option_choices,
+                        );
+                    },
+                );
+            }
             UiNodeKind::Music {
                 wav_path,
                 volume,

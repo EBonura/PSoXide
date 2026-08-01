@@ -426,7 +426,10 @@ pub fn draw_scene(
         let resolved = node_resolved(nodes, index).unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
         match node.kind {
-            LevelUiNodeKind::Canvas | LevelUiNodeKind::Group | LevelUiNodeKind::Music => {}
+            LevelUiNodeKind::Canvas
+            | LevelUiNodeKind::Group
+            | LevelUiNodeKind::Music
+            | LevelUiNodeKind::Timer => {}
             LevelUiNodeKind::Rect => {
                 draw_quad_paint(
                     resolved.verts,
