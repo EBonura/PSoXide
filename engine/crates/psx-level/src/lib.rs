@@ -3080,7 +3080,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 15;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 26;
 
 /// Runtime animation action slot.
 ///
@@ -3120,6 +3120,28 @@ pub enum CharacterAnimationAction {
     StrafeLeft = 13,
     /// Locked-on right strafe while preserving facing.
     StrafeRight = 14,
+    /// Locked-on fast backward locomotion while preserving facing.
+    RunBackward = 15,
+    /// Locked-on fast left strafe while preserving facing.
+    RunStrafeLeft = 16,
+    /// Locked-on fast right strafe while preserving facing.
+    RunStrafeRight = 17,
+    /// Locked-on left evade.
+    DashLeft = 18,
+    /// Locked-on right evade.
+    DashRight = 19,
+    /// Poise broken: reeling, controls dead until recovery.
+    Stun = 20,
+    /// Regaining footing after [`Self::Stun`].
+    StunRecovery = 21,
+    /// Damage reaction variant, alternated with [`Self::HitReact`].
+    HitReactAlt = 22,
+    /// Primary attack with the alternate (heavy) weapon class.
+    AltLightAttack = 23,
+    /// Secondary attack with the alternate (heavy) weapon class.
+    AltHeavyAttack = 24,
+    /// Follow-up / combo with the alternate (heavy) weapon class.
+    AltComboAttack = 25,
 }
 
 impl CharacterAnimationAction {
@@ -3140,6 +3162,17 @@ impl CharacterAnimationAction {
         Self::WalkBackward,
         Self::StrafeLeft,
         Self::StrafeRight,
+        Self::RunBackward,
+        Self::RunStrafeLeft,
+        Self::RunStrafeRight,
+        Self::DashLeft,
+        Self::DashRight,
+        Self::Stun,
+        Self::StunRecovery,
+        Self::HitReactAlt,
+        Self::AltLightAttack,
+        Self::AltHeavyAttack,
+        Self::AltComboAttack,
     ];
 
     /// Convert to the cooked action slot index.

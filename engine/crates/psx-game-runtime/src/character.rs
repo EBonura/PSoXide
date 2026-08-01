@@ -289,6 +289,94 @@ impl RuntimeCharacter {
                 .action_clip(CharacterAnimationAction::Death)
                 .unwrap_or(idle),
             CharacterAnimationAction::Turn => idle,
+            // Locked-on fast locomotion degrades to the walk-speed strafe
+            // set, then plain locomotion, so a character bound before the
+            // full moveset existed keeps moving.
+            CharacterAnimationAction::RunBackward => self
+                .action_clip(CharacterAnimationAction::RunBackward)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::WalkBackward)
+                        .to_option()
+                })
+                .or_else(|| self.action_clip(CharacterAnimationAction::Run).to_option())
+                .unwrap_or(walk),
+            CharacterAnimationAction::RunStrafeLeft => self
+                .action_clip(CharacterAnimationAction::RunStrafeLeft)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::StrafeLeft)
+                        .to_option()
+                })
+                .or_else(|| self.action_clip(CharacterAnimationAction::Run).to_option())
+                .unwrap_or(walk),
+            CharacterAnimationAction::RunStrafeRight => self
+                .action_clip(CharacterAnimationAction::RunStrafeRight)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::StrafeRight)
+                        .to_option()
+                })
+                .or_else(|| self.action_clip(CharacterAnimationAction::Run).to_option())
+                .unwrap_or(walk),
+            // Lateral evades degrade to the forward roll.
+            CharacterAnimationAction::DashLeft => self
+                .action_clip(CharacterAnimationAction::DashLeft)
+                .to_option()
+                .or_else(|| self.action_clip(CharacterAnimationAction::Roll).to_option())
+                .unwrap_or(walk),
+            CharacterAnimationAction::DashRight => self
+                .action_clip(CharacterAnimationAction::DashRight)
+                .to_option()
+                .or_else(|| self.action_clip(CharacterAnimationAction::Roll).to_option())
+                .unwrap_or(walk),
+            // Poise break: an unbound stun reads as a long hit reaction.
+            CharacterAnimationAction::Stun => self
+                .action_clip(CharacterAnimationAction::Stun)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::HitReact)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            CharacterAnimationAction::StunRecovery => self
+                .action_clip(CharacterAnimationAction::StunRecovery)
+                .to_option()
+                .or_else(|| self.action_clip(CharacterAnimationAction::Stun).to_option())
+                .unwrap_or(idle),
+            CharacterAnimationAction::HitReactAlt => self
+                .action_clip(CharacterAnimationAction::HitReactAlt)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::HitReact)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            // The alternate weapon class falls back to the primary set.
+            CharacterAnimationAction::AltLightAttack => self
+                .action_clip(CharacterAnimationAction::AltLightAttack)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::LightAttack)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            CharacterAnimationAction::AltHeavyAttack => self
+                .action_clip(CharacterAnimationAction::AltHeavyAttack)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::HeavyAttack)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            CharacterAnimationAction::AltComboAttack => self
+                .action_clip(CharacterAnimationAction::AltComboAttack)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::ComboAttack)
+                        .to_option()
+                })
+                .unwrap_or(idle),
         }
     }
 
