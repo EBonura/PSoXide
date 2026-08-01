@@ -491,14 +491,34 @@ pub(crate) fn finish_animation_bytes(
     fps: u16,
     records: &[PoseRecord],
 ) -> Result<Vec<u8>, Error> {
-    let payload_len = psxed_format::animation::AnimationHeader::SIZE
-        + records.len() * psxed_format::animation::POSE_RECORD_SIZE;
+    // Q11 rotation codes cover [-4096, 4096] (Q12 [-1, 1]): a rigid
+    // pose always fits, but a clip cooked with animated scale kept can
+    // exceed it. Such clips fall back to the 24-byte v2 record rather
+    // than clamping their scale away.
+    // Q12 one (4096, every identity diagonal) is exactly representable
+    // via the reserved code; anything beyond it is animated scale.
+    let fits_v3 = records
+        .iter()
+        .all(|record| record.matrix.iter().all(|&v| v.abs() <= 4096));
+    let (version, record_size) = if fits_v3 {
+        (
+            psxed_format::animation::VERSION_V3,
+            psxed_format::animation::POSE_RECORD_SIZE_V3,
+        )
+    } else {
+        (
+            psxed_format::animation::VERSION,
+            psxed_format::animation::POSE_RECORD_SIZE,
+        )
+    };
+    let payload_len =
+        psxed_format::animation::AnimationHeader::SIZE + records.len() * record_size;
     let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
     let translation_shift = animation_translation_shift(records);
     append_asset_header(
         &mut out,
         psxed_format::animation::MAGIC,
-        psxed_format::animation::VERSION,
+        version,
         0,
         payload_len,
     )?;
@@ -508,7 +528,11 @@ pub(crate) fn finish_animation_bytes(
     append_u16(&mut out, translation_shift);
 
     for record in records {
-        append_pose_record(&mut out, record, translation_shift as u8);
+        if fits_v3 {
+            append_pose_record(&mut out, record, translation_shift as u8);
+        } else {
+            append_pose_record_v2(&mut out, record, translation_shift as u8);
+        }
     }
 
     Ok(out)
@@ -534,10 +558,25 @@ pub(crate) fn pose_record(skin_matrix: &[[f32; 4]; 4], bounds: &ModelBounds) -> 
     }
 }
 
-pub(crate) fn append_pose_record(out: &mut Vec<u8>, record: &PoseRecord, translation_shift: u8) {
+pub(crate) fn append_pose_record_v2(
+    out: &mut Vec<u8>,
+    record: &PoseRecord,
+    translation_shift: u8,
+) {
     for value in record.matrix {
         append_i16(out, value);
     }
+    for value in record.translation {
+        append_i16(out, quantize_translation_i16(value, translation_shift));
+    }
+}
+
+pub(crate) fn append_pose_record(out: &mut Vec<u8>, record: &PoseRecord, translation_shift: u8) {
+    // v3: nine Q3.12 rotation elements as packed 12-bit Q11 codes
+    // (hl-psx's on-silicon encoding), then the shifted translations.
+    let mut rotation = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3];
+    psxed_format::animation::encode_rotation_q11(&record.matrix, &mut rotation);
+    out.extend_from_slice(&rotation);
     for value in record.translation {
         append_i16(out, quantize_translation_i16(value, translation_shift));
     }
