@@ -901,3 +901,26 @@ pub(super) fn debug_log_reconcile_room(label: &str, room: RoomIndex, stream_slot
     line.push_bool(loading);
     line.emit();
 }
+
+pub(super) fn debug_log_reconcile_pass(
+    current: RoomIndex,
+    desired_count: usize,
+    built: usize,
+    freed: usize,
+    converged: bool,
+    window_mask: RuntimeDebugMask,
+) {
+    let mut line = DebugLogLine::new("recon pass cur=");
+    line.push_room(current);
+    line.push_str(" want=");
+    line.push_u32(desired_count as u32);
+    line.push_str(" built=");
+    line.push_u32(built as u32);
+    line.push_str(" freed=");
+    line.push_u32(freed as u32);
+    line.push_str(" conv=");
+    line.push_bool(converged);
+    line.push_str(" win=");
+    line.push_hex_mask(window_mask);
+    line.emit();
+}
