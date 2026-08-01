@@ -407,6 +407,9 @@ pub mod ui_node_flags {
     pub const TEXT_RANDOM_MESSAGE: u16 = 1 << 12;
     /// Node is only visible once an authored loading screen can be confirmed.
     pub const LOADING_COMPLETE_ONLY: u16 = 1 << 13;
+    /// Timer node fires early on CROSS when the scene has no focusable
+    /// control.
+    pub const TIMER_SKIPPABLE: u16 = 1 << 14;
 }
 
 typed_index! {
@@ -2445,6 +2448,13 @@ pub enum LevelUiNodeKind {
     /// volume percentage in [`LevelUiNodeRecord::value`], and loop state
     /// in [`ui_node_flags::MUSIC_LOOP`].
     Music,
+    /// Non-visual auto-advance timer: fires its [`LevelUiAction`] once
+    /// per scene entry after the cooked delay. The delay in vblank
+    /// ticks lives in [`LevelUiNodeRecord::value`] as a
+    /// `ConstantQ12`; [`ui_node_flags::TIMER_SKIPPABLE`] lets a CROSS
+    /// press fire it early when the scene has no focusable control
+    /// (the splash-screen idiom).
+    Timer,
 }
 
 /// Runtime value source for data-bound UI elements.
