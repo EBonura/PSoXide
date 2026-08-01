@@ -418,6 +418,9 @@ impl CharacterAnimationAction {
         if name.contains("walk") && right {
             return Some(Self::StrafeRight);
         }
+        if name.contains("walk") && backward {
+            return Some(Self::WalkBackward);
+        }
         if name.contains("hurt_b") {
             return Some(Self::HitReactAlt);
         }
