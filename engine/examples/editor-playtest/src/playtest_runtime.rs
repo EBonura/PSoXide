@@ -78,7 +78,9 @@ impl Playtest {
     /// window so combat stays snappy while locomotion soft-blends.
     pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
         let (anim, local_tick, switch_tick) = self.anim_blend_from?;
-        let duration = if player_anim_is_attack(self.anim_state) {
+        let duration = if player_anim_is_attack(self.anim_state)
+            || self.anim_state.is_motor_fixed_action()
+        {
             PLAYER_ANIM_BLEND_ACTION_TICKS
         } else {
             PLAYER_ANIM_BLEND_LOCOMOTION_TICKS
