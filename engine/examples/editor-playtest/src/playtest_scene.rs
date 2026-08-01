@@ -1,4 +1,5 @@
 use super::*;
+use psx_game_runtime::model_rendering as mr;
 
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
@@ -920,8 +921,41 @@ impl Scene for Playtest {
                         );
                     }
                 }
+                // The effect clock starts at the first RENDERED gameplay
+                // frame, not at init, so the loading screen never eats it.
+                if self.assemble_active && self.assemble_start_tick == SimTick::ZERO {
+                    self.assemble_start_tick = ctx.sim_tick;
+                }
+                let assemble = self.assemble_progress_q12(ctx.sim_tick);
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
+                        if let Some(progress) = assemble {
+                            mr::draw_player_assemble(
+                                model_tables(),
+                                character,
+                                &self.models,
+                                &self.model_faces[..self.model_face_count],
+                                &self.model_parts[..self.model_part_count],
+                                &self.model_vertices[..self.model_vertex_count],
+                                &self.clips,
+                                player.x,
+                                player.y,
+                                player.z,
+                                self.motor.yaw(),
+                                self.anim_state.action(),
+                                character.clip_for(self.anim_state),
+                                self.anim_start_tick,
+                                ctx.sim_tick,
+                                ctx.video_hz,
+                                &camera,
+                                actor_options,
+                                &lighting,
+                                progress,
+                                &mut primitive_packets,
+                                &mut world,
+                            );
+                            return PlayerModelDrawStats::default();
+                        }
                         draw_player(
                             self.room_index,
                             character,

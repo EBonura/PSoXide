@@ -790,6 +790,197 @@ pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
         })
 }
 
+/// Nanobot assemble effect: draw the player as free triangles falling
+/// into the live pose. `progress_q12` runs 0 (fully scattered) to 4096
+/// (fully assembled). Per-face stagger, tumble, and an additive tint
+/// ramp come from a deterministic hash of the face index, so the effect
+/// replays identically every run. Replaces `draw_player` for the
+/// effect's duration; primary-joint skinning only (blend verts follow
+/// their primary joint), which is invisible at tumble speeds.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_player_assemble<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const OT_DEPTH: usize,
+>(
+    tables: ModelTables,
+    character: RuntimeCharacter,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    x: i32,
+    y: i32,
+    z: i32,
+    yaw: Angle,
+    anim_action: CharacterAnimationAction,
+    clip_local: ModelClipIndex,
+    anim_start_tick: SimTick,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    progress_q12: u16,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
+    let Some(runtime_model) = models.get(character.model.to_usize()).copied().flatten() else {
+        return;
+    };
+    let Some(anim) = runtime_model.clip(clips, clip_local) else {
+        return;
+    };
+    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
+    let phase = animation_phase_at_tick_q12(
+        anim,
+        local_tick,
+        video_hz,
+        character.action_loops(anim_action),
+        character.action_speed(anim_action),
+        character.action_frame_range(anim_action),
+    );
+    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
+    let reference_anchor =
+        model_clip_anchor(tables, runtime_model, character.clip_for(PlayerAnim::Idle));
+    let pose_translation = model_pose_anchor_translation(
+        anim,
+        phase,
+        clip_anchor,
+        reference_anchor,
+        character.action_in_place_override(anim_action),
+    );
+    let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
+    let origin = visual_model_origin(
+        x,
+        y,
+        z,
+        runtime_model.world_height,
+        character.visual_offset,
+        character.visual_scale_q8,
+        &model_rotation,
+    );
+    let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
+
+    // Per-joint world transforms for the live pose.
+    let model = runtime_model.model;
+    let joint_count = (model.joint_count() as usize).min(64);
+    let mut joints = [JointWorldTransform {
+        rotation: Mat3I16::IDENTITY,
+        translation: WorldVertex::ZERO,
+    }; 64];
+    let mut joint = 0usize;
+    while joint < joint_count {
+        if let Some(pose) = anim.pose_looped_q12(phase, joint as u16) {
+            let pose = apply_model_pose_translation(pose, pose_translation);
+            joints[joint] =
+                compute_joint_world_transform(pose, model_rotation, local_to_world, origin);
+        }
+        joint += 1;
+    }
+
+    let Some(geometry) = runtime_model_geometry(runtime_model, model_parts, model_vertices) else {
+        return;
+    };
+    let faces = runtime_model_faces(runtime_model, model_faces);
+    let base_material = lighting.shade_model_material(origin, runtime_model.material);
+    let parts = geometry.parts;
+    let vertices = geometry.vertices;
+
+    let joint_of_vertex = |vi: usize| -> usize {
+        let mut p = 0usize;
+        while p < parts.len() {
+            let part = parts[p];
+            let first = part.first_vertex() as usize;
+            if vi >= first && vi < first + part.vertex_count() as usize {
+                return (part.joint_index() as usize).min(joint_count.saturating_sub(1));
+            }
+            p += 1;
+        }
+        0
+    };
+
+    let mut face_index = 0usize;
+    while face_index < faces.len() {
+        let face = faces[face_index];
+        let seed = (face_index as u32).wrapping_mul(0x9E37_79B9);
+        // Staggered per-face timeline: each face settles at its own moment.
+        let ft = ((progress_q12 as i32) * 2 - (seed & 0x0FFF) as i32).clamp(0, 4096);
+        face_index += 1;
+        if ft == 0 {
+            continue;
+        }
+        let mut verts = [WorldVertex::ZERO; 3];
+        let mut uvs = [(0u8, 0u8); 3];
+        let mut corner = 0usize;
+        let mut skip = false;
+        while corner < 3 {
+            let word = face.corner_words[corner];
+            let vi = (word & 0xFFFF) as usize;
+            if vi >= vertices.len() {
+                skip = true;
+                break;
+            }
+            let v = vertices[vi];
+            let jwt = joints[joint_of_vertex(vi)];
+            let scaled = [
+                local_to_world.apply(v.position.x as i32),
+                local_to_world.apply(v.position.y as i32),
+                local_to_world.apply(v.position.z as i32),
+            ];
+            let r = rotate_offset_q12(&jwt.rotation, scaled);
+            verts[corner] = WorldVertex::new(
+                jwt.translation.x.saturating_add(r[0]),
+                jwt.translation.y.saturating_add(r[1]),
+                jwt.translation.z.saturating_add(r[2]),
+            );
+            uvs[corner] = (((word >> 16) & 0xFF) as u8, ((word >> 24) & 0xFF) as u8);
+            corner += 1;
+        }
+        if skip {
+            continue;
+        }
+        let cx = (verts[0].x + verts[1].x + verts[2].x) / 3;
+        let cy = (verts[0].y + verts[1].y + verts[2].y) / 3;
+        let cz = (verts[0].z + verts[1].z + verts[2].z) / 3;
+        let remaining = (4096 - ft) as i32;
+        // Fall from above with lateral scatter, easing linearly onto the pose.
+        let off_x = (((seed >> 8) & 0x3FF) as i32 - 512) * remaining >> 12;
+        let off_y = (2200 + ((seed >> 2) & 0x3FF) as i32) * remaining >> 12;
+        let off_z = (((seed >> 16) & 0x3FF) as i32 - 512) * remaining >> 12;
+        // Tumble that winds down as the face settles.
+        let spin_total = (((seed >> 20) & 0x7FF) + 1024) as i32;
+        let ang = ((spin_total * remaining) >> 12) as i16;
+        let spin = euler_q12_rotation([ang, ang / 2, 0]);
+        let mut corner = 0usize;
+        while corner < 3 {
+            let rel = [
+                verts[corner].x - cx,
+                verts[corner].y - cy,
+                verts[corner].z - cz,
+            ];
+            let rot = rotate_offset_q12(&spin, rel);
+            verts[corner] = WorldVertex::new(
+                cx + rot[0] + off_x,
+                cy + rot[1] + off_y,
+                cz + rot[2] + off_z,
+            );
+            corner += 1;
+        }
+        // Additive ghost ramp while unsettled; full material once seated.
+        let material = if ft < 3072 {
+            let level = ((ft * 255) / 3072) as u8;
+            base_material
+                .with_tint((level, level, level))
+                .with_blend_mode(BlendMode::Add)
+        } else {
+            base_material
+        };
+        world.submit_textured_world_triangle(triangles, *camera, verts, uvs, material, options);
+    }
+}
+
 pub fn draw_player<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,
