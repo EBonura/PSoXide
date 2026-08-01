@@ -97,6 +97,8 @@ const CMD_PAUSE: u8 = 0x09;
 #[cfg(target_arch = "mips")]
 const CMD_SETMODE: u8 = 0x0E;
 #[cfg(target_arch = "mips")]
+const CMD_SEEKL: u8 = 0x15;
+#[cfg(target_arch = "mips")]
 const CD_MODE_DOUBLE_SPEED_2048: u8 = 0x80;
 
 // Poll limits, straight from hl-psx (tuned on silicon; DATA_POLL covers a
@@ -508,6 +510,43 @@ impl SectorReader {
             if !self.send_command(CMD_SETLOC, &[m, s, f], IRQ_ACK, ACK_POLL) {
                 return false;
             }
+            if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_POLL) {
+                return false;
+            }
+            self.enable_irqs();
+            true
+        }
+    }
+
+    /// [`start_read`](Self::start_read) the way the real BIOS starts one:
+    /// SetLoc, then an EXPLICIT SeekL waited to completion, then ReadN.
+    ///
+    /// Traced from a real SCPH-1001 boot (2026-08-01, emulator CD command
+    /// log): the BIOS brackets every read -- even a single sector -- as
+    /// SetLoc/SeekL/SetMode/ReadN/Pause. The implicit seek a bare
+    /// SetLoc+ReadN performs starts data flowing while the mech is still
+    /// settling; the same console that corrupts our sustained implicit-seek
+    /// streams loads 1.4 MB EXEs through the BIOS bracket without fault.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn start_read_seek_first(&mut self, lba: u32, seek_poll: u32) -> bool {
+        unsafe {
+            let (m, s, f) = lba_to_bcd_msf(psx_io::disc_base::shift_lba(lba));
+            if !self.send_command(CMD_SETLOC, &[m, s, f], IRQ_ACK, ACK_POLL) {
+                return false;
+            }
+            // SeekL acks (INT3) then completes (INT2) once the head has
+            // settled on the target; only then is ReadN issued, so the
+            // drive never streams during mech settle.
+            if !self.send_command(CMD_SEEKL, &[], IRQ_ACK, ACK_POLL) {
+                return false;
+            }
+            match self.wait_irq(IRQ_COMPLETE, seek_poll) {
+                Wait::Matched => {}
+                Wait::CdError | Wait::Timeout => return false,
+            }
+            self.ack(IRQ_COMPLETE);
             if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_POLL) {
                 return false;
             }
