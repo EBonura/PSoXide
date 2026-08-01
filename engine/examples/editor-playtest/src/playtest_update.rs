@@ -195,6 +195,8 @@ impl Playtest {
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = SimTick::ZERO;
         self.anim_blend_from = None;
+        self.assemble_start_tick = SimTick::ZERO;
+        self.assemble_active = true;
         self.anim_lock_until_tick = SimTick::ZERO;
         self.active_interactable = None;
         self.checkpoint = None;

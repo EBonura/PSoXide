@@ -248,6 +248,8 @@ const PLAYER_ANIM_BLEND_LOCOMOTION_TICKS: u32 = 8;
 /// Attack/action crossfade window in sim ticks: snappier so combat
 /// startup frames are not softened away.
 const PLAYER_ANIM_BLEND_ACTION_TICKS: u32 = 4;
+/// Nanobot assemble effect length in sim ticks (spawn-in).
+const PLAYER_ASSEMBLE_TICKS: u32 = 300;
 
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
@@ -315,6 +317,12 @@ struct Playtest {
     /// clip-local tick, and the switch tick the blend ramps from.
     /// Cleared on init/respawn; expires by elapsed ticks at render.
     anim_blend_from: Option<(PlayerAnim, u32, SimTick)>,
+    /// Sim tick the nanobot assemble effect started at; the player draws
+    /// as falling triangles until `PLAYER_ASSEMBLE_TICKS` elapse.
+    assemble_start_tick: SimTick,
+    /// Whether the assemble effect is live (zero-init false; stamped at
+    /// spawn).
+    assemble_active: bool,
     /// Active-window reconcile needed: set by visibility refreshes,
     /// crossings, and stream progress; cleared when a pass converges.
     /// Keeps the steady-state reconcile at a two-branch early-out.

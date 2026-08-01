@@ -63,6 +63,18 @@ impl Playtest {
         telemetry::debug_log("player water:respawn");
     }
 
+    /// Nanobot assemble progress this tick, `None` once complete.
+    pub(super) fn assemble_progress_q12(&self, now: SimTick) -> Option<u16> {
+        if !self.assemble_active {
+            return None;
+        }
+        let elapsed = now.saturating_sub(self.assemble_start_tick);
+        if elapsed >= PLAYER_ASSEMBLE_TICKS {
+            return None;
+        }
+        Some(((elapsed * 4096) / PLAYER_ASSEMBLE_TICKS.max(1)) as u16)
+    }
+
     /// Switch the player animation state, recording the outgoing
     /// pose so the renderer can crossfade instead of hard-cutting.
     pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick) {
