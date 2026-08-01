@@ -60,6 +60,24 @@ impl FrameBuffer {
         write_gp0(gp0::draw_offset(0, target_y as i32));
     }
 
+    /// Deferred-present half of [`FrameBuffer::swap`]: switch the DRAW side
+    /// now and return the GP1 display-start word for the finished buffer,
+    /// for the caller to apply exactly at a blank edge (e.g. via psx-rt's
+    /// queued-GP1 VBlank hook). The GPU must be idle (`draw_sync`) before
+    /// this call, because it rewrites the draw area/offset directly.
+    pub fn begin_swap(&mut self) -> u32 {
+        let show = self.drawing;
+        self.drawing ^= 1;
+        let target_y = self.buffer_y(self.drawing);
+        write_gp0(gp0::draw_area_top_left(0, target_y as u32));
+        write_gp0(gp0::draw_area_bottom_right(
+            (self.width - 1) as u32,
+            (target_y + self.height - 1) as u32,
+        ));
+        write_gp0(gp0::draw_offset(0, target_y as i32));
+        gp1::display_start(0, self.buffer_y(show) as u32)
+    }
+
     /// Clear the back-buffer (the one currently being drawn to) to `(r, g, b)`.
     pub fn clear(&self, r: u8, g: u8, b: u8) {
         super::fill_rect(

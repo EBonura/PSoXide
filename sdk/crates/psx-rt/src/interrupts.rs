@@ -31,6 +31,30 @@ __psx_rt_exception_handler:
     addiu $27, $27, 1
     sw    $27, %lo(__psx_rt_vblank_count)($26)
 
+    # Apply one queued GP1 word exactly at the blank edge (deferred display
+    # flip). Zero means no request; a display-start word is never zero.
+    # Only apply while GPUSTAT bit 28 (READY_DMA_RECV, the draw_sync bit)
+    # reports the GPU idle -- a raster/fill still draining keeps the word
+    # queued for the next edge, so a flip never exposes a partial buffer
+    # and the CPU never blocks on GPU completion.
+    lui   $26, %hi(__psx_rt_pending_gp1)
+    lw    $27, %lo(__psx_rt_pending_gp1)($26)
+    nop
+    beqz  $27, 2f
+    nop
+    lui   $26, 0x1f80
+    lw    $26, 0x1814($26)
+    nop
+    srl   $26, $26, 28
+    andi  $26, $26, 1
+    beqz  $26, 2f
+    nop
+    lui   $26, %hi(__psx_rt_pending_gp1)
+    sw    $zero, %lo(__psx_rt_pending_gp1)($26)
+    lui   $26, 0x1f80
+    sw    $27, 0x1814($26)
+
+2:
     lui   $26, 0x1f80
     addiu $27, $zero, -2
     sw    $27, 0x1070($26)
@@ -47,6 +71,11 @@ __psx_rt_exception_handler:
 /// Monotonic VBlank IRQ count.
 #[no_mangle]
 pub static mut __psx_rt_vblank_count: u32 = 0;
+
+/// One queued GP1 word the VBlank handler writes to the GPU at the next
+/// blank edge, then clears. Zero = empty. Written by [`queue_gp1_at_vblank`].
+#[no_mangle]
+pub static mut __psx_rt_pending_gp1: u32 = 0;
 
 /// Set once [`install_vblank_counter`] has run, so [`wait_vblank`] can
 /// install lazily without resetting a counter the game is already using.
@@ -94,6 +123,34 @@ pub fn install_vblank_counter() {}
 #[inline]
 pub fn vblank_count() -> u32 {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_vblank_count) }
+}
+
+/// Queue one GP1 word for the VBlank handler to apply at the next blank
+/// edge (deferred tear-free display flip). Overwrites any unapplied word.
+#[cfg(target_arch = "mips")]
+#[inline]
+pub fn queue_gp1_at_vblank(word: u32) {
+    unsafe { core::ptr::write_volatile(&raw mut __psx_rt_pending_gp1, word) }
+}
+
+/// Host no-op: no IRQ exists to consume the queue off-target.
+#[cfg(not(target_arch = "mips"))]
+#[inline]
+pub fn queue_gp1_at_vblank(_word: u32) {}
+
+/// True while a word queued by [`queue_gp1_at_vblank`] has not yet been
+/// applied by the VBlank handler.
+#[cfg(target_arch = "mips")]
+#[inline]
+pub fn gp1_queue_pending() -> bool {
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_pending_gp1) != 0 }
+}
+
+/// Host no-op: nothing is ever pending off-target.
+#[cfg(not(target_arch = "mips"))]
+#[inline]
+pub fn gp1_queue_pending() -> bool {
+    false
 }
 
 /// Block until the next VBlank IRQ.
