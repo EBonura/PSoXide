@@ -2608,7 +2608,11 @@ fn gen_tones() -> Result<(), String> {
     );
     rust.push_str("/// Native playback frequency (Hz) when a single-block\n/// tone is played at [`crate::Pitch::UNITY`]. The 28-sample\n/// loop at 44100 Hz gives 44100 / 28 = 1575 Hz.\npub const NATIVE_HZ: u32 = 1575;\n\n");
     for (name, doc, samples) in tones {
-        let block = encode_adpcm_block(&samples, 8, 0, 0x07);
+        // Shift 0: nibbles decode at full scale (max nibble 7 -> 28672 of
+        // 32767). This shipped as shift 8 for a while, which decodes at
+        // 1/256 scale (~peak 112) -- inaudible; VoXide found it as "no
+        // sound in-game" while every port with its own samples was fine.
+        let block = encode_adpcm_block(&samples, 0, 0, 0x07);
         let path = vendor.join(format!("tone_{}.adpcm", name.to_ascii_lowercase()));
         fs::write(&path, block).map_err(|e| format!("{}: {e}", path.display()))?;
         println!("wrote {} - 16 bytes", relative_to_root(&path));
