@@ -130,6 +130,7 @@ fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
             letter_spacing: -2,
             color: [220, 226, 240],
             gradient: None,
+            effect: UiImageEffect::None,
         },
     );
     scene.node_mut(prompt).expect("prompt node").visible_when =
@@ -304,6 +305,7 @@ fn random_label_messages_cook_into_compact_runtime_text() {
             letter_spacing: 0,
             color: [220, 226, 240],
             gradient: None,
+            effect: UiImageEffect::None,
         },
     );
 
