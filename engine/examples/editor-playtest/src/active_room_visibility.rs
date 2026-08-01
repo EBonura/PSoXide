@@ -104,6 +104,7 @@ impl Playtest {
         self.visibility.visible_missing_mask = RuntimeDebugMask::EMPTY;
         self.visibility.visible_build_failed = 0;
         self.visibility.visible_build_failed_mask = RuntimeDebugMask::EMPTY;
+        self.active_window_dirty = true;
     }
 
     pub(super) fn portal_visible_room_limit(&self, current_record: &LevelRoomRecord) -> usize {

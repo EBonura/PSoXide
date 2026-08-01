@@ -56,6 +56,7 @@ impl Playtest {
     }
 
     pub(super) fn load_active_room_window(&mut self) {
+        self.active_window_dirty = true;
         self.window.job = ActiveRoomWindowJob::EMPTY;
         if !self.chunked_level() {
             self.rebuild_active_room_window(true);
@@ -70,10 +71,16 @@ impl Playtest {
             self.clear_visible_cell_caches();
         }
         self.apply_current_active_room_fields();
-        self.begin_active_room_window_job(true);
-        if self.current_collision_room.is_none() {
-            self.step_active_room_window_job();
+        // Refresh visibility for the new pose, then converge. The
+        // rebase above kept every still-valid entry live, so a room
+        // crossing continues drawing the old set while the window
+        // catches up (build-then-swap, never wipe-then-rebuild).
+        if let Some(record) = ROOMS.get(self.room_index.to_usize()) {
+            let view = self.active_room_selection_view();
+            self.refresh_portal_visibility_for_view(self.room_index, record, view);
+            self.window.anchor = self.motor.position();
         }
+        self.reconcile_active_room_window();
     }
 
     pub(super) fn rebase_active_rooms_to_current_room(&mut self) {
@@ -84,17 +91,14 @@ impl Playtest {
             .rebase_to_current_room(ROOMS, current_record, active_room_stream_slot);
     }
 
-    pub(super) fn begin_active_room_window_job(&mut self, update_streaming: bool) {
-        if !self.chunked_level() {
-            return;
-        }
-        let current_index = self.room_index;
-        let Some(current_record) = ROOMS.get(current_index.to_usize()) else {
-            return;
-        };
-        let view = self.active_room_selection_view();
-        self.refresh_portal_visibility_for_view(current_index, current_record, view);
-
+    /// Priority-ordered desired active set: the current room first,
+    /// then the draw set (ring or pruned-visible per feature), then
+    /// visible additions. Pure assembly over the LAST visibility
+    /// result; refreshing visibility is the caller's concern.
+    pub(super) fn desired_active_rooms(
+        &self,
+        current_index: RoomIndex,
+    ) -> ([RoomIndex; MAX_ACTIVE_ROOMS], usize) {
         let mut requested_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
         requested_rooms[0] = current_index;
         let mut requested_count = 1usize;
@@ -162,70 +166,75 @@ impl Playtest {
             visible_index += 1;
         }
 
-        self.window.begin_job(
-            current_index,
-            requested_rooms,
-            requested_count,
-            update_streaming,
-            self.motor.position(),
-        );
+        (requested_rooms, requested_count)
     }
 
-    pub(super) fn step_active_room_window_job(&mut self) {
-        if !self.window.job.active {
+    /// Per-tick convergence of the active window toward the desired
+    /// set (see `RoomWindow::reconcile` for the invariants). Cheap
+    /// when converged; never mutates the visibility result.
+    pub(super) fn reconcile_active_room_window(&mut self) {
+        if !self.chunked_level() || !self.active_window_dirty {
             return;
         }
-        let current_room = self.window.job.current_room;
-        if current_room != self.room_index {
-            self.window.job = ActiveRoomWindowJob::EMPTY;
-            return;
-        }
-        let Some(current_record) = ROOMS.get(current_room.to_usize()) else {
-            self.window.job = ActiveRoomWindowJob::EMPTY;
+        let current_index = self.room_index;
+        let Some(current_record) = ROOMS.get(current_index.to_usize()) else {
             return;
         };
-
-        // Residency is owned by update_room_residency now; the build job no
-        // longer requests streaming itself, it only builds from resident rooms.
-
-        #[cfg(feature = "cd-stream-bench")]
-        let build_blocked =
-            |index: RoomIndex| streamed_room_is_loading(index) || !streamed_room_is_resident(index);
-        #[cfg(not(feature = "cd-stream-bench"))]
-        let build_blocked = |_: RoomIndex| false;
-
+        let (desired, desired_count) = self.desired_active_rooms(current_index);
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
-        let step = self.window.step_job(
+        let result = self.window.reconcile(
             ROOMS,
+            &desired[..desired_count],
+            current_index,
             RUNTIME_SCHEDULE.active_job_builds_per_tick,
+            active_room_stream_slot,
             |slot, index, record, previous_rooms| {
                 reuse_or_build_active_room(slot, index, record, current_record, previous_rooms)
             },
-            build_blocked,
         );
-        if step.unbuilt_room != INVALID_ROOM_INDEX {
-            self.mark_visible_room_unbuilt(step.unbuilt_room);
+        if result.freed > 0 || result.built > 0 {
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
+            {
+                self.clear_visible_cell_caches();
+            }
         }
-        if let Some(active) = step.current_active {
+        if RECONCILE_DEBUG_LOGS {
+            for (label, room) in [
+                ("stale", result.freed_stale_room),
+                ("fail", result.failed_room),
+                ("skip", result.skipped_room),
+            ] {
+                if room != INVALID_ROOM_INDEX {
+                    #[cfg(feature = "cd-stream-bench")]
+                    debug_log_reconcile_room(
+                        label,
+                        room,
+                        active_room_stream_slot(room),
+                        streamed_room_is_resident(room),
+                        streamed_room_is_loading(room),
+                    );
+                    #[cfg(not(feature = "cd-stream-bench"))]
+                    debug_log_reconcile_room(label, room, active_room_stream_slot(room), true, false);
+                }
+            }
+        }
+        if let Some(active) = result.current_active {
             self.apply_current_active_room(active);
-        }
-
-        telemetry::counter(
-            telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
-            step.built as u32,
-        );
-        telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
-
-        if self.window.finish_job(
-            ROOMS,
-            current_record,
-            RUNTIME_SCHEDULE.retained_inactive_rooms,
-            room_active_chunk_limit(current_record),
-            active_room_stream_slot,
-        ) {
+        } else if result.freed > 0 {
             self.apply_current_active_room_fields();
+        }
+        if result.built > 0 {
             self.room_materials_unresolved = true;
         }
+        telemetry::counter(
+            telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
+            result.built as u32,
+        );
+        self.active_window_dirty = !result.converged;
+        telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
     }
 
     pub(super) fn apply_current_active_room_fields(&mut self) {
@@ -773,17 +782,17 @@ impl Playtest {
             || view_cos_key != self.visibility.view_cos_key
             || view_pitch_sin_key != self.visibility.view_pitch_sin_key
             || view_pitch_cos_key != self.visibility.view_pitch_cos_key;
-        if moved_far {
-            self.begin_active_room_window_job(true);
-            return;
+        // Visibility recompute stays gated on actual view change (it is
+        // the expensive half), but the window ALWAYS reconciles against
+        // the latest result: divergence heals every tick regardless of
+        // whether the camera moves.
+        if moved_far || camera_moved_far || view_changed {
+            self.refresh_portal_visibility_for_view(self.room_index, record, view);
+            if moved_far {
+                self.window.anchor = player;
+            }
         }
-        if !camera_moved_far && !view_changed {
-            return;
-        }
-        self.refresh_portal_visibility_for_view(self.room_index, record, view);
-        if !self.window.job.active && !self.portal_visible_rooms_are_active(record) {
-            self.begin_active_room_window_job(true);
-        }
+        self.reconcile_active_room_window();
     }
 
     pub(super) fn force_refresh_active_room_window_view(&mut self) {
@@ -795,8 +804,6 @@ impl Playtest {
         };
         let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(self.room_index, record, view);
-        if !self.window.job.active && !self.portal_visible_rooms_are_active(record) {
-            self.begin_active_room_window_job(true);
-        }
+        self.reconcile_active_room_window();
     }
 }

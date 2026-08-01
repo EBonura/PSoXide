@@ -66,6 +66,42 @@ budget is 10 with only 6 chunks. Both bugs live in the active-window policy
   each build failure with its reason (add a debug_log in
   `build_active_room` / `reuse_or_build_active_room`).
 
+## Reconciler landed (2026-08-01)
+
+`RoomWindow::reconcile` replaces the begin/step/finish job path and the
+movement-gated retriggers: every tick (gated by `active_window_dirty`,
+set on visibility refresh / crossing / stream progress, cleared on
+convergence) the window diffs actual against a freshly assembled desired
+set (current room first, then ring, then visible additions). Failures
+retry instead of pruning the goal; entries are freed only when undesired
+or their stream slot moved (build-then-swap). Cost: 2.9k cyc/vblank avg
+(36k ungated), total frame cycles unchanged, tape final frame
+byte-identical. `RECONCILE_DEBUG_LOGS` logs stale/fail/skip anomalies.
+
+## What the tape data actually shows (post-reconciler)
+
+- The long "stuck" mask windows in the counter CSV are SIM-PAUSE
+  artifacts: camera + all masks freeze for 36-260 frames (menus or
+  triggers in the tape); frame dumps inside them show an intact world.
+  The counter log repeats the last emitted values while the world render
+  is paused. Do not diagnose those as culls.
+- The REAL far-room cull is `portal_within_far`
+  (`psx-level/portal_visibility.rs:948`): a room only draws if some
+  accepted entry portal has nearest view-space z <= far_z (16384).
+  cortex_v3's cave has ~32k sightlines, so far chunks pop binarily at
+  the far plane (and hover-flap when a portal sits near the threshold).
+  The render gate is `draws_room` = root || within_far; the visible-mask
+  counter ignores within_far, which is why counters said "visible" while
+  the render skipped.
+- Candidate fixes, pending Manny's call: raise far_z / per-room
+  draw_distance for this content (costs room-draw perf, needs item C),
+  add hysteresis to within_far to kill the flap, and/or per-cell
+  distance clamp instead of whole-room gating.
+- The two user-visible edge moments still need pinpointing in the tape
+  (ask Manny what he did and roughly when); suspect the portal
+  front-face test at seams (camera crossing the portal plane) rather
+  than the window layer, which now provably converges.
+
 ## Fix plan
 
 A. **Self-healing retrigger**: keep unbuilt-but-visible rooms in (or beside)
