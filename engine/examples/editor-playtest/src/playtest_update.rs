@@ -194,6 +194,7 @@ impl Playtest {
         self.room_index = spawn.room;
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = SimTick::ZERO;
+        self.anim_blend_from = None;
         self.anim_lock_until_tick = SimTick::ZERO;
         self.active_interactable = None;
         self.checkpoint = None;
@@ -489,8 +490,7 @@ impl Playtest {
             if water.depth >= water.lethal_depth && submerged {
                 self.water_death_ticks_remaining = water.death_delay_ticks.max(1);
                 self.player_health = 0;
-                self.anim_state = PlayerAnim::Death;
-                self.anim_start_tick = now;
+                self.switch_player_anim(PlayerAnim::Death, now);
                 self.anim_lock_until_tick = now.saturating_add(u32::from(water.death_delay_ticks));
                 self.lock_target = None;
                 self.soft_lock_target = None;
@@ -505,8 +505,7 @@ impl Playtest {
             player_anim_from_motor(motor_frame.anim)
         };
         if new_state != self.anim_state {
-            self.anim_state = new_state;
-            self.anim_start_tick = now;
+            self.switch_player_anim(new_state, now);
             if new_state == PlayerAnim::Roll {
                 telemetry::debug_log("player roll:start");
             }

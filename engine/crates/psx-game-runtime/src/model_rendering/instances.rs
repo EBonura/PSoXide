@@ -452,6 +452,7 @@ pub fn draw_model_instances<
             runtime_model,
             anim,
             phase,
+            None,
             *camera,
             origin,
             model_rotation,
