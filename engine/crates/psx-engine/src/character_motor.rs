@@ -399,6 +399,10 @@ pub enum CharacterMotorAnim {
     Roll,
     /// Legacy quickstep animation intent retained for compatibility.
     Quickstep,
+    /// Locked-on left evade slide while preserving facing.
+    DashLeft,
+    /// Locked-on right evade slide while preserving facing.
+    DashRight,
 }
 
 /// Result of one motor update.
@@ -435,6 +439,10 @@ pub struct CharacterMotorState {
     action: CharacterMotorAction,
     action_frame: u8,
     action_yaw: Angle,
+    /// Animation intent chosen when the current action started. Lock-on
+    /// evades slide sideways or backward while facing the target, so the
+    /// clip choice cannot be derived from the action alone.
+    action_anim: CharacterMotorAnim,
     /// Sprint is latched while the button stays held so
     /// `sprint_min_q12` means "minimum to start", not "minimum to
     /// continue".
@@ -471,6 +479,7 @@ impl CharacterMotorState {
             action: CharacterMotorAction::Idle,
             action_frame: 0,
             action_yaw: yaw,
+            action_anim: CharacterMotorAnim::Roll,
             sprint_latched: false,
             sprint_exhausted: false,
             velocity_y: 0,
@@ -752,8 +761,18 @@ impl CharacterMotorState {
         let action = CharacterMotorAction::Roll;
         if let Some((move_x, move_z, _)) = analog {
             self.action_yaw = yaw_from_vector(move_x, move_z);
-            self.yaw = self.action_yaw;
+            if let Some(facing_yaw) = input.facing_yaw {
+                // Lock-on evade: slide in the input direction while the
+                // body keeps facing the target. The clip follows the
+                // slide direction (forward = the Roll slot, backward =
+                // the Backstep slot, sides = the dash slots).
+                self.action_anim = locked_evade_anim(facing_yaw, self.action_yaw);
+            } else {
+                self.yaw = self.action_yaw;
+                self.action_anim = CharacterMotorAnim::Roll;
+            }
         } else {
+            self.action_anim = CharacterMotorAnim::Roll;
             // With no directional input, preserve a responsive evade button:
             // move forward along the current combat/free-movement facing.
             self.action_yaw = input.facing_yaw.unwrap_or_else(|| {
@@ -813,7 +832,7 @@ impl CharacterMotorState {
 
         let anim = match action {
             CharacterMotorAction::Idle => CharacterMotorAnim::Idle,
-            CharacterMotorAction::Roll => CharacterMotorAnim::Roll,
+            CharacterMotorAction::Roll => self.action_anim,
             CharacterMotorAction::Quickstep => CharacterMotorAnim::Quickstep,
         };
         self.frame(anim, action, moved, blocked, false, invulnerable, recovery)
@@ -1534,6 +1553,24 @@ fn yaw_from_vector(dx: Q12, dz: Q12) -> Angle {
     Angle::from_q12((angle & 0x0FFF) as u16)
 }
 
+/// Locked-on evade clip choice by slide direction relative to facing.
+/// Sector convention matches [`locked_locomotion_anim`]; forward maps
+/// to the Roll slot and backward to the Backstep (quickstep) slot, the
+/// slots the four directional slide clips bind to.
+fn locked_evade_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorAnim {
+    let delta = facing_yaw.shortest_delta_q12(move_yaw);
+    let abs_delta = i32::from(delta).abs();
+    if abs_delta <= 512 {
+        CharacterMotorAnim::Roll
+    } else if abs_delta >= 1536 {
+        CharacterMotorAnim::Quickstep
+    } else if delta < 0 {
+        CharacterMotorAnim::DashLeft
+    } else {
+        CharacterMotorAnim::DashRight
+    }
+}
+
 fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorAnim {
     let delta = facing_yaw.shortest_delta_q12(move_yaw);
     let abs_delta = i32::from(delta).abs();
@@ -2036,6 +2073,54 @@ mod tests {
     }
 
     #[test]
+    fn locked_evade_slides_directionally_and_preserves_facing() {
+        let cases = [
+            (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Roll),
+            (Q12::ZERO, Q12::NEG_ONE, CharacterMotorAnim::Quickstep),
+            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::DashLeft),
+            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::DashRight),
+        ];
+        for (move_x, move_z, expected) in cases {
+            let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+            let frame = motor.update(
+                None,
+                CharacterMotorInput {
+                    move_x,
+                    move_z,
+                    evade: true,
+                    facing_yaw: Some(Angle::ZERO),
+                    ..CharacterMotorInput::default()
+                },
+                config(),
+            );
+            // The body keeps facing the target; only the slide direction
+            // and the reported clip intent change.
+            assert_eq!(frame.yaw, Angle::ZERO);
+            assert_eq!(frame.anim, expected);
+            assert_eq!(frame.action, CharacterMotorAction::Roll);
+            assert!(frame.moved);
+        }
+    }
+
+    #[test]
+    fn free_evade_still_turns_into_the_roll() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let frame = motor.update(
+            None,
+            CharacterMotorInput {
+                move_x: Q12::ONE,
+                move_z: Q12::ZERO,
+                evade: true,
+                ..CharacterMotorInput::default()
+            },
+            config(),
+        );
+        assert_eq!(frame.yaw, Angle::QUARTER);
+        assert_eq!(frame.anim, CharacterMotorAnim::Roll);
+        assert_eq!(frame.action, CharacterMotorAction::Roll);
+    }
+
+    #[test]
     fn locked_movement_preserves_facing_and_reports_directional_intent() {
         let cases = [
             (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Walk),
@@ -2118,17 +2203,20 @@ mod tests {
 
     #[test]
     fn locked_evade_rolls_in_every_direction_without_dropping_lock_input() {
+        // Diagonals resolve by the same sectors as locked locomotion:
+        // within a quarter-turn of the facing counts as forward, the
+        // mirrored sector as backward, the rest as side slides.
         let directions = [
-            (Q12::ZERO, Q12::ONE),
-            (Q12::ZERO, Q12::NEG_ONE),
-            (Q12::NEG_ONE, Q12::ZERO),
-            (Q12::ONE, Q12::ZERO),
-            (Q12::ONE, Q12::ONE),
-            (Q12::NEG_ONE, Q12::ONE),
-            (Q12::ONE, Q12::NEG_ONE),
-            (Q12::NEG_ONE, Q12::NEG_ONE),
+            (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Roll),
+            (Q12::ZERO, Q12::NEG_ONE, CharacterMotorAnim::Quickstep),
+            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::DashLeft),
+            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::DashRight),
+            (Q12::ONE, Q12::ONE, CharacterMotorAnim::Roll),
+            (Q12::NEG_ONE, Q12::ONE, CharacterMotorAnim::Roll),
+            (Q12::ONE, Q12::NEG_ONE, CharacterMotorAnim::Quickstep),
+            (Q12::NEG_ONE, Q12::NEG_ONE, CharacterMotorAnim::Quickstep),
         ];
-        for (move_x, move_z) in directions {
+        for (move_x, move_z, expected) in directions {
             let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::HALF);
             let frame = motor.update(
                 None,
@@ -2142,8 +2230,11 @@ mod tests {
                 config(),
             );
             assert_eq!(frame.action, CharacterMotorAction::Roll);
-            assert_eq!(frame.anim, CharacterMotorAnim::Roll);
-            assert_eq!(frame.yaw, yaw_from_vector(move_x, move_z));
+            assert_eq!(frame.anim, expected);
+            // The body no longer turns into the slide; it holds its
+            // current combat facing while the motor travels the input
+            // direction.
+            assert_eq!(frame.yaw, Angle::HALF);
             assert!(frame.moved);
             assert_eq!(motor.action_yaw, yaw_from_vector(move_x, move_z));
         }
