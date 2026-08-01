@@ -16,6 +16,9 @@ const DEBUG_LOG_LINE_CAP: usize = 256;
 /// cooldown in normal runs. Keep false for play/perf; flip to true only when
 /// debugging portal traversal.
 pub(super) const PORTAL_VIS_DEBUG_LOGS: bool = false;
+/// Log active-window reconcile anomalies (stale frees, failed or
+/// skipped builds) with streaming state, for headless diagnosis.
+pub(super) const RECONCILE_DEBUG_LOGS: bool = true;
 pub(super) const PORTAL_VIS_DEBUG_LOG_COOLDOWN_TICKS: u8 = 120;
 const PORTAL_VIS_DEBUG_VERBOSE_CLIPS: bool = false;
 const PORTAL_VIS_DEBUG_LOG_MAX_FRUSTUMS: usize = 4;
@@ -883,4 +886,18 @@ pub(super) fn emit_player_map_debug(
         telemetry::counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
         encode_debug_q12_basis(view_cos_pitch_q12),
     );
+}
+
+pub(super) fn debug_log_reconcile_room(label: &str, room: RoomIndex, stream_slot: u16, resident: bool, loading: bool) {
+    let mut line = DebugLogLine::new("recon ");
+    line.push_str(label);
+    line.push_str(" room=");
+    line.push_room(room);
+    line.push_str(" slot=");
+    line.push_u32(stream_slot as u32);
+    line.push_str(" res=");
+    line.push_bool(resident);
+    line.push_str(" load=");
+    line.push_bool(loading);
+    line.emit();
 }
