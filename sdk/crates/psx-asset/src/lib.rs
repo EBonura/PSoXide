@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 //! Runtime parsers for PSoXide cooked-asset blobs.
 //!
 //! Pairs with `editor/crates/psxed`, the host-side tool that
@@ -765,7 +766,8 @@ impl<'a> Animation<'a> {
     /// Parse a cooked `.psxanim` blob.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::animation::{
-            AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, VERSION, VERSION_V1,
+            AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
+            VERSION, VERSION_V1, VERSION_V3,
         };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -779,6 +781,7 @@ impl<'a> Animation<'a> {
         let pose_record_size = match version {
             VERSION => POSE_RECORD_SIZE,
             VERSION_V1 => POSE_RECORD_SIZE_V1,
+            VERSION_V3 => POSE_RECORD_SIZE_V3,
             _ => {
                 return Err(ParseError::UnsupportedVersion(version));
             }
@@ -800,7 +803,7 @@ impl<'a> Animation<'a> {
         let joint_count = read_u16(ah, 0);
         let frame_count = read_u16(ah, 2);
         let sample_rate_hz = read_u16(ah, 4);
-        let translation_shift = if version == VERSION {
+        let translation_shift = if version == VERSION || version == VERSION_V3 {
             let shift = read_u16(ah, 6);
             if shift > 15 {
                 return Err(ParseError::InvalidAnimationLayout);
@@ -923,6 +926,9 @@ impl<'a> Animation<'a> {
         if self.poses.as_ptr() as usize & 1 != 0 {
             return unsafe { self.pose_at_byte_offset_unaligned(base) };
         }
+        if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3 {
+            return unsafe { self.pose_v3_unchecked(base) };
+        }
         let matrix = unsafe { read_pose_matrix_aligned_unchecked(self.poses, base) };
         let off = 18;
         let translation = if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE {
@@ -953,8 +959,40 @@ impl<'a> Animation<'a> {
         }
     }
 
+    /// Decode one v3 (Q11-packed) record: rotation block at +0,
+    /// shifted i16 translations at +14. Byte-wise loads throughout, so
+    /// alignment is irrelevant.
+    ///
+    /// # Safety
+    /// `base + 20` must be in bounds.
+    unsafe fn pose_v3_unchecked(&self, base: usize) -> JointPose {
+        let matrix = unsafe { read_pose_matrix_q11_unchecked(self.poses, base) };
+        let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
+        let translation = Vec3I32::new(
+            decode_packed_translation(
+                unsafe { read_i16_unchecked(self.poses, base + off) },
+                self.translation_shift,
+            ),
+            decode_packed_translation(
+                unsafe { read_i16_unchecked(self.poses, base + off + 2) },
+                self.translation_shift,
+            ),
+            decode_packed_translation(
+                unsafe { read_i16_unchecked(self.poses, base + off + 4) },
+                self.translation_shift,
+            ),
+        );
+        JointPose {
+            matrix,
+            translation,
+        }
+    }
+
     #[inline(never)]
     unsafe fn pose_at_byte_offset_unaligned(&self, base: usize) -> JointPose {
+        if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3 {
+            return unsafe { self.pose_v3_unchecked(base) };
+        }
         let matrix = unsafe { read_pose_matrix_unchecked(self.poses, base) };
         let off = 18;
         let translation = if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE {
@@ -991,13 +1029,28 @@ impl<'a> Animation<'a> {
         frame_offset: usize,
         joint_index: u16,
     ) -> Option<GteJointPose> {
+        let v3 = self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE_V3;
         if joint_index >= self.joint_count
-            || self.pose_record_size != psxed_format::animation::POSE_RECORD_SIZE
+            || !(v3 || self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE)
         {
             return None;
         }
         let base = frame_offset.checked_add(joint_index as usize * self.pose_record_size)?;
         let bytes = self.poses.get(base..base + self.pose_record_size)?;
+        if v3 {
+            // SAFETY: the slice covers the whole 20-byte record.
+            let matrix = unsafe { read_pose_matrix_q11_unchecked(bytes, 0) };
+            let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
+            return Some(GteJointPose {
+                matrix,
+                translation: Vec3I16::new(
+                    read_i16(bytes, off),
+                    read_i16(bytes, off + 2),
+                    read_i16(bytes, off + 4),
+                ),
+                translation_shift: self.translation_shift,
+            });
+        }
         Some(GteJointPose {
             matrix: read_pose_matrix(bytes),
             translation: Vec3I16::new(
@@ -1312,6 +1365,75 @@ fn lerp_gte_pose_q12(a: GteJointPose, b: GteJointPose, alpha_q12: u16) -> GteJoi
 }
 
 #[inline]
+/// Decode one 12-bit Q11 rotation code to a Q3.12 element.
+///
+/// Ported from hl-psx's silicon-proven decoder: value = code * 2, with
+/// the reserved positive-max code 0x7FF decoding to exactly 4096. On
+/// MIPS the branchless six-instruction form avoids the select branch
+/// LLVM would otherwise emit.
+#[inline(always)]
+fn decode_q11_element(raw: u16) -> i16 {
+    #[cfg(target_arch = "mips")]
+    unsafe {
+        let decoded: u32;
+        core::arch::asm!(
+            "xori {scratch}, {decoded}, 0x07ff",
+            "sltiu {scratch}, {scratch}, 1",
+            "sll {decoded}, {decoded}, 20",
+            "sra {decoded}, {decoded}, 19",
+            "sll {scratch}, {scratch}, 1",
+            "addu {decoded}, {decoded}, {scratch}",
+            decoded = inlateout(reg) raw as u32 => decoded,
+            scratch = lateout(reg) _,
+            options(nomem, nostack, preserves_flags),
+        );
+        return decoded as i16;
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    {
+        let signed = ((raw << 4) as i16) >> 4;
+        signed
+            .wrapping_shl(1)
+            .wrapping_add((((raw & 0x0FFF) == 0x07FF) as i16) << 1)
+    }
+}
+
+/// Decode a v3 packed rotation block (nine 12-bit Q11 codes in
+/// fourteen bytes) into the row-major pose matrix. Byte-wise loads:
+/// the block is not alignment-guaranteed and the R3000 has no D-cache
+/// penalty for it.
+///
+/// # Safety
+/// `offset + 14` must be in bounds (v3 records are 20 bytes, so any
+/// in-bounds record satisfies this).
+#[inline]
+unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 3]; 3] {
+    let mut flat = [0i16; 9];
+    let mut pair = 0;
+    while pair < 4 {
+        let o = offset + pair * 3;
+        let packed = unsafe {
+            (bytes.as_ptr().add(o).read() as u32)
+                | ((bytes.as_ptr().add(o + 1).read() as u32) << 8)
+                | ((bytes.as_ptr().add(o + 2).read() as u32) << 16)
+        };
+        flat[pair * 2] = decode_q11_element((packed & 0x0FFF) as u16);
+        flat[pair * 2 + 1] = decode_q11_element(((packed >> 12) & 0x0FFF) as u16);
+        pair += 1;
+    }
+    let last = unsafe {
+        (bytes.as_ptr().add(offset + 12).read() as u16)
+            | ((bytes.as_ptr().add(offset + 13).read() as u16) << 8)
+    };
+    flat[8] = decode_q11_element(last & 0x0FFF);
+    [
+        [flat[0], flat[1], flat[2]],
+        [flat[3], flat[4], flat[5]],
+        [flat[6], flat[7], flat[8]],
+    ]
+}
+
 fn read_pose_matrix(bytes: &[u8]) -> [[i16; 3]; 3] {
     [
         [read_i16(bytes, 0), read_i16(bytes, 2), read_i16(bytes, 4)],
