@@ -539,6 +539,39 @@ pub(crate) fn cook_ui_scene_nodes(
                 default_ui_font_scale(),
                 default_ui_letter_spacing(),
             ),
+            UiNodeKind::Timer {
+                millis,
+                skippable,
+                action,
+            } => (
+                0,
+                0,
+                1,
+                1,
+                [0, 0, 0],
+                [0, 0, 0],
+                [0, 0, 0],
+                None,
+                None,
+                None,
+                // Delay in vblank ticks (NTSC 60 Hz), the clock the runtime
+                // timer pass counts in.
+                UiValueBinding::ConstantQ12((millis.saturating_mul(60) / 1000).max(1) as i32),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                String::new(),
+                String::new(),
+                cook_ui_action(*action),
+                psx_level::UI_OPTION_NONE,
+                if *skippable {
+                    psx_level::ui_node_flags::TIMER_SKIPPABLE
+                } else {
+                    0
+                },
+                0,
+                default_ui_font_scale(),
+                default_ui_letter_spacing(),
+            ),
         };
         let (sfx_first, sfx_count) = cook_ui_node_sfx(
             &node.kind,

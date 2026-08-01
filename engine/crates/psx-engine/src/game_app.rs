@@ -739,6 +739,12 @@ pub struct GameApp<'a, S: Scene> {
     /// free-runs faster than the visual cadence, so a frame COUNT is
     /// not wall time.
     loading_hold_start_tick: u32,
+    /// UI scene the timer pass last saw; timers re-arm when it changes.
+    ui_timer_scene: u16,
+    /// Tick the current UI scene was entered at, for Timer deadlines.
+    ui_timer_entered_tick: u32,
+    /// One bit per scene-local node index: Timer already fired this entry.
+    ui_timers_fired: u64,
     /// Stable random-message selector for the currently shown UI scene.
     ui_text_seed: u16,
 }
@@ -803,6 +809,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
             loading_progress_q12: 0,
             loading_confirm_ready: false,
             loading_hold_start_tick: 0,
+            ui_timer_scene: u16::MAX,
+            ui_timer_entered_tick: 0,
+            ui_timers_fired: 0,
             ui_text_seed: 0x6d2b,
         }
     }
@@ -1435,7 +1444,15 @@ impl<'a, S: Scene> GameApp<'a, S> {
             return;
         };
         self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
-        match node.action {
+        self.perform_action(node.action, ctx);
+    }
+
+    /// Execute one cooked UI action. Shared by focused-control
+    /// activation and [`Self::update_ui_timers`], so a Timer node's
+    /// auto-advance walks exactly the same flow paths a button press
+    /// does.
+    fn perform_action(&mut self, action: LevelUiAction, ctx: &mut Ctx) {
+        match action {
             LevelUiAction::GotoState { state } => {
                 if let Some(state_index) = self.flow_index_for_scene_state(state) {
                     let return_to = Some(self.cursor.current);
@@ -1487,6 +1504,14 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // take the range, not a sub-slice.
         let (first, count) = self.scene_node_range(scene);
 
+        // Timer nodes fire before input is read, so an auto-advance and a
+        // same-frame press cannot double-transition (the flow request set
+        // by the timer parks the cursor; activate_focus on the next state
+        // sees fresh focus).
+        if self.update_ui_timers(scene, first, count, ctx) {
+            return;
+        }
+
         // Seed (or repair) focus before reading input, so the first press
         // acts on the default control even on the frame the scene is entered,
         // and so a flow driven headless (update without render) still tracks
@@ -1526,6 +1551,51 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 self.request_gameplay(gameplay_index, ctx);
             }
         }
+    }
+
+    /// Arm, tick, and fire the scene's Timer nodes. Returns true when a
+    /// timer performed an action this frame (the caller stops processing
+    /// input against a scene the flow is already leaving).
+    ///
+    /// Timers arm when the scene becomes the active UI scene and fire
+    /// exactly once per entry. A [`ui_node_flags::TIMER_SKIPPABLE`] timer
+    /// also fires on a fresh CROSS when the scene has no focusable
+    /// control, which is the splash-screen idiom: logo, tag line, no
+    /// buttons, X hurries it along.
+    fn update_ui_timers(&mut self, scene: u16, first: usize, count: usize, ctx: &mut Ctx) -> bool {
+        let now = ctx.sim_tick.as_u32();
+        if self.ui_timer_scene != scene {
+            self.ui_timer_scene = scene;
+            self.ui_timer_entered_tick = now;
+            self.ui_timers_fired = 0;
+        }
+        let elapsed = now.wrapping_sub(self.ui_timer_entered_tick);
+        let skip_press = ctx.just_pressed(button::CROSS)
+            && self.resolved_focus(first, count).is_none();
+        let end = first.saturating_add(count).min(self.nodes.len());
+        for index in first..end {
+            let node = self.nodes[index];
+            if node.kind != LevelUiNodeKind::Timer {
+                continue;
+            }
+            let local = (index - first) as u64;
+            if local >= 64 || self.ui_timers_fired & (1 << local) != 0 {
+                continue;
+            }
+            let LevelUiValueBinding::ConstantQ12(delay_ticks) = node.value else {
+                continue;
+            };
+            let due = elapsed >= delay_ticks.max(0) as u32;
+            let skipped =
+                skip_press && node.flags & psx_level::ui_node_flags::TIMER_SKIPPABLE != 0;
+            if !(due || skipped) {
+                continue;
+            }
+            self.ui_timers_fired |= 1 << local;
+            self.perform_action(node.action, ctx);
+            return true;
+        }
+        false
     }
 
     fn update_ui_music(&mut self, scene: u16, ctx: &mut Ctx) {

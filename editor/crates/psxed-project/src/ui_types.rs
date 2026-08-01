@@ -1013,6 +1013,10 @@ impl Default for UiFocusStyle {
 }
 
 /// Authored 2D UI node type.
+fn default_ui_timer_millis() -> u32 {
+    3000
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiNodeKind {
     /// Root fixed-resolution PSX canvas.
@@ -1216,6 +1220,23 @@ pub enum UiNodeKind {
         #[serde(default)]
         loop_track: bool,
     },
+
+    /// Non-visual auto-advance timer: fires its action once per scene
+    /// entry after `seconds`. `skippable` lets a CROSS press fire it
+    /// early when the scene has no focusable control -- the splash
+    /// idiom (logo, tag line, no buttons).
+    Timer {
+        /// Delay before the action fires, in milliseconds (integer so
+        /// the node type stays `Eq`; the inspector edits it as seconds).
+        #[serde(default = "default_ui_timer_millis")]
+        millis: u32,
+        /// CROSS fires the timer early when nothing is focusable.
+        #[serde(default)]
+        skippable: bool,
+        /// Action performed when the timer fires.
+        #[serde(default)]
+        action: UiAction,
+    },
 }
 
 impl UiNodeKind {
@@ -1231,6 +1252,7 @@ impl UiNodeKind {
             Self::Button { .. } => "Button",
             Self::Slider { .. } => "Slider",
             Self::Music { .. } => "Music",
+            Self::Timer { .. } => "Timer",
         }
     }
 
@@ -1245,7 +1267,7 @@ impl UiNodeKind {
             | Self::Bar { rect, .. }
             | Self::Button { rect, .. }
             | Self::Slider { rect, .. } => Some(rect),
-            Self::Music { .. } => None,
+            Self::Music { .. } | Self::Timer { .. } => None,
         }
     }
 
@@ -1260,7 +1282,7 @@ impl UiNodeKind {
             | Self::Bar { rect, .. }
             | Self::Button { rect, .. }
             | Self::Slider { rect, .. } => Some(*rect),
-            Self::Music { .. } => None,
+            Self::Music { .. } | Self::Timer { .. } => None,
         }
     }
 }
