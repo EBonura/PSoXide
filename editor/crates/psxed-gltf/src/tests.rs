@@ -932,10 +932,21 @@ fn padded(mut bytes: Vec<u8>, pad: u8) -> Vec<u8> {
 }
 
 fn first_pose_matrix_component(bytes: &[u8], component: usize) -> i16 {
-    let offset = psxed_format::AssetHeader::SIZE
-        + psxed_format::animation::AnimationHeader::SIZE
-        + component * 2;
-    i16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    // The writer picks v3 (Q11-packed) for rigid clips and falls back
+    // to v2 when animated scale pushes elements past Q12 one; decode
+    // whichever this blob is so the assertions stay in Q3.12 terms.
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let offset =
+        psxed_format::AssetHeader::SIZE + psxed_format::animation::AnimationHeader::SIZE;
+    if version == psxed_format::animation::VERSION_V3 {
+        let block: [u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3] = bytes
+            [offset..offset + psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3]
+            .try_into()
+            .unwrap();
+        return psxed_format::animation::decode_rotation_q11(&block)[component];
+    }
+    let at = offset + component * 2;
+    i16::from_le_bytes([bytes[at], bytes[at + 1]])
 }
 
 fn test_source_vertex(position: [f32; 3]) -> SourceVertex {

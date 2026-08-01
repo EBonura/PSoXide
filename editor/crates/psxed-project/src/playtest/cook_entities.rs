@@ -1197,6 +1197,7 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
     let frame_count = animation.frame_count();
     let sample_rate_hz = animation.sample_rate_hz();
     let mut translations_max_abs = 0i32;
+    let mut rotation_max_abs = 0i16;
     let mut frame = 0u16;
     while frame < frame_count {
         let mut joint = 0u16;
@@ -1208,11 +1209,19 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
                     translations_max_abs.max(abs_i32_saturating(pose.translation.y));
                 translations_max_abs =
                     translations_max_abs.max(abs_i32_saturating(pose.translation.z));
+                for column in pose.matrix {
+                    for value in column {
+                        rotation_max_abs = rotation_max_abs.max(value.saturating_abs());
+                    }
+                }
             }
             joint += 1;
         }
         frame += 1;
     }
+    // Q11-packed rotations (version 3) hold |q12| <= 4096; larger values
+    // (animated scale) fall back to the flat i16 records of version 2.
+    let fits_v3 = rotation_max_abs <= 4096;
 
     let mut translation_shift = 0u16;
     while translations_max_abs > i16::MAX as i32 && translation_shift < 15 {
@@ -1221,11 +1230,22 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
     }
 
     let pose_count = frame_count as usize * joint_count as usize;
-    let payload_len = psxed_format::animation::AnimationHeader::SIZE
-        + pose_count * psxed_format::animation::POSE_RECORD_SIZE;
+    let (version, record_size) = if fits_v3 {
+        (
+            psxed_format::animation::VERSION_V3,
+            psxed_format::animation::POSE_RECORD_SIZE_V3,
+        )
+    } else {
+        (
+            psxed_format::animation::VERSION,
+            psxed_format::animation::POSE_RECORD_SIZE,
+        )
+    };
+    let payload_len =
+        psxed_format::animation::AnimationHeader::SIZE + pose_count * record_size;
     let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
     out.extend_from_slice(&psxed_format::animation::MAGIC);
-    out.extend_from_slice(&psxed_format::animation::VERSION.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&(payload_len as u32).to_le_bytes());
     out.extend_from_slice(&joint_count.to_le_bytes());
@@ -1241,9 +1261,24 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
             let pose = animation
                 .pose(frame, joint)
                 .expect("validated animation frame/joint indices");
-            for column in pose.matrix {
-                for value in column {
-                    out.extend_from_slice(&value.to_le_bytes());
+            if fits_v3 {
+                let mut flat = [0i16; 9];
+                let mut i = 0;
+                for column in pose.matrix {
+                    for value in column {
+                        flat[i] = value;
+                        i += 1;
+                    }
+                }
+                let mut block =
+                    [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3];
+                psxed_format::animation::encode_rotation_q11(&flat, &mut block);
+                out.extend_from_slice(&block);
+            } else {
+                for column in pose.matrix {
+                    for value in column {
+                        out.extend_from_slice(&value.to_le_bytes());
+                    }
                 }
             }
             for value in [pose.translation.x, pose.translation.y, pose.translation.z] {
