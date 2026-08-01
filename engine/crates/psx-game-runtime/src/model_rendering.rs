@@ -924,10 +924,12 @@ pub fn draw_player_assemble<
             }
             let v = vertices[vi];
             let jwt = joints[joint_of_vertex(vi)];
+            // compute_joint_world_transform already bakes local_to_world
+            // into the joint rotation; raw model-local verts go in as-is.
             let scaled = [
-                local_to_world.apply(v.position.x as i32),
-                local_to_world.apply(v.position.y as i32),
-                local_to_world.apply(v.position.z as i32),
+                v.position.x as i32,
+                v.position.y as i32,
+                v.position.z as i32,
             ];
             let r = rotate_offset_q12(&jwt.rotation, scaled);
             verts[corner] = WorldVertex::new(
