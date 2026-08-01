@@ -906,7 +906,7 @@ pub fn draw_player_assemble<
         let face = faces[face_index];
         let seed = (face_index as u32).wrapping_mul(0x9E37_79B9);
         // Staggered per-face timeline: each face settles at its own moment.
-        let ft = ((progress_q12 as i32) * 2 - (seed & 0x0FFF) as i32).clamp(0, 4096);
+        let ft = ((progress_q12 as i32) * 2 - (seed & 0x07FF) as i32).clamp(0, 4096);
         face_index += 1;
         if ft == 0 {
             continue;
@@ -946,9 +946,9 @@ pub fn draw_player_assemble<
         let cz = (verts[0].z + verts[1].z + verts[2].z) / 3;
         let remaining = (4096 - ft) as i32;
         // Fall from above with lateral scatter, easing linearly onto the pose.
-        let off_x = (((seed >> 8) & 0x3FF) as i32 - 512) * remaining >> 12;
-        let off_y = (2200 + ((seed >> 2) & 0x3FF) as i32) * remaining >> 12;
-        let off_z = (((seed >> 16) & 0x3FF) as i32 - 512) * remaining >> 12;
+        let off_x = ((((seed >> 8) & 0x3FF) as i32 - 512) * 3) * remaining >> 12;
+        let off_y = (1000 + ((seed >> 2) & 0x3FF) as i32) * remaining >> 12;
+        let off_z = ((((seed >> 16) & 0x3FF) as i32 - 512) * 3) * remaining >> 12;
         // Tumble that winds down as the face settles.
         let spin_total = (((seed >> 20) & 0x7FF) + 1024) as i32;
         let ang = ((spin_total * remaining) >> 12) as i16;
@@ -970,10 +970,15 @@ pub fn draw_player_assemble<
         }
         // Additive ghost ramp while unsettled; full material once seated.
         let material = if ft < 3072 {
-            let level = ((ft * 255) / 3072) as u8;
+            // Over-bright additive (128 = 1.0 modulation) so airborne
+            // shards glow against dark scenes instead of vanishing.
+            let level = (128 + (ft * 127) / 3072) as u8;
             base_material
                 .with_tint((level, level, level))
                 .with_blend_mode(BlendMode::Add)
+        } else if ft < 3584 {
+            // Seat flash: modulation above 128 over-brightens on PS1.
+            base_material.with_tint((220, 220, 220))
         } else {
             base_material
         };
