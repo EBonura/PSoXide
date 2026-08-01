@@ -434,6 +434,25 @@ impl SectorReader {
     /// concurrent CD/DMA-ch3 users, no CD-ROM IRQ handler installed). The
     /// caller accepts the global `I_MASK` rewrite.
     pub unsafe fn prepare(&mut self) -> bool {
+        unsafe { self.prepare_with_mode(CD_MODE_DOUBLE_SPEED_2048) }
+    }
+
+    /// [`prepare`](Self::prepare) at single speed: half the throughput,
+    /// twice the per-sector margin. The demo-disc chain loader measured
+    /// silent payload corruption over hundreds of back-to-back
+    /// double-speed sectors on the project console (2026-08-01, the
+    /// loader's RAM checksum against the disc build); the header sector
+    /// alone always read clean, so the failure scales with sustained
+    /// rate, and a loader that takes three extra seconds beats one that
+    /// jumps into a corrupt payload.
+    ///
+    /// # Safety
+    /// Same contract as [`prepare`](Self::prepare).
+    pub unsafe fn prepare_single_speed(&mut self) -> bool {
+        unsafe { self.prepare_with_mode(0x00) }
+    }
+
+    unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {
         unsafe {
             // Keep CD-ROM at the controller level and poll its IRQ flags
             // manually, so DataReady cannot enter an unhandled CPU IRQ storm.
@@ -470,7 +489,7 @@ impl SectorReader {
             // this cannot reproduce headless.
             self.wr_index(0);
             psx_io::write8(CD_IRQ, 0x00);
-            self.send_command(CMD_SETMODE, &[CD_MODE_DOUBLE_SPEED_2048], IRQ_ACK, ACK_POLL)
+            self.send_command(CMD_SETMODE, &[mode], IRQ_ACK, ACK_POLL)
         }
     }
 
