@@ -28,6 +28,11 @@ fn main() {
         // Match the incumbent player model's world height so the new
         // character lands at a comparable on-screen scale before tuning.
         world_height: 1024,
+        // 12 Hz instead of the 15 Hz default: the 25-clip delivery at
+        // 15 Hz overflows the persistent-asset arena (and PS1 RAM) by
+        // ~35 KB. Period-typical rate; revisit per-clip once the
+        // importer can vary the rate by clip length.
+        animation_fps: 12,
         ..Default::default()
     };
 
