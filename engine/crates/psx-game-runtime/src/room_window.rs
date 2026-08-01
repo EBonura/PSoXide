@@ -25,6 +25,24 @@ pub struct RoomWindowStep {
     pub current_active: Option<ActiveRuntimeRoom>,
 }
 
+/// Outcome of one [`RoomWindow::reconcile`] pass.
+pub struct RoomWindowReconcile {
+    /// Rooms built into the window this pass.
+    pub built: usize,
+    /// Entries freed (left the desired set, or stale stream slot).
+    pub freed: usize,
+    /// Whether every desired room is now present in the window.
+    pub converged: bool,
+    /// The freshly built current room, when this pass produced it.
+    pub current_active: Option<ActiveRuntimeRoom>,
+    /// Last room freed for a stale stream slot (diagnostics).
+    pub freed_stale_room: RoomIndex,
+    /// Last room whose build returned nothing (diagnostics).
+    pub failed_room: RoomIndex,
+    /// Last room whose build was skipped as not drawable (diagnostics).
+    pub skipped_room: RoomIndex,
+}
+
 /// Outcome of a synchronous [`RoomWindow::rebuild_from_visible`].
 pub struct RoomWindowRebuild {
     /// Staged room count (the next free window slot).
@@ -165,6 +183,119 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
             self.rooms[*next_slot] =
                 Some(previous.with_current_room_offsets(record, current_record));
             *next_slot += 1;
+        }
+    }
+
+    /// Per-tick desired/actual convergence over the live window: the
+    /// replacement for the event-triggered rebuild paths.
+    ///
+    /// Invariants (see docs/cortex-v3-visuals-30fps.md, informed by
+    /// REFERENCE's per-frame `GetRoomBounds` walk):
+    /// - The goal is read-only. A room that fails to build stays in
+    ///   `desired` and simply retries on a later pass; failures never
+    ///   prune the goal to match.
+    /// - Build-then-swap. An existing entry is freed only when its room
+    ///   left the desired set or its resident stream slot moved (its
+    ///   parsed pointers would dangle). A still-desired, still-valid
+    ///   entry is never dropped, so a visible room cannot blink while
+    ///   the window converges.
+    /// - `desired` is priority-ordered with the current room first, so
+    ///   a mandatory free of the current room rebuilds in this same
+    ///   pass while `builds_per_tick >= 1`.
+    ///
+    /// The pass is cheap when converged: one mask-style sweep and no
+    /// builds. Callers run it every tick instead of gating on camera
+    /// movement.
+    pub fn reconcile(
+        &mut self,
+        rooms: &'static [LevelRoomRecord],
+        desired: &[RoomIndex],
+        current_room: RoomIndex,
+        builds_per_tick: usize,
+        stream_slot_for: impl Fn(RoomIndex) -> u16,
+        mut build: impl FnMut(
+            usize,
+            RoomIndex,
+            &'static LevelRoomRecord,
+            &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        ) -> Option<ActiveRuntimeRoom>,
+    ) -> RoomWindowReconcile {
+        // Snapshot before freeing so a same-pass rebuild can still
+        // reuse a valid previous entry.
+        let previous_rooms = self.rooms;
+
+        let mut freed = 0usize;
+        let mut freed_stale_room = INVALID_ROOM_INDEX;
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = self.rooms[slot] {
+                let stale = active.stream_slot != stream_slot_for(active.index);
+                let wanted = desired.contains(&active.index);
+                if stale || !wanted {
+                    if stale {
+                        freed_stale_room = active.index;
+                    }
+                    self.rooms[slot] = None;
+                    freed += 1;
+                }
+            }
+            slot += 1;
+        }
+
+        let mut built = 0usize;
+        let mut converged = true;
+        let mut current_active = None;
+        let mut failed_room = INVALID_ROOM_INDEX;
+        let mut skipped_room = INVALID_ROOM_INDEX;
+        let mut desired_slot = 0usize;
+        while desired_slot < desired.len() {
+            let index = desired[desired_slot];
+            desired_slot += 1;
+            if index == INVALID_ROOM_INDEX || self.contains(index) {
+                continue;
+            }
+            if built >= builds_per_tick {
+                converged = false;
+                continue;
+            }
+            let Some(record) = rooms.get(index.to_usize()) else {
+                continue;
+            };
+            let Some(free_slot) = self.rooms.iter().position(|entry| entry.is_none()) else {
+                converged = false;
+                break;
+            };
+            match build(free_slot, index, record, &previous_rooms) {
+                Some(active) if staged_room_accepted(&active, index == current_room) => {
+                    if active.index == current_room {
+                        current_active = Some(active);
+                    }
+                    self.rooms[free_slot] = Some(active);
+                    built += 1;
+                }
+                Some(_) => {
+                    self.cache_skips = self.cache_skips.saturating_add(1);
+                    skipped_room = index;
+                    converged = false;
+                }
+                None => {
+                    failed_room = index;
+                    converged = false;
+                }
+            }
+        }
+
+        if freed > 0 || built > 0 {
+            self.bump_generation();
+        }
+        RoomWindowReconcile {
+            built,
+            freed,
+            converged,
+            current_active,
+            freed_stale_room,
+            failed_room,
+            skipped_room,
         }
     }
 

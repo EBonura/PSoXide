@@ -315,6 +315,10 @@ struct Playtest {
     /// clip-local tick, and the switch tick the blend ramps from.
     /// Cleared on init/respawn; expires by elapsed ticks at render.
     anim_blend_from: Option<(PlayerAnim, u32, SimTick)>,
+    /// Active-window reconcile needed: set by visibility refreshes,
+    /// crossings, and stream progress; cleared when a pass converges.
+    /// Keeps the steady-state reconcile at a two-branch early-out.
+    active_window_dirty: bool,
     /// Breakable box-prop state (broken bits, derived data, falls,
     /// break bursts), owned by `psx_game_runtime::box_props` since the
     /// phase-2 carve.
@@ -623,13 +627,11 @@ impl Playtest {
             false
         };
         if background_tick {
+            // Stream progress marks the window dirty: newly resident
+            // rooms can unblock builds the last pass skipped.
             #[cfg(feature = "cd-stream-bench")]
             if stream_progress {
-                if self.window.job.active {
-                    self.window.job.update_streaming = true;
-                } else {
-                    self.begin_active_room_window_job(true);
-                }
+                self.active_window_dirty = true;
             }
             // Pump the material refresh while any room texture is unresolved, not
             // only when an upload completes. A dropped texture (queue was full) is
@@ -641,7 +643,7 @@ impl Playtest {
             if upload_completed || self.room_materials_unresolved {
                 self.room_materials_unresolved = self.refresh_active_room_materials();
             }
-            self.step_active_room_window_job();
+            self.reconcile_active_room_window();
         }
     }
 
