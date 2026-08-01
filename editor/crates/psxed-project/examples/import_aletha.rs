@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use psxed_project::model_import::{
     import_animation_library, import_model_with_animation_sources,
 };
-use psxed_project::{ProjectDocument, ResourceData};
+use psxed_project::{NodeKind, ProjectDocument, ResourceData};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -74,6 +74,46 @@ fn main() {
                     .map(|r| r.name.as_str())
                     .unwrap_or("?");
                 println!("  {:?} <- {}", binding.action, clip);
+            }
+        }
+    }
+
+    // Rebind the incumbent player: the Character named "Aletha" moves to
+    // the delivered model + set (material untouched), and any scene
+    // ModelRenderer that showed her old model follows. Renderers showing
+    // other models (e.g. cortex_v4's Crimson Cross Knight) are left alone.
+    let mut old_model = None;
+    for resource in &mut project.resources {
+        if resource.name != "Aletha" {
+            continue;
+        }
+        if let ResourceData::Character(character) = &mut resource.data {
+            old_model = character.model;
+            character.model = Some(model_id);
+            character.animation_set = Some(library.set_id);
+            println!(
+                "rebound Character 'Aletha': model {old_model:?} -> {model_id:?}, set -> {:?}",
+                library.set_id
+            );
+        }
+    }
+    if let Some(old_model) = old_model {
+        for scene in &mut project.scenes {
+            let targets: Vec<_> = scene
+                .nodes()
+                .iter()
+                .filter(|node| {
+                    matches!(node.kind, NodeKind::ModelRenderer { model, .. } if model == Some(old_model))
+                })
+                .map(|node| node.id)
+                .collect();
+            for id in targets {
+                if let Some(node) = scene.node_mut(id) {
+                    if let NodeKind::ModelRenderer { model, .. } = &mut node.kind {
+                        *model = Some(model_id);
+                        println!("repointed ModelRenderer node in scene '{}'", scene.name);
+                    }
+                }
             }
         }
     }

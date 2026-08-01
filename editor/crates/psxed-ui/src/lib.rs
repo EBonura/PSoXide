@@ -200,6 +200,8 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/rust_mantis",
     "assets/animations/ci_player_complete",
     "assets/animations/rust_mantis_starter",
+    "assets/models/aletha_delivered",
+    "assets/animations/aletha_delivered",
 ];
 
 fn action_bar_height_for_status(status: &str) -> f32 {
@@ -215,6 +217,7 @@ const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Hooded Wretch",
     "Crowned Wraith",
     "Aletha",
+    "Aletha Delivered",
     "Rust Mantis",
 ];
 const STARTER_CHARACTER_MATERIAL_NAMES: &[&str] = &["Aletha Crystal"];
@@ -224,6 +227,7 @@ const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Hooded Wretch Enemy Set",
     "Crowned Wraith Enemy Set",
     "Aletha Complete Animation Set",
+    "Aletha Delivered Animation Set",
     "Rust Mantis Starter Animation Set",
 ];
 const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &[
