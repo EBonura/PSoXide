@@ -973,9 +973,9 @@ pub fn draw_player_assemble<
             // Over-bright additive (128 = 1.0 modulation) so airborne
             // shards glow against dark scenes instead of vanishing.
             let level = (128 + (ft * 127) / 3072) as u8;
-            base_material
-                .with_tint((level, level, level))
-                .with_blend_mode(BlendMode::Add)
+            // Additive submission is dropped somewhere in the world pass
+            // (under investigation); opaque-dim shards render everywhere.
+            base_material.with_tint((level, level, level))
         } else if ft < 3584 {
             // Seat flash: modulation above 128 over-brightens on PS1.
             base_material.with_tint((220, 220, 220))

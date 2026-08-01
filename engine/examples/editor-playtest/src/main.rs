@@ -248,8 +248,10 @@ const PLAYER_ANIM_BLEND_LOCOMOTION_TICKS: u32 = 8;
 /// Attack/action crossfade window in sim ticks: snappier so combat
 /// startup frames are not softened away.
 const PLAYER_ANIM_BLEND_ACTION_TICKS: u32 = 4;
-/// Nanobot assemble effect length in sim ticks (spawn-in).
-const PLAYER_ASSEMBLE_TICKS: u32 = 300;
+/// Nanobot assemble effect length in sim ticks (spawn-in). Tuning
+/// knob; slowed to 15s for observation while the look is dialed in
+/// (will become an authored character/project setting).
+const PLAYER_ASSEMBLE_TICKS: u32 = 900;
 
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
