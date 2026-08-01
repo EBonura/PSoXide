@@ -151,6 +151,9 @@ pub const DIAG_SITE_READ: u8 = 0xD0;
 #[cfg(target_arch = "mips")]
 pub struct SectorReader {
     prepared: bool,
+    /// Mode byte the last prepare() set; re-sent inside every BIOS-bracket
+    /// read start, because that is what the BIOS does.
+    mode: u8,
     discard: [u32; SECTOR_WORDS],
     /// Last failure snapshot: `[cause, status, command, flag-or-error]`.
     /// Written on every failure path so a caller with only a screen to
@@ -165,6 +168,7 @@ impl SectorReader {
     pub const fn new() -> Self {
         SectorReader {
             prepared: false,
+            mode: CD_MODE_DOUBLE_SPEED_2048,
             discard: [0; SECTOR_WORDS],
             diag: [0; 4],
         }
@@ -455,6 +459,7 @@ impl SectorReader {
     }
 
     unsafe fn prepare_with_mode(&mut self, mode: u8) -> bool {
+        self.mode = mode;
         unsafe {
             // Keep CD-ROM at the controller level and poll its IRQ flags
             // manually, so DataReady cannot enter an unhandled CPU IRQ storm.
@@ -547,6 +552,12 @@ impl SectorReader {
                 Wait::CdError | Wait::Timeout => return false,
             }
             self.ack(IRQ_COMPLETE);
+            // The BIOS re-sends SetMode inside every bracket, between the
+            // seek completion and ReadN; every one of its ReadN commands in
+            // the trace is prefixed SetLoc,SeekL,SetMode. Match it exactly.
+            if !self.send_command(CMD_SETMODE, &[self.mode], IRQ_ACK, ACK_POLL) {
+                return false;
+            }
             if !self.send_command(CMD_READN, &[], IRQ_ACK, ACK_POLL) {
                 return false;
             }
