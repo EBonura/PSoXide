@@ -37,6 +37,7 @@ impl Playtest {
         self.player_health = self.player_health_max;
         self.water_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
+        self.anim_blend_from = None;
         self.anim_lock_until_tick = SimTick::ZERO;
         self.lock_target = None;
         self.soft_lock_target = None;
@@ -62,6 +63,37 @@ impl Playtest {
         telemetry::debug_log("player water:respawn");
     }
 
+    /// Switch the player animation state, recording the outgoing
+    /// pose so the renderer can crossfade instead of hard-cutting.
+    pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick) {
+        let old = self.anim_state;
+        self.anim_blend_from = Some((old, now.saturating_sub(self.anim_start_tick), now));
+        self.anim_state = anim;
+        self.anim_start_tick = now;
+    }
+
+    /// Resolve the active crossfade for this render tick, if any.
+    ///
+    /// Alpha ramps linearly over the window; attacks use the short
+    /// window so combat stays snappy while locomotion soft-blends.
+    pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
+        let (anim, local_tick, switch_tick) = self.anim_blend_from?;
+        let duration = if player_anim_is_attack(self.anim_state) {
+            PLAYER_ANIM_BLEND_ACTION_TICKS
+        } else {
+            PLAYER_ANIM_BLEND_LOCOMOTION_TICKS
+        };
+        let elapsed = now.saturating_sub(switch_tick);
+        if elapsed >= duration {
+            return None;
+        }
+        Some(PlayerAnimBlend {
+            anim,
+            local_tick,
+            alpha_q12: ((elapsed << 12) / duration.max(1)) as u16,
+        })
+    }
+
     pub(super) fn start_player_anim_action(
         &mut self,
         anim: PlayerAnim,
@@ -74,8 +106,7 @@ impl Playtest {
         if !self.lock_player_anim_action(character, anim, now, video_hz) {
             return false;
         }
-        self.anim_state = anim;
-        self.anim_start_tick = now;
+        self.switch_player_anim(anim, now);
         if player_anim_is_attack(anim) {
             // A fresh swing gets a fresh one-hit-per-enemy mask.
             self.swing_hit_mask = 0;
