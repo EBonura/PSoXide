@@ -1178,6 +1178,7 @@ impl EditorWorkspace {
                 letter_spacing,
                 color,
                 gradient,
+                effect,
             } => {
                 inspector_section(ui, "ui-label-layout", icons::MOVE, "Layout", true, |ui| {
                     changed |= draw_ui_rect_editor(ui, rect);
@@ -1262,6 +1263,10 @@ impl EditorWorkspace {
                     |ui| {
                         changed |= color_editor(ui, "Color", color);
                         changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
+                        // Shimmer/FastShimmer sweep a sheen across the glyphs
+                        // at runtime (the "Built with PSoXide" boot tag);
+                        // other effects have no meaning on text.
+                        changed |= draw_ui_image_effect_picker(ui, effect);
                     },
                 );
             }

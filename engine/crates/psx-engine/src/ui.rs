@@ -441,6 +441,7 @@ pub fn draw_scene(
                         resolved,
                         paints,
                         text_seed.wrapping_add((index as u16).wrapping_mul(0x9e37)),
+                        frame,
                     );
                 }
             }
@@ -1094,6 +1095,7 @@ fn draw_label(
     resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
     text_seed: u16,
+    frame: u16,
 ) {
     let text = selected_label_text(node, text_seed);
     let paint = text_paint(node.color, node.color_paint, paints);
@@ -1102,6 +1104,24 @@ fn draw_label(
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
     if node.flags & ui_node_flags::TEXT_WRAP == 0 {
         let text_x = aligned_text_x(font, text, 0, resolved.width, align, scale, letter_spacing);
+        // Shimmer / FastShimmer on a Label is the boot-tag idiom: the
+        // sweeping sheen every hand-rolled "Built with PSoXide" intro
+        // (celeste collection, voxide) draws, so authored splash scenes
+        // can carry the same line. Single-line, untransformed labels
+        // only; wrapped or rotated text keeps the static paint.
+        if draw_label_sheen(
+            font,
+            node.image_effect,
+            resolved,
+            text_x,
+            text,
+            scale,
+            letter_spacing,
+            paint,
+            frame,
+        ) {
+            return;
+        }
         draw_transformed_text_paint(
             font,
             resolved,
@@ -1139,6 +1159,96 @@ fn draw_label(
         );
         line_y = line_y.saturating_add(scaled_line_height(font, scale));
         start = end;
+    }
+}
+
+/// Draw a single-line label with a sweeping sheen when its
+/// `image_effect` asks for one. Returns false when this label does not
+/// sheen (wrong effect, or a non-identity transform) so the caller
+/// falls back to the static paint path.
+///
+/// The math is the celeste-collection / voxide boot intro's, verbatim:
+/// a highlight head sweeps `char_count + 18` positions, each glyph
+/// brightens by `max(0, 18 - |i - head| * 6) / 18` toward PSX
+/// texture-modulation white (128 = full brightness, which is what the
+/// hand-rolled intros converge on during their hold phase). Shimmer
+/// advances the head every other frame like the originals;
+/// FastShimmer every frame.
+#[allow(clippy::too_many_arguments)]
+fn draw_label_sheen(
+    font: &FontAtlas,
+    effect: LevelUiImageEffect,
+    resolved: UiResolvedNode,
+    text_x: i16,
+    text: &str,
+    scale_q8: u16,
+    letter_spacing: i8,
+    paint: UiPaint,
+    frame: u16,
+) -> bool {
+    let head = {
+        let t = i32::from(frame);
+        let span = text.chars().count() as i32 + 18;
+        match effect {
+            LevelUiImageEffect::Shimmer => (t / 2).rem_euclid(span),
+            LevelUiImageEffect::FastShimmer => t.rem_euclid(span),
+            _ => return false,
+        }
+    };
+    if resolved.transform.m00 != 4096
+        || resolved.transform.m01 != 0
+        || resolved.transform.m10 != 0
+        || resolved.transform.m11 != 4096
+    {
+        return false;
+    }
+    let origin = resolved.transform.point(i32::from(text_x), 0);
+    // Per-glyph draws at a self-accumulated Q8 cursor: the same advance
+    // the font's own string loop uses, so kerning is identical to the
+    // static path and the sheen cannot drift the layout.
+    let mut cursor_q8 = i32::from(origin.0) << 8;
+    let gap_q8 = i32::from(letter_spacing) << 8;
+    for (i, ch) in text.chars().enumerate() {
+        let k = (18 - (i as i32 - head).abs() * 6).max(0);
+        let x = ((cursor_q8 + 128) >> 8) as i16;
+        let mut buf = [0u8; 4];
+        draw_scaled_text_paint(
+            font,
+            x,
+            origin.1,
+            ch.encode_utf8(&mut buf),
+            scale_q8,
+            letter_spacing,
+            sheened_paint(paint, k),
+        );
+        cursor_q8 = cursor_q8
+            .saturating_add(i32::from(font.font().glyph_advance(ch)) * i32::from(scale_q8))
+            .saturating_add(gap_q8);
+    }
+    true
+}
+
+/// Push a resolved (already font-tinted) paint toward modulation white
+/// by `k / 18`.
+fn sheened_paint(paint: UiPaint, k: i32) -> UiPaint {
+    if k <= 0 {
+        return paint;
+    }
+    let mix = |color: (u8, u8, u8)| {
+        let f = |v: u8| (i32::from(v) + (128 - i32::from(v)) * k / 18) as u8;
+        (f(color.0), f(color.1), f(color.2))
+    };
+    match paint {
+        UiPaint::Solid(color) => UiPaint::Solid(mix(color)),
+        UiPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => UiPaint::Gradient {
+            from: mix(from),
+            to: mix(to),
+            direction,
+        },
     }
 }
 

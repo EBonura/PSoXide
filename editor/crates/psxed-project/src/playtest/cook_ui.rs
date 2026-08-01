@@ -349,6 +349,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 letter_spacing,
                 color,
                 gradient,
+                effect: _,
             } => {
                 let candidates = messages
                     .iter()
@@ -569,7 +570,12 @@ pub(crate) fn cook_ui_scene_nodes(
             value,
             max,
             texture_asset,
-            image_effect: UiImageEffect::None,
+            // Labels carry their sheen through; everything else non-image
+            // stays static.
+            image_effect: match &node.kind {
+                UiNodeKind::Label { effect, .. } => *effect,
+                _ => UiImageEffect::None,
+            },
             text,
             tag,
             action,

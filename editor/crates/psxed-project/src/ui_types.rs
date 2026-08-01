@@ -1076,6 +1076,11 @@ pub enum UiNodeKind {
         /// Optional text gradient ending colour/direction.
         #[serde(default)]
         gradient: Option<UiGradient>,
+        /// Animated effect. Shimmer/FastShimmer sweep a bright sheen
+        /// across the glyphs at runtime -- the "Built with PSoXide"
+        /// boot-tag idiom. Other effects are ignored on labels.
+        #[serde(default)]
+        effect: UiImageEffect,
     },
     /// Screen-space textured image.
     Image {
