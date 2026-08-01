@@ -227,6 +227,17 @@ pub enum CharacterAnimationAction {
     WalkBackward,
     StrafeLeft,
     StrafeRight,
+    RunBackward,
+    RunStrafeLeft,
+    RunStrafeRight,
+    DashLeft,
+    DashRight,
+    Stun,
+    StunRecovery,
+    HitReactAlt,
+    AltLightAttack,
+    AltHeavyAttack,
+    AltComboAttack,
 }
 
 impl CharacterAnimationAction {
@@ -246,6 +257,17 @@ impl CharacterAnimationAction {
         Self::WalkBackward,
         Self::StrafeLeft,
         Self::StrafeRight,
+        Self::RunBackward,
+        Self::RunStrafeLeft,
+        Self::RunStrafeRight,
+        Self::DashLeft,
+        Self::DashRight,
+        Self::Stun,
+        Self::StunRecovery,
+        Self::HitReactAlt,
+        Self::AltLightAttack,
+        Self::AltHeavyAttack,
+        Self::AltComboAttack,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -267,6 +289,17 @@ impl CharacterAnimationAction {
             Self::WalkBackward => "Walk Backward",
             Self::StrafeLeft => "Strafe Left",
             Self::StrafeRight => "Strafe Right",
+            Self::RunBackward => "Run Backward",
+            Self::RunStrafeLeft => "Run Strafe Left",
+            Self::RunStrafeRight => "Run Strafe Right",
+            Self::DashLeft => "Dash Left",
+            Self::DashRight => "Dash Right",
+            Self::Stun => "Stun",
+            Self::StunRecovery => "Stun Recovery",
+            Self::HitReactAlt => "Hit React Alt",
+            Self::AltLightAttack => "Alt Light Attack",
+            Self::AltHeavyAttack => "Alt Heavy Attack",
+            Self::AltComboAttack => "Alt Combo Attack",
         }
     }
 
@@ -287,6 +320,17 @@ impl CharacterAnimationAction {
             Self::WalkBackward => 12,
             Self::StrafeLeft => 13,
             Self::StrafeRight => 14,
+            Self::RunBackward => 15,
+            Self::RunStrafeLeft => 16,
+            Self::RunStrafeRight => 17,
+            Self::DashLeft => 18,
+            Self::DashRight => 19,
+            Self::Stun => 20,
+            Self::StunRecovery => 21,
+            Self::HitReactAlt => 22,
+            Self::AltLightAttack => 23,
+            Self::AltHeavyAttack => 24,
+            Self::AltComboAttack => 25,
         }
     }
 
@@ -303,7 +347,17 @@ impl CharacterAnimationAction {
             }
             Self::HitReact => Some(AnimationRole::Hit),
             Self::Death => Some(AnimationRole::Death),
-            Self::WalkBackward | Self::StrafeLeft | Self::StrafeRight => None,
+            Self::Stun | Self::StunRecovery | Self::HitReactAlt => Some(AnimationRole::Hit),
+            Self::AltLightAttack | Self::AltHeavyAttack | Self::AltComboAttack => {
+                Some(AnimationRole::Attack)
+            }
+            Self::DashLeft | Self::DashRight => Some(AnimationRole::Roll),
+            Self::WalkBackward
+            | Self::StrafeLeft
+            | Self::StrafeRight
+            | Self::RunBackward
+            | Self::RunStrafeLeft
+            | Self::RunStrafeRight => None,
         }
     }
 
@@ -327,6 +381,68 @@ impl CharacterAnimationAction {
 
     pub fn guess_from_name(name: &str) -> Option<Self> {
         let name = name.to_ascii_lowercase();
+        // Directional shorthands (lft/rgt/fwd/bwd/bkw) follow the delivered
+        // Aletha clip naming; spelled-out forms keep matching below.
+        let left = name.contains("left") || name.contains("_lft");
+        let right = name.contains("right") || name.contains("_rgt");
+        let backward = name.contains("_bwd") || name.contains("_bkw") || name.contains("back");
+        if name.contains("stun") && name.contains("recover") {
+            return Some(Self::StunRecovery);
+        }
+        if name.contains("stun") {
+            return Some(Self::Stun);
+        }
+        if name.contains("dash") {
+            return Some(if left {
+                Self::DashLeft
+            } else if right {
+                Self::DashRight
+            } else if backward {
+                Self::Backstep
+            } else {
+                Self::Roll
+            });
+        }
+        if name.contains("run") && left {
+            return Some(Self::RunStrafeLeft);
+        }
+        if name.contains("run") && right {
+            return Some(Self::RunStrafeRight);
+        }
+        if name.contains("run") && backward {
+            return Some(Self::RunBackward);
+        }
+        if name.contains("walk") && left {
+            return Some(Self::StrafeLeft);
+        }
+        if name.contains("walk") && right {
+            return Some(Self::StrafeRight);
+        }
+        if name.contains("hurt_b") {
+            return Some(Self::HitReactAlt);
+        }
+        if name.contains("hurt") {
+            return Some(Self::HitReact);
+        }
+        // The delivered heavy-weapon set maps onto the alternate slots.
+        if name.contains("heavy_wpn") {
+            return Some(if name.contains("_b") {
+                Self::AltComboAttack
+            } else if name.contains("heavy_atk") {
+                Self::AltHeavyAttack
+            } else {
+                Self::AltLightAttack
+            });
+        }
+        if name.contains("light_wpn") {
+            return Some(if name.contains("_b") {
+                Self::ComboAttack
+            } else if name.contains("heavy_atk") {
+                Self::HeavyAttack
+            } else {
+                Self::LightAttack
+            });
+        }
         if name.contains("strafe") && name.contains("left") {
             Some(Self::StrafeLeft)
         } else if name.contains("strafe") && name.contains("right") {
