@@ -650,3 +650,74 @@ fn parses_v2_u16_indices() {
     assert_eq!(mesh.vert_count(), VERTS as u16);
     assert_eq!(mesh.face(0), (0, 255, 259));
 }
+
+/// Build a minimal v2 animation: `frames` frames, one joint, each
+/// frame's matrix diagonal and translation stamped with `values[f]`.
+fn blend_test_animation(values: &[i16]) -> std::vec::Vec<u8> {
+    use psxed_format::animation::{AnimationHeader, MAGIC, POSE_RECORD_SIZE, VERSION};
+    let payload_len = AnimationHeader::SIZE + values.len() * POSE_RECORD_SIZE;
+    let mut out = std::vec::Vec::new();
+    out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // joints
+    out.extend_from_slice(&(values.len() as u16).to_le_bytes()); // frames
+    out.extend_from_slice(&30u16.to_le_bytes()); // sample rate
+    out.extend_from_slice(&0u16.to_le_bytes()); // translation shift
+    for &value in values {
+        let matrix = [value, 0, 0, 0, value, 0, 0, 0, value];
+        for element in matrix {
+            out.extend_from_slice(&element.to_le_bytes());
+        }
+        for translation in [value, value, value] {
+            out.extend_from_slice(&translation.to_le_bytes());
+        }
+    }
+    out
+}
+
+#[test]
+fn model_pose_blend_endpoints_and_midpoint() {
+    let from_bytes_a = blend_test_animation(&[1000, 1000]);
+    let from_bytes_b = blend_test_animation(&[3000, 3000]);
+    let outgoing = Animation::from_bytes(&from_bytes_a).expect("outgoing parses");
+    let incoming = Animation::from_bytes(&from_bytes_b).expect("incoming parses");
+    let outgoing_sample = outgoing
+        .looped_pose_sample_q12(0)
+        .expect("outgoing sample");
+    let primary = incoming
+        .looped_pose_sample_q12(0)
+        .and_then(|sample| sample.pose(0))
+        .expect("incoming pose");
+
+    // Alpha 0 shows the outgoing pose.
+    let blend = ModelPoseBlend {
+        sample: outgoing_sample,
+        alpha_q12: 0,
+    };
+    assert_eq!(blend.blend_toward(primary, 0).matrix[0][0], 1000);
+
+    // Saturated alpha passes the primary through untouched.
+    let blend = ModelPoseBlend {
+        sample: outgoing_sample,
+        alpha_q12: 1 << 12,
+    };
+    assert_eq!(blend.blend_toward(primary, 0), primary);
+
+    // Midpoint lands halfway, matrix and translation alike.
+    let blend = ModelPoseBlend {
+        sample: outgoing_sample,
+        alpha_q12: 1 << 11,
+    };
+    let mid = blend.blend_toward(primary, 0);
+    assert_eq!(mid.matrix[0][0], 2000);
+    assert_eq!(mid.translation.x, 2000);
+
+    // A joint missing from the outgoing clip degrades to the primary.
+    let blend = ModelPoseBlend {
+        sample: outgoing_sample,
+        alpha_q12: 1 << 11,
+    };
+    assert_eq!(blend.blend_toward(primary, 7), primary);
+}

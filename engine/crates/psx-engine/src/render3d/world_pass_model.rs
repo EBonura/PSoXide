@@ -315,6 +315,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             model,
             animation,
             frame_q12,
+            None,
             camera,
             origin,
             instance_rotation,
@@ -352,12 +353,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
+        blend_from: Option<ModelPoseBlend<'_>>,
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
             model,
             animation,
             frame_q12,
+            blend_from,
             camera,
             origin,
             instance_rotation,
@@ -403,6 +406,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             model,
             animation,
             frame_q12,
+            None,
             camera,
             origin,
             instance_rotation,
@@ -440,12 +444,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
+        blend_from: Option<ModelPoseBlend<'_>>,
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
             model,
             animation,
             frame_q12,
+            blend_from,
             camera,
             origin,
             instance_rotation,
@@ -469,6 +475,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         model: Model<'_>,
         animation: Animation<'_>,
         frame_q12: u32,
+        blend_from: Option<ModelPoseBlend<'_>>,
         camera: WorldCamera,
         origin: WorldVertex,
         instance_rotation: Mat3I16,
@@ -503,6 +510,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // EXPLOSION PROBE (diagnostic): capture this model's compose inputs;
         // frozen once a blended (player) vertex is observed this frame.
         super::player_vert_debug::record_joints_begin(&view_instance);
+        // A saturated or absent crossfade uses the packed GTE fast path; an
+        // active blend samples both clips unpacked (the packed translations
+        // carry per-clip shifts that cannot be lerped directly).
+        let active_blend = blend_from.filter(|blend| blend.alpha_q12 < 1 << 12);
         if let Some(sample) = pose_sample {
             for (joint, joint_view_transform) in joint_view_transforms
                 .iter_mut()
@@ -511,8 +522,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             {
                 let joint_index = joint as u16;
                 super::player_vert_debug::set_joint_slot(joint as u8);
-                let joint_transform =
-                    if MODEL_GTE_JOINT_TRANSLATION && MODEL_GTE_JOINT_PACKED_TRANSLATION {
+                let joint_transform = if MODEL_GTE_JOINT_TRANSLATION
+                    && MODEL_GTE_JOINT_PACKED_TRANSLATION
+                    && active_blend.is_none()
+                {
                         sample
                             .gte_pose(joint_index)
                             .and_then(|pose| {
@@ -536,6 +549,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             })
                     } else {
                         sample.pose(joint_index).map(|pose| {
+                            let pose = match &active_blend {
+                                Some(blend) => blend.blend_toward(pose, joint_index),
+                                None => pose,
+                            };
                             let pose = apply_model_pose_translation(pose, pose_translation);
                             if MODEL_GTE_JOINT_TRANSLATION {
                                 textured_model_part_gte_transform_with_view_gte_translation(

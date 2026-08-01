@@ -1169,6 +1169,43 @@ impl AnimationPoseSample<'_> {
     }
 }
 
+/// Crossfade source: a second animation sample blended toward a
+/// primary pose.
+///
+/// Used for clip-transition crossfades: the outgoing clip's frozen
+/// sample sits here while the incoming clip plays as the primary.
+/// `alpha_q12` is the Q12 weight of the PRIMARY pose (0 shows this
+/// source, `1 << 12` shows the primary alone).
+///
+/// The blend is a linear matrix lerp, not a rotation-correct slerp:
+/// mid-blend joints shrink slightly when the two poses differ a lot.
+/// Short crossfade windows keep that invisible; renormalize later if
+/// a long blend ever makes it visible.
+#[derive(Copy, Clone, Debug)]
+pub struct ModelPoseBlend<'a> {
+    /// Outgoing pose sample (frame pair + intra-frame alpha).
+    pub sample: AnimationPoseSample<'a>,
+    /// Q12 weight of the primary pose this source blends toward.
+    pub alpha_q12: u16,
+}
+
+impl ModelPoseBlend<'_> {
+    /// Blend this source's joint pose toward `primary`.
+    ///
+    /// Falls back to `primary` unchanged when the joint is missing
+    /// from the outgoing clip (mismatched rigs never corrupt poses).
+    #[inline]
+    pub fn blend_toward(&self, primary: JointPose, joint_index: u16) -> JointPose {
+        if self.alpha_q12 >= 1 << 12 {
+            return primary;
+        }
+        match self.sample.pose(joint_index) {
+            Some(from) => lerp_pose_q12(from, primary, self.alpha_q12),
+            None => primary,
+        }
+    }
+}
+
 /// Decoded joint pose matrix.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct JointPose {
