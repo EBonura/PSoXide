@@ -651,20 +651,14 @@ impl Gpu {
     /// screenshot path reports -- letting milestone parity tests
     /// compare byte-for-byte.
     pub fn display_area(&self) -> DisplayArea {
-        if !self.display_configured {
-            // Match Redux's `takeScreenShot`: zero-sized image until
-            // GP1 0x07 or 0x08 has been written. That's what lets
-            // `display_hash` compare apples to apples from the very
-            // first instruction onward, instead of us reporting our
-            // `GP1 0x00` reset defaults while Redux still reports 0×0.
-            return DisplayArea {
-                x: self.display_start_x,
-                y: self.display_start_y,
-                width: 0,
-                height: 0,
-                bpp24: self.display_24bpp,
-            };
-        }
+        // Live register view, even before GP1 0x07/0x08 have been written
+        // after a reset: silicon scans out the (persisting) ranges the
+        // moment GP1 0x03 re-enables the display, which is how the demo
+        // disc's chain-loader screen is visible on a console. This used to
+        // return 0x0 until reconfiguration (Redux's `takeScreenShot`
+        // semantics), which hid that whole phase from --dump-hw and the
+        // GUI panel; the Redux-parity gating now lives in
+        // [`Gpu::display_hash`], the only consumer that needs it.
         DisplayArea {
             x: self.display_start_x,
             y: self.display_start_y,
@@ -686,6 +680,13 @@ impl Gpu {
     /// edge and the row count is reduced -- matching Redux's
     /// behaviour.
     pub fn display_hash(&self) -> (u64, u32, u32, usize) {
+        if !self.display_configured {
+            // Match Redux's `takeScreenShot`: zero-sized image until
+            // GP1 0x07 or 0x08 has been written after a reset, so the
+            // milestone parity hashes compare apples to apples from the
+            // very first instruction onward.
+            return (psx_hw::hash::Fnv1a64::new().finish(), 0, 0, 0);
+        }
         let da = self.display_area();
         let mut h = psx_hw::hash::Fnv1a64::new();
         let mut byte_len = 0usize;
