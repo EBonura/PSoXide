@@ -59,6 +59,8 @@ pub(crate) fn player_anim_from_motor(anim: CharacterMotorAnim) -> PlayerAnim {
         CharacterMotorAnim::Run => PlayerAnim::Run,
         CharacterMotorAnim::Roll => PlayerAnim::Roll,
         CharacterMotorAnim::Quickstep => PlayerAnim::Quickstep,
+        CharacterMotorAnim::DashLeft => PlayerAnim::DashLeft,
+        CharacterMotorAnim::DashRight => PlayerAnim::DashRight,
     }
 }
 

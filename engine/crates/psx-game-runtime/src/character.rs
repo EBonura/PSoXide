@@ -24,6 +24,8 @@ pub enum PlayerAnim {
     Run,
     Roll,
     Quickstep,
+    DashLeft,
+    DashRight,
     LightAttack,
     HeavyAttack,
     Death,
@@ -42,6 +44,8 @@ impl PlayerAnim {
             Self::Roll => CharacterAnimationAction::Roll,
             // Cooked slot 5 retains its legacy Backstep discriminant.
             Self::Quickstep => CharacterAnimationAction::Backstep,
+            Self::DashLeft => CharacterAnimationAction::DashLeft,
+            Self::DashRight => CharacterAnimationAction::DashRight,
             Self::LightAttack => CharacterAnimationAction::LightAttack,
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
             Self::Death => CharacterAnimationAction::Death,
@@ -50,7 +54,10 @@ impl PlayerAnim {
 
     /// Whether the motor drives this state as a fixed-length action.
     pub const fn is_motor_fixed_action(self) -> bool {
-        matches!(self, Self::Roll | Self::Quickstep)
+        matches!(
+            self,
+            Self::Roll | Self::Quickstep | Self::DashLeft | Self::DashRight
+        )
     }
 }
 
