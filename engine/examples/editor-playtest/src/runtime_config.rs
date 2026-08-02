@@ -244,7 +244,7 @@ pub(super) fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
 pub(super) const SCREEN_OFFSET_X_OPTION_ID: u16 = 1;
 pub(super) const SCREEN_OFFSET_Y_OPTION_ID: u16 = 2;
 
-/// Cortex tiles are smaller than REFERENCE room sectors, so one four-way split gives
+/// Cortex tiles are smaller than the reference engine room sectors, so one four-way split gives
 /// the desired affine correction without paying for the 16-leaf near band.
 pub(super) const ROOM_ADAPTIVE_SUBDIVISION_LEVELS: u8 = 1;
 pub(super) const ROOM_ADAPTIVE_SUBDIVISION_KINDS: AdaptiveSubdivisionKindMask =
