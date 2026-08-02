@@ -232,11 +232,11 @@ pub struct Gpu {
     /// `(pre-edge value, value the edge wrote)` for every pixel
     /// currently owned by an edge, keyed by `(y << 16) | x`. Erasing
     /// restores the pre-edge value instead of writing black -- games
-    /// that never repaint their background (a commercial title's menus draw
+    /// that never repaint their background (some commercial menus draw
     /// the car over a static backdrop) would otherwise accumulate a
     /// black scar wherever an edge ever was. The restore only applies
     /// while the pixel still holds what the edge wrote: if the game
-    /// overdrew our edge (a commercial title's leaderboard redraws its text rows),
+    /// overdrew our edge (leaderboard screens redraw their text rows),
     /// restoring would smear stale content over the newer frame.
     wire_saved: std::collections::HashMap<u32, (u16, u16)>,
     /// Previous-vblank value of `wireframe_enabled`, for detecting the
@@ -250,7 +250,7 @@ pub struct Gpu {
     /// display area, inclusive corners). Toggling wireframe on clears
     /// them once: polygons no longer overwrite the framebuffer, so the
     /// last textured frame would otherwise sit frozen behind the edges
-    /// for the rest of the session (GT races / a commercial title fights looked
+    /// for the rest of the session (racing and fighting scenes looked
     /// like wires over a stale photo of the scene). Live 2D content
     /// (sprites, HUD, MDEC) still draws on top of the black canvas.
     wire_cleared_rects: Vec<(u16, u16, u16, u16)>,
@@ -1023,7 +1023,7 @@ impl Gpu {
             // Toggle just turned on: black out the framebuffer pages once.
             // Polygons stop overwriting the framebuffer in wireframe mode,
             // so the last textured frame would sit frozen behind the edges
-            // for the rest of the session (GT races / a commercial title fights looked
+            // for the rest of the session (racing and fighting scenes looked
             // like wires over a stale photo). Live 2D content still draws
             // on top of the black canvas. Snapshot first so toggling off
             // can put back what this clear removed.
@@ -2483,7 +2483,7 @@ impl Gpu {
         // exceeds 255 reads VRAM PAST the tpage edge -- typically the
         // neighbouring tpage's data, garbage texels, or a different
         // CLUT-driven byte. Visible as smeared / corrupted 2D sprites
-        // (a commercial title character portraits, BIOS dialog frames).
+        // (character portraits, BIOS dialog frames).
         let u = u & 0xFF;
         let v = v & 0xFF;
         // Apply the texture window -- PSX-SPX:

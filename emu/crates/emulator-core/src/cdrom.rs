@@ -1593,7 +1593,7 @@ impl CdRom {
             // Redux's `m_irqRepeated` path leaves `m_irq` pointing at
             // CdlReset+0x100. The replacement 0x800-cycle interrupt
             // therefore publishes the pending completion, not another
-            // ACK. a commercial title's BIOS reset loop depends on seeing that INT2.
+            // ACK. A commercial BIOS reset loop depends on seeing that INT2.
             self.schedule_first_complete_response(vec![stat]);
         } else {
             self.schedule_first_response(vec![stat]);
@@ -1941,7 +1941,7 @@ impl CdRom {
         // controller's zero-initialized slot. The BIOS CDROM handler
         // drains all four bytes by polling status bit 5; publishing
         // only three makes it skip one poll/drain loop and breaks
-        // cycle parity in a commercial title's boot path.
+        // cycle parity in a commercial boot path.
         self.schedule_first_response(vec![self.stat_byte(), bin_to_bcd(m), bin_to_bcd(s), 0x00]);
     }
 

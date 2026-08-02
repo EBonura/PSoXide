@@ -562,7 +562,7 @@ impl ShadedTexTri {
 /// The CPU dispatches this via the fast path when a textured quad's
 /// vertices form an axis-aligned rectangle (`v0.y == v1.y &&
 /// v2.y == v3.y && v0.x == v2.x && v1.x == v3.x`). The submitted
-/// vertical edge order may still be mirrored; a commercial title uses that for
+/// vertical edge order may still be mirrored; commercial titles use that for
 /// the P2 VS portrait. Triangle splits produce different pixels for
 /// non-affine UV layouts (the diagonal `v3.uv = v1.uv + v2.uv -
 /// v0.uv` affine condition often fails on V), so for parity we have
@@ -780,7 +780,7 @@ mod tests {
             (482, 368),
             (578, 368),
         ));
-        // Mirrored horizontally, as seen in a commercial title's P2 portrait.
+        // Mirrored horizontally, as seen in a commercial second-player portrait.
         assert!(TexQuadBilinear::is_axis_aligned(
             (578, 352),
             (482, 352),

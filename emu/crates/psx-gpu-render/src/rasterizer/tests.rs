@@ -676,7 +676,7 @@ fn tex_tri_15bpp_axis_aligned_matches_cpu() {
 fn tex_tri_4bpp_with_clut_matches_cpu() {
     // 4bpp paletted texture: each VRAM word holds 4 texel
     // indices, each indexes a 16-entry CLUT row. This stresses
-    // the CLUT lookup path that the a commercial title-3 portrait bug
+    // the CLUT lookup path that the portrait bug
     // landed in.
     let v = [(20i32, 20i32), (60, 20), (20, 60)];
     let uv = [(0u8, 0u8), (32, 0), (0, 32)];
@@ -1231,7 +1231,7 @@ fn shaded_tex_tri_scanline_15bpp_is_bit_exact() {
     );
 }
 
-/// a commercial title portrait regression. The CPU's
+/// Commercial portrait regression. The CPU's
 /// `rasterize_axis_aligned_textured_quad` fast path uses bilinear
 /// UV interpolation; the original GPU replay split the quad into
 /// two barycentric triangles, which produced different pixels
@@ -1239,7 +1239,7 @@ fn shaded_tex_tri_scanline_15bpp_is_bit_exact() {
 /// (UV3.v != UV1.v + UV2.v - UV0.v). Now the replay detects
 /// axis-aligned + non-affine quads and dispatches the dedicated
 /// `tex_quad_bilinear` shader. This test pins that path with the
-/// exact UV layout from the divergent a commercial title packet (cmd #9032
+/// exact UV layout from the divergent packet (cmd #9032
 /// in the boot trace).
 #[test]
 fn tex_quad_bilinear_non_affine_uvs_match_cpu() {
@@ -1410,7 +1410,7 @@ fn tex_quad_bilinear_right_to_left_order_matches_cpu() {
     assert_tex_quad_bilinear_order_matches_cpu(
         [(4i32, 0i32), (0, 0), (4, 4), (0, 4)],
         [(4u8, 0u8), (0, 0), (4, 4), (0, 4)],
-        "right-to-left a commercial title-style",
+        "right-to-left mirrored",
     );
 }
 
@@ -1839,7 +1839,7 @@ fn tex_rect_modulated_tint_matches_cpu_byte_for_byte() {
 
 #[test]
 fn tex_rect_4bpp_with_clut_matches_cpu_byte_for_byte() {
-    // a commercial title-3-style 4bpp paletted rect, the most common 2D-UI
+    // 4bpp paletted rect, the most common 2D-UI
     // primitive. Strict bit-exact parity here would have caught
     // the U/V-wrap bug in `sample_texture` immediately.
     let xy = (40i32, 30i32);

@@ -1783,7 +1783,7 @@ fn sample_texture_uv_wrap_at_256_per_psx_spx() {
     // can pass values >= 256 here; without the explicit `& 0xFF`
     // we read VRAM PAST the tpage edge and pull garbage from the
     // neighbouring tpage. Visible as smeared 2D sprites in pre-fight
-    // loading screens (a commercial title character portraits) and corrupt
+    // loading screens (character portraits) and corrupt
     // BIOS dialog frames.
     //
     // Test: in 15bpp mode, place a recognisable colour at tpage
@@ -1948,7 +1948,7 @@ fn textured_quad_drops_only_the_oversize_split_half() {
 
 #[test]
 fn axis_aligned_textured_quad_draws_right_to_left_order() {
-    // a commercial title mirrors the P2 VS portrait by submitting an axis-
+    // One commercial title mirrors its second-player portrait by submitting an axis-
     // aligned textured quad whose first vertical edge is on the
     // right and second vertical edge is on the left. The fast path
     // must draw it instead of treating the negative X span as
@@ -2268,7 +2268,7 @@ fn flat_quad_replay_still_matches_silicon() {
     );
 }
 
-// a commercial title intro repro: the Universal/Naughty Dog screens are
+// Commercial intro repro: the publisher logo screens are
 // composited as GP0 0x7C textured 16x16 sprites from an 8bpp texpage at
 // (256,256) with a CLUT at (512,304), per-sprite E1 0x6B4 + E2 0x04000
 // (offset-only window, mask 0 = no-op) -- captured from the real game's
@@ -2510,11 +2510,11 @@ fn vram_copy_honours_force_mask_bit() {
 /// Wireframe edge journal + toggle transitions.
 ///
 /// - Toggling ON blacks out the framebuffer once (the last textured
-///   frame would otherwise sit frozen behind the edges -- GT races /
-///   a commercial title fights looked like wires over a stale photo).
+///   frame would otherwise sit frozen behind the edges -- racing and
+///   fighting scenes looked like wires over a stale photo).
 /// - Edges over content the game draws DURING wireframe restore that
 ///   content bit-exact when they age out, not black (erase-to-black
-///   scarred a commercial title's never-repainted menu backdrop).
+///   scarred a never-repainted menu backdrop).
 /// - Pixels the game overdraws keep the game's content.
 /// - Toggling OFF restores what the on-clear removed.
 #[test]
@@ -2556,7 +2556,7 @@ fn wireframe_erase_restores_background_not_black() {
     assert_ne!(gpu.vram.get_pixel(5, 5), 0x1234, "edge drawn over the bg");
 
     // The game also redraws part of its UI over one of our edge pixels
-    // (a commercial title's leaderboard scrolls its text rows). When that edge ages
+    // (leaderboard screens scroll their text rows). When that edge ages
     // out, the game's newer content must stand -- restoring the stale
     // saved value would leave ghost content.
     let (gx, gy) = (40u16, 10u16); // triangle vertex = guaranteed edge pixel

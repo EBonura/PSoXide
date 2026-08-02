@@ -2103,12 +2103,12 @@ fn frontend_display(
 ) -> (egui::TextureId, egui::Rect) {
     let area = display_area_or_default(bus);
     // Only true-colour (24bpp) frames must use the CPU display texture -- the HW
-    // target is BGR15 and can't represent 24bpp pre-rendered backgrounds (a commercial title/a commercial title
+    // target is BGR15 and can't represent 24bpp pre-rendered backgrounds (some commercial titles
     // rooms). Everything else, INCLUDING 16bpp frames with a GP1(06/07) screen
     // offset, goes through the upscaling HW target so the Window/hi-res toggle
     // actually applies. Before, any non-zero display offset forced the native CPU
-    // path, so a game with a constant 1px pan (a commercial title h_off=-1, a commercial title h_off=-1/v_off=8)
-    // silently lost hi-res while an offset-free sibling (a commercial title) kept it.
+    // path, so a game with a constant 1px pan (h_off=-1, or h_off=-1/v_off=8)
+    // silently lost hi-res while an offset-free sibling kept it.
     // ponytail: the fine display offset (a few px of CRT-window pan) is dropped in
     // the HW path -- imperceptible in a scale-to-fit window. Apply it at the paint
     // rect if an animated-offset (screen-shake) title ever needs it.

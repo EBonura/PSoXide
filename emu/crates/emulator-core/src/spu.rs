@@ -1651,7 +1651,7 @@ impl Spu {
                 // 0..=7FFF, but SCPH-9902 reads back manual FFFF writes
                 // verbatim, matching PSX-SPX's documented -8000..+7FFF
                 // manual range. Games also poll the live generated value:
-                // a commercial title waits for every voice to reach zero.
+                // Some titles wait for every voice to reach zero.
                 //
                 // This deliberately diverges from the Redux parity trace --
                 // Redux's SPU runs on an unpumped background thread during an

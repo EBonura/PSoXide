@@ -19,7 +19,7 @@
 //! these phases, the wgpu side is worth a separate probe.
 //!
 //! ```bash
-//! PSOXIDE_DISC="/path/a commercial title.cue" \
+//! PSOXIDE_DISC="/path/to/disc.cue" \
 //!   cargo run --release -p frontend --example bench_cpu_loop -- \
 //!     --frames 600
 //! ```

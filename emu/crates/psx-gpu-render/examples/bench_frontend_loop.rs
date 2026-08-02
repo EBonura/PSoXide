@@ -6,7 +6,7 @@
 //!
 //! Per simulated frame:
 //!   1. Run the CPU emulator forward by `--cycles-per-frame` cycles
-//!      (~558k for ~30 fps a commercial title boot, the ratio the frontend
+//!      (~558k for a ~30 fps commercial boot, the ratio the frontend
 //!      uses).
 //!   2. `sync_vram_from_cpu` -- 1 MiB CPU-to-GPU bounce.
 //!   3. Drain `cmd_log` and `replay_packet` each entry through the
@@ -18,7 +18,7 @@
 //! `download` is the bottleneck.
 //!
 //! ```bash
-//! PSOXIDE_DISC="/path/a commercial title.cue" \
+//! PSOXIDE_DISC="/path/to/disc.cue" \
 //!   cargo run --release -p psx-gpu-compute \
 //!     --example bench_frontend_loop -- --frames 600
 //! ```
