@@ -12,7 +12,6 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run run-release editor-ui-screenshot pgo web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -64,11 +63,6 @@ help:
 	@echo "                      - run exact-hash validation 3 times for determinism"
 	@echo "    make validate-bless"
 	@echo "                      - update exact-hash validation baselines"
-	@echo "    make commercial-visual-guards - run all local commercial visual guards"
-	@echo "    make tekken-mode-guard - assert a commercial title mode-select coverage"
-	@echo "    make tekken-vs-guard - assert a commercial title VS portrait coverage"
-	@echo "    make tekken-fight-guard - assert a commercial title early-fight HUD/stage/fighter coverage"
-	@echo "    make tekken-late-fight-guard - assert a commercial title late-fight sky/fighter coverage"
 	@echo "    make test-sdk     - build every SDK example + run Milestone-C regression suite"
 	@echo "    make profile-demo3 - cook/build demo3 BIN and dump streamed screenshot/profile"
 	@echo "    make profile-demo3-forward - streamed demo3 profile while holding forward"
@@ -252,31 +246,6 @@ clean:
 	cd engine && cargo clean
 	cd sdk && cargo clean
 	rm -rf build
-
-commercial-visual-guards:
-	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
-		--all \
-		--out-dir $${PSOXIDE_VISUAL_GUARD_OUT:-/tmp/psoxide-commercial-guards}
-
-tekken-mode-guard:
-	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
-		--guard tekken3-mode-select \
-		--out-dir $${PSOXIDE_TEKKEN_MODE_GUARD_OUT:-/tmp/tekken_mode_guard}
-
-tekken-vs-guard:
-	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
-		--guard tekken3-vs-portrait \
-		--out-dir $${PSOXIDE_TEKKEN_GUARD_OUT:-/tmp/tekken_owner_guard}
-
-tekken-fight-guard:
-	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
-		--guard tekken3-early-fight \
-		--out-dir $${PSOXIDE_TEKKEN_FIGHT_GUARD_OUT:-/tmp/tekken_fight_guard}
-
-tekken-late-fight-guard:
-	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
-		--guard tekken3-late-fight \
-		--out-dir $${PSOXIDE_TEKKEN_LATE_FIGHT_GUARD_OUT:-/tmp/tekken_late_fight_guard}
 
 # Milestone-C regression suite - every SDK example side-loaded into
 # the emulator, multi-signal state pinned. Depends on `examples` so
