@@ -1150,7 +1150,7 @@ impl CdRom {
             // ReadTOC: re-read the table of contents. The BIOS
             // issues this during disc-boot to learn the track
             // layout; without a response the BIOS hangs waiting
-            // for INT2 (Complete), stranding a commercial title / Crash at the
+            // for INT2 (Complete), stranding commercial titles at the
             // Sony splash.
             0x1E => self.cmd_read_toc(),
             // Init -- lid/rescan state machine; no CPU-visible INT2.
@@ -1481,7 +1481,7 @@ impl CdRom {
         let stat = self.stat_byte();
         // Redux uses a short ~7000-cycle follow-up when the drive is
         // already spun up ("standby"), and a much longer completion
-        // only when pausing from a stopped / not-ready state. a commercial title hits
+        // only when pausing from a stopped / not-ready state. Commercial titles hit
         // the standby path: without the short follow-up, Redux raises a
         // general CDROM IRQ ~7k cycles later and we don't.
         let delay = if was_motor_on {
@@ -1511,7 +1511,7 @@ impl CdRom {
     /// The BIOS's disc-boot sequence blocks on the INT2 here; we
     /// used to fall through to `cmd_getstat` on 0x1E, which only
     /// emitted the INT3 and left the BIOS waiting forever on the
-    /// INT2. Surfaced as a commercial title + Crash hanging on the Sony splash
+    /// INT2. Surfaced as commercial titles hanging on the boot splash
     /// at step ~90 M.
     fn cmd_read_toc(&mut self) {
         let stat = self.stat_byte();
@@ -1685,7 +1685,7 @@ impl CdRom {
         // command write. Chaining it off the ACK keeps the first
         // DataReady deadline anchored on the actual ACK service cycle
         // rather than `scheduling_cycle`, which otherwise lands the
-        // first sector ~0x800 cycles too early and makes a commercial title service
+        // first sector ~0x800 cycles too early and makes commercial titles service
         // a CDROM IRQ before Redux does.
         self.chain_followup(
             IrqType::DataReady,
@@ -2127,11 +2127,11 @@ impl CdRom {
             // the event's side effects (notably
             // `load_next_sector` + chained
             // `schedule_sector_event_at`) on every failed attempt.
-            // a commercial title triggered that tight loop: 46.9 M sector events
+            // A commercial title triggered that tight loop: 46.9 M sector events
             // scheduled and 11.7 M DataReady pops -- enough
             // load_next_sector re-entries to bury the emulator in
             // ISR dispatch cycles (16.7 cyc/step vs 2.4 baseline),
-            // stranding a commercial title at the PlayStation splash.
+            // stranding the title at the boot splash.
             //
             // This holds COMMAND responses only. There is one response FIFO,
             // so hardware will not overwrite a packet software has not read.
@@ -2320,13 +2320,13 @@ impl CdRom {
     /// a latched IRQ to the PSX IRQ controller (I_STAT bit 2) when
     /// `irq_flag & irq_mask` is nonzero. When it's zero the
     /// response stays latched for polled access via 0x1F801803
-    /// idx=1, but no CPU interrupt is dispatched. a commercial title (and other
+    /// idx=1, but no CPU interrupt is dispatched. Some titles (and other
     /// games) poll the flag with bits 0-2 of `irq_mask` cleared --
     /// relying on this gate to keep CDROM acks from firing the
     /// ISR while the BIOS's loader code walks the response
     /// manually. Skipping the gate (our pre-fix behaviour) caused
     /// the BIOS to run an ISR it didn't expect, stomping state
-    /// the a commercial title boot loop needed.
+    /// the commercial boot loop needed.
     pub fn should_wake_cpu(&self) -> bool {
         (self.irq_flag & self.irq_mask) != 0
     }

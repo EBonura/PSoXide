@@ -137,7 +137,7 @@ fn sample_texture(u_in: u32, v_in: u32) -> u32 {
 @compute @workgroup_size(8, 8)
 fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Quad bbox: normalize axis-aligned quads whose submitted edge
-    // order is mirrored. a commercial title's P2 VS portrait uses v0/v2 on the
+    // order is mirrored. A commercial second-player portrait uses v0/v2 on the
     // right edge and v1/v3 on the left edge.
     let x0 = prim.v0.x;
     let x1 = prim.v1.x;
