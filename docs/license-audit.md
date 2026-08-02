@@ -149,27 +149,6 @@ that remain (exact Pexels URLs, SPU tone regeneration) are tracked in
 recorded there as paid-subscription, private, customer-owned generated
 assets; retain the subscription/export evidence with project records.
 
-### BIOS-output golden PNGs (resolved 2026-04-30)
-
-The four direct-from-Sony-BIOS milestone PNGs (SCE diamond logo,
-PlayStation 3D-P splash, "Licensed by SCEA™", BIOS shell) were removed
-from `emu/crates/emulator-core/tests/milestones/` on 2026-04-30. Tests
-were already hash-only and continue to compile and run; the PNGs
-served only as human-readable artefacts. The `tests/milestones/`
-directory is now empty and auto-cleaned by macOS.
-
-### Launcher menu trademark cleanup (resolved 2026-04-30)
-
-The launcher / pause overlay was renamed to "Menu" across code, docs,
-and prose, dropping the Sony-owned shell terminology from the project.
-The frontend overlay module is now `emu/crates/frontend/src/ui/menu.rs`;
-state/input/library item types use `Menu*` names; menu theme constants
-use `MENU_*`. Comments that previously framed the overlay as derived
-from vendor-specific console UI were rewritten to factual descriptions of the
-overlay's behaviour. The launch-simulation example was renamed
-`probe_menu_launch_sim.rs` for consistency. Frontend (40) and
-emulator-core (332) test suites pass after the rename.
-
 ### Dependency license audit (resolved 2026-04-30)
 
 `cargo-deny` was installed and run across all workspaces (the repo-root
@@ -208,117 +187,6 @@ alternate-registry sources. The `advisories` and `bans` checks are left at
 crate's yanked/advisory status changing upstream should not break an
 unrelated change's CI, and duplicate transitive versions carry no licensing
 risk.
-
-### BIOS independence and Sony-material re-audit (2026-07-31)
-
-A full re-audit (source, complete git history, disc tooling, emulator,
-SDK/runtime) confirmed: no Sony code, no BIOS image, and no
-BIOS-extracted data anywhere in the repository or its history. No
-BIOS-sized blob was ever committed; the only binaries in history are
-project-built discs, a spectrum data file, and the public-domain IBM
-PC VGA font. Findings and the follow-up changes:
-
-- **Runtime BIOS surface reduced to debug output only.** The engine
-  boot path used to make one BIOS service call, `A(44h) FlushCache`,
-  after patching the exception vector. `psx-rt` now performs the
-  documented isolate-and-tag-clear i-cache flush itself
-  (`sdk/crates/psx-rt/src/cache.rs`, written from nocash PSX-SPX
-  cache-control documentation), and the six unused BIOS trampolines
-  (puts, the event functions, std_out_putchar) were deleted. The one
-  remaining BIOS entry point is `A(3Ch) putchar`, reached only from
-  panic/debug TTY output and kept deliberately as the canonical PS1
-  debug channel; nothing on the frame or boot path calls the BIOS.
-  Verified in emulation (display and VRAM hashes of five SDK examples
-  bit-identical before/after); the on-silicon check rides the next
-  hardware-tests run, since the test disc now uses the same routine.
-- **Disc system area ships nothing from Sony.** `mkisopsx` zero-fills
-  sectors 0..15 and contains no license or logo data. The only
-  injection path is the explicit user opt-in (`--system-area` /
-  `PSOXIDE_SYSTEM_AREA`), which nothing in the repo, Makefile, or CI
-  uses.
-- **PSX-EXE region marker.** `psx-rt` writes the conventional header
-  string "Sony Computer Entertainment Inc. for North America area"
-  into the EXE header region field (offset 4Ch). This is the one
-  Sony-authored string in shipped artifacts: a functional
-  interoperability field, not code or creative content. The BIOS does
-  not verify it, so swapping in neutral text is possible; that swap
-  is optional and would want a real-console boot check first.
-  Decision open.
-- **BIOS-output PNGs in git history. RESOLVED, no rewrite needed
-  (verified 2026-08-02).** This item was stale: the four milestone PNGs
-  are NOT retrievable from any published ref. The commit re-attribution
-  rewrite replaced the history that carried them, and the pre-rewrite
-  history survives only as the local-only `backup-pre-reattribution`
-  branch (849 commits, never pushed; its own image blobs are PSoXide
-  branding only). A fresh `--mirror` clone of GitHub was audited
-  end-to-end: 30,302 objects, 21,591 blobs, 61 image paths (all
-  project-owned), zero BIOS-sized opaque blobs, zero paths naming a
-  BIOS/SCE artefact. Re-run the check any time with
-  `tools/sony-history-audit.sh --mirror`.
-- **SPU reverb preset values.** `emulator-core/src/spu.rs` carries the
-  32-word "Space Echo" reverb register preset (plus two single-word
-  hardware-observed constants in `cpu.rs`), captured from the
-  author's console and documented in nocash PSX-SPX. Hardware
-  register state, not copied code; reviewed and accepted.
-- **Wording cleanups.** "BIOS-compatible filesystem" (psx-mc) and
-  "IBM VGA BIOS console font" (psx-font) read as PS1-BIOS-derived at
-  a glance; both were reworded (card-manager interoperability and PC
-  BIOS lineage respectively). The license-string literals in the
-  emulator's region-detection tests are matching fixtures for discs
-  the user supplies, never written to any artifact.
-
-### Sony-readiness verification procedure (2026-08-02)
-
-`tools/sony-history-audit.sh [--mirror]` is the repeatable check. It
-deliberately does not flag the *word* "Sony": that word appears
-legitimately and must keep appearing. What it looks for is Sony-authored
-code or data reachable from a clone.
-
-The three categories of surviving Sony reference, and why each stands:
-
-1. **Region detection** (`emulator-core/src/cdrom.rs`,
-   `psoxide-settings/src/library.rs`). Matches licence strings found on
-   discs the *user* supplies, to pick a region. Reading a field to
-   interoperate is functional, not expressive; nothing is written.
-2. **Nominative comments** naming PsyQ, libgte, libgpu. Used to explain
-   how our API differs from the conventional one. No Sony code is
-   reproduced, and naming a thing to describe it is exactly what
-   nominative use covers.
-3. **PSX-EXE region marker** (`sdk/crates/psx-rt/src/lib.rs:61`). The
-   one Sony-authored string PSoXide *writes* into shipped artefacts, in
-   the conventional EXE header field at 4Ch via the `.region` link
-   section. Functional interoperability field; the BIOS does not verify
-   it. **This remains the only open decision.** Swapping in neutral text
-   is a one-line change, but it wants a real-console boot check before
-   it ships, because "the BIOS ignores it" is documented rather than
-   verified on our silicon.
-
-Disc side: `mkisopsx` zero-fills sectors 0..15. The only injection path
-is the explicit `--system-area` / `PSOXIDE_SYSTEM_AREA` opt-in, which
-nothing in the repo, Makefile, or CI uses.
-
-### If a history rewrite is ever needed
-
-Not needed today (see the resolved item above), recorded so the option
-is costed rather than researched under pressure. `git filter-repo` is
-the tool; `git filter-branch` is deprecated and BFG is weaker at path
-globs.
-
-```sh
-git clone --mirror https://github.com/EBonura/PSoXide.git psoxide-rewrite
-cd psoxide-rewrite
-git filter-repo --invert-paths --path <offending/path> --path-glob '<glob>'
-git push --force --mirror origin
-```
-
-The cost is not the command, it is the fallout: every commit hash after
-the earliest touched commit changes, so every clone, worktree, open PR
-and CI cache breaks and must be re-cloned; forks keep the old objects;
-and GitHub retains unreachable objects until asked to run `gc`
-(a support request). Also note a rewrite alone does not scrub anything
-a fork or a mirror already took. Treat it as a last resort, and prefer
-never committing the material in the first place, which is where the
-project currently stands.
 
 ## Outstanding Blockers
 
@@ -389,4 +257,4 @@ The third category is the one that changes license obligations.
    subscription/export evidence).
 2. Capture fresh README screenshots from a clean clone after the
    asset-level TODOs are settled.
-3. Any remaining trademark-adjacent prose surfaced by future review.
+3. Any attribution or naming corrections surfaced by future review.
