@@ -952,7 +952,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         voice.set_volume(volume, volume);
         voice.set_pitch(pitch);
         voice.set_start_addr(psx_spu::SpuAddr::new(sample.addr_bytes));
-        voice.set_adsr(psx_spu::Adsr::sample());
+        // One-shot cue: default_tone, never Adsr::sample() -- on silicon
+        // the latter loops the sample forever at full envelope once the
+        // END flag lands it in an endless release (SB1, 2026-08-02).
+        voice.set_adsr(psx_spu::Adsr::default_tone());
         psx_spu::Voice::key_on(voice.mask());
     }
 

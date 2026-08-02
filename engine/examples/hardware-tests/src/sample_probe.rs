@@ -20,6 +20,9 @@
 //!   BEEP MASH      key_on at 0/10/20/30, a fast browse
 //!   BEEP KEYOFF    one key_on, key_off at frame 60
 //!   BEEP PERC      Adsr::percussive() instead: the self-fading preset
+//!   BEEP DTONE     Adsr::default_tone(): full play then ~100ms release
+//!                  at the END flag -- the envelope the v0.8 sweep moved
+//!                  every game one-shot to, measured here
 //!
 //! A looping sample reads as envelope pinned at max with ENDX never
 //! set; a clean one-shot reads as ENDX set with the envelope at zero.
@@ -42,10 +45,10 @@ use crate::{hex2, hex8, spu_dma_read};
 /// playtest boot-EXE budget, and the reported bug is the browse blip.
 static BEEP_PSAU: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau");
 
-const STAGE_COUNT: usize = 5;
+const STAGE_COUNT: usize = 6;
 const FIELD_COUNT: usize = 9;
 /// Frames each stage runs. Stage 0 is the silent audit.
-const STAGE_FRAMES: [u16; STAGE_COUNT] = [60, 300, 300, 300, 300];
+const STAGE_FRAMES: [u16; STAGE_COUNT] = [60, 300, 300, 300, 300, 300];
 /// Frames within a stage at which the envelope/ENDX checkpoints sample.
 const CHECKPOINTS: [u16; 8] = [2, 8, 16, 32, 64, 120, 200, 280];
 
@@ -245,6 +248,7 @@ impl SampleProbe {
             0 => self.audit(),
             1 | 2 | 3 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::sample()),
             4 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::percussive()),
+            5 => self.key(BEEP_VOICE, self.beep_addr, self.beep_rate, Adsr::default_tone()),
             _ => unreachable!(),
         }
         tty::print("hardware-tests: sb1 stage=");
@@ -347,7 +351,7 @@ impl SampleProbe {
             at
         };
         push(binary, b"SB1B");
-        push(binary, &[1, STAGE_COUNT as u8, FIELD_COUNT as u8, self.run]);
+        push(binary, &[2, STAGE_COUNT as u8, FIELD_COUNT as u8, self.run]);
         push(binary, &self.beep_audit.packed_summary().to_le_bytes());
         push(binary, &self.beep_audit.packed_detail().to_le_bytes());
         push(binary, &self.beep_rate.to_le_bytes());
@@ -389,7 +393,7 @@ impl SampleProbe {
             font.draw_text(8, 108, "EACH KEYED STAGE = ONE SHORT BLIP", (112, 136, 170));
             font.draw_text(8, 124, "A CONSTANT BUZZ = SAMPLE LOOPS ON", (255, 128, 96));
             font.draw_text(8, 140, "HARDWARE: THE LAUNCHER BUG, CAUGHT", (255, 128, 96));
-            font.draw_text(8, 172, "QR APPEARS AFTER ALL 5 STAGES", (112, 136, 170));
+            font.draw_text(8, 172, "QR APPEARS AFTER ALL 6 STAGES", (112, 136, 170));
             return;
         }
 
@@ -443,6 +447,7 @@ fn stage_label(stage: u8) -> &'static str {
         2 => "BEEP MASH",
         3 => "BEEP KEYOFF",
         4 => "BEEP PERC",
+        5 => "BEEP DTONE",
         _ => "?",
     }
 }
@@ -454,6 +459,7 @@ fn stage_description(stage: u8) -> &'static str {
         2 => "RETRIGGER AT 0/10/20/30: FAST BROWSE",
         3 => "KEY OFF AT 60: MEASURE THE RELEASE",
         4 => "PERCUSSIVE PRESET: SELF-FADING?",
+        5 => "DEFAULT TONE: FULL PLAY + FAST RELEASE?",
         _ => "?",
     }
 }
