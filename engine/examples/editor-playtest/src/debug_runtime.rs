@@ -924,3 +924,11 @@ pub(super) fn debug_log_reconcile_pass(
     line.push_hex_mask(window_mask);
     line.emit();
 }
+
+pub(super) fn debug_log_assemble_frame(progress_q12: u16, submitted: usize) {
+    let mut line = DebugLogLine::new("asm p=");
+    line.push_u32(progress_q12 as u32);
+    line.push_str(" faces=");
+    line.push_u32(submitted as u32);
+    line.emit();
+}
