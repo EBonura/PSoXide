@@ -12,6 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean run run-release editor-ui-screenshot pgo web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
