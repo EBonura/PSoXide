@@ -1494,7 +1494,7 @@ fn adaptive_quad_subdivision_scales_with_cortex_sector_size() {
     );
 
     // Cortex's 3300-unit horizontal boom and 600-unit camera-to-focus height
-    // difference place its focus near z=3354. That is outside REFERENCE's second
+    // difference place its focus near z=3354. That is outside the reference engine's second
     // band but remains inside the equivalent three-sector Cortex band.
     let (tr5_focus_packets, tr5_focus_stats) =
         adaptive_quad_packet_count_with_profile(3354, AdaptiveSubdivisionProfile::REFERENCE);

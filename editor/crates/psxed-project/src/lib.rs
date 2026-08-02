@@ -25,7 +25,6 @@ pub mod room_connections;
 pub mod spatial;
 pub mod streaming;
 pub mod texture_import;
-pub mod tr_level;
 mod ui_types;
 pub mod world_cook;
 pub use ui_types::*;

@@ -27,7 +27,7 @@ The runtime crate is the convergence point: the home for both halves.
    is the wrong default here; melee arcs vs capsule/box hurtboxes are
    the first-class case (the cooked `WeaponHitboxRecord` schema
    already models this -- it needs a runtime, not a redesign).
-2. **Grid world, not BSP.** Rooms are adaptive-style sector grids
+2. **Grid world, not BSP.** Rooms are sector grids
    with portals. The grid is the optimization substrate: visibility is
    portal-expanded cell sets (already precomputed at cook), collision
    is O(1) sector lookup (already true in the motor), streaming wants

@@ -24,10 +24,6 @@ name = "cook-playtest"
 path = "src/bin/cook_playtest.rs"
 
 [[bin]]
-name = "import-tr-level"
-path = "src/bin/import_tr_level.rs"
-
-[[bin]]
 name = "gen-stress-map"
 path = "src/bin/gen_stress_map.rs"
 
