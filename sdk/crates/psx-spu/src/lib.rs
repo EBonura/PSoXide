@@ -431,8 +431,19 @@ impl Adsr {
         }
     }
 
-    /// Full-level envelope for one-shot sampled SFX. The ADPCM end
-    /// flag stops playback; the envelope stays open for the sample.
+    /// Full-level envelope for sampled playback that a caller will end
+    /// itself (looped holds, streams). NOT for fire-and-forget one-shots:
+    /// on real hardware the ADPCM END+mute terminator does not silence
+    /// the voice, it drops it into RELEASE at this envelope's release
+    /// rate -- which is the slowest the hardware encodes -- while the
+    /// voice loops from the repeat address. A one-shot keyed under this
+    /// envelope therefore repeats at full volume indefinitely, and
+    /// key_off does not audibly help. Measured by hardware-tests SB1 on
+    /// console (2026-08-02): envelope 7FFF at 4.7 s with ENDX long set,
+    /// 3.7 s after key_off. The emulator zeroes the envelope at the
+    /// terminator instead, so only silicon shows it. Use
+    /// [`Adsr::percussive`] for one-shots; SB1 measured it silent within
+    /// two frames on the same console.
     pub const fn sample() -> Self {
         Self {
             lower: 0x000F,
