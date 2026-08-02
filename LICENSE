@@ -418,7 +418,7 @@ source code from them is included or derived in this repository:
 
 - OpenLara (https://github.com/XProger/OpenLara) -- architectural
   inspiration for the engine's room/portal world model (the classic
-  adaptive room system).
+  adaptive sector-grid room system).
 
 - Godot (https://godotengine.org/) -- inspiration for the editor's
   scene-tree and resource authoring model. PSoXide does not embed or
