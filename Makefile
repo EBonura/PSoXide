@@ -633,7 +633,7 @@ hardware-tests-disc: hardware-tests $(HWTEST_CDDA)
 		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--out ../../$(EXAMPLE_OUT)/hardware-tests.bin \
 		--volume PSOXIDE \
-		--cdtest-sectors 600 \
+		--cdtest-sectors 500 \
 		--cdda-track ../../$(HWTEST_CDDA)
 
 $(foreach example,$(DATA_DISC_EXAMPLES),$(eval $(call build_data_disc,$(example))))

@@ -37,6 +37,7 @@ mod handoff_probe;
 mod photo;
 mod reverb_probe;
 mod sample_probe;
+mod spu_probe;
 mod transition_probe;
 mod voice_probe;
 use audio_probe::AudioProbe;
@@ -49,6 +50,7 @@ use reverb_probe::{ReverbProbe, ReverbSnapshot};
 use transition_probe::TransitionProbe;
 use voice_probe::VoiceProbe;
 use sample_probe::SampleProbe;
+use spu_probe::SpuProbe;
 
 // A complete 4 KiB direct-mapped PS1 I-cache footprint. The custom return
 // register lets inline timing assembly call it without clobbering Rust's $ra.
@@ -113,6 +115,16 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.10: SB2, aimed at the wider SPU problem: Celeste's looped
+//       wavetables and VoXide's sample bank are both wrong on console while
+//       CD-DA -- the one path that never stores in SPU RAM -- is fine. Pass
+//       1 uploads a known pattern and reads it back over four DMA/PIO
+//       combinations, so a bad upload, a bad readback and a lying emulator
+//       are told apart; SB1's console capture already hashed SPU RAM back
+//       differently from the emulator, which is the lead. Pass 2 plays tones
+//       whose frequency is arithmetic (a synthesised square table at known
+//       pitches, 1.5s on 0.5s off) so an OBS recording measures what the
+//       speaker got while the QR carries what the registers said.
 // v1.9: SB1, the UI sample end/loop probe: the demo-disc launcher blip
 //       repeats aggressively on console, and the suspect is the blip sample's
 //       own ADPCM terminator under an ADSR that sustains forever. SB1 audits
@@ -162,9 +174,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 9;
+const SUITE_VERSION_MINOR: u8 = 10;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.9";
+const SUITE_VERSION: &str = "HWTEST v1.10";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -250,6 +262,8 @@ enum Mode {
     AudioProbe,
     /// UI sample end/loop probe: the demo-disc launcher blip bug (SB1).
     SampleProbe,
+    /// SPU RAM integrity then a controlled tone ladder (SB2).
+    SpuProbe,
     /// Friendly operator-facing pad and analog-drift diagnostic. Kept
     /// separate from `ControllerProbe`, which measures SIO handshake timing.
     ControllerTest,
@@ -287,6 +301,7 @@ impl Mode {
             Self::VoiceProbe => "HL VOICE BANK",
             Self::AudioProbe => "CD/SPU AUDIO",
             Self::SampleProbe => "UI SAMPLE PROBE",
+            Self::SpuProbe => "SPU DIAGNOSTIC",
             Self::ControllerTest => "CONTROLLER TEST",
             Self::ControllerProbe => "CONTROLLER PROBE",
             Self::AllChecks => "ALL CHECKS",
@@ -318,7 +333,8 @@ impl Mode {
             | Self::TransitionProbe
             | Self::VoiceProbe
             | Self::AudioProbe
-            | Self::SampleProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
+            | Self::SampleProbe
+            | Self::SpuProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
             Self::ControllerTest => "LIVE P1+P2  HOLD START+SELECT FOR MENU",
             Self::ControllerProbe => "DOWN=TESTS  NO PAD NEEDED TO READ THIS",
             Self::AllChecks
@@ -351,6 +367,7 @@ impl Mode {
             Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
             Self::SampleProbe => "UI BLIP END/LOOP FLAGS + ENVELOPE TRACE QR (SB1)",
+            Self::SpuProbe => "SPU RAM INTEGRITY + MEASURABLE TONES QR (SB2)",
             Self::ControllerTest => "BUTTON HISTORY + ANALOG CENTRE/DRIFT TEST",
             Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
@@ -382,7 +399,8 @@ impl Mode {
             | Self::TransitionProbe
             | Self::VoiceProbe
             | Self::AudioProbe
-            | Self::SampleProbe => "CAPTURE",
+            | Self::SampleProbe
+            | Self::SpuProbe => "CAPTURE",
             Self::ControllerTest => "LIVE",
             Self::ControllerProbe => "ACK",
             Self::AllChecks
@@ -422,6 +440,7 @@ impl Mode {
             // Targeted diagnostic for the demo-disc blip bug; not part of
             // the frozen conformance report schema.
             Self::SampleProbe => u8::MAX - 5,
+            Self::SpuProbe => u8::MAX - 6,
             // Same reasoning as Menu: this draws a chart for the operator's
             // display, it never produces a result row or a report.
             Self::VideoLevels => u8::MAX - 1,
@@ -675,7 +694,8 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
     ("BACK", MenuAction::Back),
 ];
 
-const PROBES_MENU: [(&str, MenuAction); 9] = [
+const PROBES_MENU: [(&str, MenuAction); 10] = [
+    ("SPU DIAGNOSTIC (SB2)", MenuAction::Open(Mode::SpuProbe)),
     ("UI SAMPLE END/LOOP (SB1)", MenuAction::Open(Mode::SampleProbe)),
     ("CD READ MECHANISM (CL2)", MenuAction::Open(Mode::CdChainProbe)),
     ("CONTROLLER SIO TIMING", MenuAction::Open(Mode::ControllerProbe)),
@@ -1682,6 +1702,7 @@ struct HardwareTests {
     transition_probe: TransitionProbe,
     voice_probe: VoiceProbe,
     sample_probe: SampleProbe,
+    spu_probe: SpuProbe,
     audio_probe: AudioProbe,
     controller_test: ControllerTest,
     memory_card: MemoryCardDiagnostic,
@@ -1748,6 +1769,7 @@ impl HardwareTests {
             transition_probe: TransitionProbe::new(),
             voice_probe: VoiceProbe::new(),
             sample_probe: SampleProbe::new(),
+            spu_probe: SpuProbe::new(),
             audio_probe: AudioProbe::new(),
             controller_test: ControllerTest::new(),
             memory_card: MemoryCardDiagnostic::new(),
@@ -1906,6 +1928,7 @@ impl HardwareTests {
             Mode::VoiceProbe => self.voice_probe.start(),
             Mode::AudioProbe => self.audio_probe.start(),
             Mode::SampleProbe => self.sample_probe.start(),
+            Mode::SpuProbe => self.spu_probe.start(),
             Mode::ControllerTest => self.controller_test.start(),
             _ => {}
         }
@@ -1979,6 +2002,7 @@ impl HardwareTests {
             Mode::VoiceProbe => self.voice_probe.restart(),
             Mode::AudioProbe => self.audio_probe.restart(),
             Mode::SampleProbe => self.sample_probe.restart(),
+            Mode::SpuProbe => self.spu_probe.restart(),
             Mode::VideoLevels => self.page = (self.page + 1) % VIDEO_FIELDS.len(),
             _ => self.run_section(self.mode),
         }
@@ -2087,6 +2111,8 @@ impl Scene for HardwareTests {
             self.audio_probe.update(ctx.sim_tick.as_u32());
         } else if matches!(self.mode, Mode::SampleProbe) {
             self.sample_probe.update(ctx.sim_tick.as_u32());
+        } else if matches!(self.mode, Mode::SpuProbe) {
+            self.spu_probe.update(ctx.sim_tick.as_u32());
         }
 
         if matches!(self.mode, Mode::ControllerProbe) {
@@ -2258,6 +2284,7 @@ impl Scene for HardwareTests {
                 Mode::VoiceProbe => self.voice_probe.draw(font),
                 Mode::AudioProbe => self.audio_probe.draw(font),
                 Mode::SampleProbe => self.sample_probe.draw(font),
+                Mode::SpuProbe => self.spu_probe.draw(font),
                 Mode::ControllerTest => self.controller_test.draw(font),
                 Mode::ControllerProbe => draw_controller_probe(font, self),
                 Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
@@ -2345,7 +2372,7 @@ fn draw_summary(font: &FontAtlas, suite: &HardwareTests) {
 
 fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 8, "PS1 HARDWARE TESTS", (232, 236, 244));
-    font.draw_text(224, 8, SUITE_VERSION, (112, 136, 170));
+    font.draw_text(320 - 8 - SUITE_VERSION.len() as i16 * 8, 8, SUITE_VERSION, (112, 136, 170));
     font.draw_text(8, 18, "SECTION", (140, 160, 190));
     font.draw_text(72, 18, suite.mode.label(), (255, 232, 128));
     font.draw_text(216, 18, "START MENU", (140, 160, 190));
@@ -2354,7 +2381,7 @@ fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
 /// The main menu. Every page fits on screen, so there is no scrolling.
 fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 6, "PS1 HARDWARE TESTS", (232, 236, 244));
-    font.draw_text(232, 6, SUITE_VERSION, (112, 136, 170));
+    font.draw_text(320 - 8 - SUITE_VERSION.len() as i16 * 8, 6, SUITE_VERSION, (112, 136, 170));
     font.draw_text(8, 20, menu_title(suite.menu_page), (255, 232, 128));
 
     let entries = menu_entries(suite.menu_page);

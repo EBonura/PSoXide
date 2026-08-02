@@ -14,6 +14,13 @@ path = "src/main.rs"
 panic = "abort"
 codegen-units = 1
 lto = true
+# Default opt-level on purpose. The suite outgrew its boot-EXE budget when
+# SB2 landed, and building for size looked like the cheap way out: "z"
+# crashes rustc (LLVM ShrinkWrap, MIPS-I), and "s" BUILT but produced a
+# binary that never reached its menu. A silently miscompiled hardware test
+# suite is the worst possible trade, so the room came from shrinking the
+# CDTEST region instead (600 -> 500 sectors, Makefile plus the two probes
+# that name its LBA).
 
 [dependencies]
 psx-engine = { path = "../../crates/psx-engine" }
