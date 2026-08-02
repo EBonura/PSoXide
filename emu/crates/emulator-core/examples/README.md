@@ -18,8 +18,6 @@ keeps the tools, so everything listed here is maintained.
 | Example | Purpose |
 |---------|---------|
 | `boot_disc` | Disc boot harness entry point. |
-| `commercial_route_matrix` | Boot-routing matrix across local commercial disc images. |
-| `commercial_visual_guard` | Visual regression framework for owned commercial discs. |
 | `verify_disc_reads` | Verifies disc sector delivery end to end. |
 | `cdrom_probe` | CD-ROM command/state probe; used by the cortex preburn suite. |
 | `probe_cdda_wav` | Captures CD-DA/SPU audio output to WAV; used by the preburn suite and the audio example targets. |
