@@ -508,7 +508,7 @@ pub struct AppState {
     /// = no game loaded yet (initial state on first run, also after
     /// "Reset" with no last-loaded game).
     pub current_game: Option<LibraryEntry>,
-    /// Short-lived status line -- shows "Launched a commercial title",
+    /// Short-lived status line -- shows "Launched <title>",
     /// "Scan complete: 54 games", etc. Displayed beneath the
     /// library panel; cleared after a few frames.
     pub status_message: Option<(String, f32)>,
@@ -1525,7 +1525,7 @@ impl AppState {
     ///    (data-track) BIN. Build a map
     ///    `absolute_bin_path → (cue_title, cue_id)` so each BIN
     ///    the CUE owns shows up with the CUE's friendly filename
-    ///    as its title (e.g. "a commercial title (USA)" instead of
+    ///    as its title (e.g. the disc's own name instead of
     ///    the raw PVD ID "SCUS-94900"), and under the CUE's stable
     ///    game ID so savestates key off the disc identity rather
     ///    than the BIN byte hash alone.
@@ -1535,7 +1535,7 @@ impl AppState {
     ///    them, and retail CUE entries remain hidden from Games.
     /// 3. Alphabetise each column.
     ///
-    /// Result: a commercial title shows once, under its friendly
+    /// Result: the title shows once, under its friendly
     /// title, and clicking it launches the BIN.
     pub fn refresh_menu_library(&mut self) {
         use std::collections::{HashMap, HashSet};

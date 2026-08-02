@@ -1939,7 +1939,7 @@ mod tests {
     fn reentrant_config_enter_preserves_requested_analog_mode() {
         let mut pad = DigitalPad::new();
 
-        // a commercial title first enters config from Digital, but clocks only the
+        // One commercial title first enters config from Digital, but clocks only the
         // digital-length shape because the command byte still reports
         // the current Digital ID.
         assert_eq!(pad.exchange(0x43), (0x41, true));

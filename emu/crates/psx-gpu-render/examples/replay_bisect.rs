@@ -12,7 +12,7 @@
 //! suite.
 //!
 //! ```bash
-//! PSOXIDE_DISC=/path/a commercial title.cue \
+//! PSOXIDE_DISC=/path/to/disc.cue \
 //!   cargo run --release -p psx-gpu-compute --example replay_bisect \
 //!     -- --steps 150000000 --window 50000000
 //! ```

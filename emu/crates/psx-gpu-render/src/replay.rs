@@ -292,7 +292,7 @@ impl ComputeBackend {
         // rasterizer skips the triangle split and runs a bilinear
         // UV walk over all four corners. Triangle-split + bary
         // interpolation produces different pixels for non-affine
-        // UV layouts (a commercial title character draws hit this). Mirror
+        // UV layouts (commercial character draws hit this). Mirror
         // the CPU's fast path here so VRAM stays in sync.
         if TexQuadBilinear::is_axis_aligned(v[0], v[1], v[2], v[3]) {
             let q = TexQuadBilinear::new(

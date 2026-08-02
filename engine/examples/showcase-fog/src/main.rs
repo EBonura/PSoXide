@@ -129,7 +129,7 @@ const RING_SPACING: i32 = (FAR_CAM_Z - NEAR_CAM_Z) / (RING_GAPS as i32);
 /// With FC near black, "full fog" = "near black", and brick × near
 /// black = also near black -- so far walls blend seamlessly into
 /// the black BG. Classic "tunnel fades into darkness" fog, as used
-/// in a commercial title caves, a commercial title night tunnels, etc.
+/// in fog-heavy caves, night tunnels, etc.
 ///
 /// A tiny blue tint keeps the darkness from reading as "scene
 /// turned off" -- gives it atmospheric depth.
