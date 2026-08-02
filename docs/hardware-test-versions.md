@@ -30,6 +30,29 @@ header.
 
 ## History
 
+### v1.8 (2026-08-02, schema PX7)
+
+Added an operator-facing controller diagnostic without changing any PX7 record:
+
+- A root-menu `CONTROLLER TEST (P1 + P2)` entry polls both controller ports
+  live and identifies each as empty, digital, analog, config, or unknown.
+- Every button has a persistent per-port marker: yellow while held, green once
+  observed, and grey until tested. Digital pads correctly require 14 buttons;
+  analog pads additionally require L3 and R3.
+- Both analog sticks show raw 0-255 coordinates and live position plots. After
+  the sticks remain still for 30 frames, the test samples 90 frames and reports
+  the largest offset from the hardware centre value `0x80`: 0-8 pass, 9-16
+  warning, and greater than 16 fail. Moving either stick automatically restarts
+  the sample.
+- START remains testable. Holding START+SELECT for 45 frames on either port
+  returns to the menu.
+
+The conformance schema and record meanings are unchanged. The minor version was
+bumped because adding the screen changes the linked executable against which
+machine-code and emulator timing baselines are pinned. This also corrects the
+previous payload/display mismatch: the v1.7 display string shipped while the
+two payload version bytes still encoded v1.6.
+
 ### v1.5 (2026-07-26, schema PX7)
 
 Two sweeps, added to settle findings the first complete capture raised but could
