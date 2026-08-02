@@ -190,7 +190,7 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
     /// replacement for the event-triggered rebuild paths.
     ///
     /// Invariants (see docs/cortex-v3-visuals-30fps.md, informed by
-    /// REFERENCE's per-frame `GetRoomBounds` walk):
+    /// the reference engine's per-frame `GetRoomBounds` walk):
     /// - The goal is read-only. A room that fails to build stays in
     ///   `desired` and simply retries on a later pass; failures never
     ///   prune the goal to match.
