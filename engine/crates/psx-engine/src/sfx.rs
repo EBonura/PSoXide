@@ -29,7 +29,14 @@ pub fn upload_sample(v: Voice, addr: SpuAddr, bytes: &[u8], volume: Volume) -> S
     let audio = Audio::from_bytes(bytes).expect("psau sample");
     let adpcm = audio.adpcm_bytes();
     spu::upload_adpcm(addr, adpcm);
-    v.configure_sample(addr, audio.sample_rate_hz(), volume, Adsr::sample());
+    // default_tone, not Adsr::sample(): on silicon END+mute drops the
+    // voice into RELEASE at the ADSR's release rate while it loops from
+    // the repeat address, and sample()'s release never audibly ends --
+    // every one-shot fired this way repeated forever (hardware-tests
+    // SB1 capture, 2026-08-02). default_tone plays the sample out at
+    // full level and its ~100 ms exponential release makes the END flag
+    // an actual stop.
+    v.configure_sample(addr, audio.sample_rate_hz(), volume, Adsr::default_tone());
     SpuAddr::new(addr.byte_offset() + adpcm.len() as u32)
 }
 
