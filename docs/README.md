@@ -43,13 +43,11 @@ Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hard
 | Doc | Topic |
 |-----|-------|
 | [world-format-roadmap.md](world-format-roadmap.md) | `.psxw` world format roadmap. |
-| [milestones.md](milestones.md) | Milestone ladder. |
 
 ## Validation & provenance
 
 | Doc | Topic |
 |-----|-------|
-| [commercial-parity-tracker.md](commercial-parity-tracker.md) | Retail-disc compatibility status. |
 | [asset-provenance.md](asset-provenance.md) | Asset and media provenance. |
 | [license-audit.md](license-audit.md) | License and provenance audit. |
 | [finalisation-log.md](finalisation-log.md) | Project finalisation log. |

@@ -33,4 +33,3 @@ through the bit-exact GTE core).
 
 - [Root README](../README.md#quick-start). Launching the frontend.
 - [`docs/frontend.md`](../docs/frontend.md). Frontend architecture.
-- [`docs/commercial-parity-tracker.md`](../docs/commercial-parity-tracker.md). Retail-disc compatibility status.
