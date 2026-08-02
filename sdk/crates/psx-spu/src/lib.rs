@@ -736,7 +736,17 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
     }
 
     write_reg16(SPUCNT, spucnt);
-    write_reg16(TRANSFER_CTRL, 0x0000);
+    // Leave the transfer type NORMAL, not 0. PSX-SPX is explicit that
+    // 1F801DACh "should be 0004h"; parking it at 0 selects another
+    // transfer type, and on silicon that poisons everything that touches
+    // sample RAM afterwards -- voices key on and their envelope collapses
+    // straight back to zero, so every sampled sound goes silent while
+    // noise-mode voices, which never read SPU RAM, keep playing. Measured
+    // by hardware-tests SB2 on console (2026-08-02): after a probe that
+    // left this at 0, its own tone ladder was silent and a following SB1
+    // run was silent too, both fine on the emulator, which ignores this
+    // register entirely.
+    write_reg16(TRANSFER_CTRL, 0x0004);
     for _ in 0..200 {
         core::hint::spin_loop();
     }

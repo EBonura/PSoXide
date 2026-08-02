@@ -261,7 +261,14 @@ impl SpuProbe {
         }
         let segment = step - RAM_STAGES;
         if segment == 0 {
-            // Entering pass 2: the tables replace the test pattern.
+            // Entering pass 2 with a CLEAN SPU. Pass 1 deliberately drives
+            // the transfer registers by hand, and the first console run
+            // proved that state outlives the pass: the whole ladder was
+            // silent behind it. Reset before the tables go up, so pass 2
+            // measures playback rather than pass 1's leftovers.
+            spu::init();
+            spu::set_main_volume(Volume::MAX, Volume::MAX);
+            spu::enable_cd_audio(false);
             upload_tables();
         }
         Voice::key_off(all_voices_mask());
@@ -564,7 +571,8 @@ fn pio_write(addr: u32, words: &[u32]) {
             psx_io::write16(SPU_TRANSFER_DATA, (word >> 16) as u16);
         }
         psx_io::write16(SPU_CNT, cnt & !0x0030);
-        psx_io::write16(SPU_TRANSFER_CTRL, 0x0000);
+        // 0x0004, never 0: see the note in pio_read.
+        psx_io::write16(SPU_TRANSFER_CTRL, 0x0004);
     }
 }
 
