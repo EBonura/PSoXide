@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.0**, schema PX7. Not comparable with v0.18 captures, whose timing
+Current: **v1.8**, schema PX7. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -28,9 +28,10 @@ leaving hardware state behind?**
 **Tier 1, the standing battery.** The 173 conformance cases, the CPU/GTE/SPU
 scans, 129 timing records (CPU, GTE, DMA, CD, CD-DA contention, GPU fill rate,
 MDEC, SIO) and 192 raw precision values including console identity and 22
-bit-exact raster hashes. These run automatically in `Scene::init` before a frame
-is drawn, need no controller input, and mirror every PX7 page to the debug TTY.
-This is what `make hwtest-diff` gates and what a checked-in baseline describes.
+bit-exact raster hashes. These run only when `RUN ALL TESTS + CAPTURE` is
+selected, need no further controller input, and mirror every PX7 page to the
+debug TTY. This is what `make hwtest-diff` gates and what a checked-in baseline
+describes.
 
 **Tier 2, bespoke probes.** PA2-PA5 and the controller probe. These own SPU
 state or need a specific boot state, so they cannot be batched: PA5 must
@@ -43,6 +44,33 @@ into PA5, whose `spu::init()` ran before every automatic capture, so the tier-1
 payload described a console PA5 had already touched. Boot now goes to the
 capture pages. Only a probe reached from a fresh boot sees a true BIOS handoff, so
 PA5's variants still require a reboot each.
+
+## Testing controllers and analog drift
+
+Choose **CONTROLLER TEST (P1 + P2)** from the root menu. This is a friendly,
+interactive diagnostic; the older **CONTROLLER SIO TIMING** entry under
+TARGETED PROBES remains the low-level serial-handshake measurement.
+
+The controller test polls both front-panel ports every frame. Each side of the
+screen reports the connected controller mode and keeps a complete button
+history:
+
+- **Yellow** means the button is held now.
+- **Green** means the button has been observed at least once.
+- **Grey** means it has not yet been tested.
+
+An analog controller shows both stick positions and all four raw axis bytes.
+Release both sticks and hold them still: after a short settling period the disc
+samples 90 frames and reports the largest distance from the ideal centre byte
+`128`. A maximum of 8 is green, 9-16 is a yellow warning, and anything above 16
+is a red drift failure. Moving either stick automatically clears the old result
+and starts a fresh measurement when the stick rests again. Digital controllers
+remain fully testable and show `STICKS / DRIFT N/A` rather than inventing analog
+data.
+
+START is part of the button test, so it does not immediately leave this screen.
+Hold **START+SELECT** together for roughly three quarters of a second on either
+controller to return to the main menu.
 
 ## Capturing and clearing stale BIOS reverb state (`PA5`)
 
@@ -219,47 +247,35 @@ once from the completed PA2 screen to reach the older PA1 CD-route probe.
 
 ## Operator flow
 
-Boot, watch a bar, scan five QR codes, then a menu. That is the whole disc.
-
-1. **Battery runs automatically.** A progress bar advances across the bottom of
-   the screen: green while the 173 conformance cases run, blue while the timing
-   battery does. Nothing else is on screen and that is expected; the bar is the
-   only thing saying the disc is alive, and it exists because the first burn
-   showed a black screen for tens of seconds and looked dead.
-2. **The capture pages appear by themselves.** No keypress. Left/Right pages
-   through all five QR symbols; the header reads `PX7 CAPTURE  PAGE 01/05`.
-3. **START opens the main menu**, from any screen, and it is printed on every
-   screen so it does not have to be remembered. Two levels, each fitting on
-   screen without scrolling:
+The disc boots side-effect free into its main menu. Nothing measures or changes
+hardware state until the operator chooses an entry. Menus fit without scrolling:
 
    | Root | Contains |
    |---|---|
-   | `RERUN STARTUP TESTS` | Exactly what boot runs, returning to the capture pages, so a re-run and a fresh boot are indistinguishable |
+   | `RUN ALL TESTS + CAPTURE` | Runs the standing conformance battery and builds the five-page PX7 capture |
+   | `CONTROLLER TEST (P1 + P2)` | Live two-port button, stick and analog-drift diagnostic |
+   | `MEMORY CARD (SAFE)` | Non-destructive card diagnostic with guarded write actions |
    | `VIEW CAPTURE (QR PAGES)` | Back to the five QR symbols |
    | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
    | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
-   | `TARGETED PROBES` | Controller port, and the PA1-PA5 audio probes |
+   | `TARGETED PROBES` | Controller SIO timing, CD-chain and PA1-PA5 audio probes |
+   | `VIDEO LEVELS (TV/CAPTURE)` | Grey ramp and flat fields for display-chain checks |
    | `AUDIO READOUT` | Steps the tone off / through each rate, showing its state inline |
+   | `RESUME FROM TEST` | Restarts a long battery after a selected test index |
 
-   Up/Down moves, Cross runs, START backs out one level and closes the menu
-   from the root.
+Up/Down moves, Cross runs, and START backs out one level. During the standing
+battery a progress bar names the in-flight case; after it completes, the capture
+pages appear and Left/Right pages through them.
 
-**The audio readout starts by itself**, at the fastest rate, once the battery
-finishes. That is deliberate: it is the only route that hands back a complete
-payload without photographing five symbols, and leaving it off cost a console
-session. The `AUDIO READOUT` menu row, or SQUARE from any screen, steps through
-the rates and off; the menu row shows the current state. Volume is reduced, so
-it is audible rather than alarming. Auto-playing it meant the console screeched harsh
-square waves at full volume the moment it booted, which is alarming and useless
-to anyone not recording at that instant.
+After a capture exists, the `AUDIO READOUT` menu row or SQUARE from another
+screen steps through the available rates and off. The menu shows whether the
+payload is ready and which rate is active.
 
 ### Recording a capture
 
-**The audio readout is already on** (since v1.2). The 2026-07-26 run predated
-that and was recorded with it off, leaving only the QR route, which then lost a
-page: four of five symbols decoded from the video and page 4 was unreadable in
-every frame it appeared in. One unreadable symbol costs the whole capture,
-because the payload is only valid complete.
+Enable `AUDIO READOUT` after the capture finishes if audio transport is wanted.
+One unreadable QR symbol costs the whole visual capture because the payload is
+only valid complete; audio provides an independent recovery route.
 
 **Record at least three repetitions of the tone**, about 45 seconds. OBS encodes
 audio as AAC by default, and AAC is lossy: a link recorded through it does NOT
@@ -267,7 +283,7 @@ decode from any single repetition. It decodes reliably from three via the
 per-bit majority vote, which is verified. Recording PCM/lossless instead removes
 the need, but three repetitions is the cheaper habit.
 
-**A recording usually spans several runs.** A reboot or `RERUN STARTUP TESTS`
+**A recording usually spans several runs.** A reboot or `RUN ALL TESTS + CAPTURE`
 produces different measurements under the same page numbers, so pages from
 different runs cannot be combined; `tools/hwtest-video-qr.py` resolves this by
 requiring the whole-binary CRC to check out.
