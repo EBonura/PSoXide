@@ -64,7 +64,7 @@ The goals -- driven by PSX RAM budget, not aesthetics:
 - Embedded material table or explicit material-bank reference,
   so a `.psxw` is self-resolving.
 - FloorData-style sparse sector logic stream for triggers /
-  slopes / portals (adaptive's idea).
+  slopes / portals (the classic sector-grid approach).
 - Explicit portal records -- one for visibility (between rooms)
   and one for traversal (per sector: wall / pit / sky).
 

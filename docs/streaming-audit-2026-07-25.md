@@ -304,7 +304,7 @@ once loads become frequent.
 
 ## 8. Interaction with alternate rooms
 
-If alternate rooms land (finding 1 of the REFERENCE architecture review), a room with
+If alternate rooms land (finding 1 of the the reference engine architecture review), a room with
 a flip variant has two payloads. Pinning both would double the working set for
 exactly the rooms most likely to be large set pieces.
 

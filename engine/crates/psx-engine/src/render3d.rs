@@ -1129,7 +1129,7 @@ pub const ADAPTIVE_UNDERDRAW_DEPTH_BIAS: i32 = 256;
 
 /// Camera-space depth bands for adaptive-style room subdivision.
 ///
-/// The original REFERENCE values are expressed in terms of its 1024-unit sectors.
+/// The reference values are expressed in terms of 1024-unit sectors.
 /// Keeping the profile beside each surface submission lets projects with a
 /// different sector scale preserve the same five-sector/three-sector visual
 /// schedule instead of inheriting thresholds that are too close to the camera.
@@ -1148,7 +1148,7 @@ pub struct AdaptiveSubdivisionProfile {
 }
 
 impl AdaptiveSubdivisionProfile {
-    /// Exact depth profile used by REFERENCE's 1024-unit room sectors.
+    /// Exact depth profile used by the reference engine's 1024-unit room sectors.
     pub const REFERENCE: Self = Self {
         max_levels: 2,
         far_depth: ADAPTIVE_SUBDIVIDE_FAR_DEPTH,
@@ -1157,7 +1157,7 @@ impl AdaptiveSubdivisionProfile {
         underdraw_depth_bias: ADAPTIVE_UNDERDRAW_DEPTH_BIAS,
     };
 
-    /// Preserve REFERENCE's subdivision distances for an arbitrary room sector size.
+    /// Preserve the reference engine's subdivision distances for an arbitrary room sector size.
     pub const fn for_sector_size(sector_size: i32) -> Self {
         let sector_size = if sector_size > 0 { sector_size } else { 1024 };
         Self {
