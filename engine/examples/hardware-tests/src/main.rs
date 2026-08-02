@@ -30,6 +30,7 @@ use psx_vram::{Clut, TexDepth, Tpage};
 
 mod audio_link;
 mod cd_chain_probe;
+mod controller_test;
 mod audio_probe;
 mod cpu_tests;
 mod handoff_probe;
@@ -40,6 +41,7 @@ mod voice_probe;
 use audio_probe::AudioProbe;
 use cpu_tests::*;
 use cd_chain_probe::CdChainProbe;
+use controller_test::ControllerTest;
 use handoff_probe::HandoffProbe;
 use photo::PhotoCapture;
 use reverb_probe::{ReverbProbe, ReverbSnapshot};
@@ -109,6 +111,10 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.8: Adds a polished, interactive two-port controller test. It tracks every
+//       button independently, enables and visualises both DualShock sticks,
+//       and samples their resting offset for drift. The frozen PX7 record
+//       schema is unchanged; the minor bump identifies the newly linked binary.
 // v1.7: The CD-DA contention pair (0x9B/0x9C) normalises with PAUSE instead
 //       of STOP. The 2026-07-31 console run proved STOP+respin grinds the
 //       mech for minutes right after the contention read; with the motor
@@ -148,9 +154,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 6;
+const SUITE_VERSION_MINOR: u8 = 8;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.7";
+const SUITE_VERSION: &str = "HWTEST v1.8";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -234,6 +240,9 @@ enum Mode {
     TransitionProbe,
     VoiceProbe,
     AudioProbe,
+    /// Friendly operator-facing pad and analog-drift diagnostic. Kept
+    /// separate from `ControllerProbe`, which measures SIO handshake timing.
+    ControllerTest,
     ControllerProbe,
     AllChecks,
     CpuChecks,
@@ -267,6 +276,7 @@ impl Mode {
             Self::TransitionProbe => "HL BANK TRANSITION",
             Self::VoiceProbe => "HL VOICE BANK",
             Self::AudioProbe => "CD/SPU AUDIO",
+            Self::ControllerTest => "CONTROLLER TEST",
             Self::ControllerProbe => "CONTROLLER PROBE",
             Self::AllChecks => "ALL CHECKS",
             Self::CpuChecks => "CPU CHECKS",
@@ -297,6 +307,7 @@ impl Mode {
             | Self::TransitionProbe
             | Self::VoiceProbe
             | Self::AudioProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
+            Self::ControllerTest => "LIVE P1+P2  HOLD START+SELECT FOR MENU",
             Self::ControllerProbe => "DOWN=TESTS  NO PAD NEEDED TO READ THIS",
             Self::AllChecks
             | Self::CpuChecks
@@ -327,6 +338,7 @@ impl Mode {
             Self::TransitionProbe => "EXACT FULL/LIGHT/MAP LIVE-BANK HANDOFF QR",
             Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
+            Self::ControllerTest => "BUTTON HISTORY + ANALOG CENTRE/DRIFT TEST",
             Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
             Self::CpuChecks => "CPU INSTRUCTIONS AND MEMORY ACCESS",
@@ -357,6 +369,7 @@ impl Mode {
             | Self::TransitionProbe
             | Self::VoiceProbe
             | Self::AudioProbe => "CAPTURE",
+            Self::ControllerTest => "LIVE",
             Self::ControllerProbe => "ACK",
             Self::AllChecks
             | Self::CpuChecks
@@ -390,6 +403,8 @@ impl Mode {
             // Interactive diagnostic like MemoryCard: never part of the
             // frozen conformance report schema.
             Self::CdChainProbe => u8::MAX - 3,
+            // Friendly input diagnostic only; not part of the frozen report.
+            Self::ControllerTest => u8::MAX - 4,
             // Same reasoning as Menu: this draws a chart for the operator's
             // display, it never produces a result row or a report.
             Self::VideoLevels => u8::MAX - 1,
@@ -593,12 +608,16 @@ enum MenuAction {
     RunFromIndex,
 }
 
-const ROOT_MENU: [(&str, MenuAction); 9] = [
+const ROOT_MENU: [(&str, MenuAction); 10] = [
     // Row 0 is pinned: `make hwtest-capture` selects it by firing CROSS at a
     // fixed tick with the cursor still at its boot position. Move this row and
     // the capture opens whatever took its place, which produces an empty log
     // rather than a failure anyone would notice.
     ("RUN ALL TESTS + CAPTURE", MenuAction::RunFullSuite),
+    (
+        "CONTROLLER TEST (P1 + P2)",
+        MenuAction::Open(Mode::ControllerTest),
+    ),
     ("MEMORY CARD (SAFE)", MenuAction::Open(Mode::MemoryCard)),
     ("VIEW CAPTURE (QR PAGES)", MenuAction::Open(Mode::TimingScan)),
     ("RESULTS BY SECTION", MenuAction::Submenu(MenuPage::Results)),
@@ -641,7 +660,7 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
 
 const PROBES_MENU: [(&str, MenuAction); 8] = [
     ("CD READ MECHANISM (CL2)", MenuAction::Open(Mode::CdChainProbe)),
-    ("CONTROLLER PORT", MenuAction::Open(Mode::ControllerProbe)),
+    ("CONTROLLER SIO TIMING", MenuAction::Open(Mode::ControllerProbe)),
     ("HL REVERB STATE (PA5)", MenuAction::Open(Mode::ReverbProbe)),
     ("HL VOICE HANDOFF (PA4)", MenuAction::Open(Mode::HandoffProbe)),
     ("HL BANK TRANSITION (PA3)", MenuAction::Open(Mode::TransitionProbe)),
@@ -1645,6 +1664,7 @@ struct HardwareTests {
     transition_probe: TransitionProbe,
     voice_probe: VoiceProbe,
     audio_probe: AudioProbe,
+    controller_test: ControllerTest,
     memory_card: MemoryCardDiagnostic,
     pass_count: u8,
     fail_count: u8,
@@ -1709,6 +1729,7 @@ impl HardwareTests {
             transition_probe: TransitionProbe::new(),
             voice_probe: VoiceProbe::new(),
             audio_probe: AudioProbe::new(),
+            controller_test: ControllerTest::new(),
             memory_card: MemoryCardDiagnostic::new(),
             pass_count: 0,
             fail_count: 0,
@@ -1864,6 +1885,7 @@ impl HardwareTests {
             Mode::TransitionProbe => self.transition_probe.start(),
             Mode::VoiceProbe => self.voice_probe.start(),
             Mode::AudioProbe => self.audio_probe.start(),
+            Mode::ControllerTest => self.controller_test.start(),
             _ => {}
         }
     }
@@ -1980,7 +2002,15 @@ impl Scene for HardwareTests {
         self.results[PAD_POLL_TEST_INDEX] = pad_poll_result(ctx.pad);
         self.recount();
 
-        if matches!(self.mode, Mode::MemoryCard) {
+        if matches!(self.mode, Mode::ControllerTest) {
+            if self.controller_test.update(ctx.pad) {
+                self.open_menu_page(MenuPage::Root);
+            }
+            // This screen must receive START and SELECT as ordinary testable
+            // buttons. Its deliberate hold gesture owns navigation, so do not
+            // let the global START shortcut consume either button first.
+            return;
+        } else if matches!(self.mode, Mode::MemoryCard) {
             // The engine's controller poll has fully completed before this
             // card transaction starts. Pad and card share SIO0, but are never
             // accessed concurrently.
@@ -2155,7 +2185,10 @@ impl Scene for HardwareTests {
     fn render(&mut self, ctx: &mut Ctx) {
         // The video-levels page owns the whole framebuffer: the surround bars
         // are lit pixels, and a level chart read next to them is worthless.
-        if !matches!(self.mode, Mode::VideoLevels | Mode::MemoryCard) {
+        if !matches!(
+            self.mode,
+            Mode::VideoLevels | Mode::MemoryCard | Mode::ControllerTest
+        ) {
             draw_test_pattern(ctx.sim_tick.as_u32());
         }
         // GPU line liveness cross only on the GPU section -- keeps the controller
@@ -2181,6 +2214,7 @@ impl Scene for HardwareTests {
                 | Mode::TransitionProbe
                 | Mode::VoiceProbe
                 | Mode::AudioProbe
+                | Mode::ControllerTest
                 | Mode::VideoLevels
                 | Mode::MemoryCard
         ) {
@@ -2199,6 +2233,7 @@ impl Scene for HardwareTests {
                 Mode::TransitionProbe => self.transition_probe.draw(font),
                 Mode::VoiceProbe => self.voice_probe.draw(font),
                 Mode::AudioProbe => self.audio_probe.draw(font),
+                Mode::ControllerTest => self.controller_test.draw(font),
                 Mode::ControllerProbe => draw_controller_probe(font, self),
                 Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
                 Mode::GteScan => draw_scan_report(font, self.mode, self.gte_scan),
