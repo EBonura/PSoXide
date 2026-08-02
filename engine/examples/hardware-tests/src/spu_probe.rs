@@ -111,7 +111,7 @@ const QR_SIZE: usize = 85;
 const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
 const QR_SCALE: i16 = 2;
 const QR_QUIET: i16 = 4;
-const BINARY_LEN: usize = 12 + WORDS * 4 + 4;
+const BINARY_LEN: usize = 20 + WORDS * 4 + 4;
 const BASE64_LEN: usize = BINARY_LEN.div_ceil(3) * 4;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 
@@ -122,6 +122,8 @@ pub(crate) struct SpuProbe {
     complete: bool,
     run: u8,
     words: [u32; WORDS],
+    /// Words 0 and 4 of the uploaded table, read back from SPU RAM.
+    table_back: [u32; 2],
     qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
     qr_size: u8,
     binary_crc: u32,
@@ -135,6 +137,7 @@ impl SpuProbe {
             complete: false,
             run: 0,
             words: [0; WORDS],
+            table_back: [0; 2],
             qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
             qr_size: 0,
             binary_crc: 0,
@@ -147,6 +150,7 @@ impl SpuProbe {
         self.complete = false;
         self.run = self.run.wrapping_add(1);
         self.words = [0; WORDS];
+        self.table_back = [0; 2];
         self.qr_size = 0;
         spu::init();
         spu::set_main_volume(Volume::MAX, Volume::MAX);
@@ -169,15 +173,18 @@ impl SpuProbe {
             return;
         }
         let step = self.step as usize;
-        if step < RAM_STAGES {
-            // Pass 1: one stage per frame. The transfers are synchronous;
-            // a frame each keeps the screen alive rather than freezing.
-            self.run_ram_stage(step);
+        if step >= TONE_SEGMENTS {
+            // The RAM pass runs LAST now. It drives the transfer registers
+            // by hand, and the first console capture showed the tone ladder
+            // silent behind it even with a reset in between -- so the tones
+            // are measured on a virgin SPU first, and whatever pass 1 does
+            // to the machine can only affect pass 1's own numbers.
+            self.run_ram_stage(step - TONE_SEGMENTS);
             self.advance();
             return;
         }
 
-        let segment = step - RAM_STAGES;
+        let segment = step;
         let tone_frames = if segment == 8 { HOLD_TONE_FRAMES } else { TONE_FRAMES };
         match segment {
             // SYNC: three 10-frame bursts, for finding t=0 in the audio.
@@ -214,7 +221,7 @@ impl SpuProbe {
             _ => {}
         }
 
-        let at = RAM_STAGES * RAM_FIELDS + segment * TONE_FIELDS;
+        let at = segment * TONE_FIELDS;
         if self.frame == EARLY_FRAME {
             let (pitch, env) = read_voice(VOICE);
             self.words[at] = ((segment as u32) << 24) | (tick & 0x00FF_FFFF);
@@ -224,7 +231,10 @@ impl SpuProbe {
             let (pitch, env) = read_voice(VOICE);
             self.words[at + 2] = ((pitch as u32) << 16) | env as u32;
             let base = psx_io::spu::SPU_BASE + VOICE as u32 * 16;
-            let start = unsafe { psx_io::read16(base + 4) };
+            // +6 is the START address. The first cut read +4 here, which is
+            // the PITCH register, so the payload's "start" column was the
+            // pitch repeated -- harmless but misleading in a capture.
+            let start = unsafe { psx_io::read16(base + 6) };
             // The loop truth: where silicon jumps at an END block, in
             // 8-byte units. It should equal the table's own start.
             let repeat = unsafe { psx_io::read16(base + 14) };
@@ -242,7 +252,7 @@ impl SpuProbe {
 
     fn advance(&mut self) {
         self.frame = 0;
-        if (self.step as usize) + 1 < RAM_STAGES + TONE_SEGMENTS {
+        if (self.step as usize) + 1 < TONE_SEGMENTS + RAM_STAGES {
             self.step += 1;
             self.begin_step();
         } else {
@@ -256,10 +266,10 @@ impl SpuProbe {
 
     fn begin_step(&mut self) {
         let step = self.step as usize;
-        if step < RAM_STAGES {
+        if step >= TONE_SEGMENTS {
             return;
         }
-        let segment = step - RAM_STAGES;
+        let segment = step;
         if segment == 0 {
             // Entering pass 2 with a CLEAN SPU. Pass 1 deliberately drives
             // the transfer registers by hand, and the first console run
@@ -270,6 +280,14 @@ impl SpuProbe {
             spu::set_main_volume(Volume::MAX, Volume::MAX);
             spu::enable_cd_audio(false);
             upload_tables();
+            // Read the table straight back. The console's repeat address
+            // came back pointing at table TWO, which means the voice ran
+            // past table one's END flag -- so the first question is whether
+            // the flags are even in SPU RAM. Word 0 holds the header and
+            // flags bytes of block 0; word 4 holds block 1's.
+            let mut back = [0u32; 8];
+            spu_dma_read(SPU_TABLE_ADDR, &mut back);
+            self.table_back = [back[0], back[4]];
         }
         Voice::key_off(all_voices_mask());
         Voice::set_noise_mask(0);
@@ -343,7 +361,7 @@ impl SpuProbe {
             }
         }
 
-        let at = stage * RAM_FIELDS;
+        let at = TONE_SEGMENTS * TONE_FIELDS + stage * RAM_FIELDS;
         self.words[at] = ((stage as u32) << 24) | words as u32;
         self.words[at + 1] = first_bad;
         self.words[at + 2] = got_at;
@@ -365,8 +383,10 @@ impl SpuProbe {
         binary[6] = TONE_SEGMENTS as u8;
         binary[7] = self.run;
         binary[8..12].copy_from_slice(&UNITY_HZ.to_le_bytes());
+        binary[12..16].copy_from_slice(&self.table_back[0].to_le_bytes());
+        binary[16..20].copy_from_slice(&self.table_back[1].to_le_bytes());
         for (index, word) in self.words.iter().enumerate() {
-            let at = 12 + index * 4;
+            let at = 20 + index * 4;
             binary[at..at + 4].copy_from_slice(&word.to_le_bytes());
         }
         let crc = crc32(&binary[..BINARY_LEN - 4]);
@@ -414,51 +434,49 @@ impl SpuProbe {
         tty::println(hex8(self.binary_crc).digits());
     }
 
+    /// The probe's own screen, starting BELOW the suite header.
+    ///
+    /// The first cut drew a title at y=8 and a subtitle at y=20, straight
+    /// over the harness's own "PS1 HARDWARE TESTS" and mode lines, and laid
+    /// the RAM verdict out in four columns 76 px wide -- too narrow for a
+    /// seven-character label plus an eight-digit value, so those collided
+    /// too. Everything here now starts at y=30 and the verdict is one
+    /// column, which is legible on a photographed CRT.
     pub(crate) fn draw(&self, font: &FontAtlas) {
-        font.draw_text(8, 8, "SPU DIAGNOSTIC SB2", (255, 232, 128));
         let step = self.step as usize;
         if !self.complete {
-            if step < RAM_STAGES {
-                font.draw_text(8, 20, "PASS 1: SPU RAM, SILENT", (150, 170, 200));
-                font.draw_text(8, 42, "STAGE", (140, 160, 190));
-                font.draw_text(64, 42, ram_label(step as u8), (96, 200, 255));
-                font.draw_text(8, 58, ram_description(step as u8), (220, 224, 230));
-                font.draw_text(8, 86, "PASS 2 IS 30S OF TONES", (112, 136, 170));
-                font.draw_text(8, 102, "RECORD VIDEO *AND AUDIO*", (255, 216, 96));
+            if step < TONE_SEGMENTS {
+                let segment = step as u8;
+                font.draw_text(8, 30, "PASS 1 OF 2: TONE LADDER", (150, 170, 200));
+                font.draw_text(8, 44, "SEG", (140, 160, 190));
+                font.draw_text(48, 44, hex2(segment).as_str(), (232, 236, 244));
+                font.draw_text(72, 44, tone_label(segment), (96, 200, 255));
+                font.draw_text(8, 58, tone_description(segment), (220, 224, 230));
+                font.draw_text(8, 72, "EXPECT", (140, 160, 190));
+                font.draw_text(72, 72, tone_expectation(segment), (255, 216, 96));
+                font.draw_text(8, 92, "1.5S TONE THEN 0.5S SILENCE", (112, 136, 170));
+                font.draw_text(8, 106, "RECORD VIDEO *AND AUDIO*", (255, 128, 96));
+                font.draw_text(8, 120, "DO NOT TOUCH THE VOLUME MID-RUN", (255, 128, 96));
                 return;
             }
-            let segment = (step - RAM_STAGES) as u8;
-            font.draw_text(8, 20, "PASS 2: TONE LADDER", (150, 170, 200));
-            font.draw_text(8, 42, "SEG", (140, 160, 190));
-            font.draw_text(48, 42, hex2(segment).as_str(), (232, 236, 244));
-            font.draw_text(72, 42, tone_label(segment), (96, 200, 255));
-            font.draw_text(8, 58, tone_description(segment), (220, 224, 230));
-            font.draw_text(8, 76, "EXPECT", (140, 160, 190));
-            font.draw_text(72, 76, tone_expectation(segment), (255, 216, 96));
-            font.draw_text(8, 104, "1.5S TONE THEN 0.5S SILENCE", (112, 136, 170));
-            font.draw_text(8, 120, "DO NOT TOUCH THE VOLUME MID-RUN", (255, 128, 96));
-            // Pass 1's verdict stays on screen through pass 2: if RAM is
-            // already wrong, the tones are a second opinion, not news.
-            let mut y = 148i16;
-            font.draw_text(8, 138, "SPU RAM BAD WORDS", (140, 160, 190));
-            for stage in 0..RAM_STAGES {
-                let bad = self.words[stage * RAM_FIELDS + 3];
-                let colour = if bad == 0 { (96, 240, 128) } else { (255, 96, 96) };
-                font.draw_text(8 + (stage as i16 % 4) * 76, y + (stage as i16 / 4) * 10, ram_label(stage as u8), (170, 180, 195));
-                font.draw_text(8 + (stage as i16 % 4) * 76 + 48, y + (stage as i16 / 4) * 10, hex8(bad).digits(), colour);
-            }
+            font.draw_text(8, 30, "PASS 2 OF 2: SPU RAM, SILENT", (150, 170, 200));
+            let stage = (step - TONE_SEGMENTS) as u8;
+            font.draw_text(8, 44, "STAGE", (140, 160, 190));
+            font.draw_text(72, 44, ram_label(stage), (96, 200, 255));
+            font.draw_text(8, 58, ram_description(stage), (220, 224, 230));
+            self.draw_ram_verdict(font, 80);
             return;
         }
 
-        font.draw_text(8, 20, "COMPLETE - PHOTOGRAPH THE QR", (96, 240, 128));
-        font.draw_text(8, 226, "X RERUN", (150, 170, 200));
+        font.draw_text(8, 30, "COMPLETE - PHOTOGRAPH THE QR", (96, 240, 128));
+        font.draw_text(8, 228, "X RERUN", (150, 170, 200));
         if self.qr_size as usize != QR_SIZE {
             font.draw_text(88, 112, "QR ENCODE FAILED", (255, 96, 96));
             return;
         }
         let total = (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE;
         let left = (320 - total) / 2;
-        let top = 42;
+        let top = 44;
         gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
         let data_left = left + QR_QUIET * QR_SCALE;
         let data_top = top + QR_QUIET * QR_SCALE;
@@ -484,6 +502,20 @@ impl SpuProbe {
                     );
                 }
             }
+        }
+    }
+
+    /// Bad-word counts, one stage per row: label at x=8, count at x=88.
+    /// A seven-character label is 56 px and an eight-digit value 64, so a
+    /// single column is the only layout that fits both without collision.
+    fn draw_ram_verdict(&self, font: &FontAtlas, top: i16) {
+        font.draw_text(8, top, "SPU RAM BAD WORDS", (140, 160, 190));
+        for stage in 0..RAM_STAGES {
+            let bad = self.words[TONE_SEGMENTS * TONE_FIELDS + stage * RAM_FIELDS + 3];
+            let colour = if bad == 0 { (96, 240, 128) } else { (255, 96, 96) };
+            let y = top + 14 + stage as i16 * 12;
+            font.draw_text(8, y, ram_label(stage as u8), (200, 208, 220));
+            font.draw_text(88, y, hex8(bad).digits(), colour);
         }
     }
 
