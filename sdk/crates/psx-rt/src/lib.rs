@@ -58,7 +58,7 @@ extern "Rust" {
 #[cfg(target_arch = "mips")]
 #[used]
 #[link_section = ".region"]
-static PSX_EXE_REGION: [u8; 31] = *b"PSoXide SDK homebrew executable";
+static PSX_EXE_REGION: [u8; 55] = *b"PSoXide SDK homebrew executable                        ";
 
 /// Entry point the PSX-EXE loader jumps to.
 ///
