@@ -17,7 +17,7 @@ use crate::{hex2, hex8, spu_dma_read};
 const STAGE_COUNT: usize = 5;
 const STAGE_FRAMES: u16 = 180;
 const CAPTURE_FRAME: u16 = 120;
-const CDTEST_LBA: u32 = 424;
+const CDTEST_LBA: u32 = 524;
 const SECTOR_WORDS: usize = 2048 / 4;
 const CAPTURE_WORDS: usize = 0x800 / 4;
 const CAPTURE_HALF_WORDS: usize = 0x400 / 4;
