@@ -825,12 +825,12 @@ pub fn draw_player_assemble<
     progress_q12: u16,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) {
+) -> usize {
     let Some(runtime_model) = models.get(character.model.to_usize()).copied().flatten() else {
-        return;
+        return 0;
     };
     let Some(anim) = runtime_model.clip(clips, clip_local) else {
-        return;
+        return 0;
     };
     let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
     let phase = animation_phase_at_tick_q12(
@@ -881,9 +881,10 @@ pub fn draw_player_assemble<
     }
 
     let Some(geometry) = runtime_model_geometry(runtime_model, model_parts, model_vertices) else {
-        return;
+        return 0;
     };
     let faces = runtime_model_faces(runtime_model, model_faces);
+    let mut submitted = 0usize;
     let base_material = lighting.shade_model_material(origin, runtime_model.material);
     let parts = geometry.parts;
     let vertices = geometry.vertices;
@@ -985,7 +986,9 @@ pub fn draw_player_assemble<
             base_material
         };
         world.submit_textured_world_triangle(triangles, *camera, verts, uvs, material, options);
+        submitted += 1;
     }
+    submitted
 }
 
 pub fn draw_player<

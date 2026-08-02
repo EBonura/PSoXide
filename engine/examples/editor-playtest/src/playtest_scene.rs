@@ -930,7 +930,7 @@ impl Scene for Playtest {
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         if let Some(progress) = assemble {
-                            mr::draw_player_assemble(
+                            let submitted = mr::draw_player_assemble(
                                 model_tables(),
                                 character,
                                 &self.models,
@@ -954,6 +954,7 @@ impl Scene for Playtest {
                                 &mut primitive_packets,
                                 &mut world,
                             );
+                            debug_log_assemble_frame(progress, submitted);
                             return PlayerModelDrawStats::default();
                         }
                         draw_player(
