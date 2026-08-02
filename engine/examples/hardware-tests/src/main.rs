@@ -36,6 +36,7 @@ mod cpu_tests;
 mod handoff_probe;
 mod photo;
 mod reverb_probe;
+mod sample_probe;
 mod transition_probe;
 mod voice_probe;
 use audio_probe::AudioProbe;
@@ -47,6 +48,7 @@ use photo::PhotoCapture;
 use reverb_probe::{ReverbProbe, ReverbSnapshot};
 use transition_probe::TransitionProbe;
 use voice_probe::VoiceProbe;
+use sample_probe::SampleProbe;
 
 // A complete 4 KiB direct-mapped PS1 I-cache footprint. The custom return
 // register lets inline timing assembly call it without clobbering Rust's $ra.
@@ -111,6 +113,12 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.9: SB1, the UI sample end/loop probe: the demo-disc launcher blip
+//       repeats aggressively on console, and the suspect is the blip sample's
+//       own ADPCM terminator under an ADSR that sustains forever. SB1 audits
+//       both launcher blips' block flags, replays the exact launcher voice
+//       path (plus retrigger, key_off and percussive variants), and traces
+//       envelope/ENDX into one QR. Frozen record schema unchanged.
 // v1.8: Adds a polished, interactive two-port controller test. It tracks every
 //       button independently, enables and visualises both DualShock sticks,
 //       and samples their resting offset for drift. The frozen PX7 record
@@ -154,9 +162,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 8;
+const SUITE_VERSION_MINOR: u8 = 9;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.8";
+const SUITE_VERSION: &str = "HWTEST v1.9";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -240,6 +248,8 @@ enum Mode {
     TransitionProbe,
     VoiceProbe,
     AudioProbe,
+    /// UI sample end/loop probe: the demo-disc launcher blip bug (SB1).
+    SampleProbe,
     /// Friendly operator-facing pad and analog-drift diagnostic. Kept
     /// separate from `ControllerProbe`, which measures SIO handshake timing.
     ControllerTest,
@@ -276,6 +286,7 @@ impl Mode {
             Self::TransitionProbe => "HL BANK TRANSITION",
             Self::VoiceProbe => "HL VOICE BANK",
             Self::AudioProbe => "CD/SPU AUDIO",
+            Self::SampleProbe => "UI SAMPLE PROBE",
             Self::ControllerTest => "CONTROLLER TEST",
             Self::ControllerProbe => "CONTROLLER PROBE",
             Self::AllChecks => "ALL CHECKS",
@@ -306,7 +317,8 @@ impl Mode {
             | Self::CdChainProbe
             | Self::TransitionProbe
             | Self::VoiceProbe
-            | Self::AudioProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
+            | Self::AudioProbe
+            | Self::SampleProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
             Self::ControllerTest => "LIVE P1+P2  HOLD START+SELECT FOR MENU",
             Self::ControllerProbe => "DOWN=TESTS  NO PAD NEEDED TO READ THIS",
             Self::AllChecks
@@ -338,6 +350,7 @@ impl Mode {
             Self::TransitionProbe => "EXACT FULL/LIGHT/MAP LIVE-BANK HANDOFF QR",
             Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
+            Self::SampleProbe => "UI BLIP END/LOOP FLAGS + ENVELOPE TRACE QR (SB1)",
             Self::ControllerTest => "BUTTON HISTORY + ANALOG CENTRE/DRIFT TEST",
             Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
@@ -368,7 +381,8 @@ impl Mode {
             | Self::CdChainProbe
             | Self::TransitionProbe
             | Self::VoiceProbe
-            | Self::AudioProbe => "CAPTURE",
+            | Self::AudioProbe
+            | Self::SampleProbe => "CAPTURE",
             Self::ControllerTest => "LIVE",
             Self::ControllerProbe => "ACK",
             Self::AllChecks
@@ -405,6 +419,9 @@ impl Mode {
             Self::CdChainProbe => u8::MAX - 3,
             // Friendly input diagnostic only; not part of the frozen report.
             Self::ControllerTest => u8::MAX - 4,
+            // Targeted diagnostic for the demo-disc blip bug; not part of
+            // the frozen conformance report schema.
+            Self::SampleProbe => u8::MAX - 5,
             // Same reasoning as Menu: this draws a chart for the operator's
             // display, it never produces a result row or a report.
             Self::VideoLevels => u8::MAX - 1,
@@ -658,7 +675,8 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
     ("BACK", MenuAction::Back),
 ];
 
-const PROBES_MENU: [(&str, MenuAction); 8] = [
+const PROBES_MENU: [(&str, MenuAction); 9] = [
+    ("UI SAMPLE END/LOOP (SB1)", MenuAction::Open(Mode::SampleProbe)),
     ("CD READ MECHANISM (CL2)", MenuAction::Open(Mode::CdChainProbe)),
     ("CONTROLLER SIO TIMING", MenuAction::Open(Mode::ControllerProbe)),
     ("HL REVERB STATE (PA5)", MenuAction::Open(Mode::ReverbProbe)),
@@ -1663,6 +1681,7 @@ struct HardwareTests {
     cd_chain_probe: CdChainProbe,
     transition_probe: TransitionProbe,
     voice_probe: VoiceProbe,
+    sample_probe: SampleProbe,
     audio_probe: AudioProbe,
     controller_test: ControllerTest,
     memory_card: MemoryCardDiagnostic,
@@ -1728,6 +1747,7 @@ impl HardwareTests {
             cd_chain_probe: CdChainProbe::new(),
             transition_probe: TransitionProbe::new(),
             voice_probe: VoiceProbe::new(),
+            sample_probe: SampleProbe::new(),
             audio_probe: AudioProbe::new(),
             controller_test: ControllerTest::new(),
             memory_card: MemoryCardDiagnostic::new(),
@@ -1885,6 +1905,7 @@ impl HardwareTests {
             Mode::TransitionProbe => self.transition_probe.start(),
             Mode::VoiceProbe => self.voice_probe.start(),
             Mode::AudioProbe => self.audio_probe.start(),
+            Mode::SampleProbe => self.sample_probe.start(),
             Mode::ControllerTest => self.controller_test.start(),
             _ => {}
         }
@@ -1957,6 +1978,7 @@ impl HardwareTests {
             Mode::TransitionProbe => self.transition_probe.restart(),
             Mode::VoiceProbe => self.voice_probe.restart(),
             Mode::AudioProbe => self.audio_probe.restart(),
+            Mode::SampleProbe => self.sample_probe.restart(),
             Mode::VideoLevels => self.page = (self.page + 1) % VIDEO_FIELDS.len(),
             _ => self.run_section(self.mode),
         }
@@ -2063,6 +2085,8 @@ impl Scene for HardwareTests {
             self.voice_probe.update(ctx.sim_tick.as_u32());
         } else if matches!(self.mode, Mode::AudioProbe) {
             self.audio_probe.update(ctx.sim_tick.as_u32());
+        } else if matches!(self.mode, Mode::SampleProbe) {
+            self.sample_probe.update(ctx.sim_tick.as_u32());
         }
 
         if matches!(self.mode, Mode::ControllerProbe) {
@@ -2233,6 +2257,7 @@ impl Scene for HardwareTests {
                 Mode::TransitionProbe => self.transition_probe.draw(font),
                 Mode::VoiceProbe => self.voice_probe.draw(font),
                 Mode::AudioProbe => self.audio_probe.draw(font),
+                Mode::SampleProbe => self.sample_probe.draw(font),
                 Mode::ControllerTest => self.controller_test.draw(font),
                 Mode::ControllerProbe => draw_controller_probe(font, self),
                 Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
