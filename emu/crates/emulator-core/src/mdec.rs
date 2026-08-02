@@ -979,7 +979,7 @@ fn decode_block(
     let head = loop {
         match rl.pop_front() {
             // FE00h at the start of a new block is DMA padding, not an
-            // empty Cr/Cb/Y block. a commercial title room images pad MDEC streams this way.
+            // empty Cr/Cb/Y block. Commercial room images pad MDEC streams this way.
             Some(MDEC_END_OF_DATA) => continue,
             Some(v) => break v,
             None => return false,

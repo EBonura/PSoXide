@@ -157,7 +157,7 @@ impl Dma {
     /// Read a byte from the DMA register window.
     ///
     /// Some games poke global DMA registers byte-wise. In particular,
-    /// a commercial title 3 toggles channel-specific DICR IRQ-enable bits through
+    /// Some commercial titles toggle channel-specific DICR IRQ-enable bits through
     /// `sb` at `DICR+2` while streaming FMV chunks; routing those reads
     /// through the live register state keeps the later writeback honest.
     pub fn read8(&self, phys: u32) -> u8 {

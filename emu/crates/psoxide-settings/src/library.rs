@@ -429,7 +429,7 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 
 /// Parse one file into a `LibraryEntry`. Uses cheap heuristics --
 /// read one or two well-known sectors and the file stem. Never
-/// loads the whole file (a commercial title is 600 MiB; scanning
+/// loads the whole file (discs reach 600 MiB; scanning
 /// wouldn't finish).
 fn parse_entry(path: &Path, kind: GameKind, size: u64, mtime: u64) -> LibraryEntry {
     let fallback_title = path

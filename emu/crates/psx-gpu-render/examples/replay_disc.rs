@@ -10,7 +10,7 @@
 //!     CPU rasterizer changes.
 //!
 //! ```bash
-//! PSOXIDE_DISC="/path/to/a commercial title.cue" \
+//! PSOXIDE_DISC="/path/to/disc.cue" \
 //!   cargo run --release -p psx-gpu-compute \
 //!     --example replay_disc -- --steps 50000000
 //! ```

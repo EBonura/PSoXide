@@ -76,7 +76,7 @@ fn voice_bank_round_trips_volume_pitch_start_loop() {
 #[test]
 fn voice_adsr_current_reads_live_envelope() {
     // ENVX exposes the live envelope level (hardware behavior). Games
-    // poll it -- e.g. a commercial title spins until every voice reaches 0
+    // poll it -- some titles spin until every voice reaches 0
     // before advancing past its intro -- so it must reflect the real
     // envelope, not a pinned constant. See `read_voice_reg`.
     let mut s = Spu::new();

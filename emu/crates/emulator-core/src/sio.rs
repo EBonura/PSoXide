@@ -533,7 +533,7 @@ impl Sio0 {
             (0xFF, false, true, PAD_ACK_DELAY_TICKS)
         };
         // Redux returns 0xff for a missing device but does not schedule
-        // an ACK/DSR IRQ for that byte. a commercial title polls port 2 during the BIOS
+        // an ACK/DSR IRQ for that byte. One commercial title polls port 2 during the BIOS
         // pad handler; raising a timeout IRQ there invents extra IRQ7
         // passes inside the same folded ISR.
         let dsr_timeout = false;

@@ -43,7 +43,7 @@
 //! - A = BIOS boots to Sony logo (SCPH1001, no disc)
 //! - B = BIOS boots to shell (MAIN MENU / MEMORY CARD / CD PLAYER)
 //! - C = Homebrew SDK triangle renders (see `sdk/examples/hello-tri`)
-//! - D = BIOS disc-check passes (a commercial title) -- licensed-disc
+//! - D = BIOS disc-check passes -- licensed-disc
 //!   splash rendered; game boot-EXE load is still pending.
 
 use emulator_core::{Bus, Cpu};
@@ -52,7 +52,7 @@ use std::path::PathBuf;
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const CRASH_DISC: &str = "<rom-path>";
-const TEKKEN_DISC: &str = "<rom-path>";
+const SECONDARY_DISC: &str = "<rom-path>";
 
 fn bios_path() -> PathBuf {
     std::env::var("PSOXIDE_BIOS")
@@ -215,9 +215,9 @@ fn milestone_b_bios_to_shell() {
 }
 
 #[test]
-#[ignore = "requires a commercial title USA disc + long-running (~11s)"]
+#[ignore = "requires a retail disc + long-running (~11s)"]
 fn milestone_d_bios_accepts_licensed_disc() {
-    // After 600M instructions with a commercial title USA mounted, the
+    // After 600M instructions with a retail disc mounted, the
     // BIOS has detected the licensed disc, issued the cold-boot
     // disc-read sequence from ROM, cleared the boot-logo VRAM, and
     // rendered the "SONY / PlayStation™" licensed-disc splash.
@@ -297,30 +297,30 @@ fn milestone_d_bios_accepts_licensed_disc() {
 }
 
 #[test]
-#[ignore = "requires a commercial title USA disc"]
-fn milestone_d_tekken_licensed_screen() {
-    // Secondary D-level canary: a commercial title boots all the way through
+#[ignore = "requires a second retail disc"]
+fn milestone_d_secondary_licensed_screen() {
+    // Secondary D-level canary: a second retail disc boots all the way through
     // the BIOS handoff and into its own boot-EXE, which renders
     // the 3D red "PlayStation / Licensed by Sony Computer
     // Entertainment America / SCEA™" screen. Unlike Crash (which
     // crashes on a wild pointer at step 180M, likely downstream
-    // of GTE gaps), a commercial title holds stably on the license screen --
+    // of GTE gaps), it holds stably on the license screen --
     // probably waiting for SPU / MDEC that we don't implement yet.
     //
     // Having two D-level goldens from different games doubles the
     // regression surface: a CDROM change that regresses one but
-    // not the other still gets caught, and the a commercial title path proves
+    // not the other still gets caught, and the second path proves
     // the full BIOS→EXE→render chain works end-to-end for a
     // different SCUS disc. Captured 2026-04-18 right after the
     // DMA3 sync-mode-0 fix landed.
-    if !std::path::Path::new(TEKKEN_DISC).exists() {
-        eprintln!("skip milestone_d_tekken: disc not found at {TEKKEN_DISC}");
+    if !std::path::Path::new(SECONDARY_DISC).exists() {
+        eprintln!("skip milestone_d_secondary: disc not found at {SECONDARY_DISC}");
         return;
     }
-    let state = run_milestone(800_000_000, Some(TEKKEN_DISC));
+    let state = run_milestone(800_000_000, Some(SECONDARY_DISC));
     // Hashes updated 2026-04-19 -- scanline-delta rasterizer port.
     assert_milestone(
-        "Milestone D (a commercial title license screen)",
+        "Milestone D (secondary license screen)",
         &state,
         0x30f0_f63b_e521_cc1c,
         0x661d_9f5c_7cc6_11ac,

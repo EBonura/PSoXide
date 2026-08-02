@@ -3295,7 +3295,7 @@ mod tests {
     /// / `LWR_*` / `SWL_*` / `SWR_*` tables exactly. LWL was
     /// previously inverted (shift = (addr & 3) * 8 instead of
     /// (3 - (addr & 3)) * 8), which corrupted every unaligned
-    /// word load -- the root cause of a commercial title's stack
+    /// word load -- the root cause of an observed commercial stack
     /// corruption after the Sony logo, where the game iterates
     /// strings via lwl/lwr pairs, and one of those overwrote the
     /// saved $ra.

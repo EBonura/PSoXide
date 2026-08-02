@@ -1,6 +1,6 @@
 //! End-to-end regression for the shared `PXITAPE1` controller-input tape.
 //!
-//! Unlike `re2_gameplay`, this needs no retail disc or BIOS, so it runs in
+//! This needs no retail disc or BIOS, so it runs in
 //! CI. It records a route to the on-disk tape format, reads it back, replays
 //! each frame into a real `Bus` via the same `apply_to_bus` the editor and
 //! the headless `launch --input-tape` path use, then polls the controller

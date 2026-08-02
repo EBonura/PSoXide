@@ -789,7 +789,7 @@ impl Bus {
     }
 
     /// Plug a digital controller into port 2. Used by two-player
-    /// games (a commercial title VS, a commercial title, a commercial title Alpha, etc.).
+    /// several commercial games.
     /// SIO0 already multiplexes port 1 / port 2 internally via
     /// the CTRL.SLOT bit -- games switch between them per poll.
     pub fn attach_digital_pad_port2(&mut self) {
@@ -1066,7 +1066,7 @@ impl Bus {
         // from the per-instruction BIAS tick. Processing them from
         // `Bus::tick` can make I_STAT bit 7 visible a few
         // instructions early inside BIOS/game interrupt handlers
-        // (a commercial title's first route drift at 266,946,810).
+        // (first observed route drift at 266,946,810).
         if include_sio {
             while self
                 .scheduler
@@ -1970,7 +1970,7 @@ impl Bus {
         // Redux rejects DMA3 kicks only until a sector is ready in
         // the transfer buffer (`m_read == 0`). It does not require
         // the request-register bit that gates MMIO data reads; the
-        // BIOS kicks DMA before that latch is armed in a commercial title's
+        // BIOS kicks DMA before that latch is armed in one commercial
         // CDROM handler and expects CHCR bit 24 to remain busy for
         // the scheduled DMA window.
         if self.cdrom.data_fifo_len() == 0 {
@@ -3503,7 +3503,7 @@ mod tests {
 
     #[test]
     fn segment_aliases_resolve_to_same_ram_word() {
-        // a commercial title stashed a flag in a pointer's segment bits: the
+        // One commercial title stashed a flag in a pointer's segment bits: the
         // C4-plant struct lived once in RAM, and the pointer was OR-ed with
         // 0x8000_0000 (KSEG0) or 0xA000_0000 (KSEG1) to encode wall vs
         // ground. All three segment views must resolve to the same word.
