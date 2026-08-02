@@ -19,7 +19,7 @@
 ///   ~4.4 µs, observed across boot roms (L900). `CdlInit` (`0x1C`)
 ///   uses the separate lid/rescan path instead of a second CDROM IRQ.
 /// - `AddIrqQueue(CdlReset + 0x100, 4100000)` -- Reset (`0x0A`)
-///   completion. a commercial title polls this INT2 before it starts issuing reads.
+///   completion. Some titles poll this INT2 before they start issuing reads.
 /// - `cdReadTime = psxClockSpeed / 75` -- one PSX CD-frame period
 ///   (L135). Redux schedules the first ReadN/ReadS sector at
 ///   `cdReadTime` in double-speed mode, then chains steady-state

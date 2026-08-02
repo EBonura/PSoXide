@@ -1178,7 +1178,7 @@ impl Bus {
             }
         }
         // CDROM DMA completion is observed by Redux at the exact
-        // target boundary in retail boot paths (a commercial title license-sector
+        // target boundary in retail boot paths (license-sector
         // DMA lands here). Keep the generic scheduler strict for the
         // other interrupt slots, but let CDR DMA finish on equality.
         if include_cdr_dma
