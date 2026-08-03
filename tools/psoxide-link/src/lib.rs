@@ -44,10 +44,6 @@ const SENTINEL: &str = "sdk/psoxide.ld";
 /// unchanged pin costs a string compare instead of a recursive copy.
 const MARKER: &str = ".psoxide-source";
 
-/// Default crate to look for in `cargo metadata`. Any crate from this
-/// repository would anchor the resolution; this one is small and stable.
-const DEFAULT_PIN_CRATE: &str = "psx-iso";
-
 /// Never copied: build output and version control, which are large, and
 /// content directories that belong to whoever authored them.
 fn skip(relative: &Path) -> bool {
