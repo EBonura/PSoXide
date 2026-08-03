@@ -2,18 +2,23 @@ name: CI
 
 # Host-side CI for PSoXide.
 #
-# Reliability split:
-#   - deps (gating): dependency license + source policy via cargo-deny.
-#     Verified green locally; it does not depend on toolchain formatting or
-#     lint drift, so it is a stable gate.
-#   - build-test (advisory): formatting, build, tests, and lint.
-#     rust-toolchain.toml pins a dated nightly (since 2026-07-09), so
-#     rustfmt/clippy output is reproducible until the pin is bumped --
-#     fmt/clippy findings here are real, and the tree was normalized
-#     against the pinned rustfmt on 2026-07-11. The job stays
-#     continue-on-error so a deliberate pin bump (which may re-drift
-#     formatting) never blocks merges mid-transition. Run locally with
-#     `make fmt`, `make check`, `make test`, `make lint`.
+# Both jobs gate.
+#   - deps: dependency license + source policy via cargo-deny.
+#   - build-test: formatting, build, tests, and lint.
+#
+# build-test was continue-on-error for as long as the pin floated, and it
+# stayed that way after rust-toolchain.toml was dated. By then the tree had
+# drifted behind the advisory job in every direction at once: rustfmt
+# rewrote forty files, `make lint` died in the runtime numeric guard before
+# clippy ever ran, clippy had 246 findings behind that, and eight starter
+# project tests had been failing since Aletha replaced the Crimson Cross
+# Knight. None of it was visible, because a job that cannot fail is a job
+# nobody reads.
+#
+# All four are green now, so the job gates. Run the same checks locally
+# with `make fmt`, `make check`, `make test`, `make lint`. If a deliberate
+# nightly bump re-drifts formatting, run `make fmt` in the same commit
+# rather than restoring continue-on-error.
 
 on:
   push:
@@ -44,12 +49,8 @@ jobs:
           done
 
   build-test:
-    name: Build, test, lint (advisory; see workflow notes)
+    name: Build, test, lint
     runs-on: ubuntu-latest
-    # Advisory because the repo pins a floating `nightly`: rustfmt/clippy
-    # output is not reproducible across nightlies. Do not gate on this until
-    # a dated nightly is pinned.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain (from rust-toolchain.toml)
@@ -61,7 +62,7 @@ jobs:
             libasound2-dev libudev-dev libx11-dev libxi-dev libxrandr-dev \
             libxinerama-dev libxcursor-dev libxkbcommon-dev libwayland-dev \
             mesa-vulkan-drivers
-      - name: cargo fmt --check (advisory; floating-nightly drift expected)
+      - name: cargo fmt --check
         run: |
           cargo fmt --all -- --check
           (cd engine && cargo fmt --all -- --check)
