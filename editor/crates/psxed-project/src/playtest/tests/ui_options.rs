@@ -40,15 +40,24 @@ fn tracked_editor_playtest_manifest_is_placeholder() {
 #[test]
 fn starter_project_validates_and_cooks() {
     let project = project_with_one_room();
-    let expected_camera = project
-        .active_scene()
+    // A Camera parented to the player overrides the World node's settings
+    // (see player_camera_component_drives_cooked_camera), so the authored
+    // camera the cook should reproduce is that one when it exists.
+    let scene = project.active_scene();
+    let expected_camera = scene
         .nodes()
         .iter()
         .find_map(|node| match &node.kind {
-            NodeKind::World { camera, .. } => Some(*camera),
+            NodeKind::Camera { settings } => Some(*settings),
             _ => None,
         })
-        .expect("starter world has camera settings");
+        .or_else(|| {
+            scene.nodes().iter().find_map(|node| match &node.kind {
+                NodeKind::World { camera, .. } => Some(*camera),
+                _ => None,
+            })
+        })
+        .expect("starter authors camera settings");
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let package = package.expect("package returned on ok report");

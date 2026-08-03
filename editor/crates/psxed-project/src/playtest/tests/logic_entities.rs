@@ -270,8 +270,22 @@ fn game_entity_state_clips_fall_back_down_the_chain() {
             set.turn_clip = None;
             set.roll_clip = None;
             set.backstep_clip = None;
-            set.action_clips.clear();
-            set.clips.clear();
+            // The starter set authors every action through `action_clips`
+            // rather than the dedicated slots, so clearing the list outright
+            // would strip idle and walk as well and fail the cook instead of
+            // exercising the fallback chain this test is about.
+            set.action_clips.retain(|binding| {
+                matches!(
+                    binding.action,
+                    CharacterAnimationAction::Idle | CharacterAnimationAction::Walk
+                )
+            });
+            let kept: Vec<_> = set
+                .action_clips
+                .iter()
+                .map(|binding| binding.clip)
+                .collect();
+            set.clips.retain(|clip| kept.contains(clip));
         }
         _ => unreachable!(),
     }
