@@ -3899,9 +3899,14 @@ mod focus_tests {
 
     #[test]
     fn cortex_aletha_exposes_every_mixamo_bake_in_the_viewer() {
+        // The committed miniaturised sample, not a local working project:
+        // `editor/projects/*` is gitignored, and the cortex_ignition_v1
+        // fixture this used to load was deleted in "Remove obsolete Cortex
+        // project fixtures", so the test has been unrunnable everywhere
+        // since. The sample carries the same 201 Mixamo sources.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/cortex_ignition_v1/project.ron");
-        let project = ProjectDocument::load_from_path(path).expect("Cortex project parses");
+            .join("../../samples/cortex_v1/project.ron");
+        let project = ProjectDocument::load_from_path(path).expect("Cortex sample parses");
         let model = project
             .resources
             .iter()
