@@ -526,63 +526,63 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     && MODEL_GTE_JOINT_PACKED_TRANSLATION
                     && active_blend.is_none()
                 {
-                        sample
-                            .gte_pose(joint_index)
-                            .and_then(|pose| {
-                                textured_model_part_gte_transform_with_view_gte_packed_translation(
-                                    view_instance,
-                                    view_origin_translation,
-                                    pose,
-                                    pose_translation,
-                                    local_to_world,
-                                )
-                            })
-                            .or_else(|| {
-                                sample.pose(joint_index).map(|pose| {
-                                    textured_model_part_gte_transform_with_view_gte_translation(
-                                        view_instance,
-                                        view_origin_translation,
-                                        apply_model_pose_translation(pose, pose_translation),
-                                        local_to_world,
-                                    )
-                                })
-                            })
-                    } else {
-                        sample.pose(joint_index).map(|pose| {
-                            let pose = match &active_blend {
-                                Some(blend) => blend.blend_toward(pose, joint_index),
-                                None => pose,
-                            };
-                            let pose = apply_model_pose_translation(pose, pose_translation);
-                            if MODEL_GTE_JOINT_TRANSLATION {
+                    sample
+                        .gte_pose(joint_index)
+                        .and_then(|pose| {
+                            textured_model_part_gte_transform_with_view_gte_packed_translation(
+                                view_instance,
+                                view_origin_translation,
+                                pose,
+                                pose_translation,
+                                local_to_world,
+                            )
+                        })
+                        .or_else(|| {
+                            sample.pose(joint_index).map(|pose| {
                                 textured_model_part_gte_transform_with_view_gte_translation(
                                     view_instance,
                                     view_origin_translation,
-                                    pose,
+                                    apply_model_pose_translation(pose, pose_translation),
                                     local_to_world,
                                 )
-                            } else if MODEL_GTE_JOINT_COMPOSE {
-                                textured_model_part_gte_transform_with_view_gte_compose(
-                                    camera_view,
-                                    view_instance,
-                                    camera.position,
-                                    pose,
-                                    instance_rotation,
-                                    local_to_world,
-                                    origin,
-                                )
-                            } else {
-                                textured_model_part_gte_transform_with_view(
-                                    camera_view,
-                                    camera.position,
-                                    pose,
-                                    instance_rotation,
-                                    local_to_world,
-                                    origin,
-                                )
-                            }
+                            })
                         })
-                    };
+                } else {
+                    sample.pose(joint_index).map(|pose| {
+                        let pose = match &active_blend {
+                            Some(blend) => blend.blend_toward(pose, joint_index),
+                            None => pose,
+                        };
+                        let pose = apply_model_pose_translation(pose, pose_translation);
+                        if MODEL_GTE_JOINT_TRANSLATION {
+                            textured_model_part_gte_transform_with_view_gte_translation(
+                                view_instance,
+                                view_origin_translation,
+                                pose,
+                                local_to_world,
+                            )
+                        } else if MODEL_GTE_JOINT_COMPOSE {
+                            textured_model_part_gte_transform_with_view_gte_compose(
+                                camera_view,
+                                view_instance,
+                                camera.position,
+                                pose,
+                                instance_rotation,
+                                local_to_world,
+                                origin,
+                            )
+                        } else {
+                            textured_model_part_gte_transform_with_view(
+                                camera_view,
+                                camera.position,
+                                pose,
+                                instance_rotation,
+                                local_to_world,
+                                origin,
+                            )
+                        }
+                    })
+                };
 
                 *joint_view_transform = match joint_transform {
                     Some((rotation, translation)) => JointViewTransform {
