@@ -86,7 +86,17 @@ const SEGMENT_FRAMES: u16 = TONE_FRAMES + GAP_FRAMES;
 const HOLD_TONE_FRAMES: u16 = 300;
 const EARLY_FRAME: u16 = 8;
 
-const TABLE_BLOCKS: usize = 2;
+/// 64 blocks, not 2. The console keeps playing something other than this
+/// table: its repeat address reads back as 0x1A60 in every segment and in
+/// two separate runs -- a fixed leftover, not a wandering voice -- and
+/// REPEXPL proved the register accepts 0x1010 by hand and the tone still
+/// died. Meanwhile the RAM pass's 4 KiB uploads read back as our own
+/// pattern while a 32-byte one read back as zero. So the remaining
+/// suspect is transfer SIZE: a two-block upload may simply not land. The
+/// waveform is unchanged -- still one square cycle per 28 samples, so
+/// unity is still 1575 Hz -- there is just a kilobyte of it, which is the
+/// same order as a real wavetable.
+const TABLE_BLOCKS: usize = 64;
 const TABLE_BYTES: usize = TABLE_BLOCKS * 16;
 /// 44100 / 28 samples per cycle, at SPU pitch 0x1000.
 const UNITY_HZ: u32 = 1575;
@@ -590,7 +600,17 @@ fn build_square(table: &mut [u8], half_period_blocks: usize) {
     for block in 0..TABLE_BLOCKS {
         let at = block * 16;
         table[at] = TONE_SHIFT; // filter 0
-        table[at + 1] = if block == 0 { 0x04 } else { 0x03 };
+        // Loop-start on the first block, END+REPEAT on the LAST, nothing
+        // in between. With only two blocks "not first" and "last" were
+        // the same thing; at 64 they are not, and marking every middle
+        // block as END would have ended the sample after one of them.
+        table[at + 1] = if block == 0 {
+            0x04
+        } else if block == TABLE_BLOCKS - 1 {
+            0x03
+        } else {
+            0x00
+        };
         for sample in 0..28 {
             let index = block * 28 + sample;
             let nibble = if (index % period) * 2 < period {
