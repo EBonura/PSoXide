@@ -122,6 +122,15 @@ struct Mats {
     floor: Option<ResourceId>,
     wall: Option<ResourceId>,
     ceiling: Option<ResourceId>,
+    /// True builds the kit enclosed. Default is open.
+    ///
+    /// Pieces still declare whether they *would* be roofed, because a stair
+    /// shaft is open for a structural reason rather than a stylistic one, and
+    /// that distinction should survive the switch. This only removes roofs the
+    /// piece asked for. A ceiling is two triangles a cell, so on a kit that
+    /// roofs 16 of 20 pieces this is roughly a quarter of the triangle budget
+    /// spent on surfaces an open map never shows.
+    roofed: bool,
 }
 
 /// Build one floor: wall every perimeter edge except the declared sockets.
@@ -154,7 +163,7 @@ fn floor_chamfered(
     for &(x, z) in cells {
         let y = height(x, z);
         let mut sector = GridSector::with_floor(y, m.floor);
-        if ceiling {
+        if ceiling && m.roofed {
             sector.ceiling = Some(GridHorizontalFace::flat(
                 relative_elevation + WALL,
                 m.ceiling,
@@ -267,10 +276,15 @@ fn main() {
     // Picked by eye off a decoded contact sheet, not by name: three that read
     // apart at PS1 resolution. Mottled round stones underfoot, dark rectangular
     // masonry on the walls, pale brick overhead.
+    // Open by default: the maps these pieces are for have no ceilings, and a
+    // roof is two triangles a cell you would never see. `gen-prefab-kit roofed`
+    // puts them back for an enclosed dungeon.
+    let roofed = std::env::args().any(|a| a == "roofed" || a == "--roofed");
     let m = Mats {
         floor: pick("COBBLES_1A Material"),
         wall: pick("BLOCK_1A Material"),
         ceiling: pick("BRICK_1A Material"),
+        roofed,
     };
     let flat = |_: i32, _: i32| 0;
     // Cell, not a plain counter: two emit closures capture it at once.
@@ -702,9 +716,14 @@ fn main() {
         }
     }
     println!(
-        "\n{} prefabs written to {}",
+        "\n{} prefabs written to {} ({})",
         written.get(),
-        prefabs_dir().display()
+        prefabs_dir().display(),
+        if roofed {
+            "roofed"
+        } else {
+            "open, no ceilings"
+        }
     );
 }
 
