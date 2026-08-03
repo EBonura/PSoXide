@@ -936,8 +936,7 @@ fn first_pose_matrix_component(bytes: &[u8], component: usize) -> i16 {
     // to v2 when animated scale pushes elements past Q12 one; decode
     // whichever this blob is so the assertions stay in Q3.12 terms.
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    let offset =
-        psxed_format::AssetHeader::SIZE + psxed_format::animation::AnimationHeader::SIZE;
+    let offset = psxed_format::AssetHeader::SIZE + psxed_format::animation::AnimationHeader::SIZE;
     if version == psxed_format::animation::VERSION_V3 {
         let block: [u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3] = bytes
             [offset..offset + psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3]

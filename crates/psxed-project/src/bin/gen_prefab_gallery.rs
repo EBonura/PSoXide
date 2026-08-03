@@ -70,10 +70,8 @@ fn main() {
         for light in lights {
             project.active_scene_mut().remove_node(light);
         }
-        if let Some(NodeKind::Section { grid }) = project
-            .active_scene_mut()
-            .node_mut(id)
-            .map(|n| &mut n.kind)
+        if let Some(NodeKind::Section { grid }) =
+            project.active_scene_mut().node_mut(id).map(|n| &mut n.kind)
         {
             for sector in grid.sectors.iter_mut() {
                 *sector = None;
@@ -98,12 +96,14 @@ fn main() {
         // Reuse the starter room for the first bay so the player spawns on it.
         let room = if index == 0 {
             let id = starter_room.expect("starter has a room");
-            if let Some(NodeKind::Section { grid }) = project
-                .active_scene_mut()
-                .node_mut(id)
-                .map(|n| &mut n.kind)
+            if let Some(NodeKind::Section { grid }) =
+                project.active_scene_mut().node_mut(id).map(|n| &mut n.kind)
             {
-                *grid = WorldGrid::empty(prefab.width as u16, prefab.height as u16, prefab.sector_size);
+                *grid = WorldGrid::empty(
+                    prefab.width as u16,
+                    prefab.height as u16,
+                    prefab.sector_size,
+                );
             }
             id
         } else {
@@ -143,7 +143,10 @@ fn main() {
         // this room. Same path the editor stamp takes.
         let (floors, unbound) = prefab.bound_floors(&project, room, 0);
         if unbound > 0 {
-            eprintln!("warning: {} lost {unbound} material references", prefab.name);
+            eprintln!(
+                "warning: {} lost {unbound} material references",
+                prefab.name
+            );
         }
 
         let Some(NodeKind::Section { grid }) = project
@@ -180,10 +183,8 @@ fn main() {
         // The gallery writes cells directly rather than going through the
         // editor stamp, so it has to place the piece's lights itself.
         let lights: Vec<(NodeKind, [f32; 3])> = {
-            let Some(NodeKind::Section { grid }) = project
-                .active_scene()
-                .node(room)
-                .map(|n| &n.kind)
+            let Some(NodeKind::Section { grid }) =
+                project.active_scene().node(room).map(|n| &n.kind)
             else {
                 continue;
             };
