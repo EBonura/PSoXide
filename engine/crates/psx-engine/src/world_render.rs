@@ -20,9 +20,9 @@ use crate::render3d::TexturedGouraudSubmitMicroProfile;
 
 use crate::{
     render3d::{
-        project_world_vertex_indices_gte, project_world_vertices_gte, CullMode, DepthPolicy,
-        LoadedWorldCameraGte, PreparedTriangleDepth, ProjectedVertex,
-        AdaptiveSubdivisionKindMask, AdaptiveSubdivisionProfile, ViewVertex,
+        project_world_vertex_indices_gte, project_world_vertices_gte, AdaptiveSubdivisionKindMask,
+        AdaptiveSubdivisionProfile, CullMode, DepthPolicy, LoadedWorldCameraGte,
+        PreparedTriangleDepth, ProjectedVertex, ViewVertex,
     },
     PrimitiveSink, RoomPoint, RoomRender, RoomSurfaceSink, WorldCamera, WorldRenderPass,
     WorldSurfaceOptions, WorldVertex,
@@ -33,12 +33,12 @@ mod indexed_cache;
 mod room_draw;
 
 pub use cache_build::cache_room_vertex_lit_surfaces;
-use indexed_cache::{cached_surface_center, RoomSurfaceMicroProfile};
 #[cfg(test)]
 use indexed_cache::{
-    cached_surface_uses_triangle_depth, encoded_warmed_room_quad_backface_culled,
-    adaptive_warmed_quad_requires_dynamic_submit,
+    adaptive_warmed_quad_requires_dynamic_submit, cached_surface_uses_triangle_depth,
+    encoded_warmed_room_quad_backface_culled,
 };
+use indexed_cache::{cached_surface_center, RoomSurfaceMicroProfile};
 pub use indexed_cache::{
     draw_indexed_cached_room_vertex_lit_all_cells,
     draw_indexed_cached_room_vertex_lit_visible_cells, prewarm_indexed_cached_room_quads,
@@ -109,9 +109,15 @@ impl WorldMaterialAnimation {
                 phase_u,
                 phase_v,
             } => {
+                // speed_q8 (i16) * tick (u32) overflows i32 after ~18 minutes
+                // of play, so the product is taken wide and only narrowed
+                // after the wrap into byte UV space.
+                // psx-numeric-allow-next-line: UV scroll accumulator, see above
                 let hz = i64::from(hz.max(1));
                 let resolve = |speed: i16, phase: u8, period: u8| {
+                    // psx-numeric-allow-next-line: UV scroll accumulator
                     let travelled_q8 = i64::from(speed).saturating_mul(i64::from(tick)) / hz;
+                    // psx-numeric-allow-next-line: UV scroll accumulator
                     (travelled_q8 / 256 + i64::from(phase)).rem_euclid(i64::from(period.max(1)))
                         as u8
                 };
@@ -1821,8 +1827,15 @@ fn cell_visibility_bounds(
     // Ceil each half extent because integer midpoint truncation can leave the
     // farther edge one unit away for odd/negative ranges, then ceil the square
     // root so the replacement never under-bounds a corner.
+    // Sum of three squared half-extents: each term is up to i32::MAX^2, so
+    // the accumulator must be wide or a large cell silently saturates to a
+    // radius that under-bounds it and pops geometry. Cell setup, not a
+    // per-frame path. Narrowed back to i32 before it leaves.
+    // psx-numeric-allow-next-line: squared-radius accumulator, see above
     let half_x = (x1.saturating_sub(x0).abs().saturating_add(1) >> 1) as u64;
+    // psx-numeric-allow-next-line: squared-radius accumulator
     let half_y = (max_y.saturating_sub(min_y).abs().saturating_add(1) >> 1) as u64;
+    // psx-numeric-allow-next-line: squared-radius accumulator
     let half_z = (z1.saturating_sub(z0).abs().saturating_add(1) >> 1) as u64;
     let radius_squared = half_x
         .saturating_mul(half_x)
@@ -1830,9 +1843,11 @@ fn cell_visibility_bounds(
         .saturating_add(half_z.saturating_mul(half_z));
     let radius_floor = radius_squared.isqrt();
     let radius = radius_floor
+        // psx-numeric-allow-next-line: squared-radius accumulator
         .saturating_add(u64::from(
             radius_floor.saturating_mul(radius_floor) != radius_squared,
         ))
+        // psx-numeric-allow-next-line: squared-radius accumulator
         .min(i32::MAX as u64) as i32;
     (center, radius)
 }
@@ -1894,12 +1909,19 @@ fn conservative_plane_sphere_support(a: i32, b: i32) -> i32 {
 
 #[cold]
 #[inline(never)]
+/// Wide fallback for the i32 extent dot product: taken only when the
+/// narrow path detects it would overflow. Cold and never inlined, so the
+/// 64-bit multiply cost stays off the common path.
 fn cell_aabb_extent_wide(row: [i32; 3], half_x: i32, half_y: i32, half_z: i32) -> i32 {
+    // psx-numeric-allow-next-line: overflow fallback, see doc comment
     let q12 = (row[0] as i64 * half_x as i64)
+        // psx-numeric-allow-next-line: overflow fallback
         .saturating_add(row[1] as i64 * half_y as i64)
+        // psx-numeric-allow-next-line: overflow fallback
         .saturating_add(row[2] as i64 * half_z as i64)
         .saturating_add(4095)
         >> 12;
+    // psx-numeric-allow-next-line: overflow fallback
     (q12.min(i32::MAX as i64) as i32).saturating_add(2)
 }
 
@@ -1916,11 +1938,17 @@ fn cell_aabb_lateral_visible_wide(
     half_w: i32,
     half_h: i32,
 ) -> bool {
+    // Wide fallback for the i32 lateral frustum test, entered only when the
+    // narrow path would overflow. Cold and never inlined.
+    // psx-numeric-allow-next-line: overflow fallback, see above
     let px = view.x.abs() as i64 * focal as i64;
+    // psx-numeric-allow-next-line: overflow fallback
     let py = view.y.abs() as i64 * focal as i64;
     let x_limit =
+        // psx-numeric-allow-next-line: overflow fallback
         half_w as i64 * z as i64 + focal as i64 * extent_x as i64 + half_w as i64 * extent_z as i64;
     let y_limit =
+        // psx-numeric-allow-next-line: overflow fallback
         half_h as i64 * z as i64 + focal as i64 * extent_y as i64 + half_h as i64 * extent_z as i64;
     px <= x_limit && py <= y_limit
 }
