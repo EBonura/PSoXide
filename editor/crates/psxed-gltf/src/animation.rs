@@ -511,8 +511,7 @@ pub(crate) fn finish_animation_bytes(
             psxed_format::animation::POSE_RECORD_SIZE,
         )
     };
-    let payload_len =
-        psxed_format::animation::AnimationHeader::SIZE + records.len() * record_size;
+    let payload_len = psxed_format::animation::AnimationHeader::SIZE + records.len() * record_size;
     let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
     let translation_shift = animation_translation_shift(records);
     append_asset_header(
@@ -558,11 +557,7 @@ pub(crate) fn pose_record(skin_matrix: &[[f32; 4]; 4], bounds: &ModelBounds) -> 
     }
 }
 
-pub(crate) fn append_pose_record_v2(
-    out: &mut Vec<u8>,
-    record: &PoseRecord,
-    translation_shift: u8,
-) {
+pub(crate) fn append_pose_record_v2(out: &mut Vec<u8>, record: &PoseRecord, translation_shift: u8) {
     for value in record.matrix {
         append_i16(out, value);
     }

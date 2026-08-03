@@ -9,9 +9,7 @@
 
 use std::path::PathBuf;
 
-use psxed_project::model_import::{
-    import_animation_library, import_model_with_animation_sources,
-};
+use psxed_project::model_import::{import_animation_library, import_model_with_animation_sources};
 use psxed_project::{NodeKind, ProjectDocument, ResourceData};
 
 fn main() {
@@ -21,8 +19,7 @@ fn main() {
     let name = args.next().expect("output name");
 
     let project_path = project_root.join("project.ron");
-    let mut project =
-        ProjectDocument::load_from_path(&project_path).expect("load project.ron");
+    let mut project = ProjectDocument::load_from_path(&project_path).expect("load project.ron");
 
     let config = psxed_gltf::RigidModelConfig {
         // Match the incumbent player model's world height so the new
@@ -118,6 +115,8 @@ fn main() {
         }
     }
 
-    project.save_to_path(&project_path).expect("save project.ron");
+    project
+        .save_to_path(&project_path)
+        .expect("save project.ron");
     println!("saved {}", project_path.display());
 }

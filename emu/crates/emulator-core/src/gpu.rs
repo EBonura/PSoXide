@@ -1183,8 +1183,7 @@ impl Gpu {
         if self.gp0_burst_words <= Self::GP0_FIFO_DEPTH {
             return true;
         }
-        if self.gp0_overflow_count == 0
-            && std::env::var_os("PSOXIDE_TRACE_GP0_OVERFLOW").is_some()
+        if self.gp0_overflow_count == 0 && std::env::var_os("PSOXIDE_TRACE_GP0_OVERFLOW").is_some()
         {
             eprintln!(
                 "[gpu] GP0 burst exceeded the {}-word FIFO while busy; \

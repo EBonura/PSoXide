@@ -25,7 +25,8 @@ fn water_volume_cooks_sparse_cells_and_transparent_surface() {
         .map(|node| node.id)
         .expect("fixture room");
     let (world_x, world_z) = {
-        let NodeKind::Section { grid } = &mut project.active_scene_mut().node_mut(room).unwrap().kind
+        let NodeKind::Section { grid } =
+            &mut project.active_scene_mut().node_mut(room).unwrap().kind
         else {
             unreachable!()
         };
@@ -99,7 +100,8 @@ fn water_surface_anchors_to_lowest_point_of_sloped_floor() {
         .map(|node| node.id)
         .expect("fixture room");
     let (world_x, world_z) = {
-        let NodeKind::Section { grid } = &mut project.active_scene_mut().node_mut(room).unwrap().kind
+        let NodeKind::Section { grid } =
+            &mut project.active_scene_mut().node_mut(room).unwrap().kind
         else {
             unreachable!()
         };

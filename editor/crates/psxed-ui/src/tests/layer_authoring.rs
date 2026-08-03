@@ -13,7 +13,8 @@ fn solid_layer_extrusion_builds_only_the_selected_footprint_and_undoes() {
 
     workspace.extrude_selected_layer_above(false);
 
-    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind
+    else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 2);
@@ -31,7 +32,8 @@ fn solid_layer_extrusion_builds_only_the_selected_footprint_and_undoes() {
     assert!(!right.walls.get(GridDirection::East).is_empty());
 
     workspace.do_undo();
-    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind
+    else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 1);
@@ -59,7 +61,8 @@ fn open_layer_extrusion_authors_the_exact_gap_required_by_vertical_portals() {
 
     workspace.extrude_selected_layer_above(true);
 
-    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind
+    else {
         panic!("room node");
     };
     let lower = grid.floor(0).unwrap().sector(0, 0).unwrap();
@@ -69,7 +72,8 @@ fn open_layer_extrusion_authors_the_exact_gap_required_by_vertical_portals() {
     assert!(upper.ceiling.is_some(), "upper volume must remain authored");
 
     workspace.set_selected_slab_below(false);
-    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind
+    else {
         panic!("room node");
     };
     assert!(grid
@@ -189,7 +193,8 @@ fn three_dimensional_face_selection_can_drive_layer_extrusion() {
     assert!(workspace.can_author_selected_layer_footprint());
     workspace.extrude_selected_layer_above(false);
 
-    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind
+    else {
         panic!("room node");
     };
     assert!(grid.floor(1).unwrap().sector(0, 0).is_some());

@@ -172,11 +172,7 @@ fn floor_chamfered(
             sector
                 .walls
                 .get_mut(cut_wall(corner))
-                .push(GridVerticalFace::flat(
-                    y,
-                    relative_elevation + WALL,
-                    m.wall,
-                ));
+                .push(GridVerticalFace::flat(y, relative_elevation + WALL, m.wall));
         }
         for direction in GridDirection::CARDINAL {
             // An edge that met the dropped corner no longer exists, so it can
@@ -390,20 +386,18 @@ fn main() {
 
     // ---- Diagonals. Chamfered corners give 45-degree faces, which is how
     // the catalogue's octagonal and circular chambers become expressible. ----
-    let octagon = |name: &str,
-                       cells: Vec<(i32, i32)>,
-                       sockets: Vec<Socket>,
-                       chamfers: Vec<Chamfer>| {
-        emit(
-            name,
-            vec![floor_chamfered(
-                &cells, &sockets, &chamfers, &flat, true, &m, 0,
-            )],
-            &project,
-            &written,
-            &written_paths,
-        );
-    };
+    let octagon =
+        |name: &str, cells: Vec<(i32, i32)>, sockets: Vec<Socket>, chamfers: Vec<Chamfer>| {
+            emit(
+                name,
+                vec![floor_chamfered(
+                    &cells, &sockets, &chamfers, &flat, true, &m, 0,
+                )],
+                &project,
+                &written,
+                &written_paths,
+            );
+        };
     octagon(
         "Octagon Chamber 5x5",
         rect(0, 0, 5, 5),
@@ -420,10 +414,7 @@ fn main() {
     // the diagonal are chamfered.
     octagon(
         "Rotunda 9x9",
-        less(
-            rect(0, 0, 9, 9),
-            &[(0, 0), (8, 0), (0, 8), (8, 8)],
-        ),
+        less(rect(0, 0, 9, 9), &[(0, 0), (8, 0), (0, 8), (8, 8)]),
         cat(&[
             gate(3, 8, GridDirection::North),
             gate(3, 0, GridDirection::South),
@@ -496,8 +487,15 @@ fn main() {
     const STEP: i32 = 512;
     const RISERS: i32 = WALL / STEP;
     assert_eq!(STEP % HEIGHT_QUANTUM, 0, "steps must land on the quantum");
-    assert!(STEP <= 640, "steps must stay under the engine's step-up limit");
-    assert_eq!(RISERS * STEP, WALL, "risers must land exactly on the storey");
+    assert!(
+        STEP <= 640,
+        "steps must stay under the engine's step-up limit"
+    );
+    assert_eq!(
+        RISERS * STEP,
+        WALL,
+        "risers must land exactly on the storey"
+    );
 
     // Single stair: a straight flight climbing a storey. Six risers on the run
     // plus the final one through the floor link. Long by necessity, so this is
@@ -565,7 +563,13 @@ fn main() {
         ),
     ];
     stack_link(&mut floors, 0, 2, 2);
-    emit("Stair Switchback", floors, &project, &written, &written_paths);
+    emit(
+        "Stair Switchback",
+        floors,
+        &project,
+        &written,
+        &written_paths,
+    );
 
     // Double stair: two flights up the flanks of a hall to a shared gallery.
     // The centre aisle stays at floor level, and the riser walls the flights
@@ -619,14 +623,24 @@ fn main() {
     // No floor link: the gallery is reached by mating a stair piece onto its
     // upper socket. A link here would claim you can walk up a storey in the
     // corner, which is what the generation-time check caught.
-    emit("Balcony Hall 7x7", floors, &project, &written, &written_paths);
+    emit(
+        "Balcony Hall 7x7",
+        floors,
+        &project,
+        &written,
+        &written_paths,
+    );
 
     // Spiral stair: the ring of a 3x3 block is eight cells, and a storey
     // divides into eight risers of 448, well under the step-up limit. The
     // earlier "well shaft" linked floors with a bare 3584 drop and no way up,
     // which the generation-time check rejected.
     const SPIRAL: i32 = WALL / 8;
-    assert_eq!(SPIRAL % HEIGHT_QUANTUM, 0, "spiral risers stay on the quantum");
+    assert_eq!(
+        SPIRAL % HEIGHT_QUANTUM,
+        0,
+        "spiral risers stay on the quantum"
+    );
     assert!(SPIRAL <= 640, "spiral risers stay climbable");
     // Ring order, counter-clockwise from the south-west corner.
     let spiral_order = [
@@ -667,7 +681,13 @@ fn main() {
     ];
     // Top of the ring is one riser below the storey, so the link is climbable.
     stack_link(&mut floors, 0, 0, 1);
-    emit("Spiral Stair 3x3", floors, &project, &written, &written_paths);
+    emit(
+        "Spiral Stair 3x3",
+        floors,
+        &project,
+        &written,
+        &written_paths,
+    );
 
     // Renaming a piece orphans its old file, because pieces are written by
     // name. Warn rather than prune: this directory also holds prefabs saved by
@@ -682,7 +702,11 @@ fn main() {
             );
         }
     }
-    println!("\n{} prefabs written to {}", written.get(), prefabs_dir().display());
+    println!(
+        "\n{} prefabs written to {}",
+        written.get(),
+        prefabs_dir().display()
+    );
 }
 
 fn cat(groups: &[Vec<Socket>]) -> Vec<Socket> {

@@ -61,7 +61,10 @@ fn main() {
     let project = match psxed_project::ProjectDocument::from_ron_str(&text) {
         Ok(project) => project,
         Err(error) => {
-            eprintln!("[miniaturise] {}: parse failed: {error}", project_path.display());
+            eprintln!(
+                "[miniaturise] {}: parse failed: {error}",
+                project_path.display()
+            );
             std::process::exit(2);
         }
     };
@@ -125,9 +128,7 @@ fn main() {
             _ => None,
         };
         let Some(relative) = relative_owned else {
-            eprintln!(
-                "[miniaturise] REFUSED '{path_part}': outside the project directory"
-            );
+            eprintln!("[miniaturise] REFUSED '{path_part}': outside the project directory");
             missing += 1;
             continue;
         };
@@ -213,12 +214,9 @@ fn count_source_assets(project_dir: &Path) -> usize {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, count);
-            } else if path
-                .extension()
-                .is_some_and(|ext| {
-                    ext == "psxt" || ext == "psxmdl" || ext == "psxanim" || ext == "wav"
-                })
-            {
+            } else if path.extension().is_some_and(|ext| {
+                ext == "psxt" || ext == "psxmdl" || ext == "psxanim" || ext == "wav"
+            }) {
                 *count += 1;
             }
         }

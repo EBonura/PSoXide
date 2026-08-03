@@ -232,17 +232,17 @@ pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<Response> {
 /// Seek to a logical data-sector LBA (the command receives absolute BCD MSF).
 pub fn try_set_loc_lba(lba: u32, spin_limit: u32) -> Option<Response> {
     let [minute, second, frame] = lba_to_bcd_msf(lba);
-    try_command(
-        CMD_SETLOC,
-        &[minute, second, frame],
-        spin_limit,
-    )
+    try_command(CMD_SETLOC, &[minute, second, frame], spin_limit)
 }
 
 const fn lba_to_bcd_msf(lba: u32) -> [u8; 3] {
     let absolute = lba.saturating_add(150);
     let raw_minute = absolute / (60 * 75);
-    let minute = if raw_minute > 99 { 99 } else { raw_minute as u8 };
+    let minute = if raw_minute > 99 {
+        99
+    } else {
+        raw_minute as u8
+    };
     let second = ((absolute / 75) % 60) as u8;
     let frame = (absolute % 75) as u8;
     [bin_to_bcd(minute), bin_to_bcd(second), bin_to_bcd(frame)]
@@ -278,7 +278,10 @@ pub fn try_mute(spin_limit: u32) -> Option<Response> {
 /// The number is relative to this program's own tracks; on a multi-program
 /// disc [`crate::disc_base`] shifts it past whatever came before.
 pub fn play_track(track: u8) -> Response {
-    command(CMD_PLAY, &[bin_to_bcd(crate::disc_base::shift_track(track))])
+    command(
+        CMD_PLAY,
+        &[bin_to_bcd(crate::disc_base::shift_track(track))],
+    )
 }
 
 /// Try to start CD-DA playback at a 1-based track number. Shifted like

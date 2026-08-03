@@ -683,9 +683,7 @@ fn model_pose_blend_endpoints_and_midpoint() {
     let from_bytes_b = blend_test_animation(&[3000, 3000]);
     let outgoing = Animation::from_bytes(&from_bytes_a).expect("outgoing parses");
     let incoming = Animation::from_bytes(&from_bytes_b).expect("incoming parses");
-    let outgoing_sample = outgoing
-        .looped_pose_sample_q12(0)
-        .expect("outgoing sample");
+    let outgoing_sample = outgoing.looped_pose_sample_q12(0).expect("outgoing sample");
     let primary = incoming
         .looped_pose_sample_q12(0)
         .and_then(|sample| sample.pose(0))

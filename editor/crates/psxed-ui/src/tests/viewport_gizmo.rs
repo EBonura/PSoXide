@@ -15,9 +15,10 @@ fn face_corner_reads_address_the_active_floor() {
     grid.push_floor();
     let floor1 = grid.floor_mut(1).expect("floor 1");
     floor1.add_wall(0, 0, GridDirection::North, 0, 1024, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("active-floor-pick"), project);
 
     let floor_face = FaceRef {
@@ -74,9 +75,10 @@ fn entity_selection_respects_active_floor() {
     let mut grid = WorldGrid::empty(2, 2, 1024);
     grid.set_floor(0, 0, 0, None);
     grid.push_floor();
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let scene = project.active_scene_mut();
     let ground = scene.add_node(room, "Ground", NodeKind::Entity);
     scene.node_mut(ground).unwrap().floor = 0;
@@ -131,9 +133,10 @@ fn point_light_pick_matches_visible_marker_on_independently_grown_floor() {
     grid.floor_mut(1)
         .expect("floor 1")
         .extend_to_include(-3, -2);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let light = project.active_scene_mut().add_node(
         room,
         "Light",
