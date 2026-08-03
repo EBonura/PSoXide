@@ -187,6 +187,158 @@ impl AnalogSticks {
     }
 }
 
+/// A radial dead region around stick centre.
+///
+/// Every game on the PSoXide demo disc had grown one of these, and they did not
+/// agree: hl-psx tests `x*x + y*y` against a squared threshold, while VoXide and
+/// NitroXide compare each axis on its own. Per-axis is the tempting one to write
+/// and it is wrong -- it makes the dead region a square, so a stick pushed
+/// gently along a diagonal clears the threshold on one axis and not the other,
+/// and the input snaps to a cardinal. A stick's centre drift is radial, so the
+/// region that ignores it has to be a circle.
+///
+/// This is a gate, not a rescale: a reading just outside the boundary comes back
+/// at its own magnitude rather than being remapped from zero. Rescaling would
+/// change the feel of every game that has been tuned against the gate, so it is
+/// [`Deadzone::scaled`], opt in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Deadzone {
+    squared: i32,
+    radius: i16,
+}
+
+impl Deadzone {
+    /// A dead region of `radius` counts around centre. A PS1 stick reads
+    /// 0..=255 with 128 at rest, so the usable range either side is about 127
+    /// and typical radii are 12 to 30.
+    pub const fn new(radius: i16) -> Self {
+        Self {
+            squared: (radius as i32) * (radius as i32),
+            radius,
+        }
+    }
+
+    /// The radius this was built with.
+    pub const fn radius(self) -> i16 {
+        self.radius
+    }
+
+    /// Is this reading real input rather than centre drift?
+    ///
+    /// Strictly outside, matching the boundary behaviour the games this
+    /// replaces were tuned against.
+    #[inline]
+    pub const fn outside(self, x: i16, y: i16) -> bool {
+        let (x, y) = (x as i32, y as i32);
+        x * x + y * y > self.squared
+    }
+
+    /// The reading if it is real input, or `None` inside the dead region.
+    #[inline]
+    pub const fn gate(self, x: i16, y: i16) -> Option<(i16, i16)> {
+        if self.outside(x, y) {
+            Some((x, y))
+        } else {
+            None
+        }
+    }
+
+    /// Like [`Deadzone::gate`], but remapped so the first real reading starts
+    /// from zero instead of jumping to the boundary magnitude.
+    ///
+    /// Costs a square root's worth of arithmetic and changes the feel, which is
+    /// why it is not the default. Worth it where a stick drives a rate rather
+    /// than a direction, since the jump is audible as a lurch.
+    #[inline]
+    pub fn scaled(self, x: i16, y: i16) -> Option<(i16, i16)> {
+        let (fx, fy) = (x as i32, y as i32);
+        let mag_sq = fx * fx + fy * fy;
+        if mag_sq <= self.squared {
+            return None;
+        }
+        let mag = isqrt_i32(mag_sq);
+        let r = self.radius as i32;
+        if mag <= r {
+            return None;
+        }
+        // Rescale the magnitude from (r, mag] onto (0, mag], keeping direction.
+        let scaled = ((mag - r) * 127) / (127 - r).max(1);
+        Some((
+            ((fx * scaled) / mag.max(1)) as i16,
+            ((fy * scaled) / mag.max(1)) as i16,
+        ))
+    }
+}
+
+/// Integer square root, because the PS1 has no FPU and this runs per stick per
+/// frame.
+const fn isqrt_i32(v: i32) -> i32 {
+    if v <= 0 {
+        return 0;
+    }
+    let mut x = v;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    x
+}
+
+/// Which buttons changed since the previous poll.
+///
+/// Five programs on the demo disc had written this out by hand as
+/// `held(b) && !previous.held(b)`, each carrying its own copy of the previous
+/// frame. It is not hard, it is just the sort of thing that should exist once.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Edges {
+    previous: ButtonState,
+}
+
+impl Edges {
+    /// No history: every button reads as released.
+    pub const fn new() -> Self {
+        Self {
+            previous: ButtonState(0),
+        }
+    }
+
+    /// Take this frame's reading. Call once per frame, before the queries.
+    #[inline]
+    pub fn update(&mut self, now: ButtonState) -> Transitions {
+        let before = self.previous;
+        self.previous = now;
+        Transitions { before, now }
+    }
+}
+
+/// One frame's worth of button transitions, from [`Edges::update`].
+#[derive(Copy, Clone, Debug)]
+pub struct Transitions {
+    before: ButtonState,
+    now: ButtonState,
+}
+
+impl Transitions {
+    /// Went down this frame.
+    #[inline]
+    pub const fn pressed(self, button: u16) -> bool {
+        self.now.is_held(button) && !self.before.is_held(button)
+    }
+
+    /// Came up this frame.
+    #[inline]
+    pub const fn released(self, button: u16) -> bool {
+        !self.now.is_held(button) && self.before.is_held(button)
+    }
+
+    /// Still down.
+    #[inline]
+    pub const fn held(self, button: u16) -> bool {
+        self.now.is_held(button)
+    }
+}
+
 impl Default for AnalogSticks {
     fn default() -> Self {
         Self::CENTERED
@@ -820,6 +972,61 @@ unsafe fn wait_stat_low(mask: u32, spins: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_radial_deadzone_is_a_circle_not_a_square() {
+        // The whole reason this exists. A per-axis threshold of 24, which is
+        // what NitroXide used, passes (20, 20) because neither axis clears it
+        // on its own -- so a gentle diagonal push reads as nothing, and the
+        // moment one axis does clear it the input snaps to a cardinal. Radially
+        // (20, 20) is 28.3 counts out and is real input.
+        let dz = Deadzone::new(24);
+        assert!(dz.outside(20, 20), "diagonal push must count as input");
+        assert!(!dz.outside(20, 0), "same magnitude per axis is still drift");
+        assert!(!dz.outside(0, 0));
+        assert!(dz.outside(25, 0));
+    }
+
+    #[test]
+    fn the_gate_hands_back_the_reading_unchanged() {
+        let dz = Deadzone::new(16);
+        assert_eq!(dz.gate(4, 4), None);
+        assert_eq!(dz.gate(100, -40), Some((100, -40)));
+    }
+
+    #[test]
+    fn scaling_starts_real_input_from_zero_instead_of_the_boundary() {
+        // Ungated, a reading one count outside a radius of 30 arrives at
+        // magnitude 31: a lurch. Scaled, it starts near zero and keeps its
+        // direction.
+        let dz = Deadzone::new(30);
+        let (x, y) = dz.scaled(31, 0).expect("just outside is real input");
+        assert!(x < 5, "expected a small first step, got {x}");
+        assert_eq!(y, 0, "direction must survive the rescale");
+        assert_eq!(dz.scaled(10, 10), None);
+    }
+
+    #[test]
+    fn isqrt_matches_the_real_thing() {
+        for v in [0i32, 1, 2, 3, 4, 99, 100, 16129, 32000] {
+            let r = isqrt_i32(v);
+            assert!(r * r <= v && (r + 1) * (r + 1) > v, "isqrt({v}) = {r}");
+        }
+    }
+
+    #[test]
+    fn edges_separate_a_press_from_a_hold() {
+        const A: u16 = 1 << 6;
+        let mut edges = Edges::new();
+        let down = ButtonState(A);
+        let t = edges.update(down);
+        assert!(t.pressed(A) && t.held(A) && !t.released(A));
+        let t = edges.update(down);
+        assert!(!t.pressed(A), "a held button must not re-fire");
+        assert!(t.held(A));
+        let t = edges.update(ButtonState(0));
+        assert!(t.released(A) && !t.pressed(A) && !t.held(A));
+    }
     use super::*;
 
     #[test]
