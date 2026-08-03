@@ -949,14 +949,22 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let voice = psx_spu::Voice::new(voice_index);
         let pitch = scaled_pitch(sample.base_pitch_q12, cue.pitch_q12);
         let volume = psx_spu::Volume::linear(cue.volume_percent.min(100) as u16, 100);
-        voice.set_volume(volume, volume);
-        voice.set_pitch(pitch);
-        voice.set_start_addr(psx_spu::SpuAddr::new(sample.addr_bytes));
-        // One-shot cue: default_tone, never Adsr::sample() -- on silicon
-        // the latter loops the sample forever at full envelope once the
-        // END flag lands it in an endless release (SB1, 2026-08-02).
-        voice.set_adsr(psx_spu::Adsr::default_tone());
-        psx_spu::Voice::key_on(voice.mask());
+        // Through psx-sfx, which writes the repeat address. Setting the start
+        // address and keying on leaves that register holding whatever the last
+        // sound put there, and on END silicon jumps to it rather than stopping
+        // -- so the cue ran on into some other sample's data.
+        //
+        // default_tone, never Adsr::sample(): on silicon the latter loops the
+        // sample forever at full envelope once the END flag lands it in an
+        // endless release (SB1, 2026-08-02). It is OneShot's default.
+        //
+        // Block count 0: the cue table records an address but no length, so
+        // there is no cutoff to schedule and the envelope finishes the sound.
+        let resident =
+            psx_sfx::Sample::resident(psx_spu::SpuAddr::new(sample.addr_bytes), 44_100, 0);
+        psx_sfx::OneShot::new(resident, volume)
+            .with_pitch(pitch)
+            .play(voice);
     }
 
     #[cfg(not(target_arch = "mips"))]

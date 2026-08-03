@@ -171,6 +171,14 @@ impl OneShot {
         }
     }
 
+    /// Play at a different level. For sounds whose loudness depends on what
+    /// happened -- how hard a hit landed, a volume setting -- rather than on
+    /// which sample it is.
+    pub const fn with_volume(mut self, volume: Volume) -> Self {
+        self.volume = volume;
+        self
+    }
+
     /// Override the envelope.
     pub const fn with_adsr(mut self, adsr: Adsr) -> Self {
         self.adsr = adsr;
