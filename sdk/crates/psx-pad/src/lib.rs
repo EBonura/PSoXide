@@ -189,13 +189,17 @@ impl AnalogSticks {
 
 /// A radial dead region around stick centre.
 ///
-/// Every game on the PSoXide demo disc had grown one of these, and they did not
-/// agree: hl-psx tests `x*x + y*y` against a squared threshold, while VoXide and
-/// NitroXide compare each axis on its own. Per-axis is the tempting one to write
-/// and it is wrong -- it makes the dead region a square, so a stick pushed
-/// gently along a diagonal clears the threshold on one axis and not the other,
-/// and the input snaps to a cardinal. A stick's centre drift is radial, so the
-/// region that ignores it has to be a circle.
+/// Three games on the PSoXide demo disc had grown one of these and they did not
+/// agree. hl-psx tests `x*x + y*y` against a squared radius. VoXide gates each
+/// axis separately, which makes its dead region a square: a stick pushed gently
+/// along a diagonal clears the threshold on one axis and not the other, so the
+/// input snaps to a cardinal instead of going where it was pushed. A stick's
+/// centre drift is radial, so the region that ignores it has to be a circle.
+///
+/// This is for two-axis input. A single-axis control is a different question
+/// and a scalar threshold is right for it: NitroXide steers on the left stick's
+/// X alone, and folding Y into the test there would let noise on an axis it
+/// does not read enable steering.
 ///
 /// This is a gate, not a rescale: a reading just outside the boundary comes back
 /// at its own magnitude rather than being remapped from zero. Rescaling would
@@ -231,6 +235,31 @@ impl Deadzone {
     pub const fn outside(self, x: i16, y: i16) -> bool {
         let (x, y) = (x as i32, y as i32);
         x * x + y * y > self.squared
+    }
+
+    /// The one-axis form, for a control that reads a single axis.
+    ///
+    /// NitroXide steers on the left stick's X and never looks at Y, so a radial
+    /// test there would let noise on an axis it does not read enable steering.
+    /// Same threshold, one dimension.
+    #[inline]
+    pub const fn outside_axis(self, v: i16) -> bool {
+        let v = v as i32;
+        v * v > self.squared
+    }
+
+    /// The one-axis form of [`Deadzone::scaled`]: `None` inside, otherwise the
+    /// reading with the dead region subtracted so it starts from zero.
+    #[inline]
+    pub const fn scaled_axis(self, v: i16) -> Option<i16> {
+        if !self.outside_axis(v) {
+            return None;
+        }
+        Some(if v > 0 {
+            v - self.radius
+        } else {
+            v + self.radius
+        })
     }
 
     /// The reading if it is real input, or `None` inside the dead region.
@@ -985,6 +1014,17 @@ mod tests {
         assert!(!dz.outside(20, 0), "same magnitude per axis is still drift");
         assert!(!dz.outside(0, 0));
         assert!(dz.outside(25, 0));
+    }
+
+    #[test]
+    fn the_one_axis_form_ignores_the_other_axis() {
+        // NitroXide's steering: Y is not read, so it must not gate X.
+        let dz = Deadzone::new(24);
+        assert!(dz.outside_axis(30));
+        assert!(!dz.outside_axis(20));
+        assert_eq!(dz.scaled_axis(30), Some(6), "starts from zero, not 30");
+        assert_eq!(dz.scaled_axis(-30), Some(-6), "sign survives");
+        assert_eq!(dz.scaled_axis(10), None);
     }
 
     #[test]
