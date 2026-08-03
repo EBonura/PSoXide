@@ -53,8 +53,9 @@ fn parse(mut args: env::Args) -> Result<Options> {
     let _ = args.next();
     while let Some(arg) = args.next() {
         let mut value = || {
-            args.next()
-                .ok_or_else(|| -> Box<dyn std::error::Error> { format!("{arg} needs a value").into() })
+            args.next().ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("{arg} needs a value").into()
+            })
         };
         match arg.as_str() {
             "--from" => options.from = Some(PathBuf::from(value()?)),
@@ -82,7 +83,12 @@ fn run(options: &Options) -> Result<()> {
                 .as_deref()
                 .ok_or("--rev is required unless --from is given")?;
             let source = pinned_checkout(&options.workspace, &options.pin_crate, rev)?;
-            hydrate(&source, &options.into, Some(&format!("git:{rev}")), options.quiet)
+            hydrate(
+                &source,
+                &options.into,
+                Some(&format!("git:{rev}")),
+                options.quiet,
+            )
         }
     }
 }
