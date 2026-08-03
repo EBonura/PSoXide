@@ -3276,6 +3276,7 @@ dependencies = [
  "psx-math",
  "psx-pad",
  "psx-rt",
+ "psx-sfx",
  "psx-spu",
  "psx-telemetry",
  "psx-vram",
@@ -3376,6 +3377,14 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+]
+
+[[package]]
+name = "psx-sfx"
+version = "0.1.0"
+dependencies = [
+ "psx-asset",
+ "psx-spu",
 ]
 
 [[package]]

@@ -1,7 +1,16 @@
-//! SFX conveniences on top of `psx-spu`.
+//! SFX conveniences for engine applications.
+//!
+//! The machinery lives in `psx-sfx`, one layer down in the SDK, so the half of
+//! the disc that is not an engine application can reach it too. This is the
+//! engine's shape on top of it: one voice per sound, set up once at boot, and
+//! [`play`] to fire it.
+//!
+//! Reach past this for anything sharing voices between sounds or needing a
+//! one-shot stopped on a clock. [`psx_sfx::Player`] does both.
 
-use psx_asset::Audio;
-use psx_spu::{self as spu, Adsr, Pitch, SpuAddr, Voice, Volume};
+use psx_spu::{SpuAddr, Voice, Volume};
+
+pub use psx_sfx::{Bank, OneShot, Player};
 
 /// One cooked `.psau` sample mapped to a voice.
 pub struct Sample<'a> {
@@ -13,31 +22,12 @@ pub struct Sample<'a> {
     pub volume: Volume,
 }
 
-/// Configure a voice for a pre-uploaded tone sample: half-volume,
-/// explicit pitch, and a percussive ADSR. The voice stays silent
-/// until [`play`] keys it on.
-pub fn configure_voice(v: Voice, addr: SpuAddr, pitch: Pitch) {
-    v.set_volume(Volume::HALF, Volume::HALF);
-    v.set_pitch(pitch);
-    v.set_start_addr(addr);
-    v.set_adsr(Adsr::percussive());
-}
-
 /// Upload a cooked `.psau` one-shot sample, configure its voice, and
 /// return the next free SPU RAM address.
 pub fn upload_sample(v: Voice, addr: SpuAddr, bytes: &[u8], volume: Volume) -> SpuAddr {
-    let audio = Audio::from_bytes(bytes).expect("psau sample");
-    let adpcm = audio.adpcm_bytes();
-    spu::upload_adpcm(addr, adpcm);
-    // default_tone, not Adsr::sample(): on silicon END+mute drops the
-    // voice into RELEASE at the ADSR's release rate while it loops from
-    // the repeat address, and sample()'s release never audibly ends --
-    // every one-shot fired this way repeated forever (hardware-tests
-    // SB1 capture, 2026-08-02). default_tone plays the sample out at
-    // full level and its ~100 ms exponential release makes the END flag
-    // an actual stop.
-    v.configure_sample(addr, audio.sample_rate_hz(), volume, Adsr::default_tone());
-    SpuAddr::new(addr.byte_offset() + adpcm.len() as u32)
+    let mut bank = Bank::new(addr);
+    OneShot::new(bank.upload(bytes), volume).configure(v);
+    bank.next_addr()
 }
 
 /// Upload a packed bank of one-shot samples into consecutive SPU RAM.
@@ -51,6 +41,11 @@ pub fn upload_samples(mut addr: SpuAddr, samples: &[Sample<'_>]) -> SpuAddr {
 /// Fire a pre-configured SFX voice -- re-attacks the ADSR envelope
 /// so repeated calls replay the sample's attack transient rather
 /// than letting the decay tail dominate.
+///
+/// This does not restore the voice's volume, so it must not be paired with a
+/// cutoff that silences by writing volume 0. Engine applications let the
+/// envelope finish the sound instead; [`psx_sfx::Player`] is the path that
+/// does both properly.
 #[inline]
 pub fn play(v: Voice) {
     Voice::key_on(v.mask());
