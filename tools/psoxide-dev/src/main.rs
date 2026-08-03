@@ -202,7 +202,7 @@ fn runtime_numeric_guard() -> Result<(), String> {
     let mut allowed_hits = 0usize;
     for path in &files {
         let src = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let code = blank_comments_and_literals(&src);
+        let code = blank_test_items(&blank_comments_and_literals(&src));
         let allowed = allowed_lines(&src);
         scan_forbidden_types(
             path,
@@ -413,6 +413,58 @@ fn blank_range(out: &mut [u8], start: usize, end: usize) {
             *byte = b' ';
         }
     }
+}
+
+/// Blank `#[cfg(test)]` items so the guard only judges code that ships to
+/// the console. Host tests legitimately use f64: the reference oracle for
+/// a fixed-point port is the float closed form it was ported from, and
+/// flagging those made the guard mostly false positives.
+///
+/// Only unconditionally test-only forms are blanked: `#[cfg(test)]` and
+/// `#[cfg(all(test, ...))]`. `#[cfg(any(target_arch = "mips", test))]`
+/// also compiles into the guest, so it stays under the guard.
+///
+/// Runs on comment/literal-blanked source, so braces inside strings and
+/// comments cannot break the brace match. Blanks with spaces to keep byte
+/// offsets, and therefore reported line numbers, intact.
+fn blank_test_items(code: &str) -> String {
+    let bytes = code.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut idx = 0usize;
+    while let Some(pos) = code[idx..].find("#[cfg(") {
+        let start = idx + pos;
+        let rest = &code[start + "#[cfg(".len()..];
+        if !(rest.starts_with("test)]") || rest.starts_with("all(test,")) {
+            idx = start + "#[cfg(".len();
+            continue;
+        }
+        // Walk to the end of the attached item: a brace-balanced block, or
+        // a `;` for brace-less items like `#[cfg(test)] use super::*;`.
+        let mut cursor = start;
+        let mut depth = 0usize;
+        let mut end = bytes.len();
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = cursor + 1;
+                        break;
+                    }
+                }
+                b';' if depth == 0 => {
+                    end = cursor + 1;
+                    break;
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        blank_range(&mut out, start, end);
+        idx = end;
+    }
+    String::from_utf8(out).expect("blanking only substitutes ASCII spaces")
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -2747,7 +2799,8 @@ fn gen_fonts() -> Result<(), String> {
         let Some(konst) = text.lines().find_map(|line| {
             let rest = line.trim().strip_prefix("pub const ")?;
             let (name, ty) = rest.split_once(": ")?;
-            ty.starts_with("BitmapFont").then(|| name.trim().to_string())
+            ty.starts_with("BitmapFont")
+                .then(|| name.trim().to_string())
         }) else {
             continue;
         };
@@ -3267,7 +3320,6 @@ fn parse_ttf_font(path: &Path, entry: &mut FontEntry) -> Result<Vec<Vec<u8>>, St
     Ok(glyphs)
 }
 
-
 /// Letters of the Latin alphabet that came out as the same bitmap.
 ///
 /// A font is not merely ugly when this happens, it is wrong: `PRESS X` renders
@@ -3367,4 +3419,40 @@ fn emit_font_module(entry: &FontEntry, glyphs: &[Vec<u8>]) -> String {
         bit_order
     ));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The numeric guard is only meaningful if it blanks exactly the
+    /// test-only items: too little and it flags host oracles that
+    /// legitimately use f64, too much and guest violations slip through.
+    #[test]
+    fn blank_test_items_blanks_test_only_and_keeps_the_rest() {
+        let src = "\
+fn ships() -> u64 { 1 }
+#[cfg(test)]
+mod tests { fn oracle() -> f64 { 0.5 } }
+#[cfg(all(test, feature = \"x\"))]
+fn gated() -> f64 { 1.0 }
+#[cfg(test)]
+use core::f64::consts::PI;
+#[cfg(any(target_arch = \"mips\", test))]
+fn also_ships() -> u64 { 2 }
+";
+        let out = blank_test_items(src);
+
+        assert!(out.contains("fn ships() -> u64"));
+        // `any(..., test)` still compiles into the guest, so it stays visible.
+        assert!(out.contains("fn also_ships() -> u64"));
+        // Brace-balanced item, feature-gated variant, and the brace-less
+        // `use` form all disappear.
+        assert!(!out.contains("oracle"));
+        assert!(!out.contains("gated"));
+        assert!(!out.contains("PI"));
+        // Offsets must survive, or reported line numbers drift.
+        assert_eq!(out.len(), src.len());
+        assert_eq!(out.lines().count(), src.lines().count());
+    }
 }
