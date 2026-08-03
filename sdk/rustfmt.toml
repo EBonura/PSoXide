@@ -2,4 +2,12 @@
 # which emits compact glyph tables. rustfmt explodes those to one entry
 # per line: ~10k lines of churn that the next regeneration discards, and
 # a permanently dirty `cargo fmt --check`. Leave generated tables alone.
+#
+# rustfmt's `ignore` is directory-granular with no way to re-include, so
+# this also covers the two files in there that are not generated:
+# `spleen_5x8.rs`, a hand-maintained glyph table that rustfmt would
+# explode for the same reason, and `mod.rs`, which is ordinary module
+# code and is NOT exempt in spirit. `mod.rs` is rustfmt-clean today;
+# if it ever needs reformatting, run rustfmt on it directly. The real
+# fix is for `gen-fonts` to emit `#[rustfmt::skip]` so this file can go.
 ignore = ["crates/psx-font/src/fonts"]
