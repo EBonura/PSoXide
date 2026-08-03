@@ -319,60 +319,6 @@ impl Deadzone {
     }
 }
 
-/// Which buttons changed since the previous poll.
-///
-/// Five programs on the demo disc had written this out by hand as
-/// `held(b) && !previous.held(b)`, each carrying its own copy of the previous
-/// frame. It is not hard, it is just the sort of thing that should exist once.
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Edges {
-    previous: ButtonState,
-}
-
-impl Edges {
-    /// No history: every button reads as released.
-    pub const fn new() -> Self {
-        Self {
-            previous: ButtonState(0),
-        }
-    }
-
-    /// Take this frame's reading. Call once per frame, before the queries.
-    #[inline]
-    pub fn update(&mut self, now: ButtonState) -> Transitions {
-        let before = self.previous;
-        self.previous = now;
-        Transitions { before, now }
-    }
-}
-
-/// One frame's worth of button transitions, from [`Edges::update`].
-#[derive(Copy, Clone, Debug)]
-pub struct Transitions {
-    before: ButtonState,
-    now: ButtonState,
-}
-
-impl Transitions {
-    /// Went down this frame.
-    #[inline]
-    pub const fn pressed(self, button: u16) -> bool {
-        self.now.is_held(button) && !self.before.is_held(button)
-    }
-
-    /// Came up this frame.
-    #[inline]
-    pub const fn released(self, button: u16) -> bool {
-        !self.now.is_held(button) && self.before.is_held(button)
-    }
-
-    /// Still down.
-    #[inline]
-    pub const fn held(self, button: u16) -> bool {
-        self.now.is_held(button)
-    }
-}
-
 impl Default for AnalogSticks {
     fn default() -> Self {
         Self::CENTERED
@@ -1077,19 +1023,6 @@ mod tests {
         assert_eq!(worn.scaled(120, 0), Some((STICK_FULL, 0)));
     }
 
-    #[test]
-    fn edges_separate_a_press_from_a_hold() {
-        const A: u16 = 1 << 6;
-        let mut edges = Edges::new();
-        let down = ButtonState(A);
-        let t = edges.update(down);
-        assert!(t.pressed(A) && t.held(A) && !t.released(A));
-        let t = edges.update(down);
-        assert!(!t.pressed(A), "a held button must not re-fire");
-        assert!(t.held(A));
-        let t = edges.update(ButtonState(0));
-        assert!(t.released(A) && !t.pressed(A) && !t.held(A));
-    }
     use super::*;
 
     #[test]
