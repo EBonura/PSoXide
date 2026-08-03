@@ -77,7 +77,7 @@ static mut READBACK2: [u32; PATTERN_WORDS] = [0; PATTERN_WORDS];
 
 // ---- Pass 2: the tone ladder -------------------------------------------
 
-const TONE_SEGMENTS: usize = 13;
+const TONE_SEGMENTS: usize = 14;
 const TONE_FIELDS: usize = 4;
 const TONE_FRAMES: u16 = 90;
 const GAP_FRAMES: u16 = 30;
@@ -285,8 +285,11 @@ impl SpuProbe {
             // past table one's END flag -- so the first question is whether
             // the flags are even in SPU RAM. Word 0 holds the header and
             // flags bytes of block 0; word 4 holds block 1's.
+            // PIO, not DMA. The console's RAM pass showed the DMA reader
+            // returning 0000FFFF for a region the PIO reader read as our
+            // own pattern, so a DMA readback of the table proves nothing.
             let mut back = [0u32; 8];
-            spu_dma_read(SPU_TABLE_ADDR, &mut back);
+            pio_read(SPU_TABLE_ADDR, &mut back);
             self.table_back = [back[0], back[4]];
         }
         Voice::key_off(all_voices_mask());
@@ -299,6 +302,22 @@ impl SpuProbe {
                 Voice::set_noise_mask(1 << VOICE);
                 spu::set_noise_clock(8, 2);
                 key_voice(VOICE, UNITY_PITCH, SPU_TABLE_ADDR);
+            }
+            // The console read this voice's REPEAT address back as 034C
+            // (0x1A60) -- two and a half kilobytes past a 32-byte table,
+            // so the voice ran clean past its own END flag and latched a
+            // loop-start it found in whatever the launcher left in SPU
+            // RAM. Every measured tone was proportional to its pitch but
+            // 2.41x the arithmetic, which is what playing the wrong bytes
+            // at the right rate sounds like. This segment writes the
+            // repeat register by hand straight after key-on: if the tone
+            // comes back at 1575 Hz then the flags are in RAM and it is
+            // the LATCH that silicon is not doing -- the same mechanism
+            // Celeste's wavetables depend on.
+            13 => {
+                key_voice(VOICE, UNITY_PITCH, SPU_TABLE_ADDR);
+                let base = psx_io::spu::SPU_BASE + VOICE as u32 * 16;
+                unsafe { psx_io::write16(base + 14, (SPU_TABLE_ADDR / 8) as u16) };
             }
             _ => {}
         }
@@ -668,6 +687,7 @@ fn tone_label(segment: u8) -> &'static str {
         10 => "ADDRSWAP",
         11 => "VOICES",
         12 => "NOISE",
+        13 => "REPEXPL",
         _ => "?",
     }
 }
@@ -682,6 +702,7 @@ fn tone_description(segment: u8) -> &'static str {
         10 => "START ADDR CHANGED WITHOUT KEY ON",
         11 => "1 THEN 4 THEN 8 VOICES TOGETHER",
         12 => "NOISE MODE: SILICON'S OWN LFSR",
+        13 => "SAME TABLE, REPEAT ADDR SET BY HAND",
         _ => "?",
     }
 }
@@ -703,6 +724,7 @@ fn tone_expectation(segment: u8) -> &'static str {
         10 => "1575 THEN 788 AT THE SWAP",
         11 => "1575, LOUDER IN 3 STEPS",
         12 => "HISS, NO TONE",
+        13 => "1575 HZ IF THE FLAG WAS THE FAULT",
         _ => "?",
     }
 }
