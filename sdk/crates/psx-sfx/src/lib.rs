@@ -208,7 +208,17 @@ impl OneShot {
             // Pitch is Q4.12, so unity is 0x1000: half the pitch is twice the
             // duration. Guard the zero a caller could hand us rather than
             // dividing by it.
-            Some(p) => match p.raw_value() {
+            //
+            // Clamped, because the hardware clamps. Pitch::raw takes any u16
+            // but silicon caps the register at 0x3FFF: the 2026-08-03 SB2
+            // capture played 0x3FFF and 0x5000 back at the same 15169 Hz. A
+            // cutoff timed off the requested 0x5000 would expect the sound to
+            // finish in four fifths of the time it actually takes, and clip it.
+            Some(p) => match {
+                let raw = p.raw_value();
+                let cap = Pitch::MAX.raw_value();
+                if raw > cap { cap } else { raw }
+            } {
                 0 => Some(base),
                 raw => Some(base * 0x1000 / raw as u32),
             },
@@ -365,6 +375,16 @@ mod tests {
         // Half the pitch is twice the duration, so the cutoff has to wait
         // twice as long or it clips the sound it is meant to be following.
         assert_eq!(half.ticks(60).unwrap(), plain.ticks(60).unwrap() * 2);
+    }
+
+    #[test]
+    fn a_pitch_above_the_hardware_ceiling_is_timed_at_the_ceiling() {
+        // SB2 played 0x3FFF and 0x5000 back at the same 15169 Hz on silicon.
+        // Timing the cutoff off 0x5000 would cut the sound at four fifths.
+        let s = sample(44100, 394);
+        let asked = OneShot::new(s, Volume::MAX).with_pitch(Pitch::raw(0x5000));
+        let capped = OneShot::new(s, Volume::MAX).with_pitch(Pitch::MAX);
+        assert_eq!(asked.ticks(60), capped.ticks(60));
     }
 
     #[test]
