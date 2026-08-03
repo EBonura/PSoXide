@@ -113,7 +113,6 @@ impl SkyCyclorama {
     /// behind all world geometry). Streamed sky assets carry empty baked
     /// bytes and are uploaded on gameplay entry, so residency resolves
     /// through the caller's slot resolvers; baked builds upload lazily.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_panorama<const OT_DEPTH: usize>(
         &mut self,
         sky: LevelSkyRecord,
@@ -184,7 +183,6 @@ impl SkyCyclorama {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_sky_panorama_packets(
     sky: LevelSkyRecord,
     camera: WorldCamera,
@@ -394,7 +392,6 @@ fn sky_panorama_local_u(global_u: u16, page: usize) -> u8 {
 
 /// Draw the authored far-vista panel ring: a camera-centred cylinder of
 /// textured quads at the farthest depth slot behind world geometry.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_far_vista_ring<const OT_DEPTH: usize>(
     camera: WorldCamera,
     vista: LevelFarVistaRecord,

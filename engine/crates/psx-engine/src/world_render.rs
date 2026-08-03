@@ -1292,7 +1292,6 @@ fn triangle_heights_to_quad(
     fallback
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
     room: RoomRender<'_, '_>,
     sx: u16,
@@ -1523,7 +1522,6 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
     surfaces
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     room: RoomRender<'_, '_>,
     sx: u16,
@@ -1927,7 +1925,6 @@ fn cell_aabb_extent_wide(row: [i32; 3], half_x: i32, half_y: i32, half_z: i32) -
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
 fn cell_aabb_lateral_visible_wide(
     view: ViewVertex,
     z: i32,
@@ -2195,7 +2192,6 @@ fn cell_visibility_view_in_lateral_frustum(
 
 /// Emit one floor quad. Cooked corners are `[NW, NE, SE, SW]`,
 /// which already faces upward into playable space.
-#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn emit_floor<const OT: usize>(
     sx: u16,
@@ -2233,7 +2229,6 @@ fn emit_floor<const OT: usize>(
 /// Emit one ceiling quad. Cooked corners are `[NW, NE, SE, SW]`;
 /// runtime flips them so front-sided ceilings face the room
 /// interior/underside.
-#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn emit_ceiling<const OT: usize>(
     sx: u16,
@@ -2268,7 +2263,6 @@ fn emit_ceiling<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_floor_triangle<const OT: usize>(
     sx: u16,
     sz: u16,
@@ -2298,7 +2292,6 @@ fn emit_floor_triangle<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_ceiling_triangle<const OT: usize>(
     sx: u16,
     sz: u16,
@@ -2330,7 +2323,6 @@ fn emit_ceiling_triangle<const OT: usize>(
 
 /// Emit one wall quad. Wall heights `[BL, BR, TR, TL]` map onto
 /// the cell's edge endpoints by direction.
-#[allow(clippy::too_many_arguments)]
 fn emit_wall<const OT: usize>(
     sx: u16,
     sz: u16,
@@ -2377,7 +2369,6 @@ fn emit_wall<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn emit_floor_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
@@ -2416,7 +2407,6 @@ fn emit_floor_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn emit_ceiling_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
@@ -2455,7 +2445,6 @@ fn emit_ceiling_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
@@ -2491,7 +2480,6 @@ fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
@@ -2527,7 +2515,6 @@ fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_wall_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
@@ -2600,7 +2587,6 @@ fn vertex_lighting_colors_with_depths<L: WorldSurfaceLighting>(
 
 /// Project + submit one textured quad along the standard
 /// `submit_textured_quad` 0–2 diagonal.
-#[allow(clippy::too_many_arguments)]
 fn submit_quad<const OT: usize>(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -2623,7 +2609,6 @@ fn submit_quad<const OT: usize>(
 /// order as the input verts, so the texture orientation
 /// doesn't change with the diagonal -- only the triangulation
 /// boundary moves.
-#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn submit_split_quad<const OT: usize>(
     camera: &WorldCamera,
@@ -2676,7 +2661,6 @@ fn submit_split_quad<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_split_triangle<const OT: usize>(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -2711,7 +2695,6 @@ fn submit_split_triangle<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_quad_vertex_lit<const OT: usize>(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -2739,7 +2722,6 @@ fn submit_quad_vertex_lit<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_split_quad_vertex_lit<const OT: usize>(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -2773,7 +2755,6 @@ fn submit_split_quad_vertex_lit<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_split_triangle_vertex_lit<const OT: usize>(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -2810,7 +2791,6 @@ fn submit_split_triangle_vertex_lit<const OT: usize>(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn submit_projected_split_triangle_vertex_lit_cached_uv_words<const OT: usize>(
     projected: [crate::render3d::ProjectedVertex; 4],
@@ -2885,7 +2865,6 @@ fn submit_projected_split_triangle_vertex_lit_cached_uv_words<const OT: usize>(
     let _ = profile;
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
@@ -2987,7 +2966,6 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     let _ = profile;
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_sided_projected_gouraud_quad<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
     triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,

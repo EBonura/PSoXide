@@ -157,7 +157,6 @@ fn box_prop_face_textures(
 
 /// Draw the unbroken box props of `current_room` (a falling box draws
 /// shifted by its current fall offset).
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_box_props<
     T,
@@ -246,7 +245,6 @@ pub fn draw_box_props<
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_generated_box_prop_surfaces<T, const OT_DEPTH: usize>(
     prop: &LevelBoxPropRecord,
     generated_surfaces: &[LevelBoxPropSurfaceRecord],
@@ -356,7 +354,6 @@ fn draw_generated_box_prop_surfaces<T, const OT_DEPTH: usize>(
 
 /// Draw the settled floor-debris chips of the broken box props of
 /// `current_room` through the owned debris cache.
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_box_prop_floor_debris<
     T,
@@ -431,7 +428,6 @@ pub fn draw_box_prop_floor_debris<
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_box_prop_floor_debris_chips<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     debris: &mut DebrisCache,
     prop_index: usize,
@@ -461,7 +457,6 @@ fn draw_box_prop_floor_debris_chips<T, const GTE_PROJECT: bool, const OT_DEPTH: 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     chip: &DebrisChipCache,
     projector: LoadedWorldCameraGte,
@@ -529,7 +524,6 @@ fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: u
 }
 
 /// Draw the live break bursts (flying shards) of `current_room`.
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_box_prop_break_events<
     T,
@@ -599,7 +593,6 @@ pub fn draw_box_prop_break_events<
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_box_prop_break_shards<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
     shard_runtimes: &[BoxPropBreakShardRuntime; BOX_PROP_BREAK_SHARD_COUNT],
@@ -640,7 +633,6 @@ fn draw_box_prop_break_shards<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     face_texture: Option<BoxPropFaceTextureRuntime>,
     shard_runtime: BoxPropBreakShardRuntime,
@@ -731,7 +723,6 @@ fn box_prop_apply_fog_weight(
     ]
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
     prop: &LevelBoxPropRecord,
     faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],

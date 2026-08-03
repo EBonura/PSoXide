@@ -10,7 +10,6 @@ struct AttachmentPose {
     rotation: Mat3I16,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_player_equipment<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,
@@ -208,7 +207,6 @@ fn find_model_socket(
     sockets.iter().find(|socket| socket.name == name)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn attachment_socket_pose(
     _model: RuntimeModelAsset,
     animation: Animation<'static>,

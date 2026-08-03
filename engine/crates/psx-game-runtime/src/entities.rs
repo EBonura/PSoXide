@@ -151,7 +151,6 @@ pub trait GameEntityMover {
     /// unchanged when fully blocked (including "the room's collision
     /// is not resident"). `entity` lets the backing collision exclude
     /// the mover's own body from its blocker set.
-    #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
         entity: usize,

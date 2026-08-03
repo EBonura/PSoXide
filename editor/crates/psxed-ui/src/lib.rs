@@ -3287,7 +3287,6 @@ impl EditorWorkspace {
     /// up to the caller -- the editor doesn't spawn child
     /// processes from this path; instead the status string
     /// hands back the exact command to run.
-    #[allow(clippy::too_many_arguments)]
     pub fn cook_playtest_to_disk(&mut self) -> Result<String, String> {
         let dir = psxed_project::playtest::default_generated_dir();
         let mut project = self.project.clone();

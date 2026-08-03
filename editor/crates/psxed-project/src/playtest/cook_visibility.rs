@@ -296,7 +296,6 @@ fn portal_connects_visibility_cells(
     midpoint_x2 >= min_x2 && midpoint_x2 <= max_x2 && midpoint_z2 >= min_z2 && midpoint_z2 <= max_z2
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_room_surface_cache(
     room_index: u16,
     room_bytes: &[u8],

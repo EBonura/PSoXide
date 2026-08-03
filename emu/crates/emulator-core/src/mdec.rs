@@ -1050,7 +1050,6 @@ fn sign_extend_9(value: i32) -> i32 {
 /// AAN-optimized 2D IDCT on an 8×8 block. Implements Redux's hybrid
 /// row/column traversal: walks columns first (skipping columns with
 /// only a DC coefficient when possible via `used_col`), then rows.
-#[allow(clippy::too_many_arguments)]
 fn idct(block: &mut [i32; DSIZE2], used_col: i32) {
     if used_col == -1 {
         let v = block[0];

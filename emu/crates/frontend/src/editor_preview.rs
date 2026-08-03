@@ -1041,6 +1041,7 @@ fn walk_entities(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_image_props(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
@@ -1154,6 +1155,7 @@ fn walk_image_props(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_box_props(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
@@ -1502,6 +1504,7 @@ fn box_prop_face_uv_at(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> (u8, u8) {
     (interpolate(0), interpolate(1))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_water_volumes(
     project: &ProjectDocument,
     room_id: NodeId,
@@ -1986,6 +1989,7 @@ struct PreviewModelInstance<'a> {
 /// Models with bad/missing data are skipped silently -- the
 /// editor inspector + cook validation surface those errors
 /// elsewhere; the preview just keeps drawing what it can.
+#[allow(clippy::too_many_arguments)]
 fn walk_model_instances(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
@@ -2668,7 +2672,6 @@ fn draw_preview_model_instances(
     scratch.tex_used = tex_start.saturating_add(triangles.len()).min(TRI_CAP);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_preview_model_instance(
     world: &mut psx_engine::WorldRenderPass<'_, '_, OT_DEPTH>,
     triangles: &mut psx_engine::PrimitiveArena<'_, TriTextured>,

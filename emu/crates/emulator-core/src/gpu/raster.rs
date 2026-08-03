@@ -49,7 +49,6 @@ pub(super) fn triangle_exceeds_hw_extent(v0: (i32, i32), v1: (i32, i32), v2: (i3
 ///
 /// Caller must apply the polygon-too-large extent cull first; this assumes the
 /// triangle is drawable.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn for_each_tri_pixel(
     v: [(i32, i32); 3],
     rgb: [(i32, i32, i32); 3],

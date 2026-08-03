@@ -230,7 +230,6 @@ impl<
     /// candidates rejected by the global activation radius, or `None`
     /// when the anchor is outside the room or the PVS data is missing
     /// (the caller then draws every cell through the cached path).
-    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn cached_precomputed_visible_cells(
         &mut self,
@@ -309,7 +308,6 @@ impl<
 
     /// The cache-miss rebuild: run the PVS fill into the shared pool
     /// and record the new per-slot descriptor.
-    #[allow(clippy::too_many_arguments)]
     fn fill_and_cache(
         &mut self,
         tables: WorldTables,
@@ -419,7 +417,6 @@ fn room_visibility_candidate_count(tables: WorldTables, room_index: RoomIndex) -
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-#[allow(clippy::too_many_arguments)]
 fn fill_precomputed_visible_cells<const MAX_PRECOMPUTED_VISIBLE_CELLS: usize>(
     tables: WorldTables,
     pvs_tables: PvsTables,
@@ -882,7 +879,6 @@ fn visibility_cell_aabb_intersects_camera(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-#[allow(clippy::too_many_arguments)]
 fn aabb_intersects_camera_frustum(
     x0: i32,
     x1: i32,

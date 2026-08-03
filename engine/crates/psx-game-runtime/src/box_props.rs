@@ -508,7 +508,6 @@ impl<
     }
 
     /// Break the boxes the player's movement probe overlaps.
-    #[allow(clippy::too_many_arguments)]
     pub fn break_for_movement(
         &mut self,
         props: &'static [LevelBoxPropRecord],
