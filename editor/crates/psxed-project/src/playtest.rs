@@ -1900,8 +1900,7 @@ pub fn build_package(
     // own island and a level built from more than one of them was disconnected
     // at runtime no matter how the editor drew it.
     let wiring = cross_section_portals(scene, &room_chunks_by_node);
-    let (cross_section, cross_issues, wired_edges) =
-        (wiring.portals, wiring.issues, wiring.edges);
+    let (cross_section, cross_issues, wired_edges) = (wiring.portals, wiring.issues, wiring.edges);
     room_portals.extend(cross_section);
     // Sections placed edge to edge with facing openings connect on their own.
     room_portals.extend(auto_adjacent_section_portals(
@@ -1971,8 +1970,7 @@ pub fn build_package(
             // Same map the cook uses to dedupe texture references, so the
             // reachable set cannot drift from what was actually cooked.
             used_texture_paths: {
-                let mut paths: Vec<String> =
-                    texture_asset_for_path.keys().cloned().collect();
+                let mut paths: Vec<String> = texture_asset_for_path.keys().cloned().collect();
                 paths.sort();
                 paths
             },
@@ -1999,11 +1997,10 @@ pub fn build_package(
                     // filtered by the remap it produced, so a clip dropped by the
                     // runtime-clip filter is not shipped either.
                     let remap = model_clip_remaps.get(resource_id);
-                    for (index, clip) in
-                        project
-                            .resolved_model_animation_clips(*resource_id)
-                            .iter()
-                            .enumerate()
+                    for (index, clip) in project
+                        .resolved_model_animation_clips(*resource_id)
+                        .iter()
+                        .enumerate()
                     {
                         let kept = remap
                             .map(|r| r.get(index).is_some_and(Option::is_some))

@@ -3008,7 +3008,11 @@ mod warp_probe_tests {
 
     /// Build a quad lattice with the given per-vertex depths and UV span.
     fn quad(depths: [i32; 4], uv: [(u8, u8); 4]) -> ([ProjectedVertex; 4], [u16; 4]) {
-        let mut p = [ProjectedVertex { sx: 0, sy: 0, sz: 0 }; 4];
+        let mut p = [ProjectedVertex {
+            sx: 0,
+            sy: 0,
+            sz: 0,
+        }; 4];
         let mut w = [0u16; 4];
         for i in 0..4 {
             p[i].sz = depths[i];
@@ -3029,7 +3033,11 @@ mod warp_probe_tests {
         // Reference: du * |zb-za| / (2*(za+zb)), calibrated x2.4, in 1/16ths.
         let want = 63.0 * 800.0 / (2.0 * 1200.0) * 2.4 * 16.0;
         let err = (got as f64 - want).abs() / want;
-        assert!(err < 0.02, "got {got}, want {want:.1} ({:.1}% off)", err * 100.0);
+        assert!(
+            err < 0.02,
+            "got {got}, want {want:.1} ({:.1}% off)",
+            err * 100.0
+        );
     }
 
     #[test]

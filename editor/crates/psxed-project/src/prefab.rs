@@ -154,8 +154,12 @@ impl Prefab {
                     },
                 };
             }
-            sector.floor_above.take_if(|link| link.target_floor == u16::MAX);
-            sector.floor_below.take_if(|link| link.target_floor == u16::MAX);
+            sector
+                .floor_above
+                .take_if(|link| link.target_floor == u16::MAX);
+            sector
+                .floor_below
+                .take_if(|link| link.target_floor == u16::MAX);
         }
 
         let mut materials = BTreeMap::new();
@@ -312,7 +316,13 @@ pub fn sector_material_ids(sector: &GridSector) -> Vec<ResourceId> {
         }
     }
     for direction in GridDirection::ALL {
-        out.extend(sector.walls.get(direction).iter().filter_map(|w| w.material));
+        out.extend(
+            sector
+                .walls
+                .get(direction)
+                .iter()
+                .filter_map(|w| w.material),
+        );
     }
     out
 }
@@ -329,7 +339,10 @@ pub fn remap_sector_materials(
         face.material = face.material.and_then(remap);
         for index in 0..2 {
             let over = face.triangle_overrides.get_mut(index);
-            if let Some(existing) = over.material.and_then(GridTriangleMaterialOverride::material) {
+            if let Some(existing) = over
+                .material
+                .and_then(GridTriangleMaterialOverride::material)
+            {
                 over.material = Some(GridTriangleMaterialOverride::from_material(remap(existing)));
             }
         }

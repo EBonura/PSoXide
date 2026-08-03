@@ -68,9 +68,10 @@ fn shift_selects_wall_span_from_anchor() {
     for sx in 0..4 {
         grid.add_wall(sx, 0, GridDirection::North, 0, 1024, None);
     }
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let wall_at = |sx| {
         Selection::Face(FaceRef {
@@ -106,9 +107,10 @@ fn shift_selects_wall_top_edge_path_from_anchor() {
     for sx in 0..4 {
         grid.add_wall(sx, 0, GridDirection::North, 0, 1024, None);
     }
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let edge_at = |sx| {
         Selection::Edge(EdgeRef {
@@ -145,9 +147,10 @@ fn shift_selects_floor_edge_path_from_anchor() {
     for sx in 0..4 {
         grid.set_floor(sx, 0, 0, None);
     }
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let edge_at = |sx| {
         Selection::Edge(EdgeRef {
@@ -182,9 +185,10 @@ fn modified_primitive_selection_can_mix_floor_ceiling_and_wall_faces() {
     grid.set_floor(0, 0, 0, None);
     grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, None));
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("mixed-face-selection"), project);
     let floor = Selection::Face(FaceRef {
@@ -238,9 +242,10 @@ fn primitive_grid_drag_moves_selected_faces_without_whole_sector() {
         .heights = [0, 32, 64, 96];
     grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, None));
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("primitive-grid-drag"), project);
     let floor = Selection::Face(FaceRef {
@@ -294,9 +299,10 @@ fn primitive_gizmo_y_moves_selected_face_by_height_quantum() {
     let mut project = ProjectDocument::new("primitive-gizmo-y");
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 0, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-y"), project);
     set_gizmo_test_camera(&mut workspace);
     let floor = Selection::Face(FaceRef {
@@ -334,9 +340,10 @@ fn viewport_3d_pointer_target_prefers_primitive_gizmo_over_surface() {
     let mut project = ProjectDocument::new("primitive-gizmo-target-priority");
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 0, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-target"), project);
     set_gizmo_test_camera(&mut workspace);
@@ -366,9 +373,10 @@ fn primitive_gizmo_y_moves_selected_triangle_by_height_quantum() {
     let mut project = ProjectDocument::new("primitive-gizmo-triangle-y");
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 0, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-triangle-y"), project);
     set_gizmo_test_camera(&mut workspace);
@@ -414,9 +422,10 @@ fn primitive_gizmo_x_moves_selected_face_one_cell() {
         .as_mut()
         .unwrap()
         .heights = [0, 32, 64, 96];
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-x"), project);
     set_gizmo_test_camera(&mut workspace);
     let floor = Selection::Face(FaceRef {
@@ -1089,9 +1098,10 @@ fn duplicate_wall_cook_error_marks_both_authored_faces() {
     let mut grid = WorldGrid::empty(4, 2, 1024);
     grid.add_wall(3, 1, GridDirection::South, 0, 1024, None);
     grid.add_wall(3, 0, GridDirection::North, 0, 1024, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.view_2d = false;
     workspace.camera_rig.target = [99_000, 99_000, 99_000];
@@ -1220,9 +1230,10 @@ fn material_click_assignment_updates_all_faces_in_selected_sectors() {
             flip_v: false,
         };
     }
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let mut ctrl = egui::Modifiers::NONE;
     ctrl.ctrl = true;
@@ -1293,9 +1304,10 @@ fn face_uv_rotation_and_flip_apply_to_every_selected_face() {
     grid.set_floor(1, 0, 0, None);
     grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, None));
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
 
     let floor = FaceRef {
@@ -1418,9 +1430,10 @@ fn face_uv_offset_span_and_flip_v_apply_without_replacing_untouched_fields() {
     let mut grid = WorldGrid::empty(2, 1, 1024);
     grid.set_floor(0, 0, 0, None);
     grid.set_floor(1, 0, 0, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let first = FaceRef {
         room,
@@ -1741,9 +1754,10 @@ fn water_tool_paints_one_selected_volume_and_erases_by_cell() {
     let mut grid = WorldGrid::empty(2, 1, 1024);
     grid.set_floor(0, 0, -256, None);
     grid.set_floor(1, 0, 0, None);
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.replace_resource_selection(material);
 
@@ -1847,9 +1861,10 @@ fn water_tool_derives_initial_height_from_slope_low_points() {
         .and_then(|sector| sector.floor.as_mut())
         .expect("sloped floor")
         .heights = [-256, -128, 0, 128];
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
 
     workspace.run_paint_action(ViewTool::Water, room, 0, 0, None, [512.0, 0.0, 512.0]);
@@ -1908,15 +1923,23 @@ fn four_quarter_turns_return_an_asymmetric_sector_unchanged() {
 #[test]
 fn a_saved_prefab_stamps_into_another_project_on_its_own_materials() {
     let mut source = ProjectDocument::new("prefab-stamp-source");
-    let stone = source.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let stone = source.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 0, Some(stone));
-    grid.sector_mut(0, 0).unwrap().floor.as_mut().unwrap().heights = [0, 32, 64, 96];
-    let source_room = source
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
-    let mut workspace =
-        EditorWorkspace::with_project(test_temp_dir("prefab-stamp-source"), source);
+    grid.sector_mut(0, 0)
+        .unwrap()
+        .floor
+        .as_mut()
+        .unwrap()
+        .heights = [0, 32, 64, 96];
+    let source_room =
+        source
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-stamp-source"), source);
     workspace.select_sector((source_room, 0, 0), egui::Modifiers::NONE);
 
     let prefab = workspace
@@ -1927,15 +1950,21 @@ fn a_saved_prefab_stamps_into_another_project_on_its_own_materials() {
 
     // Destination: "Dirt" occupies the id the source used for "Stone".
     let mut destination = ProjectDocument::new("prefab-stamp-destination");
-    let dirt = destination.add_resource("Dirt", ResourceData::Material(MaterialResource::opaque(None)));
-    let stone_here =
-        destination.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let dirt = destination.add_resource(
+        "Dirt",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let stone_here = destination.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     assert_eq!(dirt, stone, "the destination reuses the source's Stone id");
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 0, Some(stone_here));
-    let room = destination
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        destination
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("prefab-stamp-destination"), destination);
     workspace.replace_node_selection(room);
@@ -1953,7 +1982,11 @@ fn a_saved_prefab_stamps_into_another_project_on_its_own_materials() {
     let stamped = grid.sector(0, 1).expect("stamped cell exists");
     let floor = stamped.floor.as_ref().expect("stamped floor exists");
     assert_eq!(floor.heights, [0, 32, 64, 96]);
-    assert_eq!(floor.material, Some(stone_here), "rebound by name, not by id");
+    assert_eq!(
+        floor.material,
+        Some(stone_here),
+        "rebound by name, not by id"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -1966,15 +1999,19 @@ fn a_saved_prefab_stamps_into_another_project_on_its_own_materials() {
 #[test]
 fn stamping_a_walled_piece_against_its_neighbour_drops_the_shared_edge() {
     let mut project = ProjectDocument::new("prefab-seam");
-    let stone = project.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     let mut grid = WorldGrid::empty(2, 1, 1024);
     grid.set_floor(0, 0, 0, Some(stone));
     for direction in GridDirection::CARDINAL {
         grid.add_wall(0, 0, direction, 0, 1024, Some(stone));
     }
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-seam"), project);
     workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
 
@@ -2032,7 +2069,10 @@ fn stamping_a_walled_piece_against_its_neighbour_drops_the_shared_edge() {
 #[test]
 fn a_two_floor_piece_captures_and_stamps_its_stack_and_relinks() {
     let mut project = ProjectDocument::new("prefab-stack");
-    let stone = project.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     let mut grid = WorldGrid::empty(2, 1, 1024);
     grid.set_floor(0, 0, 0, Some(stone));
     grid.push_floor();
@@ -2041,9 +2081,10 @@ fn a_two_floor_piece_captures_and_stamps_its_stack_and_relinks() {
     let upper_elevation = upper.elevation;
     assert_ne!(upper_elevation, 0, "push_floor stacks above the base");
 
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     // Link the two floors of the piece together, the way a stair would.
     if let Some(NodeKind::Section { grid }) = project
         .active_scene_mut()
@@ -2061,7 +2102,11 @@ fn a_two_floor_piece_captures_and_stamps_its_stack_and_relinks() {
     let prefab = workspace
         .capture_selection_as_prefab("Stair Block")
         .expect("selection captures");
-    assert_eq!(prefab.floors.len(), 2, "the stack above the selection came too");
+    assert_eq!(
+        prefab.floors.len(),
+        2,
+        "the stack above the selection came too"
+    );
     assert_eq!(prefab.floors[1].relative_elevation, upper_elevation);
 
     let path = test_temp_dir("prefab-stack").join("stair.ron");
@@ -2069,11 +2114,17 @@ fn a_two_floor_piece_captures_and_stamps_its_stack_and_relinks() {
 
     // Stamp into a fresh single-floor room: the upper floor must be created.
     let mut destination = ProjectDocument::new("prefab-stack-dest");
-    let stone_here =
-        destination.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
-    let dest_room = destination
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid: WorldGrid::empty(2, 1, 1024) });
+    let stone_here = destination.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let dest_room = destination.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Section {
+            grid: WorldGrid::empty(2, 1, 1024),
+        },
+    );
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("prefab-stack-dest"), destination);
     workspace.replace_node_selection(dest_room);
@@ -2133,14 +2184,18 @@ fn a_two_floor_piece_captures_and_stamps_its_stack_and_relinks() {
 #[test]
 fn raising_a_placement_moves_floor_ceiling_and_walls_as_one() {
     let mut project = ProjectDocument::new("prefab-lift");
-    let stone = project.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     let mut grid = WorldGrid::empty(1, 2, 1024);
     grid.set_floor(0, 0, 0, Some(stone));
     grid.sector_mut(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, Some(stone)));
     grid.add_wall(0, 0, GridDirection::West, 0, 1024, Some(stone));
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-lift"), project);
     workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
 
@@ -2175,7 +2230,10 @@ fn raising_a_placement_moves_floor_ceiling_and_walls_as_one() {
         "the cooker rejects heights off the quantum"
     );
     // The source is untouched, so the nudge is placement state, not an edit.
-    assert_eq!(grid.sector(0, 0).unwrap().floor.as_ref().unwrap().heights, [0; 4]);
+    assert_eq!(
+        grid.sector(0, 0).unwrap().floor.as_ref().unwrap().heights,
+        [0; 4]
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2188,14 +2246,18 @@ fn raising_a_placement_moves_floor_ceiling_and_walls_as_one() {
 #[test]
 fn a_stamp_past_the_runtime_room_cap_says_a_portal_is_needed() {
     let mut project = ProjectDocument::new("prefab-cap");
-    let stone = project.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     let mut grid = WorldGrid::empty(psxed_project::MAX_ROOM_WIDTH, 1, 1024);
     for x in 0..psxed_project::MAX_ROOM_WIDTH {
         grid.set_floor(x, 0, 0, Some(stone));
     }
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-cap"), project);
 
     // Exactly at the cap, so the room is still legal before the stamp.
@@ -2225,19 +2287,30 @@ fn a_stamp_past_the_runtime_room_cap_says_a_portal_is_needed() {
 #[test]
 fn a_stamped_prefab_brings_its_light_along() {
     let mut project = ProjectDocument::new("prefab-light");
-    let stone = project.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     let mut grid = WorldGrid::empty(4, 4, 1024);
     for x in 0..2 {
         for z in 0..2 {
             grid.set_floor(x, z, 0, Some(stone));
         }
     }
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-light"), project);
-    for (i, (x, z)) in [(0u16, 0u16), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
-        let modifiers = if i == 0 { egui::Modifiers::NONE } else { egui::Modifiers::COMMAND };
+    for (i, (x, z)) in [(0u16, 0u16), (1, 0), (0, 1), (1, 1)]
+        .into_iter()
+        .enumerate()
+    {
+        let modifiers = if i == 0 {
+            egui::Modifiers::NONE
+        } else {
+            egui::Modifiers::COMMAND
+        };
         workspace.select_sector((room, x, z), modifiers);
     }
     let mut prefab = workspace
@@ -2263,10 +2336,17 @@ fn a_stamped_prefab_brings_its_light_along() {
             .map(|n| n.transform.translation)
             .collect()
     };
-    assert!(lights_of(&workspace).is_empty(), "no lights before stamping");
+    assert!(
+        lights_of(&workspace).is_empty(),
+        "no lights before stamping"
+    );
 
     workspace.stamp_prefab(&path);
-    assert!(workspace.floating_geometry.is_some(), "{}", workspace.status);
+    assert!(
+        workspace.floating_geometry.is_some(),
+        "{}",
+        workspace.status
+    );
     assert!(workspace.update_floating_geometry_origin([2, 2]));
     assert!(workspace.commit_floating_geometry());
 

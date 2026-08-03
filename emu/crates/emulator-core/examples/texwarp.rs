@@ -181,8 +181,7 @@ fn neg(v: V3) -> V3 {
 
 /// Determinant of the matrix whose columns are `a`, `b`, `c`.
 fn det3(a: V3, b: V3, c: V3) -> f64 {
-    a.x * (b.y * c.z - b.z * c.y) - b.x * (a.y * c.z - a.z * c.y)
-        + c.x * (a.y * b.z - a.z * b.y)
+    a.x * (b.y * c.z - b.z * c.y) - b.x * (a.y * c.z - a.z * c.y) + c.x * (a.y * b.z - a.z * b.y)
 }
 
 // ----------------------------------------------------------------------
@@ -632,15 +631,9 @@ fn predict(sc: &Scene, ss: &[f64], ts: &[f64], umax: f64) -> f64 {
         for i in 0..ss.len() - 1 {
             let du = (ss[i + 1] - ss[i]) * umax;
             let dv = (ts[j + 1] - ts[j]) * umax;
-            let (za, zb) = (
-                sc.pos(ss[i], ts[j]).z,
-                sc.pos(ss[i + 1], ts[j]).z,
-            );
+            let (za, zb) = (sc.pos(ss[i], ts[j]).z, sc.pos(ss[i + 1], ts[j]).z);
             worst = worst.max(edge_error(du, za, zb));
-            let (zc, zd) = (
-                sc.pos(ss[i], ts[j]).z,
-                sc.pos(ss[i], ts[j + 1]).z,
-            );
+            let (zc, zd) = (sc.pos(ss[i], ts[j]).z, sc.pos(ss[i], ts[j + 1]).z);
             worst = worst.max(edge_error(dv, zc, zd));
         }
     }
@@ -707,13 +700,31 @@ fn tilted2(name: &str, pitch: f64, yaw: f64, dist: f64, size: f64) -> Scene {
 fn scenes() -> Vec<Scene> {
     let mut v = Vec::new();
     for deg in [0.0f64, 20.0, 40.0, 60.0, 75.0, 85.0] {
-        v.push(tilted(&format!("floor{deg:.0}-near"), deg, 700.0, 700.0, false));
+        v.push(tilted(
+            &format!("floor{deg:.0}-near"),
+            deg,
+            700.0,
+            700.0,
+            false,
+        ));
     }
     for deg in [60.0f64, 85.0] {
-        v.push(tilted(&format!("floor{deg:.0}-far"), deg, 1800.0, 700.0, false));
+        v.push(tilted(
+            &format!("floor{deg:.0}-far"),
+            deg,
+            1800.0,
+            700.0,
+            false,
+        ));
     }
     for deg in [60.0f64, 85.0] {
-        v.push(tilted(&format!("wall{deg:.0}-near"), deg, 700.0, 700.0, true));
+        v.push(tilted(
+            &format!("wall{deg:.0}-near"),
+            deg,
+            700.0,
+            700.0,
+            true,
+        ));
     }
     for (pitch, yaw) in [(60.0f64, 40.0f64), (75.0, 55.0), (80.0, 25.0)] {
         v.push(tilted2(
@@ -761,11 +772,7 @@ fn write_uv(path: &std::path::Path, gpu: &Gpu) {
                 buf.extend_from_slice(&[16, 16, 32]);
             } else {
                 let idx = t & 0x0FFF;
-                buf.extend_from_slice(&[
-                    ((idx & 63) * 4) as u8,
-                    ((idx >> 6) * 4) as u8,
-                    64,
-                ]);
+                buf.extend_from_slice(&[((idx & 63) * 4) as u8, ((idx >> 6) * 4) as u8, 64]);
             }
         }
     }
@@ -808,7 +815,16 @@ fn main() {
         println!("\n=== scene {} ===", sc.name);
         println!(
             "{:<14} {:>6} {:>6} {:>9} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9}",
-            "strategy", "prims", "verts", "gpucyc", "mean", "p95", "max", ">1tx", ">4tx", "pred_max"
+            "strategy",
+            "prims",
+            "verts",
+            "gpucyc",
+            "mean",
+            "p95",
+            "max",
+            ">1tx",
+            ">4tx",
+            "pred_max"
         );
         for (si, st) in strats.iter().enumerate() {
             let mut gpu = Gpu::new();
@@ -945,5 +961,8 @@ fn main() {
     let csv_path = outdir.join("results.csv");
     std::fs::write(&csv_path, csv).expect("write csv");
     println!("\ncsv:    {}", csv_path.display());
-    println!("images: {}/{{err,uv}}-*.ppm (scene floor75-near)", outdir.display());
+    println!(
+        "images: {}/{{err,uv}}-*.ppm (scene floor75-near)",
+        outdir.display()
+    );
 }

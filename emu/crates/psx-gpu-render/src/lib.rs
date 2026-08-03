@@ -912,11 +912,11 @@ mod tests {
     /// which would drown out the colour comparison this exists to make.
     fn gouraud_quad(colors: [u32; 4], dither: bool) -> Vec<u32> {
         vec![
-            0xE300_0000,                      // draw area top-left (0,0)
-            0xE400_0000 | 1023 | (511 << 10), // draw area bottom-right
-            0xE500_0000,                      // draw offset (0,0)
+            0xE300_0000,                                  // draw area top-left (0,0)
+            0xE400_0000 | 1023 | (511 << 10),             // draw area bottom-right
+            0xE500_0000,                                  // draw offset (0,0)
             0xE100_0000 | if dither { 0x200 } else { 0 }, // draw mode
-            0x3800_0000 | colors[0],          // Gouraud quad + vertex 0 colour
+            0x3800_0000 | colors[0],                      // Gouraud quad + vertex 0 colour
             pack_xy((8, 8)),
             colors[1],
             pack_xy((40, 8)),
@@ -970,7 +970,7 @@ mod tests {
         // 5-bit boundary, so every channel has dithering to do.
         let cases = [
             (0x00C0_8040u32, true),
-            (0x0008_0808, true), // near black, still straddling a 5-bit step
+            (0x0008_0808, true),  // near black, still straddling a 5-bit step
             (0x00FF_FFFF, false), // white: +3 clamps back to 255
             (0x0000_0000, false), // black: -4 clamps back to 0
         ];
@@ -979,7 +979,10 @@ mod tests {
             let pixels = quad_interior(&cpu_vram, &renderer);
             for (i, (want, got)) in pixels.iter().enumerate() {
                 let (x, y) = at(i);
-                assert_eq!(want, got, "colour {color:#08x}: CPU/HW divergence at ({x}, {y})");
+                assert_eq!(
+                    want, got,
+                    "colour {color:#08x}: CPU/HW divergence at ({x}, {y})"
+                );
             }
             let distinct: std::collections::HashSet<_> = pixels.iter().map(|(w, _)| *w).collect();
             assert_eq!(

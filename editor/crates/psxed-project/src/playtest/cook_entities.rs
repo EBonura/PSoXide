@@ -1241,8 +1241,7 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
             psxed_format::animation::POSE_RECORD_SIZE,
         )
     };
-    let payload_len =
-        psxed_format::animation::AnimationHeader::SIZE + pose_count * record_size;
+    let payload_len = psxed_format::animation::AnimationHeader::SIZE + pose_count * record_size;
     let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
     out.extend_from_slice(&psxed_format::animation::MAGIC);
     out.extend_from_slice(&version.to_le_bytes());
@@ -1270,8 +1269,7 @@ pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> V
                         i += 1;
                     }
                 }
-                let mut block =
-                    [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3];
+                let mut block = [0u8; psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3];
                 psxed_format::animation::encode_rotation_q11(&flat, &mut block);
                 out.extend_from_slice(&block);
             } else {

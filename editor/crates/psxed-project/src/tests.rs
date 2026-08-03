@@ -3482,8 +3482,14 @@ fn legacy_texture_resources_migrate_into_materials_on_load() {
 #[test]
 fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
     let mut source = ProjectDocument::new("prefab-source");
-    let filler = source.add_resource("Filler", ResourceData::Material(MaterialResource::opaque(None)));
-    let stone = source.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    let filler = source.add_resource(
+        "Filler",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let stone = source.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     assert_ne!(filler, stone, "source needs two distinct ids");
 
     let mut sector = GridSector::with_floor(0, Some(stone));
@@ -3492,9 +3498,13 @@ fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
         .walls
         .north
         .push(GridVerticalFace::flat(0, 512, Some(stone)));
-    let room = source
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid: WorldGrid::empty(1, 1, 1024) });
+    let room = source.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Section {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
     // An upper floor that links back down to the base, so the round trip has a
     // floor link and a non-default relative elevation to preserve.
     let mut upper = GridSector::with_floor(1024, Some(stone));
@@ -3525,7 +3535,10 @@ fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
         0,
         &source,
     );
-    assert_eq!(prefab.materials.get(&stone.raw()).map(String::as_str), Some("Stone"));
+    assert_eq!(
+        prefab.materials.get(&stone.raw()).map(String::as_str),
+        Some("Stone")
+    );
 
     let path = std::env::temp_dir().join("psoxide-prefab-round-trip.ron");
     prefab.save_to_path(&path).expect("prefab saves");
@@ -3536,7 +3549,14 @@ fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
     assert_eq!(loaded.floors.len(), 2, "both floors survive");
     assert_eq!(loaded.floors[1].relative_elevation, 1024);
     assert_eq!(
-        loaded.floors[0].cells[0].sector.as_ref().unwrap().floor.as_ref().unwrap().heights,
+        loaded.floors[0].cells[0]
+            .sector
+            .as_ref()
+            .unwrap()
+            .floor
+            .as_ref()
+            .unwrap()
+            .heights,
         [0, 32, 64, 96]
     );
     // The link pointed at floor 0 of the captured piece, so it is stored
@@ -3553,16 +3573,28 @@ fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
     // The destination handed the source's "Stone" id to something else, which
     // is the collision this test exists for: binding by id gives "Dirt".
     let mut destination = ProjectDocument::new("prefab-destination");
-    destination.add_resource("Grass", ResourceData::Material(MaterialResource::opaque(None)));
-    let dirt = destination.add_resource("Dirt", ResourceData::Material(MaterialResource::opaque(None)));
-    let stone_here =
-        destination.add_resource("Stone", ResourceData::Material(MaterialResource::opaque(None)));
+    destination.add_resource(
+        "Grass",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let dirt = destination.add_resource(
+        "Dirt",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let stone_here = destination.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
     assert_eq!(dirt, stone, "the destination reuses the source's Stone id");
     assert_ne!(stone_here, stone);
 
-    let dest_room = destination
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid: WorldGrid::empty(1, 1, 1024) });
+    let dest_room = destination.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Section {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
     let (floors, unbound) = loaded.bound_floors(&destination, dest_room, 0);
     assert_eq!(unbound, 0);
     let sector = floors[0].cells[0].sector.as_ref().unwrap();
@@ -3583,7 +3615,13 @@ fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
     // Stamped onto floor 2 of the destination, the same link has to follow.
     let (floors, _) = loaded.bound_floors(&destination, dest_room, 2);
     assert_eq!(
-        floors[1].cells[0].sector.as_ref().unwrap().floor_below.unwrap().target_floor,
+        floors[1].cells[0]
+            .sector
+            .as_ref()
+            .unwrap()
+            .floor_below
+            .unwrap()
+            .target_floor,
         2,
         "a self-relative link rebases with the stamp"
     );
@@ -3592,9 +3630,19 @@ fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
     // guessing: an unassigned face is visibly wrong, a wrong one is not.
     let bare = ProjectDocument::new("prefab-bare");
     let (floors, unbound) = loaded.bound_floors(&bare, dest_room, 0);
-    assert_eq!(unbound, 3, "two floor faces and the wall all lose their material");
     assert_eq!(
-        floors[0].cells[0].sector.as_ref().unwrap().floor.as_ref().unwrap().material,
+        unbound, 3,
+        "two floor faces and the wall all lose their material"
+    );
+    assert_eq!(
+        floors[0].cells[0]
+            .sector
+            .as_ref()
+            .unwrap()
+            .floor
+            .as_ref()
+            .unwrap()
+            .material,
         None
     );
 }
@@ -3614,7 +3662,10 @@ fn section_nodes_load_under_every_historical_name() {
         },
     );
     let current = doc.to_ron_string().expect("serialises");
-    assert!(current.contains("Section("), "the current name is what gets written");
+    assert!(
+        current.contains("Section("),
+        "the current name is what gets written"
+    );
 
     // Rewrite the variant name to forge a file from each earlier era. Going
     // through the real serialiser keeps the rest of the schema honest, which
@@ -3634,7 +3685,10 @@ fn section_nodes_load_under_every_historical_name() {
 
         // The alias is a migration path, not a permanent second spelling.
         let resaved = loaded.to_ron_string().expect("re-serialises");
-        assert!(resaved.contains("Section("), "{legacy} re-saves under the new name");
+        assert!(
+            resaved.contains("Section("),
+            "{legacy} re-saves under the new name"
+        );
         assert!(
             !resaved.contains(&format!("{legacy}(grid")),
             "{legacy} does not survive the round trip"
@@ -3667,8 +3721,10 @@ fn two_sections_with_a_paired_portal_cook_into_connected_runtime_rooms() {
         .map(|n| n.id)
         .collect();
     for id in &existing {
-        if let Some(NodeKind::Section { grid }) =
-            project.active_scene_mut().node_mut(*id).map(|n| &mut n.kind)
+        if let Some(NodeKind::Section { grid }) = project
+            .active_scene_mut()
+            .node_mut(*id)
+            .map(|n| &mut n.kind)
         {
             for sector in grid.sectors.iter_mut() {
                 *sector = None;
@@ -3682,12 +3738,14 @@ fn two_sections_with_a_paired_portal_cook_into_connected_runtime_rooms() {
     west.origin = [0, 0];
     let mut east = WorldGrid::stone_room(2, 2, 1024, Some(material), Some(material));
     east.origin = [2, 0];
-    let west_id = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
-    let east_id = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
+    let west_id =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
+    let east_id =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
 
     // A reciprocal portal pair on the shared edge.
     let mut portal = |room: NodeId, target: NodeId, at: [f32; 3]| {
@@ -3799,8 +3857,10 @@ fn adjacent_sections_with_facing_openings_connect_without_an_authored_portal() {
             .map(|n| n.id)
             .collect();
         for id in &existing {
-            if let Some(NodeKind::Section { grid }) =
-                project.active_scene_mut().node_mut(*id).map(|n| &mut n.kind)
+            if let Some(NodeKind::Section { grid }) = project
+                .active_scene_mut()
+                .node_mut(*id)
+                .map(|n| &mut n.kind)
             {
                 for sector in grid.sectors.iter_mut() {
                     *sector = None;
@@ -3822,9 +3882,11 @@ fn adjacent_sections_with_facing_openings_connect_without_an_authored_portal() {
             west.add_wall(1, 0, GridDirection::East, 0, 2048, Some(material));
         }
 
-        let west_id = project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
+        let west_id = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "West",
+            NodeKind::Section { grid: west },
+        );
         project
             .active_scene_mut()
             .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
@@ -3901,8 +3963,10 @@ fn an_authored_cross_section_portal_suppresses_the_automatic_one() {
         .map(|n| n.id)
         .collect();
     for id in &existing {
-        if let Some(NodeKind::Section { grid }) =
-            project.active_scene_mut().node_mut(*id).map(|n| &mut n.kind)
+        if let Some(NodeKind::Section { grid }) = project
+            .active_scene_mut()
+            .node_mut(*id)
+            .map(|n| &mut n.kind)
         {
             for sector in grid.sectors.iter_mut() {
                 *sector = None;
@@ -3919,12 +3983,14 @@ fn an_authored_cross_section_portal_suppresses_the_automatic_one() {
         west.set_floor(x, 0, 0, Some(material));
         east.set_floor(x, 0, 0, Some(material));
     }
-    let west_id = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
-    let east_id = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
+    let west_id =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
+    let east_id =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
 
     // And an author wired the same seam by hand.
     for (room, target, at) in [

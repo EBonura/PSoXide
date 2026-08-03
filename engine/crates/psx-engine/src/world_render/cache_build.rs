@@ -314,12 +314,9 @@ pub fn cache_room_vertex_lit_surfaces(
                                 split,
                                 triangle_index,
                             )
-                            .with_wall_faces_owner(wall_faces_owning_cell(
-                                room,
-                                sx,
-                                sz,
-                                wall.direction(),
-                            )),
+                            .with_wall_faces_owner(
+                                wall_faces_owning_cell(room, sx, sz, wall.direction()),
+                            ),
                         ) {
                             return CachedRoomSurfaceCacheStats {
                                 cell_count,
