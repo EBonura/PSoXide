@@ -3232,6 +3232,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "psoxide-link"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "psoxide-settings"
 version = "0.1.0"
 dependencies = [
