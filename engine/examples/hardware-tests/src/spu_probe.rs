@@ -81,7 +81,6 @@ const TONE_SEGMENTS: usize = 15;
 const TONE_FIELDS: usize = 4;
 const TONE_FRAMES: u16 = 90;
 const GAP_FRAMES: u16 = 30;
-const SEGMENT_FRAMES: u16 = TONE_FRAMES + GAP_FRAMES;
 /// HOLD runs long enough for slow loop degradation to show.
 const HOLD_TONE_FRAMES: u16 = 300;
 const EARLY_FRAME: u16 = 8;
@@ -125,14 +124,23 @@ const PITCH_LADDER: [u16; 7] = [0x0400, 0x0800, 0x1000, 0x2000, 0x3000, 0x3FFF, 
 // ---- Payload ------------------------------------------------------------
 
 const WORDS: usize = RAM_STAGES * RAM_FIELDS + TONE_SEGMENTS * TONE_FIELDS;
-const QR_VERSION: Version = Version::new(17);
-const QR_SIZE: usize = 85;
+const QR_VERSION_NUM: u8 = 19;
+const QR_VERSION: Version = Version::new(QR_VERSION_NUM);
+const QR_SIZE: usize = 4 * QR_VERSION_NUM as usize + 17;
 const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
 const QR_SCALE: i16 = 2;
 const QR_QUIET: i16 = 4;
 const BINARY_LEN: usize = 20 + WORDS * 4 + 4;
 const BASE64_LEN: usize = BINARY_LEN.div_ceil(3) * 4;
 const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
+
+/// Byte-mode capacity at ECC Medium for `QR_VERSION_NUM`, from the ISO table.
+/// Version 17 holds 504 and v0.12 shipped a 519-byte payload, so `encode_text`
+/// failed and the screen drew QR ENCODE FAILED. Adding a segment must break the
+/// build, not the burn.
+const QR_BYTE_CAPACITY: usize = 624;
+const _: () = assert!(QR_TEXT_MAX <= QR_BYTE_CAPACITY, "SB2 QR payload too big");
+const _: () = assert!((QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE <= 240, "SB2 QR too tall");
 
 pub(crate) struct SpuProbe {
     /// 0..RAM_STAGES = pass 1, then pass 2 segments, then done.
