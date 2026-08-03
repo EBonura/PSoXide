@@ -198,13 +198,42 @@ pub fn init() {
     write_reg16(TRANSFER_CTRL, 0x0004); // normal mode
 }
 
+/// Spin budget for one SPU handshake. Generous next to the delay the
+/// hardware actually takes, short enough that a wedged SPU hands control
+/// back rather than freezing the frame.
+const SPU_HANDSHAKE_SPINS: u32 = 100_000;
+
 /// Poll SPUSTAT's "SPU mode" field (low 6 bits) until it matches
-/// `want & 0x3F`. Hardware needs ~1 audio frame to reflect SPUCNT
-/// changes; without a poll, fast code can miss the state.
+/// `want & 0x3F`.
+///
+/// This is not optional politeness. Per PSX-SPX, SPUCNT bits 0-5 are NOT
+/// applied immediately: after writing SPUCNT you must wait until the low
+/// bits of SPUSTAT reflect the new mode. Code that writes the transfer
+/// mode and starts moving data on the next instruction is talking to an
+/// SPU that has not entered that mode yet.
+///
+/// Bounded, unlike the first version of this: an unbounded spin on a
+/// register the hardware may never update is a hung console.
 fn wait_spu_status(want: u16) {
     let mask = 0x3F;
-    while (read_reg16(SPUSTAT) & mask) != (want & mask) {
-        core::hint::spin_loop();
+    for _ in 0..SPU_HANDSHAKE_SPINS {
+        if (read_reg16(SPUSTAT) & mask) == (want & mask) {
+            return;
+        }
+    }
+}
+
+/// Wait for SPUSTAT bit 10, the data-transfer busy flag, to clear.
+///
+/// The DMA channel reporting "done" only means the CPU side finished
+/// handing bytes over; the SPU is still draining its own FIFO into sound
+/// RAM. Changing the transfer mode before this clears cuts the tail of
+/// the upload off.
+fn wait_transfer_idle() {
+    for _ in 0..SPU_HANDSHAKE_SPINS {
+        if read_reg16(SPUSTAT) & 0x0400 == 0 {
+            return;
+        }
     }
 }
 
@@ -691,13 +720,23 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
         return false; // larger than one block-sync transfer can describe
     }
 
-    // Stop any in-flight transfer; set transfer type (normal) + target address.
+    // Stop any in-flight transfer, and WAIT for the SPU to really be
+    // stopped before touching anything else. Going through Stop is what
+    // makes the wait below meaningful: SPUSTAT only tells us the mode
+    // changed if it actually changed.
     let spucnt = read_reg16(SPUCNT) & !0x0030;
     write_reg16(SPUCNT, spucnt);
+    wait_spu_status(spucnt);
     write_reg16(TRANSFER_CTRL, 0x0004);
     write_reg16(TRANSFER_ADDR, dest.reg_field());
-    // SPUCNT transfer mode = DMA Write (bits 5..4 = 10).
+    // SPUCNT transfer mode = DMA Write (bits 5..4 = 10), then wait for
+    // the SPU to enter it. Without this the DMA can deliver the whole
+    // payload to an SPU still in Stop mode -- and the smaller the
+    // payload, the more of it is lost, which is exactly the size
+    // dependence the console showed: kilobyte banks mostly arrived while
+    // a 32-byte table arrived not at all.
     write_reg16(SPUCNT, spucnt | 0x0020);
+    wait_spu_status(spucnt | 0x0020);
 
     // Channel 4: main RAM -> SPU, block-sync, forward, start; block until done.
     dma::enable_channel(Channel::Spu);
@@ -710,6 +749,9 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
     if !dma::wait_done(Channel::Spu, dma::DEFAULT_DMA_SPINS) {
         dma::abort(Channel::Spu);
     }
+    // The channel is done handing bytes over; the SPU is still writing
+    // them into sound RAM.
+    wait_transfer_idle();
 
     // Return to Stop transfer-mode.
     write_reg16(SPUCNT, spucnt);
@@ -721,11 +763,15 @@ fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
 /// original path was missing (it only poked TRANSFER_CTRL), which silently
 /// no-op'd the upload on hardware and on FIFO-accurate emulators.
 fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
-    write_reg16(TRANSFER_CTRL, 0x0000);
-    write_reg16(TRANSFER_ADDR, dest.reg_field());
-    write_reg16(TRANSFER_CTRL, 0x0004);
     let spucnt = read_reg16(SPUCNT) & !0x0030;
+    write_reg16(SPUCNT, spucnt);
+    wait_spu_status(spucnt);
+    write_reg16(TRANSFER_CTRL, 0x0004);
+    write_reg16(TRANSFER_ADDR, dest.reg_field());
+    // Manual Write (bits 5..4 = 01), and wait for the SPU to be in it
+    // before pushing a single halfword. Same reason as the DMA path.
     write_reg16(SPUCNT, spucnt | 0x0010);
+    wait_spu_status(spucnt | 0x0010);
 
     let mut i = 0;
     while i + 1 < bytes.len() {
@@ -735,6 +781,7 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
         i += 2;
     }
 
+    wait_transfer_idle();
     write_reg16(SPUCNT, spucnt);
     // Leave the transfer type NORMAL, not 0. PSX-SPX is explicit that
     // 1F801DACh "should be 0004h"; parking it at 0 selects another
