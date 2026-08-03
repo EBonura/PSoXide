@@ -781,7 +781,8 @@ mod tests {
         std::fs::write(dir.join("chunk_1000.psxm"), [0xA5, 0x5A]).unwrap();
         std::fs::write(dir.join("ignored.psxm"), [0]).unwrap();
 
-        let pack = build_world_pack_from_inputs(None, &[dir.clone()], None, false).unwrap();
+        let pack =
+            build_world_pack_from_inputs(None, std::slice::from_ref(&dir), None, false).unwrap();
         assert_eq!(&pack[..8], b"PSOXWPAK");
         assert_eq!(u32::from_le_bytes(pack[12..16].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(pack[28..32].try_into().unwrap()), 1000);
