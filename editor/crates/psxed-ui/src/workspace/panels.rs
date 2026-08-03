@@ -2539,7 +2539,7 @@ impl EditorWorkspace {
             .active_scene()
             .node(face.room)
             .and_then(|node| match &node.kind {
-                NodeKind::Room { grid } => Some(grid),
+                NodeKind::Section { grid } => Some(grid),
                 _ => None,
             })
             .and_then(|grid| grid.sector(face.sx, face.sz))

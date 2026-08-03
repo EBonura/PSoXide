@@ -168,7 +168,7 @@ pub(crate) fn draw_room_floor_link_rows(
 pub(crate) fn collect_room_floor_link_rows(scene: &psxed_project::Scene) -> Vec<RoomFloorLinkRow> {
     let mut rows = Vec::new();
     for node in scene.nodes() {
-        let NodeKind::Room { grid } = &node.kind else {
+        let NodeKind::Section { grid } = &node.kind else {
             continue;
         };
         for x in 0..grid.width {
@@ -890,7 +890,7 @@ pub(crate) fn room_display_name(scene: &psxed_project::Scene, room: NodeId) -> S
     scene
         .node(room)
         .map(|node| node.name.clone())
-        .unwrap_or_else(|| format!("Room #{}", room.raw()))
+        .unwrap_or_else(|| format!("Section #{}", room.raw()))
 }
 
 pub(crate) fn portal_display_name(scene: &psxed_project::Scene, portal: NodeId) -> String {
@@ -1463,8 +1463,8 @@ pub(crate) fn scene_tree_kind_label(kind: &'static str) -> &'static str {
 pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 3] {
     [
         (
-            "Room",
-            NodeKind::Room {
+            "Section",
+            NodeKind::Section {
                 grid: WorldGrid::empty(3, 3, 1024),
             },
         ),

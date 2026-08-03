@@ -205,7 +205,7 @@ pub fn build_package(
     let mut room_nodes: Vec<&SceneNode> = scene
         .nodes()
         .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
         .collect();
     room_nodes.sort_by_key(|node| node.id.raw());
 
@@ -257,12 +257,12 @@ pub fn build_package(
     let room_near_rooms: Vec<u16> = Vec::new();
 
     for room_node in &room_nodes {
-        let NodeKind::Room { grid: base_grid } = &room_node.kind else {
+        let NodeKind::Section { grid: base_grid } = &room_node.kind else {
             continue;
         };
         if base_grid.populated_sector_count() == 0 {
             report.warn(format!(
-                "Room '{}' has no geometry - skipped",
+                "Section '{}' has no geometry - skipped",
                 room_node.name
             ));
             continue;
@@ -296,7 +296,7 @@ pub fn build_package(
             let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
             if plan.over_budget_count() > 0 {
                 report.warn(format!(
-                    "Room '{}' produced {} manual portal room(s) still over budget",
+                    "Section '{}' produced {} runtime room(s) still over budget",
                     room_node.name,
                     plan.over_budget_count()
                 ));
@@ -384,7 +384,7 @@ pub fn build_package(
                         .unwrap_or_else(|| format!("material #{}", cooked_material.source.raw()));
                     let Some(material_resource) = material_resource else {
                         report.error(format!(
-                            "Room '{}' material slot {} references missing resource #{}",
+                            "Section '{}' material slot {} references missing resource #{}",
                             room_node.name,
                             cooked_material.slot,
                             cooked_material.source.raw(),
@@ -396,7 +396,7 @@ pub fn build_package(
                             Ok(Some(source)) => source,
                             Ok(None) => {
                                 report.error(format!(
-                                    "Room '{}' material slot {} has no texture (resource #{})",
+                                    "Section '{}' material slot {} has no texture (resource #{})",
                                     room_node.name,
                                     cooked_material.slot,
                                     cooked_material.source.raw(),
@@ -405,7 +405,7 @@ pub fn build_package(
                             }
                             Err(msg) => {
                                 report.error(format!(
-                                    "Room '{}' material slot {}: {}",
+                                    "Section '{}' material slot {}: {}",
                                     room_node.name, cooked_material.slot, msg,
                                 ));
                                 return (None, report);
@@ -425,7 +425,7 @@ pub fn build_package(
                             // here beats wrong-colour rendering at runtime.
                             if let Err(msg) = expect_room_material_depth(&material_label, &bytes) {
                                 report.error(format!(
-                                    "Room '{}' material slot {}: {}",
+                                    "Section '{}' material slot {}: {}",
                                     room_node.name, cooked_material.slot, msg,
                                 ));
                                 return (None, report);
@@ -791,7 +791,7 @@ pub fn build_package(
             ));
             continue;
         };
-        let NodeKind::Room { grid: base_grid } = &room_node.kind else {
+        let NodeKind::Section { grid: base_grid } = &room_node.kind else {
             continue;
         };
         let floor_index = node.floor.min(base_grid.floor_count().saturating_sub(1));
@@ -900,7 +900,7 @@ pub fn build_package(
     water_cells.sort_by_key(|cell| (cell.room, cell.x, cell.z));
 
     for node in scene.nodes() {
-        if node.id == scene.root || matches!(node.kind, NodeKind::Room { .. }) {
+        if node.id == scene.root || matches!(node.kind, NodeKind::Section { .. }) {
             continue;
         }
         if node.kind.is_component() {
@@ -919,7 +919,7 @@ pub fn build_package(
             }
             continue;
         };
-        let NodeKind::Room { grid } = &room_node.kind else {
+        let NodeKind::Section { grid } = &room_node.kind else {
             continue;
         };
         let Some(chunk) = room_chunks_by_node
@@ -1542,7 +1542,7 @@ pub fn build_package(
             NodeKind::Node
             | NodeKind::Node3D
             | NodeKind::World { .. }
-            | NodeKind::Room { .. }
+            | NodeKind::Section { .. }
             | NodeKind::WaterVolume { .. }
             | NodeKind::ModelRenderer { .. }
             | NodeKind::Animator { .. }
@@ -1896,6 +1896,48 @@ pub fn build_package(
     room_floor_links.extend(auto_wire_floor_stack_links(&room_chunks_by_node));
     room_portals.extend(auto_wire_floor_stack_portals(scene, &room_chunks_by_node));
     room_portals.extend(auto_wire_floor_terrace_portals(scene, &room_chunks_by_node));
+    // Portals that join two Sections. Until this, every Section cooked as its
+    // own island and a level built from more than one of them was disconnected
+    // at runtime no matter how the editor drew it.
+    let (cross_section, cross_issues) = cross_section_portals(scene, &room_chunks_by_node);
+    // Remember which shared edges an author wired by hand, so the automatic
+    // adjacency pass below never second-guesses them.
+    let mut wired_edges: std::collections::HashSet<(i32, i32, char)> =
+        std::collections::HashSet::new();
+    for portal in &cross_section {
+        let v = portal.vertices[0];
+        let axis = if portal.normal[0] != 0 { 'X' } else { 'Z' };
+        wired_edges.insert((v[0], v[2], axis));
+    }
+    let cross_count = cross_section.len();
+    room_portals.extend(cross_section);
+    // Sections placed edge to edge with facing openings connect on their own.
+    room_portals.extend(auto_adjacent_section_portals(
+        scene,
+        &room_chunks_by_node,
+        &wired_edges,
+    ));
+    for issue in cross_issues {
+        let portal_name = scene
+            .node(issue.portal)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| format!("#{}", issue.portal.raw()));
+        let section_name = scene
+            .node(issue.room)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| format!("#{}", issue.room.raw()));
+        let message = format!(
+            "Portal '{portal_name}' in Section '{section_name}' is {} - it connects nothing at runtime",
+            issue.status.label()
+        );
+        // An unassigned portal is work in progress; a broken pairing is a door
+        // the player can see and never use, so that one fails the build.
+        match issue.status {
+            crate::room_connections::RoomConnectionStatus::Unassigned => report.warn(message),
+            _ => report.error(message),
+        }
+    }
+    let _ = cross_count;
     let room_overlapped_rooms = assign_floor_stack_overlaps(&mut rooms, &room_chunks_by_node);
     // The runtime visibility BFS reads each room's portals as the
     // contiguous slice [portal_first, portal_first+portal_count). The
@@ -2054,7 +2096,7 @@ pub fn build_debug_topology(project: &ProjectDocument) -> PlaytestDebugTopology 
     let mut room_nodes: Vec<&SceneNode> = scene
         .nodes()
         .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
         .collect();
     room_nodes.sort_by_key(|node| node.id.raw());
 
@@ -2063,7 +2105,7 @@ pub fn build_debug_topology(project: &ProjectDocument) -> PlaytestDebugTopology 
     let mut chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
     let mut runtime_room_count = 0usize;
     for room_node in room_nodes {
-        let NodeKind::Room { grid: base_grid } = &room_node.kind else {
+        let NodeKind::Section { grid: base_grid } = &room_node.kind else {
             continue;
         };
         if base_grid.populated_sector_count() == 0 {

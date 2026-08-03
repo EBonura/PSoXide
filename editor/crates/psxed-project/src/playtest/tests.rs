@@ -39,7 +39,7 @@ fn tile_arch_cooks_surfaces_materials_and_segmented_collision() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("starter has a room");
     let material = project
@@ -95,7 +95,7 @@ fn diag_project_cook() {
     // Authored side: room node, its floors, the player entity Y.
     let scene = project.active_scene();
     for node in scene.nodes() {
-        if let NodeKind::Room { grid } = &node.kind {
+        if let NodeKind::Section { grid } = &node.kind {
             println!(
                 "ROOM node id={} name={:?} sector_size={} base_elev={} floors={}",
                 node.id.raw(),
@@ -134,7 +134,7 @@ fn diag_project_cook() {
             // Physics check: where is the player relative to each
             // floor's surface at its cell?
             if let Some(room) = enclosing_room(scene, node) {
-                if let NodeKind::Room { grid } = &room.kind {
+                if let NodeKind::Section { grid } = &room.kind {
                     let s = grid.sector_size;
                     let node_y_eng = (node.transform.translation[1] * s as f32) as i32;
                     let local = grid.editor_to_room_local([
@@ -245,9 +245,9 @@ fn project_with_one_room() -> ProjectDocument {
         let room = scene
             .nodes()
             .iter()
-            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .find(|node| matches!(node.kind, NodeKind::Section { .. }))
             .expect("starter must contain a Room");
-        let NodeKind::Room { grid } = &room.kind else {
+        let NodeKind::Section { grid } = &room.kind else {
             unreachable!();
         };
         let player = scene
@@ -308,7 +308,7 @@ fn project_with_one_room() -> ProjectDocument {
         world.name = "World".to_string();
         world.kind = world_kind;
     }
-    let room_id = scene.add_node(world_id, "Room", NodeKind::Room { grid });
+    let room_id = scene.add_node(world_id, "Room", NodeKind::Section { grid });
     if let Some((name, kind)) = light_template {
         let light_id = scene.add_node(room_id, name, kind);
         if let Some(light) = scene.node_mut(light_id) {
@@ -332,7 +332,7 @@ fn project_with_one_room() -> ProjectDocument {
     let has_room = scene
         .nodes()
         .iter()
-        .any(|n| matches!(n.kind, NodeKind::Room { .. }));
+        .any(|n| matches!(n.kind, NodeKind::Section { .. }));
     let has_player_spawn = scene.nodes().iter().any(|n| is_player_spawn_node(scene, n));
     assert!(has_room, "starter must contain a Room");
     assert!(
@@ -476,7 +476,7 @@ fn insert_preview_light(project: &mut ProjectDocument) -> NodeId {
         .nodes()
         .iter()
         .find_map(|n| match &n.kind {
-            NodeKind::Room { grid } => {
+            NodeKind::Section { grid } => {
                 let e =
                     grid.world_cells_to_editor([grid.width as f32 / 2.0, grid.depth as f32 / 2.0]);
                 Some((n.id, [e[0], 1.5, e[1]]))
@@ -549,7 +549,7 @@ fn set_first_model_instance_clip(project: &mut ProjectDocument, clip_index: u16)
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("starter has Room");
     scene.add_node(

@@ -78,7 +78,7 @@ fn room_material_blend_mode_survives_package_cook() {
         .nodes()
         .iter()
         .find_map(|node| {
-            let NodeKind::Room { grid } = &node.kind else {
+            let NodeKind::Section { grid } = &node.kind else {
                 return None;
             };
             grid.sectors
@@ -111,7 +111,7 @@ fn transition_material_survives_the_complete_room_package_cook() {
         .nodes()
         .iter()
         .find_map(|node| {
-            let NodeKind::Room { grid } = &node.kind else {
+            let NodeKind::Section { grid } = &node.kind else {
                 return None;
             };
             grid.sectors
@@ -214,7 +214,7 @@ fn project_with_multiple_player_spawns_fails_validation() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("starter has a room");
     scene.add_node(
@@ -396,11 +396,11 @@ fn texture_shared_across_materials_emits_single_asset() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("starter has a room");
     if let Some(node) = scene.node_mut(room_id) {
-        if let NodeKind::Room { grid } = &mut node.kind {
+        if let NodeKind::Section { grid } = &mut node.kind {
             // The minimal starter is a single floor tile with
             // no walls. Grow to a 2x1 grid and add a north wall
             // on the new cell so the test has a wall material

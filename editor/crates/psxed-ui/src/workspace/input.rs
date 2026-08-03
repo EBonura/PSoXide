@@ -32,12 +32,12 @@ impl EditorWorkspace {
         let mut room_nodes: Vec<_> = scene
             .nodes()
             .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
             .collect();
         room_nodes.sort_by_key(|node| node.id.raw());
 
         for room_node in room_nodes {
-            let NodeKind::Room { grid } = &room_node.kind else {
+            let NodeKind::Section { grid } = &room_node.kind else {
                 continue;
             };
             if grid.populated_sector_count() == 0 {
@@ -400,7 +400,7 @@ impl EditorWorkspace {
         let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
         let scene = self.project.active_scene();
         let room = scene.nodes().iter().find(|node| {
-            matches!(node.kind, NodeKind::Room { .. })
+            matches!(node.kind, NodeKind::Section { .. })
                 && !self.scene_node_effectively_hidden(node.id)
         })?;
         let room_id = room.id;
@@ -523,7 +523,7 @@ impl EditorWorkspace {
     pub(crate) fn pick_3d_world(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<[f32; 2]> {
         let scene = self.project.active_scene();
         let room = scene.nodes().iter().find(|node| {
-            matches!(node.kind, NodeKind::Room { .. })
+            matches!(node.kind, NodeKind::Section { .. })
                 && !self.scene_node_effectively_hidden(node.id)
         })?;
         self.pick_3d_world_on_room_plane(rect, pointer, room.id, 0.0)
@@ -674,6 +674,15 @@ impl EditorWorkspace {
                     self.flip_floating_geometry_z();
                 } else {
                     self.flip_floating_geometry_x();
+                }
+            }
+            if self.floating_geometry.is_some() {
+                // Heights are absolute, so a piece authored at ground level
+                // has to be liftable onto a terrace before it is placed.
+                let raise = ctx.input_mut(|i| i.key_pressed(egui::Key::PageUp));
+                let lower = ctx.input_mut(|i| i.key_pressed(egui::Key::PageDown));
+                if raise != lower {
+                    self.nudge_floating_geometry_elevation(if raise { 1 } else { -1 });
                 }
             }
             let escape = ctx.input_mut(|i| i.key_pressed(egui::Key::Escape));
@@ -1698,6 +1707,7 @@ impl EditorWorkspace {
                 self.remove_duplicate_walls();
                 ui.close_menu();
             }
+            ui.menu_button("Prefabs", |ui| self.draw_prefab_menu(ui));
             ui.separator();
             if ui.button("Build Project").clicked() {
                 self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);

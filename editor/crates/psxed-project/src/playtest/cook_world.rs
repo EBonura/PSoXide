@@ -274,7 +274,7 @@ pub(crate) fn auto_wire_floor_stack_portals(
         if max_floor == 0 {
             continue;
         }
-        let Some(NodeKind::Room { grid }) = scene.node(*node_id).map(|n| &n.kind) else {
+        let Some(NodeKind::Section { grid }) = scene.node(*node_id).map(|n| &n.kind) else {
             continue;
         };
         let s = grid.sector_size;
@@ -460,7 +460,7 @@ pub(crate) fn auto_wire_floor_terrace_portals(
         let Some(room_node) = scene.node(*node_id) else {
             continue;
         };
-        let NodeKind::Room { grid } = &room_node.kind else {
+        let NodeKind::Section { grid } = &room_node.kind else {
             continue;
         };
         let s = grid.sector_size;
@@ -802,7 +802,7 @@ pub(crate) fn enclosing_room<'a>(
     let mut current = node.parent;
     while let Some(parent_id) = current {
         let parent = scene.node(parent_id)?;
-        if matches!(parent.kind, NodeKind::Room { .. }) {
+        if matches!(parent.kind, NodeKind::Section { .. }) {
             return Some(parent);
         }
         current = parent.parent;
@@ -945,5 +945,318 @@ pub(crate) fn angle_from_degrees(degrees: f32) -> i16 {
 }
 
 pub(crate) fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
-    format!("Room '{name}' failed cook: {err}")
+    format!("Section '{name}' failed cook: {err}")
+}
+
+/// Wire authored portals that join two different Sections.
+///
+/// The intra-section planner deliberately only cuts seams inside one grid
+/// (`portal_rooms.rs` filters markers to descendants of the section node), so
+/// before this every Section cooked as its own island: no shared portal, no PVS
+/// relationship, no traversal edge. `room_connections.rs` derived the
+/// `Section A <-> Section B` view years ahead of anything consuming it; this is
+/// where that view finally reaches the runtime.
+///
+/// Sections share one world-cell space through `WorldGrid::origin` (a Section's
+/// own X/Z transform never moves its geometry), so a cross-section portal is
+/// expressed in exactly the same coordinates as an intra-section one and needs
+/// no rebasing.
+///
+/// Returns the portal pairs plus diagnostics for connections that cannot be
+/// wired, so the caller can fail the cook rather than ship a door to nowhere.
+pub(crate) fn cross_section_portals(
+    scene: &crate::Scene,
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> (Vec<PlaytestRoomPortal>, Vec<CrossSectionIssue>) {
+    let mut out = Vec::new();
+    let mut issues = Vec::new();
+
+    for connection in crate::room_connections::derive_room_connections(scene) {
+        let a = &connection.a;
+        let Some(b) = connection.b.as_ref() else {
+            // Unassigned / missing target: the editor panel already flags these;
+            // the cook now refuses them rather than silently dropping the link.
+            issues.push(CrossSectionIssue {
+                portal: a.portal,
+                room: a.room,
+                status: connection.status,
+            });
+            continue;
+        };
+        if a.room == b.room {
+            // Same section: the intra-section planner already cut this seam.
+            continue;
+        }
+        if connection.status.needs_repair() {
+            issues.push(CrossSectionIssue {
+                portal: a.portal,
+                room: a.room,
+                status: connection.status,
+            });
+            continue;
+        }
+
+        let (Some(source), Some(destination)) = (
+            portal_runtime_room(scene, chunks_by_node, a),
+            portal_runtime_room(scene, chunks_by_node, b),
+        ) else {
+            issues.push(CrossSectionIssue {
+                portal: a.portal,
+                room: a.room,
+                status: connection.status,
+            });
+            continue;
+        };
+        let Some((quad, normal)) = cross_section_quad(scene, a) else {
+            issues.push(CrossSectionIssue {
+                portal: a.portal,
+                room: a.room,
+                status: connection.status,
+            });
+            continue;
+        };
+
+        out.push(PlaytestRoomPortal {
+            source_room: source,
+            destination_room: destination,
+            kind: 0,
+            normal,
+            vertices: quad,
+        });
+        // The reciprocal record, so visibility and traversal work both ways.
+        out.push(PlaytestRoomPortal {
+            source_room: destination,
+            destination_room: source,
+            kind: 0,
+            normal: [-normal[0], -normal[1], -normal[2]],
+            vertices: quad,
+        });
+    }
+
+    (out, issues)
+}
+
+/// A cross-section connection the cook could not wire.
+pub(crate) struct CrossSectionIssue {
+    pub portal: NodeId,
+    pub room: NodeId,
+    pub status: crate::room_connections::RoomConnectionStatus,
+}
+
+/// Runtime room index for the chunk holding this portal endpoint's cell.
+fn portal_runtime_room(
+    scene: &crate::Scene,
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+    endpoint: &crate::room_connections::RoomConnectionEndpoint,
+) -> Option<u16> {
+    let Some(NodeKind::Section { grid }) = scene.node(endpoint.room).map(|n| &n.kind) else {
+        return None;
+    };
+    let edge = endpoint.edge?;
+    let world_cell = [
+        grid.origin[0].saturating_add(i32::from(edge.x)),
+        grid.origin[1].saturating_add(i32::from(edge.z)),
+    ];
+    chunks_by_node
+        .get(&endpoint.room)?
+        .iter()
+        .find(|chunk| chunk_contains_world_cell(chunk, world_cell))
+        .map(|chunk| chunk.room_index)
+}
+
+/// The portal rectangle in shared world units, plus its source-facing normal.
+fn cross_section_quad(
+    scene: &crate::Scene,
+    endpoint: &crate::room_connections::RoomConnectionEndpoint,
+) -> Option<([[i32; 3]; 4], [i16; 3])> {
+    let Some(NodeKind::Section { grid }) = scene.node(endpoint.room).map(|n| &n.kind) else {
+        return None;
+    };
+    let edge = endpoint.edge?;
+    let s = grid.sector_size;
+    if s <= 0 {
+        return None;
+    }
+    let base_y = scene
+        .node(endpoint.room)
+        .map(|node| (f64::from(node.transform.translation[1]) * f64::from(s)) as i32)
+        .unwrap_or(0);
+    let top = base_y.saturating_add(s.saturating_mul(2));
+
+    let x = grid.origin[0].saturating_add(i32::from(edge.x));
+    let z = grid.origin[1].saturating_add(i32::from(edge.z));
+    // Canonical edges are north or east only, matching the intra-section planner.
+    let (a, b, normal) = match edge.direction {
+        GridDirection::North => (
+            [x.saturating_mul(s), z.saturating_add(1).saturating_mul(s)],
+            [
+                x.saturating_add(1).saturating_mul(s),
+                z.saturating_add(1).saturating_mul(s),
+            ],
+            [0i16, 0, -1],
+        ),
+        GridDirection::East => (
+            [
+                x.saturating_add(1).saturating_mul(s),
+                z.saturating_add(1).saturating_mul(s),
+            ],
+            [x.saturating_add(1).saturating_mul(s), z.saturating_mul(s)],
+            [-1i16, 0, 0],
+        ),
+        _ => return None,
+    };
+    Some((
+        [
+            [a[0], base_y, a[1]],
+            [b[0], base_y, b[1]],
+            [b[0], top, b[1]],
+            [a[0], top, a[1]],
+        ],
+        normal,
+    ))
+}
+
+/// Emit portals where two different Sections meet on a shared cell edge that
+/// both sides leave open.
+///
+/// This is the socket contract from the prefab kit applied between Sections: a
+/// socket is the absence of a perimeter wall, so two pieces stamped edge to
+/// edge with facing sockets already describe a doorway, and authoring a Portal
+/// marker for every such join is busywork the stamp implied.
+///
+/// It does NOT contradict the planner's rule that it "must not invent chunk
+/// boundaries for size, walls, or streaming". That rule stops the cook slicing
+/// one authored grid behind the author's back. Joining two Sections the author
+/// deliberately placed against each other honours intent rather than inventing
+/// it. Edges already covered by an authored portal are skipped, so hand-wiring
+/// always wins.
+pub(crate) fn auto_adjacent_section_portals(
+    scene: &crate::Scene,
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+    already_wired: &HashSet<(i32, i32, char)>,
+) -> Vec<PlaytestRoomPortal> {
+    // (world x, world z, floor elevation) -> (section, runtime room, floor)
+    let mut occupancy: HashMap<(i32, i32, i32), (NodeId, u16, usize)> = HashMap::new();
+    for (node_id, chunks) in chunks_by_node {
+        let Some(NodeKind::Section { grid: base }) = scene.node(*node_id).map(|n| &n.kind) else {
+            continue;
+        };
+        let base_y = scene
+            .node(*node_id)
+            .map(|n| (f64::from(n.transform.translation[1]) * f64::from(base.sector_size)) as i32)
+            .unwrap_or(0);
+        for chunk in chunks {
+            let Some(floor) = base.floor(chunk.floor_idx) else {
+                continue;
+            };
+            let elevation = base_y
+                .saturating_add(floor.elevation)
+                .saturating_sub(base.elevation);
+            for &cell in &chunk.cells {
+                let wc = chunk_cell_world_cell(chunk, cell);
+                occupancy.insert((wc[0], wc[1], elevation), (*node_id, chunk.room_index, chunk.floor_idx));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut emitted: HashSet<(i32, i32, char)> = HashSet::new();
+    let mut keys: Vec<_> = occupancy.keys().copied().collect();
+    keys.sort_unstable();
+    for key in keys {
+        let (x, z, elevation) = key;
+        let (section, room, floor_idx) = occupancy[&key];
+        // East and north only, so each shared edge is considered once.
+        for (direction, axis, nx, nz) in [
+            (GridDirection::East, 'X', x + 1, z),
+            (GridDirection::North, 'Z', x, z + 1),
+        ] {
+            let Some(&(other_section, other_room, other_floor)) =
+                occupancy.get(&(nx, nz, elevation))
+            else {
+                continue;
+            };
+            if other_section == section {
+                continue; // the intra-section planner owns this edge
+            }
+            if already_wired.contains(&(x, z, axis)) || !emitted.insert((x, z, axis)) {
+                continue;
+            }
+            // Both sides must leave the edge open. One wall is a wall.
+            let back = direction.opposite_cardinal().unwrap_or(direction);
+            if !section_edge_is_open(scene, section, floor_idx, [x, z], direction)
+                || !section_edge_is_open(scene, other_section, other_floor, [nx, nz], back)
+            {
+                continue;
+            }
+            let Some(grid) = section_floor(scene, section, floor_idx) else {
+                continue;
+            };
+            let s = grid.sector_size;
+            if s <= 0 {
+                continue;
+            }
+            let top = elevation.saturating_add(s.saturating_mul(2));
+            let (a, b, normal) = match direction {
+                GridDirection::East => (
+                    [(x + 1).saturating_mul(s), (z + 1).saturating_mul(s)],
+                    [(x + 1).saturating_mul(s), z.saturating_mul(s)],
+                    [-1i16, 0, 0],
+                ),
+                _ => (
+                    [x.saturating_mul(s), (z + 1).saturating_mul(s)],
+                    [(x + 1).saturating_mul(s), (z + 1).saturating_mul(s)],
+                    [0i16, 0, -1],
+                ),
+            };
+            let quad = [
+                [a[0], elevation, a[1]],
+                [b[0], elevation, b[1]],
+                [b[0], top, b[1]],
+                [a[0], top, a[1]],
+            ];
+            out.push(PlaytestRoomPortal {
+                source_room: room,
+                destination_room: other_room,
+                kind: 0,
+                normal,
+                vertices: quad,
+            });
+            out.push(PlaytestRoomPortal {
+                source_room: other_room,
+                destination_room: room,
+                kind: 0,
+                normal: [-normal[0], -normal[1], -normal[2]],
+                vertices: quad,
+            });
+        }
+    }
+    out
+}
+
+fn section_floor<'a>(
+    scene: &'a crate::Scene,
+    section: NodeId,
+    floor_idx: usize,
+) -> Option<&'a WorldGrid> {
+    let Some(NodeKind::Section { grid }) = scene.node(section).map(|n| &n.kind) else {
+        return None;
+    };
+    grid.floor(floor_idx)
+}
+
+/// True when the cell has floor and carries no wall on `direction`.
+fn section_edge_is_open(
+    scene: &crate::Scene,
+    section: NodeId,
+    floor_idx: usize,
+    world_cell: [i32; 2],
+    direction: GridDirection,
+) -> bool {
+    let Some(grid) = section_floor(scene, section, floor_idx) else {
+        return false;
+    };
+    grid.world_cell_to_array(world_cell[0], world_cell[1])
+        .and_then(|(sx, sz)| grid.sector(sx, sz))
+        .is_some_and(|sector| sector.floor.is_some() && sector.walls.get(direction).is_empty())
 }

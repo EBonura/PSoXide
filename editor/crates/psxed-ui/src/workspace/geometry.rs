@@ -397,6 +397,8 @@ impl EditorWorkspace {
                     sector: Some(sector),
                 })
                 .collect(),
+            extra_floors: Vec::new(),
+            lights: Vec::new(),
         };
         Ok((clipboard, populated))
     }
@@ -453,6 +455,8 @@ impl EditorWorkspace {
                     sector,
                 })
                 .collect(),
+            extra_floors: Vec::new(),
+            lights: Vec::new(),
         };
         self.status = if populated == 1 {
             "Copied 1 world cell".to_string()
@@ -466,6 +470,13 @@ impl EditorWorkspace {
         let Some(clipboard) = self.copy_selected_geometry() else {
             return;
         };
+        self.begin_floating_geometry(clipboard, "Duplicating world geometry beside source");
+    }
+
+    /// Enter the floating preview loop with `clipboard`. Shared by Duplicate
+    /// and by stamping a prefab: the two differ only in where the cells came
+    /// from and what the status line calls the operation.
+    fn begin_floating_geometry(&mut self, clipboard: GeometryClipboard, lead: &str) {
         let Some(room) = self.paste_target_room(&clipboard) else {
             self.status = "No room to duplicate into".to_string();
             return;
@@ -486,10 +497,306 @@ impl EditorWorkspace {
             selected_cells: Vec::new(),
             selected_primitives: Vec::new(),
             cells: clipboard.cells,
+            extra_floors: clipboard.extra_floors,
+            lights: clipboard.lights,
+            seam_walls_stripped: 0,
+            elevation_offset: 0,
         });
         self.apply_floating_geometry_preview();
-        self.status = "Duplicating world geometry beside source - move cursor, R rotates, F flips, Shift+F flips vertically, click places, Esc cancels"
-            .to_string();
+        self.status = format!(
+            "{lead} - move cursor, R rotates, F flips, Shift+F flips vertically, PgUp/PgDn \
+             raises and lowers, click places, Esc cancels"
+        );
+    }
+
+    /// Tools > Prefabs. Saving names the piece; stamping picks one off disk
+    /// and hands it to the same preview loop Duplicate uses, so rotate / flip /
+    /// place stay exactly as they are.
+    pub(crate) fn draw_prefab_menu(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut self.prefab_name);
+        });
+        let can_save = self.has_geometry_selection() && !self.prefab_name.trim().is_empty();
+        if ui
+            .add_enabled(can_save, egui::Button::new("Save Selection as Prefab"))
+            .on_disabled_hover_text("Select world geometry and type a name")
+            .clicked()
+        {
+            let name = std::mem::take(&mut self.prefab_name);
+            self.save_selection_as_prefab(&name);
+            ui.close_menu();
+        }
+        if ui
+            .button("Sync Library to Resources")
+            .on_hover_text(
+                "List every prefab in the shared library under res://prefabs so it can be \
+                 browsed and previewed. Resources reference the file, so a piece edited once \
+                 updates everywhere.",
+            )
+            .clicked()
+        {
+            self.sync_prefab_resources();
+            ui.close_menu();
+        }
+        ui.separator();
+        // ponytail: re-read the directory each frame the menu is open. It is a
+        // handful of files and only while the menu is open; cache it if a
+        // prefab library ever gets big enough to notice.
+        let prefabs = psxed_project::list_prefabs().unwrap_or_default();
+        if prefabs.is_empty() {
+            ui.weak("No prefabs saved yet");
+            return;
+        }
+        for path in prefabs {
+            let label = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if ui.button(label).clicked() {
+                self.stamp_prefab(&path);
+                ui.close_menu();
+            }
+        }
+    }
+
+    /// Capture the current geometry selection as a named prefab.
+    pub(crate) fn capture_selection_as_prefab(
+        &mut self,
+        name: &str,
+    ) -> Option<psxed_project::Prefab> {
+        let name = name.trim();
+        if name.is_empty() {
+            self.status = "Name the prefab first".to_string();
+            return None;
+        }
+        let clipboard = self.copy_selected_geometry()?;
+        let room = clipboard.source_room;
+        let sector_size = self
+            .room_grid_view(room)
+            .map_or(DEFAULT_WORLD_SECTOR_SIZE, |grid| grid.sector_size);
+        let base_floor = self.active_floor;
+
+        // The selection is made on one floor, so a multi-floor piece is
+        // captured as that footprint taken through the whole stack above it.
+        // Asking the user to select the same shape floor by floor would be the
+        // clicking this feature exists to remove.
+        let mut floors = vec![psxed_project::PrefabFloor {
+            relative_elevation: 0,
+            cells: clipboard.cells.clone(),
+        }];
+        let (world_cells, base_elevation, floor_count) = {
+            let Some(NodeKind::Section { grid }) = self
+                .project
+                .active_scene()
+                .node(room)
+                .map(|node| &node.kind)
+            else {
+                return None;
+            };
+            let base = grid.floor(base_floor)?;
+            // `source_origin` is already in world cells, and each cell offset
+            // is measured from it, so the world address is just their sum.
+            // Floors are free grids with their own `origin`, so world cells are
+            // the only address that means the same thing on all of them.
+            let world_cells: Vec<[i32; 2]> = clipboard
+                .cells
+                .iter()
+                .map(|cell| {
+                    [
+                        clipboard.source_origin[0] + cell.offset[0],
+                        clipboard.source_origin[1] + cell.offset[1],
+                    ]
+                })
+                .collect();
+            (world_cells, base.elevation, grid.floor_count())
+        };
+        for floor_index in (base_floor + 1)..floor_count {
+            let Some(NodeKind::Section { grid }) = self
+                .project
+                .active_scene()
+                .node(room)
+                .map(|node| &node.kind)
+            else {
+                break;
+            };
+            let Some(floor) = grid.floor(floor_index) else {
+                break;
+            };
+            let cells: Vec<psxed_project::PrefabCell> = clipboard
+                .cells
+                .iter()
+                .zip(&world_cells)
+                .map(|(cell, world)| psxed_project::PrefabCell {
+                    offset: cell.offset,
+                    sector: floor
+                        .world_cell_to_array(world[0], world[1])
+                        .and_then(|(sx, sz)| floor.sector(sx, sz))
+                        .cloned(),
+                })
+                .collect();
+            // A stack that runs out of authored geometry stops the piece there
+            // rather than padding it with empty floors.
+            if cells.iter().all(|cell| cell.sector.is_none()) {
+                break;
+            }
+            floors.push(psxed_project::PrefabFloor {
+                relative_elevation: floor.elevation.saturating_sub(base_elevation),
+                cells,
+            });
+        }
+
+        Some(psxed_project::Prefab::capture(
+            name,
+            sector_size,
+            clipboard.width,
+            clipboard.height,
+            clipboard.mode == GeometryClipboardMode::MergePrimitives,
+            floors,
+            room,
+            base_floor,
+            &self.project,
+        ))
+    }
+
+    /// Write the current geometry selection to `editor/prefabs/<name>.ron`.
+    pub(crate) fn save_selection_as_prefab(&mut self, name: &str) {
+        let Some(prefab) = self.capture_selection_as_prefab(name) else {
+            return;
+        };
+        let path = psxed_project::prefab_path(&prefab.name);
+        self.status = match prefab.save_to_path(&path) {
+            Ok(()) => format!("Saved prefab to {}", path.display()),
+            Err(error) => format!("Could not save prefab: {error}"),
+        };
+    }
+
+    /// Register every prefab in the shared library as a project resource.
+    ///
+    /// Resources hold the path, not a copy, so the library stays global and the
+    /// browser preview always shows what would actually stamp. Re-running is
+    /// safe: entries already pointing at a file are left alone, and entries
+    /// whose file has gone are removed.
+    pub(crate) fn sync_prefab_resources(&mut self) {
+        let files = psxed_project::list_prefabs().unwrap_or_default();
+        let mut added = 0usize;
+        let mut removed = 0usize;
+
+        let live: Vec<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let stale: Vec<ResourceId> = self
+            .project
+            .resources
+            .iter()
+            .filter(|r| {
+                matches!(&r.data, ResourceData::Prefab { source_path }
+                    if !live.contains(source_path))
+            })
+            .map(|r| r.id)
+            .collect();
+        for id in stale {
+            self.project.resources.retain(|r| r.id != id);
+            removed += 1;
+        }
+
+        for path in &files {
+            let source_path = path.to_string_lossy().into_owned();
+            let known = self.project.resources.iter().any(|r| {
+                matches!(&r.data, ResourceData::Prefab { source_path: p } if *p == source_path)
+            });
+            if known {
+                continue;
+            }
+            let name = psxed_project::Prefab::load_from_path(path)
+                .map(|prefab| prefab.name)
+                .unwrap_or_else(|_| {
+                    path.file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| source_path.clone())
+                });
+            self.project
+                .add_resource(&name, ResourceData::Prefab { source_path });
+            added += 1;
+        }
+
+        if added > 0 || removed > 0 {
+            self.mark_dirty();
+        }
+        self.status = format!(
+            "Prefab resources synced - {added} added, {removed} removed, {} in library",
+            files.len()
+        );
+    }
+
+    /// Load a prefab and enter the floating preview loop with it. Materials
+    /// are rebound to this project by name; anything the project does not have
+    /// is cleared and counted so the status line can say so.
+    pub(crate) fn stamp_prefab(&mut self, path: &Path) {
+        let prefab = match psxed_project::Prefab::load_from_path(path) {
+            Ok(prefab) => prefab,
+            Err(error) => {
+                self.status = format!("Could not load prefab: {error}");
+                return;
+            }
+        };
+        let Some(room) = self.active_room_id() else {
+            self.status = "Select a room to stamp into".to_string();
+            return;
+        };
+        let (mut floors, unbound) = prefab.bound_floors(&self.project, room, self.active_floor);
+        if floors.is_empty() {
+            self.status = format!("Prefab '{}' has no floors", prefab.name);
+            return;
+        }
+        let cells = floors.remove(0).cells;
+        let extra_floors = floors;
+        let grid = self.room_grid_view(room);
+        let origin = grid
+            .as_ref()
+            .map(|grid| match self.selection.selected_sector {
+                Some((sx, sz)) => [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32],
+                None => grid.origin,
+            })
+            .unwrap_or([0, 0]);
+        let sector_size = grid.map_or(DEFAULT_WORLD_SECTOR_SIZE, |grid| grid.sector_size);
+
+        let mut notes = Vec::new();
+        if sector_size != prefab.sector_size {
+            notes.push(format!(
+                "authored at sector size {} not {sector_size}, heights will not match",
+                prefab.sector_size
+            ));
+        }
+        if unbound > 0 {
+            notes.push(format!("{unbound} material references cleared"));
+        }
+        if !extra_floors.is_empty() {
+            notes.push(format!("{} floors", extra_floors.len() + 1));
+        }
+        let lead = if notes.is_empty() {
+            format!("Stamping '{}'", prefab.name)
+        } else {
+            format!("Stamping '{}' ({})", prefab.name, notes.join("; "))
+        };
+
+        let clipboard = GeometryClipboard {
+            mode: if prefab.merge_primitives {
+                GeometryClipboardMode::MergePrimitives
+            } else {
+                GeometryClipboardMode::ReplaceCells
+            },
+            source_room: room,
+            source_origin: origin,
+            next_paste_origin: origin,
+            width: prefab.width,
+            height: prefab.height,
+            cells,
+            extra_floors,
+            lights: prefab.lights.clone(),
+        };
+        self.begin_floating_geometry(clipboard, &lead);
     }
 
     pub(crate) fn paste_target_room(&self, clipboard: &GeometryClipboard) -> Option<NodeId> {
@@ -497,7 +804,7 @@ impl EditorWorkspace {
             self.project
                 .active_scene()
                 .node(clipboard.source_room)
-                .and_then(|node| matches!(node.kind, NodeKind::Room { .. }).then_some(node.id))
+                .and_then(|node| matches!(node.kind, NodeKind::Section { .. }).then_some(node.id))
         })
     }
 
@@ -565,6 +872,23 @@ impl EditorWorkspace {
         self.status = "Flipped duplicate preview horizontally".to_string();
     }
 
+    /// Raise or lower the floating placement by `steps` height quanta.
+    ///
+    /// Snapped to [`HEIGHT_QUANTUM`] because the cooker rejects any authored
+    /// height that is not a multiple of it, and a free-running offset would
+    /// turn a stamp into a build failure the user cannot see.
+    pub(crate) fn nudge_floating_geometry_elevation(&mut self, steps: i32) {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return;
+        };
+        preview.elevation_offset = preview
+            .elevation_offset
+            .saturating_add(steps.saturating_mul(HEIGHT_QUANTUM));
+        let offset = preview.elevation_offset;
+        self.apply_floating_geometry_preview();
+        self.status = format!("Placement raised {offset} units from its authored height");
+    }
+
     pub(crate) fn flip_floating_geometry_z(&mut self) {
         let Some(preview) = self.floating_geometry.as_mut() else {
             return;
@@ -578,6 +902,11 @@ impl EditorWorkspace {
         let Some(preview) = self.floating_geometry.take() else {
             return false;
         };
+        // Lights go in before anything consumes `preview`, and before the undo
+        // snapshot is recorded: `base_project` is the pre-placement state, so
+        // recording it after is still correct and one Escape still undoes the
+        // whole stamp, lights included.
+        let lit = self.place_floating_lights(&preview);
         self.history.record(preview.base_project);
         match preview.mode {
             GeometryClipboardMode::ReplaceCells => {
@@ -587,9 +916,120 @@ impl EditorWorkspace {
                 self.select_geometry_primitives(preview.room, preview.selected_primitives);
             }
         }
-        self.status = "Placed duplicated world geometry".to_string();
+        let mut notes = Vec::new();
+        match preview.seam_walls_stripped {
+            0 => {}
+            1 => notes.push("1 wall dropped onto a seam a neighbour owns".to_string()),
+            n => notes.push(format!("{n} walls dropped onto seams neighbours own")),
+        }
+        match self.portal_rooms_over_budget(preview.room) {
+            0 => {}
+            1 => notes.push("1 runtime room past a hard cap - author a Portal to split it".to_string()),
+            n => notes.push(format!("{n} runtime rooms past a hard cap - author Portals to split them")),
+        }
+        match lit {
+            0 => {}
+            1 => notes.push("1 light placed".to_string()),
+            n => notes.push(format!("{n} lights placed")),
+        }
+        self.status = if notes.is_empty() {
+            "Placed world geometry".to_string()
+        } else {
+            format!("Placed world geometry - {}", notes.join("; "))
+        };
         self.mark_dirty();
         true
+    }
+
+    /// Derived runtime rooms in `room` that still bust a hard cap.
+    ///
+    /// The authored grid is one contiguous room; the runtime splits it only at
+    /// authored `Portal` nodes, and the planner deliberately will not invent a
+    /// seam for size (`portal_rooms.rs:3-5`). Stamping grows the grid freely,
+    /// so a piece placed past `MAX_ROOM_WIDTH` becomes a build failure that
+    /// otherwise only surfaces on Play, an hour of clicking later. Counting
+    /// here says it at the moment the placement causes it.
+    ///
+    /// ponytail: the plan, not a cook. `over_budget` comes off the budget
+    /// estimate, which is a sector walk; cooking each derived room the way the
+    /// Play path does would be far too slow to run on a click.
+    fn portal_rooms_over_budget(&self, room: NodeId) -> usize {
+        let scene = self.project.active_scene();
+        let Some(NodeKind::Section { grid }) = scene.node(room).map(|node| &node.kind) else {
+            return 0;
+        };
+        plan_portal_rooms(scene, room, grid, PortalRoomConfig::default())
+            .rooms
+            .iter()
+            .filter(|derived| derived.over_budget)
+            .count()
+    }
+
+    /// Materialise the piece's lights as child nodes of the destination room.
+    ///
+    /// Runs on commit rather than on every preview pass, because the preview
+    /// rebuilds the project from its base snapshot each frame and would either
+    /// discard them or stack duplicates. Offsets go through the same transform
+    /// the cells take, so a rotated piece keeps its light in the same corner.
+    fn place_floating_lights(&mut self, preview: &FloatingGeometryPlacement) -> usize {
+        if preview.lights.is_empty() {
+            return 0;
+        }
+        // Reuse the geometry transform verbatim by feeding it sectorless cells:
+        // any divergence here would drift a rotated piece's light off-centre.
+        let carrier: Vec<GeometryClipboardCell> = preview
+            .lights
+            .iter()
+            .map(|light| GeometryClipboardCell {
+                offset: light.cell,
+                sector: None,
+            })
+            .collect();
+        let placed = transformed_geometry_cells(
+            &carrier,
+            preview.width,
+            preview.height,
+            preview.rotation_quarters,
+            preview.flip_x,
+            preview.flip_z,
+        );
+
+        let Some(grid) = self.room_grid_view(preview.room) else {
+            return 0;
+        };
+        let sector_size = grid.sector_size.max(1) as f32;
+        let lift = preview.elevation_offset as f32 / sector_size;
+        let spawn: Vec<(String, NodeKind, [f32; 3])> = preview
+            .lights
+            .iter()
+            .zip(&placed)
+            .map(|(light, (offset, _))| {
+                let editor = grid.world_cells_to_editor([
+                    (preview.origin[0] + offset[0]) as f32 + 0.5,
+                    (preview.origin[1] + offset[1]) as f32 + 0.5,
+                ]);
+                (
+                    "Prefab Light".to_string(),
+                    NodeKind::PointLight {
+                        color: light.color,
+                        intensity: light.intensity,
+                        radius: light.radius,
+                    },
+                    [editor[0], light.height_sectors + lift, editor[1]],
+                )
+            })
+            .collect();
+
+        let scene = self.project.active_scene_mut();
+        let mut count = 0;
+        for (name, kind, translation) in spawn {
+            let id = scene.add_node(preview.room, &name, kind);
+            if let Some(node) = scene.node_mut(id) {
+                node.transform.translation = translation;
+            }
+            count += 1;
+        }
+        count
     }
 
     pub(crate) fn cancel_floating_geometry(&mut self) -> bool {
@@ -604,6 +1044,105 @@ impl EditorWorkspace {
         true
     }
 
+    /// Write one floor of a floating placement, growing the floor stack and the
+    /// grid footprint to fit. Returns how many walls the seam pass dropped.
+    #[allow(clippy::too_many_arguments)]
+    fn place_floating_floor(
+        &mut self,
+        preview: &FloatingGeometryPlacement,
+        target_floor: usize,
+        base_floor: usize,
+        relative_elevation: i32,
+        cells: Vec<([i32; 2], Option<GridSector>)>,
+        selected_cells: &mut Vec<(u16, u16)>,
+        selected_primitives: &mut Vec<Selection>,
+    ) -> Result<usize, &'static str> {
+        {
+            let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node_mut(preview.room) else {
+                return Err("Duplicate target room no longer exists");
+            };
+            let NodeKind::Section { grid } = &mut node.kind else {
+                return Err("Duplicate target is not a Room");
+            };
+            // Grow the stack so an upper floor of the piece has somewhere to
+            // land. A floor this stamp creates takes the piece's own spacing;
+            // one that already existed keeps its authored elevation, because
+            // moving it would drag the geometry already sitting on it.
+            while grid.floor_count() <= target_floor {
+                let base_elevation = grid.floor(base_floor).map(|floor| floor.elevation);
+                let created = grid.push_floor();
+                if created == target_floor && relative_elevation != 0 {
+                    if let (Some(base_elevation), Some(floor)) =
+                        (base_elevation, grid.floor_mut(created))
+                    {
+                        floor.elevation = base_elevation.saturating_add(relative_elevation);
+                    }
+                }
+            }
+            for (offset, _) in &cells {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    preview.room,
+                    preview.origin[0] + offset[0],
+                    preview.origin[1] + offset[1],
+                    target_floor,
+                );
+            }
+        }
+
+        let scene = self.project.active_scene_mut();
+        let Some(node) = scene.node_mut(preview.room) else {
+            return Err("Duplicate target room no longer exists");
+        };
+        let NodeKind::Section { grid } = &mut node.kind else {
+            return Err("Duplicate target is not a Room");
+        };
+        let floor_idx = target_floor.min(grid.floor_count().saturating_sub(1));
+        let grid = grid
+            .floor_mut(floor_idx)
+            .expect("floor index clamped to range");
+        for (offset, sector) in cells {
+            let wcx = preview.origin[0] + offset[0];
+            let wcz = preview.origin[1] + offset[1];
+            let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+                continue;
+            };
+            let Some(index) = grid.sector_index(sx, sz) else {
+                continue;
+            };
+            match preview.mode {
+                GeometryClipboardMode::ReplaceCells => {
+                    grid.sectors[index] = sector;
+                    selected_cells.push((sx, sz));
+                }
+                GeometryClipboardMode::MergePrimitives => {
+                    let Some(fragment) = sector else {
+                        continue;
+                    };
+                    let target = grid.sectors[index].get_or_insert_with(GridSector::empty);
+                    merge_primitive_fragment(
+                        target,
+                        fragment,
+                        preview.room,
+                        sx,
+                        sz,
+                        selected_primitives,
+                    );
+                }
+            }
+        }
+        // Placing a piece against existing geometry hands the cooker two claims
+        // on one physical edge, which it rejects outright. The incoming wall
+        // loses. ponytail: cells only -- MergePrimitives grafts individual faces
+        // onto a sector that keeps its own walls, so it never authors a whole
+        // perimeter to collide.
+        Ok(match preview.mode {
+            GeometryClipboardMode::ReplaceCells => grid.strip_seam_walls(selected_cells),
+            GeometryClipboardMode::MergePrimitives => 0,
+        })
+    }
+
     pub(crate) fn apply_floating_geometry_preview(&mut self) {
         let Some(preview) = self.floating_geometry.clone() else {
             return;
@@ -611,7 +1150,7 @@ impl EditorWorkspace {
         self.project = preview.base_project.clone();
         self.dirty = preview.base_dirty;
 
-        let cells = transformed_geometry_cells(
+        let mut cells = transformed_geometry_cells(
             &preview.cells,
             preview.width,
             preview.height,
@@ -619,78 +1158,63 @@ impl EditorWorkspace {
             preview.flip_x,
             preview.flip_z,
         );
+        for sector in cells.iter_mut().filter_map(|(_, sector)| sector.as_mut()) {
+            sector.offset_heights(preview.elevation_offset);
+        }
         let mut selected_cells = Vec::new();
         let mut selected_primitives = Vec::new();
+        let mut seam_walls_stripped = 0;
         let active_floor = self.active_floor;
-        {
-            let scene = self.project.active_scene_mut();
-            let Some(node) = scene.node(preview.room) else {
-                self.floating_geometry = None;
-                self.status = "Duplicate target room no longer exists".to_string();
-                return;
-            };
-            let NodeKind::Room { .. } = &node.kind else {
-                self.floating_geometry = None;
-                self.status = "Duplicate target is not a Room".to_string();
-                return;
-            };
-            for (offset, _) in &cells {
-                let _ = extend_room_grid_to_include_preserving_child_positions(
-                    scene,
-                    preview.room,
-                    preview.origin[0] + offset[0],
-                    preview.origin[1] + offset[1],
-                    active_floor,
-                );
+
+        // Batch 0 is the active floor. A multi-floor prefab adds one batch per
+        // floor above it, each carrying the same rotation, flips and lift.
+        let mut batches = vec![(0usize, 0i32, cells)];
+        for (index, floor) in preview.extra_floors.iter().enumerate() {
+            let mut above = transformed_geometry_cells(
+                &floor.cells,
+                preview.width,
+                preview.height,
+                preview.rotation_quarters,
+                preview.flip_x,
+                preview.flip_z,
+            );
+            for sector in above.iter_mut().filter_map(|(_, sector)| sector.as_mut()) {
+                sector.offset_heights(preview.elevation_offset);
             }
-            let Some(node) = scene.node_mut(preview.room) else {
-                self.floating_geometry = None;
-                self.status = "Duplicate target room no longer exists".to_string();
-                return;
-            };
-            let NodeKind::Room { grid } = &mut node.kind else {
-                self.floating_geometry = None;
-                self.status = "Duplicate target is not a Room".to_string();
-                return;
-            };
-            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
-            let grid = grid
-                .floor_mut(floor_idx)
-                .expect("floor index clamped to range");
-            for (offset, sector) in cells {
-                let wcx = preview.origin[0] + offset[0];
-                let wcz = preview.origin[1] + offset[1];
-                let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
-                    continue;
-                };
-                let Some(index) = grid.sector_index(sx, sz) else {
-                    continue;
-                };
-                match preview.mode {
-                    GeometryClipboardMode::ReplaceCells => {
-                        grid.sectors[index] = sector;
-                        selected_cells.push((sx, sz));
-                    }
-                    GeometryClipboardMode::MergePrimitives => {
-                        let Some(fragment) = sector else {
-                            continue;
-                        };
-                        let target = grid.sectors[index].get_or_insert_with(GridSector::empty);
-                        merge_primitive_fragment(
-                            target,
-                            fragment,
-                            preview.room,
-                            sx,
-                            sz,
-                            &mut selected_primitives,
-                        );
-                    }
+            batches.push((index + 1, floor.relative_elevation, above));
+        }
+
+        for (floor_delta, relative_elevation, cells) in batches {
+            let target_floor = active_floor + floor_delta;
+            let mut floor_cells = Vec::new();
+            let mut floor_primitives = Vec::new();
+            match self.place_floating_floor(
+                &preview,
+                target_floor,
+                active_floor,
+                relative_elevation,
+                cells,
+                &mut floor_cells,
+                &mut floor_primitives,
+            ) {
+                Ok(stripped) => seam_walls_stripped += stripped,
+                Err(message) => {
+                    self.floating_geometry = None;
+                    self.status = message.to_string();
+                    return;
                 }
+            }
+            // Selection tracks the floor the user is authoring on; geometry
+            // written to the floors above it is placed but not selected.
+            if floor_delta == 0 {
+                selected_cells = floor_cells;
+                selected_primitives = floor_primitives;
             }
         }
         if let Some(active_preview) = self.floating_geometry.as_mut() {
             active_preview.selected_cells = selected_cells.clone();
             active_preview.selected_primitives = selected_primitives.clone();
+            active_preview.seam_walls_stripped = seam_walls_stripped;
         }
         match preview.mode {
             GeometryClipboardMode::ReplaceCells => {
@@ -713,7 +1237,7 @@ impl EditorWorkspace {
             .map(|preview| preview.base_project.active_scene())
             .unwrap_or_else(|| self.project.active_scene());
         let node = scene.node(room)?;
-        let NodeKind::Room { grid } = &node.kind else {
+        let NodeKind::Section { grid } = &node.kind else {
             return None;
         };
         let center = node_world(node);
@@ -812,7 +1336,7 @@ impl EditorWorkspace {
                 self.status = "Selected room no longer exists".to_string();
                 return;
             };
-            let NodeKind::Room { .. } = &node.kind else {
+            let NodeKind::Section { .. } = &node.kind else {
                 self.status = "Selected target is not a Room".to_string();
                 return;
             };
@@ -830,7 +1354,7 @@ impl EditorWorkspace {
                 self.status = "Selected room no longer exists".to_string();
                 return;
             };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let NodeKind::Section { grid } = &mut node.kind else {
                 self.status = "Selected target is not a Room".to_string();
                 return;
             };
@@ -906,7 +1430,7 @@ impl EditorWorkspace {
         }
         self.push_undo();
         let first_material = self.first_material();
-        if let NodeKind::Room { grid } = &mut kind {
+        if let NodeKind::Section { grid } = &mut kind {
             *grid = starter_room_grid(
                 self.project.world_sector_size_for_node(parent),
                 first_material,
@@ -972,7 +1496,7 @@ impl EditorWorkspace {
             self.status = "Target room is missing".to_string();
             return;
         };
-        if !matches!(target_room_node.kind, NodeKind::Room { .. }) {
+        if !matches!(target_room_node.kind, NodeKind::Section { .. }) {
             self.status = "Target node is not a room".to_string();
             return;
         }
@@ -1793,14 +2317,14 @@ impl EditorWorkspace {
             .active_scene()
             .nodes()
             .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
             .map(|node| node.id)
             .collect();
 
         let mut found = 0usize;
         for &id in &room_ids {
             if let Some(node) = self.project.active_scene().node(id) {
-                if let NodeKind::Room { grid } = &node.kind {
+                if let NodeKind::Section { grid } = &node.kind {
                     found += grid.duplicate_wall_count_all_floors();
                 }
             }
@@ -1817,7 +2341,7 @@ impl EditorWorkspace {
             let Some(node) = self.project.active_scene_mut().node_mut(id) else {
                 continue;
             };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let NodeKind::Section { grid } = &mut node.kind else {
                 continue;
             };
             let n = grid.dedupe_duplicate_walls_all_floors();

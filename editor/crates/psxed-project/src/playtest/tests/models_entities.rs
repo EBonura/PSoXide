@@ -187,7 +187,7 @@ fn two_instances_of_one_model_dedup_to_one_record() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     for name in ["PlayerClone2", "PlayerClone3"] {
@@ -220,7 +220,7 @@ fn entity_model_instance_preserves_authored_yaw() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     let entity = scene.add_node(room_id, "Rotated Prop", NodeKind::Entity);
@@ -275,7 +275,7 @@ fn image_prop_preserves_authored_pitch_yaw_roll() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     let prop_id = scene.add_node(
@@ -320,7 +320,7 @@ fn box_prop_cooks_faces_vertices_and_collision() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     let vertices = crate::box_prop_vertices_for_size(512);
@@ -383,7 +383,7 @@ fn eroded_box_prop_cooks_shared_runtime_surfaces() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("starter has a room");
     let mut erosion = crate::BoxPropErosion::default();
@@ -429,7 +429,7 @@ fn cylinder_prop_cooks_shared_triangle_and_quad_surfaces() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("starter has a room");
     let mut geometry = crate::CylinderPropGeometry::default();
@@ -487,13 +487,13 @@ fn box_prop_cooks_authored_y_instead_of_snapping_to_floor() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     // Raise the floor under (0,0) so a floor-snap would be observable.
     let sector_size = {
         let room = scene.node_mut(room_id).expect("room node");
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             panic!("starter room is a room");
         };
         let (sx, sz) = grid.editor_cells_to_array([0.0, 0.0]).unwrap();
@@ -552,7 +552,7 @@ fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     let enemy = scene.add_node(room_id, "Facing Enemy", NodeKind::Entity);
@@ -602,11 +602,11 @@ fn entity_model_instance_y_snaps_to_floor_under_authored_xz() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     if let Some(room) = scene.node_mut(room_id) {
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             panic!("starter room is a room");
         };
         let (sx, sz) = grid.editor_cells_to_array([0.0, 0.0]).unwrap();
@@ -684,7 +684,7 @@ fn project_with_spawn_at(ex: f32, ez: f32) -> (ProjectDocument, NodeId, NodeId) 
         let room = scene
             .nodes()
             .iter()
-            .find(|n| matches!(n.kind, crate::NodeKind::Room { .. }))
+            .find(|n| matches!(n.kind, crate::NodeKind::Section { .. }))
             .expect("starter has a room");
         (room.id, player_spawn_node_id(&project))
     };
@@ -704,7 +704,7 @@ fn expected_package_room_local_xz(
 ) -> (i32, i32) {
     let scene = project.active_scene();
     let room = scene.node(room_id).expect("room exists");
-    let crate::NodeKind::Room { grid } = &room.kind else {
+    let crate::NodeKind::Section { grid } = &room.kind else {
         panic!("expected room");
     };
     let cooked_room = &package.rooms[package_room as usize];
@@ -744,7 +744,7 @@ fn spawn_after_negative_grow_lands_in_same_physical_cell() {
     // to contain the spawn so the pre/post comparison is well
     // defined; the test still exercises the -X grow path below.
     if let Some(node) = project.active_scene_mut().node_mut(room_id) {
-        if let crate::NodeKind::Room { grid } = &mut node.kind {
+        if let crate::NodeKind::Section { grid } = &mut node.kind {
             if let Some(initial) = grid.editor_cells_to_array([-1.0, 0.0]) {
                 let _ = initial;
             } else {
@@ -768,7 +768,7 @@ fn spawn_after_negative_grow_lands_in_same_physical_cell() {
 
     let scene = project.active_scene_mut();
     if let Some(node) = scene.node_mut(room_id) {
-        if let crate::NodeKind::Room { grid } = &mut node.kind {
+        if let crate::NodeKind::Section { grid } = &mut node.kind {
             let (sx, sz) = grid.extend_to_include(-1, 0);
             grid.set_floor(sx, sz, 0, Some(floor_material));
         }
@@ -807,7 +807,7 @@ fn entity_after_negative_grow_uses_same_array_relative_formula() {
         node.transform.translation = [0.0, 0.0, 0.0];
     }
     if let Some(node) = scene.node_mut(room_id) {
-        if let crate::NodeKind::Room { grid } = &mut node.kind {
+        if let crate::NodeKind::Section { grid } = &mut node.kind {
             grid.extend_to_include(0, -1);
             if let Some((sx, sz)) = grid.editor_cells_to_array([0.0, 0.0]) {
                 grid.set_floor(sx, sz, 0, Some(floor_material));
@@ -893,7 +893,7 @@ fn model_renderer_material_override_cooks_onto_instance() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     let entity = scene.add_node(room_id, "Covered Prop", NodeKind::Entity);

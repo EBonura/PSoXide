@@ -975,9 +975,9 @@ mod tests {
         let room = project.active_scene_mut().add_node(
             crate::NodeId::ROOT,
             "Room",
-            NodeKind::Room { grid },
+            NodeKind::Section { grid },
         );
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let plan = plan_portal_rooms(
@@ -1000,7 +1000,7 @@ mod tests {
         let room = project.active_scene_mut().add_node(
             crate::NodeId::ROOT,
             "Room",
-            NodeKind::Room { grid },
+            NodeKind::Section { grid },
         );
         let portal = project.active_scene_mut().add_node(
             room,
@@ -1018,7 +1018,7 @@ mod tests {
             .unwrap()
             .transform
             .translation = [0.0, 0.0, 0.0];
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let plan = plan_portal_rooms(
@@ -1071,7 +1071,7 @@ mod tests {
         let room = project.active_scene_mut().add_node(
             crate::NodeId::ROOT,
             "Room",
-            NodeKind::Room { grid },
+            NodeKind::Section { grid },
         );
         let portal = project.active_scene_mut().add_node(
             room,
@@ -1089,7 +1089,7 @@ mod tests {
             .unwrap()
             .transform
             .translation = [0.0, 0.0, 0.0];
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let plan = plan_portal_rooms(
@@ -1125,7 +1125,7 @@ mod tests {
         let room = project.active_scene_mut().add_node(
             crate::NodeId::ROOT,
             "Room",
-            NodeKind::Room { grid },
+            NodeKind::Section { grid },
         );
         let portal = project.active_scene_mut().add_node(
             room,
@@ -1143,7 +1143,7 @@ mod tests {
             .unwrap()
             .transform
             .translation = [0.0, 0.0, 0.0];
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let plan = plan_portal_rooms(
@@ -1176,7 +1176,7 @@ mod tests {
         let room = project.active_scene_mut().add_node(
             crate::NodeId::ROOT,
             "Room",
-            NodeKind::Room { grid },
+            NodeKind::Section { grid },
         );
         let portal = project.active_scene_mut().add_node(
             room,
@@ -1188,7 +1188,7 @@ mod tests {
                 geometry: None,
             },
         );
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let editor =
@@ -1199,7 +1199,7 @@ mod tests {
             .unwrap()
             .transform
             .translation = [editor[0], 0.0, editor[1]];
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
 
@@ -1285,9 +1285,9 @@ mod tests {
         let room = project.active_scene_mut().add_node(
             crate::NodeId::ROOT,
             "Room",
-            NodeKind::Room { grid },
+            NodeKind::Section { grid },
         );
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let plan = plan_portal_rooms(
@@ -1313,7 +1313,7 @@ mod tests {
         let room = project.active_scene_mut().add_node(
             crate::NodeId::ROOT,
             "Room",
-            NodeKind::Room { grid },
+            NodeKind::Section { grid },
         );
         let portal = project.active_scene_mut().add_node(
             room,
@@ -1325,7 +1325,7 @@ mod tests {
                 geometry: None,
             },
         );
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let editor =
@@ -1336,7 +1336,7 @@ mod tests {
             .unwrap()
             .transform
             .translation = [editor[0], 0.0, editor[1]];
-        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+        let NodeKind::Section { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
         let plan = plan_portal_rooms(

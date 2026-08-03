@@ -891,6 +891,60 @@ impl WorldGrid {
         removed
     }
 
+    /// Drop walls on `cells` that sit on a physical edge an untouched
+    /// neighbour already claims. Returns how many segments went.
+    ///
+    /// The wall between `(x, z)` and `(x+1, z)` is one face whether authored
+    /// as `East(x, z)` or `West(x+1, z)`, and the cooker rejects a grid that
+    /// claims it twice (`DuplicatePhysicalWall`). Tiling pieces edge to edge
+    /// produces exactly that, so a stamp runs this over the cells it wrote:
+    /// the incoming wall loses, because the destination is the thing already
+    /// on screen. Seams *inside* the stamp are left alone -- a piece that
+    /// contradicts itself was authored broken and should say so at cook time
+    /// rather than be quietly repaired on every placement.
+    ///
+    /// [`WorldGrid::dedupe_duplicate_walls`] does not cover this: it only
+    /// removes segments byte-identical to another on the *same* edge.
+    pub fn strip_seam_walls(&mut self, cells: &[(u16, u16)]) -> usize {
+        let stamped: HashSet<(u16, u16)> = cells.iter().copied().collect();
+        let mut claimed: HashSet<GridPhysicalEdge> = HashSet::new();
+        for x in 0..self.width {
+            for z in 0..self.depth {
+                if stamped.contains(&(x, z)) {
+                    continue;
+                }
+                let Some(sector) = self.sector(x, z) else {
+                    continue;
+                };
+                for direction in GridDirection::CARDINAL {
+                    if sector.walls.get(direction).is_empty() {
+                        continue;
+                    }
+                    claimed.extend(direction.physical_edge(x, z));
+                }
+            }
+        }
+
+        let mut stripped = 0;
+        for &(x, z) in &stamped {
+            let Some(sector) = self.sector_mut(x, z) else {
+                continue;
+            };
+            for direction in GridDirection::CARDINAL {
+                if !direction
+                    .physical_edge(x, z)
+                    .is_some_and(|edge| claimed.contains(&edge))
+                {
+                    continue;
+                }
+                let walls = sector.walls.get_mut(direction);
+                stripped += walls.len();
+                walls.clear();
+            }
+        }
+        stripped
+    }
+
     /// Exact duplicate wall segments on this floor, without modifying it.
     pub fn duplicate_wall_count(&self) -> usize {
         self.sectors

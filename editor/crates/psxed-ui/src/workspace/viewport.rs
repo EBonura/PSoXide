@@ -27,7 +27,7 @@ impl EditorWorkspace {
         let settings = settings.normalized();
         let player = room
             .and_then(|room_id| {
-                let NodeKind::Room { grid } = &scene.node(room_id)?.kind else {
+                let NodeKind::Section { grid } = &scene.node(room_id)?.kind else {
                     return None;
                 };
                 let floor_grid = grid.floor(floor)?;
@@ -111,7 +111,7 @@ impl EditorWorkspace {
                     .nodes()
                     .iter()
                     .find(|n| {
-                        matches!(n.kind, NodeKind::Room { .. })
+                        matches!(n.kind, NodeKind::Section { .. })
                             && !self.scene_node_effectively_hidden(n.id)
                     })
                     .map(|n| n.id)

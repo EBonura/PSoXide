@@ -2691,6 +2691,42 @@ impl GridSector {
         }
     }
 
+    /// Shift every authored height in this sector by `delta` world units.
+    ///
+    /// Heights are absolute engine units, never room-relative, so a piece
+    /// captured at ground level arrives buried when it is stamped onto a
+    /// raised floor. Moving the whole sector at once keeps slopes, wall
+    /// stacks and per-triangle overrides in the same relative shape; shifting
+    /// only the floor would flatten the piece against its own walls.
+    pub fn offset_heights(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        for face in [self.floor.as_mut(), self.ceiling.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            for height in &mut face.heights {
+                *height = height.saturating_add(delta);
+            }
+            for index in 0..2 {
+                let Some(heights) = face.triangle_overrides.get_mut(index).heights.as_mut() else {
+                    continue;
+                };
+                for height in heights {
+                    *height = height.saturating_add(delta);
+                }
+            }
+        }
+        for direction in GridDirection::ALL {
+            for wall in self.walls.get_mut(direction) {
+                for height in &mut wall.heights {
+                    *height = height.saturating_add(delta);
+                }
+            }
+        }
+    }
+
     /// True if the sector emits any geometry.
     pub fn has_geometry(&self) -> bool {
         self.floor.is_some()
@@ -2716,9 +2752,9 @@ pub struct GridFloorLink {
     /// floor links visible until the room can be repaired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_room: Option<NodeId>,
-    /// Target floor within that room. PSoXide currently cooks floor
-    /// zero only; the field is present so TR-style vertical stacking
-    /// has a stable authored address before runtime traversal uses it.
+    /// Target floor within that room. The cook walks every floor
+    /// (`playtest.rs` loops `base_grid.floor_count()`), so this is a
+    /// live address, not a placeholder.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub target_floor: u16,
 }
@@ -2834,15 +2870,31 @@ pub(crate) fn floor_transition_wall_material(
     }
 }
 
-/// Hard caps on a single room's authoring shape. The cooker
-/// rejects past these, and the editor inspector warns as the
-/// budget approaches them -- both to keep the cooked `.psxw`
-/// inside reasonable PSX-side memory and to surface coordinate
-/// safety early (32-sector room × 1024 sector_size = 32 768,
-/// right at the i16 cliff; the renderer uses anchor-relative
-/// coords now but still respects the cap as belt-and-braces).
+/// Hard caps on a single runtime room's shape.
+///
+/// The dimension cap exists for one reason: a room-local vertex is
+/// `cell_index * sector_size`, and that has to survive the i16 boundary the
+/// GTE works in. The old flat 32 encoded that bound for `sector_size` 1024
+/// alone (32 x 1024 = 32 768, exactly the cliff) and was silently wrong
+/// everywhere else -- at 1792 it permitted 32 cells where only 18 fit, so it
+/// was too loose, not merely vestigial. [`max_room_cells_for_sector_size`]
+/// states the real rule.
+///
+/// These two constants are the ceiling the editor still shows in budget UI;
+/// the cook uses the sector-size-aware bound.
 pub const MAX_ROOM_WIDTH: u16 = 32;
 pub const MAX_ROOM_DEPTH: u16 = 32;
+
+/// Largest runtime-room span, in cells, whose far edge still fits i16 at this
+/// `sector_size`. Never larger than [`MAX_ROOM_WIDTH`], because the triangle
+/// and byte caps assume rooms of roughly that order.
+pub fn max_room_cells_for_sector_size(sector_size: i32) -> u16 {
+    if sector_size <= 0 {
+        return MAX_ROOM_WIDTH;
+    }
+    let fits = (i32::from(i16::MAX) / sector_size).clamp(1, i32::from(MAX_ROOM_WIDTH));
+    fits as u16
+}
 pub const MAX_WALL_STACK: usize = 4;
 pub const MAX_ROOM_TRIANGLES: usize = 2048;
 pub const MAX_ROOM_BYTES: usize = 64 * 1024;

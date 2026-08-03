@@ -34,12 +34,12 @@ fn room_light_is_emitted_once_without_generated_splits() {
         scene
             .nodes()
             .iter()
-            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .find(|n| matches!(n.kind, NodeKind::Section { .. }))
             .expect("starter has a room")
             .id
     };
     if let Some(room) = project.active_scene_mut().node_mut(room_id) {
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             panic!("starter room is a room");
         };
         *grid = crate::WorldGrid::empty(1, 16, crate::DEFAULT_WORLD_SECTOR_SIZE);
@@ -93,11 +93,11 @@ fn floor_transition_wall_stays_in_single_manual_room() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .expect("starter has a room")
         .id;
     if let Some(room) = project.active_scene_mut().node_mut(room_id) {
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             panic!("starter room is a room");
         };
         *grid = crate::WorldGrid::empty(17, 1, crate::DEFAULT_WORLD_SECTOR_SIZE);
@@ -346,7 +346,7 @@ fn light_radius_converts_sectors_to_world_units() {
         .nodes()
         .iter()
         .find_map(|node| match &node.kind {
-            NodeKind::Room { grid } => Some(grid.sector_size),
+            NodeKind::Section { grid } => Some(grid.sector_size),
             _ => None,
         })
         .expect("starter has a room");
@@ -391,7 +391,7 @@ fn interactable_component_emits_prompt_and_message_records() {
     let room = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("starter has room");
     let entity = scene.add_node(room, "Echo Body", NodeKind::Entity);
@@ -520,7 +520,7 @@ fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
     let mut grid = crate::WorldGrid::empty(2, 2, 1024);
     grid.set_floor(0, 0, 0, Some(material));
     grid.set_floor(1, 1, 0, Some(material));
-    let room = scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+    let room = scene.add_node(scene.root, "Room", NodeKind::Section { grid });
     let entity = scene.add_node(room, "Player", NodeKind::Entity);
     if let Some(node) = scene.node_mut(entity) {
         node.transform.translation = [0.5, 0.0, 0.5];

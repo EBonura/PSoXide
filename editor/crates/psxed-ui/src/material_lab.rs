@@ -1031,7 +1031,7 @@ fn draw_material_lab_preview(
         let project_root = workspace.project_root().to_path_buf();
         workspace.active_room_id().and_then(|room| {
             let node = workspace.project.active_scene().node(room)?;
-            let NodeKind::Room { grid } = &node.kind else {
+            let NodeKind::Section { grid } = &node.kind else {
                 return None;
             };
             let bytes = psxed_project::generate_room_reflection_probe_psxt(

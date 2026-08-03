@@ -15,7 +15,7 @@ pub(super) fn visible_room_grids<'a>(
             if scene_node_hidden(scene, hidden_scene_nodes, node.id) {
                 return None;
             }
-            let NodeKind::Room { grid } = &node.kind else {
+            let NodeKind::Section { grid } = &node.kind else {
                 return None;
             };
             Some((node.id, grid))
@@ -108,7 +108,7 @@ pub(super) fn preview_room_grids<'a>(
             continue;
         }
         let Some(base) = scene.node(room).and_then(|node| match &node.kind {
-            NodeKind::Room { grid } => Some(grid),
+            NodeKind::Section { grid } => Some(grid),
             _ => None,
         }) else {
             continue;
@@ -165,7 +165,7 @@ pub(super) fn push_preview_room_seed(
     }
     if scene
         .node(room)
-        .is_some_and(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .is_some_and(|node| matches!(node.kind, NodeKind::Section { .. }))
     {
         seeds.push(room);
     }
@@ -182,7 +182,7 @@ pub(super) fn selected_room_ancestor(
             return None;
         }
         let node = scene.node(id)?;
-        if matches!(node.kind, NodeKind::Room { .. }) {
+        if matches!(node.kind, NodeKind::Section { .. }) {
             return Some(id);
         }
         current = node.parent;
@@ -194,7 +194,7 @@ pub(super) fn room_ancestor(scene: &Scene, node_id: NodeId) -> Option<NodeId> {
     let mut current = Some(node_id);
     while let Some(id) = current {
         let node = scene.node(id)?;
-        if matches!(node.kind, NodeKind::Room { .. }) {
+        if matches!(node.kind, NodeKind::Section { .. }) {
             return Some(id);
         }
         current = node.parent;

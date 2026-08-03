@@ -73,7 +73,7 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         NodeKind::World { .. } | NodeKind::Node | NodeKind::WaterVolume { .. } => {
             NodeTransformInspector::Hidden
         }
-        NodeKind::Room { .. } => NodeTransformInspector::RoomGrid,
+        NodeKind::Section { .. } => NodeTransformInspector::RoomGrid,
         NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } | NodeKind::Logic { .. } => {
             NodeTransformInspector::PositionOnly
         }
@@ -2125,7 +2125,7 @@ pub(crate) fn draw_node_kind_editor(
                 "Streamed-region group; holds Room children, camera, sky, and far vista settings.",
             );
         }
-        NodeKind::Room { grid } => {
+        NodeKind::Section { grid } => {
             ui.horizontal(|ui| {
                 ui.label(icons::text(icons::GRID, 12.0).color(STUDIO_TEXT_WEAK));
                 ui.label("Grid");
@@ -4274,7 +4274,7 @@ pub(crate) fn node_lucide_icon(kind: &str, root: bool) -> char {
         "Node3D" => icons::CIRCLE_DOT,
         "Entity" => icons::BOX,
         "World" => icons::HOUSE,
-        "Room" | "Map" => icons::GRID,
+        "Section" | "Room" | "Map" => icons::GRID,
         "Mesh Instance" | "MeshInstance" => icons::BOX,
         "Image Prop" | "ImageProp" => icons::PALETTE,
         "Box Prop" | "BoxProp" => icons::BOX,
@@ -4303,7 +4303,7 @@ pub(crate) fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color
     match kind {
         "Entity" => Color32::from_rgb(156, 174, 190),
         "World" => Color32::from_rgb(232, 152, 96),
-        "Room" | "Map" => Color32::from_rgb(209, 118, 71),
+        "Section" | "Room" | "Map" => Color32::from_rgb(209, 118, 71),
         "Mesh Instance" | "MeshInstance" => Color32::from_rgb(156, 174, 190),
         "Image Prop" | "ImageProp" => Color32::from_rgb(210, 170, 120),
         "Box Prop" | "BoxProp" => Color32::from_rgb(135, 180, 220),

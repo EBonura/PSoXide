@@ -2971,7 +2971,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
             .active_scene()
             .nodes()
             .iter()
-            .find(|n| matches!(n.kind, psxed_project::NodeKind::Room { .. }))
+            .find(|n| matches!(n.kind, psxed_project::NodeKind::Section { .. }))
             .map(|n| n.id),
         args.active_floor,
         NodeId::ROOT,
