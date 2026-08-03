@@ -1,6 +1,7 @@
 //! Cook-time validation for authored world grids.
 
 use super::*;
+use crate::max_room_cells_for_sector_size;
 
 pub(super) fn validate_grid_shape(grid: &WorldGrid) -> Result<(), WorldGridCookError> {
     if snap_world_sector_size(grid.sector_size) != grid.sector_size {
@@ -29,18 +30,22 @@ pub(super) fn validate_grid_shape(grid: &WorldGrid) -> Result<(), WorldGridCookE
 /// inspector now share `WorldGridBudget::over_budget` semantics:
 /// what the editor warned about will fail at cook time.
 pub(super) fn validate_grid_budget(grid: &WorldGrid) -> Result<(), WorldGridCookError> {
-    if grid.width > MAX_ROOM_WIDTH {
+    // The bound scales with sector_size: a room-local vertex is
+    // cell * sector_size and has to survive i16. A flat 32 was only ever
+    // correct at sector_size 1024.
+    let span = max_room_cells_for_sector_size(grid.sector_size);
+    if grid.width > span {
         return Err(WorldGridCookError::RoomDimensionExceeded {
             axis: 'X',
             value: grid.width,
-            limit: MAX_ROOM_WIDTH,
+            limit: span,
         });
     }
-    if grid.depth > MAX_ROOM_DEPTH {
+    if grid.depth > span {
         return Err(WorldGridCookError::RoomDimensionExceeded {
             axis: 'Z',
             value: grid.depth,
-            limit: MAX_ROOM_DEPTH,
+            limit: span,
         });
     }
     // Per-edge wall stack -- caught at the source rather than
