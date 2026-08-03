@@ -341,6 +341,13 @@ impl Pitch {
         Self(v)
     }
 
+    /// The raw register value, as [`Pitch::raw`] took it. Callers scaling a
+    /// duration by pitch need the number back: at half unity a sample lasts
+    /// twice as long, and a cutoff that ignores that clips the sound.
+    pub const fn raw_value(self) -> u16 {
+        self.0
+    }
+
     /// Pitch that makes a native-rate sine loop play at `hz_num /
     /// hz_den` where the loop's natural frequency is `base_hz`.
     /// Integer-only so `no_std` users can compute at compile time.
@@ -719,6 +726,17 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
         bytes.len().is_multiple_of(2),
         "upload_adpcm: byte slice must be a multiple of 2",
     );
+    // The silent block every one-shot's repeat address points at lives at
+    // 0x1000, so a bank laid over it takes away the only thing stopping a
+    // finished voice wandering into other samples -- and does it silently,
+    // since the symptom is a stray blip rather than a crash. Celeste's PICO-8
+    // waveform bank starts at exactly 0x1000, which is how this was found.
+    // Banks start at 0x1010.
+    assert!(
+        dest.byte_offset() >= SILENCE_BLOCK.byte_offset() + SILENCE_BLOCK_BYTES.len() as u32
+            || core::ptr::eq(bytes.as_ptr(), SILENCE_BLOCK_BYTES.as_ptr()),
+        "upload_adpcm: destination overlaps the SPU silence block at 0x1000",
+    );
     // Prefer DMA (channel 4): fast, and the only reliable path for uploads
     // larger than the 32-halfword transfer FIFO. Falls back to PIO when the
     // source is not word-aligned / a whole number of 32-bit words.
@@ -855,12 +873,14 @@ mod tests {
     }
 
     #[test]
-    fn the_silence_block_sits_below_every_sample_bank() {
-        // Everything in this workspace uploads from 0x1010 up, which leaves
-        // this one block free. Move a bank down onto it and a one-shot's tail
-        // starts playing that bank's first block instead of nothing.
+    fn the_silence_block_owns_the_first_usable_block_of_spu_ram() {
+        // SPU RAM below 0x1000 is the hardware's own decode area, so 0x1000 is
+        // the first address a program may use and this claims it. A bank laid
+        // over it takes away the only thing stopping a finished voice
+        // wandering, which is why upload_adpcm refuses the overlap rather than
+        // trusting every game to start at 0x1010.
         assert_eq!(SILENCE_BLOCK.byte_offset(), 0x1000);
-        assert!(SILENCE_BLOCK.byte_offset() + 16 <= 0x1010);
+        assert_eq!(SILENCE_BLOCK_BYTES.len(), 16);
     }
 
     #[test]

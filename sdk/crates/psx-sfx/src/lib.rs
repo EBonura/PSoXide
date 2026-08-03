@@ -1,0 +1,353 @@
+//! One-shot sample playback on the SPU.
+//!
+//! Four programs on the PSoXide demo disc grew their own copy of this: the
+//! launcher, VoXide, NitroXide and the Celeste collection. Three of them are
+//! not engine applications, so the helpers in `psx-engine` were out of reach
+//! and each rewrote the same three things. That mattered more than the
+//! duplication itself, because what they were rewriting is the part emulators
+//! get wrong:
+//!
+//! * A one-shot's repeat address has to be written by hand. Silicon latches it
+//!   only from a block carrying the loop-start flag, and a one-shot has none,
+//!   so it otherwise keeps whatever the previous sound left there and the
+//!   voice ends up playing an unrelated sample. [`psx_spu::Voice::
+//!   configure_sample`] does this now; going through it is the point.
+//! * A one-shot does not stop itself. END drops the voice into RELEASE at the
+//!   ADSR's release rate rather than muting it, so a slow release leaves the
+//!   voice running audibly past its own data. A fast release hides that, which
+//!   is why the bug survived so long: the Celeste collection is inaudibly
+//!   wrong rather than right. The honest fix is to silence the voice on a
+//!   clock, which is what [`Player::tick`] does.
+//! * Voices have to be shared out, or a new sound cuts off the one before it.
+//!
+//! ```ignore
+//! let mut bank = Bank::new(SpuAddr::new(0x1010));
+//! let blip = bank.upload(include_bytes!("blip.psau"));
+//! let mut player: Player<3> = Player::new([Voice::V0, Voice::V1, Voice::V2], 60);
+//!
+//! // once a frame
+//! player.tick(tick);
+//! if pressed { player.play(&OneShot::new(blip, Volume::HALF), tick); }
+//! ```
+
+#![no_std]
+
+use psx_asset::Audio;
+use psx_spu::{Adsr, Pitch, SpuAddr, Voice, Volume};
+
+/// Decoded samples in one ADPCM block. Fourteen data bytes, two nibbles each.
+const SAMPLES_PER_BLOCK: u32 = 28;
+
+/// Bytes in one ADPCM block: a shift/filter byte, a flags byte, and fourteen
+/// of data.
+const BLOCK_BYTES: u32 = 16;
+
+/// Ticks of margin added past a sample's own length before its voice is
+/// silenced, so the cutoff never clips a sound that is still sounding.
+///
+/// The length is computed from the block count, which rounds up to a whole
+/// block, and the key-on itself lands somewhere inside the current tick.
+const TAIL_TICKS: u32 = 2;
+
+/// A sample resident in SPU RAM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    addr: SpuAddr,
+    rate_hz: u32,
+    frames: u32,
+}
+
+impl Sample {
+    /// Where the sample starts in SPU RAM.
+    pub const fn addr(&self) -> SpuAddr {
+        self.addr
+    }
+
+    /// The rate the sample was cooked at.
+    pub const fn sample_rate_hz(&self) -> u32 {
+        self.rate_hz
+    }
+
+    /// Decoded length in samples.
+    pub const fn len_samples(&self) -> u32 {
+        self.frames * SAMPLES_PER_BLOCK
+    }
+
+    /// How long this sample runs, in ticks of a `ticks_hz` clock, played at
+    /// its own rate. Includes [`TAIL_TICKS`] of margin.
+    ///
+    /// Pitch-shifted playback stretches this: see [`OneShot::with_pitch`].
+    pub const fn ticks_at(&self, ticks_hz: u32) -> u32 {
+        let rate = if self.rate_hz == 0 { 1 } else { self.rate_hz };
+        self.len_samples() * ticks_hz / rate + TAIL_TICKS
+    }
+}
+
+/// A sequential SPU RAM allocator: uploads cooked `.psau` samples one after
+/// another and hands back where each landed.
+///
+/// Start it at or above [`psx_spu::SILENCE_BLOCK`] plus one block. `psx-spu`
+/// keeps the first usable block of SPU RAM for the silence every finished
+/// one-shot parks on, and [`psx_spu::upload_adpcm`] rejects a bank laid over
+/// it rather than letting the collision be silent.
+pub struct Bank {
+    next: SpuAddr,
+}
+
+impl Bank {
+    /// Start a bank at `base`.
+    pub const fn new(base: SpuAddr) -> Self {
+        Self { next: base }
+    }
+
+    /// Where the next upload will land, and so the first address free after
+    /// everything uploaded so far.
+    pub const fn next_addr(&self) -> SpuAddr {
+        self.next
+    }
+
+    /// Upload one cooked `.psau` sample.
+    ///
+    /// # Panics
+    /// If `psau` is not a valid cooked sample, matching the rest of the SDK's
+    /// asset handling: a bad `include_bytes!` is a build mistake, not a
+    /// runtime condition worth threading a Result through a sound effect for.
+    pub fn upload(&mut self, psau: &[u8]) -> Sample {
+        let audio = Audio::from_bytes(psau).expect("cooked psau sample");
+        let adpcm = audio.adpcm_bytes();
+        psx_spu::upload_adpcm(self.next, adpcm);
+        let sample = Sample {
+            addr: self.next,
+            rate_hz: audio.sample_rate_hz(),
+            frames: adpcm.len() as u32 / BLOCK_BYTES,
+        };
+        self.next = SpuAddr::new(self.next.byte_offset() + adpcm.len() as u32);
+        sample
+    }
+}
+
+/// A sample with the settings it should be played at.
+#[derive(Clone, Copy)]
+pub struct OneShot {
+    sample: Sample,
+    volume: Volume,
+    adsr: Adsr,
+    pitch: Option<Pitch>,
+}
+
+impl OneShot {
+    /// A one-shot at its own recorded rate, under [`Adsr::default_tone`].
+    ///
+    /// `default_tone` rather than `percussive`: percussive self-fades in about
+    /// 150 ms, which is most of a quarter-second sound. The cutoff, not the
+    /// envelope, is what stops this.
+    pub const fn new(sample: Sample, volume: Volume) -> Self {
+        Self {
+            sample,
+            volume,
+            adsr: Adsr::default_tone(),
+            pitch: None,
+        }
+    }
+
+    /// Override the envelope.
+    pub const fn with_adsr(mut self, adsr: Adsr) -> Self {
+        self.adsr = adsr;
+        self
+    }
+
+    /// Play at an explicit pitch instead of the sample's own rate. `0x1000` is
+    /// unity; lower stretches the sound and raises how long it lasts, which
+    /// [`OneShot::ticks`] accounts for.
+    pub const fn with_pitch(mut self, pitch: Pitch) -> Self {
+        self.pitch = Some(pitch);
+        self
+    }
+
+    /// The sample behind this one-shot.
+    pub const fn sample(&self) -> Sample {
+        self.sample
+    }
+
+    /// How long this will sound, in ticks of a `ticks_hz` clock, with any
+    /// pitch override applied.
+    pub const fn ticks(&self, ticks_hz: u32) -> u32 {
+        let base = self.sample.ticks_at(ticks_hz);
+        match self.pitch {
+            // Pitch is Q4.12, so unity is 0x1000: half the pitch is twice the
+            // duration. Guard the zero a caller could hand us rather than
+            // dividing by it.
+            Some(p) => match p.raw_value() {
+                0 => base,
+                raw => base * 0x1000 / raw as u32,
+            },
+            None => base,
+        }
+    }
+
+    /// Point `voice` at this one-shot without starting it.
+    ///
+    /// Separate from [`OneShot::play`] because a program that keeps one voice
+    /// per sound can set it up once at boot and then only key on. A program
+    /// sharing voices has to do both together.
+    pub fn configure(&self, voice: Voice) {
+        voice.configure_sample(
+            self.sample.addr,
+            self.sample.rate_hz,
+            self.volume,
+            self.adsr,
+        );
+        if let Some(pitch) = self.pitch {
+            voice.set_pitch(pitch);
+        }
+    }
+
+    /// Key this one-shot on `voice`.
+    ///
+    /// Volume is set on every key-on rather than once at upload, because the
+    /// cutoff silences a voice by writing volume 0 and `key_on` does not
+    /// restore it. Omitting this is how the demo disc's v0.11 pressing ended
+    /// up with a browse blip that played exactly once and never again.
+    pub fn play(&self, voice: Voice) {
+        self.configure(voice);
+        Voice::key_on(voice.mask());
+    }
+}
+
+/// Has `now` reached `deadline`, on a tick counter that wraps?
+///
+/// Split out so the wrap is testable off-hardware. A plain `now >= deadline`
+/// stops working the first time the counter rolls over, which on a 60 Hz clock
+/// is a little over two years of uptime, but the comparison costs the same
+/// either way.
+const fn expired(now: u32, deadline: u32) -> bool {
+    now.wrapping_sub(deadline) < u32::MAX / 2
+}
+
+/// Plays one-shots across a fixed set of voices, silencing each when its
+/// sample has run out.
+///
+/// `N` voices are driven round-robin by [`Player::play`], or addressed
+/// directly by [`Player::play_on`] when a sound wants a voice of its own.
+pub struct Player<const N: usize> {
+    voices: [Voice; N],
+    /// Tick each voice must be silenced on, or `None` when it is idle.
+    off_at: [Option<u32>; N],
+    next: usize,
+    ticks_hz: u32,
+}
+
+impl<const N: usize> Player<N> {
+    /// Drive `voices` from a clock running at `ticks_hz` (60 for NTSC frames,
+    /// 50 for PAL).
+    pub const fn new(voices: [Voice; N], ticks_hz: u32) -> Self {
+        Self {
+            voices,
+            off_at: [None; N],
+            next: 0,
+            ticks_hz,
+        }
+    }
+
+    /// Silence any voice whose sample has ended. Call once per tick, before
+    /// anything that might start a new sound.
+    pub fn tick(&mut self, now: u32) {
+        for (slot, deadline) in self.off_at.iter_mut().enumerate() {
+            if let Some(at) = *deadline {
+                if expired(now, at) {
+                    self.voices[slot].set_volume(Volume::SILENCE, Volume::SILENCE);
+                    *deadline = None;
+                }
+            }
+        }
+    }
+
+    /// Fire `shot` on a specific voice slot.
+    pub fn play_on(&mut self, slot: usize, shot: &OneShot, now: u32) {
+        let voice = self.voices[slot];
+        shot.play(voice);
+        self.off_at[slot] = Some(now.wrapping_add(shot.ticks(self.ticks_hz)));
+    }
+
+    /// Fire `shot` on the next voice in the rotation, and return which slot
+    /// took it.
+    ///
+    /// Round-robin rather than picking an idle voice: finding the idle one
+    /// costs a scan, and a rotation of a few voices means a new sound rarely
+    /// lands on one that is still sounding anyway.
+    pub fn play(&mut self, shot: &OneShot, now: u32) -> usize {
+        let slot = self.next;
+        self.next = (self.next + 1) % N;
+        self.play_on(slot, shot, now);
+        slot
+    }
+
+    /// Silence every voice now, whatever it was doing.
+    pub fn silence_all(&mut self) {
+        for (slot, voice) in self.voices.iter().enumerate() {
+            voice.set_volume(Volume::SILENCE, Volume::SILENCE);
+            self.off_at[slot] = None;
+        }
+    }
+
+    /// The voice in `slot`.
+    pub const fn voice(&self, slot: usize) -> Voice {
+        self.voices[slot]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(rate_hz: u32, frames: u32) -> Sample {
+        Sample {
+            addr: SpuAddr::new(0x1010),
+            rate_hz,
+            frames,
+        }
+    }
+
+    #[test]
+    fn a_samples_length_follows_its_block_count_and_rate() {
+        // 126 blocks at 44100 Hz is ui_beep: 3528 samples, 0.08 s, so five
+        // ticks of a 60 Hz clock once the margin is on.
+        let s = sample(44100, 126);
+        assert_eq!(s.len_samples(), 3528);
+        assert_eq!(s.ticks_at(60), 3528 * 60 / 44100 + TAIL_TICKS);
+    }
+
+    #[test]
+    fn a_zero_rate_sample_does_not_divide_by_zero() {
+        assert_eq!(sample(0, 10).ticks_at(60), 10 * 28 * 60 + TAIL_TICKS);
+    }
+
+    #[test]
+    fn stretching_the_pitch_stretches_the_cutoff() {
+        let s = sample(44100, 394); // jump, 0.25 s
+        let plain = OneShot::new(s, Volume::MAX);
+        let half = plain.with_pitch(Pitch::raw(0x0800));
+        // Half the pitch is twice the duration, so the cutoff has to wait
+        // twice as long or it clips the sound it is meant to be following.
+        assert_eq!(half.ticks(60), plain.ticks(60) * 2);
+    }
+
+    #[test]
+    fn a_zero_pitch_falls_back_rather_than_dividing_by_zero() {
+        let s = sample(44100, 394);
+        let shot = OneShot::new(s, Volume::MAX).with_pitch(Pitch::raw(0));
+        assert_eq!(shot.ticks(60), s.ticks_at(60));
+    }
+
+    #[test]
+    fn the_cutoff_survives_the_tick_counter_wrapping() {
+        assert!(!expired(10, 20));
+        assert!(expired(20, 20));
+        assert!(expired(21, 20));
+        // Deadline set just before the counter rolls over, checked just
+        // after: the naive `now >= deadline` says "not yet" here and leaves
+        // the voice running for the rest of time.
+        assert!(!expired(u32::MAX - 5, u32::MAX - 2));
+        assert!(expired(2, u32::MAX - 2));
+    }
+}
