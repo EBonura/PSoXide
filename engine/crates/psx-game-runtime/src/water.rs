@@ -20,7 +20,6 @@ use crate::vram::VramSlot;
 
 /// Draw visible water cells in one runtime room. Each cell is a single tiled
 /// quad; there is no collision query and no mutable per-cell state.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_water_cells<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     cells: &[LevelWaterCellRecord],
     current_room: RoomIndex,

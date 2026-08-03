@@ -258,7 +258,6 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     /// it are the prefetch ring and are counted as such in telemetry, keep
     /// their loads unprotected against eviction, and may be dropped first
     /// under slot pressure.
-    #[allow(clippy::too_many_arguments)]
     pub fn reconcile_residency<const PAGES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,

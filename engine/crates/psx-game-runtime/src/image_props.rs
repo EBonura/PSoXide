@@ -26,7 +26,6 @@ const IMAGE_PROP_DEPTH_BIAS: i32 = 256;
 /// optionally GTE-projected textured cards. `GTE_PROJECT` is a const
 /// parameter so a game that disables the GTE path pays nothing for it
 /// (the flag was a compile-time const before the carve).
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_image_props<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     props: &[LevelImagePropRecord],
@@ -248,7 +247,6 @@ fn image_prop_sort_depth_projected(verts: [ProjectedVertex; 4], near_z: i32) -> 
     nearest.max(near_z)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn image_prop_vertices(
     origin: WorldVertex,
     width: u16,

@@ -3,7 +3,6 @@ use super::*;
 impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Submit one camera-space room triangle using adaptive's bounded
     /// bounded subdivision schedule.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_adaptive_textured_gouraud_view_triangle_uv_words(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -66,7 +65,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn submit_adaptive_textured_gouraud_view_triangle_split(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -119,7 +117,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn submit_adaptive_textured_gouraud_view_triangle_leaf(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -206,7 +203,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// space until each leaf is projected. Splitting the already-projected
     /// polygon would preserve the original affine texture plane and therefore
     /// would not provide adaptive's piecewise-perspective correction.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_adaptive_textured_gouraud_view_quad_uv_words<P>(
         &mut self,
         primitives: &mut P,
@@ -351,7 +347,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Fixed-topology one-level quad split. The nine shared points are
     /// projected once and addressed through a constant four-leaf table.
     #[cfg(feature = "tr-subdivision-lattice")]
-    #[allow(clippy::too_many_arguments)]
     fn submit_adaptive_textured_gouraud_view_quad_lattice<P>(
         &mut self,
         primitives: &mut P,
@@ -441,7 +436,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     }
 
     #[cfg(feature = "tr-subdivision-lattice")]
-    #[allow(clippy::too_many_arguments)]
     fn submit_adaptive_textured_gouraud_projected_quad_leaf<P>(
         &mut self,
         primitives: &mut P,
@@ -513,7 +507,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn submit_adaptive_textured_gouraud_view_quad_split<P>(
         &mut self,
         primitives: &mut P,
@@ -573,7 +566,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn submit_adaptive_textured_gouraud_view_quad_leaf<P>(
         &mut self,
         primitives: &mut P,
@@ -1087,7 +1079,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// both hardware triangles are safe. Oversized packets are split through
     /// the normal triangle path so the real PS1 GPU cannot discard visible
     /// room geometry for exceeding its 1023x511 coordinate-delta limits.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth<P>(
         &mut self,
         primitives: &mut P,
@@ -1848,7 +1839,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// earlier frames simply takes the constructor on its first
     /// visible frame. In-place patching is safe behind the present
     /// flip's DMA drain.
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     pub(crate) fn submit_prebuilt_textured_gouraud_quad(
         &mut self,

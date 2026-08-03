@@ -3237,7 +3237,6 @@ pub mod player_vert_debug {
     #[inline(always)]
     pub(super) fn record_compose_input(_model: &Mat3I16, _ptrans: Vec3I16) {}
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     pub(super) fn observe(
         _vertex: ModelVertex,
@@ -3283,7 +3282,6 @@ fn projected_from_gte(projected: scene::Projected) -> ProjectedVertex {
 /// its own check). Called between an RTPT kick and its read, this is
 /// the scalar work that hides the GTE op latency.
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 fn commit_projected_triple(
     base: usize,
     triple: [scene::Projected; 3],
@@ -3457,7 +3455,6 @@ const BLENDED_VERTEX_CHUNK: usize = 32;
 /// `projected_vertices`, belongs to the part whose joint is `primary`, and
 /// passed [`model_vertex_uses_cpu_blend`].
 #[cfg(not(feature = "vert-debug"))]
-#[allow(clippy::too_many_arguments)]
 unsafe fn flush_blended_model_vertex_chunk(
     chunk_ptr: *const u16,
     chunk_len: usize,
@@ -3987,7 +3984,6 @@ fn merge_world_stats(stats: &mut WorldRenderStats, next: WorldRenderStats) {
     stats.command_overflow |= next.command_overflow;
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn flush_packed_unclamped_model_batch_stats(
     stats: &mut TexturedModelRenderStats,

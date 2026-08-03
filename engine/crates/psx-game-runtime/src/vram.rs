@@ -331,7 +331,6 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
     /// preloads the other menu states so later transitions avoid CD reads.
     /// Collapsed from the game's glue in phase 1.5: one owner drives the
     /// defer window, the contiguous preload, and the VRAM upload pass.
-    #[allow(clippy::too_many_arguments)]
     pub fn service_menu_images<
         const RAM_ASSETS: usize,
         const VRAM_ASSETS: usize,

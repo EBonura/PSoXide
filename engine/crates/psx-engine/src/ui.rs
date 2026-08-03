@@ -400,7 +400,6 @@ fn node_visible_in_tree(
 ///
 /// `visible` lets higher-level runtime code apply game/input state to
 /// authored nodes without baking those states into this renderer.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_scene(
     nodes: &[LevelUiNodeRecord],
     first: usize,
@@ -653,7 +652,6 @@ fn draw_focus_tracer(
 /// along the focus ring band (top edge left-to-right, then right edge
 /// down, bottom right-to-left, left edge up), splitting across edges
 /// and the wrap point as needed.
-#[allow(clippy::too_many_arguments)]
 fn draw_perimeter_run(
     node: UiResolvedNode,
     width: i16,
@@ -1054,7 +1052,6 @@ fn draw_scaled_text_paint(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_transformed_text_paint(
     font: &FontAtlas,
     resolved: UiResolvedNode,
@@ -1177,7 +1174,6 @@ fn draw_label(
 /// hand-rolled intros converge on during their hold phase). Shimmer
 /// advances the head every other frame like the originals;
 /// FastShimmer every frame.
-#[allow(clippy::too_many_arguments)]
 fn draw_label_sheen(
     font: &FontAtlas,
     effect: LevelUiImageEffect,
@@ -1644,7 +1640,6 @@ fn draw_button(
 /// current proportion; `fill_num` is clamped into `[0, fill_den]` here so
 /// an out-of-range value cannot run the knob off the track. The bound
 /// option's value feeds this through [`slider_fill`] in [`draw_scene`].
-#[allow(clippy::too_many_arguments)]
 fn draw_slider(
     resolved: UiResolvedNode,
     fill_num: i32,

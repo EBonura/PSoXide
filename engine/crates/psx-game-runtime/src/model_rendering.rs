@@ -150,7 +150,6 @@ pub struct RuntimeModelAsset {
 }
 
 impl RuntimeModelAsset {
-    #[allow(clippy::too_many_arguments)]
     fn from_record(
         index: ModelIndex,
         record: &LevelModelRecord,
@@ -563,7 +562,6 @@ fn runtime_model_geometry<'a>(
 
 /// The clip's full duration in vblanks for one playthrough of the
 /// action's frame range at its authored speed.
-#[allow(clippy::too_many_arguments)]
 pub fn player_clip_duration_vblanks<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,
@@ -633,7 +631,6 @@ pub fn player_action_push_speed<
 /// Parse every cooked model + animation into the runtime tables:
 /// clears the caches, decodes clips, then decodes each model's faces,
 /// parts, and vertices into the shared pools.
-#[allow(clippy::too_many_arguments)]
 pub fn load_runtime_models<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,
@@ -753,7 +750,6 @@ pub struct PlayerModelDrawStats {
 
 /// Draw the player's animated model through the compact predecoded
 /// model path.
-#[allow(clippy::too_many_arguments)]
 #[inline]
 /// Resolve a crossfade spec into a pose-blend source against this
 /// model's clip table.
@@ -961,7 +957,6 @@ pub fn draw_player<
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn submit_runtime_model_predecoded<
     const MODEL_VERTEX_CAP: usize,
@@ -1087,7 +1082,6 @@ pub struct EquipmentDrawStats {
 
 /// Draw the player's attached equipment (weapon models) and evaluate
 /// its active weapon hitboxes against cooked entities.
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_player_equipment<
     const MAX_RUNTIME_MODELS: usize,
@@ -1348,7 +1342,6 @@ pub fn animation_phase_at_tick_q12(
 /// Sample one player joint through the exact presentation transform used by
 /// [`draw_player`]. Gameplay hit volumes therefore follow the visible pose,
 /// including authored visual yaw/scale/offset and in-place root correction.
-#[allow(clippy::too_many_arguments)]
 pub fn player_joint_world_transform(
     tables: ModelTables,
     runtime_model: RuntimeModelAsset,
@@ -1399,7 +1392,6 @@ pub fn player_joint_world_transform(
 /// Sample one live model-instance joint through the same transform used by
 /// [`draw_model_instances`]. The caller supplies the entity's live transform,
 /// clip, and phase so authored hurtboxes stay attached to the rendered rig.
-#[allow(clippy::too_many_arguments)]
 pub fn model_instance_joint_world_transform(
     tables: ModelTables,
     runtime_model: RuntimeModelAsset,
