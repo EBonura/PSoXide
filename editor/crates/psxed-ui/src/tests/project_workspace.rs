@@ -7,7 +7,7 @@ fn room_grid_grow_preserves_spatial_descendant_preview_position() {
     let room = scene.add_node(
         scene.root,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(2, 2, 1024),
         },
     );
@@ -173,7 +173,7 @@ fn editor_camera_saves_with_project_and_restores_on_open() {
     project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: populated_grid(2, 2),
         },
     );
@@ -309,7 +309,7 @@ fn select_pick_passes_through_culled_wall_front_material() {
     grid.add_wall(0, 0, GridDirection::South, 0, 1024, Some(material));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
 
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.replace_node_selection(room);
@@ -348,7 +348,7 @@ fn select_pick_passes_through_culled_ceiling_to_visible_floor() {
         Some(GridHorizontalFace::flat(1024, Some(material)));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
 
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.replace_node_selection(room);
@@ -377,7 +377,7 @@ fn paint_ceiling_ignores_floor_face_hit_for_targeting() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -413,7 +413,7 @@ fn paint_ceiling_fallback_pick_uses_ceiling_plane() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(8, 8, 1024),
         },
     );
@@ -561,7 +561,7 @@ fn entering_material_paint_clears_geometry_selection_and_syncs_the_material() {
     grid.set_floor(0, 0, 0, Some(material));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("paint-modal-selection"), project);
     workspace.replace_node_selection(room);

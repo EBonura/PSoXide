@@ -1,0 +1,50 @@
+(
+    name: "Spiral Stair 3x3",
+    sector_size: 1792,
+    width: 3,
+    height: 3,
+    merge_primitives: false,
+    materials: {
+        985: "BLOCK_1A Material",
+        1002: "BRICK_1A Material",
+        1032: "COBBLES_1A Material",
+    },
+    floors: [
+        (
+            relative_elevation: 0,
+            cells: [
+                (offset: (0, 0), sector: Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 0, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: [])))),
+                (offset: (1, 0), sector: Some((floor: Some((heights: (448, 448, 448, 448), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (448, 448, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], east: [], south: [(heights: (448, 448, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], west: [(heights: (0, 0, 448, 448), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: [])))),
+                (offset: (2, 0), sector: Some((floor: Some((heights: (896, 896, 896, 896), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (896, 896, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], south: [(heights: (896, 896, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], west: [(heights: (448, 448, 896, 896), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: [])))),
+                (offset: (2, 1), sector: Some((floor: Some((heights: (1344, 1344, 1344, 1344), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (1344, 1344, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], south: [(heights: (896, 896, 1344, 1344), material: Some((985)), solid: true, dropped_corner: None)], west: [(heights: (1344, 1344, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: [])))),
+                (offset: (2, 2), sector: Some((floor: Some((heights: (1792, 1792, 1792, 1792), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (1792, 1792, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], east: [(heights: (1792, 1792, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], south: [(heights: (1344, 1344, 1792, 1792), material: Some((985)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: [])))),
+                (offset: (1, 2), sector: Some((floor: Some((heights: (2240, 2240, 2240, 2240), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (2240, 2240, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], east: [(heights: (1792, 1792, 2240, 2240), material: Some((985)), solid: true, dropped_corner: None)], south: [(heights: (2240, 2240, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: [])))),
+                (offset: (0, 2), sector: Some((floor: Some((heights: (2688, 2688, 2688, 2688), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (2688, 2688, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], east: [(heights: (2240, 2240, 2688, 2688), material: Some((985)), solid: true, dropped_corner: None)], south: [], west: [(heights: (2688, 2688, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: [])))),
+                (offset: (0, 1), sector: Some((floor: Some((heights: (3136, 3136, 3136, 3136), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (2688, 2688, 3136, 3136), material: Some((985)), solid: true, dropped_corner: None)], east: [(heights: (3136, 3136, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], south: [(heights: (0, 0, 3136, 3136), material: Some((985)), solid: true, dropped_corner: None)], west: [(heights: (3136, 3136, 3584, 3584), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []), floor_above: Some((target_floor: 1))))),
+            ],
+        ),
+        (
+            relative_elevation: 3584,
+            cells: [
+                (offset: (0, 1), sector: Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: Some((heights: (7168, 7168, 7168, 7168), split: NorthWestSouthEast, material: Some((1002)), walkable: true, dropped_corner: None)), walls: (north: [], east: [(heights: (0, 0, 7168, 7168), material: Some((985)), solid: true, dropped_corner: None)], south: [(heights: (0, 0, 7168, 7168), material: Some((985)), solid: true, dropped_corner: None)], west: [(heights: (0, 0, 7168, 7168), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []), floor_below: Some(())))),
+                (offset: (0, 2), sector: Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((1032)), walkable: true, dropped_corner: None)), ceiling: Some((heights: (7168, 7168, 7168, 7168), split: NorthWestSouthEast, material: Some((1002)), walkable: true, dropped_corner: None)), walls: (north: [], east: [(heights: (0, 0, 7168, 7168), material: Some((985)), solid: true, dropped_corner: None)], south: [], west: [(heights: (0, 0, 7168, 7168), material: Some((985)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: [])))),
+            ],
+        ),
+    ],
+    lights: [
+        (
+            cell: (
+                1,
+                0,
+            ),
+            height_sectors: 1.0,
+            color: (
+                255,
+                255,
+                255,
+            ),
+            intensity: 1.0,
+            radius: 2.5,
+        ),
+    ],
+)

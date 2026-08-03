@@ -46,6 +46,7 @@ pub(crate) fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectF
     push_resource_folder(project, &mut rows, "animations", ResourceFilter::Animation);
     push_resource_folder(project, &mut rows, "characters", ResourceFilter::Character);
     push_resource_folder(project, &mut rows, "weapons", ResourceFilter::Weapon);
+    push_resource_folder(project, &mut rows, "prefabs", ResourceFilter::Prefab);
     push_resource_folder(project, &mut rows, "meshes", ResourceFilter::Mesh);
     push_resource_folder(project, &mut rows, "spawns", ResourceFilter::Other);
     rows
@@ -181,6 +182,7 @@ pub(crate) fn resource_file_name(resource: &Resource) -> String {
         ResourceData::Character(_) => cooked_name(&resource.name, "", "profile"),
         ResourceData::Weapon(_) => cooked_name(&resource.name, "", "weapon"),
         ResourceData::Mesh { source_path } => cooked_name(&resource.name, source_path, "psxmesh"),
+        ResourceData::Prefab { source_path } => cooked_name(&resource.name, source_path, "ron"),
         ResourceData::Scene { source_path } => cooked_name(&resource.name, source_path, "room"),
         ResourceData::Script { source_path } => cooked_name(&resource.name, source_path, "script"),
         ResourceData::Audio { source_path } => cooked_name(&resource.name, source_path, "vag"),
@@ -211,7 +213,7 @@ pub(crate) fn snake_name(name: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFilter, usize); 8] {
+pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFilter, usize); 9] {
     let mut material = 0;
     let mut model = 0;
     let mut animation = 0;
@@ -219,6 +221,7 @@ pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFil
     let mut weapon = 0;
     let mut mesh = 0;
     let mut room = 0;
+    let mut prefab = 0usize;
     let mut other = 0;
     for resource in &project.resources {
         if resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) {
@@ -236,6 +239,7 @@ pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFil
             ResourceData::Character(_) => character += 1,
             ResourceData::Weapon(_) => weapon += 1,
             ResourceData::Mesh { .. } => mesh += 1,
+            ResourceData::Prefab { .. } => prefab += 1,
             ResourceData::Scene { .. } => room += 1,
             ResourceData::Script { .. } | ResourceData::Audio { .. } => other += 1,
         }
@@ -247,6 +251,7 @@ pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFil
         (ResourceFilter::Character, character),
         (ResourceFilter::Weapon, weapon),
         (ResourceFilter::Mesh, mesh),
+        (ResourceFilter::Prefab, prefab),
         (ResourceFilter::Room, room),
         (ResourceFilter::Other, other),
     ]
@@ -286,6 +291,7 @@ pub(crate) fn resource_source_path(resource: &Resource) -> Option<&str> {
         ResourceData::AnimationSource(source) => Some(source.source_path.as_str()),
         ResourceData::AnimationClip(clip) => Some(clip.psxanim_path.as_str()),
         ResourceData::Mesh { source_path }
+        | ResourceData::Prefab { source_path }
         | ResourceData::Scene { source_path }
         | ResourceData::Script { source_path }
         | ResourceData::Audio { source_path } => Some(source_path.as_str()),
@@ -308,6 +314,7 @@ pub(crate) fn resource_lucide_icon(data: &ResourceData) -> char {
         ResourceData::Character(_) => icons::MAP_PIN,
         ResourceData::Weapon(_) => icons::WAYPOINT,
         ResourceData::Mesh { .. } => icons::BOX,
+        ResourceData::Prefab { .. } => icons::LAYERS,
         ResourceData::Scene { .. } => icons::GRID,
         ResourceData::Script { .. } => icons::FILE,
         ResourceData::Audio { .. } => icons::AUDIO_LINES,
@@ -330,6 +337,7 @@ pub(crate) fn resource_lucide_color(data: &ResourceData, selected: bool) -> Colo
         ResourceData::Character(_) => Color32::from_rgb(120, 220, 148),
         ResourceData::Weapon(_) => Color32::from_rgb(222, 196, 112),
         ResourceData::Mesh { .. } => Color32::from_rgb(156, 174, 190),
+        ResourceData::Prefab { .. } => Color32::from_rgb(122, 152, 198),
         ResourceData::Scene { .. } => Color32::from_rgb(209, 118, 71),
         ResourceData::Script { .. } => Color32::from_rgb(188, 176, 104),
         ResourceData::Audio { .. } => Color32::from_rgb(104, 202, 188),
@@ -762,6 +770,7 @@ pub(crate) fn resource_preview_color(resource: &Resource) -> Color32 {
             ResourceData::Character(_) => Color32::from_rgb(96, 144, 110),
             ResourceData::Weapon(_) => Color32::from_rgb(150, 132, 76),
             ResourceData::Mesh { .. } => Color32::from_rgb(110, 120, 130),
+            ResourceData::Prefab { .. } => Color32::from_rgb(122, 152, 198),
             ResourceData::Scene { .. } => Color32::from_rgb(92, 130, 106),
             ResourceData::Script { .. } => Color32::from_rgb(128, 126, 80),
             ResourceData::Audio { .. } => Color32::from_rgb(80, 128, 128),
@@ -786,6 +795,7 @@ pub(crate) fn resource_detail(resource: &Resource) -> &'static str {
         ResourceData::Character(_) => "Character Profile",
         ResourceData::Weapon(_) => "Weapon",
         ResourceData::Mesh { .. } => "Mesh",
+        ResourceData::Prefab { .. } => "Prefab",
         ResourceData::Scene { .. } => "Room",
         ResourceData::Script { .. } => "Script",
         ResourceData::Audio { .. } => "Audio",

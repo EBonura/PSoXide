@@ -207,7 +207,7 @@ impl EditorWorkspace {
         let Some(room) = scene.node(room_id) else {
             return;
         };
-        let NodeKind::Room { grid } = &room.kind else {
+        let NodeKind::Section { grid } = &room.kind else {
             return;
         };
         let room_center = node_world(room);
@@ -319,7 +319,7 @@ impl EditorWorkspace {
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
-            let NodeKind::Room { .. } = &node.kind else {
+            let NodeKind::Section { .. } = &node.kind else {
                 self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
@@ -338,7 +338,7 @@ impl EditorWorkspace {
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let NodeKind::Section { grid } = &mut node.kind else {
                 self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
@@ -385,7 +385,7 @@ impl EditorWorkspace {
             .filter(|drag| drag.room == room)
             .and_then(|drag| drag.base_project.active_scene().node(room))
             .and_then(|node| match &node.kind {
-                NodeKind::Room { grid } => Some(grid),
+                NodeKind::Section { grid } => Some(grid),
                 _ => None,
             })
             .or_else(|| self.room_grid_view(room))?;
@@ -632,7 +632,7 @@ impl EditorWorkspace {
         let Some(room) = scene.node(room_id) else {
             return Vec::new();
         };
-        let NodeKind::Room { grid } = &room.kind else {
+        let NodeKind::Section { grid } = &room.kind else {
             return Vec::new();
         };
         let floor = psxed_project::floor_view::node_floor(scene, *node_id);
@@ -783,7 +783,7 @@ impl EditorWorkspace {
             let Some(room) = scene.node(room_id) else {
                 continue;
             };
-            let NodeKind::Room { grid } = &room.kind else {
+            let NodeKind::Section { grid } = &room.kind else {
                 continue;
             };
             return grid.sector_size.max(1);
@@ -1297,7 +1297,7 @@ impl EditorWorkspace {
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
-            let NodeKind::Room { .. } = &node.kind else {
+            let NodeKind::Section { .. } = &node.kind else {
                 self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
@@ -1316,7 +1316,7 @@ impl EditorWorkspace {
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let NodeKind::Section { grid } = &mut node.kind else {
                 self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
@@ -1881,7 +1881,7 @@ impl EditorWorkspace {
         let sector_size = room_id
             .and_then(|id| scene.node(id))
             .and_then(|n| match &n.kind {
-                NodeKind::Room { grid } => Some(grid.sector_size as f32),
+                NodeKind::Section { grid } => Some(grid.sector_size as f32),
                 _ => None,
             })
             .unwrap_or(1.0);

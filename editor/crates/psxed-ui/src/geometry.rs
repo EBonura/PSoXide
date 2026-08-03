@@ -1393,7 +1393,7 @@ pub(crate) fn remove_primitive_faces_from_project(
         let Some(node) = project.active_scene_mut().node_mut(face.room) else {
             continue;
         };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let NodeKind::Section { grid } = &mut node.kind else {
             continue;
         };
         let idx = active_floor.min(grid.floor_count().saturating_sub(1));

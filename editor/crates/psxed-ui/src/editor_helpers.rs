@@ -76,7 +76,7 @@ pub(crate) fn room_grid_center_cells(
     room: NodeId,
 ) -> Option<[f32; 2]> {
     let node = scene.node(room)?;
-    let NodeKind::Room { grid } = &node.kind else {
+    let NodeKind::Section { grid } = &node.kind else {
         return None;
     };
     Some(grid.grid_center_cells())
@@ -134,7 +134,7 @@ pub(crate) fn extend_room_grid_to_include_preserving_child_positions(
     let old_center = room_grid_center_cells(scene, room)?;
     let cell = {
         let node = scene.node_mut(room)?;
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let NodeKind::Section { grid } = &mut node.kind else {
             return None;
         };
         let idx = active_floor.min(grid.floor_count().saturating_sub(1));
@@ -158,7 +158,7 @@ pub(crate) fn resize_room_grid_preserving_child_positions(
         let Some(node) = scene.node_mut(room) else {
             return false;
         };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let NodeKind::Section { grid } = &mut node.kind else {
             return false;
         };
         let idx = active_floor.min(grid.floor_count().saturating_sub(1));
@@ -667,14 +667,14 @@ pub(crate) fn sanitise_room_filename(name: &str) -> String {
 
 /// Walk the active scene and collect every Room node as an
 /// `(id, display name)` pair, used by Portal pickers.
-/// Walk parent links until a `NodeKind::Room` is found.
+/// Walk parent links until a `NodeKind::Section` is found.
 /// Returns its `NodeId` or `None` if `node_id` lives outside
 /// any Room.
 pub(crate) fn enclosing_room_id(scene: &psxed_project::Scene, node_id: NodeId) -> Option<NodeId> {
     let mut current = scene.node(node_id)?.parent;
     while let Some(parent_id) = current {
         let parent = scene.node(parent_id)?;
-        if matches!(parent.kind, NodeKind::Room { .. }) {
+        if matches!(parent.kind, NodeKind::Section { .. }) {
             return Some(parent_id);
         }
         current = parent.parent;
@@ -686,7 +686,7 @@ pub(crate) fn node_enclosing_sector_size(scene: &psxed_project::Scene, node_id: 
     enclosing_room_id(scene, node_id)
         .and_then(|room_id| scene.node(room_id))
         .and_then(|room| match &room.kind {
-            NodeKind::Room { grid } => Some(grid.sector_size.max(1)),
+            NodeKind::Section { grid } => Some(grid.sector_size.max(1)),
             _ => None,
         })
         .unwrap_or(DEFAULT_WORLD_SECTOR_SIZE)
@@ -808,7 +808,7 @@ pub(crate) fn entity_bound_kind_and_size(
     node: &psxed_project::SceneNode,
 ) -> Option<(EntityBoundKind, [f32; 3])> {
     match &node.kind {
-        NodeKind::Room { .. }
+        NodeKind::Section { .. }
         | NodeKind::World { .. }
         | NodeKind::Node
         | NodeKind::Node3D
@@ -1032,7 +1032,7 @@ pub(crate) fn collect_room_options(project: &ProjectDocument) -> Vec<(NodeId, St
         .active_scene()
         .nodes()
         .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| (node.id, node.name.clone()))
         .collect()
 }

@@ -296,10 +296,10 @@ fn eroded_box_prop_preview_uses_generated_surface_mesh() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .expect("starter room");
     let room_id = room.id;
-    let NodeKind::Room { grid } = &room.kind else {
+    let NodeKind::Section { grid } = &room.kind else {
         unreachable!();
     };
     let [target_x, _, target_z] = psxed_project::spatial::room_preview_center(grid);
@@ -408,10 +408,10 @@ fn cylinder_prop_preview_renders_shared_generated_profile_headlessly() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .expect("starter room");
     let room_id = room.id;
-    let NodeKind::Room { grid } = &room.kind else {
+    let NodeKind::Section { grid } = &room.kind else {
         unreachable!();
     };
     let [target_x, _, target_z] = psxed_project::spatial::room_preview_center(grid);
@@ -531,9 +531,9 @@ fn sample_aletha_crystal_preview_uses_its_generated_texture() {
     let room = scene
         .nodes()
         .iter()
-        .find(|node| node.name == "Demo7 Map" && matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| node.name == "Demo7 Map" && matches!(node.kind, NodeKind::Section { .. }))
         .expect("Demo7 Map room exists");
-    let NodeKind::Room { grid } = &room.kind else {
+    let NodeKind::Section { grid } = &room.kind else {
         unreachable!();
     };
     let player = scene
@@ -827,14 +827,14 @@ fn visible_room_grids_keeps_all_non_hidden_rooms() {
     let room_a = scene.add_node(
         scene.root,
         "Room A",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
     let room_b = scene.add_node(
         scene.root,
         "Room B",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -861,42 +861,42 @@ fn preview_room_grids_walks_bounded_portal_neighborhood() {
     let room_a = scene.add_node(
         scene.root,
         "Room A",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
     let room_b = scene.add_node(
         scene.root,
         "Room B",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
     let room_c = scene.add_node(
         scene.root,
         "Room C",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
     let room_d = scene.add_node(
         scene.root,
         "Room D",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
     let room_e = scene.add_node(
         scene.root,
         "Room E",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
     let room_far = scene.add_node(
         scene.root,
         "Room Far",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -950,7 +950,7 @@ fn preview_room_grids_shows_active_floor_and_below_only() {
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.push_floor(); // floor 1
     grid.push_floor(); // floor 2
-    let room = scene.add_node(scene.root, "Stacked", NodeKind::Room { grid });
+    let room = scene.add_node(scene.root, "Stacked", NodeKind::Section { grid });
 
     let hidden = std::collections::HashSet::new();
     // Active floor = 1 (middle of three).
@@ -1580,7 +1580,7 @@ fn diagnose_static_glb_scene_render() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::stone_room(6, 6, 1024, None, None),
         },
     );

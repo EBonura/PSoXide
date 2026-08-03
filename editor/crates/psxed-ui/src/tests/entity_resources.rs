@@ -147,7 +147,7 @@ fn dropping_weapon_resource_creates_equipment_entity() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(2, 2, 1024),
         },
     );
@@ -592,7 +592,7 @@ fn scene_graph_add_menu_is_structure_only() {
     assert_eq!(addable.len(), 3);
     assert!(addable
         .iter()
-        .any(|(label, kind)| *label == "Room" && matches!(kind, NodeKind::Room { .. })));
+        .any(|(label, kind)| *label == "Section" && matches!(kind, NodeKind::Section { .. })));
     assert!(addable
         .iter()
         .any(|(label, kind)| *label == "Entity" && matches!(kind, NodeKind::Entity)));
@@ -693,7 +693,7 @@ fn camera_preview_request_targets_floor_anchored_player_origin() {
     let mut grid = WorldGrid::empty(3, 3, 1024);
     grid.origin = [-1, -2];
     grid.set_floor(1, 2, 256, None);
-    let room = scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+    let room = scene.add_node(scene.root, "Room", NodeKind::Section { grid });
     let player = scene.add_node(room, "Player", NodeKind::Entity);
     scene
         .node_mut(player)
@@ -725,7 +725,7 @@ fn camera_preview_request_targets_floor_anchored_player_origin() {
         .selected_camera_preview_request()
         .expect("camera preview request");
     let scene = workspace.project.active_scene();
-    let NodeKind::Room { grid } = &scene.node(room).expect("room exists").kind else {
+    let NodeKind::Section { grid } = &scene.node(room).expect("room exists").kind else {
         panic!("expected room");
     };
     let expected_player = psxed_project::spatial::floor_anchored_node_preview_origin(
@@ -774,7 +774,7 @@ fn add_room_child_creates_three_by_three_floor_with_first_material() {
     workspace.replace_node_selection(world);
 
     workspace.add_child(
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(9, 9, 1024),
         },
         "Room",
@@ -783,7 +783,7 @@ fn add_room_child_creates_three_by_three_floor_with_first_material() {
     let room = workspace.selection.selected_node;
     let scene = workspace.project.active_scene();
     let node = scene.node(room).expect("new room exists");
-    let NodeKind::Room { grid } = &node.kind else {
+    let NodeKind::Section { grid } = &node.kind else {
         panic!("added node should be a room");
     };
     assert_eq!(node.parent, Some(world));
@@ -808,7 +808,7 @@ fn dropping_first_character_profile_creates_player_controller() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -845,7 +845,7 @@ fn dropping_character_profile_stays_non_player_when_player_exists() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -898,7 +898,7 @@ fn dropping_enemy_profile_first_preserves_authored_enemy_defaults() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -977,7 +977,7 @@ fn dropping_player_profile_applies_camera_preset_and_replaces_player_source() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -1051,7 +1051,7 @@ fn player_source_demote_handles_spawn_points_and_character_controllers() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -1096,7 +1096,7 @@ fn character_controller_player_toggle_demotes_existing_player_source() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -1169,7 +1169,7 @@ fn pick_entity_bound_includes_box_prop_bounds() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );

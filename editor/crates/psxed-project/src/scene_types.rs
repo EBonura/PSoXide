@@ -42,10 +42,21 @@ pub enum NodeKind {
         #[serde(default)]
         physics: WorldPhysicsSettings,
     },
-    /// One authored adaptive-style room: a sector grid plus its
-    /// child entities and portal links.
-    #[serde(rename = "Room", alias = "Map")]
-    Room {
+    /// One authored level section: a sector grid plus its child
+    /// entities and portal links.
+    ///
+    /// Named Section, not Room, because "room" already means two other
+    /// things: the runtime [`crate::portal_rooms::PortalRoom`] the cook
+    /// derives by splitting this grid at authored portals (the streaming,
+    /// PVS and residency unit, and what the size caps apply to), and the
+    /// chamber a player perceives. A Section is an authoring unit, closer
+    /// to a TrenchBroom layer: you name it, place it, hide it, save it as
+    /// a prefab. One Section usually becomes several runtime rooms.
+    ///
+    /// The alias chain keeps every project that was saved as `Map` or
+    /// `Room` loading unchanged.
+    #[serde(rename = "Section", alias = "Room", alias = "Map")]
+    Section {
         /// Authored grid-world payload.
         grid: WorldGrid,
     },
@@ -393,7 +404,7 @@ impl NodeKind {
             Self::Node3D => "Node3D",
             Self::Entity => "Entity",
             Self::World { .. } => "World",
-            Self::Room { .. } => "Room",
+            Self::Section { .. } => "Section",
             Self::WaterVolume { .. } => "Water Volume",
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",

@@ -877,7 +877,7 @@ mod tests {
             .nodes()
             .iter()
             .find_map(|node| match &node.kind {
-                NodeKind::Room { grid } => Some(grid.clone()),
+                NodeKind::Section { grid } => Some(grid.clone()),
                 _ => None,
             })
             .expect("starter project should contain a room");
@@ -1382,16 +1382,45 @@ mod tests {
 
     #[test]
     fn rejects_oversized_room_dimensions() {
+        use crate::max_room_cells_for_sector_size;
         let project = ProjectDocument::starter();
-        let grid = WorldGrid::empty(MAX_ROOM_WIDTH + 1, 4, world::SECTOR_SIZE);
+        let span = max_room_cells_for_sector_size(world::SECTOR_SIZE);
+        let grid = WorldGrid::empty(span + 1, 4, world::SECTOR_SIZE);
         match cook_world_grid(&project, &grid) {
             Err(WorldGridCookError::RoomDimensionExceeded { axis, value, limit }) => {
                 assert_eq!(axis, 'X');
-                assert_eq!(value, MAX_ROOM_WIDTH + 1);
-                assert_eq!(limit, MAX_ROOM_WIDTH);
+                assert_eq!(value, span + 1);
+                assert_eq!(limit, span);
             }
             other => panic!("expected RoomDimensionExceeded, got {other:?}"),
         }
+    }
+
+    /// The dimension cap guards one thing: a room-local vertex is
+    /// `cell * sector_size` and must survive i16. So the cell bound has to fall
+    /// as `sector_size` rises. The old flat 32 did not, which made it too loose
+    /// above 1024 and, at exactly 1024, off by one (32 x 1024 = 32 768, one
+    /// past `i16::MAX`).
+    #[test]
+    fn the_room_dimension_cap_tracks_sector_size() {
+        use crate::max_room_cells_for_sector_size;
+        for sector_size in [512, 1024, 1536, 1664, 1792] {
+            let span = max_room_cells_for_sector_size(sector_size);
+            assert!(
+                i32::from(span) * sector_size <= i32::from(i16::MAX),
+                "{sector_size}: {span} cells must fit i16"
+            );
+            assert!(
+                i32::from(span + 1) * sector_size > i32::from(i16::MAX)
+                    || span == MAX_ROOM_WIDTH,
+                "{sector_size}: {span} is the largest span that fits"
+            );
+        }
+        // Bigger sectors mean fewer cells, which is the whole point.
+        assert!(
+            max_room_cells_for_sector_size(1792) < max_room_cells_for_sector_size(1024),
+            "the bound falls as sector_size rises"
+        );
     }
 
     #[test]

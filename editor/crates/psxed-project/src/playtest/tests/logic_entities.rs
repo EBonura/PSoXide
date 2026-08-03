@@ -22,7 +22,7 @@ fn room_node_id(project: &ProjectDocument) -> NodeId {
         .active_scene()
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("room exists")
 }
@@ -81,7 +81,7 @@ fn add_interactable_entity(
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("room exists");
     let entity_id = scene.add_node(room_id, name, NodeKind::Entity);
@@ -107,7 +107,7 @@ fn add_enemy_entity(
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("room exists");
     let entity_id = scene.add_node(room_id, name, NodeKind::Entity);
@@ -302,7 +302,7 @@ fn plain_non_player_controller_cooks_no_game_entity() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .expect("room exists");
     let entity_id = scene.add_node(room_id, "Idle NPC", NodeKind::Entity);

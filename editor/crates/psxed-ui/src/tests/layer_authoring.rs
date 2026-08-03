@@ -13,7 +13,7 @@ fn solid_layer_extrusion_builds_only_the_selected_footprint_and_undoes() {
 
     workspace.extrude_selected_layer_above(false);
 
-    let NodeKind::Room { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 2);
@@ -31,7 +31,7 @@ fn solid_layer_extrusion_builds_only_the_selected_footprint_and_undoes() {
     assert!(!right.walls.get(GridDirection::East).is_empty());
 
     workspace.do_undo();
-    let NodeKind::Room { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 1);
@@ -42,7 +42,7 @@ fn solid_layer_extrusion_builds_only_the_selected_footprint_and_undoes() {
 fn open_layer_extrusion_authors_the_exact_gap_required_by_vertical_portals() {
     let (mut workspace, room) = workspace_with_populated_grid("open-layer", 2, 1);
     {
-        let NodeKind::Room { grid } = &mut workspace
+        let NodeKind::Section { grid } = &mut workspace
             .project
             .active_scene_mut()
             .node_mut(room)
@@ -59,7 +59,7 @@ fn open_layer_extrusion_authors_the_exact_gap_required_by_vertical_portals() {
 
     workspace.extrude_selected_layer_above(true);
 
-    let NodeKind::Room { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
         panic!("room node");
     };
     let lower = grid.floor(0).unwrap().sector(0, 0).unwrap();
@@ -69,7 +69,7 @@ fn open_layer_extrusion_authors_the_exact_gap_required_by_vertical_portals() {
     assert!(upper.ceiling.is_some(), "upper volume must remain authored");
 
     workspace.set_selected_slab_below(false);
-    let NodeKind::Room { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
         panic!("room node");
     };
     assert!(grid
@@ -103,7 +103,7 @@ fn extrusion_below_base_preserves_existing_world_height_and_node_floor() {
 
     let scene = workspace.project.active_scene();
     let room_node = scene.node(room).unwrap();
-    let NodeKind::Room { grid } = &room_node.kind else {
+    let NodeKind::Section { grid } = &room_node.kind else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 2);
@@ -141,7 +141,7 @@ fn deleting_empty_base_promotes_upper_layer_without_moving_or_losing_nodes() {
     {
         let room_node = workspace.project.active_scene_mut().node_mut(room).unwrap();
         room_node.transform.translation[1] = -2.0;
-        let NodeKind::Room { grid } = &mut room_node.kind else {
+        let NodeKind::Section { grid } = &mut room_node.kind else {
             panic!("room node");
         };
         grid.push_floor();
@@ -154,7 +154,7 @@ fn deleting_empty_base_promotes_upper_layer_without_moving_or_losing_nodes() {
 
     let scene = workspace.project.active_scene();
     let room_node = scene.node(room).unwrap();
-    let NodeKind::Room { grid } = &room_node.kind else {
+    let NodeKind::Section { grid } = &room_node.kind else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 1);
@@ -167,7 +167,7 @@ fn deleting_empty_base_promotes_upper_layer_without_moving_or_losing_nodes() {
     workspace.do_undo();
     let scene = workspace.project.active_scene();
     let room_node = scene.node(room).unwrap();
-    let NodeKind::Room { grid } = &room_node.kind else {
+    let NodeKind::Section { grid } = &room_node.kind else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 2);
@@ -189,7 +189,7 @@ fn three_dimensional_face_selection_can_drive_layer_extrusion() {
     assert!(workspace.can_author_selected_layer_footprint());
     workspace.extrude_selected_layer_above(false);
 
-    let NodeKind::Room { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
+    let NodeKind::Section { grid } = &workspace.project.active_scene().node(room).unwrap().kind else {
         panic!("room node");
     };
     assert!(grid.floor(1).unwrap().sector(0, 0).is_some());

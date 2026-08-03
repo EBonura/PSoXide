@@ -240,6 +240,41 @@ impl EditorWorkspace {
                     &attachment_socket_names,
                 );
             }
+            ResourceData::Prefab { source_path } => {
+                // Read the piece off disk to preview it. The resource is a
+                // reference, not a copy, so the library stays global and this
+                // always shows what would actually stamp.
+                let loaded = psxed_project::Prefab::load_from_path(source_path.as_str());
+                match &loaded {
+                    Ok(prefab) => {
+                        draw_prefab_plan(ui, prefab);
+                        ui.label(format!(
+                            "{}x{} cells - {} floor(s) - sector {}",
+                            prefab.width,
+                            prefab.height,
+                            prefab.floors.len(),
+                            prefab.sector_size
+                        ));
+                        ui.label(format!(
+                            "{} cells - {} lights - {} materials",
+                            prefab.floors.iter().map(|f| f.cells.len()).sum::<usize>(),
+                            prefab.lights.len(),
+                            prefab.materials.len()
+                        ));
+                    }
+                    Err(error) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(210, 120, 110),
+                            format!("cannot read prefab: {error}"),
+                        );
+                    }
+                }
+                egui::CollapsingHeader::new(icons::label(icons::FILE, "Source"))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        changed |= ui.text_edit_singleline(source_path).changed();
+                    });
+            }
             ResourceData::Mesh { source_path }
             | ResourceData::Scene { source_path }
             | ResourceData::Script { source_path }
@@ -1077,4 +1112,66 @@ fn material_thumbnail_signature(project: &ProjectDocument, id: ResourceId) -> St
     let mut signature = String::new();
     append(project, id, &mut Vec::new(), &mut signature);
     signature
+}
+
+/// Paint a prefab's base floor as a small top-down plan: filled cells, walls on
+/// the edges that carry them, and sockets picked out in green. Enough to tell
+/// two pieces apart in the browser without opening either.
+fn draw_prefab_plan(ui: &mut egui::Ui, prefab: &psxed_project::Prefab) {
+    use psxed_project::{GridDirection, GridSector};
+    let Some(floor) = prefab.floors.first() else {
+        return;
+    };
+    let size = ui.available_width().min(180.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(24, 24, 30));
+
+    let span = prefab.width.max(prefab.height).max(1) as f32;
+    let cell = (size / span).max(1.0);
+    let present: std::collections::HashSet<(i32, i32)> = floor
+        .cells
+        .iter()
+        .filter(|c| c.sector.as_ref().is_some_and(GridSector::has_geometry))
+        .map(|c| (c.offset[0], c.offset[1]))
+        .collect();
+
+    for entry in &floor.cells {
+        let Some(sector) = entry.sector.as_ref().filter(|s| s.has_geometry()) else {
+            continue;
+        };
+        let (cx, cz) = (entry.offset[0], entry.offset[1]);
+        // +Z is north, so flip into screen space where +Y runs down.
+        let x0 = rect.left() + cx as f32 * cell;
+        let y0 = rect.top() + (prefab.height - 1 - cz) as f32 * cell;
+        let cell_rect = egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(cell, cell));
+        painter.rect_filled(cell_rect, 0.0, egui::Color32::from_rgb(150, 145, 138));
+
+        for direction in GridDirection::CARDINAL {
+            let neighbour = match direction {
+                GridDirection::North => (cx, cz + 1),
+                GridDirection::South => (cx, cz - 1),
+                GridDirection::East => (cx + 1, cz),
+                GridDirection::West => (cx - 1, cz),
+                _ => continue,
+            };
+            let walled = !sector.walls.get(direction).is_empty();
+            if present.contains(&neighbour) && !walled {
+                continue;
+            }
+            let colour = if walled {
+                egui::Color32::from_rgb(58, 58, 70)
+            } else {
+                egui::Color32::from_rgb(84, 217, 140)
+            };
+            let (a, b) = match direction {
+                GridDirection::North => (cell_rect.left_top(), cell_rect.right_top()),
+                GridDirection::South => (cell_rect.left_bottom(), cell_rect.right_bottom()),
+                GridDirection::West => (cell_rect.left_top(), cell_rect.left_bottom()),
+                GridDirection::East => (cell_rect.right_top(), cell_rect.right_bottom()),
+                _ => continue,
+            };
+            painter.line_segment([a, b], egui::Stroke::new(2.0, colour));
+        }
+    }
 }

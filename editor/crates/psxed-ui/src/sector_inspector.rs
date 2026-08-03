@@ -104,7 +104,7 @@ pub(crate) fn draw_sector_inspector(
     let Some(room) = scene.node_mut(room_id) else {
         return false;
     };
-    let NodeKind::Room { grid } = &mut room.kind else {
+    let NodeKind::Section { grid } = &mut room.kind else {
         return false;
     };
     let idx = active_floor.min(grid.floor_count().saturating_sub(1));

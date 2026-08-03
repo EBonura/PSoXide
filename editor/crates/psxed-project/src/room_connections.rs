@@ -236,7 +236,7 @@ fn room_ancestor(scene: &Scene, id: NodeId) -> Option<NodeId> {
     let mut current = Some(id);
     while let Some(node_id) = current {
         let node = scene.node(node_id)?;
-        if matches!(node.kind, NodeKind::Room { .. }) {
+        if matches!(node.kind, NodeKind::Section { .. }) {
             return Some(node_id);
         }
         current = node.parent;
@@ -246,7 +246,7 @@ fn room_ancestor(scene: &Scene, id: NodeId) -> Option<NodeId> {
 
 fn room_grid(scene: &Scene, room: NodeId) -> Option<&WorldGrid> {
     scene.node(room).and_then(|node| match &node.kind {
-        NodeKind::Room { grid } => Some(grid),
+        NodeKind::Section { grid } => Some(grid),
         _ => None,
     })
 }
@@ -254,7 +254,7 @@ fn room_grid(scene: &Scene, room: NodeId) -> Option<&WorldGrid> {
 fn is_room(scene: &Scene, id: NodeId) -> bool {
     scene
         .node(id)
-        .is_some_and(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .is_some_and(|node| matches!(node.kind, NodeKind::Section { .. }))
 }
 
 fn classify_edge(edge: PortalEdge) -> RoomConnectionKind {
@@ -303,7 +303,7 @@ mod tests {
         scene.add_node(
             scene.root,
             name,
-            NodeKind::Room {
+            NodeKind::Section {
                 grid: WorldGrid::empty(2, 2, 1024),
             },
         )

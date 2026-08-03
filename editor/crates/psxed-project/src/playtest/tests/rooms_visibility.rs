@@ -60,7 +60,7 @@ fn package_resolves_vertical_floor_links_to_runtime_rooms() {
     let source_id = scene
         .nodes()
         .iter()
-        .find(|node| node.name == "Room" && matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| node.name == "Room" && matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("source room");
     let target_grid = WorldGrid::stone_room(
@@ -70,9 +70,9 @@ fn package_resolves_vertical_floor_links_to_runtime_rooms() {
         room_material,
         room_material,
     );
-    let target_id = scene.add_node(world_id, "Below", NodeKind::Room { grid: target_grid });
+    let target_id = scene.add_node(world_id, "Below", NodeKind::Section { grid: target_grid });
     let source = scene.node_mut(source_id).expect("source node");
-    let NodeKind::Room { grid } = &mut source.kind else {
+    let NodeKind::Section { grid } = &mut source.kind else {
         panic!("source should be room");
     };
     grid.set_floor_below(0, 0, Some(crate::GridFloorLink::room(target_id)));
@@ -109,11 +109,11 @@ fn floors_cook_to_stacked_rooms_with_auto_links() {
         let room_id = scene
             .nodes()
             .iter()
-            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .find(|node| matches!(node.kind, NodeKind::Section { .. }))
             .map(|node| node.id)
             .expect("room node");
         let node = scene.node_mut(room_id).expect("room node");
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let NodeKind::Section { grid } = &mut node.kind else {
             panic!("expected a room");
         };
         let (w, d, s, origin) = (grid.width, grid.depth, grid.sector_size, grid.origin);
@@ -222,7 +222,7 @@ fn adjacent_floor_layers_cook_as_a_traversable_terrace_seam() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("room node");
     let node = project
@@ -230,7 +230,7 @@ fn adjacent_floor_layers_cook_as_a_traversable_terrace_seam() {
         .node_mut(room_id)
         .expect("room node");
     node.transform.translation[1] = 0.0;
-    let NodeKind::Room { grid } = &mut node.kind else {
+    let NodeKind::Section { grid } = &mut node.kind else {
         panic!("expected a room");
     };
     let sector_size = grid.sector_size;
@@ -293,12 +293,12 @@ fn layered_pvs_can_leave_a_room_and_reenter_behind_a_shallow_recess() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("room node");
     let node = project.active_scene_mut().node_mut(room_id).expect("room");
     node.transform.translation[1] = 0.0;
-    let NodeKind::Room { grid } = &mut node.kind else {
+    let NodeKind::Section { grid } = &mut node.kind else {
         panic!("expected room grid");
     };
     let sector_size = grid.sector_size;
@@ -371,11 +371,11 @@ fn entities_bind_to_their_explicit_floor() {
         let room_id = scene
             .nodes()
             .iter()
-            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .find(|node| matches!(node.kind, NodeKind::Section { .. }))
             .map(|node| node.id)
             .expect("room node");
         let node = scene.node_mut(room_id).expect("room node");
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let NodeKind::Section { grid } = &mut node.kind else {
             panic!("expected a room");
         };
         let (w, d, s, origin) = (grid.width, grid.depth, grid.sector_size, grid.origin);
@@ -456,7 +456,7 @@ fn room_vertical_placement_flows_from_transform_into_origin_y() {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("room node");
     scene.node_mut(room_id).expect("room").transform.translation[1] = 2.0;
@@ -553,12 +553,12 @@ fn oversized_authored_room_fails_without_manual_split() {
         scene
             .nodes()
             .iter()
-            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .find(|n| matches!(n.kind, NodeKind::Section { .. }))
             .expect("starter has a room")
             .id
     };
     if let Some(room) = project.active_scene_mut().node_mut(room_id) {
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             panic!("starter room is a room");
         };
         *grid = crate::WorldGrid::empty(
@@ -601,11 +601,11 @@ fn portal_room_cook_emits_directed_room_portals() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .expect("starter has a room")
         .id;
     if let Some(room) = project.active_scene_mut().node_mut(room_id) {
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             panic!("starter room is a room");
         };
         *grid = crate::WorldGrid::stone_room(
@@ -673,12 +673,12 @@ fn manual_portal_rooms_emit_warm_residency_hints() {
         scene
             .nodes()
             .iter()
-            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .find(|n| matches!(n.kind, NodeKind::Section { .. }))
             .expect("starter has a room")
             .id
     };
     if let Some(room) = project.active_scene_mut().node_mut(room_id) {
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             panic!("starter room is a room");
         };
         *grid = crate::WorldGrid::stone_room(

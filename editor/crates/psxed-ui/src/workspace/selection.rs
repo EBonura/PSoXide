@@ -647,7 +647,7 @@ impl EditorWorkspace {
         }
         let scene = self.project.active_scene();
         let node = scene.node(id)?;
-        if matches!(node.kind, NodeKind::Room { .. }) {
+        if matches!(node.kind, NodeKind::Section { .. }) {
             return self.room_bounds_3d(node.id);
         }
 
@@ -669,7 +669,7 @@ impl EditorWorkspace {
         let scene = self.project.active_scene();
         let node = scene.node(id)?;
         match &node.kind {
-            NodeKind::Room { grid } => {
+            NodeKind::Section { grid } => {
                 let (local_center, half) = grid_authored_editor_center_half(grid)?;
                 let center = node_world(node);
                 Some((
@@ -1011,7 +1011,7 @@ impl EditorWorkspace {
                 if self.scene_node_effectively_hidden(node.id) {
                     return None;
                 }
-                matches!(node.kind, NodeKind::Room { .. }).then_some(node.id)
+                matches!(node.kind, NodeKind::Section { .. }).then_some(node.id)
             })
             .collect();
 
@@ -1128,7 +1128,7 @@ impl EditorWorkspace {
             if self.scene_node_effectively_hidden(node.id) {
                 continue;
             }
-            let NodeKind::Room { grid } = &node.kind else {
+            let NodeKind::Section { grid } = &node.kind else {
                 continue;
             };
             let idx = active_floor.min(grid.floor_count().saturating_sub(1));

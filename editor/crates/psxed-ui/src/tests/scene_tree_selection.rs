@@ -107,7 +107,7 @@ fn node_transform_inspector_hides_unused_transform_fields() {
         NodeTransformInspector::Hidden
     );
     assert_eq!(
-        node_transform_inspector(&NodeKind::Room {
+        node_transform_inspector(&NodeKind::Section {
             grid: WorldGrid::empty(1, 1, DEFAULT_WORLD_SECTOR_SIZE),
         }),
         NodeTransformInspector::RoomGrid
@@ -186,7 +186,7 @@ fn scene_tree_select_clears_inspector_shadow_selection() {
     let room = scene
         .nodes()
         .iter()
-        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .expect("starter scene has a Room")
         .id;
     let spawn = starter_player_entity(scene).id;
@@ -405,7 +405,7 @@ fn scene_tree_toggle_visibility_hides_entity_bounds() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::stone_room(1, 1, 1024, None, None),
         },
     );
@@ -615,7 +615,7 @@ fn select_all_current_scope_selects_scene_nodes_outside_select_tool() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -644,7 +644,7 @@ fn select_all_current_scope_selects_all_faces_in_active_room() {
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::Select;
     workspace.selection_mode = SelectionMode::Face;
@@ -693,7 +693,7 @@ fn select_all_current_scope_respects_edge_and_vertex_modes() {
     grid.set_floor(0, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::Select;
     workspace.replace_node_selection(room);
@@ -726,7 +726,7 @@ fn ctrl_selected_sector_delete_removes_all_selected_tiles() {
     grid.set_floor(1, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let coords = [(0u16, 0u16), (1u16, 0u16)];
 
@@ -741,7 +741,7 @@ fn ctrl_selected_sector_delete_removes_all_selected_tiles() {
 
     let scene = workspace.project.active_scene();
     let node = scene.node(room).expect("room node exists");
-    let NodeKind::Room { grid } = &node.kind else {
+    let NodeKind::Section { grid } = &node.kind else {
         panic!("active room is a room node");
     };
     assert!(grid.sector(coords[0].0, coords[0].1).is_none());
@@ -758,7 +758,7 @@ fn deleting_every_tile_removes_the_now_empty_layer_in_the_same_undo_step() {
     grid.floor_mut(1).unwrap().set_floor(0, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     project
         .active_scene_mut()
         .node_mut(room)
@@ -780,7 +780,7 @@ fn deleting_every_tile_removes_the_now_empty_layer_in_the_same_undo_step() {
 
     let scene = workspace.project.active_scene();
     let room_node = scene.node(room).unwrap();
-    let NodeKind::Room { grid } = &room_node.kind else {
+    let NodeKind::Section { grid } = &room_node.kind else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 1);
@@ -792,7 +792,7 @@ fn deleting_every_tile_removes_the_now_empty_layer_in_the_same_undo_step() {
     workspace.do_undo();
     let scene = workspace.project.active_scene();
     let room_node = scene.node(room).unwrap();
-    let NodeKind::Room { grid } = &room_node.kind else {
+    let NodeKind::Section { grid } = &room_node.kind else {
         panic!("room node");
     };
     assert_eq!(grid.floor_count(), 2);
@@ -811,7 +811,7 @@ fn autotile_selected_sector_walls_updates_all_selected_tiles() {
     }
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let mut ctrl = egui::Modifiers::NONE;
     ctrl.ctrl = true;
@@ -863,7 +863,7 @@ fn shift_selects_horizontal_faces_as_primitives() {
     }
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("horizontal-primitive-selection"), project);
     let floor_0 = Selection::Face(FaceRef {
@@ -905,7 +905,7 @@ fn shift_selects_horizontal_face_rectangle_from_anchor() {
     }
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("horizontal-face-rect-selection"), project);
     let floor_at = |sx, sz| {
@@ -987,7 +987,7 @@ fn viewport_box_select_selects_cells_inside_screen_rectangle() {
     }
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("box-select"), project);
     let transform = ViewportTransform::new(
         Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::splat(400.0)),
@@ -1025,7 +1025,7 @@ fn additive_viewport_box_select_keeps_initial_sector_selection() {
     }
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("box-select-additive"), project);
     let transform = ViewportTransform::new(
@@ -1053,7 +1053,7 @@ fn viewport_3d_box_select_selects_projected_floor_faces() {
     grid.set_floor(1, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("box-select-3d"), project);
     workspace.camera_rig.mode = ViewportCameraMode::Free;
     workspace.camera_rig.free_position = [512, 512, -2048];
@@ -1101,7 +1101,7 @@ fn additive_viewport_3d_box_select_keeps_initial_primitive_selection() {
     grid.set_floor(1, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("box-select-3d-additive"), project);
     workspace.camera_rig.mode = ViewportCameraMode::Free;
@@ -1154,7 +1154,7 @@ fn floating_duplicate_previews_moves_and_commits_world_geometry() {
         .heights = [0, 32, 64, 96];
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("geometry-duplicate"), project);
 
     workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
@@ -1204,7 +1204,7 @@ fn floating_duplicate_stays_adjacent_until_the_pointer_deliberately_moves() {
     grid.set_floor(1, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("geometry-duplicate-pointer-anchor"), project);
 
@@ -1259,7 +1259,7 @@ fn floating_duplicate_of_face_selection_copies_only_selected_primitives() {
     grid.add_wall(0, 0, GridDirection::South, 0, 1024, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("primitive-geometry-duplicate"), project);
     let floor = Selection::Face(FaceRef {
@@ -1366,7 +1366,7 @@ fn floating_duplicate_flip_x_mirrors_preview_geometry() {
         .heights = [100, 132, 164, 196];
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("geometry-duplicate-flip-x"), project);
     let mut ctrl = egui::Modifiers::NONE;
@@ -1516,7 +1516,7 @@ fn floating_duplicate_cancel_restores_base_world_geometry() {
         .heights = [0, 32, 64, 96];
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("geometry-duplicate-cancel"), project);
 
@@ -1563,7 +1563,7 @@ fn rotate_selected_world_geometry_rotates_cells_and_wall_orientation() {
         .heights = [100, 132, 164, 196];
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("geometry-rotate"), project);
     let mut ctrl = egui::Modifiers::NONE;
     ctrl.ctrl = true;

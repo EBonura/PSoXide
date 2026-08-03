@@ -28,6 +28,8 @@ pub mod texture_import;
 mod ui_types;
 pub mod world_cook;
 pub use ui_types::*;
+mod prefab;
+pub use prefab::*;
 mod scene_grid_types;
 pub use scene_grid_types::*;
 mod box_prop_erosion;

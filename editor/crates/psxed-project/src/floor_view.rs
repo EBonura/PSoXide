@@ -40,7 +40,7 @@ pub fn node_floor(scene: &Scene, node_id: NodeId) -> usize {
     while let Some(id) = current {
         let Some(node) = scene.node(id) else { break };
         floor = floor.max(node.floor);
-        if matches!(node.kind, NodeKind::Room { .. }) {
+        if matches!(node.kind, NodeKind::Section { .. }) {
             break;
         }
         current = node.parent;
@@ -57,7 +57,7 @@ pub fn node_floor(scene: &Scene, node_id: NodeId) -> usize {
 /// is not a Room node.
 pub fn active_room_floors(scene: &Scene, room: NodeId, active_floor: usize) -> Vec<ResolvedFloor> {
     let Some(base) = scene.node(room).and_then(|node| match &node.kind {
-        NodeKind::Room { grid } => Some(grid),
+        NodeKind::Section { grid } => Some(grid),
         _ => None,
     }) else {
         return Vec::new();
@@ -117,7 +117,7 @@ mod tests {
         let mut grid = WorldGrid::empty(1, 1, 1024);
         grid.push_floor(); // floor 1
         grid.push_floor(); // floor 2
-        let room = scene.add_node(scene.root, "Stacked", NodeKind::Room { grid });
+        let room = scene.add_node(scene.root, "Stacked", NodeKind::Section { grid });
         (project, room)
     }
 

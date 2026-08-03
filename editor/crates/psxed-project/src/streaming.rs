@@ -53,7 +53,7 @@ fn collect_resource_use(
         }
 
         match &node.kind {
-            NodeKind::Room { grid } => {
+            NodeKind::Section { grid } => {
                 collect_grid_resources(grid, &mut use_set, &mut materials);
             }
             NodeKind::WaterVolume { material, .. } => {
@@ -275,7 +275,7 @@ mod tests {
         let room = scene.add_node(
             scene.root,
             "Room",
-            NodeKind::Room {
+            NodeKind::Section {
                 grid: WorldGrid::stone_room(2, 2, 1024, Some(material), None),
             },
         );
@@ -363,7 +363,7 @@ mod tests {
             .material = Some(GridTriangleMaterialOverride::Resource(triangle_material));
 
         let scene = project.active_scene_mut();
-        scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+        scene.add_node(scene.root, "Room", NodeKind::Section { grid });
 
         let use_set = collect_scene_resource_use(&project);
         assert_eq!(

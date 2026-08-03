@@ -906,7 +906,7 @@ fn push_material_resource_upload(
 
 fn preview_room_probe_bytes(project: &ProjectDocument, project_root: &Path) -> Option<Vec<u8>> {
     project.active_scene().nodes().iter().find_map(|node| {
-        let NodeKind::Room { grid } = &node.kind else {
+        let NodeKind::Section { grid } = &node.kind else {
             return None;
         };
         generate_room_reflection_probe_psxt(project, grid, project_root).ok()
@@ -1579,7 +1579,7 @@ mod tests {
             .nodes()
             .iter()
             .find_map(|node| match &node.kind {
-                NodeKind::Room { grid } => Some(grid),
+                NodeKind::Section { grid } => Some(grid),
                 _ => None,
             })
             .expect("sample project room");
@@ -1928,7 +1928,7 @@ mod tests {
         let grid = WorldGrid::stone_room(1, 1, 1024, Some(used), Some(used));
 
         let scene = project.active_scene_mut();
-        scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+        scene.add_node(scene.root, "Room", NodeKind::Section { grid });
 
         let plan = preview_texture_upload_plan(&project, Path::new("."));
         assert_eq!(plan.first().map(|item| item.id), Some(used));
@@ -1997,7 +1997,7 @@ mod tests {
         far_vista.texture_panels[0] = Some(panel);
 
         let scene = project.active_scene_mut();
-        scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+        scene.add_node(scene.root, "Room", NodeKind::Section { grid });
         scene.add_node(
             scene.root,
             "World",

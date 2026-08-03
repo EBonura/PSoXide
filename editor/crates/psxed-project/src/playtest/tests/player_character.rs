@@ -482,7 +482,7 @@ fn legacy_spawn_without_character_assignment_auto_picks_when_one_exists() {
         .active_scene()
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .unwrap();
     let spawn_id = project.active_scene_mut().add_node(
