@@ -104,22 +104,22 @@ const SFX_BANK: [sfx::Sample<'static>; 4] = [
     sfx::Sample {
         voice: VOICE_SHOOT,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/swoosh.psau"),
-        volume: Volume::linear(1, 20),
+        volume: Volume::linear(1, 7),
     },
     sfx::Sample {
         voice: VOICE_KILL,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/explosion_short.psau"),
-        volume: Volume::linear(1, 22),
+        volume: Volume::linear(1, 7),
     },
     sfx::Sample {
         voice: VOICE_MARCH,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau"),
-        volume: Volume::linear(1, 24),
+        volume: Volume::linear(1, 8),
     },
     sfx::Sample {
         voice: VOICE_LOSE,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/hit_metal.psau"),
-        volume: Volume::linear(1, 26),
+        volume: Volume::linear(1, 9),
     },
 ];
 
