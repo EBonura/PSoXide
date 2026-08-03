@@ -3239,7 +3239,7 @@ impl EditorWorkspace {
             .map(|node| (node.id, node.name.clone()))
             .collect();
         if rooms.is_empty() {
-            return Err("No Room nodes in the active scene".to_string());
+            return Err("No Section nodes in the active scene".to_string());
         }
 
         let mut total_bytes = 0usize;

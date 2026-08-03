@@ -478,7 +478,7 @@ impl EditorWorkspace {
     /// from and what the status line calls the operation.
     fn begin_floating_geometry(&mut self, clipboard: GeometryClipboard, lead: &str) {
         let Some(room) = self.paste_target_room(&clipboard) else {
-            self.status = "No room to duplicate into".to_string();
+            self.status = "No section to duplicate into".to_string();
             return;
         };
         self.floating_geometry = Some(FloatingGeometryPlacement {
@@ -742,7 +742,7 @@ impl EditorWorkspace {
             }
         };
         let Some(room) = self.active_room_id() else {
-            self.status = "Select a room to stamp into".to_string();
+            self.status = "Select a section to stamp into".to_string();
             return;
         };
         let (mut floors, unbound) = prefab.bound_floors(&self.project, room, self.active_floor);
@@ -1060,10 +1060,10 @@ impl EditorWorkspace {
         {
             let scene = self.project.active_scene_mut();
             let Some(node) = scene.node_mut(preview.room) else {
-                return Err("Duplicate target room no longer exists");
+                return Err("Duplicate target section no longer exists");
             };
             let NodeKind::Section { grid } = &mut node.kind else {
-                return Err("Duplicate target is not a Room");
+                return Err("Duplicate target is not a Section");
             };
             // Grow the stack so an upper floor of the piece has somewhere to
             // land. A floor this stamp creates takes the piece's own spacing;
@@ -1093,10 +1093,10 @@ impl EditorWorkspace {
 
         let scene = self.project.active_scene_mut();
         let Some(node) = scene.node_mut(preview.room) else {
-            return Err("Duplicate target room no longer exists");
+            return Err("Duplicate target section no longer exists");
         };
         let NodeKind::Section { grid } = &mut node.kind else {
-            return Err("Duplicate target is not a Room");
+            return Err("Duplicate target is not a Section");
         };
         let floor_idx = target_floor.min(grid.floor_count().saturating_sub(1));
         let grid = grid

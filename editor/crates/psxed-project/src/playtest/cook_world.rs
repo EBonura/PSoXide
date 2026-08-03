@@ -967,9 +967,10 @@ pub(crate) fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String
 pub(crate) fn cross_section_portals(
     scene: &crate::Scene,
     chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
-) -> (Vec<PlaytestRoomPortal>, Vec<CrossSectionIssue>) {
+) -> CrossSectionWiring {
     let mut out = Vec::new();
     let mut issues = Vec::new();
+    let mut edges = HashSet::new();
 
     for connection in crate::room_connections::derive_room_connections(scene) {
         let a = &connection.a;
@@ -1016,6 +1017,14 @@ pub(crate) fn cross_section_portals(
             continue;
         };
 
+        // Record the runtime room PAIR, not the edge. An authored marker can
+        // never sit on a section boundary: `portal_edge_key_for_node` only
+        // considers edges whose neighbour cell is populated and in the same
+        // grid, so an authored cross-section portal always snaps to an internal
+        // seam of its own section. Edge keys from the two passes therefore
+        // describe different things and could never collide. What is genuinely
+        // redundant is a second link between the same two runtime rooms.
+        edges.insert(ordered_pair(source, destination));
         out.push(PlaytestRoomPortal {
             source_room: source,
             destination_room: destination,
@@ -1033,7 +1042,30 @@ pub(crate) fn cross_section_portals(
         });
     }
 
-    (out, issues)
+    CrossSectionWiring {
+        portals: out,
+        issues,
+        edges,
+    }
+}
+
+/// What the cross-section pass produced, including the edges it claimed so the
+/// automatic adjacency pass can stand down on them.
+pub(crate) struct CrossSectionWiring {
+    pub portals: Vec<PlaytestRoomPortal>,
+    pub issues: Vec<CrossSectionIssue>,
+    /// Runtime room pairs an author wired by hand, so the adjacency pass can
+    /// stand down on them.
+    pub edges: HashSet<(u16, u16)>,
+}
+
+/// Room pair in a stable order, so a link is recognised from either side.
+fn ordered_pair(a: u16, b: u16) -> (u16, u16) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// A cross-section connection the cook could not wire.
@@ -1133,7 +1165,7 @@ fn cross_section_quad(
 pub(crate) fn auto_adjacent_section_portals(
     scene: &crate::Scene,
     chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
-    already_wired: &HashSet<(i32, i32, char)>,
+    already_wired: &HashSet<(u16, u16)>,
 ) -> Vec<PlaytestRoomPortal> {
     // (world x, world z, floor elevation) -> (section, runtime room, floor)
     let mut occupancy: HashMap<(i32, i32, i32), (NodeId, u16, usize)> = HashMap::new();
@@ -1179,7 +1211,9 @@ pub(crate) fn auto_adjacent_section_portals(
             if other_section == section {
                 continue; // the intra-section planner owns this edge
             }
-            if already_wired.contains(&(x, z, axis)) || !emitted.insert((x, z, axis)) {
+            if already_wired.contains(&ordered_pair(room, other_room))
+                || !emitted.insert((x, z, axis))
+            {
                 continue;
             }
             // Both sides must leave the edge open. One wall is a wall.
@@ -1189,14 +1223,25 @@ pub(crate) fn auto_adjacent_section_portals(
             {
                 continue;
             }
-            let Some(grid) = section_floor(scene, section, floor_idx) else {
+            let (Some(grid), Some(other_grid)) = (
+                section_floor(scene, section, floor_idx),
+                section_floor(scene, other_section, other_floor),
+            ) else {
                 continue;
             };
             let s = grid.sector_size;
-            if s <= 0 {
+            // Two sections at different cell sizes do not share a grid, so
+            // "adjacent" is meaningless between them and the quad would be
+            // built in the wrong units. Leave those to an authored portal.
+            if s <= 0 || s != other_grid.sector_size {
                 continue;
             }
-            let top = elevation.saturating_add(s.saturating_mul(2));
+            // The real opening, not an assumed storey height.
+            let Some((bottom, top)) =
+                shared_opening_bounds(grid, [x, z], other_grid, [nx, nz], elevation)
+            else {
+                continue;
+            };
             let (a, b, normal) = match direction {
                 GridDirection::East => (
                     [(x + 1).saturating_mul(s), (z + 1).saturating_mul(s)],
@@ -1210,8 +1255,8 @@ pub(crate) fn auto_adjacent_section_portals(
                 ),
             };
             let quad = [
-                [a[0], elevation, a[1]],
-                [b[0], elevation, b[1]],
+                [a[0], bottom, a[1]],
+                [b[0], bottom, b[1]],
                 [b[0], top, b[1]],
                 [a[0], top, a[1]],
             ];
@@ -1243,6 +1288,52 @@ fn section_floor<'a>(
         return None;
     };
     grid.floor(floor_idx)
+}
+
+/// Vertical opening between two cells: from the higher floor to the lower
+/// ceiling. Falls back to the default wall height when neither cell has a
+/// ceiling, which is the open-topped case.
+///
+/// Using a constant `sector_size * 2` here instead would be wrong wherever the
+/// author did not use default wall heights, and the intra-section planner
+/// already measures the real gap (`portal_height_bounds`).
+fn shared_opening_bounds(
+    grid_a: &WorldGrid,
+    a: [i32; 2],
+    grid_b: &WorldGrid,
+    b: [i32; 2],
+    base_y: i32,
+) -> Option<(i32, i32)> {
+    // The two cells live in different sections, so each is looked up in its own
+    // grid. Resolving both against one grid silently found nothing.
+    let sector_at = |grid: &'_ WorldGrid, cell: [i32; 2]| {
+        grid.world_cell_to_array(cell[0], cell[1])
+            .and_then(|(sx, sz)| grid.sector(sx, sz))
+            .cloned()
+    };
+    let (sa, sb) = (sector_at(grid_a, a)?, sector_at(grid_b, b)?);
+    let (sa, sb) = (&sa, &sb);
+    let floor_of = |s: &crate::GridSector| {
+        s.floor
+            .as_ref()
+            .map(|f| f.heights.iter().copied().max().unwrap_or(0))
+    };
+    let ceiling_of = |s: &crate::GridSector| {
+        s.ceiling
+            .as_ref()
+            .map(|c| c.heights.iter().copied().min().unwrap_or(0))
+    };
+    let bottom = floor_of(sa)?.max(floor_of(sb)?);
+    let default_top = bottom.saturating_add(grid_a.sector_size.saturating_mul(2));
+    let top = match (ceiling_of(sa), ceiling_of(sb)) {
+        (Some(x), Some(y)) => x.min(y),
+        (Some(x), None) | (None, Some(x)) => x,
+        (None, None) => default_top,
+    };
+    if top <= bottom {
+        return None;
+    }
+    Some((base_y.saturating_add(bottom), base_y.saturating_add(top)))
 }
 
 /// True when the cell has floor and carries no wall on `direction`.
