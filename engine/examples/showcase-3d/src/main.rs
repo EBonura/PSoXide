@@ -275,9 +275,9 @@ impl Scene for Showcase3D {
             let x = SCREEN_W / 2 + self.rng.signed(SCREEN_W / 2 - 20);
             let y = SCREEN_H / 2 + self.rng.signed(SCREEN_H / 2 - 30);
             let color = (
-                100 + (self.rng.next() & 0x7F) as u8,
-                100 + (self.rng.next() & 0x7F) as u8,
-                140 + (self.rng.next() & 0x7F) as u8,
+                100 + (self.rng.next_mixed() & 0x7F) as u8,
+                100 + (self.rng.next_mixed() & 0x7F) as u8,
+                140 + (self.rng.next_mixed() & 0x7F) as u8,
             );
             self.sparks
                 .spawn_burst(&mut self.rng, (x, y), color, 2, 16, 50);
@@ -299,7 +299,7 @@ impl Showcase3D {
         for i in 0..STAR_COUNT {
             let x = self.rng.signed(STAR_SPREAD_XY);
             let y = self.rng.signed(STAR_SPREAD_XY);
-            let z = (self.rng.next() as i16).abs() & 0x7FFF;
+            let z = (self.rng.next_mixed() as i16).abs() & 0x7FFF;
             unsafe {
                 STARS[i] = Vec3I16::new(x, y, z);
             }
@@ -309,7 +309,7 @@ impl Showcase3D {
     fn spawn_star(&mut self, idx: usize) {
         let x = self.rng.signed(STAR_SPREAD_XY);
         let y = self.rng.signed(STAR_SPREAD_XY);
-        let z = STAR_MAX_Z - (self.rng.next() as i16 & 0x0FFF);
+        let z = STAR_MAX_Z - (self.rng.next_mixed() as i16 & 0x0FFF);
         unsafe {
             STARS[idx] = Vec3I16::new(x, y, z);
         }
