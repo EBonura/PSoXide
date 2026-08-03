@@ -87,17 +87,17 @@ const SFX_BANK: [sfx::Sample<'static>; 3] = [
     sfx::Sample {
         voice: VOICE_WALL,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau"),
-        volume: Volume::linear(1, 18),
+        volume: Volume::linear(1, 6),
     },
     sfx::Sample {
         voice: VOICE_PADDLE,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/hit_punch.psau"),
-        volume: Volume::linear(1, 16),
+        volume: Volume::linear(1, 5),
     },
     sfx::Sample {
         voice: VOICE_SCORE,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/pickup_coin.psau"),
-        volume: Volume::linear(1, 18),
+        volume: Volume::linear(1, 6),
     },
 ];
 
