@@ -771,6 +771,8 @@ impl Bus {
         self.cdrom.dropped_lba_range()
     }
 
+    /// Number of controller polls port 1 has completed, for pacing input
+    /// replay against the guest rather than the host clock.
     pub fn port1_completed_polls(&self) -> u64 {
         self.sio0
             .port1()

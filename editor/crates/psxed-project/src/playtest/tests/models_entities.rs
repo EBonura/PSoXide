@@ -432,8 +432,10 @@ fn cylinder_prop_cooks_shared_triangle_and_quad_surfaces() {
         .find(|node| matches!(node.kind, NodeKind::Section { .. }))
         .map(|node| node.id)
         .expect("starter has a room");
-    let mut geometry = crate::CylinderPropGeometry::default();
-    geometry.broken_ends = crate::CylinderBrokenEnds::Top;
+    let mut geometry = crate::CylinderPropGeometry {
+        broken_ends: crate::CylinderBrokenEnds::Top,
+        ..Default::default()
+    };
     geometry.top_bulge.enabled = true;
     scene.add_node(
         room_id,

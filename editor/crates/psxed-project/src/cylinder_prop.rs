@@ -361,6 +361,8 @@ fn make_ring_from_heights(
     jitter: Option<(u32, i32)>,
 ) -> Ring {
     let mut vertices = Vec::with_capacity(sides);
+    // `side` drives the ring angle and the noise seed, not just a lookup.
+    #[allow(clippy::needless_range_loop)]
     for side in 0..sides {
         let angle = core::f32::consts::TAU * side as f32 / sides as f32;
         let mut radius_percent = 100;
@@ -587,9 +589,11 @@ mod tests {
 
     #[test]
     fn broken_top_is_seeded_and_uses_fracture_material() {
-        let mut geometry = CylinderPropGeometry::default();
-        geometry.broken_ends = CylinderBrokenEnds::Top;
-        geometry.seed = 42;
+        let geometry = CylinderPropGeometry {
+            broken_ends: CylinderBrokenEnds::Top,
+            seed: 42,
+            ..Default::default()
+        };
         let first = generate_cylinder_prop_surfaces(geometry);
         let second = generate_cylinder_prop_surfaces(geometry);
         assert_eq!(first, second);
@@ -612,8 +616,10 @@ mod tests {
 
     #[test]
     fn side_count_is_clamped_to_safe_budget() {
-        let mut geometry = CylinderPropGeometry::default();
-        geometry.sides = 1;
+        let mut geometry = CylinderPropGeometry {
+            sides: 1,
+            ..Default::default()
+        };
         assert_eq!(
             generate_cylinder_prop_surfaces(geometry)
                 .iter()

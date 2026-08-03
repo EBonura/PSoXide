@@ -20,6 +20,8 @@ pub struct DrawArea {
 }
 
 impl DrawArea {
+    // Unclipped draw area, used to build rasterizer test fixtures.
+    #[cfg(test)]
     pub fn full_vram() -> Self {
         Self {
             left: 0,
@@ -136,6 +138,8 @@ pub struct MonoTri {
 impl MonoTri {
     /// Opaque triangle -- the simplest case. No mask handling, no
     /// blending. Bounding box is computed automatically.
+    // Test-fixture constructor.
+    #[cfg(test)]
     pub fn opaque(v0: (i32, i32), v1: (i32, i32), v2: (i32, i32), color_bgr15: u16) -> Self {
         Self::new(
             v0,
@@ -329,6 +333,8 @@ pub struct MonoRect {
 impl MonoRect {
     /// Opaque rectangle -- no semi-trans, no mask. Width / height of
     /// zero are dropped (the dispatcher handles this).
+    // Test-fixture constructor.
+    #[cfg(test)]
     pub fn opaque(xy: (i32, i32), wh: (u32, u32), color_bgr15: u16) -> Self {
         Self::new(xy, wh, color_bgr15, PrimFlags::empty(), BlendMode::Average)
     }

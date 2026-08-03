@@ -196,7 +196,7 @@ fn build_sky_panorama_packets(
     let mut columns = sky
         .skybox_columns
         .clamp(SKY_CYCLORAMA_COLUMNS_MIN, SKY_CYCLORAMA_COLUMNS_MAX) as usize;
-    if columns % 2 != 0 {
+    if !columns.is_multiple_of(2) {
         columns += 1;
     }
     let rows = sky_panorama_runtime_rows(sky);

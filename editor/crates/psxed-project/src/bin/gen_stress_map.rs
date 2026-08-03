@@ -247,17 +247,16 @@ fn run(args: &Args) -> Result<(), String> {
 
 /// Pull the starter room's floor/wall/ceiling materials and sector size so
 /// the synthetic grid cooks against known-good resources.
-fn harvest_template(
-    project: &ProjectDocument,
-) -> Result<
-    (
-        Option<psxed_project::ResourceId>,
-        Option<psxed_project::ResourceId>,
-        Option<psxed_project::ResourceId>,
-        i32,
-    ),
-    String,
-> {
+/// The material, model and light resource ids harvested from a template
+/// scene, plus its floor height.
+type HarvestedTemplate = (
+    Option<psxed_project::ResourceId>,
+    Option<psxed_project::ResourceId>,
+    Option<psxed_project::ResourceId>,
+    i32,
+);
+
+fn harvest_template(project: &ProjectDocument) -> Result<HarvestedTemplate, String> {
     let scene = project.active_scene();
     let grid = scene
         .nodes()

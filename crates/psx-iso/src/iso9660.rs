@@ -530,7 +530,7 @@ fn dir_record(extent_lba: u32, size: u32, ident: &[u8], is_dir: bool) -> Vec<u8>
     let ident_len = ident.len() as u8;
     let base_len: u8 = 33;
     let mut record_len = base_len + ident_len;
-    if record_len % 2 != 0 {
+    if !record_len.is_multiple_of(2) {
         record_len += 1;
     }
     let mut r = vec![0u8; record_len as usize];
@@ -571,7 +571,7 @@ fn encode_path_table_entry(
         buf.extend_from_slice(&parent_num.to_le_bytes());
     }
     buf.extend_from_slice(ident);
-    if ident.len() % 2 != 0 {
+    if !ident.len().is_multiple_of(2) {
         buf.push(0); // padding to even
     }
 }

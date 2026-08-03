@@ -266,9 +266,9 @@ fn main() {
     {
         // OP with IR feedback: each component reuses the just-written IR.
         let (d1, d2, d3) = (0x1000i64, 0x2000i64, 0x3000i64);
-        let (mut ir1, mut ir2, mut ir3) = (0x400i64, 0x500i64, 0x600i64);
+        let (mut ir2, ir3) = (0x500i64, 0x600i64);
         let mac1 = ((ir3 * d2 - ir2 * d3) >> 12) as i32;
-        ir1 = mac1 as i64;
+        let ir1 = mac1 as i64;
         let mac2 = ((ir1 * d3 - ir3 * d1) >> 12) as i32;
         ir2 = mac2 as i64;
         let mac3 = ((ir2 * d1 - ir1 * d2) >> 12) as i32;

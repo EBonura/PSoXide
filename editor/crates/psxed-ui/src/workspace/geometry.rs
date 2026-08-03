@@ -1,5 +1,9 @@
 use super::*;
 
+/// The node whose geometry is selected plus that selection's cell
+/// coordinates, or the reason no single target could be resolved.
+type GeometryCellTargets = Result<(NodeId, Vec<(u16, u16)>), &'static str>;
+
 impl EditorWorkspace {
     /// Stop a transient character action/movement preview when its Animator is
     /// edited. The transient preview carries its own clip override, so leaving
@@ -261,9 +265,7 @@ impl EditorWorkspace {
         }
     }
 
-    pub(crate) fn selected_geometry_cell_targets(
-        &self,
-    ) -> Result<(NodeId, Vec<(u16, u16)>), &'static str> {
+    pub(crate) fn selected_geometry_cell_targets(&self) -> GeometryCellTargets {
         let mut targets = Vec::new();
         if !self.selection.selected_sectors.is_empty() {
             targets.extend(
@@ -2213,9 +2215,11 @@ impl EditorWorkspace {
                         &self.project_dir,
                         &temp_dir,
                     )?;
-                    let mut config = psxed_project::model_import::RigidModelConfig::default();
-                    config.world_height = world_height;
-                    config.extra_animations_affect_bounds = false;
+                    let config = psxed_project::model_import::RigidModelConfig {
+                        world_height,
+                        extra_animations_affect_bounds: false,
+                        ..Default::default()
+                    };
                     psxed_project::model_import::bake_animation_source_for_model(
                         &mut self.project,
                         model_id,

@@ -486,7 +486,7 @@ fn main() {
     const STEP: i32 = 512;
     const RISERS: i32 = WALL / STEP;
     assert_eq!(STEP % HEIGHT_QUANTUM, 0, "steps must land on the quantum");
-    assert!(
+    const _: () = assert!(
         STEP <= 640,
         "steps must stay under the engine's step-up limit"
     );
@@ -640,7 +640,7 @@ fn main() {
         0,
         "spiral risers stay on the quantum"
     );
-    assert!(SPIRAL <= 640, "spiral risers stay climbable");
+    const _: () = assert!(SPIRAL <= 640, "spiral risers stay climbable");
     // Ring order, counter-clockwise from the south-west corner.
     let spiral_order = [
         (0, 0),

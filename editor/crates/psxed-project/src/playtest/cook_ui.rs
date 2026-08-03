@@ -28,6 +28,18 @@ pub(crate) fn active_far_vista_panel_count(
 /// followed by the built-in gameplay state, and
 /// enters the first UI scene when one exists. With no UI scenes the
 /// flow is a single `Gameplay` state entered at index `0`.
+/// Everything one UI cook pass produces: the node/paint/scene tables,
+/// the SFX sample and cue tables, the game flow, and the CD-DA track list.
+type CookedUi = (
+    Vec<PlaytestUiNode>,
+    Vec<PlaytestUiPaint>,
+    Vec<PlaytestUiScene>,
+    Vec<PlaytestUiSfxSample>,
+    Vec<PlaytestUiSfxCue>,
+    PlaytestGameFlow,
+    Vec<PlaytestCddaTrack>,
+);
+
 pub(crate) fn cook_ui_nodes(
     project: &ProjectDocument,
     project_root: &Path,
@@ -39,15 +51,7 @@ pub(crate) fn cook_ui_nodes(
     // without them boots to a placeholder menu with no audio.
     used_ui_source_paths: &mut Vec<String>,
     report: &mut PlaytestValidationReport,
-) -> (
-    Vec<PlaytestUiNode>,
-    Vec<PlaytestUiPaint>,
-    Vec<PlaytestUiScene>,
-    Vec<PlaytestUiSfxSample>,
-    Vec<PlaytestUiSfxCue>,
-    PlaytestGameFlow,
-    Vec<PlaytestCddaTrack>,
-) {
+) -> CookedUi {
     let mut ui_nodes: Vec<PlaytestUiNode> = Vec::new();
     let mut ui_paints: Vec<PlaytestUiPaint> = Vec::new();
     let mut ui_scenes: Vec<PlaytestUiScene> = Vec::new();

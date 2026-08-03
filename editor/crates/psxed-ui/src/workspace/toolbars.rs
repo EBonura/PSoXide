@@ -924,27 +924,6 @@ impl EditorWorkspace {
         );
     }
 
-    pub(crate) fn draw_workspace_group_menu(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(180.0);
-        for view in [
-            WorkspaceView::Room,
-            WorkspaceView::Ui,
-            WorkspaceView::Animation,
-            WorkspaceView::Material,
-        ] {
-            if toolbar_menu_choice(
-                ui,
-                icons::label(view.icon(), view.label()),
-                self.active_workspace == view,
-            ) && self.active_workspace != view
-            {
-                self.active_workspace = view;
-                self.status = format!("Workspace: {}", view.label());
-                self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
-            }
-        }
-    }
-
     pub(crate) fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(236.0);
         let room_active = self.active_room_id().is_some();
@@ -1409,10 +1388,12 @@ impl EditorWorkspace {
             }
         }
 
-        let mut materials = self.project.resources.iter().filter_map(|resource| {
-            matches!(&resource.data, ResourceData::Material(_))
-                .then(|| (resource.id, resource.name.clone()))
-        });
+        let mut materials = self
+            .project
+            .resources
+            .iter()
+            .filter(|&resource| matches!(&resource.data, ResourceData::Material(_)))
+            .map(|resource| (resource.id, resource.name.clone()));
         let only = materials.next()?;
         materials.next().is_none().then_some(only)
     }

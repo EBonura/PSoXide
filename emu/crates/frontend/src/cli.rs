@@ -151,6 +151,9 @@ impl EditorViewArg {
 /// as UI features are built so each one has a scriptable
 /// equivalent.
 #[derive(Debug, Subcommand)]
+// Parsed once per process from argv. Boxing the big arg structs would
+// only add indirection to code that runs a single time.
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Print resolved config paths + effective settings values.
     Info,
@@ -1329,7 +1332,7 @@ fn run_headless_launch(
                 }
             }
             if let Some(dir) = args.route_screenshot_dir.as_ref() {
-                if route_ticks % args.route_screenshot_interval == 0 {
+                if route_ticks.is_multiple_of(args.route_screenshot_interval) {
                     let path = dir.join(format!("tick-{route_ticks:06}.ppm"));
                     let (rgba, width, height) = bus.gpu.display_rgba8();
                     write_rgb_ppm_from_rgba(&path, width, height, &rgba)?;
@@ -2445,7 +2448,7 @@ fn validation_launch_args(
 }
 
 fn matches_filter(filter: &Option<String>, value: &str) -> bool {
-    filter.as_ref().map_or(true, |filter| filter == value)
+    filter.as_ref().is_none_or(|filter| filter == value)
 }
 
 fn resolve_cli_path(repo_root: &Path, path: &Path) -> PathBuf {

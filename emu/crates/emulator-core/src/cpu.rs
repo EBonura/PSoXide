@@ -2758,7 +2758,7 @@ mod tests {
         cpu.write_word(memory::cache_control::ADDR, u32::MAX, &mut bus);
         assert_eq!(
             cpu.read_word(memory::cache_control::ADDR, &mut bus),
-            u32::MAX & !((1 << 6) | (1 << 10))
+            !((1 << 6) | (1 << 10))
         );
     }
 

@@ -36,12 +36,6 @@ pub const VRAM_LEN_U32: u64 = (VRAM_WIDTH as u64) * (VRAM_HEIGHT as u64);
 /// Size of the VRAM storage buffer in bytes.
 pub const VRAM_BYTES: u64 = VRAM_LEN_U32 * 4;
 
-/// `R16Uint` is no longer the on-GPU format, but the public constant
-/// still names the *semantic* per-pixel format the rasterizer is
-/// emulating (one 16-bit BGR15 word per VRAM cell). Kept as a stable
-/// API hook so callers don't need to know the storage layout.
-pub const VRAM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Uint;
-
 #[derive(Debug, Error)]
 pub enum VramGpuError {
     #[error("rect ({x},{y}) {w}x{h} extends past VRAM bounds (1024×512)")]
@@ -239,6 +233,8 @@ impl VramGpu {
     }
 
     /// Read a single pixel. Convenience wrapper for tests.
+    // Readback helper for the GPU-vs-reference assertions below.
+    #[cfg(test)]
     pub fn read_pixel(&self, x: u32, y: u32) -> Result<u16, VramGpuError> {
         let v = self.download_rect(x, y, 1, 1)?;
         Ok(v[0])
@@ -246,6 +242,8 @@ impl VramGpu {
 
     /// Reset VRAM to all zeros (matches CPU `Vram::new`). Done on the
     /// GPU side via `clear_buffer` -- no host roundtrip.
+    // Only the clear-resets-full-texture test needs this.
+    #[cfg(test)]
     pub fn clear(&self) {
         let mut encoder = self
             .device

@@ -45,9 +45,9 @@ pub mod prim;
 
 use crate::material::{BlendMode, TextureMaterial};
 use psx_hw::gpu::pack_texcoord;
-use psx_hw::gpu::{gp0, gp1, pack_color, pack_vertex, pack_xy, GpuStat};
+use psx_hw::gpu::{gp0, gp1, pack_color, pack_vertex, pack_xy};
 use psx_io::dma::{self, Channel};
-use psx_io::gpu::{gpustat, wait_cmd_ready, write_gp0, write_gp1};
+use psx_io::gpu::{wait_cmd_ready, write_gp0, write_gp1};
 use psx_io::timers;
 
 /// Video standard.

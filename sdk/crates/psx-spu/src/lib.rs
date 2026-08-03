@@ -750,20 +750,20 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
 /// number of 32-bit words -- the DMA controller is word-addressed.
 fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
     let src = bytes.as_ptr() as u32;
-    if src % 4 != 0 || !bytes.len().is_multiple_of(4) {
+    if !src.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
         return false;
     }
     let words = (bytes.len() / 4) as u32;
     // Largest block size (in words) that divides the count; the SPU transfer
     // FIFO is 16 words, so cap there. ADPCM is whole 16-byte (4-word) blocks,
     // so 4 always divides.
-    let block_size = if words % 16 == 0 {
+    let block_size = if words.is_multiple_of(16) {
         16
-    } else if words % 8 == 0 {
+    } else if words.is_multiple_of(8) {
         8
-    } else if words % 4 == 0 {
+    } else if words.is_multiple_of(4) {
         4
-    } else if words % 2 == 0 {
+    } else if words.is_multiple_of(2) {
         2
     } else {
         1

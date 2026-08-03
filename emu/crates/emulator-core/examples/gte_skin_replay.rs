@@ -109,7 +109,7 @@ fn clamp_i16(v: i32) -> i16 {
 /// exact register write path scene::transform_vertex uses.
 fn mvmva(rt: &[[i16; 3]; 3], tr: &[i32; 3], v: &[i16; 3]) -> [i32; 3] {
     let mut gte = Gte::new();
-    let pack = |a: i16, b: i16| ((a as u16 as u32) | ((b as u16 as u32) << 16));
+    let pack = |a: i16, b: i16| (a as u16 as u32) | ((b as u16 as u32) << 16);
     gte.write_control(0, pack(rt[0][0], rt[0][1]));
     gte.write_control(1, pack(rt[0][2], rt[1][0]));
     gte.write_control(2, pack(rt[1][1], rt[1][2]));
@@ -170,16 +170,16 @@ fn parse(text: &str) -> Capture {
         };
         let h32 = |s: &str| u32::from_str_radix(s, 16).ok().map(|v| v as i32);
         let row16 = |out: &mut [i16; 3], rest: &[&str]| {
-            for i in 0..3 {
+            for (i, slot) in out.iter_mut().enumerate() {
                 if let Some(v) = rest.get(i).and_then(|s| h16(s)) {
-                    out[i] = v;
+                    *slot = v;
                 }
             }
         };
         let row32 = |out: &mut [i32; 3], rest: &[&str]| {
-            for i in 0..3 {
+            for (i, slot) in out.iter_mut().enumerate() {
                 if let Some(v) = rest.get(i).and_then(|s| h32(s)) {
-                    out[i] = v;
+                    *slot = v;
                 }
             }
         };

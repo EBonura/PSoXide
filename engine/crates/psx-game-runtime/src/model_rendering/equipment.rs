@@ -123,60 +123,56 @@ pub(super) fn draw_player_equipment<
             .rotation
             .mul(&euler_q12_rotation_inverse(weapon.grip_rotation_q12));
 
-        match weapon.model {
-            Some(model_index) => {
-                let Some(weapon_model) = models.get(model_index.to_usize()).copied().flatten()
-                else {
-                    continue;
-                };
-                let grip = scaled_offset(weapon_model.local_to_world, weapon.grip_translation);
-                let grip_world = rotate_offset_q12(&weapon_rotation, grip);
-                let origin = WorldVertex::new(
-                    socket_pose.origin.x.saturating_sub(grip_world[0]),
-                    socket_pose.origin.y.saturating_sub(grip_world[1]),
-                    socket_pose.origin.z.saturating_sub(grip_world[2]),
+        if let Some(model_index) = weapon.model {
+            let Some(weapon_model) = models.get(model_index.to_usize()).copied().flatten() else {
+                continue;
+            };
+            let grip = scaled_offset(weapon_model.local_to_world, weapon.grip_translation);
+            let grip_world = rotate_offset_q12(&weapon_rotation, grip);
+            let origin = WorldVertex::new(
+                socket_pose.origin.x.saturating_sub(grip_world[0]),
+                socket_pose.origin.y.saturating_sub(grip_world[1]),
+                socket_pose.origin.z.saturating_sub(grip_world[2]),
+            );
+            if let Some(anim) = weapon_model.clip(clips, weapon_model.default_clip) {
+                let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
+                let material = lighting.shade_model_material(origin, weapon_model.material);
+                let model_options = options
+                    .with_depth_policy(DepthPolicy::Average)
+                    .with_cull_mode(CullMode::Back)
+                    .with_material_layer(material)
+                    .with_textured_triangle_splitting(true)
+                    .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
+                let faces = runtime_model_faces(weapon_model, model_faces);
+                let stats = submit_runtime_model_predecoded(
+                    world,
+                    triangles,
+                    weapon_model,
+                    anim,
+                    phase,
+                    None,
+                    *camera,
+                    origin,
+                    weapon_rotation,
+                    weapon_model.local_to_world,
+                    ModelPoseTranslation::ZERO,
+                    material,
+                    None,
+                    model_options,
+                    faces,
+                    model_parts,
+                    model_vertices,
+                    PROFILE,
+                    scratch,
                 );
-                if let Some(anim) = weapon_model.clip(clips, weapon_model.default_clip) {
-                    let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
-                    let material = lighting.shade_model_material(origin, weapon_model.material);
-                    let model_options = options
-                        .with_depth_policy(DepthPolicy::Average)
-                        .with_cull_mode(CullMode::Back)
-                        .with_material_layer(material)
-                        .with_textured_triangle_splitting(true)
-                        .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
-                    let faces = runtime_model_faces(weapon_model, model_faces);
-                    let stats = submit_runtime_model_predecoded(
-                        world,
-                        triangles,
-                        weapon_model,
-                        anim,
-                        phase,
-                        None,
-                        *camera,
-                        origin,
-                        weapon_rotation,
-                        weapon_model.local_to_world,
-                        ModelPoseTranslation::ZERO,
-                        material,
-                        None,
-                        model_options,
-                        faces,
-                        model_parts,
-                        model_vertices,
-                        PROFILE,
-                        scratch,
-                    );
-                    accumulate_model_stats(&mut out.stats, stats);
-                    if stats.primitive_overflow || stats.command_overflow {
-                        out.draws = drawn as u16;
-                        return out;
-                    }
-                    drawn += 1;
+                accumulate_model_stats(&mut out.stats, stats);
+                if stats.primitive_overflow || stats.command_overflow {
                     out.draws = drawn as u16;
+                    return out;
                 }
+                drawn += 1;
+                out.draws = drawn as u16;
             }
-            None => {}
         };
 
         let (active, hits) = evaluate_weapon_hitboxes(
@@ -222,7 +218,7 @@ fn attachment_socket_pose(
     // The socket must ride the same crossfaded pose the body renders
     // with, or the held weapon visibly detaches from the hand mid-blend.
     let raw_pose = match &blend_from {
-        Some(blend) => blend.blend_toward(raw_pose, u16::from(socket.joint)),
+        Some(blend) => blend.blend_toward(raw_pose, socket.joint),
         None => raw_pose,
     };
     let pose = apply_model_pose_translation(raw_pose, pose_translation);

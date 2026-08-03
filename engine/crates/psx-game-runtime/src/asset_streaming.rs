@@ -44,6 +44,9 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
     /// gaps, which keeps the allocator O(ASSETS) with no free list. Assets are
     /// placed once per residency change, not per frame, so a linear bump plus
     /// an occasional compaction is the cheap answer.
+    // Reachable only from the tests today; kept beside `compact`, whose
+    // bump-allocation story it documents.
+    #[allow(dead_code)]
     fn allocation_end(&self) -> usize {
         let mut end = 0usize;
         let mut slot = 0usize;
@@ -96,6 +99,9 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStorage<PAGES, ASSE
     /// `Model<'static>` borrowed from the pool, and relocating under it would
     /// dangle. Reserved for a boundary where no parsed view is live, such as a
     /// level change, and the caller must rebuild views on a generation change.
+    // Deliberately uncalled in the runtime -- see the doc above: it is
+    // reserved for a level-change boundary where no parsed view is live.
+    #[allow(dead_code)]
     fn compact(&mut self) -> bool {
         let base = self.pages.as_mut_ptr().cast::<u8>();
         let mut cursor = 0usize;
@@ -354,10 +360,10 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
             let Some(res) = room_residency.iter().find(|r| r.room == room) else {
                 continue;
             };
-            let listed = res.required_ram.iter().any(|&a| a == asset)
-                || res.warm_ram.iter().any(|&a| a == asset)
-                || res.required_vram.iter().any(|&a| a == asset)
-                || res.warm_vram.iter().any(|&a| a == asset);
+            let listed = res.required_ram.contains(&asset)
+                || res.warm_ram.contains(&asset)
+                || res.required_vram.contains(&asset)
+                || res.warm_vram.contains(&asset);
             if listed {
                 return true;
             }

@@ -1204,6 +1204,9 @@ const fn cached_room_cell_key(x: u16, z: u16) -> u32 {
 }
 
 #[inline(always)]
+// `shade_prewarmed_packets` only drives the normal submit path, which the
+// `room-surface-profile` build replaces wholesale.
+#[cfg_attr(feature = "room-surface-profile", allow(unused_variables))]
 fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: &CachedRoomSurface,
     cached_vertices: &[WorldVertex],
@@ -1949,6 +1952,10 @@ const fn warmed_room_quad_ready_value(
 }
 
 #[inline(always)]
+// The `room-surface-profile` build replaces the normal cached-room
+// submit path, which is the only caller of this helper, so it reads
+// as dead there while staying live in every shipping build.
+#[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
 fn warmed_room_quad_packet_vertices_from_ready(
     mut verts: [ProjectedVertex; 4],
     ready: u8,
@@ -1964,6 +1971,10 @@ fn warmed_room_quad_packet_vertices_from_ready(
 }
 
 #[inline(always)]
+// The `room-surface-profile` build replaces the normal cached-room
+// submit path, which is the only caller of this helper, so it reads
+// as dead there while staying live in every shipping build.
+#[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
 fn warmed_room_quad_packet_colors_from_ready(
     mut colors: [(u8, u8, u8); 4],
     ready: u8,
@@ -1979,6 +1990,10 @@ fn warmed_room_quad_packet_colors_from_ready(
 }
 
 #[inline(always)]
+// The `room-surface-profile` build replaces the normal cached-room
+// submit path, which is the only caller of this helper, so it reads
+// as dead there while staying live in every shipping build.
+#[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
 fn try_submit_encoded_warmed_room_quad<const OT: usize>(
     surface: &CachedRoomSurface,
     cached_vertices: &[WorldVertex],
@@ -2077,6 +2092,10 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
 
 #[allow(unused_variables)]
 #[inline(always)]
+// The `room-surface-profile` build replaces the normal cached-room
+// submit path, which is the only caller of this helper, so it reads
+// as dead there while staying live in every shipping build.
+#[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
 fn try_submit_shaded_encoded_warmed_room_quad<const OT: usize, L: WorldSurfaceLighting>(
     surface: &CachedRoomSurface,
     cached_vertices: &[WorldVertex],
@@ -2218,6 +2237,10 @@ fn try_submit_shaded_encoded_warmed_room_quad<const OT: usize, L: WorldSurfaceLi
 }
 
 #[inline(always)]
+// The `room-surface-profile` build replaces the normal cached-room
+// submit path, which is the only caller of this helper, so it reads
+// as dead there while staying live in every shipping build.
+#[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
 pub(super) fn encoded_warmed_room_quad_backface_culled(
     mut projected: [ProjectedVertex; 4],
     ready: u8,
@@ -2239,6 +2262,10 @@ pub(super) fn encoded_warmed_room_quad_backface_culled(
 }
 
 #[inline(always)]
+// The `room-surface-profile` build replaces the normal cached-room
+// submit path, which is the only caller of this helper, so it reads
+// as dead there while staying live in every shipping build.
+#[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
 fn warmed_room_quad_packet_vertices(
     verts: [ProjectedVertex; 4],
     sidedness: SurfaceSidedness,
@@ -2424,6 +2451,10 @@ fn adaptive_debug_root_colors<const N: usize>(
 /// Warmed authored quads can only take the direct packet path when TR
 /// subdivision will not replace them with dynamically generated children.
 #[inline(always)]
+// The `room-surface-profile` build replaces the normal cached-room
+// submit path, which is the only caller of this helper, so it reads
+// as dead there while staying live in every shipping build.
+#[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
 pub(super) fn adaptive_warmed_quad_requires_dynamic_submit(
     options: &WorldSurfaceOptions,
     projected: [ProjectedVertex; 4],

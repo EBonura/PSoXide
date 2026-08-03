@@ -55,7 +55,7 @@ fn env_flag(name: &str) -> bool {
 /// library browser (Games / Examples columns), so we don't have
 /// a separate "library" panel -- it's integrated into the shell
 /// the PSX way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PanelVisibility {
     /// Unified emulator diagnostics sidebar.
     pub debug_sidebar: bool,
@@ -83,20 +83,6 @@ impl PanelVisibility {
             memory: dev_open,
             vram: dev_open,
             profiler: dev_open,
-        }
-    }
-}
-
-impl Default for PanelVisibility {
-    fn default() -> Self {
-        // Sections start COLLAPSED: the sidebar opens as a tidy list of
-        // headers and the user expands what they need.
-        Self {
-            debug_sidebar: false,
-            registers: false,
-            memory: false,
-            vram: false,
-            profiler: false,
         }
     }
 }

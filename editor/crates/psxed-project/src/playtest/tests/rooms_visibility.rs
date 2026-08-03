@@ -757,8 +757,10 @@ fn reflective_second_layer_cooks_room_probe_residency() {
             _ => None,
         })
         .expect("starter has a material");
-    let mut layer = crate::ModelSecondaryLayer::default();
-    layer.texture_mode = crate::MaterialTextureMode::ReflectiveProbe;
+    let layer = crate::ModelSecondaryLayer {
+        texture_mode: crate::MaterialTextureMode::ReflectiveProbe,
+        ..Default::default()
+    };
     material.secondary_layer = Some(layer);
 
     let (package, report) = build_package(&project, &starter_project_root());

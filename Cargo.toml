@@ -35,7 +35,13 @@ exclude = ["sdk", "engine", "build"]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.75"
+# The declared 1.75 had not been true for a while: emulator-core already
+# uses `iter::repeat_n` (1.82) and `is_multiple_of` (1.87), and clippy was
+# reporting each use against the stale floor. Nothing builds this tree on
+# 1.75 anyway -- rust-toolchain.toml pins a nightly because the
+# mipsel-sony-psx target needs one -- so state the real floor instead of
+# rewriting working code to defend a number nobody relies on.
+rust-version = "1.87"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/EBonura/PSoXide"
 

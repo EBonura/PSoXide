@@ -229,7 +229,7 @@ mod projects_dir_tests {
         let existing = std::env::temp_dir().join("psoxide-seed-existing");
         std::fs::create_dir_all(&existing).expect("temp dir");
         unsafe { std::env::set_var("PSOXIDE_PROJECTS_DIR", &existing) };
-        assert_eq!(ensure_projects_seeded().expect("seed"), false);
+        assert!(!ensure_projects_seeded().expect("seed"));
         unsafe {
             match previous {
                 Some(value) => std::env::set_var("PSOXIDE_PROJECTS_DIR", value),

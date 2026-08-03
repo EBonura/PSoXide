@@ -1282,11 +1282,7 @@ pub(crate) fn auto_adjacent_section_portals(
     out
 }
 
-fn section_floor<'a>(
-    scene: &'a crate::Scene,
-    section: NodeId,
-    floor_idx: usize,
-) -> Option<&'a WorldGrid> {
+fn section_floor(scene: &crate::Scene, section: NodeId, floor_idx: usize) -> Option<&WorldGrid> {
     let Some(NodeKind::Section { grid }) = scene.node(section).map(|n| &n.kind) else {
         return None;
     };

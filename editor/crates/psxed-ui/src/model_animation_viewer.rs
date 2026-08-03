@@ -2303,6 +2303,8 @@ fn manipulate_selected_capsule(
                         *component /= length;
                     }
                 }
+                // `component` indexes direction plus both capsule ends.
+                #[allow(clippy::needless_range_loop)]
                 for component in 0..3 {
                     let half = direction[component] * length_delta * 0.5;
                     capsule.start[component] = compact_capsule_coord(
@@ -3710,10 +3712,12 @@ mod focus_tests {
 
     #[test]
     fn frame_preview_restores_content_derived_radius_without_changing_angle() {
-        let mut viewer = ModelAnimationViewerState::default();
-        viewer.yaw_q12 = 1024;
-        viewer.pitch_q12 = 128;
-        viewer.radius = 4096;
+        let mut viewer = ModelAnimationViewerState {
+            yaw_q12: 1024,
+            pitch_q12: 128,
+            radius: 4096,
+            ..Default::default()
+        };
 
         viewer.frame_preview();
 
