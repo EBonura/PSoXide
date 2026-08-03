@@ -44,7 +44,9 @@ pub enum TapeClock {
 /// A tape plus the clock its samples are indexed by.
 #[derive(Clone, Debug)]
 pub struct Tape {
+    /// Pad state, one entry per tick of `clock`.
     pub samples: Vec<PadSample>,
+    /// Which clock indexes `samples`.
     pub clock: TapeClock,
     /// For [`TapeClock::PadPoll`], the port-1 poll index that sample 0 belongs
     /// to; replay feeds nothing until the guest reaches it. Zero otherwise.

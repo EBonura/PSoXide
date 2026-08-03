@@ -3,6 +3,15 @@
 
 use super::*;
 
+/// Two preview triangles produced by splitting one: each is a vertex
+/// triple plus its UV triple.
+type SplitPreviewTri = (
+    [psx_gte::scene::Projected; 3],
+    [(u8, u8); 3],
+    [psx_gte::scene::Projected; 3],
+    [(u8, u8); 3],
+);
+
 /// Per-face emit: routes to the flat or textured pool based on
 /// `shade`, packing UVs only when textured.
 pub(crate) fn emit_face_tri(
@@ -79,12 +88,7 @@ pub(crate) fn clamp_preview_projected(p: psx_gte::scene::Projected) -> psx_gte::
 pub(crate) fn split_preview_projected_triangle(
     p: [psx_gte::scene::Projected; 3],
     uvs: [(u8, u8); 3],
-) -> (
-    [psx_gte::scene::Projected; 3],
-    [(u8, u8); 3],
-    [psx_gte::scene::Projected; 3],
-    [(u8, u8); 3],
-) {
+) -> SplitPreviewTri {
     match largest_preview_projected_edge(p) {
         0 => {
             let mid = midpoint_projected(p[0], p[1]);

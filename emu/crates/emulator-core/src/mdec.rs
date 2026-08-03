@@ -356,10 +356,8 @@ impl Mdec {
                 // Silicon exposes data-out readiness before software starts
                 // DMA1. Public ps1-tests polls bit 31 between DMA0 and DMA1.
                 self.decode_until_output_words(1);
-                if !self.can_continue_decode() {
-                    if self.out_queue.is_empty() {
-                        self.reg1 &= !MDEC1_BUSY;
-                    }
+                if !self.can_continue_decode() && self.out_queue.is_empty() {
+                    self.reg1 &= !MDEC1_BUSY;
                 }
             }
             2 => {
@@ -817,7 +815,7 @@ impl Mdec {
         match self.output_depth() {
             0 => {
                 for samples in mono.chunks_exact(4) {
-                    let nibble = |sample: u8| u16::from(((u16::from(sample) + 8) >> 4).min(15));
+                    let nibble = |sample: u8| ((u16::from(sample) + 8) >> 4).min(15);
                     self.out_queue.push_back(
                         nibble(samples[0])
                             | (nibble(samples[1]) << 4)

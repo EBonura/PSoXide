@@ -200,13 +200,22 @@ pub fn try_wait_data_sector(spin_limit: u32) -> bool {
     }
 }
 
-/// GetStat status-byte bits. The drive sets at most one of the three
-/// activity bits at a time; between activities (stopping, spinning up
-/// before a seek engages) it reports NONE of them for a second or two on
-/// real hardware, a window emulators currently skip past.
+/// GetStat: CD-DA playback in progress.
+///
+/// The drive sets at most one of the three activity bits
+/// ([`STAT_PLAYING`], [`STAT_SEEKING`], [`STAT_READING`]) at a time;
+/// between activities (stopping, spinning up before a seek engages) it
+/// reports NONE of them for a second or two on real hardware, a window
+/// emulators currently skip past.
 pub const STAT_PLAYING: u8 = 0x80;
+/// GetStat: a seek is in progress. See [`STAT_PLAYING`] for the
+/// at-most-one-activity-bit rule.
 pub const STAT_SEEKING: u8 = 0x40;
+/// GetStat: a sector read is in progress. See [`STAT_PLAYING`] for the
+/// at-most-one-activity-bit rule.
 pub const STAT_READING: u8 = 0x20;
+/// GetStat: the spindle motor is running. Independent of the activity
+/// bits: the motor stays on between them.
 pub const STAT_MOTOR_ON: u8 = 0x02;
 
 /// Get the CD-ROM drive status byte.

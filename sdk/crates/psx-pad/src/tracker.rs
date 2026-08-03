@@ -89,7 +89,7 @@ impl PadTracker {
             if held_for == 1 {
                 return true; // fresh press
             }
-            if held_for > delay && (held_for - delay - 1) % rate == 0 {
+            if held_for > delay && (held_for - delay - 1).is_multiple_of(rate) {
                 return true;
             }
         }

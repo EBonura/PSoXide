@@ -154,7 +154,7 @@ impl BurnState {
         if self
             .burners
             .get(self.selected_burner)
-            .map_or(true, |burner| !burner.can_burn())
+            .is_none_or(|burner| !burner.can_burn())
         {
             self.selected_burner = self
                 .burners
@@ -565,7 +565,7 @@ fn field(line: &str, start: usize, end: usize) -> &str {
 }
 
 fn parse_drive_number(line: &str) -> Option<usize> {
-    line.trim_start().split_whitespace().next()?.parse().ok()
+    line.split_whitespace().next()?.parse().ok()
 }
 
 fn burner_signature(burners: &[CdBurner]) -> String {

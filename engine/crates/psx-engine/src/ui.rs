@@ -1251,7 +1251,7 @@ fn sheened_paint(paint: UiPaint, k: i32) -> UiPaint {
     }
 }
 
-fn selected_label_text<'a>(node: &'a LevelUiNodeRecord, seed: u16) -> &'a str {
+fn selected_label_text(node: &LevelUiNodeRecord, seed: u16) -> &str {
     if node.flags & ui_node_flags::TEXT_RANDOM_MESSAGE == 0 {
         return node.text;
     }

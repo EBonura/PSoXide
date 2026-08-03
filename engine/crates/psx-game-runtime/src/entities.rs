@@ -465,10 +465,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
 
     /// Clip selection for entity `index`'s current state. Locomotion
     /// states loop from their state-entry tick; the attack grammar
-    /// plays the attack clip as ONE one-shot whose phase spans Windup
-    /// + Attack + Recover (the telegraph/commit/punish the player
-    /// reads is the same clip the AI windows run on). Stagger and
-    /// Death are one-shots from state entry; Dead keeps counting
+    /// plays the attack clip as ONE one-shot whose phase spans
+    /// Windup + Attack + Recover (the telegraph/commit/punish the
+    /// player reads is the same clip the AI windows run on). Stagger
+    /// and Death are one-shots from state entry; Dead keeps counting
     /// ticks (see [`Self::tick`]) so the death clip finishes and
     /// holds its final frame as the corpse pose.
     pub fn clip_for_state(
@@ -1064,8 +1064,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             return;
         }
         let move_yaw = atan2_q12(dx, dz).wrapping_add(yaw_offset) & 0x0fff;
-        let sin = i32::from(psx_math::sin_q12(move_yaw));
-        let cos = i32::from(psx_math::cos_q12(move_yaw));
+        let sin = psx_math::sin_q12(move_yaw);
+        let cos = psx_math::cos_q12(move_yaw);
         let speed = speed.max(1);
         let step_x = (sin * speed) >> 12;
         let step_z = (cos * speed) >> 12;
@@ -1113,8 +1113,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         } else {
             // The player motor's move shape: yaw -> Q12 sin/cos * speed.
             let yaw = atan2_q12(dx, dz);
-            let sin = i32::from(psx_math::sin_q12(yaw));
-            let cos = i32::from(psx_math::cos_q12(yaw));
+            let sin = psx_math::sin_q12(yaw);
+            let cos = psx_math::cos_q12(yaw);
             ((sin * speed) >> 12, (cos * speed) >> 12)
         };
         let position = [self.x[index], self.y[index], self.z[index]];
@@ -1812,7 +1812,7 @@ mod tests {
             ..near_input(&ACTIVE)
         };
         let mut damage = 0u16;
-        for _ in 0..u16::from(GAME_ENTITY_ATTACK_ACTIVE_TICKS) {
+        for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
             damage += entities
                 .tick(&IDLE_ENEMY, rolling, &mut NoClipMover)
                 .player_damage;
@@ -1845,7 +1845,7 @@ mod tests {
             ..near_input(&ACTIVE)
         };
         let mut damage = 0u16;
-        for _ in 0..u16::from(GAME_ENTITY_ATTACK_ACTIVE_TICKS) {
+        for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
             damage += entities
                 .tick(&IDLE_ENEMY, behind, &mut NoClipMover)
                 .player_damage;

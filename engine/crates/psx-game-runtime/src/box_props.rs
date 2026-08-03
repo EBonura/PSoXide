@@ -443,6 +443,9 @@ impl<
             return true;
         }
         let room = props[index].room;
+        // `other` indexes props, self.fall and the broken/door predicates,
+        // so iterating one of them still leaves the rest indexed.
+        #[allow(clippy::needless_range_loop)]
         for other in 0..count {
             if other == index
                 || props[other].room != room
@@ -921,7 +924,7 @@ fn box_prop_movement_probe_target(
     } else {
         config.walk_speed
     };
-    let speed = base_speed.saturating_mul(delta_vblanks.max(1).min(4) as i32);
+    let speed = base_speed.saturating_mul(delta_vblanks.clamp(1, 4) as i32);
     let dx = input.move_x.mul_i32(speed);
     let dz = input.move_z.mul_i32(speed);
     if dx != 0 || dz != 0 {

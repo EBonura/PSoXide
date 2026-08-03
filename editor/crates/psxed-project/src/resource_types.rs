@@ -1082,9 +1082,10 @@ pub(crate) const fn default_combat_capsule_radius() -> u16 {
 /// action-state decision). Dealing volumes are enabled only for the authored
 /// inclusive frame range of one character action, mirroring Souls TimeAct
 /// attack events while keeping damage data separate from animation files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CombatCapsuleRole {
     /// Receives damage when an active opposing attack capsule overlaps it.
+    #[default]
     Hurtbox,
     /// Deals damage during one animation action's active frame window.
     Hitbox {
@@ -1099,12 +1100,6 @@ pub enum CombatCapsuleRole {
         /// Poise damage applied on a new connection.
         poise_damage: u16,
     },
-}
-
-impl Default for CombatCapsuleRole {
-    fn default() -> Self {
-        Self::Hurtbox
-    }
 }
 
 /// One visually authored capsule attached to a character rig joint.

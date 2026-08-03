@@ -255,6 +255,9 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }]);
+        // Ends the closure's mutable borrow of `selected` so the assertion
+        // below can read it. Not a Drop impl, which is what clippy sees.
+        #[allow(clippy::drop_non_drop)]
         drop(draw);
 
         assert_eq!(selected, Some(2));

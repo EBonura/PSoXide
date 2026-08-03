@@ -32,7 +32,7 @@ impl CharacterControllerRole {
         player: &mut bool,
         settings: &mut CharacterControllerSettings,
     ) -> bool {
-        let before = (*player, settings.enemy.clone());
+        let before = (*player, settings.enemy);
         match self {
             Self::Passive => {
                 *player = false;
@@ -48,7 +48,7 @@ impl CharacterControllerRole {
                 }
             }
         }
-        before != (*player, settings.enemy.clone())
+        before != (*player, settings.enemy)
     }
 
     fn label(self) -> &'static str {

@@ -357,7 +357,7 @@ pub fn draw_room_atmosphere_overlay(
     let mut i = 0u32;
     while i < count {
         let seed = atmosphere_seed(i);
-        let layer = ((seed >> 4) & 3) as u32;
+        let layer = (seed >> 4) & 3;
         let fall_q4 = base_fall_q4 + (layer as i32) * 3;
         let wind_q4 = base_wind_q4 + layer as i32;
         let base_x = (seed & 0x1ff) as i32;

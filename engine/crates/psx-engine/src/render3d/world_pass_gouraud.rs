@@ -264,7 +264,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 );
                 let underdraw = if let Some(root_projected) = _root_projected {
                     if _root_extent_safe && !underdraw_options.adaptive_debug_subdivision_levels {
-                        if let Some(quad) = _warmed_root.as_deref_mut() {
+                        if let Some(quad) = _warmed_root {
                             let prepared_depth = PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(
                                 underdraw_options,
                                 root_projected,
@@ -1725,6 +1725,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// prepared fixed depth.
     #[cfg(any(not(feature = "room-surface-profile"), test))]
     #[inline(always)]
+    // The `room-surface-profile` build replaces the normal cached-room
+    // submit path, which is the only caller of this helper, so it reads
+    // as dead there while staying live in every shipping build.
+    #[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
     pub(crate) fn submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -1939,6 +1943,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     /// Patch dynamic colours into an otherwise prewarmed room packet.
     #[inline(always)]
+    // The `room-surface-profile` build replaces the normal cached-room
+    // submit path, which is the only caller of this helper, so it reads
+    // as dead there while staying live in every shipping build.
+    #[cfg_attr(feature = "room-surface-profile", allow(dead_code))]
     pub(crate) fn try_submit_warmed_textured_gouraud_quad_with_colors(
         &mut self,
         quad: &mut QuadTexturedGouraud,

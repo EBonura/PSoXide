@@ -127,6 +127,7 @@ pub use syncopate::SYNCOPATE;
 pub use share_tech_mono::SHARE_TECH_MONO;
 pub use jura::JURA;
 
-// Hand-maintained fonts: no generator entry, kept as-is.
+/// Spleen 5x8, hand-maintained: no `psoxide-dev gen-fonts` entry, so
+/// unlike its siblings in this module it is edited directly.
 pub mod spleen_5x8;
 pub use spleen_5x8::SPLEEN_5X8;

@@ -170,6 +170,15 @@ pub struct RoomStreamScheduler<const N: usize, const MAX_STREAMED_ROOM_INDEX_COU
 }
 
 #[cfg(feature = "cd-stream-bench")]
+impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize> Default
+    for RoomStreamScheduler<N, MAX_STREAMED_ROOM_INDEX_COUNT>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
 impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     RoomStreamScheduler<N, MAX_STREAMED_ROOM_INDEX_COUNT>
 {
@@ -608,6 +617,8 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         self.job.set_wait_for_sectors(wait);
     }
 
+    /// Advance streaming by one step: retire finished reads and start the
+    /// next queued one.
     pub fn pump<const PAGES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,
@@ -1019,7 +1030,7 @@ pub fn streamed_chunk_range_valid<T>(total_bytes: usize, offset: usize, count: u
     if count == 0 {
         return offset <= total_bytes;
     }
-    if offset % core::mem::align_of::<T>() != 0 {
+    if !offset.is_multiple_of(core::mem::align_of::<T>()) {
         return false;
     }
     let Some(byte_count) = count.checked_mul(core::mem::size_of::<T>()) else {
@@ -1086,6 +1097,13 @@ pub struct StreamedRoomPages<const PAGES: usize, const SLOTS: usize> {
     pages: [[u32; cd_stream::SECTOR_BYTES / 4]; PAGES],
     runs: [StreamedRoomPageRun; SLOTS],
     layout_generation: u32,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl<const PAGES: usize, const SLOTS: usize> Default for StreamedRoomPages<PAGES, SLOTS> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(feature = "cd-stream-bench")]

@@ -74,11 +74,11 @@ impl TextureWindow {
             "texture-window height must be a power of two >= 8"
         );
         assert!(
-            origin_x % 8 == 0,
+            origin_x.is_multiple_of(8),
             "texture-window origin_x must align to 8 texels"
         );
         assert!(
-            origin_y % 8 == 0,
+            origin_y.is_multiple_of(8),
             "texture-window origin_y must align to 8 texels"
         );
         assert!(size_x <= 128, "texture-window width must fit GP0(E2)");

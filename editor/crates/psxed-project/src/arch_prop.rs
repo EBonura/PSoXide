@@ -911,8 +911,10 @@ mod tests {
 
     #[test]
     fn half_arches_are_mirrored_and_share_one_generator() {
-        let mut left = ArchPropGeometry::default();
-        left.portion = ArchPortion::LeftHalf;
+        let left = ArchPropGeometry {
+            portion: ArchPortion::LeftHalf,
+            ..Default::default()
+        };
         let mut right = left;
         right.portion = ArchPortion::RightHalf;
         let left = generate_arch_prop_surfaces(left, 1024);
@@ -936,8 +938,10 @@ mod tests {
 
     #[test]
     fn zero_leg_arch_is_an_arc_with_two_support_caps() {
-        let mut geometry = ArchPropGeometry::default();
-        geometry.leg_height_quanta = 0;
+        let geometry = ArchPropGeometry {
+            leg_height_quanta: 0,
+            ..Default::default()
+        };
         let surfaces = generate_arch_prop_surfaces(geometry, 1024);
         assert_eq!(surfaces.len(), 26);
         assert_eq!(

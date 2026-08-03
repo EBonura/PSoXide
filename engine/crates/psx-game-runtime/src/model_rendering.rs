@@ -527,10 +527,10 @@ fn clamp_model_render_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
     (uv.0.min(max_u), uv.1.min(max_v))
 }
 
-fn runtime_model_faces<'a>(
+fn runtime_model_faces(
     model: RuntimeModelAsset,
-    face_pool: &'a [TexturedModelRenderFace],
-) -> &'a [TexturedModelRenderFace] {
+    face_pool: &[TexturedModelRenderFace],
+) -> &[TexturedModelRenderFace] {
     let first = model.face_first as usize;
     let count = model.face_count as usize;
     let end = first.saturating_add(count).min(face_pool.len());
@@ -786,6 +786,8 @@ pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
         })
 }
 
+/// Draw the player model: pose the skeleton, skin the mesh, and submit
+/// the resulting faces into the ordering table.
 pub fn draw_player<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,
@@ -989,9 +991,10 @@ fn submit_runtime_model_predecoded<
         0
     };
     let Some(geometry) = runtime_model_geometry(runtime_model, model_parts, model_vertices) else {
-        let mut stats = TexturedModelRenderStats::default();
-        stats.vertex_overflow = true;
-        return stats;
+        return TexturedModelRenderStats {
+            vertex_overflow: true,
+            ..Default::default()
+        };
     };
     let stats = if runtime_model.requires_cpu_blend {
         world.submit_textured_model_predecoded_geometry_faces_layered(

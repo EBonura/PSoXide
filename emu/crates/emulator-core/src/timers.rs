@@ -342,9 +342,11 @@ impl Timers {
     pub fn hold_counter_for_read(&mut self, phys: u32, cycles: u32) {
         let (idx, off) = decode(phys);
         let mode = self.timers[idx].mode;
-        let configured_extra = if idx == 2 && mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0 {
-            0
-        } else if mode & MODE_RESET_AT_TARGET != 0 {
+        // Both of the zero cases hold no extra cycles: an IRQ-configured
+        // counter 2, and any counter that resets at target.
+        let configured_extra = if (idx == 2 && mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0)
+            || mode & MODE_RESET_AT_TARGET != 0
+        {
             0
         } else if idx == 0 && matches!((mode >> 8) & 3, 1 | 3) {
             self.timer0_dot_read_extra_hold

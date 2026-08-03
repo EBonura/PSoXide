@@ -278,7 +278,7 @@ impl EditorTextures {
             let generated_bytes = item
                 .generated_bytes
                 .as_deref()
-                .or_else(|| transition_bytes.as_deref());
+                .or(transition_bytes.as_deref());
             let slot = generated_bytes
                 .and_then(|bytes| {
                     self.upload_psxt_bytes_with_clut_mode(bytes, item.force_zero_opaque)
@@ -374,7 +374,7 @@ impl EditorTextures {
         bytes: &[u8],
         force_zero_opaque: bool,
     ) -> Option<MaterialSlot> {
-        let texture = Texture::from_bytes(&bytes).ok()?;
+        let texture = Texture::from_bytes(bytes).ok()?;
         // PSX UVs are 8-bit so anything >256 wouldn't be addressable
         // from a single primitive anyway; reject taller-than-256
         // textures rather than silently producing wrong UVs.
@@ -1516,7 +1516,8 @@ fn pack_clut_word(clut_x_halfwords: u16, clut_y: u16) -> u16 {
 }
 
 fn room_texture_window_size(size: u16) -> Option<u8> {
-    if size < 8 || size > ROOM_TILE_TEXELS || !size.is_power_of_two() || size % 8 != 0 {
+    if !(8..=ROOM_TILE_TEXELS).contains(&size) || !size.is_power_of_two() || !size.is_multiple_of(8)
+    {
         return None;
     }
     u8::try_from(size).ok()

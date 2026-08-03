@@ -317,10 +317,10 @@ impl RawPoll {
 // (`psx_hw::sio::sio0` is the single source of truth for these bits; the spin
 // budgets below are this driver's behavior, not layout, and stay local.)
 
+// We never take the CPU interrupt (the controller source stays masked in
+// `I_MASK`; the runtime only unmasks VBlank), but see the layout doc: enabling
+// this is what latches `STAT` bit 9 on the `/ACK` edge for polling.
 const CTRL_ACK: u16 = sio0::ctrl::ACK;
-/// We never take the CPU interrupt (the controller source stays masked in
-/// `I_MASK`; the runtime only unmasks VBlank), but see the layout doc: enabling
-/// this is what latches `STAT` bit 9 on the `/ACK` edge for polling.
 
 const STAT_TX_READY: u32 = sio0::stat::TX_READY;
 const STAT_RX_NOT_EMPTY: u32 = sio0::stat::RX_NOT_EMPTY;

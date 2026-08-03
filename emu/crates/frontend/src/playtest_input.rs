@@ -25,17 +25,12 @@ pub(crate) fn read_input_tape(path: &Path) -> Result<emulator_core::input_tape::
     read_tape_full(path)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PlaytestInputMode {
+    #[default]
     Idle,
     Recording,
     Replaying,
-}
-
-impl Default for PlaytestInputMode {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// One state transition emitted while applying a tape frame.
@@ -301,7 +296,7 @@ mod tests {
             frames[0]
         );
         replay.note_polls(Port1PadSample::default(), 1);
-        let (last, event) = replay.sample_for_frame(Port1PadSample::default());
+        let (last, _event) = replay.sample_for_frame(Port1PadSample::default());
         assert_eq!(last, frames[1]);
         replay.note_polls(Port1PadSample::default(), 1);
         let (_, event) = replay.sample_for_frame(Port1PadSample::default());

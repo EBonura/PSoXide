@@ -1117,7 +1117,7 @@ fn draw_material_lab_preview(
         workspace.material_lab.rendered_preview_tick = None;
     }
 
-    let preview_size = ui.available_width().min(420.0).max(240.0);
+    let preview_size = ui.available_width().clamp(240.0, 420.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(preview_size), Sense::hover());
     let painter = ui.painter_at(rect);
     draw_preview_checker(&painter, rect);

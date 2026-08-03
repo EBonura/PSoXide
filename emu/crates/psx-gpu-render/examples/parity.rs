@@ -129,7 +129,7 @@ fn run_fixture(
     bus.enable_hle_bios();
     bus.attach_digital_pad_port1();
 
-    let exe_bytes = std::fs::read(&exe_path).expect("read EXE");
+    let exe_bytes = std::fs::read(exe_path).expect("read EXE");
     let exe = Exe::parse(&exe_bytes).expect("parse EXE");
     bus.load_exe_payload(exe.load_addr, &exe.payload);
     bus.clear_exe_bss(exe.bss_addr, exe.bss_size);

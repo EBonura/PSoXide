@@ -1981,8 +1981,8 @@ struct PreviewModelInstance<'a> {
 
 /// Render every Model-backed legacy `MeshInstance` or component
 /// `Entity` in the scene as a real textured animated model.
-/// Mirrors the runtime path in `editor-playtest`: parse `.psxmdl`
-/// + `.psxt` + `.psxanim`, upload atlas (lazily -- done by
+/// Mirrors the runtime path in `editor-playtest`: parse the
+/// `.psxmdl` + `.psxt` + `.psxanim` set, upload atlas (lazily, done by
 /// `EditorTextures::refresh_models`), then submit the model through
 /// `psx-engine`'s canonical model render pass.
 ///

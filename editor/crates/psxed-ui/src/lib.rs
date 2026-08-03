@@ -253,6 +253,9 @@ const LEGACY_OBSIDIAN_WARDEN_RESOURCE_NAMES: &[&str] = &[
 /// drains the queue after iteration so all the mutating helpers
 /// (`push_undo`, `add_node`, `move_node`, …) can take `&mut self`
 /// without fighting the iteration borrow.
+// One transient action per frame, never stored in bulk, so the variant
+// spread costs nothing worth a Box indirection.
+#[allow(clippy::large_enum_variant)]
 enum TreeAction {
     Select {
         id: NodeId,
@@ -2371,9 +2374,9 @@ impl EditorWorkspace {
             }
             ResourceData::AnimationClip(clip) => {
                 self.animation_viewer.selected_clip_path() == Some(clip.psxanim_path.as_str())
-                    && clip.target_model.map_or(true, |model| {
-                        self.animation_viewer.selected_model() == Some(model)
-                    })
+                    && clip
+                        .target_model
+                        .is_none_or(|model| self.animation_viewer.selected_model() == Some(model))
             }
             ResourceData::AnimationSource(source) => {
                 let selected_path = self.animation_viewer.selected_clip_path();
@@ -2386,9 +2389,9 @@ impl EditorWorkspace {
                             && selected_path == Some(clip.psxanim_path.as_str())
                     });
                 source_is_selected
-                    && source.target_model.map_or(true, |model| {
-                        self.animation_viewer.selected_model() == Some(model)
-                    })
+                    && source
+                        .target_model
+                        .is_none_or(|model| self.animation_viewer.selected_model() == Some(model))
             }
             ResourceData::AnimationSet(set) => {
                 self.animation_viewer

@@ -34,12 +34,8 @@ pub(crate) fn build_log_failure_detail(log_path: &std::path::Path) -> String {
         .lines()
         .map(str::trim)
         .find(|line| line.starts_with("error[") || line.starts_with("error:"));
-    let summary = first_error.or_else(|| {
-        text.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .last()
-    });
+    let summary =
+        first_error.or_else(|| text.lines().map(str::trim).rfind(|line| !line.is_empty()));
     match summary {
         Some(line) => format!("{}. {where_full}", truncate_for_status(line, 200)),
         None => where_full,

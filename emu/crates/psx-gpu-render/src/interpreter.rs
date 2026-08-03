@@ -200,8 +200,8 @@ impl Interpreter {
             0x3C..=0x3F => self.decode_shaded_tex_quad(fifo),
 
             // ---------- Lines / polylines ----------
-            0x40..=0x47 | 0x48..=0x4F => self.decode_mono_line(fifo),
-            0x50..=0x57 | 0x58..=0x5F => self.decode_shaded_line(fifo),
+            0x40..=0x4F => self.decode_mono_line(fifo),
+            0x50..=0x5F => self.decode_shaded_line(fifo),
 
             // ---------- Rectangles ----------
             0x60..=0x63 => self.decode_mono_rect_variable(fifo),

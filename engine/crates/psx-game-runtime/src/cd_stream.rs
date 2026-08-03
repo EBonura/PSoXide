@@ -277,6 +277,12 @@ pub struct WorldRoomSlotsReadJob<const N: usize> {
     state: WorldRoomSlotsReadState,
 }
 
+impl<const N: usize> Default for WorldRoomSlotsReadJob<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> WorldRoomSlotsReadJob<N> {
     /// All-zero-bytes idle placeholder (for the scheduler's `zeroed`
     /// arena constructor); differs from [`Self::new`] only in the slot
@@ -367,7 +373,6 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             self.fail_all(STATUS_UNSUPPORTED);
             self.state = WorldRoomSlotsReadState::Done;
             telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_STATUS, self.result.status);
-            return;
         }
 
         #[cfg(target_arch = "mips")]
@@ -425,6 +430,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         self.wait_for_sectors = wait;
     }
 
+    /// Advance the in-flight read, moving any completed sectors into `dst`.
     pub fn poll_into(
         &mut self,
         cd: &mut CdController,
@@ -444,7 +450,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             self.fail_all(STATUS_UNSUPPORTED);
             self.state = WorldRoomSlotsReadState::Done;
             telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_STATUS, self.result.status);
-            return self.result;
+            self.result
         }
 
         #[cfg(target_arch = "mips")]

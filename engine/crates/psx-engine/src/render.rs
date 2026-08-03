@@ -369,7 +369,13 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// Insert compact raw packet commands in reverse array order.
     ///
     /// See [`OrderingTable::insert_packed_commands_reverse_unchecked`] for the
-    /// two-word command layout and safety contract.
+    /// two-word command layout.
+    ///
+    /// # Safety
+    ///
+    /// `commands` must point at `command_count * 2` readable words laid out
+    /// as that method documents, and the ordering table must have room for
+    /// them: neither is checked here.
     #[inline(always)]
     pub unsafe fn add_packed_commands_reverse_unchecked(
         &mut self,

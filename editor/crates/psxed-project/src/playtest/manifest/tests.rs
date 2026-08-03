@@ -160,26 +160,28 @@ fn world_pack_order_appends_disconnected_chunks_by_proximity() {
 
 #[test]
 fn world_pack_toc_uses_same_layout_as_pack_builder() {
-    let mut package = PlaytestPackage::default();
-    package.assets = vec![
-        test_room_asset(static_lit_test_room_bytes(), 0),
-        test_room_asset(static_lit_test_room_bytes(), 1),
-        test_room_asset(static_lit_test_room_bytes(), 2),
-    ];
-    package.rooms = vec![test_room(0), test_room(1), test_room(2)];
-    package.chunks = vec![
-        test_chunk(0, 0, 0, 0, [None, Some(1), Some(2), None]),
-        test_chunk(1, 0, 1, 0, [None, None, None, Some(0)]),
-        test_chunk(2, 0, 0, 1, [Some(0), None, None, None]),
-    ];
-    package.spawn = Some(PlaytestSpawn {
-        room: 2,
-        x: 0,
-        y: 0,
-        z: 0,
-        yaw: 0,
-        flags: 1,
-    });
+    let package = PlaytestPackage {
+        assets: vec![
+            test_room_asset(static_lit_test_room_bytes(), 0),
+            test_room_asset(static_lit_test_room_bytes(), 1),
+            test_room_asset(static_lit_test_room_bytes(), 2),
+        ],
+        rooms: vec![test_room(0), test_room(1), test_room(2)],
+        chunks: vec![
+            test_chunk(0, 0, 0, 0, [None, Some(1), Some(2), None]),
+            test_chunk(1, 0, 1, 0, [None, None, None, Some(0)]),
+            test_chunk(2, 0, 0, 1, [Some(0), None, None, None]),
+        ],
+        spawn: Some(PlaytestSpawn {
+            room: 2,
+            x: 0,
+            y: 0,
+            z: 0,
+            yaw: 0,
+            flags: 1,
+        }),
+        ..Default::default()
+    };
 
     let order = world_pack_order(&package);
     assert_eq!(order, vec![2, 0, 1]);
@@ -230,62 +232,64 @@ fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
 
 #[test]
 fn ui_scene_table_and_flow_emit_addressable_scenes() {
-    let mut package = PlaytestPackage::default();
-    package.ui_nodes = vec![PlaytestUiNode {
-        parent: None,
-        kind: UiNodeKind::Canvas {
+    let package = PlaytestPackage {
+        ui_nodes: vec![PlaytestUiNode {
+            parent: None,
+            kind: UiNodeKind::Canvas {
+                width: 320,
+                height: 240,
+            },
+            x: 0,
+            y: 0,
             width: 320,
             height: 240,
+            color: [0, 0, 0],
+            background: [0, 0, 0],
+            accent: [0, 0, 0],
+            color_paint: None,
+            background_paint: None,
+            accent_paint: None,
+            value: UiValueBinding::ConstantQ12(0),
+            max: UiValueBinding::ConstantQ12(0),
+            texture_asset: None,
+            image_effect: UiImageEffect::None,
+            text: String::new(),
+            tag: String::new(),
+            action: PlaytestUiAction::default(),
+            option: psx_level::UI_OPTION_NONE,
+            rotation_degrees: 0,
+            flags: 0,
+            sfx_first: psx_level::UI_SFX_NONE,
+            sfx_count: 0,
+            font: 0,
+            font_scale: crate::default_ui_font_scale(),
+            letter_spacing: crate::default_ui_letter_spacing(),
+        }],
+        ui_scenes: vec![PlaytestUiScene {
+            id: 7,
+            name: "Pause".to_string(),
+            node_first: 0,
+            node_count: 1,
+            focus_style: crate::ui_types::UiFocusStyle::default(),
+        }],
+        game_flow: PlaytestGameFlow {
+            states: vec![
+                PlaytestFlowState::SceneState { state: 1 },
+                PlaytestFlowState::SceneState { state: 0 },
+            ],
+            scene_states: vec![
+                PlaytestSceneState::gameplay(),
+                PlaytestSceneState {
+                    id: 1,
+                    name: "Pause".to_string(),
+                    world: PlaytestWorldLayer::None,
+                    ui_scene: 7,
+                    flags: psx_level::scene_state_flags::UI_INPUT,
+                },
+            ],
+            entry: 0,
         },
-        x: 0,
-        y: 0,
-        width: 320,
-        height: 240,
-        color: [0, 0, 0],
-        background: [0, 0, 0],
-        accent: [0, 0, 0],
-        color_paint: None,
-        background_paint: None,
-        accent_paint: None,
-        value: UiValueBinding::ConstantQ12(0),
-        max: UiValueBinding::ConstantQ12(0),
-        texture_asset: None,
-        image_effect: UiImageEffect::None,
-        text: String::new(),
-        tag: String::new(),
-        action: PlaytestUiAction::default(),
-        option: psx_level::UI_OPTION_NONE,
-        rotation_degrees: 0,
-        flags: 0,
-        sfx_first: psx_level::UI_SFX_NONE,
-        sfx_count: 0,
-        font: 0,
-        font_scale: crate::default_ui_font_scale(),
-        letter_spacing: crate::default_ui_letter_spacing(),
-    }];
-    package.ui_scenes = vec![PlaytestUiScene {
-        id: 7,
-        name: "Pause".to_string(),
-        node_first: 0,
-        node_count: 1,
-        focus_style: crate::ui_types::UiFocusStyle::default(),
-    }];
-    package.game_flow = PlaytestGameFlow {
-        states: vec![
-            PlaytestFlowState::SceneState { state: 1 },
-            PlaytestFlowState::SceneState { state: 0 },
-        ],
-        scene_states: vec![
-            PlaytestSceneState::gameplay(),
-            PlaytestSceneState {
-                id: 1,
-                name: "Pause".to_string(),
-                world: PlaytestWorldLayer::None,
-                ui_scene: 7,
-                flags: psx_level::scene_state_flags::UI_INPUT,
-            },
-        ],
-        entry: 0,
+        ..Default::default()
     };
 
     let src = render_manifest_source(&package);
@@ -302,91 +306,93 @@ fn ui_scene_table_and_flow_emit_addressable_scenes() {
 
 #[test]
 fn button_and_slider_nodes_render_action_accent_and_option_fields() {
-    let mut package = PlaytestPackage::default();
-    package.ui_nodes = vec![
-        PlaytestUiNode {
-            parent: None,
-            kind: UiNodeKind::Button {
-                rect: crate::UiRect::new(0, 0, 80, 18),
-                label: "Play".to_string(),
-                align: UiTextAlign::Center,
-                font: crate::UiFontChoice::Basic8x16,
+    let package = PlaytestPackage {
+        ui_nodes: vec![
+            PlaytestUiNode {
+                parent: None,
+                kind: UiNodeKind::Button {
+                    rect: crate::UiRect::new(0, 0, 80, 18),
+                    label: "Play".to_string(),
+                    align: UiTextAlign::Center,
+                    font: crate::UiFontChoice::Basic8x16,
+                    font_scale: crate::default_ui_font_scale(),
+                    letter_spacing: crate::default_ui_letter_spacing(),
+                    color: [50, 60, 70],
+                    background_gradient: None,
+                    text_color: [236, 240, 248],
+                    text_gradient: None,
+                    transparent: false,
+                    action: UiAction::Back,
+                    sfx: crate::UiSfxBindings::default(),
+                },
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 18,
+                color: [50, 60, 70],
+                background: [0, 0, 0],
+                accent: [0, 0, 0],
+                color_paint: None,
+                background_paint: None,
+                accent_paint: None,
+                value: UiValueBinding::ConstantQ12(0),
+                max: UiValueBinding::ConstantQ12(0),
+                texture_asset: None,
+                image_effect: UiImageEffect::None,
+                text: "Play".to_string(),
+                tag: String::new(),
+                action: PlaytestUiAction::GotoScene { scene: 7 },
+                option: psx_level::UI_OPTION_NONE,
+                rotation_degrees: 0,
+                flags: 0,
+                sfx_first: psx_level::UI_SFX_NONE,
+                sfx_count: 0,
+                font: 1,
+                font_scale: crate::UI_FONT_SCALE_ONE_Q8 * 2,
+                letter_spacing: 3,
+            },
+            PlaytestUiNode {
+                parent: None,
+                kind: UiNodeKind::Slider {
+                    rect: crate::UiRect::new(0, 0, 96, 8),
+                    option: crate::OptionId(3),
+                    track: [11, 12, 13],
+                    track_gradient: None,
+                    fill: [21, 22, 23],
+                    fill_gradient: None,
+                    knob: [31, 32, 33],
+                    knob_gradient: None,
+                    sfx: crate::UiSfxBindings::default(),
+                },
+                x: 0,
+                y: 0,
+                width: 96,
+                height: 8,
+                color: [11, 12, 13],
+                background: [21, 22, 23],
+                accent: [31, 32, 33],
+                color_paint: None,
+                background_paint: None,
+                accent_paint: None,
+                value: UiValueBinding::ConstantQ12(0),
+                max: UiValueBinding::ConstantQ12(0),
+                texture_asset: None,
+                image_effect: UiImageEffect::None,
+                text: String::new(),
+                tag: String::new(),
+                action: PlaytestUiAction::default(),
+                option: 3,
+                rotation_degrees: 0,
+                flags: 0,
+                sfx_first: psx_level::UI_SFX_NONE,
+                sfx_count: 0,
+                font: 0,
                 font_scale: crate::default_ui_font_scale(),
                 letter_spacing: crate::default_ui_letter_spacing(),
-                color: [50, 60, 70],
-                background_gradient: None,
-                text_color: [236, 240, 248],
-                text_gradient: None,
-                transparent: false,
-                action: UiAction::Back,
-                sfx: crate::UiSfxBindings::default(),
             },
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 18,
-            color: [50, 60, 70],
-            background: [0, 0, 0],
-            accent: [0, 0, 0],
-            color_paint: None,
-            background_paint: None,
-            accent_paint: None,
-            value: UiValueBinding::ConstantQ12(0),
-            max: UiValueBinding::ConstantQ12(0),
-            texture_asset: None,
-            image_effect: UiImageEffect::None,
-            text: "Play".to_string(),
-            tag: String::new(),
-            action: PlaytestUiAction::GotoScene { scene: 7 },
-            option: psx_level::UI_OPTION_NONE,
-            rotation_degrees: 0,
-            flags: 0,
-            sfx_first: psx_level::UI_SFX_NONE,
-            sfx_count: 0,
-            font: 1,
-            font_scale: crate::UI_FONT_SCALE_ONE_Q8 * 2,
-            letter_spacing: 3,
-        },
-        PlaytestUiNode {
-            parent: None,
-            kind: UiNodeKind::Slider {
-                rect: crate::UiRect::new(0, 0, 96, 8),
-                option: crate::OptionId(3),
-                track: [11, 12, 13],
-                track_gradient: None,
-                fill: [21, 22, 23],
-                fill_gradient: None,
-                knob: [31, 32, 33],
-                knob_gradient: None,
-                sfx: crate::UiSfxBindings::default(),
-            },
-            x: 0,
-            y: 0,
-            width: 96,
-            height: 8,
-            color: [11, 12, 13],
-            background: [21, 22, 23],
-            accent: [31, 32, 33],
-            color_paint: None,
-            background_paint: None,
-            accent_paint: None,
-            value: UiValueBinding::ConstantQ12(0),
-            max: UiValueBinding::ConstantQ12(0),
-            texture_asset: None,
-            image_effect: UiImageEffect::None,
-            text: String::new(),
-            tag: String::new(),
-            action: PlaytestUiAction::default(),
-            option: 3,
-            rotation_degrees: 0,
-            flags: 0,
-            sfx_first: psx_level::UI_SFX_NONE,
-            sfx_count: 0,
-            font: 0,
-            font_scale: crate::default_ui_font_scale(),
-            letter_spacing: crate::default_ui_letter_spacing(),
-        },
-    ];
+        ],
+        ..Default::default()
+    };
 
     let src = render_manifest_source(&package);
     assert!(src.contains("    &psx_font::fonts::BASIC_8X16,\n"));
@@ -403,48 +409,50 @@ fn button_and_slider_nodes_render_action_accent_and_option_fields() {
 
 #[test]
 fn ui_gradient_paints_emit_table_and_node_refs() {
-    let mut package = PlaytestPackage::default();
-    package.ui_paints = vec![PlaytestUiPaint {
-        from: [20, 30, 40],
-        to: [80, 90, 100],
-        direction: UiGradientDirection::Horizontal,
-    }];
-    package.ui_nodes = vec![PlaytestUiNode {
-        parent: None,
-        kind: UiNodeKind::Rect {
-            rect: crate::UiRect::new(0, 0, 80, 18),
+    let package = PlaytestPackage {
+        ui_paints: vec![PlaytestUiPaint {
+            from: [20, 30, 40],
+            to: [80, 90, 100],
+            direction: UiGradientDirection::Horizontal,
+        }],
+        ui_nodes: vec![PlaytestUiNode {
+            parent: None,
+            kind: UiNodeKind::Rect {
+                rect: crate::UiRect::new(0, 0, 80, 18),
+                color: [20, 30, 40],
+                gradient: Some(crate::UiGradient::new(
+                    [80, 90, 100],
+                    UiGradientDirection::Horizontal,
+                )),
+            },
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 18,
             color: [20, 30, 40],
-            gradient: Some(crate::UiGradient::new(
-                [80, 90, 100],
-                UiGradientDirection::Horizontal,
-            )),
-        },
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 18,
-        color: [20, 30, 40],
-        background: [0, 0, 0],
-        accent: [0, 0, 0],
-        color_paint: Some(0),
-        background_paint: None,
-        accent_paint: None,
-        value: UiValueBinding::ConstantQ12(0),
-        max: UiValueBinding::ConstantQ12(0),
-        texture_asset: None,
-        image_effect: UiImageEffect::None,
-        text: String::new(),
-        tag: String::new(),
-        action: PlaytestUiAction::default(),
-        option: psx_level::UI_OPTION_NONE,
-        rotation_degrees: 0,
-        flags: 0,
-        sfx_first: psx_level::UI_SFX_NONE,
-        sfx_count: 0,
-        font: 0,
-        font_scale: crate::default_ui_font_scale(),
-        letter_spacing: crate::default_ui_letter_spacing(),
-    }];
+            background: [0, 0, 0],
+            accent: [0, 0, 0],
+            color_paint: Some(0),
+            background_paint: None,
+            accent_paint: None,
+            value: UiValueBinding::ConstantQ12(0),
+            max: UiValueBinding::ConstantQ12(0),
+            texture_asset: None,
+            image_effect: UiImageEffect::None,
+            text: String::new(),
+            tag: String::new(),
+            action: PlaytestUiAction::default(),
+            option: psx_level::UI_OPTION_NONE,
+            rotation_degrees: 0,
+            flags: 0,
+            sfx_first: psx_level::UI_SFX_NONE,
+            sfx_count: 0,
+            font: 0,
+            font_scale: crate::default_ui_font_scale(),
+            letter_spacing: crate::default_ui_letter_spacing(),
+        }],
+        ..Default::default()
+    };
 
     let src = render_manifest_source(&package);
     assert!(src.contains("pub static UI_PAINTS: &[LevelUiPaintRecord]"));
@@ -457,13 +465,15 @@ fn ui_gradient_paints_emit_table_and_node_refs() {
 
 #[test]
 fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
-    let mut package = PlaytestPackage::default();
-    package.runtime_depth_sort_mode = crate::RuntimeDepthSortMode::PerTriangle;
-    package.runtime_texture_split_mode = crate::RuntimeTextureSplitMode::DepthSorted;
-    package.runtime_room_draw_order_mode = crate::RuntimeRoomDrawOrderMode::Portal;
-    package.runtime_texture_split_max_edge = 96;
-    package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
-    package.rooms = vec![test_room(0)];
+    let mut package = PlaytestPackage {
+        runtime_depth_sort_mode: crate::RuntimeDepthSortMode::PerTriangle,
+        runtime_texture_split_mode: crate::RuntimeTextureSplitMode::DepthSorted,
+        runtime_room_draw_order_mode: crate::RuntimeRoomDrawOrderMode::Portal,
+        runtime_texture_split_max_edge: 96,
+        assets: vec![test_room_asset(static_lit_test_room_bytes(), 0)],
+        rooms: vec![test_room(0)],
+        ..Default::default()
+    };
     package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
         room: 0,
         cell_first: 0,
@@ -495,9 +505,11 @@ fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
 
 #[test]
 fn streamed_room_chunk_payload_splits_collision_and_render_cache_records() {
-    let mut package = PlaytestPackage::default();
-    package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
-    package.rooms = vec![test_room(0)];
+    let mut package = PlaytestPackage {
+        assets: vec![test_room_asset(static_lit_test_room_bytes(), 0)],
+        rooms: vec![test_room(0)],
+        ..Default::default()
+    };
     package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
         room: 0,
         cell_first: 0,
@@ -579,9 +591,11 @@ fn streamed_room_chunk_payload_splits_collision_and_render_cache_records() {
 
 #[test]
 fn streamed_room_chunk_memory_report_accounts_for_collision_render_and_padding() {
-    let mut package = PlaytestPackage::default();
-    package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
-    package.rooms = vec![test_room(0)];
+    let mut package = PlaytestPackage {
+        assets: vec![test_room_asset(static_lit_test_room_bytes(), 0)],
+        rooms: vec![test_room(0)],
+        ..Default::default()
+    };
     package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
         room: 0,
         cell_first: 0,

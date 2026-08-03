@@ -2150,7 +2150,8 @@ fn flat_triangle_edge_cases_match_silicon() {
     // Every flat-triangle GPU CHECKS case and its real-silicon hash (HWB-005
     // photos, high 7 nibbles == hash>>4; the OBS column clips the low nibble).
     // The Redux corner-sampled rasterizer failed ALL of these on hardware.
-    let cases: [(&str, [(i16, i16); 3], (u8, u8, u8), u32); 4] = [
+    type FlatTriCase = (&'static str, [(i16, i16); 3], (u8, u8, u8), u32);
+    let cases: [FlatTriCase; 4] = [
         // case 105: vertex past the right edge.
         (
             "past-edge",
@@ -2212,7 +2213,8 @@ fn textured_gouraud_tris_replay_match_silicon() {
     let cols = [(0x80, 0x80, 0x80), (0xc0, 0x80, 0x40), (0x40, 0xc0, 0x80)];
     let uvs = [(0, 0), (15, 0), (8, 15)];
     // The player's exact primitive. (name, verts, silicon hi7).
-    let cases: [(&str, [(i16, i16); 3], u32); 3] = [
+    type TexturedTriCase = (&'static str, [(i16, i16); 3], u32);
+    let cases: [TexturedTriCase; 3] = [
         // case 108: textured-gouraud tri (player prim), direct. hi7 0200A83.
         ("player", [(8, 8), (88, 16), (40, 88)], 0x0020_0A83),
         // case 112: textured-gouraud with a large span. hi7 C79F556.
