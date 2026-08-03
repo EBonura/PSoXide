@@ -1187,7 +1187,13 @@ fn delete_current_project_refuses_directory_outside_projects_root() {
 
     let error = workspace.delete_current_project().unwrap_err();
 
-    assert!(error.contains("editor/projects"));
+    // The guard reports the root it actually enforced, and `projects_dir()`
+    // builds that from CARGO_MANIFEST_DIR without normalising the `..`
+    // segments, so match the resolved value rather than a literal path.
+    assert!(
+        error.contains(&psxed_project::projects_dir().display().to_string()),
+        "{error}"
+    );
     assert!(dir.join("project.ron").is_file());
     let _ = std::fs::remove_dir_all(dir);
 }
