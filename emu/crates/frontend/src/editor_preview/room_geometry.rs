@@ -591,6 +591,7 @@ pub(super) fn light_face(
 /// containing `c` is skipped (`split` must already be on the
 /// diagonal that keeps the other half alive -- `Corner::surviving_split`
 /// enforces this at the data layer).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_horizontal_face(
     scratch: &mut PreviewScratch,
     camera: psx_engine::WorldCamera,

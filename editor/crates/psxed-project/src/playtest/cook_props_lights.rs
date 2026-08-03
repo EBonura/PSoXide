@@ -1,7 +1,6 @@
 use super::*;
 use crate::generate_material_texture_psxt;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_material_texture_asset(
     project: &ProjectDocument,
     project_root: &Path,
@@ -67,7 +66,6 @@ pub(crate) fn resolve_material_texture_asset(
 /// keeps the model atlas; a textured Material becomes a covering
 /// texture requirement. Blend mode, tint, and sidedness apply in
 /// either case.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_model_material_override(
     project: &ProjectDocument,
     project_root: &Path,
@@ -149,7 +147,6 @@ pub(crate) fn resolve_model_material_override(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_model_secondary_texture_asset(
     project: &ProjectDocument,
     project_root: &Path,
@@ -1906,7 +1903,6 @@ pub(crate) const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
     (rgb[0], rgb[1], rgb[2])
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bake_surface_vertex_rgb(
     materials: &[CookedWorldMaterial],
     ambient: [u8; 3],

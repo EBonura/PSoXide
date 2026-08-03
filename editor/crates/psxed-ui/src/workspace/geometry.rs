@@ -1049,7 +1049,6 @@ impl EditorWorkspace {
 
     /// Write one floor of a floating placement, growing the floor stack and the
     /// grid footprint to fit. Returns how many walls the seam pass dropped.
-    #[allow(clippy::too_many_arguments)]
     fn place_floating_floor(
         &mut self,
         preview: &FloatingGeometryPlacement,

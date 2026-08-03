@@ -92,7 +92,6 @@ impl Playtest {
 
     /// The crate visible-cell selection over this example's cooked PVS
     /// tables, tuning consts, and arena-owned depth scratch.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn cached_precomputed_visible_cells(
         &mut self,
         active_slot: usize,

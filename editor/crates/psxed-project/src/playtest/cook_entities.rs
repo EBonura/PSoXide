@@ -1880,7 +1880,6 @@ impl GameEntityStateClips {
 /// its cooked instance. Hard-fails (like the idle-instance cook) only
 /// when an AUTHORED idle clip cannot resolve; unauthored roles walk
 /// the fallback chain instead.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn game_entity_state_clips(
     project: &ProjectDocument,
     character_name: &str,

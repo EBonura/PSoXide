@@ -27,7 +27,6 @@ struct CylinderTextureRuntime {
 }
 
 /// Draw all cooked CylinderProps in `current_room`.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_cylinder_props<T, const OT_DEPTH: usize, const USE_STATIC_PROP_QUAD_LEAF: bool>(
     props: &[LevelCylinderPropRecord],
     surfaces: &[LevelCylinderPropSurfaceRecord],

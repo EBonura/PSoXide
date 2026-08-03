@@ -291,7 +291,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// This is the canonical runtime model path. Callers decode cooked `.psxmdl`
     /// parts, vertices, and faces once during asset load, then pass those compact
     /// records here every frame.
-    #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model_predecoded_geometry_faces(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -334,7 +333,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     /// Submit an animated textured model with a second material pass while
     /// reusing the sampled joints and projected vertices from the first pass.
-    #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model_predecoded_geometry_faces_layered(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -382,7 +380,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// This is the lower-cost variant for models whose vertices are all
     /// single-bone skinned; callers still pass the same predecoded part,
     /// vertex, and face records.
-    #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model_primary_joints_predecoded_geometry_faces(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -425,7 +422,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     /// Primary-joint counterpart of
     /// [`Self::submit_textured_model_predecoded_geometry_faces_layered`].
-    #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model_primary_joints_predecoded_geometry_faces_layered(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -468,7 +464,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn submit_textured_model_geometry_impl(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -1278,7 +1273,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     pub(super) fn submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch<
         const CULL_BACK: bool,
@@ -1415,7 +1409,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     pub(super) fn submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch<
         const CULL_BACK: bool,
@@ -1539,7 +1532,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         false
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch<
         const CULL_BACK: bool,
@@ -1637,7 +1629,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn submit_predecoded_model_faces_packed_average_unclamped_batch<const CULL_BACK: bool>(
         &mut self,
@@ -1787,7 +1778,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         false
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn submit_predecoded_model_face_packed_back_average_in_front_fast(
         &mut self,
@@ -1855,7 +1845,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.primitive_overflow || stats.command_overflow
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn submit_predecoded_model_face_packed_back_in_front_fast(
         &mut self,
@@ -1923,7 +1912,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.primitive_overflow || stats.command_overflow
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn submit_predecoded_model_face_packed_fast(
         &mut self,
@@ -2000,7 +1988,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.primitive_overflow || stats.command_overflow
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn submit_predecoded_model_face(
         &mut self,

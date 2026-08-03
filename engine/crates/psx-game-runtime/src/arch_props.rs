@@ -24,7 +24,6 @@ struct ArchTextureRuntime {
 }
 
 /// Draw cooked arch quads in `current_room`.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_arch_props<T, const OT_DEPTH: usize>(
     props: &[LevelArchPropRecord],
     surfaces: &[LevelArchPropSurfaceRecord],

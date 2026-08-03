@@ -145,7 +145,6 @@ fn room_reflection_probe_slot(room: RoomIndex) -> Option<VramSlot> {
 }
 
 /// Draw the player's animated model through the crate policy.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_player(
     current_room: RoomIndex,
     character: RuntimeCharacter,
@@ -209,7 +208,6 @@ pub(super) fn draw_player(
 }
 
 /// Draw the player's attached equipment through the crate policy.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_player_equipment(
     current_room: RoomIndex,
     character: RuntimeCharacter,
@@ -272,7 +270,6 @@ pub(super) fn draw_player_equipment(
 
 /// Animate + draw the placed model instances of `current_room` through
 /// the crate policy.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_model_instances(
     current_room: RoomIndex,
     elapsed_tick: SimTick,
@@ -323,7 +320,6 @@ pub(super) fn draw_model_instances(
 }
 
 /// Draw the floor shadow decal under every placed model instance.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_model_instance_shadows(
     current_room: RoomIndex,
     camera: &WorldCamera,
@@ -350,7 +346,6 @@ pub(super) fn draw_model_instance_shadows(
 }
 
 /// Draw one actor's circular floor shadow decal.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_actor_shadow(
     x: i32,
     floor_y: i32,

@@ -641,7 +641,6 @@ pub(crate) fn draw_validation_issue_diagonal(
     painter.line_segment([a, b], Stroke::new(4.0, Color32::from_rgb(255, 64, 64)));
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_grid_sector_walls(
     painter: &egui::Painter,
     transform: ViewportTransform,
@@ -925,7 +924,6 @@ pub(crate) fn draw_spawn_marker(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_light_marker(
     painter: &egui::Painter,
     transform: ViewportTransform,

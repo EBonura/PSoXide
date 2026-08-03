@@ -3188,7 +3188,6 @@ const LARGE_CELL_TTF_FONTS: &[(&str, usize, usize, f32)] = &[
     ("jura", 32, 28, 26.0),
 ];
 
-#[allow(clippy::too_many_arguments)]
 fn font_entry(
     source: &'static str,
     format: FontFormat,

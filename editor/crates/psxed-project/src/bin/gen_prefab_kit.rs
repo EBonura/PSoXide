@@ -136,7 +136,6 @@ fn floor_of(
     floor_chamfered(cells, sockets, &[], height, ceiling, m, relative_elevation)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn floor_chamfered(
     cells: &[(i32, i32)],
     sockets: &[Socket],

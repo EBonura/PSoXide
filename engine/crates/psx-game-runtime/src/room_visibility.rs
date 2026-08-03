@@ -207,7 +207,6 @@ impl<
     /// authored draw distance, and the portal knobs come from the
     /// game's schedule config. Returns the traversal camera so the
     /// caller's debug snapshot path can log it.
-    #[allow(clippy::too_many_arguments)]
     pub fn rebuild(
         &mut self,
         rooms: &'static [LevelRoomRecord],

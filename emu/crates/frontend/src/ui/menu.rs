@@ -1263,6 +1263,7 @@ fn marquee_offset(t: f32, overflow: f32) -> f32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_row_icon_action(
     ctx: &egui::Context,
     painter: &egui::Painter,

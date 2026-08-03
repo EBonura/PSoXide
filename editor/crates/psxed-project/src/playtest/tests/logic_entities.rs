@@ -45,7 +45,6 @@ fn add_box_prop(project: &mut ProjectDocument, name: &str) {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn add_logic_node(
     project: &mut ProjectDocument,
     name: &str,

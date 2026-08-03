@@ -20,7 +20,6 @@ const STAMINA_BAR_W: i16 = 96;
 const STAMINA_BAR_H: i16 = 5;
 const HUD_BAR_GAP: i16 = 5;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_player_hud(
     nodes: &[LevelUiNodeRecord],
     hud_first: usize,

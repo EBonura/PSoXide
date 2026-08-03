@@ -1656,7 +1656,6 @@ fn mono_rect_zero_size_is_dropped() {
 
 /// Drive the CPU rasterizer for a textured rect via GP0 0x64.
 /// Caller has already set draw area + uploaded VRAM.
-#[allow(clippy::too_many_arguments)]
 fn cpu_push_tex_rect(
     cpu: &mut Gpu,
     cmd_byte: u8,

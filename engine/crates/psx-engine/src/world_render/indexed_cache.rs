@@ -468,7 +468,6 @@ impl RoomSurfaceMicroProfile {
 /// Draw a cached vertex-lit room using a deduplicated cached vertex
 /// stream. The projected scratch slices must be at least as long as
 /// `cached_vertices`.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     const OT: usize,
     L: WorldSurfaceLighting,
@@ -763,7 +762,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
 /// already selected an active chunk. Cells are still depth-sorted for the
 /// ordering-table painter path, and surfaces still run the usual projection,
 /// screen, near-plane, and backface checks.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSurfaceLighting>(
     cached_cells: &[CachedRoomCell],
     cached_cell_vertices: &[u16],
@@ -1205,7 +1203,6 @@ const fn cached_room_cell_key(x: u16, z: u16) -> u32 {
     ((x as u32) << 16) | z as u32
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: &CachedRoomSurface,
@@ -1981,7 +1978,6 @@ fn warmed_room_quad_packet_colors_from_ready(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn try_submit_encoded_warmed_room_quad<const OT: usize>(
     surface: &CachedRoomSurface,
@@ -2079,7 +2075,6 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
         .is_some()
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(unused_variables)]
 #[inline(always)]
 fn try_submit_shaded_encoded_warmed_room_quad<const OT: usize, L: WorldSurfaceLighting>(
@@ -2279,7 +2274,6 @@ fn warmed_room_quad_packet_values<T: Copy>(
 /// invalid avoids both whole-surface popping and a permanent per-room view
 /// arena. The clipped polygon is emitted as ordinary triangles, preserving
 /// the PS1 extent splitter and interpolating UV/light values at the new edge.
-#[allow(clippy::too_many_arguments)]
 fn draw_near_clipped_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: &CachedRoomSurface,
     cached_vertices: &[WorldVertex],
@@ -2462,7 +2456,6 @@ fn adaptive_projected_triangle_needs_subdivision(
         < profile.far_depth
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_adaptive_cached_room_triangle<const OT: usize>(
     cached_vertices: &[WorldVertex],
     ids: [u16; 4],
@@ -2504,7 +2497,6 @@ fn submit_adaptive_cached_room_triangle<const OT: usize>(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_adaptive_cached_room_quad<const OT: usize>(
     cached_vertices: &[WorldVertex],
     ids: [u16; 4],

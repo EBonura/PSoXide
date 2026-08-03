@@ -1012,7 +1012,6 @@ impl FontAtlas {
     ///     (255, 220, 80), (200, 40, 20),
     /// );
     /// ```
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_text_scaled_gradient(
         &self,
         x: i16,
@@ -1064,7 +1063,6 @@ impl FontAtlas {
     /// This is the general-purpose path behind gradient UI text:
     /// vertical gradients use `[top, top, bottom, bottom]`, horizontal
     /// gradients use `[left, right, left, right]`.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw_text_scaled_gouraud_with_spacing_q8(
         &self,
         x: i16,

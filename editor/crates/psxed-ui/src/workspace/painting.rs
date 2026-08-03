@@ -1640,7 +1640,6 @@ impl EditorWorkspace {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn set_layer_boundary_open_no_undo(
         &mut self,
         room: NodeId,
