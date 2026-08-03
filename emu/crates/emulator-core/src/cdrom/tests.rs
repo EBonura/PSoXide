@@ -546,7 +546,7 @@ fn a_handler_that_never_runs_loses_sectors_rather_than_stalling_the_drive() {
         "sectors should have been lost, none were"
     );
     assert!(
-        cd.waiting_sectors.len() <= SECTOR_BUFFERS - 1,
+        cd.waiting_sectors.len() < SECTOR_BUFFERS,
         "the ring must stay bounded, held {}",
         cd.waiting_sectors.len()
     );

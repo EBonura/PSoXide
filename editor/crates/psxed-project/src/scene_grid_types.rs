@@ -676,7 +676,7 @@ impl ModelSecondaryLayer {
             motion: MaterialUvMotion {
                 enabled: true,
                 speed_u_q8: 2 * 256,
-                speed_v_q8: 1 * 256,
+                speed_v_q8: 256,
                 phase_u: 0,
                 phase_v: 0,
             },
@@ -3148,8 +3148,10 @@ mod wall_dedupe_tests {
                 ..a.clone()
             },
         ] {
-            let mut walls = GridWalls::default();
-            walls.north = vec![a.clone(), variant];
+            let mut walls = GridWalls {
+                north: vec![a.clone(), variant],
+                ..Default::default()
+            };
             assert_eq!(walls.dedupe_exact(), 0, "distinct walls must be kept");
             assert_eq!(walls.north.len(), 2);
         }

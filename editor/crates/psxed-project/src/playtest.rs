@@ -1555,7 +1555,7 @@ pub fn build_package(
         }
     }
 
-    for room_index in 0..rooms.len() {
+    for (room_index, room) in rooms.iter().enumerate() {
         let box_count = box_props
             .iter()
             .filter(|prop| {
@@ -1572,7 +1572,7 @@ pub fn build_package(
         if total > psx_level::MAX_STATIC_PROP_AABB_BLOCKERS {
             report.error(format!(
                 "Room '{}' needs {total} static prop collision AABBs ({box_count} box + {arch_count} arch), exceeding the PS1 runtime budget of {}",
-                rooms[room_index].name,
+                room.name,
                 psx_level::MAX_STATIC_PROP_AABB_BLOCKERS,
             ));
         }

@@ -313,9 +313,11 @@ fn character_controller_role_is_derived_from_existing_controller_state() {
 
 #[test]
 fn character_controller_role_preserves_enemy_tuning_while_player_controlled() {
-    let mut settings = CharacterControllerSettings::default();
-    settings.enemy = Some(psxed_project::EnemyBehaviorSettings::defaults());
-    let original_enemy = settings.enemy.clone();
+    let mut settings = CharacterControllerSettings {
+        enemy: Some(psxed_project::EnemyBehaviorSettings::defaults()),
+        ..Default::default()
+    };
+    let original_enemy = settings.enemy;
     let mut player = false;
 
     assert!(CharacterControllerRole::Player.apply_to(&mut player, &mut settings));
@@ -354,8 +356,10 @@ fn inline_character_controller_edit_undoes_with_entity_selected() {
     let entity = project
         .active_scene_mut()
         .add_node(NodeId::ROOT, "Enemy", NodeKind::Entity);
-    let mut settings = CharacterControllerSettings::default();
-    settings.enemy = Some(psxed_project::EnemyBehaviorSettings::defaults());
+    let settings = CharacterControllerSettings {
+        enemy: Some(psxed_project::EnemyBehaviorSettings::defaults()),
+        ..Default::default()
+    };
     let controller = project.active_scene_mut().add_node(
         entity,
         "Character Controller",
@@ -524,9 +528,11 @@ fn character_motion_preview_moves_without_mutating_authored_transform_and_tracks
     let entity = project
         .active_scene_mut()
         .add_node(NodeId::ROOT, "Player", NodeKind::Entity);
-    let mut settings = CharacterControllerSettings::default();
-    settings.walk_speed = 10;
-    settings.turn_speed_degrees_per_second = 180;
+    let settings = CharacterControllerSettings {
+        walk_speed: 10,
+        turn_speed_degrees_per_second: 180,
+        ..Default::default()
+    };
     project.active_scene_mut().add_node(
         entity,
         "Character Controller",

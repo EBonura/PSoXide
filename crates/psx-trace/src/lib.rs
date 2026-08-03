@@ -143,7 +143,7 @@ mod tests {
                 .to_string();
         line.push_str(
             &std::iter::once("-431".to_string())
-                .chain(std::iter::repeat("0".to_string()).take(31))
+                .chain(std::iter::repeat_n("0".to_string(), 31))
                 .collect::<Vec<_>>()
                 .join(","),
         );

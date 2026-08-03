@@ -62,7 +62,7 @@ impl DisplayHashLog {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(());
         };
-        if checkpoint_frame % self.interval != 0 {
+        if !checkpoint_frame.is_multiple_of(self.interval) {
             return Ok(());
         }
         let (hash, width, height, byte_len) = bus.gpu.display_hash();

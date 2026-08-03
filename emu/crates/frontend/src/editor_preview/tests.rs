@@ -457,9 +457,11 @@ fn cylinder_prop_preview_renders_shared_generated_profile_headlessly() {
     };
     let baseline = build_frame(&project, NodeId::ROOT);
 
-    let mut geometry = psxed_project::CylinderPropGeometry::default();
-    geometry.radius = [320, 320];
-    geometry.height = 1024;
+    let mut geometry = psxed_project::CylinderPropGeometry {
+        radius: [320, 320],
+        height: 1024,
+        ..Default::default()
+    };
     geometry.base_bulge.enabled = true;
     geometry.top_bulge.enabled = true;
     geometry.broken_ends = psxed_project::CylinderBrokenEnds::Top;

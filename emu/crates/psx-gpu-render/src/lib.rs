@@ -1029,7 +1029,7 @@ mod tests {
         let (_, _, rgba) = renderer.read_subrect_rgba8(16, 16, 64, 64);
         for y in 0..32usize {
             for x in 0..32usize {
-                let want = bgr15_to_rgba8(cpu_vram[((y + 8) * VRAM_WIDTH as usize + x + 8)]);
+                let want = bgr15_to_rgba8(cpu_vram[(y + 8) * VRAM_WIDTH as usize + x + 8]);
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let o = ((y * 2 + dy) * 64 + x * 2 + dx) * 4;
                     let got = [rgba[o], rgba[o + 1], rgba[o + 2], rgba[o + 3]];

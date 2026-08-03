@@ -234,7 +234,7 @@ pub fn draw_collision_cylinder_debug(
         let next = (i + 1) % COLLISION_DEBUG_SEGMENTS;
         draw_optional_debug_line(bottom[i], bottom[next], color);
         draw_optional_debug_line(top[i], top[next], color);
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             draw_optional_debug_line(bottom[i], top[i], color);
         }
         i += 1;

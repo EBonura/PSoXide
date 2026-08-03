@@ -2475,6 +2475,7 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
         (self.dropped_lba_first, self.dropped_lba_last)
     }
 
+    /// Bytes currently readable from the data FIFO.
     pub fn data_fifo_len(&self) -> usize {
         self.data_fifo.len()
     }

@@ -107,6 +107,12 @@ pub struct FontPackScratch<const LEN: usize> {
     words: [u16; LEN],
 }
 
+impl<const LEN: usize> Default for FontPackScratch<LEN> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const LEN: usize> FontPackScratch<LEN> {
     /// Zero-initialized scratch; `const` so the game's static instance
     /// stays in `.bss`.
@@ -183,6 +189,13 @@ pub struct UiImageCache<const STAGE_WORDS: usize, const SLOTS: usize> {
     count: usize,
     ready: bool,
     defer_frames: u8,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl<const STAGE_WORDS: usize, const SLOTS: usize> Default for UiImageCache<STAGE_WORDS, SLOTS> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -273,7 +286,7 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
         while i < ui_pack_toc.len() && n < SLOTS {
             let entry = ui_pack_toc[i];
             i += 1;
-            let asset_id = AssetId(entry.room.raw() as u16);
+            let asset_id = AssetId(entry.room.raw());
             let Some(asset) = find_asset_of_kind(assets, asset_id, AssetKind::Texture) else {
                 continue;
             };
@@ -518,7 +531,7 @@ fn vram_asset_required(
             continue;
         }
         if let Some(res) = room_residency.iter().find(|r| r.room == room) {
-            if res.required_vram.iter().any(|&a| a == asset) {
+            if res.required_vram.contains(&asset) {
                 return true;
             }
         }
@@ -1515,7 +1528,7 @@ impl<
             // The CD read writes whole sectors as bytes through the scratch's
             // u32-aligned staging view; the read consumes it before the
             // upload, and nothing else touches it during gameplay.
-            let sky_stage_words = (gameplay_pack_max_chunk_bytes + 3) / 4;
+            let sky_stage_words = gameplay_pack_max_chunk_bytes.div_ceil(4);
             let Some(stage) = scratch.stage_words_mut(sky_stage_words) else {
                 continue;
             };
@@ -1666,10 +1679,10 @@ impl<
     /// upload queue re-resolves job bytes through `resolve` per step (phase
     /// 1.5) instead of retaining `&'static` slices across frames.
     #[cfg(feature = "cd-stream-bench")]
-    pub fn load_ui_images_for_scene<'r, const STAGE_WORDS: usize, const SLOTS: usize>(
+    pub fn load_ui_images_for_scene<const STAGE_WORDS: usize, const SLOTS: usize>(
         &mut self,
         layout: VramLayout,
-        cache: &'r UiImageCache<STAGE_WORDS, SLOTS>,
+        cache: &UiImageCache<STAGE_WORDS, SLOTS>,
         scene_id: u16,
         ui_scenes: &'static [LevelUiScene],
         ui_nodes: &'static [LevelUiNodeRecord],
@@ -1773,7 +1786,11 @@ impl<
 }
 
 fn room_texture_window_size(layout: VramLayout, size: u16) -> Option<u8> {
-    if size < 8 || size > layout.room_tile_texels || !size.is_power_of_two() || size % 8 != 0 {
+    if size < 8
+        || size > layout.room_tile_texels
+        || !size.is_power_of_two()
+        || !size.is_multiple_of(8)
+    {
         return None;
     }
     u8::try_from(size).ok()

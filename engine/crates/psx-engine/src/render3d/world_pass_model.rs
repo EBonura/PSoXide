@@ -96,62 +96,6 @@ impl PreparedModelDepthSlots {
     }
 }
 
-#[cfg(test)]
-mod prepared_model_depth_tests {
-    use super::*;
-
-    fn assert_matches_generic<const OT_DEPTH: usize>(
-        band: DepthBand,
-        range: DepthRange,
-        depths: &[i32],
-    ) {
-        let options = WorldSurfaceOptions::new(band, range);
-        let prepared = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
-        for &depth in depths {
-            assert_eq!(
-                prepared.slot(depth),
-                band.slot_depth::<OT_DEPTH>(range, CameraDepth::new(depth))
-                    .index(),
-                "OT={OT_DEPTH}, band={band:?}, range={range:?}, depth={depth}"
-            );
-        }
-    }
-
-    #[test]
-    fn prepared_depth_slots_match_generic_mapping() {
-        let depths = [
-            i32::MIN,
-            -1,
-            0,
-            40,
-            63,
-            64,
-            65,
-            95,
-            96,
-            8_192,
-            16_383,
-            16_384,
-            16_385,
-            i32::MAX,
-        ];
-        // Shipping playtest mapping: 16,320 depth units over 510 slots,
-        // exactly 32 units per slot (the shift fast path).
-        assert_matches_generic::<512>(DepthBand::new(0, 510), DepthRange::new(64, 16_384), &depths);
-        // Non-power-of-two quantum and non-divisible spans retain the exact
-        // generic multiply/divide mapping.
-        assert_matches_generic::<512>(DepthBand::new(7, 403), DepthRange::new(40, 12_345), &depths);
-        assert_matches_generic::<32>(
-            DepthBand::new(3, usize::MAX),
-            DepthRange::new(-200, 997),
-            &depths,
-        );
-        // Degenerate tables/ranges keep the conservative front slot.
-        assert_matches_generic::<0>(DepthBand::whole(), DepthRange::new(10, 1_000), &depths);
-        assert_matches_generic::<64>(DepthBand::new(20, 10), DepthRange::new(500, 500), &depths);
-    }
-}
-
 impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Submit a textured triangle in camera space.
     ///
@@ -2300,5 +2244,61 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             material,
             options,
         )
+    }
+}
+
+#[cfg(test)]
+mod prepared_model_depth_tests {
+    use super::*;
+
+    fn assert_matches_generic<const OT_DEPTH: usize>(
+        band: DepthBand,
+        range: DepthRange,
+        depths: &[i32],
+    ) {
+        let options = WorldSurfaceOptions::new(band, range);
+        let prepared = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        for &depth in depths {
+            assert_eq!(
+                prepared.slot(depth),
+                band.slot_depth::<OT_DEPTH>(range, CameraDepth::new(depth))
+                    .index(),
+                "OT={OT_DEPTH}, band={band:?}, range={range:?}, depth={depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_depth_slots_match_generic_mapping() {
+        let depths = [
+            i32::MIN,
+            -1,
+            0,
+            40,
+            63,
+            64,
+            65,
+            95,
+            96,
+            8_192,
+            16_383,
+            16_384,
+            16_385,
+            i32::MAX,
+        ];
+        // Shipping playtest mapping: 16,320 depth units over 510 slots,
+        // exactly 32 units per slot (the shift fast path).
+        assert_matches_generic::<512>(DepthBand::new(0, 510), DepthRange::new(64, 16_384), &depths);
+        // Non-power-of-two quantum and non-divisible spans retain the exact
+        // generic multiply/divide mapping.
+        assert_matches_generic::<512>(DepthBand::new(7, 403), DepthRange::new(40, 12_345), &depths);
+        assert_matches_generic::<32>(
+            DepthBand::new(3, usize::MAX),
+            DepthRange::new(-200, 997),
+            &depths,
+        );
+        // Degenerate tables/ranges keep the conservative front slot.
+        assert_matches_generic::<0>(DepthBand::whole(), DepthRange::new(10, 1_000), &depths);
+        assert_matches_generic::<64>(DepthBand::new(20, 10), DepthRange::new(500, 500), &depths);
     }
 }

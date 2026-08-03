@@ -382,10 +382,9 @@ impl<const PAGE_COUNT: usize> Default for TextureWindowAtlas<PAGE_COUNT> {
 }
 
 fn texture_window_units(size: u16) -> Option<usize> {
-    if size < TEXTURE_WINDOW_UNIT_TEXELS
-        || size > 128
+    if !(TEXTURE_WINDOW_UNIT_TEXELS..=128).contains(&size)
         || !size.is_power_of_two()
-        || size % TEXTURE_WINDOW_UNIT_TEXELS != 0
+        || !size.is_multiple_of(TEXTURE_WINDOW_UNIT_TEXELS)
     {
         return None;
     }
@@ -1052,7 +1051,8 @@ fn copy_to_vram_header(rect: VramRect) {
 /// and this function's completion wait would then spin unboundedly.
 /// Callers who opt in accept that risk on their own boot path.
 pub fn dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
-    if (src as usize) % 4 != 0 || rect.w % 2 != 0 || rect.w == 0 || rect.h == 0 {
+    if !(src as usize).is_multiple_of(4) || !rect.w.is_multiple_of(2) || rect.w == 0 || rect.h == 0
+    {
         return false;
     }
     let words_per_row = rect.w / 2;

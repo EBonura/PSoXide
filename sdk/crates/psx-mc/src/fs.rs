@@ -289,6 +289,9 @@ impl<B: Block> Card<B> {
             }
         }
 
+        // `i` is both a slot index and a bit position in `visited`, so the
+        // iterator form would still need the counter.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..DATA_BLOCKS {
             if matches!(states[i], ST_MIDDLE | ST_LAST) && visited & (1u16 << i) == 0 {
                 return Err(Error::Corrupt);

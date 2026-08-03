@@ -934,7 +934,7 @@ pub fn load_disc_from_cue(cue_path: &Path) -> Result<psx_iso::Disc, String> {
             file_cache.insert(spec.path.clone(), bytes);
         }
         let bytes = file_cache.get(&spec.path).expect("cached cue file bytes");
-        if bytes.len() % psx_iso::SECTOR_BYTES != 0 {
+        if !bytes.len().is_multiple_of(psx_iso::SECTOR_BYTES) {
             return Err(format!(
                 "{} is not a whole number of raw 2352-byte sectors",
                 spec.path.display()

@@ -546,7 +546,7 @@ fn hex(bytes: &[u8]) -> String {
 
 fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
     let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err("hex string must have an even number of digits".into());
     }
     (0..cleaned.len())

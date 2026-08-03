@@ -111,7 +111,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState) {
                     .burn
                     .burners
                     .get(state.burn.selected_burner)
-                    .map_or(false, |burner| burner.can_burn());
+                    .is_some_and(|burner| burner.can_burn());
                 let confirmed = state.burn.simulate || state.burn.confirm_real_burn;
                 let can_burn = state.burn.target.is_some()
                     && selected_can_burn

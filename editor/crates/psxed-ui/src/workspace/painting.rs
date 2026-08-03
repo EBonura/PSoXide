@@ -2135,9 +2135,11 @@ impl EditorWorkspace {
                         .as_ref()
                         .map(|(_, name)| format!("{name} Column"))
                         .unwrap_or_else(|| "Cylinder Prop".to_string());
-                    let mut geometry = psxed_project::CylinderPropGeometry::default();
-                    geometry.radius = [size / 2, size / 2];
-                    geometry.height = size.saturating_mul(2);
+                    let geometry = psxed_project::CylinderPropGeometry {
+                        radius: [size / 2, size / 2],
+                        height: size.saturating_mul(2),
+                        ..Default::default()
+                    };
                     (
                         name,
                         NodeKind::CylinderProp {
@@ -2556,8 +2558,10 @@ impl EditorWorkspace {
         let volume_id = if let Some(id) = selected_volume {
             id
         } else {
-            let mut settings = WaterVolumeSettings::default();
-            settings.height_above_floor = default_height;
+            let settings = WaterVolumeSettings {
+                height_above_floor: default_height,
+                ..Default::default()
+            };
             let id = self.project.active_scene_mut().add_node(
                 room_id,
                 "Water Volume",

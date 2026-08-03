@@ -2851,6 +2851,7 @@ fn project_blended_textured_model_vertex(
 ///     -> the CPU lerp/SKINNING blend overflowing.
 ///   - `scr_*` / `oob`: projected screen coords -> the RTPS PROJECTION flinging
 ///     a vertex off-screen even from a sane view position.
+///
 /// On the silicon-faithful emulator these stay small/in-bounds; if hardware
 /// blows one stage up while the others stay sane, that stage is the bug.
 #[cfg(feature = "vert-debug")]

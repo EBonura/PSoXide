@@ -556,14 +556,6 @@ impl HwPipeline {
             mapped_at_creation: false,
         });
     }
-
-    /// Vertex-buffer capacity in bytes (sticky high-water mark).
-    /// Translator can use this to cap its emission so we never
-    /// truncate. The initial allocation covers 16 K vertices and
-    /// then grows to a byte-aligned power-of-two high-water mark.
-    pub fn vertex_capacity_bytes(&self) -> u64 {
-        self.vertex_capacity_bytes
-    }
 }
 
 // `bind_group_layout` exists on the pipeline for future bind-group

@@ -48,7 +48,7 @@ pub(super) fn dram_refresh_wait(now: u64, next_deadline: &mut u64, stall_cycles:
     if request_lateness > 10 {
         return 0;
     }
-    if request_index % 8 == 0 {
+    if request_index.is_multiple_of(8) {
         stall_cycles
             + if stall_cycles == DRAM_REFRESH_CACHED_STALL_CYCLES {
                 1

@@ -1913,8 +1913,8 @@ fn gaussian_table_is_hardware_nocash_table() {
     assert_eq!(GAUSS_TABLE[0], -1);
     assert_eq!(GAUSS_TABLE[0x1FF], 0x59B3);
     // First 16 coefficients are -1 on hardware.
-    for k in 0..16 {
-        assert_eq!(GAUSS_TABLE[k], -1, "entry {k}");
+    for (k, entry) in GAUSS_TABLE.iter().enumerate().take(16) {
+        assert_eq!(*entry, -1, "entry {k}");
     }
 }
 
@@ -2062,7 +2062,7 @@ fn cd_audio_writes_l_r_capture_buffers() {
     s.tick_sample(2 * SAMPLE_CYCLES);
     let want_l2 = ((s2 as i32 * 0x4000) >> 15) as u16;
     assert_eq!(
-        s.ram[(0x000 + 2) >> 1],
+        s.ram[2 >> 1],
         want_l2,
         "capture ring must advance 2 bytes per sample"
     );

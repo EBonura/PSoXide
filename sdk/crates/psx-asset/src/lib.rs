@@ -1401,7 +1401,6 @@ fn lerp_gte_pose_q12(a: GteJointPose, b: GteJointPose, alpha_q12: u16) -> GteJoi
     }
 }
 
-#[inline]
 /// Decode one 12-bit Q11 rotation code to a Q3.12 element.
 ///
 /// Ported from hl-psx's silicon-proven decoder: value = code * 2, with

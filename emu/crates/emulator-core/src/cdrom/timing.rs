@@ -27,6 +27,7 @@
 /// - `scheduleCDPlayIRQ(SEEK_DONE ? 0x800 : cdReadTime * 4)` --
 ///   SeekL / SeekP second response (L875). If the target is already
 ///   seeked, quick ack; otherwise a full seek-time equivalent.
+///
 /// Typical command acknowledgement with no readable media. The CD controller
 /// sub-CPU services commands from its firmware loop rather than responding in
 /// the old fixed 0x800-cycle shortcut. Current hardware-oriented emulators use

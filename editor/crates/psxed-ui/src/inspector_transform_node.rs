@@ -1388,12 +1388,8 @@ pub(crate) fn node_gizmo_translation(
         | NodeKind::CylinderProp { .. } => {
             node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
         }
-        NodeKind::ArchProp { .. } => {
-            if direction[1].abs() > 0.5 {
-                node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
-            } else {
-                1.0
-            }
+        NodeKind::ArchProp { .. } if direction[1].abs() > 0.5 => {
+            node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
         }
         _ => 1.0,
     };

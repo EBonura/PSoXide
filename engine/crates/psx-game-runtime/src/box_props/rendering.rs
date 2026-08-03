@@ -740,6 +740,9 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
         + PrimitiveSink<TriTexturedGouraud>
         + PrimitiveSink<QuadTexturedGouraud>,
 {
+    // `face` indexes faces, texture_assets, blend_modes, uvs and
+    // baked_vertex_rgb; iterating one array still leaves four indexed.
+    #[allow(clippy::needless_range_loop)]
     for face in 0..psx_level::BOX_PROP_FACE_COUNT {
         let face_runtime = faces[face];
         if !box_prop_face_front_facing(camera, face_runtime) {

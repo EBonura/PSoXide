@@ -399,6 +399,15 @@ impl<const SLOTS: usize, const CAP: usize> PrebuiltRoomQuads<SLOTS, CAP> {
     }
 }
 
+/// The four parallel slices a resolved room-surface cache hands back:
+/// cells, the cell-to-vertex index, vertices, and surfaces.
+pub type ResolvedRoomSurfaceCache = (
+    &'static [CachedRoomCell],
+    &'static [u16],
+    &'static [WorldVertex],
+    &'static [CachedRoomSurface],
+);
+
 /// Resolve `index`'s surface-cache window. A streamed candidate (already
 /// resolved by the game's streaming layer) wins; otherwise the cooked
 /// surface-cache table is validated against the cache record pools.
@@ -465,12 +474,7 @@ pub fn generated_room_surface_cache_slices<const MAX_CACHED_ROOM_VERTICES: usize
     cache_vertices: &'static [LevelCachedRoomVertexRecord],
     cache_surfaces: &'static [LevelCachedRoomSurfaceRecord],
     cache: ActiveRoomSurfaceCache,
-) -> Option<(
-    &'static [CachedRoomCell],
-    &'static [u16],
-    &'static [WorldVertex],
-    &'static [CachedRoomSurface],
-)> {
+) -> Option<ResolvedRoomSurfaceCache> {
     if !cache.ready || cache.vertex_count > MAX_CACHED_ROOM_VERTICES {
         return None;
     }
