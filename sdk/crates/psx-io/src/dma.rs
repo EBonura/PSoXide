@@ -132,16 +132,24 @@ pub fn enable_channel(ch: Channel) {
     unsafe { crate::write32(DPCR, dpcr | (1 << ch.dpcr_enable_bit())) }
 }
 
-/// OTC-channel helper: clears a RAM block as a reverse-linked chain
-/// the GPU-DMA walker consumes. `buf` points at the first word; the
-/// hardware starts from the last word and steps backward, writing a
-/// terminator at the first transfer and then predecessor pointers.
+/// OTC-channel helper: clears `buf` as a reverse-linked chain the
+/// GPU-DMA walker consumes. The hardware starts from the last word and
+/// steps backward, writing a terminator at the first transfer and then
+/// predecessor pointers.
 ///
 /// Convenience wrapper: sets up MADR/BCR/CHCR and blocks until done.
-pub fn clear_ordering_table(buf: *mut u32, words: u16) -> bool {
-    if words == 0 {
+/// Returns false if the channel wedged, or if `buf` is longer than the
+/// 16-bit BCR word count can express.
+pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
+    let Ok(words) = u16::try_from(buf.len()) else {
+        // Truncating to 16 bits would clear only the tail of the table
+        // and leave the head pointing into words the DMA never touched.
+        return false;
+    };
+    let Some(last) = buf.last_mut() else {
         return true;
-    }
+    };
+    let last_addr = last as *mut u32 as u32;
     // Abort whatever the channel was doing before arming it. On silicon a
     // transfer that never completes leaves START latched, and a write to
     // CHCR while the channel is still busy is ignored: one stuck kick
@@ -150,8 +158,7 @@ pub fn clear_ordering_table(buf: *mut u32, words: u16) -> bool {
     // the CD reader, the ordering-table clear, and the boot uploads.
     abort(Channel::Otc);
     enable_channel(Channel::Otc);
-    let last = unsafe { buf.add(words as usize - 1) };
-    set_madr(Channel::Otc, last as u32);
+    set_madr(Channel::Otc, last_addr);
     set_bcr_manual(Channel::Otc, words);
     // OTC clear: direction backward (step -4), manual sync, trigger bit.
     set_chcr(
