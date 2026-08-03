@@ -58,6 +58,22 @@ pub struct Sample {
 }
 
 impl Sample {
+    /// Describe a sample already resident in SPU RAM, for banks uploaded by
+    /// something other than [`Bank`] -- VoXide streams its straight off the
+    /// disc into the SPU, never holding it in main RAM.
+    ///
+    /// `blocks` is the sample's ADPCM block count, or 0 when the bank format
+    /// does not record one. Length is what a cutoff is computed from, so a
+    /// sample without it gets no cutoff and falls back to the envelope: see
+    /// [`Sample::ticks_at`].
+    pub const fn resident(addr: SpuAddr, rate_hz: u32, blocks: u32) -> Self {
+        Self {
+            addr,
+            rate_hz,
+            frames: blocks,
+        }
+    }
+
     /// Where the sample starts in SPU RAM.
     pub const fn addr(&self) -> SpuAddr {
         self.addr
@@ -74,12 +90,17 @@ impl Sample {
     }
 
     /// How long this sample runs, in ticks of a `ticks_hz` clock, played at
-    /// its own rate. Includes [`TAIL_TICKS`] of margin.
+    /// its own rate, with [`TAIL_TICKS`] of margin. `None` when the block
+    /// count is unknown, which means no cutoff can be computed and the
+    /// envelope has to finish the sound instead.
     ///
     /// Pitch-shifted playback stretches this: see [`OneShot::with_pitch`].
-    pub const fn ticks_at(&self, ticks_hz: u32) -> u32 {
+    pub const fn ticks_at(&self, ticks_hz: u32) -> Option<u32> {
+        if self.frames == 0 {
+            return None;
+        }
         let rate = if self.rate_hz == 0 { 1 } else { self.rate_hz };
-        self.len_samples() * ticks_hz / rate + TAIL_TICKS
+        Some(self.len_samples() * ticks_hz / rate + TAIL_TICKS)
     }
 }
 
@@ -170,18 +191,20 @@ impl OneShot {
     }
 
     /// How long this will sound, in ticks of a `ticks_hz` clock, with any
-    /// pitch override applied.
-    pub const fn ticks(&self, ticks_hz: u32) -> u32 {
-        let base = self.sample.ticks_at(ticks_hz);
+    /// pitch override applied. `None` when the sample's length is unknown.
+    pub const fn ticks(&self, ticks_hz: u32) -> Option<u32> {
+        let Some(base) = self.sample.ticks_at(ticks_hz) else {
+            return None;
+        };
         match self.pitch {
             // Pitch is Q4.12, so unity is 0x1000: half the pitch is twice the
             // duration. Guard the zero a caller could hand us rather than
             // dividing by it.
             Some(p) => match p.raw_value() {
-                0 => base,
-                raw => base * 0x1000 / raw as u32,
+                0 => Some(base),
+                raw => Some(base * 0x1000 / raw as u32),
             },
-            None => base,
+            None => Some(base),
         }
     }
 
@@ -263,10 +286,14 @@ impl<const N: usize> Player<N> {
     }
 
     /// Fire `shot` on a specific voice slot.
+    ///
+    /// A shot whose sample has no recorded length gets no cutoff: the voice
+    /// runs until its envelope finishes it, which is what every one-shot did
+    /// before this crate existed.
     pub fn play_on(&mut self, slot: usize, shot: &OneShot, now: u32) {
         let voice = self.voices[slot];
         shot.play(voice);
-        self.off_at[slot] = Some(now.wrapping_add(shot.ticks(self.ticks_hz)));
+        self.off_at[slot] = shot.ticks(self.ticks_hz).map(|t| now.wrapping_add(t));
     }
 
     /// Fire `shot` on the next voice in the rotation, and return which slot
@@ -314,12 +341,12 @@ mod tests {
         // ticks of a 60 Hz clock once the margin is on.
         let s = sample(44100, 126);
         assert_eq!(s.len_samples(), 3528);
-        assert_eq!(s.ticks_at(60), 3528 * 60 / 44100 + TAIL_TICKS);
+        assert_eq!(s.ticks_at(60), Some(3528 * 60 / 44100 + TAIL_TICKS));
     }
 
     #[test]
     fn a_zero_rate_sample_does_not_divide_by_zero() {
-        assert_eq!(sample(0, 10).ticks_at(60), 10 * 28 * 60 + TAIL_TICKS);
+        assert_eq!(sample(0, 10).ticks_at(60), Some(10 * 28 * 60 + TAIL_TICKS));
     }
 
     #[test]
@@ -329,7 +356,7 @@ mod tests {
         let half = plain.with_pitch(Pitch::raw(0x0800));
         // Half the pitch is twice the duration, so the cutoff has to wait
         // twice as long or it clips the sound it is meant to be following.
-        assert_eq!(half.ticks(60), plain.ticks(60) * 2);
+        assert_eq!(half.ticks(60).unwrap(), plain.ticks(60).unwrap() * 2);
     }
 
     #[test]
@@ -337,6 +364,16 @@ mod tests {
         let s = sample(44100, 394);
         let shot = OneShot::new(s, Volume::MAX).with_pitch(Pitch::raw(0));
         assert_eq!(shot.ticks(60), s.ticks_at(60));
+    }
+
+    #[test]
+    fn a_sample_of_unknown_length_gets_no_cutoff() {
+        // VoXide's cooked bank records an offset and a rate but no block
+        // count, so there is nothing to compute a deadline from. Better to
+        // say so than to invent a length and clip the sound.
+        let s = Sample::resident(SpuAddr::new(0x1010), 22050, 0);
+        assert_eq!(s.ticks_at(60), None);
+        assert_eq!(OneShot::new(s, Volume::MAX).ticks(60), None);
     }
 
     #[test]
