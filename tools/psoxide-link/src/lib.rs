@@ -58,9 +58,7 @@ const MARKER: &str = ".psoxide-source";
 /// dropping it breaks `make run` in every game that has one.
 fn skip(relative: &Path) -> bool {
     let mut components = relative.components();
-    let top = components
-        .next()
-        .and_then(|c| c.as_os_str().to_str());
+    let top = components.next().and_then(|c| c.as_os_str().to_str());
     matches!(
         top,
         Some(".git" | "target" | "build" | "captures" | "dist" | "data" | "graphify-out")
@@ -152,7 +150,6 @@ pub fn verify_tree(path: &Path) -> Result<()> {
     .into())
 }
 
-
 /// The PSoXide checkout this build of psoxide-link came from.
 ///
 /// When a game depends on this crate by git rev, Cargo puts the whole
@@ -206,7 +203,12 @@ pub fn hydrate(source: &Path, destination: &Path, id: Option<&str>, quiet: bool)
 /// Hydrate the checkout this crate was compiled from. The one call a game's
 /// pin crate needs.
 pub fn hydrate_pinned(destination: &Path, rev: &str, quiet: bool) -> Result<()> {
-    hydrate(&pinned_source_root(), destination, Some(&format!("git:{rev}")), quiet)
+    hydrate(
+        &pinned_source_root(),
+        destination,
+        Some(&format!("git:{rev}")),
+        quiet,
+    )
 }
 
 #[cfg(test)]
