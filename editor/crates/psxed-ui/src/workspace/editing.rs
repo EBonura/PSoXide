@@ -321,7 +321,7 @@ impl EditorWorkspace {
             };
             let NodeKind::Section { .. } = &node.kind else {
                 self.interaction = Interaction::Idle;
-                self.status = "Move target is not a Room".to_string();
+                self.status = "Move target is not a Section".to_string();
                 return;
             };
             for cell in &drag.cells {
@@ -340,7 +340,7 @@ impl EditorWorkspace {
             };
             let NodeKind::Section { grid } = &mut node.kind else {
                 self.interaction = Interaction::Idle;
-                self.status = "Move target is not a Room".to_string();
+                self.status = "Move target is not a Section".to_string();
                 return;
             };
             let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
@@ -1299,7 +1299,7 @@ impl EditorWorkspace {
             };
             let NodeKind::Section { .. } = &node.kind else {
                 self.interaction = Interaction::Idle;
-                self.status = "Move target is not a Room".to_string();
+                self.status = "Move target is not a Section".to_string();
                 return;
             };
             for cell in &grid_drag.cells {
@@ -1318,7 +1318,7 @@ impl EditorWorkspace {
             };
             let NodeKind::Section { grid } = &mut node.kind else {
                 self.interaction = Interaction::Idle;
-                self.status = "Move target is not a Room".to_string();
+                self.status = "Move target is not a Section".to_string();
                 return;
             };
             let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));

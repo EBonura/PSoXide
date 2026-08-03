@@ -3866,3 +3866,128 @@ fn adjacent_sections_with_facing_openings_connect_without_an_authored_portal() {
         "a wall on the shared edge vetoes the automatic join"
     );
 }
+
+/// The authored and automatic cross-section passes must never emit the same
+/// directed link twice.
+///
+/// They cannot generally collide, and it took a wrong test to see why: an
+/// authored Portal marker can never sit on a section boundary, because
+/// `portal_edge_key_for_node` only considers edges whose neighbour cell is
+/// populated and in the same grid. An authored cross-section portal therefore
+/// always snaps to an internal seam of its own section and says "this way lies
+/// section B", while the adjacency pass wires the physical boundary. Those are
+/// different links between different runtime rooms and both are wanted. What
+/// must not happen is the same room pair being linked twice.
+#[test]
+fn an_authored_cross_section_portal_suppresses_the_automatic_one() {
+    let mut project = ProjectDocument::starter();
+    let material = project
+        .resources
+        .iter()
+        .find(|r| matches!(r.data, ResourceData::Material(_)))
+        .map(|r| r.id)
+        .expect("starter has a material");
+    let character = project
+        .resources
+        .iter()
+        .find(|r| matches!(r.data, ResourceData::Character(_)))
+        .map(|r| r.id)
+        .expect("starter defines a character");
+    let existing: Vec<NodeId> = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Section { .. }))
+        .map(|n| n.id)
+        .collect();
+    for id in &existing {
+        if let Some(NodeKind::Section { grid }) =
+            project.active_scene_mut().node_mut(*id).map(|n| &mut n.kind)
+        {
+            for sector in grid.sectors.iter_mut() {
+                *sector = None;
+            }
+        }
+    }
+
+    // Open floors on both sides, so the automatic pass would fire on its own.
+    let mut west = WorldGrid::empty(2, 1, 1024);
+    west.origin = [0, 0];
+    let mut east = WorldGrid::empty(2, 1, 1024);
+    east.origin = [2, 0];
+    for x in 0..2 {
+        west.set_floor(x, 0, 0, Some(material));
+        east.set_floor(x, 0, 0, Some(material));
+    }
+    let west_id = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
+    let east_id = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
+
+    // And an author wired the same seam by hand.
+    for (room, target, at) in [
+        (west_id, east_id, [1.0f32, 0.0, 0.0]),
+        (east_id, west_id, [-1.0f32, 0.0, 0.0]),
+    ] {
+        let id = project.active_scene_mut().add_node(
+            room,
+            "Seam",
+            NodeKind::Portal {
+                target_room: Some(target),
+                target_entry: String::new(),
+                entry_name: String::new(),
+                geometry: None,
+            },
+        );
+        if let Some(node) = project.active_scene_mut().node_mut(id) {
+            node.transform.translation = at;
+        }
+    }
+    project.active_scene_mut().add_node(
+        west_id,
+        "Player Spawn",
+        NodeKind::SpawnPoint {
+            player: true,
+            character: Some(character),
+        },
+    );
+
+    let (package, report) = playtest::build_package(&project, &projects_dir().join("default"));
+    assert!(report.is_ok(), "cooks: {:?}", report.errors);
+    let package = package.expect("package built");
+    let owner = |index: u16| -> String {
+        package
+            .rooms
+            .get(index as usize)
+            .map(|r| r.name.clone())
+            .unwrap_or_default()
+    };
+    let crossing: Vec<(u16, u16)> = package
+        .room_portals
+        .iter()
+        .filter(|p| {
+            owner(p.source_room).contains("West") != owner(p.destination_room).contains("West")
+        })
+        .map(|p| (p.source_room, p.destination_room))
+        .collect();
+    assert!(
+        crossing.len() >= 2,
+        "the sections are linked at all: {crossing:?}"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for pair in &crossing {
+        assert!(
+            seen.insert(*pair),
+            "room pair {pair:?} is linked twice: {crossing:?}"
+        );
+    }
+    // And every link is reciprocal, or visibility only flows one way.
+    for (a, b) in &crossing {
+        assert!(
+            crossing.contains(&(*b, *a)),
+            "link {a}->{b} has no return: {crossing:?}"
+        );
+    }
+}

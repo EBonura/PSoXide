@@ -1899,17 +1899,9 @@ pub fn build_package(
     // Portals that join two Sections. Until this, every Section cooked as its
     // own island and a level built from more than one of them was disconnected
     // at runtime no matter how the editor drew it.
-    let (cross_section, cross_issues) = cross_section_portals(scene, &room_chunks_by_node);
-    // Remember which shared edges an author wired by hand, so the automatic
-    // adjacency pass below never second-guesses them.
-    let mut wired_edges: std::collections::HashSet<(i32, i32, char)> =
-        std::collections::HashSet::new();
-    for portal in &cross_section {
-        let v = portal.vertices[0];
-        let axis = if portal.normal[0] != 0 { 'X' } else { 'Z' };
-        wired_edges.insert((v[0], v[2], axis));
-    }
-    let cross_count = cross_section.len();
+    let wiring = cross_section_portals(scene, &room_chunks_by_node);
+    let (cross_section, cross_issues, wired_edges) =
+        (wiring.portals, wiring.issues, wiring.edges);
     room_portals.extend(cross_section);
     // Sections placed edge to edge with facing openings connect on their own.
     room_portals.extend(auto_adjacent_section_portals(
@@ -1937,7 +1929,6 @@ pub fn build_package(
             _ => report.error(message),
         }
     }
-    let _ = cross_count;
     let room_overlapped_rooms = assign_floor_stack_overlaps(&mut rooms, &room_chunks_by_node);
     // The runtime visibility BFS reads each room's portals as the
     // contiguous slice [portal_first, portal_first+portal_count). The
