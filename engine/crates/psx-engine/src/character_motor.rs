@@ -1070,7 +1070,6 @@ impl CharacterMotorState {
         self.ground_anchor_z = self.position.z;
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn frame(
         &self,
         anim: CharacterMotorAnim,

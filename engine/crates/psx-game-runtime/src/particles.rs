@@ -33,7 +33,6 @@ const WATER_SPLASH_LIFETIME: u32 = 16;
 
 /// Draw one authored particle emitter's steady-state population as
 /// camera-facing textured quads. Returns the submitted quad count.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_particle_emitter<const OT_DEPTH: usize>(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
@@ -94,7 +93,6 @@ pub fn draw_particle_emitter<const OT_DEPTH: usize>(
 /// Draw a tiny fixed-budget splash around a moving actor's feet. This is a
 /// purely visual three-sprite effect: it owns no emitter state, performs no
 /// collision queries, and derives its phase from the gameplay tick.
-#[allow(clippy::too_many_arguments)]
 pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
     x: i32,
     surface_y: i32,
@@ -155,7 +153,6 @@ pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
     submitted
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_particle_sample<const OT_DEPTH: usize>(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,

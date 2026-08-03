@@ -705,7 +705,6 @@ fn append_spandrel_end_cap(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_leg(
     out: &mut Vec<GeneratedArchPropSurface>,
     x0: i32,

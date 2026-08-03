@@ -377,7 +377,6 @@ pub struct TexRect {
 }
 
 impl TexRect {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         xy: (i32, i32),
         wh: (u32, u32),
@@ -429,7 +428,6 @@ pub struct ShadedTri {
 }
 
 impl ShadedTri {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         v0: (i32, i32),
         v1: (i32, i32),

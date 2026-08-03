@@ -104,7 +104,6 @@ pub fn accumulate_model_instance_draw_stats(
 
 /// Draw the floor shadow decal under every placed model instance of
 /// `current_room`.
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEPTH: usize>(
     tables: ModelTables,
@@ -149,7 +148,6 @@ pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEP
 }
 
 /// Draw one actor's circular floor shadow decal.
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_actor_shadow<const OT_DEPTH: usize>(
     shadow: ShadowTuning,
@@ -270,7 +268,6 @@ fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color:
 
 /// Animate + draw the placed model instances of `current_room` that
 /// fall in `depth_pass`.
-#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn draw_model_instances<
     const MAX_RUNTIME_MODELS: usize,

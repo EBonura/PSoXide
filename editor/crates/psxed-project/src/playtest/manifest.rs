@@ -2796,7 +2796,6 @@ fn compact_triangle_walkable_bit(index: usize) -> u8 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_height_override_if_needed(
     out: &mut Vec<u8>,
     sx: u16,

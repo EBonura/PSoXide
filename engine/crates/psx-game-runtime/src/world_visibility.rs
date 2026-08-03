@@ -470,7 +470,6 @@ pub fn collect_portal_room_bounds<const MAX_PORTAL_ROOM_BOUNDS: usize>(
     count
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_portal_room_bounds<const MAX_PORTAL_ROOM_BOUNDS: usize>(
     out: &mut [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
     count: usize,

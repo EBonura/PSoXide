@@ -1430,7 +1430,6 @@ struct TimelineLaneResponse {
     range: Option<(u16, u16)>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_timeline_range_lane(
     ui: &mut egui::Ui,
     id_salt: &str,

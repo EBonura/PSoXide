@@ -2370,7 +2370,6 @@ impl Gpu {
     /// `tint` -- 24-bit vertex colour that modulates each texel (see
     /// [`modulate_tint`]). Raw-texture rectangles pass
     /// `(0x80, 0x80, 0x80)` so modulation is a no-op.
-    #[allow(clippy::too_many_arguments)]
     fn paint_textured_rect(
         &mut self,
         x: i32,
@@ -3109,7 +3108,6 @@ impl Gpu {
     /// `tint` is the 24-bit vertex colour that modulates each texel
     /// (see [`modulate_tint`]). Raw-texture primitives (cmd bit 0 set)
     /// pass `(0x80, 0x80, 0x80)` so modulation is a no-op.
-    #[allow(clippy::too_many_arguments)]
     fn rasterize_textured_triangle(
         &mut self,
         v0: (i32, i32),
@@ -3183,7 +3181,6 @@ impl Gpu {
     /// Same edge-function inside test as the flat path, but interpolates
     /// RGB using normalized barycentric weights `(w0, w1, w2)` per pixel
     /// and packs the result back into a 15-bit BGR VRAM word.
-    #[allow(clippy::too_many_arguments)]
     fn rasterize_shaded_triangle(
         &mut self,
         v0: (i32, i32),

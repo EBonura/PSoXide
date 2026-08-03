@@ -4355,7 +4355,6 @@ pub(crate) fn toolbar_group_menu_icon_only<R>(
     toolbar_group_menu_impl(ui, number, glow, icon, label, current, false, add_contents)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn toolbar_group_menu_impl<R>(
     ui: &mut egui::Ui,
     number: u8,

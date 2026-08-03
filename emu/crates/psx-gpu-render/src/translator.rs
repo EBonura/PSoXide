@@ -278,7 +278,6 @@ impl Translator {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn push_wire_tri(
         &mut self,
         v0: (i32, i32),
@@ -539,7 +538,6 @@ impl Translator {
             | ((tp.tex_window_off_y & 0xFF) << 24)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn push_tex_tri_psx(
         &mut self,
         v0: (i32, i32),
@@ -585,7 +583,6 @@ impl Translator {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn push_tex_tri(
         &mut self,
         v0: (i32, i32),
@@ -723,7 +720,6 @@ impl Translator {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn push_shaded_tri(
         &mut self,
         v0: (i32, i32),
@@ -882,7 +878,6 @@ impl Translator {
         self.push_tri(v10, v11, v01, color, kind);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn push_tex_rect(
         &mut self,
         cmd: u32,

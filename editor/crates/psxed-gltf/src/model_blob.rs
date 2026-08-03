@@ -2,7 +2,6 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn cook_model_blob(
     source: &SkinnedSourceMesh,
     bounds: &ModelBounds,

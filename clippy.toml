@@ -1,0 +1,11 @@
+# clippy's default `too_many_arguments` threshold is 7, and the tree had
+# accumulated 204 `#[allow(clippy::too_many_arguments)]` attributes under
+# it. Measuring against a raised bar showed why: guest render and cook
+# paths in engine/ and sdk/ sit in the 8-10 range, where they pass loose
+# scalars precisely to avoid building and copying a struct on a 33 MHz
+# CPU. Not one guest function exceeds 10.
+#
+# So 10 is the line. Everything still over it is host-side tooling
+# (editor/, emu/) where a parameter struct costs nothing, and carries the
+# allow deliberately rather than by reflex.
+too-many-arguments-threshold = 10

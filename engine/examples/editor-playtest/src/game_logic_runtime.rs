@@ -261,7 +261,6 @@ impl Playtest {
     /// Resolve authored rig volumes when the selected action has any hitbox.
     /// `None` selects the legacy arc fallback; `Some` means the authored frame
     /// window is authoritative, including frames with no active capsule.
-    #[allow(clippy::too_many_arguments)]
     fn resolve_player_combat_capsules(
         &mut self,
         ctx: &Ctx,

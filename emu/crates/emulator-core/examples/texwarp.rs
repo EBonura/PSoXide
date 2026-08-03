@@ -304,7 +304,6 @@ fn edge_error(du: f64, za: f64, zb: f64) -> f64 {
 /// T-junctions, unlike a quadtree).
 fn splits_adaptive(za: f64, zb: f64, du: f64, eps: f64) -> Vec<f64> {
     /// Depth-first walk; pushes the right-hand endpoint of every accepted span.
-    #[allow(clippy::too_many_arguments)]
     fn go(sa: f64, sb: f64, za: f64, zb: f64, du: f64, eps: f64, depth: u32, out: &mut Vec<f64>) {
         if depth == 0 || edge_error(du, za, zb) <= eps {
             out.push(sb);

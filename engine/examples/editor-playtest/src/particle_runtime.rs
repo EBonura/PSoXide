@@ -5,7 +5,6 @@
 use super::*;
 
 /// Draw one authored particle emitter through the crate policy.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_particle_emitter(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
@@ -28,7 +27,6 @@ pub(super) fn draw_particle_emitter(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_water_wade_splash(
     x: i32,
     surface_y: i32,
