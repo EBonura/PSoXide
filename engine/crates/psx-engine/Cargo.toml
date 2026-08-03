@@ -20,6 +20,7 @@ psx-math  = { path = "../../../sdk/crates/psx-math" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-pad   = { path = "../../../sdk/crates/psx-pad" }
 psx-spu   = { path = "../../../sdk/crates/psx-spu" }
+psx-sfx   = { path = "../../../sdk/crates/psx-sfx" }
 psx-vram  = { path = "../../../sdk/crates/psx-vram" }
 
 [target.'cfg(target_arch = "mips")'.dependencies]

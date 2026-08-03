@@ -12,6 +12,7 @@ members = [
     "crates/psx-font",
     "crates/psx-math",
     "crates/psx-spu",
+    "crates/psx-sfx",
     "crates/psx-telemetry",
     "crates/psx-fx",
     "crates/psx-asset",
