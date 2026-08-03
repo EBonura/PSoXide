@@ -2031,6 +2031,17 @@ pub enum ResourceData {
         /// Project-relative source path.
         source_path: String,
     },
+    /// Reusable geometry piece from the shared library
+    /// (`editor/prefabs/*.ron`).
+    ///
+    /// A path rather than an inlined copy: prefabs are deliberately global
+    /// across projects, so a piece edited once should update everywhere
+    /// rather than fork per project. The resource exists so the browser can
+    /// list and preview the library; stamping still reads the file.
+    Prefab {
+        /// Path to the `.ron`, resolved like every other resource path.
+        source_path: String,
+    },
     /// Nested room/prefab reference.
     Scene {
         /// Project-relative room/prefab path.
@@ -2068,6 +2079,7 @@ impl ResourceData {
             Self::AnimationClip(_) => "Animation Clip",
             Self::AnimationSet(_) => "Clip Role Map",
             Self::Mesh { .. } => "Mesh",
+            Self::Prefab { .. } => "Prefab",
             Self::Scene { .. } => "Room",
             Self::Script { .. } => "Script",
             Self::Audio { .. } => "Audio",

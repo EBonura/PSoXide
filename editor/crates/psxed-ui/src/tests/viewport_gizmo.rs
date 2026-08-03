@@ -5,7 +5,7 @@ use super::*;
 /// two floors carry DISTINCT geometry (floor 0 has a floor face at
 /// (0,0); floor 1 has a north wall there and no floor), so reading
 /// the wrong floor is observable. Before the fix, `face_world_corners`
-/// destructured `NodeKind::Room { grid }` directly (always floor 0);
+/// destructured `NodeKind::Section { grid }` directly (always floor 0);
 /// now it routes through `room_grid_view`, which honours `active_floor`.
 #[test]
 fn face_corner_reads_address_the_active_floor() {
@@ -17,7 +17,7 @@ fn face_corner_reads_address_the_active_floor() {
     floor1.add_wall(0, 0, GridDirection::North, 0, 1024, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("active-floor-pick"), project);
 
     let floor_face = FaceRef {
@@ -76,7 +76,7 @@ fn entity_selection_respects_active_floor() {
     grid.push_floor();
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let scene = project.active_scene_mut();
     let ground = scene.add_node(room, "Ground", NodeKind::Entity);
     scene.node_mut(ground).unwrap().floor = 0;
@@ -133,7 +133,7 @@ fn point_light_pick_matches_visible_marker_on_independently_grown_floor() {
         .extend_to_include(-3, -2);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let light = project.active_scene_mut().add_node(
         room,
         "Light",
@@ -155,7 +155,7 @@ fn point_light_pick_matches_visible_marker_on_independently_grown_floor() {
 
     let scene = workspace.project.active_scene();
     let room_node = scene.node(room).unwrap();
-    let NodeKind::Room { grid } = &room_node.kind else {
+    let NodeKind::Section { grid } = &room_node.kind else {
         unreachable!("test room is a room");
     };
     let light_node = scene.node(light).unwrap();

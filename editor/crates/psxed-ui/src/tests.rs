@@ -230,7 +230,7 @@ impl ViewportHarness {
         let room =
             project
                 .active_scene_mut()
-                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+                .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
         let mut workspace = EditorWorkspace::with_project(test_temp_dir(label), project);
         workspace.transform_gizmo_mode = TransformGizmoMode::Move;
         workspace.camera_rig.mode = ViewportCameraMode::Free;
@@ -401,7 +401,7 @@ fn assert_size_approx(actual: Vec2, expected: Vec2) {
 fn test_node_preview_origin(project: &ProjectDocument, room: NodeId, node: NodeId) -> [i32; 3] {
     let scene = project.active_scene();
     let room_node = scene.node(room).expect("room exists");
-    let NodeKind::Room { grid } = &room_node.kind else {
+    let NodeKind::Section { grid } = &room_node.kind else {
         panic!("expected room");
     };
     let node = scene.node(node).expect("node exists");
@@ -435,7 +435,7 @@ fn starter_player_entity(scene: &psxed_project::Scene) -> &psxed_project::SceneN
 fn floor_heights(workspace: &EditorWorkspace, room: NodeId, sx: u16, sz: u16) -> [i32; 4] {
     let scene = workspace.project.active_scene();
     let node = scene.node(room).expect("room node exists");
-    let NodeKind::Room { grid } = &node.kind else {
+    let NodeKind::Section { grid } = &node.kind else {
         panic!("active room is a room node");
     };
     grid.sector(sx, sz)
@@ -453,7 +453,7 @@ fn floor_triangle_heights(
 ) -> [i32; 3] {
     let scene = workspace.project.active_scene();
     let node = scene.node(room).expect("room node exists");
-    let NodeKind::Room { grid } = &node.kind else {
+    let NodeKind::Section { grid } = &node.kind else {
         panic!("active room is a room node");
     };
     grid.sector(sx, sz)
@@ -465,7 +465,7 @@ fn floor_triangle_heights(
 fn first_floor_sector(workspace: &EditorWorkspace, room: NodeId) -> (u16, u16) {
     let scene = workspace.project.active_scene();
     let node = scene.node(room).expect("room node exists");
-    let NodeKind::Room { grid } = &node.kind else {
+    let NodeKind::Section { grid } = &node.kind else {
         panic!("active room is a room node");
     };
     grid.sectors
@@ -520,7 +520,7 @@ fn workspace_with_populated_grid(label: &str, width: u16, depth: u16) -> (Editor
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: populated_grid(width, depth),
         },
     );

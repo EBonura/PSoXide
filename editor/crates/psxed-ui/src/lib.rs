@@ -410,6 +410,8 @@ pub struct EditorWorkspace {
     /// lets Escape cancel without dirtying the document and lets
     /// click commit one clean undo step.
     floating_geometry: Option<FloatingGeometryPlacement>,
+    /// Name typed into the Prefabs menu for the next "Save Selection".
+    prefab_name: String,
     /// What the next paint click would target. Cell variant fires
     /// for floor / ceiling / erase / place; Wall variant fires for
     /// PaintWall. World-cell coords let the preview track cells
@@ -1210,6 +1212,12 @@ struct GeometryClipboard {
     width: i32,
     height: i32,
     cells: Vec<GeometryClipboardCell>,
+    /// Floors stacked above `cells`, base floor first above the active one.
+    /// Always empty for Duplicate, which works one floor at a time; only a
+    /// multi-floor prefab fills it.
+    extra_floors: Vec<psxed_project::PrefabFloor>,
+    /// Lights the piece carries. Empty for Duplicate.
+    lights: Vec<psxed_project::PrefabLight>,
 }
 
 #[derive(Debug, Clone)]
@@ -1225,11 +1233,10 @@ enum GeometryClipboardMode {
     MergePrimitives,
 }
 
-#[derive(Debug, Clone)]
-struct GeometryClipboardCell {
-    offset: [i32; 2],
-    sector: Option<GridSector>,
-}
+/// The clipboard cell and the prefab cell are the same thing: an offset plus
+/// an optional sector. Sharing the type is what lets a prefab be written and
+/// read with no conversion layer.
+type GeometryClipboardCell = psxed_project::PrefabCell;
 
 #[derive(Debug, Clone)]
 struct FloatingGeometryPlacement {
@@ -1257,6 +1264,18 @@ struct FloatingGeometryPlacement {
     selected_cells: Vec<(u16, u16)>,
     selected_primitives: Vec<Selection>,
     cells: Vec<GeometryClipboardCell>,
+    /// Upper floors of a multi-floor prefab. Empty for Duplicate.
+    extra_floors: Vec<psxed_project::PrefabFloor>,
+    /// Lights the piece carries, materialised as child nodes on commit.
+    lights: Vec<psxed_project::PrefabLight>,
+    /// Walls the latest preview pass dropped for landing on an edge a
+    /// neighbour already claimed. Reported once on commit rather than every
+    /// preview frame, which would fight the rotate / flip status messages.
+    seam_walls_stripped: usize,
+    /// World units added to every authored height in the placement. Heights
+    /// are absolute, so this is the only way to land a ground-level piece on
+    /// a terrace without re-authoring every face.
+    elevation_offset: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -2159,6 +2178,7 @@ enum ResourceFilter {
     Character,
     Weapon,
     Mesh,
+    Prefab,
     Room,
     Other,
 }
@@ -2220,6 +2240,7 @@ impl ResourceFilter {
             Self::Character => "Character Profiles",
             Self::Weapon => "Weapon",
             Self::Mesh => "Mesh",
+            Self::Prefab => "Prefab",
             Self::Room => "Room",
             Self::Other => "Other",
         }
@@ -2235,6 +2256,7 @@ impl ResourceFilter {
             Self::Character => icons::MAP_PIN,
             Self::Weapon => icons::WAYPOINT,
             Self::Mesh => icons::BOX,
+            Self::Prefab => icons::LAYERS,
             Self::Room => icons::GRID,
             Self::Other => icons::FILE,
         }
@@ -2256,6 +2278,7 @@ impl ResourceFilter {
             Self::Character => matches!(data, ResourceData::Character(_)),
             Self::Weapon => matches!(data, ResourceData::Weapon(_)),
             Self::Mesh => matches!(data, ResourceData::Mesh { .. }),
+            Self::Prefab => matches!(data, ResourceData::Prefab { .. }),
             Self::Room => matches!(data, ResourceData::Scene { .. }),
             Self::Other => matches!(
                 data,
@@ -2476,6 +2499,7 @@ impl EditorWorkspace {
             validation_issue_primitives: Vec::new(),
             validation_issue_rooms: HashSet::new(),
             floating_geometry: None,
+            prefab_name: String::new(),
             paint_target_preview: None,
             last_paint_stamp: None,
             wall_paint_shape: WallPaintShape::Cardinal,
@@ -2943,7 +2967,7 @@ impl EditorWorkspace {
             .active_scene()
             .nodes()
             .iter()
-            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .find(|node| matches!(node.kind, NodeKind::Section { .. }))
             .map(|node| node.id)
         {
             self.replace_node_selection(room_id);
@@ -3085,7 +3109,7 @@ impl EditorWorkspace {
     fn room_bounds_3d(&self, room_id: NodeId) -> Option<([f32; 3], [f32; 3])> {
         let scene = self.project.active_scene();
         let room = scene.node(room_id)?;
-        let NodeKind::Room { grid } = &room.kind else {
+        let NodeKind::Section { grid } = &room.kind else {
             return None;
         };
         let footprint = grid.authored_footprint()?;
@@ -3138,7 +3162,7 @@ impl EditorWorkspace {
     fn sector_bounds_3d(&self, room_id: NodeId, sx: u16, sz: u16) -> Option<([f32; 3], [f32; 3])> {
         let scene = self.project.active_scene();
         let room = scene.node(room_id)?;
-        let NodeKind::Room { grid } = &room.kind else {
+        let NodeKind::Section { grid } = &room.kind else {
             return None;
         };
         Self::sector_bounds_3d_for_grid(grid, sx, sz)
@@ -3211,7 +3235,7 @@ impl EditorWorkspace {
         let rooms: Vec<(NodeId, String)> = scene
             .nodes()
             .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
             .map(|node| (node.id, node.name.clone()))
             .collect();
         if rooms.is_empty() {
@@ -3226,7 +3250,7 @@ impl EditorWorkspace {
                 let Some(node) = scene.node(*room_id) else {
                     continue;
                 };
-                let NodeKind::Room { grid } = &node.kind else {
+                let NodeKind::Section { grid } = &node.kind else {
                     continue;
                 };
                 psxed_project::world_cook::encode_world_grid_psxw(&self.project, grid)

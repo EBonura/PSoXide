@@ -1032,7 +1032,7 @@ impl EditorWorkspace {
             active_floor,
         )?;
         let node = scene.node(room_id)?;
-        let NodeKind::Room { grid } = &node.kind else {
+        let NodeKind::Section { grid } = &node.kind else {
             return None;
         };
         let grid = grid.floor(active_floor).unwrap_or(grid);
@@ -1049,7 +1049,7 @@ impl EditorWorkspace {
     pub(crate) fn room_sector_size(&self, room_id: NodeId) -> Option<i32> {
         let node = self.project.active_scene().node(room_id)?;
         match &node.kind {
-            NodeKind::Room { grid } => Some(grid.sector_size),
+            NodeKind::Section { grid } => Some(grid.sector_size),
             _ => None,
         }
     }
@@ -1070,7 +1070,7 @@ impl EditorWorkspace {
     pub(crate) fn room_grid_view(&self, room_id: NodeId) -> Option<&WorldGrid> {
         let node = self.project.active_scene().node(room_id)?;
         match &node.kind {
-            NodeKind::Room { grid } => {
+            NodeKind::Section { grid } => {
                 // Route every editor read (render overlays, hit-test,
                 // selection, paint preview) to the active floor so the
                 // Room workspace edits the floor the user is on. Floor 0
@@ -1096,7 +1096,7 @@ impl EditorWorkspace {
                 .active_scene()
                 .nodes()
                 .iter()
-                .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+                .find(|node| matches!(node.kind, NodeKind::Section { .. }))
                 .map(|node| node.id)
         })
     }
@@ -1106,7 +1106,7 @@ impl EditorWorkspace {
     /// [`Self::room_grid_view`] for active-floor reads.
     pub(crate) fn room_base_grid(&self, room_id: NodeId) -> Option<&WorldGrid> {
         match &self.project.active_scene().node(room_id)?.kind {
-            NodeKind::Room { grid } => Some(grid),
+            NodeKind::Section { grid } => Some(grid),
             _ => None,
         }
     }
@@ -1119,7 +1119,7 @@ impl EditorWorkspace {
     pub(crate) fn room_floor_grid_mut(&mut self, room: NodeId) -> Option<&mut WorldGrid> {
         let active_floor = self.active_floor;
         match &mut self.project.active_scene_mut().node_mut(room)?.kind {
-            NodeKind::Room { grid } => {
+            NodeKind::Section { grid } => {
                 let idx = active_floor.min(grid.floor_count().saturating_sub(1));
                 grid.floor_mut(idx)
             }
@@ -1139,7 +1139,7 @@ impl EditorWorkspace {
             let Some(node) = self.project.active_scene_mut().node_mut(room_id) else {
                 return;
             };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let NodeKind::Section { grid } = &mut node.kind else {
                 return;
             };
             if active_floor + 1 >= grid.floor_count() {
@@ -1196,7 +1196,7 @@ impl EditorWorkspace {
         let (replacement, new_floor_count) = {
             let scene = self.project.active_scene_mut();
             let room_node = scene.node_mut(room)?;
-            let NodeKind::Room { grid } = &mut room_node.kind else {
+            let NodeKind::Section { grid } = &mut room_node.kind else {
                 return None;
             };
             if grid.floor_count() <= 1
@@ -1242,14 +1242,14 @@ impl EditorWorkspace {
         let room_ids: Vec<NodeId> = scene
             .nodes()
             .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
             .map(|node| node.id)
             .collect();
         for room_id in room_ids {
             let Some(node) = scene.node_mut(room_id) else {
                 continue;
             };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let NodeKind::Section { grid } = &mut node.kind else {
                 continue;
             };
             for current_floor in 0..grid.floor_count() {
@@ -1410,7 +1410,7 @@ impl EditorWorkspace {
             let Some(room_node) = scene.node_mut(room) else {
                 return;
             };
-            let NodeKind::Room { grid } = &mut room_node.kind else {
+            let NodeKind::Section { grid } = &mut room_node.kind else {
                 return;
             };
             let source_floor = source_floor.min(grid.floor_count().saturating_sub(1));
@@ -1460,7 +1460,7 @@ impl EditorWorkspace {
             let Some(room_node) = scene.node_mut(room) else {
                 return;
             };
-            let NodeKind::Room { grid } = &mut room_node.kind else {
+            let NodeKind::Section { grid } = &mut room_node.kind else {
                 return;
             };
             let Some(target) = grid.floor_mut(target_floor) else {
@@ -1656,7 +1656,7 @@ impl EditorWorkspace {
         let Some(room_node) = scene.node_mut(room) else {
             return 0;
         };
-        let NodeKind::Room { grid } = &mut room_node.kind else {
+        let NodeKind::Section { grid } = &mut room_node.kind else {
             return 0;
         };
 
@@ -2390,7 +2390,7 @@ impl EditorWorkspace {
         let Some(room) = scene.node_mut(room_id) else {
             return;
         };
-        let NodeKind::Room { grid } = &mut room.kind else {
+        let NodeKind::Section { grid } = &mut room.kind else {
             return;
         };
         // Paint into the active floor's grid (floor 0 = base). Clamp so a

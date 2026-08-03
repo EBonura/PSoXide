@@ -119,7 +119,7 @@ fn run(args: &Args) -> Result<(), String> {
     let room_id = scene
         .nodes()
         .iter()
-        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
         .map(|n| n.id)
         .ok_or("starter has no Room node")?;
 
@@ -220,7 +220,7 @@ fn run(args: &Args) -> Result<(), String> {
     }
 
     if let Some(node) = scene.node_mut(room_id) {
-        node.kind = NodeKind::Room { grid };
+        node.kind = NodeKind::Section { grid };
     }
 
     // Boot straight into gameplay so --hold-forward and tapes drive from
@@ -263,7 +263,7 @@ fn harvest_template(
         .nodes()
         .iter()
         .find_map(|n| match &n.kind {
-            NodeKind::Room { grid } => Some(grid),
+            NodeKind::Section { grid } => Some(grid),
             _ => None,
         })
         .ok_or("starter has no Room node")?;

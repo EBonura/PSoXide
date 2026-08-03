@@ -173,7 +173,7 @@ impl EditorWorkspace {
                             .map(|hit| hit.id);
                         let top_hit_is_room = top_hit
                             .and_then(|id| self.project.active_scene().node(id))
-                            .is_some_and(|node| matches!(node.kind, NodeKind::Room { .. }));
+                            .is_some_and(|node| matches!(node.kind, NodeKind::Section { .. }));
                         let primary_down = ui
                             .input(|input| input.pointer.button_down(egui::PointerButton::Primary));
                         if !primary_down {
@@ -1573,7 +1573,7 @@ impl EditorWorkspace {
             // with the rendered marker / model exactly.
             let center_world = match enclosing_room.and_then(|id| scene.node(id)) {
                 Some(room_node) => match &room_node.kind {
-                    NodeKind::Room { grid } => {
+                    NodeKind::Section { grid } => {
                         // A stacked floor can grow independently from the
                         // base floor, so its width/origin (and therefore its
                         // editor-to-preview conversion) can differ. The 3D
@@ -1693,7 +1693,7 @@ impl EditorWorkspace {
         let scene = self.project.active_scene();
         let mut current = self.selection.selected_node;
         while let Some(node) = scene.node(current) {
-            if matches!(node.kind, NodeKind::Room { .. })
+            if matches!(node.kind, NodeKind::Section { .. })
                 && !self.scene_node_effectively_hidden(current)
             {
                 return Some(current);
@@ -1705,7 +1705,7 @@ impl EditorWorkspace {
             .nodes()
             .iter()
             .find(|node| {
-                matches!(node.kind, NodeKind::Room { .. })
+                matches!(node.kind, NodeKind::Section { .. })
                     && !self.scene_node_effectively_hidden(node.id)
             })
             .map(|node| node.id)

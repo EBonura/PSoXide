@@ -320,6 +320,7 @@ pub(crate) fn remap_resource_data(
         ResourceData::Weapon(weapon) => remap_resource_id_option(&mut weapon.model, id_map),
         ResourceData::Texture { .. }
         | ResourceData::Mesh { .. }
+        | ResourceData::Prefab { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. }

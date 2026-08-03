@@ -280,7 +280,7 @@ pub(crate) fn draw_scene_viewport(
         if scene_node_hidden(scene, hidden_scene_nodes, node.id) {
             continue;
         }
-        if matches!(node.kind, NodeKind::Room { .. }) {
+        if matches!(node.kind, NodeKind::Section { .. }) {
             draw_room(
                 painter,
                 transform,
@@ -439,7 +439,7 @@ pub(crate) fn draw_room(
     show_portals: bool,
     hits: &mut Vec<ViewportHit>,
 ) {
-    let NodeKind::Room { grid } = &node.kind else {
+    let NodeKind::Section { grid } = &node.kind else {
         return;
     };
 
@@ -1012,7 +1012,7 @@ pub(crate) fn draw_portal_seam_2d(
     let Some(room) = scene.node(room_id) else {
         return;
     };
-    let NodeKind::Room { grid } = &room.kind else {
+    let NodeKind::Section { grid } = &room.kind else {
         return;
     };
     let seam = portal_seam_edges_for_node(grid, node);

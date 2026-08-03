@@ -947,6 +947,7 @@ impl ProjectDocument {
                 );
             }
             ResourceData::Mesh { source_path }
+            | ResourceData::Prefab { source_path }
             | ResourceData::Scene { source_path }
             | ResourceData::Script { source_path }
             | ResourceData::Audio { source_path } => {
@@ -1260,13 +1261,13 @@ impl ProjectDocument {
             let orphan_rooms: Vec<NodeId> = scene
                 .nodes()
                 .iter()
-                .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+                .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
                 .filter(|node| scene.world_sector_size_for_node(node.id).is_none())
                 .map(|node| node.id)
                 .collect();
             for room_id in orphan_rooms {
                 if let Some(node) = scene.node_mut(room_id) {
-                    if let NodeKind::Room { grid } = &mut node.kind {
+                    if let NodeKind::Section { grid } = &mut node.kind {
                         grid.rescale_sector_size(grid.sector_size);
                     }
                 }
@@ -1344,6 +1345,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         ResourceData::Texture { .. }
         | ResourceData::Skeleton(_)
         | ResourceData::Mesh { .. }
+        | ResourceData::Prefab { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. } => 0,
@@ -1394,6 +1396,7 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
         ResourceData::Texture { .. }
         | ResourceData::Skeleton(_)
         | ResourceData::Mesh { .. }
+        | ResourceData::Prefab { .. }
         | ResourceData::Scene { .. }
         | ResourceData::Script { .. }
         | ResourceData::Audio { .. } => 0,
@@ -1402,7 +1405,7 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
 
 pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
     match kind {
-        NodeKind::Room { grid } => grid_resource_reference_count(grid, id),
+        NodeKind::Section { grid } => grid_resource_reference_count(grid, id),
         NodeKind::WaterVolume { material, .. } => option_resource_reference_count(*material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             option_resource_reference_count(*mesh, id)
@@ -1475,7 +1478,7 @@ pub(crate) fn clear_far_vista_resource_references(
 
 pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
     match kind {
-        NodeKind::Room { grid } => clear_grid_resource_references(grid, id),
+        NodeKind::Section { grid } => clear_grid_resource_references(grid, id),
         NodeKind::WaterVolume { material, .. } => clear_option_resource(material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
@@ -1606,7 +1609,7 @@ pub(crate) fn apply_world_sector_size_to_descendants(
             continue;
         };
         match &mut node.kind {
-            NodeKind::Room { grid } => {
+            NodeKind::Section { grid } => {
                 if rescale {
                     grid.rescale_sector_size(sector_size);
                 } else {
@@ -1689,6 +1692,7 @@ pub(crate) fn plan_resource_file_deletes(
             plan_path_delete(&source.source_path, project_root, &mut plan);
         }
         ResourceData::Mesh { source_path }
+        | ResourceData::Prefab { source_path }
         | ResourceData::Scene { source_path }
         | ResourceData::Script { source_path }
         | ResourceData::Audio { source_path } => {
@@ -1985,6 +1989,7 @@ pub(crate) const fn resource_default_stem(data: &ResourceData) -> &'static str {
         ResourceData::AnimationSet(_) => "animation_set",
         ResourceData::Weapon(_) => "weapon",
         ResourceData::Mesh { .. } => "mesh",
+        ResourceData::Prefab { .. } => "prefab",
         ResourceData::Scene { .. } => "room",
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "audio",
@@ -2003,6 +2008,7 @@ pub(crate) const fn resource_default_extension(data: &ResourceData) -> &'static 
         ResourceData::AnimationSet(_) => "animset",
         ResourceData::Weapon(_) => "weapon",
         ResourceData::Mesh { .. } => "psxmesh",
+        ResourceData::Prefab { .. } => "prefab",
         ResourceData::Scene { .. } => "room",
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "vag",

@@ -99,7 +99,7 @@ fn place_image_prop_defaults_to_room_sector_size() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1536),
         },
     );
@@ -136,7 +136,7 @@ fn place_image_prop_with_material_uses_it_directly() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -257,7 +257,7 @@ fn portal_icon_place_writes_edge_midpoint_marker() {
     grid.set_floor(1, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::Place;
     workspace.place_kind = PlaceKind::Portal;
@@ -289,7 +289,7 @@ fn portal_icon_place_refuses_duplicate_edge_marker() {
     grid.set_floor(1, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::Place;
     workspace.place_kind = PlaceKind::Portal;
@@ -323,7 +323,7 @@ fn visible_portal_bounds_follow_the_authored_seam() {
     grid.set_floor(1, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::Place;
     workspace.place_kind = PlaceKind::Portal;
@@ -367,7 +367,7 @@ fn portal_icon_place_rejects_edges_without_populated_neighbour() {
     grid.set_floor(0, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::Place;
     workspace.place_kind = PlaceKind::Portal;
@@ -405,7 +405,7 @@ fn material_assignment_updates_selected_triangle_override() {
     grid.set_floor(0, 0, 0, Some(original));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let triangle = HorizontalTriangleRef {
         room,
@@ -442,7 +442,7 @@ fn paint_floor_in_triangle_mode_targets_clicked_triangle_only() {
     grid.set_floor(0, 0, 0, Some(original));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
     workspace.brush_material = Some(target);
@@ -482,7 +482,7 @@ fn paint_ceiling_in_triangle_mode_targets_clicked_triangle_only() {
         Some(GridHorizontalFace::flat(1024, Some(original)));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
     workspace.brush_material = Some(target);
@@ -526,7 +526,7 @@ fn workspace_with_terrain_strip(label: &str) -> (EditorWorkspace, NodeId, Resour
     let grid = WorldGrid::stone_room(3, 1, 1024, Some(grass), Some(grass));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     (
         EditorWorkspace::with_project(std::env::temp_dir(), project),
         room,
@@ -548,7 +548,7 @@ fn workspace_with_terrain_patch(label: &str) -> (EditorWorkspace, NodeId, Resour
     let grid = WorldGrid::stone_room(3, 3, 1024, Some(grass), Some(grass));
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     (
         EditorWorkspace::with_project(std::env::temp_dir(), project),
         room,
@@ -1007,7 +1007,7 @@ fn wall_paint_shape_stamps_diagonal_wall() {
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
-        NodeKind::Room {
+        NodeKind::Section {
             grid: WorldGrid::empty(1, 1, 1024),
         },
     );
@@ -1029,7 +1029,7 @@ fn paint_wall_on_existing_wall_adds_next_stack_entry() {
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let picked = FaceRef {
         room,
@@ -1064,7 +1064,7 @@ fn paint_wall_stamp_ignores_stack_to_prevent_drag_restacking() {
     grid.add_wall(0, 0, GridDirection::North, 1024, 2048, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::PaintWall;
     let face = |stack| FaceRef {
@@ -1103,7 +1103,7 @@ fn horizontal_edit_mode_picks_triangle_face_halves() {
     grid.set_floor(0, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let face = FaceRef {
         room,
@@ -1141,7 +1141,7 @@ fn triangle_edit_edge_mode_can_pick_split_diagonal() {
     grid.set_floor(0, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let face = FaceRef {
         room,
@@ -1174,7 +1174,7 @@ fn dragging_triangle_face_moves_only_its_three_corners() {
     grid.set_floor(0, 0, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     let triangle = HorizontalTriangleRef {
         room,
@@ -1206,7 +1206,7 @@ fn selected_room_bounds_follow_authored_tiles() {
     grid.set_floor(3, 4, 0, None);
     let room = project
         .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
 
     workspace.replace_node_selection(room);
