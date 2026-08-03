@@ -20,11 +20,47 @@ impl LcgRng {
 
     /// One LCG step. Multiplier + increment are `glibc`'s constants.
     /// Returns the fresh internal state.
+    ///
+    /// # Take the high bits, not the low ones
+    ///
+    /// The low bits of any power-of-two LCG are very weak, and bit 0 of this
+    /// one is not random at all. The multiplier and the increment are both
+    /// odd, so `x' = x*m + c` gives `x'0 = x0 ^ 1`: bit 0 strictly alternates,
+    /// period two. Bit `k` has period at most `2^(k+1)`.
+    ///
+    /// So `next() & 1` ping-pongs, `next() & 127` cycles inside 128 draws, and
+    /// `next() % 25` leans on the same weak bits. Use [`LcgRng::next_mixed`]
+    /// for anything that masks or takes a remainder, or shift the high half
+    /// down yourself as [`LcgRng::signed`] does.
     #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u32 {
         self.0 = self.0.wrapping_mul(1_103_515_245).wrapping_add(12345);
         self.0
+    }
+
+    /// One step with the strong high half folded down over the weak low half,
+    /// for callers that mask or take a remainder.
+    ///
+    /// VoXide worked this out and carried it as a private wrapper: its callers
+    /// lean on `& 1`, `% 4` and `% 120`, and the raw low bits cycle with tiny
+    /// periods. It belongs on the generator rather than in one game.
+    #[inline]
+    pub fn next_mixed(&mut self) -> u32 {
+        let x = self.next();
+        x ^ (x >> 16)
+    }
+
+    /// Uniform-ish value in `[0, max)`, or 0 when `max` is 0.
+    ///
+    /// Sourced from [`LcgRng::next_mixed`], so it is safe against the low-bit
+    /// weakness a bare `next() % max` walks into.
+    #[inline]
+    pub fn below(&mut self, max: u32) -> u32 {
+        if max == 0 {
+            return 0;
+        }
+        self.next_mixed() % max
     }
 
     /// Signed integer in roughly `[-range, +range]`, sourced from

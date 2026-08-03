@@ -351,7 +351,7 @@ impl Invaders {
             Some(s) => s,
             None => return,
         };
-        let col = (self.rng.next() as usize) % COLS;
+        let col = self.rng.below(COLS as u32) as usize;
         for row in (0..ROWS).rev() {
             if self.aliens[row * COLS + col] {
                 let (ax, ay, _, ay_end) = self.alien_bbox(row, col);
