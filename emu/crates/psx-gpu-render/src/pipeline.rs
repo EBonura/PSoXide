@@ -404,7 +404,11 @@ impl HwPipeline {
     /// uniform. The dither path needs it to recover the PSX-native
     /// pixel coordinate from the S-times-denser fragment coordinate.
     pub fn set_internal_scale(&self, queue: &wgpu::Queue, scale: u32) {
-        queue.write_buffer(&self.filter_buffer, 4, bytemuck::cast_slice(&[scale.max(1)]));
+        queue.write_buffer(
+            &self.filter_buffer,
+            4,
+            bytemuck::cast_slice(&[scale.max(1)]),
+        );
     }
 
     /// Mirror CPU VRAM into the GPU-side `R16Uint` texture used by

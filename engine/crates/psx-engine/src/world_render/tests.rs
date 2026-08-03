@@ -64,12 +64,8 @@ fn warmed_room_quad_defers_to_sector_scaled_adaptive_splitter() {
         ProjectedVertex::new(64, 64, 9000),
     ];
 
-    assert!(adaptive_warmed_quad_requires_dynamic_submit(
-        &options, near
-    ));
-    assert!(!adaptive_warmed_quad_requires_dynamic_submit(
-        &options, far
-    ));
+    assert!(adaptive_warmed_quad_requires_dynamic_submit(&options, near));
+    assert!(!adaptive_warmed_quad_requires_dynamic_submit(&options, far));
     assert!(adaptive_warmed_quad_requires_dynamic_submit(
         &options.with_adaptive_subdivision_debug_levels(true),
         far,

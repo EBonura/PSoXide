@@ -703,9 +703,9 @@ impl EditorWorkspace {
 
         for path in &files {
             let source_path = path.to_string_lossy().into_owned();
-            let known = self.project.resources.iter().any(|r| {
-                matches!(&r.data, ResourceData::Prefab { source_path: p } if *p == source_path)
-            });
+            let known = self.project.resources.iter().any(
+                |r| matches!(&r.data, ResourceData::Prefab { source_path: p } if *p == source_path),
+            );
             if known {
                 continue;
             }
@@ -924,8 +924,11 @@ impl EditorWorkspace {
         }
         match self.portal_rooms_over_budget(preview.room) {
             0 => {}
-            1 => notes.push("1 runtime room past a hard cap - author a Portal to split it".to_string()),
-            n => notes.push(format!("{n} runtime rooms past a hard cap - author Portals to split them")),
+            1 => notes
+                .push("1 runtime room past a hard cap - author a Portal to split it".to_string()),
+            n => notes.push(format!(
+                "{n} runtime rooms past a hard cap - author Portals to split them"
+            )),
         }
         match lit {
             0 => {}

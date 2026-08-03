@@ -307,9 +307,10 @@ fn select_pick_passes_through_culled_wall_front_material() {
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, Some(material));
     grid.add_wall(0, 0, GridDirection::South, 0, 1024, Some(material));
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
 
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.replace_node_selection(room);
@@ -346,9 +347,10 @@ fn select_pick_passes_through_culled_ceiling_to_visible_floor() {
     grid.set_floor(0, 0, 0, Some(material));
     grid.ensure_sector(0, 0).unwrap().ceiling =
         Some(GridHorizontalFace::flat(1024, Some(material)));
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
 
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.replace_node_selection(room);
@@ -559,9 +561,10 @@ fn entering_material_paint_clears_geometry_selection_and_syncs_the_material() {
     );
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 0, Some(material));
-    let room = project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
+    let room =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
     let mut workspace =
         EditorWorkspace::with_project(test_temp_dir("paint-modal-selection"), project);
     workspace.replace_node_selection(room);

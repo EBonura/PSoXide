@@ -17,7 +17,9 @@ use crate::render::{
 };
 use crate::{Angle, WorldVertex, Q12};
 use core::mem::MaybeUninit;
-use psx_asset::{Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelPoseBlend, ModelVertex};
+use psx_asset::{
+    Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelPoseBlend, ModelVertex,
+};
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
     prim::{QuadTexturedGouraud, TriGouraud, TriTextured, TriTexturedGouraud},
@@ -2134,17 +2136,7 @@ fn project_adaptive_view_lattice_gte(
         adaptive_view_gte_input(vertices[7]),
         adaptive_view_gte_input(vertices[8]),
     ];
-    let [
-        Some(a),
-        Some(b),
-        Some(c),
-        Some(d),
-        Some(e),
-        Some(f),
-        Some(g),
-        Some(h),
-        Some(i),
-    ] = inputs
+    let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i)] = inputs
     else {
         return Some([
             projection.project_view(vertices[0])?,

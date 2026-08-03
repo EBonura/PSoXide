@@ -35,7 +35,10 @@ fn main() {
     let disc = disc_support::load_disc_path(std::path::Path::new(&disc_path)).expect("disc");
     warm_bios_for_disc_fast_boot(&mut bus, &mut cpu, DISC_FAST_BOOT_WARMUP_STEPS).expect("warmup");
     let info = fast_boot_disc_with_hle(&mut bus, &mut cpu, &disc, false).expect("fast boot");
-    println!("fastboot={} entry=0x{:08x}", info.boot_path, info.initial_pc);
+    println!(
+        "fastboot={} entry=0x{:08x}",
+        info.boot_path, info.initial_pc
+    );
     bus.cdrom.insert_disc(Some(disc));
     bus.attach_digital_pad_port1();
 

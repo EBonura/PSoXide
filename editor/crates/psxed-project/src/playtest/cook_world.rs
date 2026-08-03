@@ -1186,7 +1186,10 @@ pub(crate) fn auto_adjacent_section_portals(
                 .saturating_sub(base.elevation);
             for &cell in &chunk.cells {
                 let wc = chunk_cell_world_cell(chunk, cell);
-                occupancy.insert((wc[0], wc[1], elevation), (*node_id, chunk.room_index, chunk.floor_idx));
+                occupancy.insert(
+                    (wc[0], wc[1], elevation),
+                    (*node_id, chunk.room_index, chunk.floor_idx),
+                );
             }
         }
     }

@@ -113,7 +113,11 @@ fn main() {
                 let py = top + (prefab.height - 1 - cz) * CELL;
 
                 let h = sector.floor.as_ref().map_or(lo, |f| f.heights[0]);
-                let t = if hi > lo { (h - lo) * 100 / (hi - lo) } else { 0 };
+                let t = if hi > lo {
+                    (h - lo) * 100 / (hi - lo)
+                } else {
+                    0
+                };
                 let shade = 68 - t * 30 / 100;
                 // A dropped corner makes the cell a triangle, so draw it as
                 // one. Screen north is up, so NW is the top-left corner.

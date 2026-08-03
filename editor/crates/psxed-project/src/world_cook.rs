@@ -12,8 +12,7 @@ use crate::{
     snap_world_sector_size, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridVerticalFace, GridWalls, MaterialAnimation, MaterialFaceSidedness, MaterialResource,
     ProjectDocument, PsxBlendMode, ResourceData, ResourceId, WallCorner, WorldGrid, HEIGHT_QUANTUM,
-    MAX_ROOM_BYTES, MAX_ROOM_TRIANGLES, MAX_WALL_STACK,
-    WORLD_SECTOR_SIZE_QUANTUM,
+    MAX_ROOM_BYTES, MAX_ROOM_TRIANGLES, MAX_WALL_STACK, WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 mod coords;
@@ -1411,8 +1410,7 @@ mod tests {
                 "{sector_size}: {span} cells must fit i16"
             );
             assert!(
-                i32::from(span + 1) * sector_size > i32::from(i16::MAX)
-                    || span == MAX_ROOM_WIDTH,
+                i32::from(span + 1) * sector_size > i32::from(i16::MAX) || span == MAX_ROOM_WIDTH,
                 "{sector_size}: {span} is the largest span that fits"
             );
         }

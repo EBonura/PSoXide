@@ -2663,6 +2663,13 @@ fn unpaced_gp0_bursts_past_the_fifo_are_counted() {
     gpu.decay_busy(2_000_000);
     assert!(gpu.note_cpu_gp0_arrival());
     gpu.charge_busy(10);
-    assert!(gpu.note_cpu_gp0_arrival(), "occupancy reset after an idle write");
-    assert_eq!(gpu.gp0_overflow_count(), 1, "no new overflow after the reset");
+    assert!(
+        gpu.note_cpu_gp0_arrival(),
+        "occupancy reset after an idle write"
+    );
+    assert_eq!(
+        gpu.gp0_overflow_count(),
+        1,
+        "no new overflow after the reset"
+    );
 }

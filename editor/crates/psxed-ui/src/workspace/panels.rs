@@ -1546,9 +1546,7 @@ impl EditorWorkspace {
                         *millis = (seconds * 1000.0).round().clamp(100.0, 600_000.0) as u32;
                         changed = true;
                     }
-                    changed |= ui
-                        .checkbox(skippable, "Cross skips the wait")
-                        .changed();
+                    changed |= ui.checkbox(skippable, "Cross skips the wait").changed();
                 });
                 inspector_section(
                     ui,

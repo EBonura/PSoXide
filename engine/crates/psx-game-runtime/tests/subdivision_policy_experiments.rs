@@ -54,11 +54,7 @@ fn prepared_visible_list_only_scales_after_multiple_global_passes() {
     assert!(cortex_prepared >= cortex_repeated);
 }
 
-fn active_entity_indices(
-    rooms: &[u8],
-    engaged: &[bool],
-    active_room_mask: u64,
-) -> Vec<usize> {
+fn active_entity_indices(rooms: &[u8], engaged: &[bool], active_room_mask: u64) -> Vec<usize> {
     rooms
         .iter()
         .zip(engaged)

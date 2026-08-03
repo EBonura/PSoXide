@@ -267,8 +267,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         .saturating_add(subdivision_profile.underdraw_depth_bias),
                 );
                 let underdraw = if let Some(root_projected) = _root_projected {
-                    if _root_extent_safe && !underdraw_options.adaptive_debug_subdivision_levels
-                    {
+                    if _root_extent_safe && !underdraw_options.adaptive_debug_subdivision_levels {
                         if let Some(quad) = _warmed_root.as_deref_mut() {
                             let prepared_depth = PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(
                                 underdraw_options,

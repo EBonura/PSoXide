@@ -1052,7 +1052,17 @@ mod tests {
         // Gouraud + mono: colour-only prims. The CPU dithers the
         // Gouraud walker and leaves flat mono on the undithered path.
         assert_ne!(
-            dithered_prim_flags(0x30, vec![0x3040_8040, xy(10, 10), 0x00C0_40C0, xy(20, 10), 0x0080_C080, xy(10, 20)]) & fbits::DITHER,
+            dithered_prim_flags(
+                0x30,
+                vec![
+                    0x3040_8040,
+                    xy(10, 10),
+                    0x00C0_40C0,
+                    xy(20, 10),
+                    0x0080_C080,
+                    xy(10, 20)
+                ]
+            ) & fbits::DITHER,
             0,
             "Gouraud triangle must dither"
         );
@@ -1114,7 +1124,14 @@ mod tests {
             entry(0xE1, vec![0xE100_0000]),
             entry(
                 0x30,
-                vec![0x3040_8040, xy(10, 10), 0x00C0_40C0, xy(20, 10), 0x0080_C080, xy(10, 20)],
+                vec![
+                    0x3040_8040,
+                    xy(10, 10),
+                    0x00C0_40C0,
+                    xy(20, 10),
+                    0x0080_C080,
+                    xy(10, 20),
+                ],
             ),
         ];
         let mut translator = Translator::new();

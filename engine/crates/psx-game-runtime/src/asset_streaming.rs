@@ -660,7 +660,10 @@ mod tests {
         // and the asset only room 2 wants is left alone.
         let mut cold = Streamer::new();
         assert!(cold.request_rooms(0, &[], &assets, &[RoomIndex(0)], ROOMS));
-        assert_eq!(cold.asset_count, 2, "asset 3 is in neither of room 0's sets");
+        assert_eq!(
+            cold.asset_count, 2,
+            "asset 3 is in neither of room 0's sets"
+        );
         assert_eq!(&cold.ids[..2], &[1, 2]);
 
         // Nothing missing: planning must arm no read at all.
@@ -757,9 +760,13 @@ mod tests {
         storage.release_slot(1);
         assert!(!storage.resident(1));
 
-        assert!(storage.prepare_slot(3, third), "interior hole must be reused");
+        assert!(
+            storage.prepare_slot(3, third),
+            "interior hole must be reused"
+        );
         assert_eq!(
-            storage.offsets[3], storage.offsets[0] + third as u32,
+            storage.offsets[3],
+            storage.offsets[0] + third as u32,
             "new asset lands in the freed hole"
         );
         assert_eq!(storage.layout_generation, 0, "nothing may be relocated");
@@ -805,7 +812,10 @@ mod tests {
         assert!(storage.compact());
         assert!(storage.layout_generation > 0, "callers must rebuild views");
         assert_eq!(storage.offsets[1], 0, "survivor packed to zero");
-        assert_eq!(&storage.bytes_for(1, quarter).expect("live")[..8], &[9u8; 8]);
+        assert_eq!(
+            &storage.bytes_for(1, quarter).expect("live")[..8],
+            &[9u8; 8]
+        );
         // A full-pool allocation now fits where it previously could not.
         assert!(storage.prepare_slot(2, SECTOR_BYTES - quarter));
     }
@@ -839,9 +849,15 @@ mod tests {
         // One page of pool, one asset asking for four.
         let mut streamer = PersistentAssetStreamer::<1, 2>::new();
         streamer.begin(0, &[], &[persistent_asset(0, 4 * SECTOR_BYTES as u32)]);
-        assert!(streamer.failed(), "an unallocatable asset must fail at begin");
+        assert!(
+            streamer.failed(),
+            "an unallocatable asset must fail at begin"
+        );
         assert!(!streamer.ready());
-        assert!(!streamer.pump(&mut CdController::zeroed(), 8), "no progress");
+        assert!(
+            !streamer.pump(&mut CdController::zeroed(), 8),
+            "no progress"
+        );
         // Naming the asset is the point: a bare count leaves every streamed
         // asset in the level as the search space.
         assert_eq!(streamer.failed_asset(), 0);
@@ -850,7 +866,11 @@ mod tests {
         // A record the cooker should never emit is a different diagnosis.
         let mut bad = PersistentAssetStreamer::<1, 2>::new();
         bad.begin(0, &[], &[persistent_asset(7, 64)]);
-        assert_eq!(bad.failed_asset(), 7, "slot id out of range names the asset");
+        assert_eq!(
+            bad.failed_asset(),
+            7,
+            "slot id out of range names the asset"
+        );
         assert_eq!(bad.failed_reason(), ASSET_FAIL_BAD_RECORD);
     }
 
