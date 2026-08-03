@@ -187,82 +187,76 @@ impl AnalogSticks {
     }
 }
 
-/// A radial dead region around stick centre.
+/// A radial dead region around stick centre, with the scaled response the
+/// literature settles on.
 ///
 /// Three games on the PSoXide demo disc had grown one of these and they did not
 /// agree. hl-psx tests `x*x + y*y` against a squared radius. VoXide gates each
 /// axis separately, which makes its dead region a square: a stick pushed gently
 /// along a diagonal clears the threshold on one axis and not the other, so the
-/// input snaps to a cardinal instead of going where it was pushed. A stick's
-/// centre drift is radial, so the region that ignores it has to be a circle.
+/// input snaps to a cardinal instead of going where it was pushed. Sutphin's
+/// write-up calls that the axial dead zone and its snapping is the classic
+/// complaint about it.
+///
+/// A stick's centre drift is radial, so the region that ignores it is a circle,
+/// and [`Deadzone::scaled`] is the scaled-radial form: remapped so the first
+/// real reading starts from zero rather than jumping to the boundary magnitude.
+/// That is the recommended default. [`Deadzone::gate`] is the plain radial one,
+/// kept because the games being replaced were tuned against it.
 ///
 /// This is for two-axis input. A single-axis control is a different question
 /// and a scalar threshold is right for it: NitroXide steers on the left stick's
 /// X alone, and folding Y into the test there would let noise on an axis it
-/// does not read enable steering.
-///
-/// This is a gate, not a rescale: a reading just outside the boundary comes back
-/// at its own magnitude rather than being remapped from zero. Rescaling would
-/// change the feel of every game that has been tuned against the gate, so it is
-/// [`Deadzone::scaled`], opt in.
+/// does not read enable steering. See [`Deadzone::outside_axis`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Deadzone {
-    squared: i32,
-    radius: i16,
+    inner_squared: i32,
+    inner: i16,
+    outer: i16,
 }
 
+/// Full deflection on one axis, from a stick that reads 0..=255 about 128.
+pub const STICK_FULL: i16 = 127;
+
 impl Deadzone {
-    /// A dead region of `radius` counts around centre. A PS1 stick reads
-    /// 0..=255 with 128 at rest, so the usable range either side is about 127
-    /// and typical radii are 12 to 30.
+    /// A dead region of `radius` counts around centre. Typical radii are 12 to
+    /// 30 of the 127 counts a healthy stick reaches.
     pub const fn new(radius: i16) -> Self {
         Self {
-            squared: (radius as i32) * (radius as i32),
-            radius,
+            inner_squared: (radius as i32) * (radius as i32),
+            inner: radius,
+            outer: STICK_FULL,
         }
     }
 
-    /// The radius this was built with.
+    /// Treat any deflection at or beyond `outer` as full scale.
+    ///
+    /// A worn stick often cannot reach its corners, so without this the player
+    /// simply never gets full input. Sutphin recommends exposing it as a
+    /// setting for anything where magnitude matters.
+    pub const fn with_outer(mut self, outer: i16) -> Self {
+        self.outer = outer;
+        self
+    }
+
+    /// The inner radius this was built with.
     pub const fn radius(self) -> i16 {
-        self.radius
+        self.inner
     }
 
     /// Is this reading real input rather than centre drift?
     ///
-    /// Strictly outside, matching the boundary behaviour the games this
-    /// replaces were tuned against.
+    /// Strictly outside, matching the boundary behaviour of the games this
+    /// replaces.
     #[inline]
     pub const fn outside(self, x: i16, y: i16) -> bool {
         let (x, y) = (x as i32, y as i32);
-        x * x + y * y > self.squared
+        x * x + y * y > self.inner_squared
     }
 
-    /// The one-axis form, for a control that reads a single axis.
-    ///
-    /// NitroXide steers on the left stick's X and never looks at Y, so a radial
-    /// test there would let noise on an axis it does not read enable steering.
-    /// Same threshold, one dimension.
-    #[inline]
-    pub const fn outside_axis(self, v: i16) -> bool {
-        let v = v as i32;
-        v * v > self.squared
-    }
-
-    /// The one-axis form of [`Deadzone::scaled`]: `None` inside, otherwise the
-    /// reading with the dead region subtracted so it starts from zero.
-    #[inline]
-    pub const fn scaled_axis(self, v: i16) -> Option<i16> {
-        if !self.outside_axis(v) {
-            return None;
-        }
-        Some(if v > 0 {
-            v - self.radius
-        } else {
-            v + self.radius
-        })
-    }
-
-    /// The reading if it is real input, or `None` inside the dead region.
+    /// The reading unchanged if it is real input, or `None` inside the dead
+    /// region. The plain radial form: direction is preserved, but magnitude
+    /// jumps from zero to the boundary the moment it is crossed.
     #[inline]
     pub const fn gate(self, x: i16, y: i16) -> Option<(i16, i16)> {
         if self.outside(x, y) {
@@ -272,46 +266,57 @@ impl Deadzone {
         }
     }
 
-    /// Like [`Deadzone::gate`], but remapped so the first real reading starts
-    /// from zero instead of jumping to the boundary magnitude.
+    /// Scaled radial: `None` inside the dead region, otherwise the reading with
+    /// its magnitude remapped from the dead edge onto full scale, keeping
+    /// direction.
     ///
-    /// Costs a square root's worth of arithmetic and changes the feel, which is
-    /// why it is not the default. Worth it where a stick drives a rate rather
-    /// than a direction, since the jump is audible as a lurch.
+    /// The result is clamped to [`STICK_FULL`] per axis. Without that a full
+    /// diagonal, which is 179 counts long rather than 127, remaps to 138 on
+    /// each axis and hands the game 9% more than it believes the stick can
+    /// produce.
     #[inline]
     pub fn scaled(self, x: i16, y: i16) -> Option<(i16, i16)> {
         let (fx, fy) = (x as i32, y as i32);
-        let mag_sq = fx * fx + fy * fy;
-        if mag_sq <= self.squared {
+        let magnitude = psx_math::int32::isqrt_i32(fx * fx + fy * fy);
+        let inner = self.inner as i32;
+        if magnitude <= inner {
             return None;
         }
-        let mag = isqrt_i32(mag_sq);
-        let r = self.radius as i32;
-        if mag <= r {
-            return None;
-        }
-        // Rescale the magnitude from (r, mag] onto (0, mag], keeping direction.
-        let scaled = ((mag - r) * 127) / (127 - r).max(1);
+        let span = (self.outer as i32 - inner).max(1);
+        let scaled = (((magnitude - inner) * STICK_FULL as i32) / span).min(STICK_FULL as i32);
         Some((
-            ((fx * scaled) / mag.max(1)) as i16,
-            ((fy * scaled) / mag.max(1)) as i16,
+            ((fx * scaled) / magnitude) as i16,
+            ((fy * scaled) / magnitude) as i16,
         ))
     }
-}
 
-/// Integer square root, because the PS1 has no FPU and this runs per stick per
-/// frame.
-const fn isqrt_i32(v: i32) -> i32 {
-    if v <= 0 {
-        return 0;
+    /// The one-axis form, for a control that reads a single axis.
+    #[inline]
+    pub const fn outside_axis(self, v: i16) -> bool {
+        let v = v as i32;
+        v * v > self.inner_squared
     }
-    let mut x = v;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + v / x) / 2;
+
+    /// The one-axis form of [`Deadzone::scaled`].
+    #[inline]
+    pub const fn scaled_axis(self, v: i16) -> Option<i16> {
+        if !self.outside_axis(v) {
+            return None;
+        }
+        let span = if self.outer > self.inner {
+            (self.outer - self.inner) as i32
+        } else {
+            1
+        };
+        let magnitude = if v < 0 { -(v as i32) } else { v as i32 };
+        let scaled = (magnitude - self.inner as i32) * STICK_FULL as i32 / span;
+        let scaled = if scaled > STICK_FULL as i32 {
+            STICK_FULL as i32
+        } else {
+            scaled
+        };
+        Some(if v < 0 { -scaled as i16 } else { scaled as i16 })
     }
-    x
 }
 
 /// Which buttons changed since the previous poll.
@@ -1022,8 +1027,11 @@ mod tests {
         let dz = Deadzone::new(24);
         assert!(dz.outside_axis(30));
         assert!(!dz.outside_axis(20));
-        assert_eq!(dz.scaled_axis(30), Some(6), "starts from zero, not 30");
-        assert_eq!(dz.scaled_axis(-30), Some(-6), "sign survives");
+        // Rescaled onto full span like the two-axis form, not merely offset:
+        // (30 - 24) of the 103 counts left maps to 7 of 127.
+        assert_eq!(dz.scaled_axis(30), Some(7), "starts from zero, not 30");
+        assert_eq!(dz.scaled_axis(-30), Some(-7), "sign survives");
+        assert_eq!(dz.scaled_axis(127), Some(STICK_FULL), "full stays full");
         assert_eq!(dz.scaled_axis(10), None);
     }
 
@@ -1042,16 +1050,31 @@ mod tests {
         let dz = Deadzone::new(30);
         let (x, y) = dz.scaled(31, 0).expect("just outside is real input");
         assert!(x < 5, "expected a small first step, got {x}");
+        assert_eq!(dz.scaled(127, 0), Some((STICK_FULL, 0)), "full stays full");
         assert_eq!(y, 0, "direction must survive the rescale");
         assert_eq!(dz.scaled(10, 10), None);
     }
 
     #[test]
-    fn isqrt_matches_the_real_thing() {
-        for v in [0i32, 1, 2, 3, 4, 99, 100, 16129, 32000] {
-            let r = isqrt_i32(v);
-            assert!(r * r <= v && (r + 1) * (r + 1) > v, "isqrt({v}) = {r}");
-        }
+    fn a_full_diagonal_does_not_exceed_full_scale() {
+        // A diagonal is 179 counts long, not 127. Remapping that onto full
+        // scale without a clamp hands the game 138 on each axis and it has no
+        // reason to expect anything over 127.
+        let dz = Deadzone::new(30);
+        let (x, y) = dz.scaled(127, 127).expect("full deflection is input");
+        assert!(x <= STICK_FULL && y <= STICK_FULL, "got ({x}, {y})");
+        assert_eq!(x, y, "a diagonal must stay a diagonal");
+    }
+
+    #[test]
+    fn an_outer_zone_lets_a_worn_stick_reach_full_scale() {
+        // A stick that only manages 100 counts never gives full input without
+        // this, which is the tip Sutphin gives for anything where magnitude
+        // matters.
+        let worn = Deadzone::new(20).with_outer(100);
+        assert_eq!(worn.scaled(100, 0), Some((STICK_FULL, 0)));
+        // And past the outer edge it saturates rather than overshooting.
+        assert_eq!(worn.scaled(120, 0), Some((STICK_FULL, 0)));
     }
 
     #[test]

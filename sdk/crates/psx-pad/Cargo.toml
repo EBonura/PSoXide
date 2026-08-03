@@ -9,6 +9,7 @@ description  = "SIO0 controller polling: digital and DualShock analog pads, plus
 [dependencies]
 psx-hw = { workspace = true }
 psx-io = { path = "../psx-io" }
+psx-math = { path = "../psx-math" }
 
 [lints.rust]
 missing_docs = "warn"
