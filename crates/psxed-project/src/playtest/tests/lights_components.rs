@@ -631,7 +631,8 @@ fn weapon_melee_arc_cooks_authored_values() {
 
 #[test]
 fn weapon_melee_arc_rejects_zero_reach_zero_damage_and_degenerate_angles() {
-    let cases: [(&str, fn(&mut crate::WeaponResource)); 4] = [
+    type WeaponCase = (&'static str, fn(&mut crate::WeaponResource));
+    let cases: [WeaponCase; 4] = [
         ("arc reach 0", |weapon| weapon.arc_reach = 0),
         ("damage 0", |weapon| weapon.damage = 0),
         ("half-angle 0", |weapon| weapon.arc_half_angle_degrees = 0),

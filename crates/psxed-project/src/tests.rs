@@ -315,20 +315,22 @@ fn sky_settings_resolve_clamps_subdivision_defaults() {
         default_sky_mountain_layer_count()
     );
 
-    let mut sky = SkySettings::default();
-    sky.horizon_glow_percent = 240;
-    sky.horizon_glow_yaw_degrees = 720;
-    sky.sun_yaw_degrees = -720;
-    sky.sun_pitch_degrees = 120;
-    sky.sun_size_percent = 0;
-    sky.sun_glow_percent = 240;
-    sky.sun_glow_size_percent = 240;
-    sky.mountain_height_percent = 240;
-    sky.mountain_gap_percent = 240;
-    sky.mountain_roughness_percent = 240;
-    sky.mountain_layer_count = 9;
-    sky.skybox_columns = 1;
-    sky.skybox_rows = 99;
+    let sky = SkySettings {
+        horizon_glow_percent: 240,
+        horizon_glow_yaw_degrees: 720,
+        sun_yaw_degrees: -720,
+        sun_pitch_degrees: 120,
+        sun_size_percent: 0,
+        sun_glow_percent: 240,
+        sun_glow_size_percent: 240,
+        mountain_height_percent: 240,
+        mountain_gap_percent: 240,
+        mountain_roughness_percent: 240,
+        mountain_layer_count: 9,
+        skybox_columns: 1,
+        skybox_rows: 99,
+        ..Default::default()
+    };
     let resolved = sky.resolved_for_room(false, [0, 0, 0]);
     assert_eq!(resolved.horizon_glow_percent, 100);
     assert_eq!(resolved.horizon_glow_yaw_degrees, 180);
@@ -368,16 +370,18 @@ fn sky_cyclorama_generation_is_cook_time_geometry() {
 
 #[test]
 fn dense_cyclorama_sky_stays_under_playtest_budget() {
-    let mut sky = SkySettings::default();
-    sky.top_color = [36, 36, 36];
-    sky.horizon_color = [87, 34, 34];
-    sky.lower_color = [0, 0, 0];
-    sky.horizon_percent = 40;
-    sky.horizon_thickness_percent = 0;
-    sky.sun_enabled = true;
-    sky.mountain_layer_count = 3;
-    sky.skybox_columns = 12;
-    sky.skybox_rows = 5;
+    let mut sky = SkySettings {
+        top_color: [36, 36, 36],
+        horizon_color: [87, 34, 34],
+        lower_color: [0, 0, 0],
+        horizon_percent: 40,
+        horizon_thickness_percent: 0,
+        sun_enabled: true,
+        mountain_layer_count: 3,
+        skybox_columns: 12,
+        skybox_rows: 5,
+        ..Default::default()
+    };
     sky.cloud_layer.enabled = true;
     sky.cloud_layer.color = [155, 142, 140];
     sky.cloud_layer.density = 255;
@@ -400,12 +404,14 @@ fn dense_cyclorama_sky_stays_under_playtest_budget() {
 
 #[test]
 fn sky_cyclorama_sun_uses_faceted_polar_geometry() {
-    let mut sky = SkySettings::default();
-    sky.sun_enabled = true;
-    sky.mountain_height_percent = 0;
-    sky.top_color = [178, 178, 198];
-    sky.horizon_color = [142, 108, 100];
-    sky.lower_color = [80, 58, 70];
+    let mut sky = SkySettings {
+        sun_enabled: true,
+        mountain_height_percent: 0,
+        top_color: [178, 178, 198],
+        horizon_color: [142, 108, 100],
+        lower_color: [80, 58, 70],
+        ..Default::default()
+    };
     sky.cloud_layer.enabled = false;
 
     let resolved = sky.resolved_for_room(false, [0, 0, 0]);
@@ -752,13 +758,15 @@ fn saving_normalizes_room_sector_size_to_world() {
 fn dynamic_material_recipe_round_trips_through_project_ron() {
     let mut project = ProjectDocument::new("dynamic material persistence");
     let mut material = MaterialResource::opaque(None);
-    let mut layer = ModelSecondaryLayer::default();
-    layer.motion = MaterialUvMotion {
-        enabled: true,
-        speed_u_q8: 640,
-        speed_v_q8: -384,
-        phase_u: 17,
-        phase_v: 231,
+    let layer = ModelSecondaryLayer {
+        motion: MaterialUvMotion {
+            enabled: true,
+            speed_u_q8: 640,
+            speed_v_q8: -384,
+            phase_u: 17,
+            phase_v: 231,
+        },
+        ..Default::default()
     };
     material.secondary_layer = Some(layer.clone());
     material.set_secondary_layer_enabled(false);

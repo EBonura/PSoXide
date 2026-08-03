@@ -166,7 +166,7 @@ fn probe_texture<'a>(
     material: ResourceId,
     cache: &'a mut HashMap<ResourceId, Option<ProbeTexture>>,
 ) -> Option<&'a Option<ProbeTexture>> {
-    if !cache.contains_key(&material) {
+    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(material) {
         let decoded = project.resource(material).and_then(|resource| {
             let tint = match &resource.data {
                 ResourceData::Material(material) => material.tint,
@@ -178,7 +178,7 @@ fn probe_texture<'a>(
                 .1;
             decode_probe_texture(&bytes, tint)
         });
-        cache.insert(material, decoded);
+        e.insert(decoded);
     }
     cache.get(&material)
 }
@@ -289,10 +289,10 @@ pub fn generate_material_texture_psxt(settings: GeneratedMaterialTexture) -> Vec
     for (index, rgb) in palette.iter_mut().enumerate() {
         if settings.noise_enabled {
             let t = index as u16;
-            for channel in 0..3 {
+            for (channel, out) in rgb.iter_mut().enumerate() {
                 let a = u16::from(settings.base_color[channel]);
                 let b = u16::from(settings.noise_color[channel]);
-                rgb[channel] = ((a * (15 - t) + b * t + 7) / 15) as u8;
+                *out = ((a * (15 - t) + b * t + 7) / 15) as u8;
             }
         } else {
             *rgb = settings.base_color;
@@ -864,9 +864,9 @@ fn smooth_q8(value: u32) -> u32 {
 
 fn lerp_q8(a: u32, b: u32, t: u32) -> u32 {
     if b >= a {
-        a + ((b - a) * t >> 8)
+        a + (((b - a) * t) >> 8)
     } else {
-        a - ((a - b) * t >> 8)
+        a - (((a - b) * t) >> 8)
     }
 }
 
@@ -1124,7 +1124,7 @@ mod tests {
         let first = generate_model_noise_indices(settings);
         let second = generate_model_noise_indices(settings);
         assert_eq!(first, second);
-        assert!(first.iter().any(|&index| index == 0));
+        assert!(first.contains(&0));
         assert!(first.iter().any(|&index| index >= 14));
         assert!(first.iter().all(|&index| index < 16));
     }

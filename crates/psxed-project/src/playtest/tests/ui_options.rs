@@ -701,14 +701,16 @@ fn cook_options_flattens_every_kind() {
 
 #[test]
 fn manifest_emits_cooked_options_table() {
-    let mut package = PlaytestPackage::default();
-    package.options = vec![PlaytestOption {
-        id: 7,
-        min: 0,
-        max: 5,
-        step: 1,
-        default: 3,
-    }];
+    let package = PlaytestPackage {
+        options: vec![PlaytestOption {
+            id: 7,
+            min: 0,
+            max: 5,
+            step: 1,
+            default: 3,
+        }],
+        ..Default::default()
+    };
     let src = render_manifest_source(&package);
     assert!(src.contains("pub static OPTIONS: &[LevelOptionDef] = &[\n"));
     assert!(src.contains("LevelOptionDef { id: 7, min: 0, max: 5, step: 1, default: 3 },"));
