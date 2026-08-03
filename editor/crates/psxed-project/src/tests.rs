@@ -1511,15 +1511,27 @@ fn embedded_default_project_ron_deserializes() {
         .resources
         .iter()
         .any(|r| matches!(&r.data, ResourceData::Texture { .. })));
-    // Starter seeds the active player with the Crimson Cross Knight profile,
-    // its Meshy Gold animation library, and material atlas.
-    let (character_id, character) = project
-        .resources
+    // Starter seeds the active player with the Aletha Delivered profile,
+    // its animation library, and material atlas. Resolve the character
+    // through the wired player controller rather than by resource name, so
+    // swapping the starter actor again only moves the path assertions.
+    let character_id = project
+        .active_scene()
+        .nodes()
         .iter()
-        .find_map(|r| match &r.data {
-            ResourceData::Character(c) if r.name == "Crimson Cross Knight Player" => {
-                Some((r.id, c))
-            }
+        .find_map(|node| match &node.kind {
+            NodeKind::CharacterController {
+                player: true,
+                character,
+                ..
+            } => *character,
+            _ => None,
+        })
+        .expect("starter scene wires a player character controller");
+    let character = project
+        .resource(character_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character),
             _ => None,
         })
         .expect("starter player character resource missing");
@@ -1533,25 +1545,17 @@ fn embedded_default_project_ron_deserializes() {
         .expect("starter player model resource missing");
     assert!(model
         .model_path
-        .ends_with("crimson_cross_knight/crimson_cross_knight.psxmdl"));
+        .ends_with("aletha_delivered/aletha_delivered.psxmdl"));
     assert!(model
         .texture_path
         .as_deref()
-        .is_some_and(|path| path.ends_with("crimson_cross_knight.psxt")));
+        .is_some_and(|path| path.ends_with("aletha_delivered.psxt")));
     assert!(model.skeleton.is_some());
     assert_eq!(
         model.collision_radius,
         default_model_collision_radius_for_height(model.world_height)
     );
     assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
-    assert!(project.active_scene().nodes().iter().any(|node| matches!(
-        &node.kind,
-        NodeKind::CharacterController {
-            player: true,
-            character: Some(id),
-            ..
-        } if *id == character_id
-    )));
 }
 
 #[test]
@@ -1584,6 +1588,16 @@ fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
         .nodes()
         .iter()
         .any(|node| matches!(node.kind, NodeKind::World { .. })));
+    // Whichever Entity node comes first is the one the rewrite below
+    // demotes to a legacy Actor, so capture its name rather than assuming
+    // the starter actor is still called "Player".
+    let demoted_name = starter
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Entity))
+        .map(|node| node.name.clone())
+        .expect("starter has an entity node");
     let legacy = replace_first_world_payload(DEFAULT_PROJECT_RON).replacen(
         "kind: Entity,",
         "kind: Actor,",
@@ -1608,7 +1622,7 @@ fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
     let migrated = scene
         .nodes()
         .iter()
-        .find(|node| node.name == "Player")
+        .find(|node| node.name == demoted_name)
         .expect("starter player entity exists");
     assert!(matches!(&migrated.kind, NodeKind::Entity));
 }

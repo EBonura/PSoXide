@@ -2,11 +2,12 @@ use super::*;
 
 #[test]
 fn starter_project_emits_expected_texture_assets() {
-    // Starter cooks one room texture, one sky panorama, and the player atlas.
+    // Starter cooks the BIGDOOR_1A room texture, one sky panorama, the
+    // Aletha Crystal material, and the player model atlas.
     let project = project_with_one_room();
     let (package, _) = build_package(&project, &starter_project_root());
     let package = package.expect("starter cooks");
-    assert_eq!(package.texture_asset_count(), 3);
+    assert_eq!(package.texture_asset_count(), 4);
     assert!(package.rooms[0]
         .sky
         .cloud_layer
@@ -302,7 +303,7 @@ fn cook_to_dir_writes_manifest_rooms_and_textures() {
         .is_file());
     assert!(dir
         .join(MODELS_DIRNAME)
-        .join("model_000_crimson_cross_knight")
+        .join("model_000_aletha_delivered")
         .join("atlas.psxt")
         .is_file());
 

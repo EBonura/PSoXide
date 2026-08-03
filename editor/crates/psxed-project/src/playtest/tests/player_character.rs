@@ -40,14 +40,14 @@ fn starter_project_emits_player_controller_and_character() {
 #[test]
 fn character_combat_capsules_cook_to_bounded_contiguous_runtime_slice() {
     let mut project = project_with_one_room();
-    let character = project
-        .resources
-        .iter_mut()
-        .find_map(|resource| match &mut resource.data {
-            ResourceData::Character(character) => Some(character),
-            _ => None,
-        })
-        .expect("starter character exists");
+    // The assertions below read `package.characters[0]`, which cooks from
+    // the wired player. The starter carries several Character resources, so
+    // taking the first one lands on a preset the cook never reaches.
+    let character_id = player_character_resource_id(&project);
+    let character = match &mut project.resource_mut(character_id).expect("player").data {
+        ResourceData::Character(character) => character,
+        _ => unreachable!("player controller resolves to a Character"),
+    };
     character.combat_capsules = vec![
         crate::CharacterCombatCapsule {
             name: "Torso".to_string(),
@@ -226,23 +226,40 @@ fn player_character_controller_settings_drive_cooked_character() {
 fn player_camera_component_drives_cooked_camera() {
     let mut project = project_with_one_room();
     let player = player_spawn_node_id(&project);
-    project.active_scene_mut().add_node(
-        player,
-        "Camera",
-        NodeKind::Camera {
-            settings: WorldCameraSettings {
-                distance: 2048,
-                height: 900,
-                target_height: 700,
-                lock_rise_percent: 24,
-                min_floor_clearance: 96,
-                orbit_speed_level: 6,
-                position_lag_shift: 1,
-                focus_lag_shift: 3,
-                distance_lag_shift: 5,
-            },
-        },
-    );
+    let authored = WorldCameraSettings {
+        distance: 2048,
+        height: 900,
+        target_height: 700,
+        lock_rise_percent: 24,
+        min_floor_clearance: 96,
+        orbit_speed_level: 6,
+        position_lag_shift: 1,
+        focus_lag_shift: 3,
+        distance_lag_shift: 5,
+    };
+    // The starter already parents a Camera to the player. Adding a second
+    // one leaves the cook reading the original, so retarget the existing
+    // node when there is one and only add when there is not.
+    let existing = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| node.parent == Some(player) && matches!(node.kind, NodeKind::Camera { .. }))
+        .map(|node| node.id);
+    match existing {
+        Some(id) => {
+            let scene = project.active_scene_mut();
+            let node = scene.node_mut(id).expect("existing player camera");
+            node.kind = NodeKind::Camera { settings: authored };
+        }
+        None => {
+            project.active_scene_mut().add_node(
+                player,
+                "Camera",
+                NodeKind::Camera { settings: authored },
+            );
+        }
+    }
 
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
