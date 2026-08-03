@@ -281,7 +281,7 @@ fn main() {
     // Cell, not a plain counter: two emit closures capture it at once.
     let written = std::cell::Cell::new(0usize);
     let written_paths: std::cell::RefCell<Vec<std::path::PathBuf>> = Default::default();
-    let mut one = |name: &str, cells: Vec<(i32, i32)>, sockets: Vec<Socket>| {
+    let one = |name: &str, cells: Vec<(i32, i32)>, sockets: Vec<Socket>| {
         emit(
             name,
             vec![floor_of(&cells, &sockets, &flat, true, &m, 0)],
@@ -390,7 +390,7 @@ fn main() {
 
     // ---- Diagonals. Chamfered corners give 45-degree faces, which is how
     // the catalogue's octagonal and circular chambers become expressible. ----
-    let mut octagon = |name: &str,
+    let octagon = |name: &str,
                        cells: Vec<(i32, i32)>,
                        sockets: Vec<Socket>,
                        chamfers: Vec<Chamfer>| {
@@ -498,7 +498,6 @@ fn main() {
     assert_eq!(STEP % HEIGHT_QUANTUM, 0, "steps must land on the quantum");
     assert!(STEP <= 640, "steps must stay under the engine's step-up limit");
     assert_eq!(RISERS * STEP, WALL, "risers must land exactly on the storey");
-    let step_h = STEP;
 
     // Single stair: a straight flight climbing a storey. Six risers on the run
     // plus the final one through the floor link. Long by necessity, so this is
@@ -596,7 +595,7 @@ fn main() {
 
     // Balcony room: open hall below, a ring gallery above overlooking it. The
     // ring's hole is what makes it a balcony rather than a second storey.
-    let mut floors = vec![
+    let floors = vec![
         floor_of(
             &rect(0, 0, 7, 7),
             &cat(&[

@@ -2122,7 +2122,7 @@ pub(crate) fn draw_node_kind_editor(
         }
         NodeKind::World { .. } => {
             ui.weak(
-                "Streamed-region group; holds Room children, camera, sky, and far vista settings.",
+                "Streamed-region group; holds Section children, camera, sky, and far vista settings.",
             );
         }
         NodeKind::Section { grid } => {

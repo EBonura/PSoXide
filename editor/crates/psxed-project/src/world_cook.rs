@@ -12,7 +12,7 @@ use crate::{
     snap_world_sector_size, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridVerticalFace, GridWalls, MaterialAnimation, MaterialFaceSidedness, MaterialResource,
     ProjectDocument, PsxBlendMode, ResourceData, ResourceId, WallCorner, WorldGrid, HEIGHT_QUANTUM,
-    MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WALL_STACK,
+    MAX_ROOM_BYTES, MAX_ROOM_TRIANGLES, MAX_WALL_STACK,
     WORLD_SECTOR_SIZE_QUANTUM,
 };
 
@@ -1403,7 +1403,7 @@ mod tests {
     /// past `i16::MAX`).
     #[test]
     fn the_room_dimension_cap_tracks_sector_size() {
-        use crate::max_room_cells_for_sector_size;
+        use crate::{max_room_cells_for_sector_size, MAX_ROOM_WIDTH};
         for sector_size in [512, 1024, 1536, 1664, 1792] {
             let span = max_room_cells_for_sector_size(sector_size);
             assert!(
