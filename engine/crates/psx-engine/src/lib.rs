@@ -152,4 +152,4 @@ pub use world_render::{
 /// names.
 pub use psx_pad::button;
 /// Pad-state types re-exported for scenes that need analog stick data.
-pub use psx_pad::{AnalogSticks, Deadzone, Edges, PadMode, PadState, Transitions, STICK_FULL};
+pub use psx_pad::{AnalogSticks, Deadzone, PadMode, PadState, STICK_FULL};
