@@ -196,7 +196,24 @@ pub fn init() {
     // Transfer mode: "Stop" (bit 0..=2 = 0). Games toggle this to
     // Manual/DMA as needed when uploading.
     write_reg16(TRANSFER_CTRL, 0x0004); // normal mode
+
+    upload_adpcm(SILENCE_BLOCK, &SILENCE_BLOCK_BYTES);
 }
+
+/// One ADPCM block of silence that loops on itself, for every one-shot's
+/// repeat address to point at. See [`SILENCE_BLOCK_BYTES`].
+///
+/// SPU RAM below 0x1000 belongs to the hardware's own decode buffers, so
+/// 0x1000 is the first address a program may use, and everything in this
+/// workspace already starts its sample bank at 0x1010. That leaves exactly one
+/// block spare, which is all this needs.
+pub const SILENCE_BLOCK: SpuAddr = SpuAddr::new(0x1000);
+
+/// Shift/filter 0, flags END|REPEAT, and fourteen bytes of zero nibbles.
+///
+/// A voice that lands here decodes silence and jumps straight back to the top
+/// of the same block, so it stays here until something keys it off.
+const SILENCE_BLOCK_BYTES: [u8; 16] = [0x00, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// Spin budget for one SPU handshake. Generous next to the delay the
 /// hardware actually takes, short enough that a wedged SPU hands control
@@ -587,6 +604,24 @@ impl Voice {
         self.set_volume(volume, volume);
         self.set_pitch(Pitch::for_sample_rate(sample_rate_hz));
         self.set_start_addr(addr);
+        // Where silicon jumps when the sample's last block raises END. The
+        // hardware latches this register itself, but only from a block
+        // carrying the loop-start flag, and a one-shot has none: every psau in
+        // this workspace is 0x00 on the first block and 0x01 on the last. So
+        // without this write the register simply keeps whatever a previous
+        // sound left in it, and the voice runs off the end of its own data
+        // into whichever sample happens to sit at that stale address.
+        //
+        // The 2026-08-03 SB2 capture read it back on silicon: 0x034C for
+        // thirteen of fifteen segments regardless of what was keyed, against a
+        // start of 0x0202. The one segment that wrote the register explicitly
+        // read back correct, which is what says this write takes.
+        //
+        // Audibly, it was a blip after the launcher's browse sound (jump at
+        // 0x1010 running into pickup_coin at 0x28B0) and after VoXide's
+        // footstep. A caller that wants a genuine loop sets its own address
+        // after this returns.
+        self.set_loop_addr(SILENCE_BLOCK);
         self.set_adsr(adsr);
     }
 
@@ -806,6 +841,27 @@ fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_silence_block_ends_and_repeats_onto_itself() {
+        // Without both flags the voice either runs on past this block or
+        // stops here by luck rather than by contract.
+        assert_eq!(SILENCE_BLOCK_BYTES[1] & 0x01, 0x01, "END");
+        assert_eq!(SILENCE_BLOCK_BYTES[1] & 0x02, 0x02, "REPEAT");
+        assert!(
+            SILENCE_BLOCK_BYTES[2..].iter().all(|&b| b == 0),
+            "the block has to decode to silence",
+        );
+    }
+
+    #[test]
+    fn the_silence_block_sits_below_every_sample_bank() {
+        // Everything in this workspace uploads from 0x1010 up, which leaves
+        // this one block free. Move a bank down onto it and a one-shot's tail
+        // starts playing that bank's first block instead of nothing.
+        assert_eq!(SILENCE_BLOCK.byte_offset(), 0x1000);
+        assert!(SILENCE_BLOCK.byte_offset() + 16 <= 0x1010);
+    }
 
     #[test]
     fn volume_linear_scales() {
