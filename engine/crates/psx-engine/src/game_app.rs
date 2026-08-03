@@ -744,6 +744,10 @@ pub struct GameApp<'a, S: Scene> {
     /// Tick the current UI scene was entered at, for Timer deadlines.
     ui_timer_entered_tick: u32,
     /// One bit per scene-local node index: Timer already fired this entry.
+    /// A bitmask, not a counter: the width IS the per-scene Timer-node
+    /// capacity (see the `local >= 64` bound in the timer pass), so
+    /// narrowing this to u32 would silently halve it.
+    /// psx-numeric-allow-next-line: fired-bit mask, see above
     ui_timers_fired: u64,
     /// Stable random-message selector for the currently shown UI scene.
     ui_text_seed: u16,
@@ -1581,14 +1585,15 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.ui_timers_fired = 0;
         }
         let elapsed = now.wrapping_sub(self.ui_timer_entered_tick);
-        let skip_press = ctx.just_pressed(button::CROSS)
-            && self.resolved_focus(first, count).is_none();
+        let skip_press =
+            ctx.just_pressed(button::CROSS) && self.resolved_focus(first, count).is_none();
         let end = first.saturating_add(count).min(self.nodes.len());
         for index in first..end {
             let node = self.nodes[index];
             if node.kind != LevelUiNodeKind::Timer {
                 continue;
             }
+            // psx-numeric-allow-next-line: shift count for the 64-bit fired mask
             let local = (index - first) as u64;
             if local >= 64 || self.ui_timers_fired & (1 << local) != 0 {
                 continue;
@@ -1597,8 +1602,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 continue;
             };
             let due = elapsed >= delay_ticks.max(0) as u32;
-            let skipped =
-                skip_press && node.flags & psx_level::ui_node_flags::TIMER_SKIPPABLE != 0;
+            let skipped = skip_press && node.flags & psx_level::ui_node_flags::TIMER_SKIPPABLE != 0;
             if !(due || skipped) {
                 continue;
             }
