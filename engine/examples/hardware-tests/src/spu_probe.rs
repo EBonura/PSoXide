@@ -77,7 +77,7 @@ static mut READBACK2: [u32; PATTERN_WORDS] = [0; PATTERN_WORDS];
 
 // ---- Pass 2: the tone ladder -------------------------------------------
 
-const TONE_SEGMENTS: usize = 14;
+const TONE_SEGMENTS: usize = 15;
 const TONE_FIELDS: usize = 4;
 const TONE_FRAMES: u16 = 90;
 const GAP_FRAMES: u16 = 30;
@@ -108,6 +108,15 @@ const HIGH_NIBBLE: u8 = 0x7;
 const LOW_NIBBLE: u8 = 0x8; // -8 in 4-bit two's complement
 const SPU_TABLE_ADDR: u32 = 0x1010;
 const SPU_TABLE2_ADDR: u32 = SPU_TABLE_ADDR + TABLE_BYTES as u32;
+/// A two-block copy of the same waveform, uploaded by the same call, at
+/// its own address. Two things changed at once this round -- the upload
+/// path learned to wait for the SPU, and the table grew from 32 bytes to
+/// a kilobyte -- so a correct ladder would not say which fixed it. This
+/// segment keeps the small size and changes nothing else: right means
+/// size never mattered and the missing waits were the whole bug, wrong
+/// means small uploads are still losing data on their own.
+const SPU_SMALL_ADDR: u32 = SPU_TABLE2_ADDR + TABLE_BYTES as u32;
+const SMALL_BLOCKS: usize = 2;
 const VOICE: u8 = 0;
 const MAX_VOICES: u8 = 8;
 const TONE_VOLUME: Volume = Volume::linear(1, 4);
@@ -324,6 +333,7 @@ impl SpuProbe {
             // comes back at 1575 Hz then the flags are in RAM and it is
             // the LATCH that silicon is not doing -- the same mechanism
             // Celeste's wavetables depend on.
+            14 => key_voice(VOICE, UNITY_PITCH, SPU_SMALL_ADDR),
             13 => {
                 key_voice(VOICE, UNITY_PITCH, SPU_TABLE_ADDR);
                 let base = psx_io::spu::SPU_BASE + VOICE as u32 * 16;
@@ -591,6 +601,20 @@ fn upload_tables() {
     let mut table2 = [0u8; TABLE_BYTES];
     build_square(&mut table2, 2);
     spu::upload_adpcm(SpuAddr::new(SPU_TABLE2_ADDR), &table2);
+    // The size control: same waveform, same call, 32 bytes.
+    let mut small = [0u8; SMALL_BLOCKS * 16];
+    for block in 0..SMALL_BLOCKS {
+        let at = block * 16;
+        small[at] = TONE_SHIFT;
+        small[at + 1] = if block == 0 { 0x04 } else { 0x03 };
+        for sample in 0..28 {
+            let index = block * 28 + sample;
+            let nibble = if (index % 28) * 2 < 28 { HIGH_NIBBLE } else { LOW_NIBBLE };
+            let byte = at + 2 + sample / 2;
+            if sample % 2 == 0 { small[byte] |= nibble } else { small[byte] |= nibble << 4 }
+        }
+    }
+    spu::upload_adpcm(SpuAddr::new(SPU_SMALL_ADDR), &small);
 }
 
 /// `half_period_blocks == 1` gives one square cycle per 28 samples (1575 Hz
@@ -708,6 +732,7 @@ fn tone_label(segment: u8) -> &'static str {
         11 => "VOICES",
         12 => "NOISE",
         13 => "REPEXPL",
+        14 => "SMALLTAB",
         _ => "?",
     }
 }
@@ -723,6 +748,7 @@ fn tone_description(segment: u8) -> &'static str {
         11 => "1 THEN 4 THEN 8 VOICES TOGETHER",
         12 => "NOISE MODE: SILICON'S OWN LFSR",
         13 => "SAME TABLE, REPEAT ADDR SET BY HAND",
+        14 => "A 32-BYTE TABLE, SAME UPLOAD PATH",
         _ => "?",
     }
 }
@@ -745,6 +771,7 @@ fn tone_expectation(segment: u8) -> &'static str {
         11 => "1575, LOUDER IN 3 STEPS",
         12 => "HISS, NO TONE",
         13 => "1575 HZ IF THE FLAG WAS THE FAULT",
+        14 => "1575 HZ IF SIZE NEVER MATTERED",
         _ => "?",
     }
 }
