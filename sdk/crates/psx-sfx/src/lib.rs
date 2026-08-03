@@ -214,14 +214,15 @@ impl OneShot {
             // capture played 0x3FFF and 0x5000 back at the same 15169 Hz. A
             // cutoff timed off the requested 0x5000 would expect the sound to
             // finish in four fifths of the time it actually takes, and clip it.
-            Some(p) => match {
-                let raw = p.raw_value();
+            Some(p) => {
+                let requested = p.raw_value();
                 let cap = Pitch::MAX.raw_value();
-                if raw > cap { cap } else { raw }
-            } {
-                0 => Some(base),
-                raw => Some(base * 0x1000 / raw as u32),
-            },
+                let raw = if requested > cap { cap } else { requested };
+                match raw {
+                    0 => Some(base),
+                    raw => Some(base * 0x1000 / raw as u32),
+                }
+            }
             None => Some(base),
         }
     }
