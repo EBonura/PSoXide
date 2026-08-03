@@ -941,7 +941,6 @@ pub(crate) fn push_sun_cyclorama(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_sun_disc_fan<F>(
     out: &mut Vec<SkyCycloramaQuad>,
     sky: ResolvedSkySettings,
@@ -1072,7 +1071,6 @@ pub(crate) fn push_sun_annulus_triangles<F>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn sun_polar_point(
     center_yaw: f32,
     center_pitch: f32,
@@ -1106,7 +1104,6 @@ pub(crate) fn sun_directional_weight(theta: f32, direction: f32, power: f32) -> 
         .powf(power.max(0.01))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn sun_tinted_sky_color(
     sky: ResolvedSkySettings,
     yaw: f32,
@@ -1503,6 +1500,7 @@ pub(crate) fn push_wrapped_cloud_ribbon_cyclorama(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_cloud_ribbon_cyclorama(
     out: &mut Vec<SkyCycloramaQuad>,
     sky: ResolvedSkySettings,
