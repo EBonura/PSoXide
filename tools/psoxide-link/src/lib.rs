@@ -46,6 +46,16 @@ const MARKER: &str = ".psoxide-source";
 
 /// Never copied: build output and version control, which are large, and
 /// content directories that belong to whoever authored them.
+///
+/// `build` is the one worth naming. It holds the SDK's own compiled examples
+/// and runs to 583 MB, which was 71% of every hydrated tree and was being
+/// copied once per game on every disc build. Nothing references it: a game
+/// links source, and this workspace's own `build/` is reached through the
+/// submodule rather than through anybody's cache.
+///
+/// `editor` is deliberately NOT skipped, tempting as its 26 MB is: the emulator
+/// frontend's default features pull psxed-ui and psxed-project in by path, so
+/// dropping it breaks `make run` in every game that has one.
 fn skip(relative: &Path) -> bool {
     let mut components = relative.components();
     let top = components
@@ -53,7 +63,7 @@ fn skip(relative: &Path) -> bool {
         .and_then(|c| c.as_os_str().to_str());
     matches!(
         top,
-        Some(".git" | "target" | "captures" | "dist" | "data" | "graphify-out")
+        Some(".git" | "target" | "build" | "captures" | "dist" | "data" | "graphify-out")
     ) || components.any(|c| matches!(c.as_os_str().to_str(), Some(".git" | "target")))
 }
 
@@ -208,6 +218,8 @@ mod tests {
         assert!(skip(Path::new(".git")));
         assert!(skip(Path::new("target")));
         assert!(skip(Path::new("sdk/target")));
+        // 583 MB of the SDK's own compiled examples, once per game.
+        assert!(skip(Path::new("build")));
         assert!(skip(Path::new("engine/examples/.git")));
     }
 
@@ -216,6 +228,12 @@ mod tests {
         assert!(!skip(Path::new("sdk")));
         assert!(!skip(Path::new("sdk/crates/psx-sfx/src/lib.rs")));
         assert!(!skip(Path::new("sdk/psoxide.ld")));
+        // The frontend's default features reach these by path, so a hydrated
+        // tree without them cannot build `make run`.
+        assert!(!skip(Path::new("editor/crates/psxed-ui/src/lib.rs")));
+        assert!(!skip(Path::new("emu/crates/frontend/Cargo.toml")));
+        // A crate called "build" is source, not the top-level output dir.
+        assert!(!skip(Path::new("sdk/crates/psx-gpu/build")));
         // "data" is skipped only at the top level: a crate's own data
         // directory is source, and dropping it would hydrate a broken tree.
         assert!(skip(Path::new("data")));
