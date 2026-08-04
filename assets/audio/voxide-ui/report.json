@@ -1,0 +1,44 @@
+{
+  "source_name": "VoXide UI sounds",
+  "source_url": "https://github.com/EBonura/voxide",
+  "license": "CC0-1.0",
+  "archive_sha256": "893e6b9be76b93505564bdfd3e01f673eef2e50833aab1c3ef1c45b5333e171e",
+  "target_sample_rate_hz": 44100,
+  "normalize_peak": 0.9,
+  "sounds": [
+    {
+      "id": "ui_click",
+      "source_path": "click.wav",
+      "output_psau": "psau/ui_click.psau",
+      "preview_wav": "preview/ui_click.wav",
+      "source_sha256": "cb3a8c9b800cd8527f71c054a80a6c5fbad02815085e81876451ed484406d8da",
+      "cooked_sha256": "21897213f8c8902789a2335ae005f6f7a5d46d1790ba84b2cf0f79574c6bce6f",
+      "original_sample_rate_hz": 22050,
+      "original_channels": 1,
+      "input_sample_frames": 2142,
+      "cooked_sample_count": 4284,
+      "adpcm_blocks": 153,
+      "psau_bytes": 2480,
+      "peak_before": 0.86483765,
+      "peak_after": 0.8999634,
+      "decoded_rms_error": 53.709003
+    },
+    {
+      "id": "ui_confirm",
+      "source_path": "confirm.wav",
+      "output_psau": "psau/ui_confirm.psau",
+      "preview_wav": "preview/ui_confirm.wav",
+      "source_sha256": "59877416734f0df99b0afe3207a0780e80cd5e70229113a527c65ce212eab4c5",
+      "cooked_sha256": "5f2f83b0cbdc98211864fb17b50f410f0dbf4c599f4f4d166708080617b6661b",
+      "original_sample_rate_hz": 11025,
+      "original_channels": 1,
+      "input_sample_frames": 3195,
+      "cooked_sample_count": 12780,
+      "adpcm_blocks": 457,
+      "psau_bytes": 7344,
+      "peak_before": 0.897583,
+      "peak_after": 0.8999634,
+      "decoded_rms_error": 17.090977
+    }
+  ]
+}
