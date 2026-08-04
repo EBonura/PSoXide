@@ -2379,13 +2379,30 @@ fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
 }
 
 /// The main menu. Every page fits on screen, so there is no scrolling.
+/// First menu row, and the step between rows.
+///
+/// Both are bounded by the page chrome: the header band ends at 47 with a rule
+/// on 48, and a second rule sits on 187. The longest page has twelve rows, so
+/// the pitch is what decides whether the list clears the bottom.
+const MENU_TOP: i16 = 52;
+const MENU_ROW_PITCH: i16 = 11;
+
 fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 6, "PS1 HARDWARE TESTS", (232, 236, 244));
     font.draw_text(320 - 8 - SUITE_VERSION.len() as i16 * 8, 6, SUITE_VERSION, (112, 136, 170));
     font.draw_text(8, 20, menu_title(suite.menu_page), (255, 232, 128));
 
     let entries = menu_entries(suite.menu_page);
-    let mut y = 40i16;
+    // The page chrome paints a header band over y 0..47 and rules at 48 and
+    // 187, so the list has to live between them. It used to start at 40, which
+    // put the first row inside the header band and above its own separator --
+    // visible on the 2026-08-04 capture as an option floating over the rule.
+    //
+    // Pitch is 11 rather than 12 because RESULTS_MENU carries twelve rows: at
+    // 12 the last one lands on 190 and falls through the lower rule instead,
+    // which is the same fault at the other end. 52 + 11*11 + 6 = 179 clears
+    // both with the glyphs being seven pixels tall.
+    let mut y = MENU_TOP;
     let mut row = 0usize;
     while row < entries.len() {
         let selected = row == suite.menu_cursor;
@@ -2414,7 +2431,7 @@ fn draw_menu(font: &FontAtlas, suite: &HardwareTests) {
                 font.draw_text(214, y, hex2((suite.audio_rate - 1) as u8).as_str(), (96, 240, 128));
             }
         }
-        y += 12;
+        y += MENU_ROW_PITCH;
         row += 1;
     }
 
