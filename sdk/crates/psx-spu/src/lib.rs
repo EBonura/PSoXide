@@ -112,6 +112,10 @@ const KEY_OFF_LO: u32 = 0x1F80_1D8C;
 const KEY_OFF_HI: u32 = 0x1F80_1D8E;
 const PITCH_MOD_LO: u32 = 0x1F80_1D90;
 const PITCH_MOD_HI: u32 = 0x1F80_1D92;
+/// ENDX: one sticky bit per voice, set when that voice decodes a block with
+/// the END flag. Write to clear.
+const ENDX_LO: u32 = 0x1F80_1D9C;
+const ENDX_HI: u32 = 0x1F80_1D9E;
 const NOISE_LO: u32 = 0x1F80_1D94;
 const NOISE_HI: u32 = 0x1F80_1D96;
 const REVERB_ENABLE_LO: u32 = 0x1F80_1D98;
@@ -640,6 +644,25 @@ impl Voice {
     pub fn key_on(mask: u32) {
         write_reg16(KEY_ON_LO, mask as u16);
         write_reg16(KEY_ON_HI, (mask >> 16) as u16);
+    }
+
+    /// Which voices have decoded a block carrying the END flag since ENDX was
+    /// last cleared, one sticky bit each.
+    ///
+    /// This is the only direct evidence that a one-shot reached its own
+    /// terminator. Everything else about termination has to be inferred: the
+    /// repeat address says where the hardware *would* jump, not whether it
+    /// did, and the 2026-08-03 SB2 capture read that register back as correct
+    /// while voices were audibly running into the next sample anyway.
+    pub fn voices_ended() -> u32 {
+        read_reg16(ENDX_LO) as u32 | ((read_reg16(ENDX_HI) as u32) << 16)
+    }
+
+    /// Clear the sticky END flags for the voices in `mask`, so the next
+    /// [`Voice::voices_ended`] reports only what happened after this call.
+    pub fn clear_ended(mask: u32) {
+        write_reg16(ENDX_LO, mask as u16);
+        write_reg16(ENDX_HI, (mask >> 16) as u16);
     }
 
     /// Stop the voices whose bits are set in `mask` -- fires the
