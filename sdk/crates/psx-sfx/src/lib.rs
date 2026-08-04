@@ -42,8 +42,23 @@ const SAMPLES_PER_BLOCK: u32 = 28;
 /// of data.
 const BLOCK_BYTES: u32 = 16;
 
+/// One ADPCM block of silence that loops onto itself, written after every
+/// uploaded sample so a voice running past its own END lands on nothing.
+///
+/// Shift/filter 0, flags `0x07` = LOOP-START | REPEAT | END, then fourteen
+/// bytes of zero nibbles. LOOP-START is the bit that matters: the hardware
+/// latches the repeat address off this block while decoding it, which does not
+/// depend on anything written before key-on.
+const SAMPLE_TAIL: [u8; BLOCK_BYTES as usize] =
+    [0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
 /// Ticks of margin added past a sample's own length before its voice is
 /// silenced, so the cutoff never clips a sound that is still sounding.
+///
+/// This margin is exactly the window the browse blip was audibly wandering in
+/// before SAMPLE_TAIL existed: 0.250 s of sample against a 0.283 s cutoff left
+/// 33 ms in which the voice played the next sample in the bank. The margin is
+/// safe to keep now that the sample parks itself.
 ///
 /// The length is computed from the block count, which rounds up to a whole
 /// block, and the key-on itself lands somewhere inside the current tick.
@@ -143,6 +158,25 @@ impl Bank {
             frames: adpcm.len() as u32 / BLOCK_BYTES,
         };
         self.next = SpuAddr::new(self.next.byte_offset() + adpcm.len() as u32);
+        // A parking block after every sample, not just one shared block that
+        // the repeat register points at.
+        //
+        // Pointing the register at psx_spu::SILENCE_BLOCK is not enough on
+        // silicon. The 2026-08-04 launcher capture caught the browse voice
+        // running off the end of jump at 0x1010 straight into pickup_coin at
+        // 0x28B0: the stray 40 ms burst matched the coin's opening spectrum on
+        // all five peaks, 2800/2825/2850/8450/8475 Hz. SB2 had read the repeat
+        // register back as 0x0200, which is that shared block, so the register
+        // was right and the voice went past it anyway.
+        //
+        // VoXide is the counter-example that says what actually works: its
+        // cooker appends a self-looping silent block to every sample and it has
+        // never had the artefact. The difference is the loop-start bit. This
+        // block carries END, REPEAT and LOOP-START, so the hardware latches the
+        // repeat address to the block itself as it decodes it, rather than
+        // relying on a value written before key-on.
+        psx_spu::upload_adpcm(self.next, &SAMPLE_TAIL);
+        self.next = SpuAddr::new(self.next.byte_offset() + BLOCK_BYTES);
         sample
     }
 }
@@ -352,6 +386,23 @@ mod tests {
             rate_hz,
             frames,
         }
+    }
+
+    #[test]
+    fn the_parking_block_ends_repeats_and_marks_a_loop_start() {
+        // LOOP-START is the bit that separates this from psx-spu's shared
+        // silence block, which the browse voice ran straight past on silicon
+        // despite the repeat register naming it. The hardware latches the
+        // repeat address off a block carrying 0x04 as it decodes it, which
+        // owes nothing to a register written before key-on.
+        assert_eq!(SAMPLE_TAIL[1] & 0x01, 0x01, "END");
+        assert_eq!(SAMPLE_TAIL[1] & 0x02, 0x02, "REPEAT");
+        assert_eq!(SAMPLE_TAIL[1] & 0x04, 0x04, "LOOP-START");
+        assert_eq!(SAMPLE_TAIL[0], 0x00, "shift and filter zero");
+        assert!(
+            SAMPLE_TAIL[2..].iter().all(|&b| b == 0),
+            "decodes to silence"
+        );
     }
 
     #[test]
