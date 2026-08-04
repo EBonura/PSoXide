@@ -77,7 +77,7 @@ static mut READBACK2: [u32; PATTERN_WORDS] = [0; PATTERN_WORDS];
 
 // ---- Pass 2: the tone ladder -------------------------------------------
 
-const TONE_SEGMENTS: usize = 19;
+const TONE_SEGMENTS: usize = 22;
 const TONE_FIELDS: usize = 4;
 const TONE_FRAMES: u16 = 90;
 const GAP_FRAMES: u16 = 30;
@@ -145,7 +145,12 @@ const PITCH_LADDER: [u16; 7] = [0x0400, 0x0800, 0x1000, 0x2000, 0x3000, 0x3FFF, 
 // ---- Payload ------------------------------------------------------------
 
 const WORDS: usize = RAM_STAGES * RAM_FIELDS + TONE_SEGMENTS * TONE_FIELDS;
-const QR_VERSION_NUM: u8 = 19;
+/// 21, not 19. Each tone segment costs four words, and 22 of them push the
+/// payload to 667 characters against version 19's 624. Version 21 holds 711 and
+/// draws 101 modules, which at scale 2 with its quiet zone is 218 pixels of the
+/// 240 available -- denser to photograph, but the const asserts below are what
+/// stop that being discovered on a burn.
+const QR_VERSION_NUM: u8 = 21;
 const QR_VERSION: Version = Version::new(QR_VERSION_NUM);
 const QR_SIZE: usize = 4 * QR_VERSION_NUM as usize + 17;
 const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
@@ -159,7 +164,7 @@ const QR_TEXT_MAX: usize = 4 + BASE64_LEN + 3 + 8;
 /// Version 17 holds 504 and v0.12 shipped a 519-byte payload, so `encode_text`
 /// failed and the screen drew QR ENCODE FAILED. Adding a segment must break the
 /// build, not the burn.
-const QR_BYTE_CAPACITY: usize = 624;
+const QR_BYTE_CAPACITY: usize = 711;
 const _: () = assert!(QR_TEXT_MAX <= QR_BYTE_CAPACITY, "SB2 QR payload too big");
 const _: () = assert!((QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE <= 240, "SB2 QR too tall");
 
@@ -302,6 +307,59 @@ impl SpuProbe {
                     key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
                 }
             }
+            // KEYVOL: does key_on restore a voice whose volume was written to
+            // zero while it played?
+            //
+            // The demo disc's v0.11 pressing shipped a browse blip that sounded
+            // once and never again. Its cutoff silenced the voice by writing
+            // volume 0, and the next key_on did not put it back, so every blip
+            // after the first was mute. psx-sfx sets volume on every key-on
+            // because of it, and that rule is currently a comment rather than a
+            // measurement.
+            //
+            // Key, silence mid-tone, then key again touching nothing else. A
+            // late envelope of zero means volume does not survive a key-on and
+            // the rule is real; a live envelope means it does.
+            19 => match self.frame {
+                0 => key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR),
+                20 => Voice::new(VOICE).set_volume(Volume::SILENCE, Volume::SILENCE),
+                40 => Voice::key_on(Voice::new(VOICE).mask()),
+                _ => {}
+            },
+            // RETRIG: key a voice that is still sounding, which is what the
+            // carousel does on every turn and what a player leaning on the pad
+            // does several times a second.
+            //
+            // Re-keys every 12 frames without touching anything else, so the
+            // envelope read late says whether silicon restarts cleanly or
+            // accumulates state across an interrupted sample.
+            20 => {
+                if self.frame % 12 == 0 && self.frame < tone_frames {
+                    Voice::key_on(Voice::new(VOICE).mask());
+                }
+                if self.frame == 0 {
+                    key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
+                }
+            }
+            // XFERLIVE: upload to SPU RAM while a voice is playing from a
+            // different address.
+            //
+            // hl-psx streams a map's dialogue in while sounds are playing and
+            // VoXide streams its whole bank at boot, so a transfer that
+            // disturbs playback would show up as a stutter nobody could place.
+            // The upload targets the far end of RAM, well clear of the tone.
+            21 => {
+                if self.frame == 0 {
+                    key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
+                }
+                if self.frame == 30 {
+                    let small = unsafe { &*core::ptr::addr_of!(SOURCE) };
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(small.as_ptr() as *const u8, 512)
+                    };
+                    spu::upload_adpcm(SpuAddr::new(ADDR_HIGH), bytes);
+                }
+            }
             _ => {}
         }
 
@@ -314,7 +372,7 @@ impl SpuProbe {
         // The termination segments report ENDX instead of an early sample: the
         // question they ask is whether the voice reached its own terminator,
         // and the sticky flag is the only direct evidence of that.
-        if segment >= 15 && self.frame + 2 == tone_frames {
+        if (15..19).contains(&segment) && self.frame + 2 == tone_frames {
             self.words[at + 1] = Voice::voices_ended();
         }
         if self.frame + 2 == tone_frames {
@@ -838,6 +896,9 @@ fn tone_label(segment: u8) -> &'static str {
         16 => "UNPARKED",
         17 => "ENDXBIT",
         18 => "ENVZERO",
+        19 => "KEYVOL",
+        20 => "RETRIG",
+        21 => "XFERLIVE",
         _ => "?",
     }
 }
