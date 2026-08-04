@@ -77,7 +77,7 @@ static mut READBACK2: [u32; PATTERN_WORDS] = [0; PATTERN_WORDS];
 
 // ---- Pass 2: the tone ladder -------------------------------------------
 
-const TONE_SEGMENTS: usize = 15;
+const TONE_SEGMENTS: usize = 19;
 const TONE_FIELDS: usize = 4;
 const TONE_FRAMES: u16 = 90;
 const GAP_FRAMES: u16 = 30;
@@ -116,6 +116,27 @@ const SPU_TABLE2_ADDR: u32 = SPU_TABLE_ADDR + TABLE_BYTES as u32;
 /// means small uploads are still losing data on their own.
 const SPU_SMALL_ADDR: u32 = SPU_TABLE2_ADDR + TABLE_BYTES as u32;
 const SMALL_BLOCKS: usize = 2;
+
+/// Termination pair, for segments 15..19.
+///
+/// Two identical four-block tones laid down twice. PARKED is followed by a
+/// self-looping silent block carrying LOOP-START; UNPARKED is followed by a
+/// loud, obviously different tone and no parking block at all. Everything else
+/// about them is the same, so the only thing the two segments can disagree
+/// about is what the hardware does when a voice reaches the end of its data.
+///
+/// This is the measurement SB2 could not make. It read the repeat register and
+/// found it correct on 2026-08-03 while voices were audibly running into the
+/// next sample, because the register says where the hardware WOULD jump, not
+/// whether it did.
+const TERM_BLOCKS: usize = 4;
+const TERM_BYTES: usize = TERM_BLOCKS * 16;
+/// PARKED's tone, then its parking block.
+const SPU_TERM_PARKED_ADDR: u32 = SPU_SMALL_ADDR + (SMALL_BLOCKS * 16) as u32;
+const SPU_TERM_PARK_BLOCK: u32 = SPU_TERM_PARKED_ADDR + TERM_BYTES as u32;
+/// UNPARKED's tone, then the neighbour it must not reach.
+const SPU_TERM_UNPARKED_ADDR: u32 = SPU_TERM_PARK_BLOCK + 16;
+const SPU_TERM_NEIGHBOUR_ADDR: u32 = SPU_TERM_UNPARKED_ADDR + TERM_BYTES as u32;
 const VOICE: u8 = 0;
 const MAX_VOICES: u8 = 8;
 const TONE_VOLUME: Volume = Volume::linear(1, 4);
@@ -245,6 +266,42 @@ impl SpuProbe {
                     }
                 }
             }
+            // PARKED: a one-shot followed by a self-looping silent block.
+            // ENDX is cleared at key-on so the payload's "early" word reports
+            // only what this voice did during this segment.
+            15 => {
+                if self.frame == 0 {
+                    Voice::clear_ended(0x00FF_FFFF);
+                    key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
+                }
+            }
+            // UNPARKED: the same one-shot with a loud neighbour behind it and
+            // nothing to park on. Audible on a capture as well as readable in
+            // the payload, because a voice that runs on drops an octave.
+            16 => {
+                if self.frame == 0 {
+                    Voice::clear_ended(0x00FF_FFFF);
+                    key_voice(VOICE, UNITY_PITCH, SPU_TERM_UNPARKED_ADDR);
+                }
+            }
+            // ENDXBIT: does the sticky END flag set for the right voice, and
+            // only that voice? Keys voice 1 rather than 0, so a payload that
+            // reports bit 0 is reporting a stale flag.
+            17 => {
+                if self.frame == 0 {
+                    Voice::clear_ended(0x00FF_FFFF);
+                    key_voice(1, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
+                }
+            }
+            // ENVZERO: leave the voice alone after it ends and read the
+            // envelope late. A one-shot that terminated should be at zero; one
+            // still reading forward will not be.
+            18 => {
+                if self.frame == 0 {
+                    Voice::clear_ended(0x00FF_FFFF);
+                    key_voice(VOICE, UNITY_PITCH, SPU_TERM_PARKED_ADDR);
+                }
+            }
             _ => {}
         }
 
@@ -254,10 +311,19 @@ impl SpuProbe {
             self.words[at] = ((segment as u32) << 24) | (tick & 0x00FF_FFFF);
             self.words[at + 1] = ((pitch as u32) << 16) | env as u32;
         }
+        // The termination segments report ENDX instead of an early sample: the
+        // question they ask is whether the voice reached its own terminator,
+        // and the sticky flag is the only direct evidence of that.
+        if segment >= 15 && self.frame + 2 == tone_frames {
+            self.words[at + 1] = Voice::voices_ended();
+        }
         if self.frame + 2 == tone_frames {
-            let (pitch, env) = read_voice(VOICE);
+            // ENDXBIT keys voice 1, so read the voice the segment actually
+            // drove or the row describes a voice that was never touched.
+            let observed = if segment == 17 { 1 } else { VOICE };
+            let (pitch, env) = read_voice(observed);
             self.words[at + 2] = ((pitch as u32) << 16) | env as u32;
-            let base = psx_io::spu::SPU_BASE + VOICE as u32 * 16;
+            let base = psx_io::spu::SPU_BASE + observed as u32 * 16;
             // +6 is the START address. The first cut read +4 here, which is
             // the PITCH register, so the payload's "start" column was the
             // pitch repeated -- harmless but misleading in a capture.
@@ -609,6 +675,33 @@ fn upload_tables() {
     let mut table2 = [0u8; TABLE_BYTES];
     build_square(&mut table2, 2);
     spu::upload_adpcm(SpuAddr::new(SPU_TABLE2_ADDR), &table2);
+    // The termination pair. Both tones are identical four-block one-shots
+    // whose last block raises END and nothing else -- exactly the shape every
+    // cooked .psau on the disc has, and the shape that was wandering.
+    //
+    // PARKED is followed by a self-looping silent block carrying LOOP-START,
+    // which is what psx-sfx and hl-psx append now. UNPARKED is followed by a
+    // deliberately loud neighbour and no parking block, which is what every
+    // packed bank looked like before. If the two segments read back the same
+    // repeat address, the parking block is doing nothing and the fix is
+    // theatre. If PARKED reports the park block's own address and UNPARKED
+    // does not, the latch is real and it is what stops the wandering.
+    let mut term = [0u8; TERM_BYTES];
+    build_square(&mut term, 1);
+    // Plain END on the last block, no repeat and no loop-start: a one-shot,
+    // not a loop. build_square writes a looping shape, so undo it here.
+    term[1] = 0x00;
+    term[(TERM_BLOCKS - 1) * 16 + 1] = 0x01;
+    spu::upload_adpcm(SpuAddr::new(SPU_TERM_PARKED_ADDR), &term);
+    let park = [0x00u8, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    spu::upload_adpcm(SpuAddr::new(SPU_TERM_PARK_BLOCK), &park);
+    spu::upload_adpcm(SpuAddr::new(SPU_TERM_UNPARKED_ADDR), &term);
+    // The neighbour: an octave down and unmissable, so a capture can hear a
+    // voice that ran past its own data as well as read it in the payload.
+    let mut neighbour = [0u8; TERM_BYTES];
+    build_square(&mut neighbour, 2);
+    spu::upload_adpcm(SpuAddr::new(SPU_TERM_NEIGHBOUR_ADDR), &neighbour);
+
     // The size control: same waveform, same call, 32 bytes.
     let mut small = [0u8; SMALL_BLOCKS * 16];
     for block in 0..SMALL_BLOCKS {
@@ -741,6 +834,10 @@ fn tone_label(segment: u8) -> &'static str {
         12 => "NOISE",
         13 => "REPEXPL",
         14 => "SMALLTAB",
+        15 => "PARKED",
+        16 => "UNPARKED",
+        17 => "ENDXBIT",
+        18 => "ENVZERO",
         _ => "?",
     }
 }

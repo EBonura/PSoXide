@@ -174,9 +174,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 11;
+const SUITE_VERSION_MINOR: u8 = 12;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.11";
+const SUITE_VERSION: &str = "HWTEST v1.12";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -367,7 +367,7 @@ impl Mode {
             Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
             Self::SampleProbe => "UI BLIP END/LOOP FLAGS + ENVELOPE TRACE QR (SB1)",
-            Self::SpuProbe => "SPU RAM INTEGRITY + MEASURABLE TONES QR (SB2)",
+            Self::SpuProbe => "SPU RAM + TONES + TERMINATION QR (SB3)",
             Self::ControllerTest => "BUTTON HISTORY + ANALOG CENTRE/DRIFT TEST",
             Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
