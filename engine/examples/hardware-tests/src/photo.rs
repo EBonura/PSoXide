@@ -1,11 +1,23 @@
-//! Dense photographable transport for the complete real-console result set.
+//! Dense photographable transport for the real-console result set.
 //!
-//! PX7 keeps the dense Base64 record used by the debug TTY and report parser,
-//! but transports each page visually as a QR symbol. Four scans preserve all
-//! 173 conformance observations and statuses, all 128 timing envelopes, the
-//! memory-control snapshot, startup scan summaries, and 128 raw precision
-//! values without manual character transcription. Page and binary CRC-32
+//! PX8 keeps the dense Base64 record used by the debug TTY and report parser,
+//! but transports each page visually as a QR symbol. Page and binary CRC-32
 //! values provide independent end-to-end validation after QR decoding.
+//!
+//! PX7 always carried everything: every conformance observation whether it
+//! passed or not, plus every timing envelope and precision value. Those last
+//! two are 71% of the payload and they are *characterisation* -- there is no
+//! expected value to check them against, silicon is the reference. A routine
+//! run does not need them, and as the suite grows towards covering every chip
+//! the fixed cost of shipping them on every capture is what limits how many
+//! cases can be added.
+//!
+//! So PX8 makes each block optional behind a flags byte. A conformance capture
+//! carries the status bitmap and one record per FAILING case; a
+//! characterisation capture carries the lot, exactly as PX7 did and in the same
+//! field order, so the archived `docs/hardware-refs/px7-*` captures still
+//! describe the same thing a full PX8 does. Pages are counted from the payload
+//! rather than fixed, so a capture costs as many photographs as it has data.
 
 use psx_font::FontAtlas;
 use psx_gpu as gpu;
@@ -14,40 +26,101 @@ use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
 use crate::{hex2, hex8, section_report, Mode, ScanReport, TestResult, TimingReport};
 
-pub(crate) const CAPTURE_PAGE_COUNT: usize = 5;
+/// Most pages a capture can need. Sized for the worst case a full
+/// characterisation run can produce with every conformance case failing, which
+/// is not a real console but is a real buffer.
+pub(crate) const CAPTURE_PAGE_MAX: usize = 8;
 const BASE64_CHARS_PER_LINE: usize = 36;
 const BASE64_LINES_PER_PAGE: usize = 23;
 const BASE64_CHARS_PER_PAGE: usize = BASE64_CHARS_PER_LINE * BASE64_LINES_PER_PAGE;
-const QR_VERSION: Version = Version::new(20);
+/// Largest symbol a page can need, and the size every buffer is cut for.
+const QR_VERSION_MAX: Version = Version::new(20);
+/// Smallest the encoder may choose. A conformance page is a quarter the size of
+/// a characterisation page, and forcing it into a 97-module symbol anyway makes
+/// it needlessly hard to photograph off a CRT -- which is the step that has cost
+/// re-burns. Let the encoder pick, then scale the result up to fill the same
+/// screen area, so fewer modules means physically bigger ones.
+const QR_VERSION_MIN: Version = Version::new(10);
 const QR_SIZE: usize = 97;
-const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
+const QR_BUFFER_LEN: usize = QR_VERSION_MAX.buffer_len();
 const QR_TEXT_MAX: usize = 9 + BASE64_CHARS_PER_PAGE + 3 + 8;
-const QR_SCALE: i16 = 2;
 const QR_QUIET: i16 = 4;
+/// Vertical room between the two header lines and the bottom of the screen.
+const QR_AREA: i16 = 210;
 
-// PX7 binary layout, little-endian:
-//   66-byte header (includes the suite version, not just the schema version)
-//   173 x u32 complete conformance observations
-//   173 x packed 3-bit statuses (65 bytes)
-//   176 x (u8 id, u16 minimum, u16 median, u16 maximum) timing records
-//   9 x u32 memory-control registers
-//   192 x u32 raw precision values
+/// Which blocks a capture carries, in the header's `flags` byte.
+///
+/// A reader must consult these before walking the body: an absent block
+/// occupies no bytes at all rather than being zero-filled, which is the whole
+/// point of the flags.
+pub(crate) mod blocks {
+    /// Packed 3-bit status per conformance case. Always present: without it a
+    /// capture cannot say what ran, only what broke.
+    pub const STATUS: u8 = 1 << 0;
+    /// One record per failing case: id, expected, observed.
+    pub const FAILURES: u8 = 1 << 1;
+    /// Observed value for *every* case, passing or not.
+    pub const OBSERVED: u8 = 1 << 2;
+    /// Timing envelopes: min/median/max per record id.
+    pub const TIMING: u8 = 1 << 3;
+    /// Memory-control register snapshot.
+    pub const MEMCTL: u8 = 1 << 4;
+    /// Raw precision values.
+    pub const PRECISION: u8 = 1 << 5;
+
+    /// What a routine run emits: verdicts, and detail only where it failed.
+    pub const CONFORMANCE: u8 = STATUS | FAILURES;
+    /// What a reference-establishing run emits: everything PX7 carried.
+    pub const FULL: u8 = STATUS | FAILURES | OBSERVED | TIMING | MEMCTL | PRECISION;
+}
+
+// PX8 binary layout, little-endian. Every block after the header is present
+// only if its flag is set:
+//   72-byte header (includes the suite version, not just the schema version)
+//   [STATUS]    ceil(TEST_COUNT * 3 / 8) bytes of packed 3-bit statuses
+//   [FAILURES]  u16 count, then count x (u16 id, u32 expected, u32 observed)
+//   [OBSERVED]  TEST_COUNT x u32 conformance observations
+//   [TIMING]    TIMING_RECORD_COUNT x (u8 id, u16 min, u16 median, u16 max)
+//   [MEMCTL]    9 x u32 memory-control registers
+//   [PRECISION] 192 x u32 raw precision values
 //   u32 CRC-32 over every preceding byte
-// PX6 carried 90 four-byte records in 1,733 bytes over three pages, with each
-// record's identity implied by its POSITION. PX7 writes the id explicitly, so
-// an unused slot is skippable and adding a probe cannot silently shift every
-// later record's meaning. With the median column and room for the CD battery
-// that is 2,269 bytes / 3,028 Base64 characters: a fourth page at the same
-// proven Version-20-L geometry (4 x 828 = 3,312 characters of capacity).
-const BINARY_LEN: usize = 2_863;
-const BASE64_LEN: usize = 3_820;
+//
+// The counts in the header are u16 where PX7 had u8. The suite is on its way to
+// covering every chip in the console, and a case count that silently wraps at
+// 256 is the kind of thing that is discovered from a decoded capture that makes
+// no sense rather than from a build error.
+//
+// A failure record names its case by `TestSpec::id`, not by array position, so
+// a capture archived today still points at the same test after the array grows.
+const FAILURE_RECORD_LEN: usize = 2 + 4 + 4;
+const STATUS_LEN: usize = (crate::TEST_COUNT * 3 + 7) / 8;
+const HEADER_LEN: usize = 72;
+/// Worst case: a full characterisation run in which every case also failed.
+const BINARY_CAP: usize = HEADER_LEN
+    + STATUS_LEN
+    + 2
+    + crate::TEST_COUNT * FAILURE_RECORD_LEN
+    + crate::TEST_COUNT * 4
+    + crate::TIMING_RECORD_COUNT * 7
+    + crate::MEMORY_CONTROL_REGISTER_COUNT * 4
+    + crate::PRECISION_VALUE_COUNT * 4
+    + 4;
+const BASE64_CAP: usize = (BINARY_CAP + 2) / 3 * 4;
+const _: () = assert!(
+    (BASE64_CAP + BASE64_CHARS_PER_PAGE - 1) / BASE64_CHARS_PER_PAGE <= CAPTURE_PAGE_MAX,
+    "worst-case capture needs more pages than CAPTURE_PAGE_MAX"
+);
 
 pub(crate) struct PhotoCapture {
     /// The encoded binary, kept so the audio link can transmit the same bytes
     /// the QR pages carry. One payload, two independent readout paths.
-    binary: [u8; BINARY_LEN],
-    payload: [u8; BASE64_LEN],
+    binary: [u8; BINARY_CAP],
+    binary_len: u16,
+    payload: [u8; BASE64_CAP],
     payload_len: u16,
+    page_count: u8,
+    flags: u8,
+    failures: u16,
     binary_crc: u32,
     qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
     qr_size: u8,
@@ -56,9 +129,13 @@ pub(crate) struct PhotoCapture {
 impl PhotoCapture {
     pub(crate) const fn new() -> Self {
         Self {
-            binary: [0; BINARY_LEN],
-            payload: [0; BASE64_LEN],
+            binary: [0; BINARY_CAP],
+            binary_len: 0,
+            payload: [0; BASE64_CAP],
             payload_len: 0,
+            page_count: 0,
+            flags: 0,
+            failures: 0,
             binary_crc: 0,
             qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
             qr_size: 0,
@@ -71,22 +148,25 @@ impl PhotoCapture {
         results: &[TestResult; crate::TEST_COUNT],
         conformance_run: u8,
         scans: [ScanReport; 3],
+        flags: u8,
         page: usize,
     ) {
-        let mut binary = [0u8; BINARY_LEN];
+        let mut binary = [0u8; BINARY_CAP];
         let mut out = BinaryBuffer::new(&mut binary);
 
-        out.push_bytes(b"PX7B");
-        out.push_u8(3); // transport schema version
+        out.push_bytes(b"PX8B");
+        out.push_u8(4); // transport schema version
         // Suite version: what the record ids MEAN, as distinct from how the
         // bytes are laid out. Lets the host refuse a cross-version diff.
         out.push_u8(crate::SUITE_VERSION_MAJOR);
         out.push_u8(crate::SUITE_VERSION_MINOR);
+        out.push_u8(flags);
         out.push_u8(conformance_run);
         out.push_u8(timing.summary.runs);
-        out.push_u8(crate::TEST_COUNT as u8);
-        out.push_u8(crate::TIMING_RECORD_COUNT as u8);
-        out.push_u8(crate::MEMORY_CONTROL_REGISTER_COUNT as u8);
+        out.push_u16(crate::TEST_COUNT as u16);
+        out.push_u16(crate::TIMING_RECORD_COUNT as u16);
+        out.push_u16(crate::MEMORY_CONTROL_REGISTER_COUNT as u16);
+        out.push_u16(crate::PRECISION_VALUE_COUNT as u16);
         out.push_u8(3); // status bits per conformance case
         out.push_u8(scans.len() as u8);
         out.push_u32(section_report(Mode::AllChecks, results).hash);
@@ -101,54 +181,91 @@ impl PhotoCapture {
             out.push_u32(scan.aux);
             out.push_u8(scan.runs);
         }
+        assert!(out.len() == HEADER_LEN, "PX8 header layout drift");
 
-        for result in results {
-            out.push_u32(result.observed);
-        }
-
-        let mut status_acc = 0u32;
-        let mut status_bits = 0u8;
-        for result in results {
-            status_acc |= result.status.code() << status_bits;
-            status_bits += 3;
-            while status_bits >= 8 {
+        if flags & blocks::STATUS != 0 {
+            let mut status_acc = 0u32;
+            let mut status_bits = 0u8;
+            for result in results {
+                status_acc |= result.status.code() << status_bits;
+                status_bits += 3;
+                while status_bits >= 8 {
+                    out.push_u8(status_acc as u8);
+                    status_acc >>= 8;
+                    status_bits -= 8;
+                }
+            }
+            if status_bits != 0 {
                 out.push_u8(status_acc as u8);
-                status_acc >>= 8;
-                status_bits -= 8;
             }
         }
-        if status_bits != 0 {
-            out.push_u8(status_acc as u8);
+
+        let mut failures = 0u16;
+        if flags & blocks::FAILURES != 0 {
+            for result in results {
+                if result.status.is_failure() {
+                    failures += 1;
+                }
+            }
+            out.push_u16(failures);
+            for (index, result) in results.iter().enumerate() {
+                if result.status.is_failure() {
+                    out.push_u16(crate::TESTS[index].id);
+                    out.push_u32(result.expected);
+                    out.push_u32(result.observed);
+                }
+            }
         }
 
-        for record in timing.records {
-            out.push_u8(record.id);
-            out.push_u16(record.min);
-            out.push_u16(record.med);
-            out.push_u16(record.max);
+        if flags & blocks::OBSERVED != 0 {
+            for result in results {
+                out.push_u32(result.observed);
+            }
         }
-        for value in timing.memory_control {
-            out.push_u32(value);
+        if flags & blocks::TIMING != 0 {
+            for record in timing.records {
+                out.push_u8(record.id);
+                out.push_u16(record.min);
+                out.push_u16(record.med);
+                out.push_u16(record.max);
+            }
         }
-        for value in timing.precision {
-            out.push_u32(value);
+        if flags & blocks::MEMCTL != 0 {
+            for value in timing.memory_control {
+                out.push_u32(value);
+            }
+        }
+        if flags & blocks::PRECISION != 0 {
+            for value in timing.precision {
+                out.push_u32(value);
+            }
         }
 
         let crc = crc32(out.bytes());
         out.push_u32(crc);
         let binary_len = out.len();
         drop(out);
-        assert!(binary_len == BINARY_LEN, "PX7 binary layout drift");
 
         let encoded_len = base64_encode(&binary[..binary_len], &mut self.payload);
-        assert!(encoded_len == BASE64_LEN, "PX7 Base64 layout drift");
+        self.binary_len = binary_len as u16;
         self.payload_len = encoded_len as u16;
+        self.page_count =
+            ((encoded_len + BASE64_CHARS_PER_PAGE - 1) / BASE64_CHARS_PER_PAGE).max(1) as u8;
+        self.flags = flags;
+        self.failures = failures;
         self.binary_crc = crc;
         self.binary = binary;
         self.encode_qr(page);
 
         self.print_page(page);
     }
+
+    /// Never zero: page navigation divides by this, and it is read before the
+    /// first capture exists.
+    pub(crate) fn page_count(&self) -> usize {
+        (self.page_count as usize).max(1)
+    }
+
 
     /// Re-render an already-encoded capture at a different page.
     ///
@@ -166,7 +283,7 @@ impl PhotoCapture {
     fn encode_qr(&mut self, page: usize) {
         let mut text = [0u8; QR_TEXT_MAX];
         let mut len = 0usize;
-        append(&mut text, &mut len, b"PX7/");
+        append(&mut text, &mut len, b"PX8/");
         append(
             &mut text,
             &mut len,
@@ -175,7 +292,7 @@ impl PhotoCapture {
         append(
             &mut text,
             &mut len,
-            hex2(CAPTURE_PAGE_COUNT as u8).as_str().as_bytes(),
+            hex2(self.page_count as u8).as_str().as_bytes(),
         );
         append(&mut text, &mut len, b"/");
         append(&mut text, &mut len, self.page_chunk(page).as_bytes());
@@ -194,8 +311,8 @@ impl PhotoCapture {
             &mut temp,
             &mut output,
             QrCodeEcc::Low,
-            QR_VERSION,
-            QR_VERSION,
+            QR_VERSION_MIN,
+            QR_VERSION_MAX,
             None,
             false,
         ) else {
@@ -243,12 +360,12 @@ impl PhotoCapture {
     }
 
     pub(crate) fn print_page(&self, page: usize) {
-        if page >= CAPTURE_PAGE_COUNT {
+        if page >= self.page_count() {
             return;
         }
-        tty::print("hardware-tests: px7 PX7/");
+        tty::print("hardware-tests: px8 PX8/");
         tty::print(hex2((page + 1) as u8).as_str());
-        tty::print(hex2(CAPTURE_PAGE_COUNT as u8).as_str());
+        tty::print(hex2(self.page_count as u8).as_str());
         tty::print("/");
         tty::print(self.page_chunk(page));
         tty::print("/C:");
@@ -260,14 +377,25 @@ pub(crate) fn draw_capture_page(font: &FontAtlas, capture: &PhotoCapture, page: 
     // Title is shortened deliberately: the full string ran into the PAGE
     // counter at x=208, and this header is what the operator reads off the TV
     // to label a capture. A garbled page number is how captures get misfiled.
-    font.draw_text(0, 0, "PX7 CAPTURE", (255, 232, 128));
+    // Which capture this is, because the two kinds are told apart by the
+    // operator on the day and by the filename forever after. A conformance page
+    // photographed and filed as a characterisation reference is a diff against
+    // nothing.
+    let (title, tint) = if capture.flags & blocks::OBSERVED != 0 {
+        ("PX8 FULL", (255, 232, 128))
+    } else if capture.failures == 0 {
+        ("PX8 CONF - ALL PASS", (96, 240, 128))
+    } else {
+        ("PX8 CONF - FAILURES", (255, 128, 96))
+    };
+    font.draw_text(0, 0, title, tint);
     font.draw_text(208, 0, "PAGE", (140, 160, 190));
     font.draw_text(248, 0, hex2((page + 1) as u8).as_str(), (232, 236, 244));
     font.draw_text(264, 0, "/", (140, 160, 190));
     font.draw_text(
         272,
         0,
-        hex2(CAPTURE_PAGE_COUNT as u8).as_str(),
+        hex2(capture.page_count).as_str(),
         (232, 236, 244),
     );
     // Labels are abbreviated so the navigation hint fits on the same line.
@@ -289,33 +417,39 @@ pub(crate) fn draw_capture_page(font: &FontAtlas, capture: &PhotoCapture, page: 
     font.draw_text(186, 10, "L/R", (150, 170, 200));
     font.draw_text(216, 10, "START MENU", (255, 232, 128));
 
-    if capture.qr_size as usize != QR_SIZE {
+    if capture.qr_size == 0 {
         font.draw_text(80, 112, "QR ENCODE FAILED", (255, 96, 96));
         return;
     }
 
-    let total = (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE;
+    let modules = capture.qr_size as i16;
+    // Largest whole-pixel module that still fits. Whole pixels only: a
+    // fractional scale puts module edges between pixels, and a QR read off a
+    // photograph of a CRT has little enough contrast already.
+    let scale = (QR_AREA / (modules + QR_QUIET * 2)).max(1);
+    let total = (modules + QR_QUIET * 2) * scale;
     let left = (320 - total) / 2;
     let top = 28;
     gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
-    let data_left = left + QR_QUIET * QR_SCALE;
-    let data_top = top + QR_QUIET * QR_SCALE;
-    for y in 0..QR_SIZE {
+    let data_left = left + QR_QUIET * scale;
+    let data_top = top + QR_QUIET * scale;
+    let side = modules as usize;
+    for y in 0..side {
         let mut x = 0usize;
-        while x < QR_SIZE {
-            while x < QR_SIZE && !capture.qr_module(x, y) {
+        while x < side {
+            while x < side && !capture.qr_module(x, y) {
                 x += 1;
             }
             let first = x;
-            while x < QR_SIZE && capture.qr_module(x, y) {
+            while x < side && capture.qr_module(x, y) {
                 x += 1;
             }
             if first < x {
                 gpu::draw_rect_flat(
-                    data_left + first as i16 * QR_SCALE,
-                    data_top + y as i16 * QR_SCALE,
-                    ((x - first) as i16 * QR_SCALE) as u16,
-                    QR_SCALE as u16,
+                    data_left + first as i16 * scale,
+                    data_top + y as i16 * scale,
+                    ((x - first) as i16 * scale) as u16,
+                    scale as u16,
                     0,
                     0,
                     0,
