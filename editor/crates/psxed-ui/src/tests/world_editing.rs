@@ -1916,6 +1916,122 @@ fn four_quarter_turns_return_an_asymmetric_sector_unchanged() {
     assert_eq!(rotated, sector, "four quarter turns must round trip");
 }
 
+fn save_single_cell_prefab(workspace: &mut EditorWorkspace, room: NodeId, label: &str) -> PathBuf {
+    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
+    let path = test_temp_dir(label).join("drag_drop_prefab.ron");
+    workspace
+        .capture_selection_as_prefab("Drag Drop Prefab")
+        .expect("selection captures")
+        .save_to_path(&path)
+        .expect("prefab saves");
+    path
+}
+
+#[test]
+fn dropping_a_prefab_in_2d_starts_preview_at_the_pointer_cell() {
+    let (mut workspace, room) = workspace_with_populated_grid("prefab-drop-2d", 4, 4);
+    let path = save_single_cell_prefab(&mut workspace, room, "prefab-drop-2d");
+    let editor_world = workspace
+        .room_grid_view(room)
+        .unwrap()
+        .world_cells_to_editor([2.25, 1.25]);
+
+    workspace.drop_prefab_2d(&path, editor_world);
+
+    let preview = workspace
+        .floating_geometry
+        .as_ref()
+        .expect("drop enters the floating preview loop");
+    assert_eq!(preview.room, room);
+    assert_eq!(preview.origin, [2, 1]);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn dropping_a_prefab_in_3d_starts_preview_at_the_hit_face_cell() {
+    let (mut workspace, room) = workspace_with_populated_grid("prefab-drop-3d", 4, 4);
+    let path = save_single_cell_prefab(&mut workspace, room, "prefab-drop-3d");
+    let grid_origin = workspace.room_grid_view(room).unwrap().origin;
+    let face = FaceRef {
+        room,
+        sx: 3,
+        sz: 2,
+        kind: FaceKind::Floor,
+    };
+
+    workspace.drop_prefab_3d(&path, Some((face, [0.0; 3])), None);
+
+    let preview = workspace
+        .floating_geometry
+        .as_ref()
+        .expect("drop enters the floating preview loop");
+    assert_eq!(preview.room, room);
+    assert_eq!(preview.origin, [grid_origin[0] + 3, grid_origin[1] + 2]);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn stock_prefab_stamps_ceilings_with_front_facing_destination_materials() {
+    let path = test_temp_dir("roofed-prefab-stamp").join("connector_straight.ron");
+    std::fs::create_dir_all(path.parent().expect("fixture has a parent"))
+        .expect("fixture directory creates");
+    std::fs::write(
+        &path,
+        psxed_project::prefab_kit_body("connector_straight")
+            .expect("connector is embedded in the stock kit"),
+    )
+    .expect("embedded connector fixture writes");
+
+    let mut project = ProjectDocument::new("roofed-prefab-destination");
+    project.add_resource(
+        "COBBLES_1A Material",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    project.add_resource(
+        "BLOCK_1A Material",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let ceiling_material = project.add_resource(
+        "BRICK_1A Material",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Section {
+            grid: WorldGrid::empty(1, 1, 1792),
+        },
+    );
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("roofed-prefab-destination"), project);
+    workspace.replace_node_selection(room);
+
+    workspace.stamp_prefab(&path);
+    assert!(workspace.commit_floating_geometry());
+
+    let grid = workspace.room_grid_view(room).expect("destination room");
+    for z in 0..3 {
+        let ceiling = grid
+            .sector(0, z)
+            .and_then(|sector| sector.ceiling.as_ref())
+            .unwrap_or_else(|| panic!("stock connector cell {z} has a ceiling"));
+        assert_eq!(ceiling.material, Some(ceiling_material));
+    }
+    let ResourceData::Material(material) = &workspace
+        .project
+        .resource(ceiling_material)
+        .expect("destination ceiling material")
+        .data
+    else {
+        panic!("ceiling resource changed kind");
+    };
+    assert_eq!(material.sidedness(), MaterialFaceSidedness::Front);
+
+    let _ = std::fs::remove_file(path);
+}
+
 /// The whole point of a prefab: geometry authored in one project lands in
 /// another, on that project's own materials. Binding by raw `ResourceId` would
 /// pass this test's shape while painting the wrong texture, so the destination
@@ -2386,45 +2502,51 @@ fn a_stamped_prefab_brings_its_light_along() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The library is a directory of files; the browser lists resources. Sync is
-/// what bridges them, and it has to be idempotent: running it twice must not
-/// duplicate the library, and a piece deleted from disk must not linger as a
-/// resource pointing at nothing.
+/// The shared library is cached as editor state and must never create project
+/// resources. Refreshing updates that cache without dirtying `project.ron`.
 #[test]
-fn syncing_the_prefab_library_is_idempotent_and_prunes_dead_entries() {
-    let project = ProjectDocument::new("prefab-sync");
-    let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-sync"), project);
+fn refreshing_the_prefab_library_does_not_mutate_project_resources() {
+    let project = ProjectDocument::new("prefab-library");
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-library"), project);
+    let resources_before = workspace.project.resources.clone();
+    let ron_before = workspace
+        .project
+        .to_ron_string()
+        .expect("project serializes");
 
-    let count = |w: &EditorWorkspace| {
-        w.project()
-            .resources
-            .iter()
-            .filter(|r| matches!(r.data, ResourceData::Prefab { .. }))
-            .count()
-    };
-    assert_eq!(count(&workspace), 0);
+    let count = workspace
+        .refresh_prefab_library()
+        .expect("shared library refreshes");
 
-    workspace.sync_prefab_resources();
-    let first = count(&workspace);
+    assert!(count > 0, "the embedded library is not empty");
+    assert_eq!(workspace.prefab_library.len(), count);
+    assert_eq!(workspace.project.resources, resources_before);
     assert_eq!(
-        first,
-        psxed_project::list_prefabs().unwrap().len(),
-        "every prefab in the library is listed: {}",
-        workspace.status
+        workspace
+            .project
+            .to_ron_string()
+            .expect("project serializes"),
+        ron_before
     );
-    assert!(first > 0, "the library is not empty");
+    assert!(!workspace.dirty);
+}
 
-    workspace.sync_prefab_resources();
-    assert_eq!(count(&workspace), first, "a second sync adds nothing");
+#[test]
+fn selecting_a_prefab_preserves_the_stamp_room_and_cell() {
+    let project = ProjectDocument::starter();
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-target"), project);
+    let room = workspace.active_room_id().expect("starter room");
+    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
+    let path = workspace
+        .prefab_library
+        .first()
+        .expect("embedded prefab library")
+        .path
+        .clone();
 
-    // A resource whose file has gone must be pruned, not left dangling.
-    workspace.project.add_resource(
-        "Ghost",
-        ResourceData::Prefab {
-            source_path: "/nonexistent/ghost.ron".to_string(),
-        },
-    );
-    assert_eq!(count(&workspace), first + 1);
-    workspace.sync_prefab_resources();
-    assert_eq!(count(&workspace), first, "the dead entry is pruned");
+    workspace.replace_prefab_selection(path.clone());
+
+    assert_eq!(workspace.active_room_id(), Some(room));
+    assert_eq!(workspace.selection.selected_sector, Some((0, 0)));
+    assert_eq!(workspace.selection.selected_prefab, Some(path));
 }

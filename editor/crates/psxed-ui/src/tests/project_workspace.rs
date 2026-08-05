@@ -1078,6 +1078,16 @@ fn create_and_open_project_sets_document_name_and_derived_directory() {
     assert_eq!(ws.project().name, name);
     assert_eq!(ws.project_root(), target);
     assert!(!ws.is_dirty());
+    assert!(ws
+        .project()
+        .resources
+        .iter()
+        .all(|resource| match &resource.data {
+            ResourceData::Material(material) => {
+                material.face_sidedness == MaterialFaceSidedness::Front && !material.double_sided
+            }
+            _ => true,
+        }));
     let saved = ProjectDocument::load_from_path(target.join("project.ron")).unwrap();
     assert_eq!(saved.name, ws.project().name);
     let _ = std::fs::remove_dir_all(target);

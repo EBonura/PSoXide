@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn playtest_packages_only_runtime_required_player_clips() {
+fn playtest_packages_the_runtime_bound_player_clips() {
     let project = ProjectDocument::starter();
     let player_model = player_model_resource_id(&project);
     let authored_clip_count = project.resolved_model_animation_clips(player_model).len();
@@ -20,9 +20,9 @@ fn playtest_packages_only_runtime_required_player_clips() {
         .find(|(_, model)| model.source_resource == player_model)
         .expect("player model is packaged");
 
-    assert!(
-        (model.clip_count as usize) < authored_clip_count,
-        "runtime should not package the full editor animation library"
+    assert_eq!(
+        model.clip_count as usize, authored_clip_count,
+        "every clip in the Bonnie AI starter set is bound to a gameplay action"
     );
 
     let character = package
@@ -1115,7 +1115,7 @@ fn player_model_renderer_material_without_texture_keeps_model_atlas() {
     assert_eq!(material_override.tint_rgb, [128, 128, 128]);
     let manifest = render_manifest_source(&package);
     assert!(manifest.contains(
-        "material_override: Some(LevelModelMaterialOverride { texture_asset: None, blend_mode: 1, tint_rgb: [128, 128, 128], motion: LevelMaterialUvMotion { enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0 }, secondary_layer: None, flags: 2 })"
+        "material_override: Some(LevelModelMaterialOverride { texture_asset: None, blend_mode: 1, tint_rgb: [128, 128, 128], motion: LevelMaterialUvMotion { enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0 }, secondary_layer: None, flags: 0 })"
     ));
 }
 

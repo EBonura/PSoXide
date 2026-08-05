@@ -947,7 +947,6 @@ impl ProjectDocument {
                 );
             }
             ResourceData::Mesh { source_path }
-            | ResourceData::Prefab { source_path }
             | ResourceData::Scene { source_path }
             | ResourceData::Script { source_path }
             | ResourceData::Audio { source_path } => {
@@ -963,7 +962,8 @@ impl ProjectDocument {
             ResourceData::Skeleton(_)
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)
-            | ResourceData::Weapon(_) => {}
+            | ResourceData::Weapon(_)
+            | ResourceData::Prefab { .. } => {}
         }
 
         execute_resource_rename_plan(&plan)?;
@@ -1139,9 +1139,20 @@ impl ProjectDocument {
             .retain(|resource| !matches!(resource.data, ResourceData::Texture { .. }));
     }
 
+    /// Drop the short-lived project-resource bridge for the shared prefab
+    /// library. Prefabs are editor furniture and are discovered from
+    /// [`crate::prefabs_dir`]; keeping their paths here dirties every project
+    /// and makes global library state look project-owned. The enum variant
+    /// remains readable so projects saved while the bridge existed still load.
+    fn migrate_legacy_prefab_resources(&mut self) {
+        self.resources
+            .retain(|resource| !matches!(resource.data, ResourceData::Prefab { .. }));
+    }
+
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
         self.migrate_legacy_texture_resources();
+        self.migrate_legacy_prefab_resources();
         for resource in &mut self.resources {
             if let ResourceData::Material(material) = &mut resource.data {
                 material.normalize_versions();
@@ -1692,7 +1703,6 @@ pub(crate) fn plan_resource_file_deletes(
             plan_path_delete(&source.source_path, project_root, &mut plan);
         }
         ResourceData::Mesh { source_path }
-        | ResourceData::Prefab { source_path }
         | ResourceData::Scene { source_path }
         | ResourceData::Script { source_path }
         | ResourceData::Audio { source_path } => {
@@ -1701,7 +1711,8 @@ pub(crate) fn plan_resource_file_deletes(
         ResourceData::Skeleton(_)
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
-        | ResourceData::Weapon(_) => {}
+        | ResourceData::Weapon(_)
+        | ResourceData::Prefab { .. } => {}
     }
     plan
 }
