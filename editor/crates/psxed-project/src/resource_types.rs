@@ -238,6 +238,8 @@ pub enum CharacterAnimationAction {
     AltLightAttack,
     AltHeavyAttack,
     AltComboAttack,
+    /// First-spawn intro, played once with control locked out.
+    Intro,
 }
 
 impl CharacterAnimationAction {
@@ -268,6 +270,7 @@ impl CharacterAnimationAction {
         Self::AltLightAttack,
         Self::AltHeavyAttack,
         Self::AltComboAttack,
+        Self::Intro,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -300,6 +303,7 @@ impl CharacterAnimationAction {
             Self::AltLightAttack => "Alt Light Attack",
             Self::AltHeavyAttack => "Alt Heavy Attack",
             Self::AltComboAttack => "Alt Combo Attack",
+            Self::Intro => "Intro",
         }
     }
 
@@ -331,6 +335,7 @@ impl CharacterAnimationAction {
             Self::AltLightAttack => 23,
             Self::AltHeavyAttack => 24,
             Self::AltComboAttack => 25,
+            Self::Intro => 26,
         }
     }
 
@@ -352,6 +357,9 @@ impl CharacterAnimationAction {
                 Some(AnimationRole::Attack)
             }
             Self::DashLeft | Self::DashRight => Some(AnimationRole::Roll),
+            // A spawn intro is its own thing; no existing role fits, and
+            // guessing one would auto-assign it to gameplay slots.
+            Self::Intro => None,
             Self::WalkBackward
             | Self::StrafeLeft
             | Self::StrafeRight

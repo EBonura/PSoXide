@@ -42,3 +42,7 @@ path = "src/bin/gen_stress_map.rs"
 [[bin]]
 name = "miniaturise-project"
 path = "src/bin/miniaturise_project.rs"
+
+[[bin]]
+name = "import-locomotion"
+path = "src/bin/import_locomotion.rs"

@@ -69,6 +69,7 @@ mod performance;
 mod schema;
 pub(crate) use cook_ui::*;
 mod cook_entities;
+pub use cook_entities::bake_model_clip_frame_bounds;
 pub(crate) use cook_entities::*;
 mod cook_props_lights;
 pub(crate) use cook_props_lights::*;

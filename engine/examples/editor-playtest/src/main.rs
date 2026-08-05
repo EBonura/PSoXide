@@ -248,6 +248,17 @@ const PLAYER_ANIM_BLEND_LOCOMOTION_TICKS: u32 = 8;
 /// Attack/action crossfade window in sim ticks: snappier so combat
 /// startup frames are not softened away.
 const PLAYER_ANIM_BLEND_ACTION_TICKS: u32 = 4;
+/// Crossfade window when LEAVING a committed one-shot (attack, intro).
+/// Entering one stays snappy so its startup frames read, but a 2.5-4.5s
+/// swing cut to idle in four ticks is the harshest transition in the game;
+/// it wants a settle roughly as long as a footfall.
+const PLAYER_ANIM_BLEND_ACTION_OUT_TICKS: u32 = 14;
+/// Crossfade window between two stepping gaits (walk <-> run <-> strafe).
+/// Longer than the generic locomotion window because gait clips are
+/// cook-time aligned to foot-down and the incoming clip is entered at the
+/// outgoing clip's phase, so a long fade blends like poses instead of
+/// averaging opposite halves of a stride.
+const PLAYER_ANIM_BLEND_GAIT_TICKS: u32 = 10;
 
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
