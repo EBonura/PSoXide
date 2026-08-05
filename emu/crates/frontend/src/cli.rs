@@ -414,7 +414,7 @@ pub struct LaunchArgs {
     /// Spec is `tick:button[:hold]`, comma separated, ticks counted from the
     /// start of the route. `hold` defaults to 4 ticks, which is long enough for
     /// the guest to poll the pad at least once. Buttons: cross, circle, square,
-    /// triangle, start, select, up, down, left, right, l1, r1, l2, r2.
+    /// triangle, start, select, up, down, left, right, l1, r1, l2, r2, l3, r3.
     ///
     /// Combines with `--hold-forward`: held input stays applied, and a scheduled
     /// press is added on top for its duration.
@@ -3391,6 +3391,8 @@ fn press_button_mask(name: &str) -> Option<u16> {
         "r1" => button::R1,
         "l2" => button::L2,
         "r2" => button::R2,
+        "l3" => button::L3,
+        "r3" => button::R3,
         _ => return None,
     })
 }
