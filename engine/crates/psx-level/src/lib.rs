@@ -3085,7 +3085,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 26;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 27;
 
 /// Runtime animation action slot.
 ///
@@ -3147,6 +3147,9 @@ pub enum CharacterAnimationAction {
     AltHeavyAttack = 24,
     /// Follow-up / combo with the alternate (heavy) weapon class.
     AltComboAttack = 25,
+    /// First-spawn intro: played once when gameplay begins, with player
+    /// control locked out for the clip's duration.
+    Intro = 26,
 }
 
 impl CharacterAnimationAction {
@@ -3178,6 +3181,7 @@ impl CharacterAnimationAction {
         Self::AltLightAttack,
         Self::AltHeavyAttack,
         Self::AltComboAttack,
+        Self::Intro,
     ];
 
     /// Convert to the cooked action slot index.
