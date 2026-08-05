@@ -174,9 +174,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 13;
+const SUITE_VERSION_MINOR: u8 = 14;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.13";
+const SUITE_VERSION: &str = "HWTEST v1.14";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -514,6 +514,16 @@ impl Status {
         }
     }
 
+    /// Whether a conformance capture spends bytes describing this case.
+    ///
+    /// `Warn` counts: a warning is a case whose observed value the suite could
+    /// not confidently judge, which is exactly the kind of thing worth carrying
+    /// off the console. `Pending` does not -- an unrun case has nothing to say,
+    /// and the status bitmap already records that it did not run.
+    const fn is_failure(self) -> bool {
+        matches!(self, Self::Fail | Self::Warn)
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
@@ -592,10 +602,35 @@ impl TestResult {
 
 #[derive(Copy, Clone)]
 struct TestSpec {
+    /// Identity that outlives this array's ordering.
+    ///
+    /// A failure record names the case by this number, so a capture taken on
+    /// one suite version stays readable against a later one. Inserting a case
+    /// in the middle used to renumber every case after it, which silently
+    /// re-pointed every archived failure at the wrong test. Assign the next
+    /// free id and never reuse a retired one; `TEST_IDS_ARE_UNIQUE` refuses to
+    /// compile a duplicate.
+    id: u16,
     group: &'static str,
     name: &'static str,
     run: fn() -> TestResult,
 }
+
+// Compile-time uniqueness check for `TestSpec::id`. Quadratic, but it runs once
+// at build time over a list that is only ever appended to, and it is the only
+// thing standing between a copy-pasted id and two tests claiming the same
+// failure record.
+const _: () = {
+    let mut i = 0;
+    while i < TEST_COUNT {
+        let mut j = i + 1;
+        while j < TEST_COUNT {
+            assert!(TESTS[i].id != TESTS[j].id, "duplicate TestSpec id");
+            j += 1;
+        }
+        i += 1;
+    }
+};
 
 #[derive(Copy, Clone)]
 struct ScanReport {
@@ -635,6 +670,9 @@ enum MenuPage {
 enum MenuAction {
     /// Run conformance, scans, timing battery, then build capture output.
     RunFullSuite,
+    /// As `RunFullSuite`, but the capture carries every characterisation block
+    /// rather than just the verdicts and the failures.
+    RunFullSuiteCharacterisation,
     Open(Mode),
     Submenu(MenuPage),
     Back,
@@ -644,12 +682,20 @@ enum MenuAction {
     RunFromIndex,
 }
 
-const ROOT_MENU: [(&str, MenuAction); 10] = [
+const ROOT_MENU: [(&str, MenuAction); 11] = [
     // Row 0 is pinned: `make hwtest-capture` selects it by firing CROSS at a
     // fixed tick with the cursor still at its boot position. Move this row and
     // the capture opens whatever took its place, which produces an empty log
     // rather than a failure anyone would notice.
     ("RUN ALL TESTS + CAPTURE", MenuAction::RunFullSuite),
+    // A routine capture carries verdicts and failures. Establishing a new
+    // reference -- timing envelopes, precision values, the register snapshot --
+    // is a deliberate act, and it is the operator who knows which one this run
+    // is for, so it gets its own row rather than a heuristic.
+    (
+        "FULL CHARACTERISATION CAPTURE",
+        MenuAction::RunFullSuiteCharacterisation,
+    ),
     (
         "CONTROLLER TEST (P1 + P2)",
         MenuAction::Open(Mode::ControllerTest),
@@ -775,10 +821,6 @@ impl TimingReport {
     }
 }
 
-const fn timing_page_count() -> usize {
-    photo::CAPTURE_PAGE_COUNT
-}
-
 impl ScanReport {
     const fn pending(note: &'static str) -> Self {
         Self {
@@ -821,866 +863,1039 @@ struct SectionReport {
 
 const TESTS: [TestSpec; TEST_COUNT] = [
     TestSpec {
+        id: 0x0000,
         group: "CPU",
         name: "little-endian word layout",
         run: test_cpu_endian,
     },
     TestSpec {
+        id: 0x0001,
         group: "CPU",
         name: "wrapping add/shift/multiply",
         run: test_cpu_arithmetic,
     },
     TestSpec {
+        id: 0x0002,
         group: "CPU",
         name: "MIPS-I R-type opcode battery",
         run: test_cpu_rtype_opcodes,
     },
     TestSpec {
+        id: 0x0003,
         group: "CPU",
         name: "MIPS-I immediate opcode battery",
         run: test_cpu_immediate_opcodes,
     },
     TestSpec {
+        id: 0x0004,
         group: "CPU",
         name: "MIPS-I HI/LO multiply divide",
         run: test_cpu_hilo_opcodes,
     },
     TestSpec {
+        id: 0x0005,
         group: "CPU",
         name: "MIPS-I branch delay battery",
         run: test_cpu_branch_delay_opcodes,
     },
     TestSpec {
+        id: 0x0006,
         group: "CPU",
         name: "MIPS-I load/store battery",
         run: test_cpu_load_store_opcodes,
     },
     TestSpec {
+        id: 0x0007,
         group: "RAM",
         name: "volatile byte/half/word stores",
         run: test_volatile_memory,
     },
     TestSpec {
+        id: 0x0008,
         group: "RAM",
         name: "KSEG1 uncached RAM alias",
         run: test_kseg1_alias,
     },
     TestSpec {
+        id: 0x0009,
         group: "IRQ",
         name: "I_MASK register roundtrip",
         run: test_irq_mask_roundtrip,
     },
     TestSpec {
+        id: 0x000a,
         group: "IRQ",
         name: "GPU IRQ visible through I_STAT",
         run: test_irq_gpu_ack_path,
     },
     TestSpec {
+        id: 0x000b,
         group: "DMA",
         name: "OTC reverse linked-list clear",
         run: test_dma_otc_clear,
     },
     TestSpec {
+        id: 0x000c,
         group: "DMA",
         name: "channel register roundtrip",
         run: test_dma_channel_register_roundtrip,
     },
     TestSpec {
+        id: 0x000d,
         group: "DMA",
         name: "DPCR priority enable latch",
         run: test_dma_dpcr_roundtrip,
     },
     TestSpec {
+        id: 0x000e,
         group: "TMR",
         name: "timer2 free-run increments",
         run: test_timer2_increments,
     },
     TestSpec {
+        id: 0x000f,
         group: "TMR",
         name: "timer1 scanline range",
         run: test_timer1_scanline,
     },
     TestSpec {
+        id: 0x0010,
         group: "GPU",
         name: "GPUSTAT mode/readiness",
         run: test_gpu_status,
     },
     TestSpec {
+        id: 0x0011,
         group: "GPU",
         name: "GP0 IRQ set + GP1 ack",
         run: test_gpu_irq_ack,
     },
     TestSpec {
+        id: 0x0012,
         group: "GPU",
         name: "primitive packet encoding",
         run: test_gpu_primitive_packet_encoding,
     },
     TestSpec {
+        id: 0x0013,
         group: "GTE",
         name: "data/control register roundtrip",
         run: test_gte_register_roundtrip,
     },
     TestSpec {
+        id: 0x0014,
         group: "GTE",
         name: "RTPS projects centre vertex",
         run: test_gte_projection_center,
     },
     TestSpec {
+        id: 0x0015,
         group: "GTE",
         name: "all exposed GTE opcode battery",
         run: test_gte_all_ops_digest,
     },
     TestSpec {
+        id: 0x0016,
         group: "GTE",
         name: "NCLIP MAC0 winding sign",
         run: test_gte_nclip_mac0,
     },
     TestSpec {
+        id: 0x0017,
         group: "SPU",
         name: "SPUSTAT readable",
         run: test_spu_status_readable,
     },
     TestSpec {
+        id: 0x0018,
         group: "SPU",
         name: "voice register matrix",
         run: test_spu_voice_registers,
     },
     TestSpec {
+        id: 0x0019,
         group: "SPU",
         name: "main volume register roundtrip",
         run: test_spu_main_volume_roundtrip,
     },
     TestSpec {
+        id: 0x001a,
         group: "SIO",
         name: "port 1 pad poll",
         run: test_pad_poll,
     },
     TestSpec {
+        id: 0x001b,
         group: "SIO",
         name: "mode control baud latches",
         run: test_sio_register_latches,
     },
     TestSpec {
+        id: 0x001c,
         group: "GPU",
         name: "draw area command latch",
         run: test_gpu_draw_area_command,
     },
     TestSpec {
+        id: 0x001d,
         group: "DMA",
         name: "GPU DMA direction survives OTC",
         run: test_gpu_dma_direction_after_otc,
     },
     TestSpec {
+        id: 0x001e,
         group: "TMR",
         name: "timer2 target sticky bit",
         run: test_timer2_target_sticky,
     },
     TestSpec {
+        id: 0x001f,
         group: "TMR",
         name: "mode write resets counter",
         run: test_timer_mode_write_resets_counter,
     },
     TestSpec {
+        id: 0x0020,
         group: "TMR",
         name: "mode read clears sticky flags",
         run: test_timer_mode_read_clears_sticky,
     },
     TestSpec {
+        id: 0x0021,
         group: "TMR",
         name: "timer2 sync stop vs free-run",
         run: test_timer2_sync_stop_vs_free_run,
     },
     TestSpec {
+        id: 0x0022,
         group: "TMR",
         name: "timer2 system clock divided by 8",
         run: test_timer2_clock_divider,
     },
     TestSpec {
+        id: 0x0023,
         group: "TMR",
         name: "timer2 0xffff wrap sticky bit",
         run: test_timer2_wrap_sticky,
     },
     TestSpec {
+        id: 0x0024,
         group: "TMR",
         name: "timer2 target IRQ latch",
         run: test_timer2_target_irq_latch,
     },
     TestSpec {
+        id: 0x0025,
         group: "TMR",
         name: "timer2 wrap IRQ latch",
         run: test_timer2_wrap_irq_latch,
     },
     TestSpec {
+        id: 0x0026,
         group: "TMR",
         name: "timer1 HBlank clock advances",
         run: test_timer1_hblank_clock_advances,
     },
     TestSpec {
+        id: 0x0027,
         group: "TMR",
         name: "timer0 dot clock slower than system",
         run: test_timer0_dot_clock_ratio,
     },
     TestSpec {
+        id: 0x0028,
         group: "DMA",
         name: "OTC DMA completes within bounded poll",
         run: test_dma_otc_bounded_completion,
     },
     TestSpec {
+        id: 0x0029,
         group: "RAM",
         name: "scratchpad byte/half/word roundtrip",
         run: test_scratchpad_roundtrip,
     },
     TestSpec {
+        id: 0x002a,
         group: "CD",
         name: "CD-ROM GetStat command response",
         run: test_cdrom_getstat_response,
     },
     TestSpec {
+        id: 0x002b,
         group: "CD",
         name: "CD-ROM register index latch",
         run: test_cdrom_index_latch,
     },
     TestSpec {
+        id: 0x002c,
         group: "SIO",
         name: "direct port 1 pad poll stability",
         run: test_pad_direct_stability,
     },
     TestSpec {
+        id: 0x002d,
         group: "CPU",
         name: "MIPS-I unaligned load/store pairs",
         run: test_cpu_unaligned_load_store_pairs,
     },
     TestSpec {
+        id: 0x002e,
         group: "GPU",
         name: "DMA direction mode latch",
         run: test_gpu_dma_direction_mode_latch,
     },
     TestSpec {
+        id: 0x002f,
         group: "GPU",
         name: "GP1 info environment readback",
         run: test_gpu_gp1_info_environment_readback,
     },
     TestSpec {
+        id: 0x0030,
         group: "TMR",
         name: "target register roundtrip",
         run: test_timer_target_register_roundtrip,
     },
     TestSpec {
+        id: 0x0031,
         group: "GPU",
         name: "GPU IRQ1 flag settle latency",
         run: test_gpu_irq_latency_probe,
     },
     TestSpec {
+        id: 0x0032,
         group: "GTE",
         name: "NCLIP MAC0 raw value probe",
         run: test_gte_nclip_mac0_value,
     },
     TestSpec {
+        id: 0x0033,
         group: "TMR",
         name: "timer0 dot/system tick counts",
         run: test_timer0_dot_clock_counts,
     },
     TestSpec {
+        id: 0x0034,
         group: "GPU",
         name: "DMA-direction readback values",
         run: test_gpu_dma_direction_readback,
     },
     TestSpec {
+        id: 0x0035,
         group: "GTE",
         name: "RTPS off-centre projection value",
         run: test_gte_rtps_offcenter_value,
     },
     TestSpec {
+        id: 0x0036,
         group: "GTE",
         name: "scene RTPS A SXY2 (div-ovf+sat)",
         run: test_gte_scene_rtps_a_sxy,
     },
     TestSpec {
+        id: 0x0037,
         group: "GTE",
         name: "scene RTPS A FLAG (0x80066000)",
         run: test_gte_scene_rtps_a_flag,
     },
     TestSpec {
+        id: 0x0038,
         group: "GTE",
         name: "scene RTPS B SXY2 (clamp hi/lo)",
         run: test_gte_scene_rtps_b_sxy,
     },
     TestSpec {
+        id: 0x0039,
         group: "GTE",
         name: "scene RTPS C SXY2 (SZ3 survives)",
         run: test_gte_scene_rtps_c_sxy,
     },
     TestSpec {
+        id: 0x003a,
         group: "GTE",
         name: "scene RTPS C FLAG (0x80002000)",
         run: test_gte_scene_rtps_c_flag,
     },
     TestSpec {
+        id: 0x003b,
         group: "GTE",
         name: "scene RTPS D SXY2 (neg-X vertex)",
         run: test_gte_scene_rtps_d_sxy,
     },
     TestSpec {
+        id: 0x003c,
         group: "GTE",
         name: "scene RTPS D FLAG (0x80006000)",
         run: test_gte_scene_rtps_d_flag,
     },
     TestSpec {
+        id: 0x003d,
         group: "GTE",
         name: "NCLIP SXY0 input readback",
         run: test_gte_nclip_in_sxy0,
     },
     TestSpec {
+        id: 0x003e,
         group: "GTE",
         name: "NCLIP SXY1 input readback",
         run: test_gte_nclip_in_sxy1,
     },
     TestSpec {
+        id: 0x003f,
         group: "GTE",
         name: "NCLIP SXY2 input readback",
         run: test_gte_nclip_in_sxy2,
     },
     TestSpec {
+        id: 0x0040,
         group: "GTE",
         name: "NCLIP MAC0 after 8 nops",
         run: test_gte_nclip_mac0_nop8,
     },
     TestSpec {
+        id: 0x0041,
         group: "GTE",
         name: "NCLIP MAC0 after 16 nops",
         run: test_gte_nclip_mac0_nop16,
     },
     TestSpec {
+        id: 0x0042,
         group: "GTE",
         name: "scene MVMVA A (RT*V0+TR)",
         run: test_gte_scene_mvmva_a,
     },
     TestSpec {
+        id: 0x0043,
         group: "GTE",
         name: "scene MVMVA B (RT*V0+TR)",
         run: test_gte_scene_mvmva_b,
     },
     TestSpec {
+        id: 0x0044,
         group: "GTE",
         name: "scene MVMVA C (RT*V0+TR)",
         run: test_gte_scene_mvmva_c,
     },
     TestSpec {
+        id: 0x0045,
         group: "GTE",
         name: "scene MVMVA D (RT*V0+TR)",
         run: test_gte_scene_mvmva_d,
     },
     TestSpec {
+        id: 0x0046,
         group: "GTE",
         name: "scene RTPT A SXY (div-ovf)",
         run: test_gte_scene_rtpt_a_sxy,
     },
     TestSpec {
+        id: 0x0047,
         group: "GTE",
         name: "scene RTPT B SXY (div-ovf)",
         run: test_gte_scene_rtpt_b_sxy,
     },
     TestSpec {
+        id: 0x0048,
         group: "GTE",
         name: "scene RTPT C SXY (div-ovf)",
         run: test_gte_scene_rtpt_c_sxy,
     },
     TestSpec {
+        id: 0x0049,
         group: "GTE",
         name: "scene RTPT D SXY (all-clamp)",
         run: test_gte_scene_rtpt_d_sxy,
     },
     TestSpec {
+        id: 0x004a,
         group: "GTE",
         name: "scene RTPT E SXY (in-frustum)",
         run: test_gte_scene_rtpt_e_sxy,
     },
     TestSpec {
+        id: 0x004b,
         group: "GTE",
         name: "scene RTPT F SXY (in-frustum)",
         run: test_gte_scene_rtpt_f_sxy,
     },
     TestSpec {
+        id: 0x004c,
         group: "GTE",
         name: "scene RTPT A FLAG (0x80006000)",
         run: test_gte_scene_rtpt_a_flag,
     },
     TestSpec {
+        id: 0x004d,
         group: "GTE",
         name: "scene RTPT B FLAG (0x80066000)",
         run: test_gte_scene_rtpt_b_flag,
     },
     TestSpec {
+        id: 0x004e,
         group: "GTE",
         name: "scene RTPT A SZ3 depth",
         run: test_gte_scene_rtpt_a_sz3,
     },
     TestSpec {
+        id: 0x004f,
         group: "GTE",
         name: "scene RTPT E SZ3 depth",
         run: test_gte_scene_rtpt_e_sz3,
     },
     TestSpec {
+        id: 0x0050,
         group: "GTE",
         name: "scene NCLIP A MAC0 (real)",
         run: test_gte_scene_nclip_a,
     },
     TestSpec {
+        id: 0x0051,
         group: "GTE",
         name: "scene NCLIP B MAC0 (real)",
         run: test_gte_scene_nclip_b,
     },
     TestSpec {
+        id: 0x0052,
         group: "GTE",
         name: "scene NCLIP C MAC0 (real)",
         run: test_gte_scene_nclip_c,
     },
     TestSpec {
+        id: 0x0053,
         group: "GTE",
         name: "LZCR 0x00ffffff = 8",
         run: test_gte_lzcr_zeros,
     },
     TestSpec {
+        id: 0x0054,
         group: "GTE",
         name: "LZCR 0xffff0000 = 16",
         run: test_gte_lzcr_half,
     },
     TestSpec {
+        id: 0x0055,
         group: "GTE",
         name: "LZCR 0x00000001 = 31",
         run: test_gte_lzcr_one,
     },
     TestSpec {
+        id: 0x0056,
         group: "GTE",
         name: "LZCR 0x7fffffff = 1",
         run: test_gte_lzcr_posmax,
     },
     TestSpec {
+        id: 0x0057,
         group: "GTE",
         name: "LZCR 0x80000000 = 1",
         run: test_gte_lzcr_negmin,
     },
     TestSpec {
+        id: 0x0058,
         group: "GTE",
         name: "MVMVA FC-bug MAC1",
         run: test_gte_mvmva_fc_mac1,
     },
     TestSpec {
+        id: 0x0059,
         group: "GTE",
         name: "MVMVA FC-bug MAC2",
         run: test_gte_mvmva_fc_mac2,
     },
     TestSpec {
+        id: 0x005a,
         group: "GTE",
         name: "MVMVA FC-bug MAC3",
         run: test_gte_mvmva_fc_mac3,
     },
     TestSpec {
+        id: 0x005b,
         group: "GTE",
         name: "SQR squares IR1..3",
         run: test_gte_sqr,
     },
     TestSpec {
+        id: 0x005c,
         group: "GTE",
         name: "OP cross product MAC1",
         run: test_gte_op_mac1,
     },
     TestSpec {
+        id: 0x005d,
         group: "GTE",
         name: "OP cross product MAC2",
         run: test_gte_op_mac2,
     },
     TestSpec {
+        id: 0x005e,
         group: "GTE",
         name: "OP cross product MAC3",
         run: test_gte_op_mac3,
     },
     TestSpec {
+        id: 0x005f,
         group: "GTE",
         name: "OP full-seed MAC1",
         run: test_gte_op_full_seed_mac1,
     },
     TestSpec {
+        id: 0x0060,
         group: "GTE",
         name: "OP full-seed MAC2",
         run: test_gte_op_full_seed_mac2,
     },
     TestSpec {
+        id: 0x0061,
         group: "GTE",
         name: "OP full-seed MAC3",
         run: test_gte_op_full_seed_mac3,
     },
     TestSpec {
+        id: 0x0062,
         group: "GTE",
         name: "AVSZ3 averages SZ -> OTZ",
         run: test_gte_avsz3,
     },
     TestSpec {
+        id: 0x0063,
         group: "GTE",
         name: "RTPS SXY2 read-latency",
         run: test_gte_lat_sxy2,
     },
     TestSpec {
+        id: 0x0064,
         group: "GTE",
         name: "RTPS SZ3 read-latency",
         run: test_gte_lat_sz3,
     },
     TestSpec {
+        id: 0x0065,
         group: "GTE",
         name: "RTPS IR1 read-latency",
         run: test_gte_lat_ir1,
     },
     TestSpec {
+        id: 0x0066,
         group: "GTE",
         name: "RTPS IR0 read-latency",
         run: test_gte_lat_ir0,
     },
     TestSpec {
+        id: 0x0067,
         group: "GTE",
         name: "RT load settle +0",
         run: test_rt_settle_gap0,
     },
     TestSpec {
+        id: 0x0068,
         group: "GTE",
         name: "RT load settle +2",
         run: test_rt_settle_gap2,
     },
     TestSpec {
+        id: 0x0069,
         group: "GTE",
         name: "RT load settle +4",
         run: test_rt_settle_gap4,
     },
     TestSpec {
+        id: 0x006a,
         group: "GTE",
         name: "RT load settle +8",
         run: test_rt_settle_gap8,
     },
     TestSpec {
+        id: 0x006b,
         group: "GTE",
         name: "RT load settle +16",
         run: test_rt_settle_gap16,
     },
     TestSpec {
+        id: 0x006c,
         group: "GTE",
         name: "RT load settle +32",
         run: test_rt_settle_gap32,
     },
     TestSpec {
+        id: 0x006d,
         group: "GTE",
         name: "RT drop-during-RTPS +0",
         run: test_rt_drop_gap0,
     },
     TestSpec {
+        id: 0x006e,
         group: "GTE",
         name: "RT drop-during-RTPS +4",
         run: test_rt_drop_gap4,
     },
     TestSpec {
+        id: 0x006f,
         group: "GTE",
         name: "RT drop-during-RTPS +8",
         run: test_rt_drop_gap8,
     },
     TestSpec {
+        id: 0x0070,
         group: "GTE",
         name: "RT drop-during-RTPS +16",
         run: test_rt_drop_gap16,
     },
     TestSpec {
+        id: 0x0071,
         group: "GTE",
         name: "compose chain hot (engine shape)",
         run: test_compose_chain_hot,
     },
     TestSpec {
+        id: 0x0072,
         group: "GTE",
         name: "compose chain V0-settled",
         run: test_compose_chain_v0_settled,
     },
     TestSpec {
+        id: 0x0073,
         group: "GTE",
         name: "compose chain load-settled",
         run: test_compose_chain_load_settled,
     },
     TestSpec {
+        id: 0x0074,
         group: "GTE",
         name: "NCLIP MAC0 settle +1",
         run: test_mac0_settle_gap1,
     },
     TestSpec {
+        id: 0x0075,
         group: "GTE",
         name: "NCLIP MAC0 settle +2",
         run: test_mac0_settle_gap2,
     },
     TestSpec {
+        id: 0x0076,
         group: "GTE",
         name: "NCLIP MAC0 settle +3",
         run: test_mac0_settle_gap3,
     },
     TestSpec {
+        id: 0x0077,
         group: "GTE",
         name: "NCLIP MAC0 settle +4",
         run: test_mac0_settle_gap4,
     },
     TestSpec {
+        id: 0x0078,
         group: "GTE",
         name: "NCLIP MAC0 settle +6",
         run: test_mac0_settle_gap6,
     },
     TestSpec {
+        id: 0x0079,
         group: "GTE",
         name: "LZCR settle +1",
         run: test_lzcr_settle_gap1,
     },
     TestSpec {
+        id: 0x007a,
         group: "GTE",
         name: "LZCR settle +2",
         run: test_lzcr_settle_gap2,
     },
     TestSpec {
+        id: 0x007b,
         group: "GTE",
         name: "LZCR settle +3",
         run: test_lzcr_settle_gap3,
     },
     TestSpec {
+        id: 0x007c,
         group: "GTE",
         name: "LZCR settle +4",
         run: test_lzcr_settle_gap4,
     },
     TestSpec {
+        id: 0x007d,
         group: "GTE",
         name: "LZCR settle +6",
         run: test_lzcr_settle_gap6,
     },
     TestSpec {
+        id: 0x007e,
         group: "GTE",
         name: "NCLIP big-value settle +1",
         run: test_mac0_big_settle_gap1,
     },
     TestSpec {
+        id: 0x007f,
         group: "GTE",
         name: "NCLIP big-value settle +2",
         run: test_mac0_big_settle_gap2,
     },
     TestSpec {
+        id: 0x0080,
         group: "GTE",
         name: "NCLIP big-value settle +4",
         run: test_mac0_big_settle_gap4,
     },
     TestSpec {
+        id: 0x0081,
         group: "GTE",
         name: "NCLIP big-value settle +8",
         run: test_mac0_big_settle_gap8,
     },
     TestSpec {
+        id: 0x0082,
         group: "GTE",
         name: "NCLIP big-value settle +12",
         run: test_mac0_big_gap12,
     },
     TestSpec {
+        id: 0x0083,
         group: "GTE",
         name: "NCLIP big-value settle +16",
         run: test_mac0_big_gap16,
     },
     TestSpec {
+        id: 0x0084,
         group: "GTE",
         name: "NCLIP big-value settle +24",
         run: test_mac0_big_gap24,
     },
     TestSpec {
+        id: 0x0085,
         group: "GTE",
         name: "NCLIP big-value settle +32",
         run: test_mac0_big_gap32,
     },
     TestSpec {
+        id: 0x0086,
         group: "GTE",
         name: "NCLIP big-value settle +48",
         run: test_mac0_big_gap48,
     },
     TestSpec {
+        id: 0x0087,
         group: "GTE",
         name: "NCLIP magnitude quarter +4",
         run: test_mac0_mag_quarter,
     },
     TestSpec {
+        id: 0x0088,
         group: "GTE",
         name: "NCLIP magnitude half +4",
         run: test_mac0_mag_half,
     },
     TestSpec {
+        id: 0x0089,
         group: "GTE",
         name: "NCLIP magnitude double +4",
         run: test_mac0_mag_double,
     },
     TestSpec {
+        id: 0x008a,
         group: "GTE",
         name: "NCLIP controlled scene-B +2",
         run: test_mac0_ctrl_b,
     },
     TestSpec {
+        id: 0x008b,
         group: "GTE",
         name: "NCLIP controlled scene-C +2",
         run: test_mac0_ctrl_c,
     },
     TestSpec {
+        id: 0x008c,
         group: "GTE",
         name: "SXY0 dump after A writes",
         run: test_sxy_dump_a_12,
     },
     TestSpec {
+        id: 0x008d,
         group: "GTE",
         name: "SXY1 dump after A writes",
         run: test_sxy_dump_a_13,
     },
     TestSpec {
+        id: 0x008e,
         group: "GTE",
         name: "SXY2 dump after A writes",
         run: test_sxy_dump_a_14,
     },
     TestSpec {
+        id: 0x008f,
         group: "GTE",
         name: "SXY0 dump after C writes",
         run: test_sxy_dump_c_12,
     },
     TestSpec {
+        id: 0x0090,
         group: "GTE",
         name: "SXY1 dump after C writes",
         run: test_sxy_dump_c_13,
     },
     TestSpec {
+        id: 0x0091,
         group: "GTE",
         name: "SXY2 dump after C writes",
         run: test_sxy_dump_c_14,
     },
     TestSpec {
+        id: 0x0092,
         group: "GTE",
         name: "SXY0 after probe NCLIP (A)",
         run: test_sxy_post_a,
     },
     TestSpec {
+        id: 0x0093,
         group: "GTE",
         name: "SXY0 after probe NCLIP (C)",
         run: test_sxy_post_c,
     },
     TestSpec {
+        id: 0x0094,
         group: "GPU",
         name: "VRAM fill + read-back",
         run: test_gpu_vram_roundtrip,
     },
     TestSpec {
+        id: 0x0095,
         group: "GPU",
         name: "draw flat triangle",
         run: test_gpu_draw_flat_tri,
     },
     TestSpec {
+        id: 0x0096,
         group: "GPU",
         name: "draw gouraud triangle",
         run: test_gpu_draw_gouraud_tri,
     },
     TestSpec {
+        id: 0x0097,
         group: "GPU",
         name: "draw flat quad",
         run: test_gpu_draw_flat_quad,
     },
     TestSpec {
+        id: 0x0098,
         group: "GPU",
         name: "draw gouraud quad",
         run: test_gpu_draw_gouraud_quad,
     },
     TestSpec {
+        id: 0x0099,
         group: "GPU",
         name: "tri vertex past right edge",
         run: test_gpu_tri_past_right_edge,
     },
     TestSpec {
+        id: 0x009a,
         group: "GPU",
         name: "tri negative coordinate",
         run: test_gpu_tri_negative_coord,
     },
     TestSpec {
+        id: 0x009b,
         group: "GPU",
         name: "tri coord exceeds 11-bit (wrap)",
         run: test_gpu_tri_coord_wrap,
     },
     TestSpec {
+        id: 0x009c,
         group: "GPU",
         name: "textured gouraud tri (player prim)",
         run: test_gpu_textured_gouraud_tri,
     },
     TestSpec {
+        id: 0x009d,
         group: "GPU",
         name: "OT + DMA linked-list draw",
         run: test_gpu_ot_dma_draw,
     },
     TestSpec {
+        id: 0x009e,
         group: "GPU",
         name: "tri X-span > 1023 (poly-too-large)",
         run: test_gpu_tri_large_span,
     },
     TestSpec {
+        id: 0x009f,
         group: "GPU",
         name: "tri vertex past bottom edge",
         run: test_gpu_tri_y_past_edge,
     },
     TestSpec {
+        id: 0x00a0,
         group: "GPU",
         name: "textured gouraud large span",
         run: test_gpu_texgouraud_large_span,
     },
     TestSpec {
+        id: 0x00a1,
         group: "GPU",
         name: "textured gouraud via OT + DMA (player path)",
         run: test_gpu_texgouraud_ot_dma,
     },
     TestSpec {
+        id: 0x00a2,
         group: "GPU",
         name: "8bpp CLUT textured tri (model format)",
         run: test_gpu_8bpp_clut_tri,
     },
     TestSpec {
+        id: 0x00a3,
         group: "GPU",
         name: "deep OT + DMA (8 prims)",
         run: test_gpu_big_ot,
     },
     TestSpec {
+        id: 0x00a4,
         group: "SPU",
         name: "voice0 writable-bit mask",
         run: test_spu_voice_writable_mask,
     },
     TestSpec {
+        id: 0x00a5,
         group: "SPU",
         name: "voice0 pitch/ADSR readback",
         run: test_spu_voice_reg_readback,
     },
     TestSpec {
+        id: 0x00a6,
         group: "SPU",
         name: "SPU RAM DMA upload round-trip",
         run: test_spu_ram_dma_roundtrip,
     },
     TestSpec {
+        id: 0x00a7,
         group: "SPU",
         name: "SPU RAM manual-FIFO upload round-trip",
         run: test_spu_ram_manual_fifo_roundtrip,
     },
     TestSpec {
+        id: 0x00a8,
         group: "GPU",
         name: "ordered-dither checkerboard (flat mid-tone)",
         run: test_gpu_dither_checkerboard,
     },
     TestSpec {
+        id: 0x00a9,
         group: "GPU",
         name: "mask bit on CPU->VRAM copy",
         run: test_gpu_cpu_vram_upload_mask,
     },
     TestSpec {
+        id: 0x00aa,
         group: "SIO",
         name: "port 1 handshake strict (no-wait)",
         run: test_pad_handshake_strict,
     },
     TestSpec {
+        id: 0x00ab,
         group: "SIO",
         name: "port 1 diag setup+inter timing",
         run: test_pad_diag_timing,
     },
     TestSpec {
+        id: 0x00ac,
         group: "SIO",
         name: "DualShock analog enable handshake",
         run: test_pad_analog_handshake,
@@ -1712,6 +1927,11 @@ struct HardwareTests {
     info_count: u8,
     page: usize,
     rerun_count: u8,
+    /// Which blocks the next capture encodes. A routine run leaves this at
+    /// [`photo::blocks::CONFORMANCE`]; the characterisation entry raises it to
+    /// [`photo::blocks::FULL`] for one capture and the operator files the
+    /// result as a reference.
+    capture_flags: u8,
     /// Latest port-1 poll for each [`PROBE_VARIANTS`] timing, refreshed every
     /// frame while in the controller probe. Used to find which setup/inter-byte
     /// timing wakes a strict original pad.
@@ -1779,6 +1999,7 @@ impl HardwareTests {
             info_count: 0,
             page: 0,
             rerun_count: 0,
+            capture_flags: photo::blocks::CONFORMANCE,
             probe_variants: [psx_pad::RawPoll::NONE; PROBE_VARIANT_COUNT],
             audio_rate: 0,
             audio_prepared: false,
@@ -1898,12 +2119,13 @@ impl HardwareTests {
             &self.results,
             self.rerun_count,
             [self.cpu_scan, self.gte_scan, self.spu_scan],
+            self.capture_flags,
             page,
         );
         // Mirror a complete, internally consistent page set on every encode.
         // Headless validation must not depend on controller pulse timing, and
         // keeping the latest occurrence of each page must never mix captures.
-        for other in 0..photo::CAPTURE_PAGE_COUNT {
+        for other in 0..self.timing_capture.page_count() {
             if other != page {
                 self.timing_capture.print_page(other);
             }
@@ -2167,6 +2389,12 @@ impl Scene for HardwareTests {
             if ctx.just_pressed(button::CROSS) {
                 match entries[self.menu_cursor].1 {
                     MenuAction::RunFullSuite => {
+                        self.capture_flags = photo::blocks::CONFORMANCE;
+                        self.run_full_suite();
+                        self.enter_mode(Mode::TimingScan);
+                    }
+                    MenuAction::RunFullSuiteCharacterisation => {
+                        self.capture_flags = photo::blocks::FULL;
                         self.run_full_suite();
                         self.enter_mode(Mode::TimingScan);
                     }
@@ -2196,7 +2424,7 @@ impl Scene for HardwareTests {
             && ctx.just_pressed(button::LEFT)
         {
             let pages = if matches!(self.mode, Mode::TimingScan) {
-                timing_page_count()
+                self.timing_capture.page_count()
             } else {
                 page_count_for_mode(self.mode)
             };
@@ -2213,7 +2441,7 @@ impl Scene for HardwareTests {
             && ctx.just_pressed(button::RIGHT)
         {
             let pages = if matches!(self.mode, Mode::TimingScan) {
-                timing_page_count()
+                self.timing_capture.page_count()
             } else {
                 page_count_for_mode(self.mode)
             };
