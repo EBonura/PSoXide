@@ -122,7 +122,7 @@ struct Mats {
     floor: Option<ResourceId>,
     wall: Option<ResourceId>,
     ceiling: Option<ResourceId>,
-    /// True builds the kit enclosed. Default is open.
+    /// True builds the kit enclosed. Default is roofed.
     ///
     /// Pieces still declare whether they *would* be roofed, because a stair
     /// shaft is open for a structural reason rather than a stylistic one, and
@@ -276,10 +276,10 @@ fn main() {
     // Picked by eye off a decoded contact sheet, not by name: three that read
     // apart at PS1 resolution. Mottled round stones underfoot, dark rectangular
     // masonry on the walls, pale brick overhead.
-    // Open by default: the maps these pieces are for have no ceilings, and a
-    // roof is two triangles a cell you would never see. `gen-prefab-kit roofed`
-    // puts them back for an enclosed dungeon.
-    let roofed = std::env::args().any(|a| a == "roofed" || a == "--roofed");
+    // Roofed by default: a prefab should arrive as a complete room. The open
+    // variant remains useful for outdoor maps, but it must be requested
+    // explicitly rather than silently omitting half of the enclosure.
+    let roofed = !std::env::args().any(|a| a == "open" || a == "--open");
     let m = Mats {
         floor: pick("COBBLES_1A Material"),
         wall: pick("BLOCK_1A Material"),

@@ -279,9 +279,203 @@ pub fn prefab_path(name: &str) -> PathBuf {
     prefabs_dir().join(format!("{}.ron", project_file_stem(name)))
 }
 
-/// Every `.ron` under [`prefabs_dir`], sorted. Missing directory is empty,
-/// not an error: the first save creates it.
+/// The starter kit, embedded so it travels with the binary.
+///
+/// [`prefabs_dir`] resolves to the source tree only when the source tree is
+/// there; a shipped build or a `PSOXIDE_PROJECTS_DIR` override lands on an
+/// empty directory instead, so a fresh install had a prefab browser with
+/// nothing in it. Embedding the kit is what makes "every new project starts
+/// with the prefabs" true off the source tree as well as on it.
+const PREFAB_KIT: &[(&str, &str)] = &[
+    ("arena_5x5", include_str!("../../../prefabs/arena_5x5.ron")),
+    (
+        "balcony_hall_7x7",
+        include_str!("../../../prefabs/balcony_hall_7x7.ron"),
+    ),
+    (
+        "boss_arena_9x9",
+        include_str!("../../../prefabs/boss_arena_9x9.ron"),
+    ),
+    (
+        "canyon_3x9",
+        include_str!("../../../prefabs/canyon_3x9.ron"),
+    ),
+    (
+        "connector_corner",
+        include_str!("../../../prefabs/connector_corner.ron"),
+    ),
+    (
+        "connector_crossroads",
+        include_str!("../../../prefabs/connector_crossroads.ron"),
+    ),
+    (
+        "connector_diagonal",
+        include_str!("../../../prefabs/connector_diagonal.ron"),
+    ),
+    (
+        "connector_long",
+        include_str!("../../../prefabs/connector_long.ron"),
+    ),
+    (
+        "connector_straight",
+        include_str!("../../../prefabs/connector_straight.ron"),
+    ),
+    (
+        "connector_t",
+        include_str!("../../../prefabs/connector_t.ron"),
+    ),
+    (
+        "crossroads_hall_5x5",
+        include_str!("../../../prefabs/crossroads_hall_5x5.ron"),
+    ),
+    (
+        "hall_pillared_7x7",
+        include_str!("../../../prefabs/hall_pillared_7x7.ron"),
+    ),
+    (
+        "lantern_chamber",
+        include_str!("../../../prefabs/lantern_chamber.ron"),
+    ),
+    (
+        "octagon_chamber_5x5",
+        include_str!("../../../prefabs/octagon_chamber_5x5.ron"),
+    ),
+    (
+        "rotunda_9x9",
+        include_str!("../../../prefabs/rotunda_9x9.ron"),
+    ),
+    (
+        "spiral_stair_3x3",
+        include_str!("../../../prefabs/spiral_stair_3x3.ron"),
+    ),
+    (
+        "stair_double",
+        include_str!("../../../prefabs/stair_double.ron"),
+    ),
+    ("stair_run", include_str!("../../../prefabs/stair_run.ron")),
+    (
+        "stair_switchback",
+        include_str!("../../../prefabs/stair_switchback.ron"),
+    ),
+    (
+        "treasure_alcove",
+        include_str!("../../../prefabs/treasure_alcove.ron"),
+    ),
+];
+
+/// Names of every embedded kit piece.
+pub fn prefab_kit_names() -> impl Iterator<Item = &'static str> {
+    PREFAB_KIT.iter().map(|(name, _)| *name)
+}
+
+/// Embedded body for a kit piece, if it is one.
+pub fn prefab_kit_body(name: &str) -> Option<&'static str> {
+    PREFAB_KIT
+        .iter()
+        .find(|(kit_name, _)| *kit_name == name)
+        .map(|(_, body)| *body)
+}
+
+/// Write any kit piece that is not on disk yet, creating the directory.
+///
+/// Missing pieces are restored rather than overwriting, so an edited or
+/// deleted piece stays the user's decision for as long as the file exists,
+/// and a file the user removed comes back on the next listing. That is the
+/// trade for having the kit always available; deleting a stock piece for good
+/// is not currently expressible.
+pub fn ensure_prefab_kit() -> std::io::Result<()> {
+    let root = prefabs_dir();
+    std::fs::create_dir_all(&root)?;
+    for (name, body) in PREFAB_KIT {
+        let path = root.join(format!("{name}.ron"));
+        if !path.exists() {
+            std::fs::write(&path, body)?;
+            continue;
+        }
+
+        // The original embedded kit shipped completely open. Upgrade only
+        // that recognisable legacy shape: a stock piece with no ceilings at
+        // all. Copying ceilings cell-by-cell preserves any walls, floors, or
+        // lights the user changed locally, and the presence of even one
+        // authored ceiling makes the migration leave the file alone.
+        let Ok(mut existing) = Prefab::load_from_path(&path) else {
+            continue;
+        };
+        let Ok(current) = ron::from_str::<Prefab>(body) else {
+            continue;
+        };
+        if upgrade_legacy_open_kit_prefab(&mut existing, &current) {
+            existing
+                .save_to_path(&path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Add the current stock ceilings to an older all-open copy of the same kit
+/// piece. Returns whether the existing prefab changed.
+fn upgrade_legacy_open_kit_prefab(existing: &mut Prefab, current: &Prefab) -> bool {
+    if existing.name != current.name
+        || existing.sector_size != current.sector_size
+        || existing.width != current.width
+        || existing.height != current.height
+        || existing.floors.len() != current.floors.len()
+    {
+        return false;
+    }
+
+    let mut populated = 0usize;
+    let mut has_ceiling = false;
+    for sector in existing.cells().filter_map(|cell| cell.sector.as_ref()) {
+        populated += 1;
+        has_ceiling |= sector.ceiling.is_some();
+    }
+    if populated == 0 || has_ceiling {
+        return false;
+    }
+
+    let mut changed = false;
+    for (floor_index, floor) in existing.floors.iter_mut().enumerate() {
+        let Some(current_floor) = current.floors.get(floor_index) else {
+            continue;
+        };
+        for cell in &mut floor.cells {
+            let Some(sector) = cell.sector.as_mut() else {
+                continue;
+            };
+            let Some(ceiling) = current_floor
+                .cells
+                .iter()
+                .find(|candidate| candidate.offset == cell.offset)
+                .and_then(|candidate| candidate.sector.as_ref())
+                .and_then(|sector| sector.ceiling.as_ref())
+            else {
+                continue;
+            };
+            if let Some(material) = ceiling.material {
+                if let Some(name) = current.materials.get(&material.raw()) {
+                    existing
+                        .materials
+                        .entry(material.raw())
+                        .or_insert_with(|| name.clone());
+                }
+            }
+            sector.ceiling = Some(ceiling.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Every `.ron` under [`prefabs_dir`], sorted.
+///
+/// Seeds the embedded starter kit first, so every project sees the stock
+/// pieces whether or not it was created from the source tree. A seed failure
+/// is not fatal: a read-only prefabs directory should still list whatever is
+/// already there.
 pub fn list_prefabs() -> std::io::Result<Vec<PathBuf>> {
+    let _ = ensure_prefab_kit();
     let root = prefabs_dir();
     if !root.is_dir() {
         return Ok(Vec::new());
@@ -351,5 +545,65 @@ pub fn remap_sector_materials(
         for wall in sector.walls.get_mut(direction) {
             wall.material = wall.material.and_then(remap);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_open_stock_prefab_gains_current_ceilings_without_replacing_geometry() {
+        let current: Prefab = ron::from_str(
+            prefab_kit_body("arena_5x5").expect("arena is embedded in the stock kit"),
+        )
+        .expect("embedded arena parses");
+        let mut legacy = current.clone();
+        for sector in legacy
+            .floors
+            .iter_mut()
+            .flat_map(|floor| floor.cells.iter_mut())
+            .filter_map(|cell| cell.sector.as_mut())
+        {
+            sector.ceiling = None;
+        }
+        let custom_wall_height = 4096;
+        let wall = legacy
+            .floors
+            .iter_mut()
+            .flat_map(|floor| floor.cells.iter_mut())
+            .filter_map(|cell| cell.sector.as_mut())
+            .flat_map(|sector| sector.walls.north.iter_mut())
+            .next()
+            .expect("arena has a north wall");
+        wall.heights[2] = custom_wall_height;
+
+        assert!(upgrade_legacy_open_kit_prefab(&mut legacy, &current));
+        assert_eq!(
+            legacy
+                .cells()
+                .filter_map(|cell| cell.sector.as_ref())
+                .filter(|sector| sector.ceiling.is_some())
+                .count(),
+            current
+                .cells()
+                .filter_map(|cell| cell.sector.as_ref())
+                .filter(|sector| sector.ceiling.is_some())
+                .count()
+        );
+        assert_eq!(
+            legacy
+                .cells()
+                .filter_map(|cell| cell.sector.as_ref())
+                .flat_map(|sector| sector.walls.north.iter())
+                .next()
+                .expect("custom wall survives")
+                .heights[2],
+            custom_wall_height
+        );
+        assert!(
+            !upgrade_legacy_open_kit_prefab(&mut legacy, &current),
+            "the roof migration only runs once"
+        );
     }
 }
