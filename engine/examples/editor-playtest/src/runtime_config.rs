@@ -277,6 +277,34 @@ pub(super) fn fallback_surface_options() -> WorldSurfaceOptions {
         .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
+/// Room surface options for an ACTOR standing in that room.
+///
+/// Actors and the floor sort into the same ordering table by depth, and a
+/// painter's algorithm cannot resolve a character standing ON a surface: with
+/// a low camera the tile in front of her feet is genuinely nearer than her
+/// torso, so it correctly wins the depth test and slices her on screen. No
+/// sort-key refinement fixes that; splitting each tile into two per-triangle
+/// leaves was measured to change nothing.
+///
+/// Tomb Raider avoids it structurally, drawing a room's geometry and then the
+/// objects in that room, so an actor never competes with the floor it stands
+/// on. This is that priority expressed as a depth offset: pull the actor
+/// toward the camera by half a sector, which is the most a tile's centre key
+/// can sit in front of a character standing on it. Derived from the room's own
+/// sector size so it scales with the geometry instead of being tuned.
+pub(super) fn actor_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
+    let clearance = i32::from(record.sector_size) / 2;
+    room_surface_options(record).with_depth_bias(-clearance)
+}
+
+/// [`actor_surface_options`] for the room an actor currently occupies.
+pub(super) fn current_actor_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
+    ROOMS
+        .get(room_index.to_usize())
+        .map(actor_surface_options)
+        .unwrap_or_else(fallback_surface_options)
+}
+
 pub(super) fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
     ROOMS
         .get(room_index.to_usize())
