@@ -2034,13 +2034,12 @@ pub enum ResourceData {
         /// Project-relative source path.
         source_path: String,
     },
-    /// Reusable geometry piece from the shared library
-    /// (`editor/prefabs/*.ron`).
+    /// Legacy project-local pointer to a shared prefab.
     ///
-    /// A path rather than an inlined copy: prefabs are deliberately global
-    /// across projects, so a piece edited once should update everywhere
-    /// rather than fork per project. The resource exists so the browser can
-    /// list and preview the library; stamping still reads the file.
+    /// Kept only so projects written by the old "Sync Library to Resources"
+    /// command still deserialize. [`ProjectDocument::normalize_loaded`]
+    /// removes these rows immediately; the editor lists `prefabs_dir()`
+    /// directly and never writes library paths to `project.ron`.
     Prefab {
         /// Path to the `.ron`, resolved like every other resource path.
         source_path: String,

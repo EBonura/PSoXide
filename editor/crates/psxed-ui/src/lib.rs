@@ -415,6 +415,9 @@ pub struct EditorWorkspace {
     floating_geometry: Option<FloatingGeometryPlacement>,
     /// Name typed into the Prefabs menu for the next "Save Selection".
     prefab_name: String,
+    /// Shared editor-library prefabs, cached outside project data. Refreshed
+    /// after saves and on explicit request so panel paint never hits disk.
+    prefab_library: Vec<PrefabLibraryEntry>,
     /// What the next paint click would target. Cell variant fires
     /// for floor / ceiling / erase / place; Wall variant fires for
     /// PaintWall. World-cell coords let the preview track cells
@@ -724,8 +727,14 @@ struct ResourceClick {
     modifiers: egui::Modifiers,
 }
 
+#[derive(Debug, Clone)]
+struct PrefabDragPayload {
+    path: PathBuf,
+}
+
 enum ProjectFileRowAction {
     Select(ResourceClick),
+    SelectPrefab(PathBuf),
     ToggleFolder(String),
 }
 
@@ -1538,6 +1547,9 @@ struct SelectionState {
     node_selection_anchor: Option<NodeId>,
     /// Primary selected resource (content browser / inspector).
     selected_resource: Option<ResourceId>,
+    /// Shared prefab selected in the filesystem or content browser. This is
+    /// editor state only and is never serialized into `project.ron`.
+    selected_prefab: Option<PathBuf>,
     /// Multi-selection of resources.
     selected_resources: HashSet<ResourceId>,
     /// Anchor for Shift-click resource range selection.
@@ -1600,6 +1612,7 @@ impl SelectionState {
         )
         .unwrap_or(NodeId::ROOT);
         self.selected_resource = None;
+        self.selected_prefab = None;
         self.selected_resources.clear();
         self.resource_selection_anchor = None;
         self.clear_primitives();
@@ -1629,6 +1642,7 @@ impl SelectionState {
             order,
             id,
         );
+        self.selected_prefab = None;
         self.selected_node = NodeId::ROOT;
         self.selected_nodes.clear();
         self.node_selection_anchor = None;
@@ -2281,7 +2295,8 @@ impl ResourceFilter {
             Self::Character => matches!(data, ResourceData::Character(_)),
             Self::Weapon => matches!(data, ResourceData::Weapon(_)),
             Self::Mesh => matches!(data, ResourceData::Mesh { .. }),
-            Self::Prefab => matches!(data, ResourceData::Prefab { .. }),
+            // Shared prefabs are virtual browser entries, not project data.
+            Self::Prefab => false,
             Self::Room => matches!(data, ResourceData::Scene { .. }),
             Self::Other => matches!(
                 data,
@@ -2469,6 +2484,7 @@ impl EditorWorkspace {
             .active_ui_scene()
             .map(|scene| scene.root)
             .unwrap_or(UiNodeId::ROOT);
+        let prefab_library = load_prefab_library().unwrap_or_default();
         Self {
             project,
             project_dir,
@@ -2482,6 +2498,7 @@ impl EditorWorkspace {
                 selected_nodes: HashSet::new(),
                 node_selection_anchor: None,
                 selected_resource: None,
+                selected_prefab: None,
                 selected_resources: HashSet::new(),
                 resource_selection_anchor: None,
                 selected_sector: None,
@@ -2503,6 +2520,7 @@ impl EditorWorkspace {
             validation_issue_rooms: HashSet::new(),
             floating_geometry: None,
             prefab_name: String::new(),
+            prefab_library,
             paint_target_preview: None,
             last_paint_stamp: None,
             wall_paint_shape: WallPaintShape::Cardinal,

@@ -21,9 +21,11 @@ fn starter_project_emits_player_controller_and_character() {
         CharacterAnimationAction::Idle,
         CharacterAnimationAction::Walk,
         CharacterAnimationAction::Run,
-        CharacterAnimationAction::Roll,
         CharacterAnimationAction::LightAttack,
         CharacterAnimationAction::HeavyAttack,
+        CharacterAnimationAction::ComboAttack,
+        CharacterAnimationAction::Intro,
+        CharacterAnimationAction::HitReact,
     ] {
         assert_ne!(
             character.action_clips[action.to_index()],

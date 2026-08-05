@@ -178,11 +178,11 @@ impl PsxBlendMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaterialFaceSidedness {
     /// Render the face's authored/front winding only.
+    #[default]
     Front,
     /// Render only the opposite side.
     Back,
     /// Render both sides.
-    #[default]
     Both,
 }
 
@@ -975,12 +975,12 @@ impl MaterialResource {
                 },
             },
             secondary_layer: None,
-            face_sidedness: MaterialFaceSidedness::Both,
+            face_sidedness: MaterialFaceSidedness::Front,
             active_version_id: MaterialVersionId::ORIGINAL,
             active_version_name: default_material_version_name(),
             versions: Vec::new(),
             legacy_texture: None,
-            double_sided: true,
+            double_sided: false,
         }
     }
 
@@ -1033,19 +1033,17 @@ impl MaterialResource {
                 },
             },
             secondary_layer: None,
-            face_sidedness: MaterialFaceSidedness::Both,
+            face_sidedness: MaterialFaceSidedness::Front,
             active_version_id: MaterialVersionId::ORIGINAL,
             active_version_name: default_material_version_name(),
             versions: Vec::new(),
             legacy_texture: None,
-            double_sided: true,
+            double_sided: false,
         }
     }
 
-    /// Resolved sidedness. Missing `face_sidedness` defaults to
-    /// `Both` so old projects keep matching the editor preview, while
-    /// legacy `double_sided = true` still upgrades an explicit/front
-    /// value to two-sided.
+    /// Resolved sidedness. Missing `face_sidedness` defaults to `Front`, while
+    /// legacy `double_sided = true` still upgrades that value to two-sided.
     pub const fn sidedness(&self) -> MaterialFaceSidedness {
         if self.double_sided && matches!(self.face_sidedness, MaterialFaceSidedness::Front) {
             MaterialFaceSidedness::Both

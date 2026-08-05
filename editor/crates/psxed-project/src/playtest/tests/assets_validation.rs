@@ -303,7 +303,7 @@ fn cook_to_dir_writes_manifest_rooms_and_textures() {
         .is_file());
     assert!(dir
         .join(MODELS_DIRNAME)
-        .join("model_000_aletha_delivered")
+        .join("model_000_aletha_uthana")
         .join("atlas.psxt")
         .is_file());
 
