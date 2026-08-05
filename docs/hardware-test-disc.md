@@ -17,7 +17,7 @@ same id may name two different measurements. Baselines are named by version
 rather than date. The bump rule and the full history of what each version
 changed are in [hardware-test-versions.md](hardware-test-versions.md).
 
-Current: **v1.8**, schema PX7. Not comparable with v0.18 captures, whose timing
+Current: **v1.14**, schema PX8. Not comparable with v0.18 captures, whose timing
 was sampled without interrupt masking.
 
 ## Test tiers
@@ -29,7 +29,7 @@ leaving hardware state behind?**
 scans, 129 timing records (CPU, GTE, DMA, CD, CD-DA contention, GPU fill rate,
 MDEC, SIO) and 192 raw precision values including console identity and 22
 bit-exact raster hashes. These run only when `RUN ALL TESTS + CAPTURE` is
-selected, need no further controller input, and mirror every PX7 page to the
+selected, need no further controller input, and mirror every PX8 page to the
 debug TTY. This is what `make hwtest-diff` gates and what a checked-in baseline
 describes.
 
@@ -252,10 +252,11 @@ hardware state until the operator chooses an entry. Menus fit without scrolling:
 
    | Root | Contains |
    |---|---|
-   | `RUN ALL TESTS + CAPTURE` | Runs the standing conformance battery and builds the five-page PX7 capture |
+   | `RUN ALL TESTS + CAPTURE` | Runs the standing conformance battery and builds the PX8 conformance capture: verdicts, and one record per failing case |
+   | `FULL CHARACTERISATION CAPTURE` | The same run, but the capture also carries timing envelopes, precision values and the register snapshot. Use when establishing a reference, not for a routine check |
    | `CONTROLLER TEST (P1 + P2)` | Live two-port button, stick and analog-drift diagnostic |
    | `MEMORY CARD (SAFE)` | Non-destructive card diagnostic with guarded write actions |
-   | `VIEW CAPTURE (QR PAGES)` | Back to the five QR symbols |
+   | `VIEW CAPTURE (QR PAGES)` | Back to the QR symbols the last capture produced |
    | `RESULTS BY SECTION` | All checks, then CPU/RAM/IRQ/DMA/TIMERS/GPU/GTE/SPU/CDROM/SIO |
    | `HARDWARE SCANS` | CPU sweep, GTE sweep, SPU register map |
    | `TARGETED PROBES` | Controller SIO timing, CD-chain and PA1-PA5 audio probes |
@@ -418,10 +419,29 @@ a 512-sector seek, so its seek time is distance-independent. Single and double
 speed differ by exactly 2.0x. Both are exactly the kind of claim a console
 capture can confirm or demolish.
 
-## Payload schema `PX7`
+## Payload schema `PX8`
 
-PX7 supersedes PX6: four pages instead of three, a median column beside each
-min/max, explicit per-record ids, and 128 record slots.
+PX8 supersedes PX7: every block after the header is optional, behind a flags
+byte, and pages are counted from the payload rather than fixed per schema.
+
+PX7 always carried everything. Timing envelopes and precision values are 71% of
+that payload and they are *characterisation*: there is no expected value to
+check them against, silicon is the reference. A routine run does not need them,
+and as the suite grows towards covering every chip, shipping them on every
+capture is what limits how many cases can be added.
+
+So a **conformance** capture carries the status bitmap and one record per
+FAILING case -- 383 bytes and a single QR at 173 cases, and still one QR at a
+thousand, because a passing case costs three bits and nothing else. A
+**characterisation** capture carries the lot, in PX7's field order, so an
+archived `px7-*` reference still describes the same thing a full PX8 does.
+
+A failure record names its case by `TestSpec::id`, not by array position, so a
+capture archived today still points at the same test after the array grows. The
+ids are checked for uniqueness at compile time.
+
+PX7 itself superseded PX6: four pages instead of three, a median column beside
+each min/max, explicit per-record ids, and 128 record slots.
 
 The median is not decoration. With five samples reduced to two numbers, a
 min/max gap cannot distinguish one stray interrupt from a genuinely bimodal
@@ -587,9 +607,10 @@ bus/SPU/GTE time so unrelated instruction sequences observe the same effects.
 
 There are two independent readout paths carrying the *same* bytes.
 
-**QR, five pages.** The proven path. Scan each page, keep the
-`PX7/<page>/<chunk>/C:<crc>` text. Self-validating and visible, but paged and
-manual.
+**QR.** The proven path. Scan each page, keep the `PX8/<page>/<chunk>/C:<crc>`
+text. Self-validating and visible, but paged and manual. A conformance capture
+is one page; a characterisation capture is six. The page header carries the
+total, so there is no fixed count to remember.
 
 **Audio link.** The disc streams the whole 2,637-byte payload out of the SPU as
 binary FSK and loops it in hardware, forever, with no CPU involvement. Point a
