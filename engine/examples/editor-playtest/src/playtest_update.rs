@@ -250,6 +250,14 @@ impl Playtest {
             }
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
+            // First spawn plays the intro with control locked out for the
+            // clip's length. This has to arm HERE rather than in
+            // `init_gameplay`: the streaming load sits between the two, and
+            // a lock armed against tick zero has already expired by the time
+            // the first gameplay tick runs. `start_player_anim_action` is a
+            // no-op when no Intro clip is bound, so a character without one
+            // starts in Idle exactly as before.
+            self.start_player_anim_action(PlayerAnim::Intro, ctx.sim_tick, ctx.video_hz);
         }
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
@@ -382,6 +390,8 @@ impl Playtest {
                 self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.video_hz)
             } else if ctx.just_pressed(HEAVY_ATTACK_BUTTON) {
                 self.start_player_anim_action(PlayerAnim::HeavyAttack, now, ctx.video_hz)
+            } else if ctx.just_pressed(COMBO_ATTACK_BUTTON) {
+                self.start_player_anim_action(PlayerAnim::ComboAttack, now, ctx.video_hz)
             } else {
                 false
             };
@@ -490,7 +500,7 @@ impl Playtest {
             if water.depth >= water.lethal_depth && submerged {
                 self.water_death_ticks_remaining = water.death_delay_ticks.max(1);
                 self.player_health = 0;
-                self.switch_player_anim(PlayerAnim::Death, now);
+                self.switch_player_anim(PlayerAnim::Death, now, ctx.video_hz);
                 self.anim_lock_until_tick = now.saturating_add(u32::from(water.death_delay_ticks));
                 self.lock_target = None;
                 self.soft_lock_target = None;
@@ -505,7 +515,7 @@ impl Playtest {
             player_anim_from_motor(motor_frame.anim)
         };
         if new_state != self.anim_state {
-            self.switch_player_anim(new_state, now);
+            self.switch_player_anim(new_state, now, ctx.video_hz);
             if new_state == PlayerAnim::Roll {
                 telemetry::debug_log("player roll:start");
             }

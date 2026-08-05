@@ -201,7 +201,13 @@ impl Playtest {
             return;
         };
         let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
-        let spec = if self.anim_state == PlayerAnim::HeavyAttack {
+        // ComboAttack is the heaviest swing the player has, so it takes the
+        // heavy scaling too; a distinct multiplier would be a tuning change,
+        // not plumbing.
+        let spec = if matches!(
+            self.anim_state,
+            PlayerAnim::HeavyAttack | PlayerAnim::ComboAttack
+        ) {
             spec.heavy()
         } else {
             spec

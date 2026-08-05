@@ -1,5 +1,23 @@
 use super::*;
 
+/// Crossfade length for a specific transition, rather than one number for
+/// every change of state. What reads well depends on BOTH ends: an attack
+/// must start crisply but settle slowly, and a gait change can afford a long
+/// fade only because the clips are phase-matched.
+fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
+    if player_anim_is_attack(to) || to.is_motor_fixed_action() {
+        // Entering a committed action: its first frames carry the read.
+        PLAYER_ANIM_BLEND_ACTION_TICKS
+    } else if player_anim_is_attack(from) || matches!(from, PlayerAnim::Intro) {
+        // Leaving one: a long swing needs somewhere to land.
+        PLAYER_ANIM_BLEND_ACTION_OUT_TICKS
+    } else if from.is_gait() && to.is_gait() {
+        PLAYER_ANIM_BLEND_GAIT_TICKS
+    } else {
+        PLAYER_ANIM_BLEND_LOCOMOTION_TICKS
+    }
+}
+
 impl Playtest {
     pub(super) fn water_cell_at(
         &self,
@@ -65,33 +83,75 @@ impl Playtest {
 
     /// Switch the player animation state, recording the outgoing
     /// pose so the renderer can crossfade instead of hard-cutting.
-    pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick) {
+    pub(super) fn switch_player_anim(&mut self, anim: PlayerAnim, now: SimTick, video_hz: VideoHz) {
         let old = self.anim_state;
         self.anim_blend_from = Some((old, now.saturating_sub(self.anim_start_tick), now));
+        // Gait to gait, enter the incoming cycle at the phase the outgoing one
+        // had reached. Cook-time alignment puts foot-down at frame 0 of every
+        // gait clip, so equal phase is the same point in the stride and the
+        // feet stay in step across the change. Backdating the start tick is
+        // how the phase is expressed: the clip reads as having begun earlier.
+        let carried = self.gait_phase_carry(old, anim, now, video_hz);
         self.anim_state = anim;
-        self.anim_start_tick = now;
+        self.anim_start_tick = SimTick::from_u32(now.as_u32().saturating_sub(carried));
+    }
+
+    /// Ticks to backdate the incoming gait clip by so it starts in phase with
+    /// the outgoing one. Zero for anything that is not gait-to-gait, and for
+    /// any clip whose duration cannot be resolved.
+    fn gait_phase_carry(
+        &self,
+        from: PlayerAnim,
+        to: PlayerAnim,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> u32 {
+        if !from.is_gait() || !to.is_gait() || from == to {
+            return 0;
+        }
+        let Some(character) = self.character else {
+            return 0;
+        };
+        let cycle = |anim: PlayerAnim| {
+            self.player_clip_duration_vblanks(
+                character,
+                character.clip_for(anim),
+                video_hz,
+                character.action_speed(anim.action()),
+                character.action_frame_range(anim.action()),
+            )
+            .filter(|ticks| *ticks > 0)
+        };
+        let (Some(out_cycle), Some(in_cycle)) = (cycle(from), cycle(to)) else {
+            return 0;
+        };
+        let local = now.saturating_sub(self.anim_start_tick) % out_cycle;
+        // Same fraction of the incoming cycle, in integer math.
+        ((u64::from(local) * u64::from(in_cycle)) / u64::from(out_cycle)) as u32
     }
 
     /// Resolve the active crossfade for this render tick, if any.
     ///
     /// Alpha ramps linearly over the window; attacks use the short
     /// window so combat stays snappy while locomotion soft-blends.
+    ///
+    /// The outgoing clip KEEPS PLAYING through the window: its local
+    /// tick advances with elapsed time rather than staying pinned to
+    /// the switch moment. Holding it still made a released walk freeze
+    /// mid-stride and slide into idle, because the fade was lerping
+    /// toward a static pose instead of one that was still moving.
+    /// Non-looping outgoing clips are safe to advance -- the phase
+    /// helper clamps them at their last frame.
     pub(super) fn player_anim_blend(&self, now: SimTick) -> Option<PlayerAnimBlend> {
         let (anim, local_tick, switch_tick) = self.anim_blend_from?;
-        let duration = if player_anim_is_attack(self.anim_state)
-            || self.anim_state.is_motor_fixed_action()
-        {
-            PLAYER_ANIM_BLEND_ACTION_TICKS
-        } else {
-            PLAYER_ANIM_BLEND_LOCOMOTION_TICKS
-        };
+        let duration = player_blend_ticks(anim, self.anim_state);
         let elapsed = now.saturating_sub(switch_tick);
         if elapsed >= duration {
             return None;
         }
         Some(PlayerAnimBlend {
             anim,
-            local_tick,
+            local_tick: local_tick.saturating_add(elapsed),
             alpha_q12: ((elapsed << 12) / duration.max(1)) as u16,
         })
     }
@@ -108,7 +168,7 @@ impl Playtest {
         if !self.lock_player_anim_action(character, anim, now, video_hz) {
             return false;
         }
-        self.switch_player_anim(anim, now);
+        self.switch_player_anim(anim, now, video_hz);
         if player_anim_is_attack(anim) {
             // A fresh swing gets a fresh one-hit-per-enemy mask.
             self.swing_hit_mask = 0;

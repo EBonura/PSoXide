@@ -1097,3 +1097,45 @@ run-hardware-tests: hardware-tests-disc
 
 run-hello-engine: hello-engine-disc
 	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-engine.cue cargo run -p frontend --release
+
+# ---------------------------------------------------------------------------
+# cortex_anim: the AI-generated locomotion/attack pack on Aletha.
+#
+# `cortex-anim-disc` cooks the project and burns the playtest ISO. The UI-pack
+# flags are NOT optional: persistent gameplay assets live in that pack, and a
+# disc built without them stalls on the loading screen with zero sectors read.
+#
+# `cortex-anim-shots` drives the disc headlessly through the menu and fires the
+# whole moveset, writing one PNG-able PPM per CORTEX_ANIM_SHOT_INTERVAL ticks.
+# Gameplay starts at route tick ~480; the press script is keyed to that.
+CORTEX_ANIM_PROJECT ?= projects/cortex_anim/project.ron
+CORTEX_ANIM_SHOT_DIR ?= /tmp/cortex-anim-shots
+CORTEX_ANIM_SHOT_INTERVAL ?= 3
+CORTEX_ANIM_STEPS ?= 450000000
+# tick:button[:hold] -- menu, then walk, run, light (R1), heavy (R2), combo (L2).
+CORTEX_ANIM_PRESS ?= 120:cross,200:cross,300:cross,420:cross,540:up:70,760:up:70,760:circle:70,980:r1:6,1150:r2:6,1430:l2:6
+
+cortex-anim-disc:
+	$(MAKE) cook-playtest PROJECT=$(CORTEX_ANIM_PROJECT)
+	$(MAKE) build-editor-playtest
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--volume PSOXIDE \
+		--cdtest-sectors 32 \
+		--world-pack-rooms-dir $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/stream_chunks \
+		--world-pack-order-file $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/world_pack_order.txt \
+		--ui-pack-dir $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/ui_stream_chunks \
+		--ui-pack-order-file $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/ui_pack_order.txt \
+		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
+
+cortex-anim-shots: cortex-anim-disc
+	rm -rf $(CORTEX_ANIM_SHOT_DIR) && mkdir -p $(CORTEX_ANIM_SHOT_DIR)
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
+		--embedded-playtest \
+		--steps $(CORTEX_ANIM_STEPS) \
+		--press "$(CORTEX_ANIM_PRESS)" \
+		--route-screenshot-dir $(CORTEX_ANIM_SHOT_DIR) \
+		--route-screenshot-interval $(CORTEX_ANIM_SHOT_INTERVAL)
+	@echo "[cortex-anim-shots] wrote $$(ls $(CORTEX_ANIM_SHOT_DIR) | wc -l | tr -d ' ') frames to $(CORTEX_ANIM_SHOT_DIR)"
