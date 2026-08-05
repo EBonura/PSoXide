@@ -524,7 +524,7 @@ HWTEST_CAPTURE  := build/hwtest-capture.log
 # version should overwrite rather than accumulate files. The capture date lives
 # in the file header.
 HWTEST_SUITE := $(shell sed -n 's/^const SUITE_VERSION: &str = "HWTEST v\(.*\)";/\1/p' engine/examples/hardware-tests/src/main.rs)
-HWTEST_BASELINE := docs/hardware-refs/px7-emulator-v$(HWTEST_SUITE).txt
+HWTEST_BASELINE := docs/hardware-refs/px8-emulator-v$(HWTEST_SUITE).txt
 HWTEST_STEPS    := 400000000
 
 # Always run a source-built emulator. `cargo run` guarantees that; invoking a
@@ -542,7 +542,7 @@ hwtest-capture: hardware-tests-disc
 		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
 		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
 		--steps $(HWTEST_STEPS) --pad-pulses '0x4000@25+3' > ../$(HWTEST_CAPTURE)
-	@echo "captured $$(grep -c 'px7' $(HWTEST_CAPTURE)) PX7 pages -> $(HWTEST_CAPTURE)"
+	@echo "captured $$(grep -c 'px8' $(HWTEST_CAPTURE)) PX8 page(s) -> $(HWTEST_CAPTURE)"
 
 HWTEST_CODE_BASELINE := docs/hardware-refs/hwtest-machine-code-v$(HWTEST_SUITE).txt
 
@@ -600,9 +600,9 @@ hwtest-baseline: hwtest-capture
 		echo "# git:       $$(git describe --always --dirty)"; \
 		echo "# guest exe: sha256:$$(shasum -a 256 $(EXAMPLE_OUT)/hardware-tests.exe | cut -c1-16)"; \
 		echo "# emulator:  frontend launch --steps $(HWTEST_STEPS) (menu Cross pulse)"; \
-		echo "# schema:    PX7, 5 pages"; \
+		echo "# schema:    PX8 conformance, $$(grep -c 'px8' $(HWTEST_CAPTURE)) page(s)"; \
 		echo "#"; \
-		grep 'px7' $(HWTEST_CAPTURE) | sed 's/^hardware-tests: px7 //'; \
+		grep 'px8' $(HWTEST_CAPTURE) | sed 's/^hardware-tests: px8 //'; \
 	} > $(HWTEST_BASELINE)
 	@echo "re-baselined $(HWTEST_BASELINE)"
 
