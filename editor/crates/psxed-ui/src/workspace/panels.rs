@@ -949,7 +949,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_filesystem_panel_body(&mut self, ui: &mut egui::Ui) {
-        let rows = project_filesystem_rows(&self.project);
+        let rows = project_filesystem_rows(&self.project, &self.prefab_library);
         let filter = self.file_filter.to_ascii_lowercase();
         let visible_rows =
             project_filesystem_display_rows(&rows, &filter, &self.collapsed_file_folders);
@@ -958,6 +958,7 @@ impl EditorWorkspace {
         let mut clicked_resource = None;
         let mut toggled_folder = None;
         let selected_resource = self.selection.selected_resource;
+        let selected_prefab = self.selection.selected_prefab.clone();
         let selected_resources = self.selection.selected_resources.clone();
         let collapsed_folders = self.collapsed_file_folders.clone();
         let file_scroll_height = (ui.available_height() - 28.0).max(24.0);
@@ -972,11 +973,15 @@ impl EditorWorkspace {
                         row,
                         selected_resource,
                         &selected_resources,
+                        selected_prefab.as_deref(),
                         &filter,
                         &collapsed_folders,
                     ) {
                         Some(ProjectFileRowAction::Select(click)) => {
                             clicked_resource = Some(click);
+                        }
+                        Some(ProjectFileRowAction::SelectPrefab(path)) => {
+                            self.replace_prefab_selection(path);
                         }
                         Some(ProjectFileRowAction::ToggleFolder(key)) => {
                             toggled_folder = Some(key);
@@ -1714,6 +1719,11 @@ impl EditorWorkspace {
 
                                 if self.active_workspace == WorkspaceView::Ui {
                                     self.draw_ui_inspector(ui);
+                                    return;
+                                }
+
+                                if let Some(path) = self.selection.selected_prefab.clone() {
+                                    self.draw_prefab_inspector(ui, &path);
                                     return;
                                 }
 

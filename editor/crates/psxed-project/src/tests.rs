@@ -877,6 +877,36 @@ fn material_versions_round_trip_and_legacy_materials_become_original() {
 }
 
 #[test]
+fn new_materials_default_to_front_faces() {
+    for material in [
+        MaterialResource::opaque(None),
+        MaterialResource::translucent(None, PsxBlendMode::Average),
+    ] {
+        assert_eq!(material.face_sidedness, MaterialFaceSidedness::Front);
+        assert_eq!(material.sidedness(), MaterialFaceSidedness::Front);
+        assert!(!material.double_sided);
+    }
+    assert_eq!(
+        MaterialFaceSidedness::default(),
+        MaterialFaceSidedness::Front
+    );
+}
+
+#[test]
+fn legacy_double_sided_materials_still_resolve_to_both_faces() {
+    let legacy = r#"(
+        texture_mode: SimpleImage,
+        blend_mode: Opaque,
+        tint: (128, 128, 128),
+        double_sided: true,
+    )"#;
+    let material: MaterialResource = ron::from_str(legacy).expect("legacy material parses");
+
+    assert_eq!(material.face_sidedness, MaterialFaceSidedness::Front);
+    assert_eq!(material.sidedness(), MaterialFaceSidedness::Both);
+}
+
+#[test]
 fn grid_direction_physical_edges_use_editor_z_convention() {
     assert_eq!(
         GridDirection::North.physical_edge(2, 3),
@@ -1519,10 +1549,21 @@ fn embedded_default_project_ron_deserializes() {
         .resources
         .iter()
         .any(|r| matches!(&r.data, ResourceData::Texture { .. })));
-    // Starter seeds the active player with the Aletha Delivered profile,
-    // its animation library, and material atlas. Resolve the character
-    // through the wired player controller rather than by resource name, so
-    // swapping the starter actor again only moves the path assertions.
+    let starter_materials: Vec<&MaterialResource> = project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::Material(material) => Some(material),
+            _ => None,
+        })
+        .collect();
+    assert!(!starter_materials.is_empty());
+    assert!(starter_materials.iter().all(|material| {
+        material.face_sidedness == MaterialFaceSidedness::Front && !material.double_sided
+    }));
+    // Starter seeds the active player with the Cortex animation project's
+    // Bonnie AI model and action map. Resolve the character through the wired
+    // player controller rather than assuming a particular resource id.
     let character_id = project
         .active_scene()
         .nodes()
@@ -1553,17 +1594,61 @@ fn embedded_default_project_ron_deserializes() {
         .expect("starter player model resource missing");
     assert!(model
         .model_path
-        .ends_with("aletha_delivered/aletha_delivered.psxmdl"));
+        .ends_with("aletha_uthana/aletha_uthana.psxmdl"));
     assert!(model
         .texture_path
         .as_deref()
-        .is_some_and(|path| path.ends_with("aletha_delivered.psxt")));
+        .is_some_and(|path| path.ends_with("aletha_uthana.psxt")));
     assert!(model.skeleton.is_some());
     assert_eq!(
         model.collision_radius,
         default_model_collision_radius_for_height(model.world_height)
     );
     assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+
+    let animation_set_id = character
+        .animation_set
+        .expect("starter character has an animation set");
+    let animation_set_resource = project
+        .resource(animation_set_id)
+        .expect("starter animation set resource missing");
+    assert_eq!(animation_set_resource.name, "bonnie_ai_set");
+    let ResourceData::AnimationSet(animation_set) = &animation_set_resource.data else {
+        panic!("starter animation set has the wrong resource kind");
+    };
+    for (action, stem) in [
+        (CharacterAnimationAction::Idle, "idle"),
+        (CharacterAnimationAction::Intro, "wake_up"),
+        (CharacterAnimationAction::HitReact, "hit_react"),
+        (CharacterAnimationAction::LightAttack, "light_attack"),
+        (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
+        (CharacterAnimationAction::ComboAttack, "combo_attack"),
+        (CharacterAnimationAction::Walk, "walk_fwd"),
+        (CharacterAnimationAction::WalkBackward, "walk_bwd"),
+        (CharacterAnimationAction::StrafeLeft, "walk_lft"),
+        (CharacterAnimationAction::StrafeRight, "walk_rgt"),
+        (CharacterAnimationAction::Run, "run_fwd"),
+        (CharacterAnimationAction::RunBackward, "run_bwd"),
+        (CharacterAnimationAction::RunStrafeLeft, "run_lft"),
+        (CharacterAnimationAction::RunStrafeRight, "run_rgt"),
+    ] {
+        let clip_id = animation_set
+            .action_clip(action)
+            .unwrap_or_else(|| panic!("starter animation set is missing {action:?}"));
+        let clip = project
+            .resource(clip_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip) => Some(clip),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("starter {action:?} clip resource missing"));
+        assert_eq!(
+            clip.psxanim_path,
+            format!("assets/animations/bonnie_ai/{stem}.psxanim")
+        );
+        assert_eq!(clip.target_model, Some(model_id));
+        assert_eq!(clip.skeleton, model.skeleton);
+    }
 }
 
 #[test]
@@ -4078,4 +4163,71 @@ fn an_authored_cross_section_portal_suppresses_the_automatic_one() {
             "link {a}->{b} has no return: {crossing:?}"
         );
     }
+}
+
+/// The embedded kit is the one on disk: a piece added to `editor/prefabs/`
+/// without being embedded would silently not ship, and an embedded body that
+/// no longer parses would seed a broken prefab into every new project.
+#[test]
+fn embedded_prefab_kit_matches_the_source_tree_and_parses() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("prefabs");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+        .expect("source-tree prefabs directory")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension()? == "ron").then(|| {
+                path.file_stem()
+                    .expect("stem")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect();
+    on_disk.sort();
+
+    let mut embedded: Vec<String> = crate::prefab_kit_names().map(str::to_string).collect();
+    embedded.sort();
+    assert_eq!(
+        embedded, on_disk,
+        "embedded kit and editor/prefabs/ disagree"
+    );
+
+    for name in crate::prefab_kit_names() {
+        let body = crate::prefab_kit_body(name).expect("embedded body");
+        let prefab = ron::from_str::<crate::Prefab>(body)
+            .unwrap_or_else(|e| panic!("embedded prefab {name} does not parse: {e}"));
+        assert!(
+            prefab
+                .cells()
+                .filter_map(|cell| cell.sector.as_ref())
+                .any(|sector| sector.ceiling.is_some()),
+            "embedded prefab {name} has no ceiling geometry"
+        );
+    }
+}
+
+#[test]
+fn legacy_prefab_resources_load_but_do_not_reserialize() {
+    let mut project = ProjectDocument::new("legacy-prefab-resource");
+    project.add_resource(
+        "Old Prefab Row",
+        ResourceData::Prefab {
+            source_path: "/shared/prefabs/old.ron".to_string(),
+        },
+    );
+    let legacy_ron = project.to_ron_string().expect("legacy project serializes");
+    assert!(legacy_ron.contains("Prefab"));
+
+    let loaded = ProjectDocument::from_ron_str(&legacy_ron).expect("legacy project loads");
+    assert!(!loaded
+        .resources
+        .iter()
+        .any(|resource| matches!(resource.data, ResourceData::Prefab { .. })));
+    assert!(!loaded
+        .to_ron_string()
+        .expect("normalized project serializes")
+        .contains("Prefab"));
 }

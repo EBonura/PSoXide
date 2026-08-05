@@ -83,6 +83,8 @@ impl EditorWorkspace {
                         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
                         let resource_drop_hovered =
                             response.dnd_hover_payload::<ResourceId>().is_some();
+                        let prefab_drop_hovered =
+                            response.dnd_hover_payload::<PrefabDragPayload>().is_some();
 
                         if !dnd_active
                             && (response.dragged_by(egui::PointerButton::Middle)
@@ -119,15 +121,22 @@ impl EditorWorkspace {
                         let transform =
                             ViewportTransform::new(rect, self.viewport_pan, self.viewport_zoom);
                         if self.floating_geometry.is_none() {
-                            if let Some(resource_id) = response
-                                .dnd_release_payload::<ResourceId>()
-                                .map(|payload| *payload)
+                            let dropped_resource = resource_drop_hovered
+                                .then(|| response.dnd_release_payload::<ResourceId>())
+                                .flatten()
+                                .map(|payload| *payload);
+                            let dropped_prefab = prefab_drop_hovered
+                                .then(|| response.dnd_release_payload::<PrefabDragPayload>())
+                                .flatten()
+                                .map(|payload| payload.path.clone());
+                            if let Some(pointer) =
+                                response.interact_pointer_pos().or(response.hover_pos())
                             {
-                                if let Some(pointer) =
-                                    response.interact_pointer_pos().or(response.hover_pos())
-                                {
-                                    let world = transform.screen_to_world(pointer);
+                                let world = transform.screen_to_world(pointer);
+                                if let Some(resource_id) = dropped_resource {
                                     self.drop_resource_2d(resource_id, world);
+                                } else if let Some(path) = dropped_prefab {
+                                    self.drop_prefab_2d(&path, world);
                                 }
                             }
                         }
@@ -246,7 +255,7 @@ impl EditorWorkspace {
                         );
                         draw_viewport_box_select_marquee(&painter, self.viewport_box_select_rect());
                         draw_axes_gizmo(&painter, rect);
-                        if resource_drop_hovered {
+                        if resource_drop_hovered || prefab_drop_hovered {
                             painter.rect_stroke(
                                 rect.shrink(2.0),
                                 2.0,
@@ -256,7 +265,11 @@ impl EditorWorkspace {
                             painter.text(
                                 rect.center_top() + Vec2::new(0.0, 16.0),
                                 Align2::CENTER_TOP,
-                                "Drop resource into scene",
+                                if prefab_drop_hovered {
+                                    "Drop prefab into scene"
+                                } else {
+                                    "Drop resource into scene"
+                                },
                                 FontId::proportional(13.0),
                                 STUDIO_ACCENT,
                             );

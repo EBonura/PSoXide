@@ -1211,7 +1211,8 @@ fn pick_entity_bound_includes_box_prop_bounds() {
 #[test]
 fn project_filesystem_rows_are_generated_from_resources() {
     let project = ProjectDocument::starter();
-    let rows = project_filesystem_rows(&project);
+    let prefab_library = load_prefab_library().expect("prefab library loads");
+    let rows = project_filesystem_rows(&project, &prefab_library);
     let material_name = project
         .resources
         .iter()
@@ -1228,12 +1229,16 @@ fn project_filesystem_rows_are_generated_from_resources() {
     assert!(rows
         .iter()
         .any(|row| row.name == material_name && row.resource.is_some()));
+    assert!(rows.iter().any(|row| {
+        row.key.starts_with("res://prefabs/") && row.resource.is_none() && row.prefab.is_some()
+    }));
 }
 
 #[test]
 fn collapsed_project_filesystem_folder_hides_children() {
     let project = ProjectDocument::starter();
-    let rows = project_filesystem_rows(&project);
+    let prefab_library = load_prefab_library().expect("prefab library loads");
+    let rows = project_filesystem_rows(&project, &prefab_library);
     let material_name = project
         .resources
         .iter()

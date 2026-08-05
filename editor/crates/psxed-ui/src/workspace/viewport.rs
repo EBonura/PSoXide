@@ -76,6 +76,7 @@ impl EditorWorkspace {
             allocate_centered_preview_rect(ui, "viewport_3d_canvas", egui::Sense::click_and_drag());
         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
         let resource_drop_hovered = response.dnd_hover_payload::<ResourceId>().is_some();
+        let prefab_drop_hovered = response.dnd_hover_payload::<PrefabDragPayload>().is_some();
 
         // Sims-style: primary button always belongs to the active
         // tool -- click-and-drag floors / walls / entities into the
@@ -185,12 +186,19 @@ impl EditorWorkspace {
                 self.track_floating_geometry_pointer_origin(origin);
             }
         }
-        let dropped_resource = response
-            .dnd_release_payload::<ResourceId>()
+        let dropped_resource = resource_drop_hovered
+            .then(|| response.dnd_release_payload::<ResourceId>())
+            .flatten()
             .map(|payload| *payload);
+        let dropped_prefab = prefab_drop_hovered
+            .then(|| response.dnd_release_payload::<PrefabDragPayload>())
+            .flatten()
+            .map(|payload| payload.path.clone());
         if self.floating_geometry.is_none() {
             if let Some(resource_id) = dropped_resource {
                 self.drop_resource_3d(resource_id, face_hit, hover_world);
+            } else if let Some(path) = dropped_prefab {
+                self.drop_prefab_3d(&path, face_hit, hover_world);
             }
         }
 
@@ -374,7 +382,7 @@ impl EditorWorkspace {
         self.draw_primitive_gizmo(&painter, rect, hovered_primitive_axis);
         self.draw_node_gizmo(&painter, rect, hovered_node_handle);
         draw_viewport_box_select_marquee(&painter, self.viewport_3d_box_select_rect());
-        if resource_drop_hovered {
+        if resource_drop_hovered || prefab_drop_hovered {
             painter.rect_stroke(
                 rect.shrink(2.0),
                 2.0,
@@ -384,7 +392,11 @@ impl EditorWorkspace {
             painter.text(
                 rect.center_top() + Vec2::new(0.0, 16.0),
                 Align2::CENTER_TOP,
-                "Drop resource into scene",
+                if prefab_drop_hovered {
+                    "Drop prefab into scene"
+                } else {
+                    "Drop resource into scene"
+                },
                 FontId::proportional(13.0),
                 STUDIO_ACCENT,
             );

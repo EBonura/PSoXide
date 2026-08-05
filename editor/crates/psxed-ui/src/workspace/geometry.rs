@@ -529,36 +529,36 @@ impl EditorWorkspace {
             self.save_selection_as_prefab(&name);
             ui.close_menu();
         }
-        if ui
-            .button("Sync Library to Resources")
-            .on_hover_text(
-                "List every prefab in the shared library under res://prefabs so it can be \
-                 browsed and previewed. Resources reference the file, so a piece edited once \
-                 updates everywhere.",
-            )
-            .clicked()
-        {
-            self.sync_prefab_resources();
+        if ui.button("Refresh Library").clicked() {
+            self.status = match self.refresh_prefab_library() {
+                Ok(count) => format!("Refreshed shared prefab library - {count} pieces"),
+                Err(error) => format!("Could not refresh prefab library: {error}"),
+            };
             ui.close_menu();
         }
         ui.separator();
-        // ponytail: re-read the directory each frame the menu is open. It is a
-        // handful of files and only while the menu is open; cache it if a
-        // prefab library ever gets big enough to notice.
-        let prefabs = psxed_project::list_prefabs().unwrap_or_default();
-        if prefabs.is_empty() {
+        if self.prefab_library.is_empty() {
             ui.weak("No prefabs saved yet");
             return;
         }
-        for path in prefabs {
-            let label = path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if ui.button(label).clicked() {
-                self.stamp_prefab(&path);
-                ui.close_menu();
+        let mut stamp = None;
+        for entry in &self.prefab_library {
+            if ui
+                .add_enabled(entry.prefab.is_some(), egui::Button::new(&entry.name))
+                .on_disabled_hover_text(
+                    entry
+                        .load_error
+                        .as_deref()
+                        .unwrap_or("Prefab could not be loaded"),
+                )
+                .clicked()
+            {
+                stamp = Some(entry.path.clone());
             }
+        }
+        if let Some(path) = stamp {
+            self.stamp_prefab(&path);
+            ui.close_menu();
         }
     }
 
@@ -668,68 +668,16 @@ impl EditorWorkspace {
         };
         let path = psxed_project::prefab_path(&prefab.name);
         self.status = match prefab.save_to_path(&path) {
-            Ok(()) => format!("Saved prefab to {}", path.display()),
+            Ok(()) => {
+                let refresh_note = self
+                    .refresh_prefab_library()
+                    .err()
+                    .map(|error| format!("; library refresh failed: {error}"))
+                    .unwrap_or_default();
+                format!("Saved prefab to {}{refresh_note}", path.display())
+            }
             Err(error) => format!("Could not save prefab: {error}"),
         };
-    }
-
-    /// Register every prefab in the shared library as a project resource.
-    ///
-    /// Resources hold the path, not a copy, so the library stays global and the
-    /// browser preview always shows what would actually stamp. Re-running is
-    /// safe: entries already pointing at a file are left alone, and entries
-    /// whose file has gone are removed.
-    pub(crate) fn sync_prefab_resources(&mut self) {
-        let files = psxed_project::list_prefabs().unwrap_or_default();
-        let mut added = 0usize;
-        let mut removed = 0usize;
-
-        let live: Vec<String> = files
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        let stale: Vec<ResourceId> = self
-            .project
-            .resources
-            .iter()
-            .filter(|r| {
-                matches!(&r.data, ResourceData::Prefab { source_path }
-                    if !live.contains(source_path))
-            })
-            .map(|r| r.id)
-            .collect();
-        for id in stale {
-            self.project.resources.retain(|r| r.id != id);
-            removed += 1;
-        }
-
-        for path in &files {
-            let source_path = path.to_string_lossy().into_owned();
-            let known = self.project.resources.iter().any(
-                |r| matches!(&r.data, ResourceData::Prefab { source_path: p } if *p == source_path),
-            );
-            if known {
-                continue;
-            }
-            let name = psxed_project::Prefab::load_from_path(path)
-                .map(|prefab| prefab.name)
-                .unwrap_or_else(|_| {
-                    path.file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| source_path.clone())
-                });
-            self.project
-                .add_resource(&name, ResourceData::Prefab { source_path });
-            added += 1;
-        }
-
-        if added > 0 || removed > 0 {
-            self.mark_dirty();
-        }
-        self.status = format!(
-            "Prefab resources synced - {added} added, {removed} removed, {} in library",
-            files.len()
-        );
     }
 
     /// Load a prefab and enter the floating preview loop with it. Materials
@@ -747,13 +695,6 @@ impl EditorWorkspace {
             self.status = "Select a section to stamp into".to_string();
             return;
         };
-        let (mut floors, unbound) = prefab.bound_floors(&self.project, room, self.active_floor);
-        if floors.is_empty() {
-            self.status = format!("Prefab '{}' has no floors", prefab.name);
-            return;
-        }
-        let cells = floors.remove(0).cells;
-        let extra_floors = floors;
         let grid = self.room_grid_view(room);
         let origin = grid
             .as_ref()
@@ -762,6 +703,76 @@ impl EditorWorkspace {
                 None => grid.origin,
             })
             .unwrap_or([0, 0]);
+        self.begin_prefab_stamp(prefab, room, origin);
+    }
+
+    pub(crate) fn drop_prefab_2d(&mut self, path: &Path, editor_world: [f32; 2]) {
+        let Some(room) = self.active_room_id() else {
+            self.status = "Drop the prefab over a section".to_string();
+            return;
+        };
+        let Some(origin) = self.floating_origin_from_2d_world(room, editor_world) else {
+            self.status = "Drop the prefab over a section".to_string();
+            return;
+        };
+        self.stamp_prefab_at(path, room, origin);
+    }
+
+    pub(crate) fn drop_prefab_3d(
+        &mut self,
+        path: &Path,
+        face_hit: Option<(FaceRef, [f32; 3])>,
+        ground_hit: Option<[f32; 2]>,
+    ) {
+        let Some(room) = face_hit
+            .map(|(face, _)| face.room)
+            .or_else(|| self.active_room_id())
+        else {
+            self.status = "Drop the prefab onto a section surface".to_string();
+            return;
+        };
+        let origin = face_hit
+            .and_then(|(face, _)| {
+                self.room_grid_view(face.room).map(|grid| {
+                    [
+                        grid.origin[0] + face.sx as i32,
+                        grid.origin[1] + face.sz as i32,
+                    ]
+                })
+            })
+            .or_else(|| self.floating_origin_from_3d_hover(room, None, ground_hit));
+        let Some(origin) = origin else {
+            self.status = "Drop the prefab onto a section surface".to_string();
+            return;
+        };
+        self.stamp_prefab_at(path, room, origin);
+    }
+
+    fn stamp_prefab_at(&mut self, path: &Path, room: NodeId, origin: [i32; 2]) {
+        let prefab = match psxed_project::Prefab::load_from_path(path) {
+            Ok(prefab) => prefab,
+            Err(error) => {
+                self.status = format!("Could not load prefab: {error}");
+                return;
+            }
+        };
+        self.begin_prefab_stamp(prefab, room, origin);
+    }
+
+    fn begin_prefab_stamp(
+        &mut self,
+        prefab: psxed_project::Prefab,
+        room: NodeId,
+        origin: [i32; 2],
+    ) {
+        let (mut floors, unbound) = prefab.bound_floors(&self.project, room, self.active_floor);
+        if floors.is_empty() {
+            self.status = format!("Prefab '{}' has no floors", prefab.name);
+            return;
+        }
+        let cells = floors.remove(0).cells;
+        let extra_floors = floors;
+        let grid = self.room_grid_view(room);
         let sector_size = grid.map_or(DEFAULT_WORLD_SECTOR_SIZE, |grid| grid.sector_size);
 
         let mut notes = Vec::new();
