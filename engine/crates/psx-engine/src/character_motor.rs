@@ -626,22 +626,38 @@ impl CharacterMotorState {
                 self.yaw = move_yaw;
                 CharacterMotorAnim::Walk
             };
-            // Sprint intent remains authoritative during lock-on in every
-            // movement direction. Walking keeps the combat-facing stance;
-            // sprinting temporarily faces travel while the camera and target
-            // lock remain active, matching the modern Souls control contract.
+            // Lock-on holds the combat stance and, following Dark Souls,
+            // allows sprint ONLY toward the target: you fast-walk sideways
+            // relative to it or charge straight at it. Lateral and backward
+            // movement therefore stay at walk speed on the walk-direction
+            // clips, which is why the game needs no run-strafe animations at
+            // all. Suppressing the sprint here also stops it draining stamina.
             let wants_sprint = input.sprint;
             self.update_sprint_gate(wants_sprint);
-            let sprinting = self.can_sprint(wants_sprint, config);
+            let locked_lateral = input.facing_yaw.is_some_and(|facing_yaw| {
+                !matches!(
+                    locked_locomotion_anim(facing_yaw, move_yaw),
+                    CharacterMotorAnim::Walk
+                )
+            });
+            let sprinting = !locked_lateral && self.can_sprint(wants_sprint, config);
             let base_speed = if sprinting {
                 config.run_speed
             } else {
                 config.walk_speed
             };
             let speed = move_mag.mul_i32(base_speed);
-            if sprinting {
-                self.yaw = move_yaw;
-            }
+            let directional_anim = match (sprinting, input.facing_yaw) {
+                // Locked sprinting only happens toward the target, so the
+                // forward run clip is the only one it can select.
+                (true, Some(_)) => CharacterMotorAnim::Run,
+                // Unlocked sprinting turns to face travel.
+                (true, None) => {
+                    self.yaw = move_yaw;
+                    CharacterMotorAnim::Run
+                }
+                (false, _) => directional_anim,
+            };
             let (moved, blocked) = self.try_move_vector(
                 collision,
                 move_x,
@@ -657,10 +673,11 @@ impl CharacterMotorState {
                 self.recover_stamina(config);
             }
 
+            // `directional_anim` already resolves the speed: plain `Run` when
+            // sprinting unlocked, the matching directional run clip when
+            // sprinting locked, and the walk-speed direction otherwise.
             let anim = if !moved && blocked {
                 CharacterMotorAnim::Idle
-            } else if sprinting {
-                CharacterMotorAnim::Run
             } else {
                 directional_anim
             };
@@ -1584,6 +1601,7 @@ fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorA
     }
 }
 
+
 fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Option<i32> {
     let height = floor_height_at(room, x, z)?;
     if radius <= 0 {
@@ -2146,7 +2164,11 @@ mod tests {
     }
 
     #[test]
-    fn locked_sprint_applies_to_every_movement_direction() {
+    fn locked_sprint_only_applies_toward_the_target() {
+        // Dark Souls' contract: locked on, you charge at full speed toward the
+        // target or fast-walk sideways relative to it. Sprint is suppressed for
+        // lateral and backward movement, so those keep walk speed AND the
+        // walk-direction clip, and no run-strafe animation is ever needed.
         let directions = [
             (Q12::ZERO, Q12::ONE),
             (Q12::ZERO, Q12::NEG_ONE),
@@ -2158,33 +2180,47 @@ mod tests {
             (Q12::NEG_ONE, Q12::NEG_ONE),
         ];
         for (move_x, move_z) in directions {
-            let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
-            let frame = motor.update(
-                None,
-                CharacterMotorInput {
-                    move_x,
-                    move_z,
-                    facing_yaw: Some(Angle::ZERO),
-                    sprint: true,
-                    ..CharacterMotorInput::default()
-                },
-                config(),
-            );
-            assert_eq!(frame.yaw, yaw_from_vector(move_x, move_z));
-            assert_eq!(frame.anim, CharacterMotorAnim::Run);
-            assert!(frame.sprinting);
-            assert!(frame.moved);
+            let input = |sprint| CharacterMotorInput {
+                move_x,
+                move_z,
+                facing_yaw: Some(Angle::ZERO),
+                sprint,
+                ..CharacterMotorInput::default()
+            };
+            let walked = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO)
+                .update(None, input(false), config());
+            let sprinted = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO)
+                .update(None, input(true), config());
+
+            // Facing is held on the target regardless of speed or direction.
+            assert_eq!(walked.yaw, Angle::ZERO);
+            assert_eq!(sprinted.yaw, Angle::ZERO);
+
+            if walked.anim == CharacterMotorAnim::Walk {
+                // Toward the target: sprint engages and swaps to the run clip.
+                assert!(sprinted.sprinting, "forward should sprint");
+                assert_eq!(sprinted.anim, CharacterMotorAnim::Run);
+            } else {
+                // Anything else: sprint is refused, clip and speed unchanged.
+                assert!(
+                    !sprinted.sprinting,
+                    "lateral/backward must not sprint under lock ({move_x:?}, {move_z:?})"
+                );
+                assert_eq!(sprinted.anim, walked.anim);
+                assert_eq!(sprinted.position, walked.position);
+            }
         }
     }
 
     #[test]
-    fn locked_forward_stick_can_sprint_while_camera_aligns_to_target() {
+    fn locked_lateral_stick_refuses_sprint_and_strafes_at_walk_speed() {
+        // Camera-relative forward can be lateral to the target for a few frames
+        // right after lock-on. The character strafes at walk speed facing the
+        // target rather than turning away into a run.
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
             None,
             CharacterMotorInput {
-                // Camera-relative forward can be lateral to the target for a
-                // few frames immediately after lock-on is acquired.
                 walk: 1,
                 move_x: Q12::ONE,
                 facing_yaw: Some(Angle::ZERO),
@@ -2194,10 +2230,10 @@ mod tests {
             config(),
         );
 
-        assert_eq!(frame.yaw, Angle::QUARTER);
-        assert_eq!(frame.anim, CharacterMotorAnim::Run);
-        assert!(frame.sprinting);
-        assert_eq!(frame.position.x, config().run_speed);
+        assert_eq!(frame.yaw, Angle::ZERO, "facing stays on the target");
+        assert_eq!(frame.anim, CharacterMotorAnim::StrafeRight);
+        assert!(!frame.sprinting, "no sprint sideways under lock");
+        assert_eq!(frame.position.x, config().walk_speed);
     }
 
     #[test]
