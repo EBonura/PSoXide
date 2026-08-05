@@ -371,7 +371,12 @@ impl Scene for Playtest {
                     self.gameplay_tick(ctx.sim_tick).as_u32(),
                     ctx.video_hz.as_u16(),
                 );
-                let actor_options = room_options;
+                // Actors clear the surface they stand on; see actor_surface_options.
+                let actor_options = actor_surface_options(room_record)
+                    .with_material_animation(
+                        self.gameplay_tick(ctx.sim_tick).as_u32(),
+                        ctx.video_hz.as_u16(),
+                    );
                 let room_camera = camera_for_room(camera, active);
                 let lighting = RuntimeRoomLighting {
                     room_index: active.index,
@@ -903,7 +908,7 @@ impl Scene for Playtest {
             if let Some(character) = self.character {
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
-                let actor_options = current_room_surface_options(self.room_index);
+                let actor_options = current_actor_surface_options(self.room_index);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
                 if !cfg!(feature = "actor-shadows-off") {
                     if let Some(shadow_material) = self.shadow_material {
