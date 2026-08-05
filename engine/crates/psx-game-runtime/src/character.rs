@@ -28,6 +28,9 @@ pub enum PlayerAnim {
     DashRight,
     LightAttack,
     HeavyAttack,
+    ComboAttack,
+    /// First-spawn intro, played once with control locked out.
+    Intro,
     Death,
 }
 
@@ -48,8 +51,20 @@ impl PlayerAnim {
             Self::DashRight => CharacterAnimationAction::DashRight,
             Self::LightAttack => CharacterAnimationAction::LightAttack,
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
+            Self::ComboAttack => CharacterAnimationAction::ComboAttack,
+            Self::Intro => CharacterAnimationAction::Intro,
             Self::Death => CharacterAnimationAction::Death,
         }
+    }
+
+    /// Whether this state is a stepping gait: a cyclic clip whose phase
+    /// means a position in the stride. Idle loops too, but has no stride,
+    /// so carrying phase into or out of it is meaningless.
+    pub const fn is_gait(self) -> bool {
+        matches!(
+            self,
+            Self::Walk | Self::WalkBackward | Self::StrafeLeft | Self::StrafeRight | Self::Run
+        )
     }
 
     /// Whether the motor drives this state as a fixed-length action.
@@ -63,20 +78,25 @@ impl PlayerAnim {
 
 /// Whether `anim` is one of the attack states.
 pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
-    matches!(anim, PlayerAnim::LightAttack | PlayerAnim::HeavyAttack)
+    matches!(
+        anim,
+        PlayerAnim::LightAttack | PlayerAnim::HeavyAttack | PlayerAnim::ComboAttack
+    )
 }
 
 /// Player clip-transition crossfade, resolved per frame by the caller.
 ///
-/// The outgoing animation state is frozen at `local_tick` (its
-/// clip-local tick at the switch moment); `alpha_q12` is the Q12
-/// weight of the INCOMING clip this frame. The renderer shows the
-/// pure incoming clip at `1 << 12` and the frozen outgoing pose at 0.
+/// The outgoing animation plays on at `local_tick` (its clip-local
+/// tick for this render tick, advanced by the caller); `alpha_q12` is
+/// the Q12 weight of the INCOMING clip this frame. The renderer shows
+/// the pure incoming clip at `1 << 12` and the pure outgoing pose at 0.
 #[derive(Copy, Clone, Debug)]
 pub struct PlayerAnimBlend {
     /// Outgoing animation state at the switch.
     pub anim: PlayerAnim,
-    /// Outgoing clip's frozen clip-local tick.
+    /// Outgoing clip's clip-local tick for THIS render tick. The
+    /// caller advances it across the crossfade so the outgoing clip
+    /// keeps playing while it fades out.
     pub local_tick: u32,
     /// Q12 weight of the incoming clip.
     pub alpha_q12: u16,
@@ -310,6 +330,13 @@ impl RuntimeCharacter {
                 .unwrap_or(idle),
             CharacterAnimationAction::Death => self
                 .action_clip(CharacterAnimationAction::Death)
+                .unwrap_or(idle),
+            // An unauthored intro degrades to idle: the spawn lock is
+            // skipped entirely when the clip is missing, so the player
+            // never loses control waiting for an animation that is not
+            // there.
+            CharacterAnimationAction::Intro => self
+                .action_clip(CharacterAnimationAction::Intro)
                 .unwrap_or(idle),
             CharacterAnimationAction::Turn => idle,
             // Locked-on fast locomotion degrades to the walk-speed strafe

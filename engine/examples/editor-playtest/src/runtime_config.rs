@@ -154,6 +154,7 @@ pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
 pub(super) const LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const HEAVY_ATTACK_BUTTON: u16 = button::R2;
+pub(super) const COMBO_ATTACK_BUTTON: u16 = button::L2;
 /// Player health pool at gameplay init (the phase-3 combat slice's
 /// sane cooked default -- the Character record carries no health
 /// field yet; authoring it is a future editor slice). Death/respawn

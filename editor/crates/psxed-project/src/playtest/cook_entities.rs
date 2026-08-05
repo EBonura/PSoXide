@@ -1323,7 +1323,10 @@ pub(crate) struct ModelBoundsJointTransform {
     pub(crate) translation: [i32; 3],
 }
 
-pub(crate) fn bake_model_clip_frame_bounds(
+/// Per-frame model bounds for a clip, including the grounding `floor_y`
+/// each frame would sit on. Public so import tooling can level a clip
+/// against the same definition of "floor" the cook uses.
+pub fn bake_model_clip_frame_bounds(
     model: &psx_asset::Model<'_>,
     animation: &psx_asset::Animation<'_>,
 ) -> Vec<PlaytestModelFrameBounds> {
