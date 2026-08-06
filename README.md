@@ -19,10 +19,9 @@ disc images, and run them in emulators or on original hardware.
 
 **Try it now:** the emulator runs in your browser on
 [the itch.io page](https://bonnie-studios.itch.io/psoxide). Press play and the
-[PSoXide Demo Disc](https://bonnie-studios.itch.io/psoxide-demo-disc) (ten
-homebrew programs, CD audio and all) streams in on demand; the SDK and engine
-samples are baked in under **Examples**, so there is something to run without
-supplying a disc. No install, no BIOS.
+PSoXide Demo Disc (ten homebrew programs, CD audio and all) streams in on
+demand; the SDK and engine samples are baked in under **Examples**, so there
+is something to run without supplying a disc. No install, no BIOS.
 
 The primary reference project is a dark, third-person PS1 action-RPG vertical
 slice. The public tools are built around proving the full workflow end to end.
