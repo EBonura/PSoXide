@@ -333,8 +333,12 @@ impl PhotoCapture {
     }
 
     /// The exact bytes the QR pages encode, for the audio link.
+    ///
+    /// Sliced to the encoded length: the backing array is cut for the
+    /// worst-case capture, and handing the whole thing to the audio link
+    /// once made its frame outgrow SPU RAM, so it silently sent nothing.
     pub(crate) fn binary(&self) -> &[u8] {
-        &self.binary
+        &self.binary[..self.binary_len as usize]
     }
 
     fn qr_module(&self, x: usize, y: usize) -> bool {
