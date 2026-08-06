@@ -81,6 +81,11 @@ export function wsFetch(id, url) {
 export function wsGunzip(id) {
   const s = _slots[id];
   if (!s || s.state !== 'done' || s.unzipping) return;
+  // Some CDNs (itch.io's, for one) serve a .gz file with Content-Encoding:
+  // gzip, so the browser has already inflated it by the time XHR hands it
+  // over. The magic bytes say which case this is; the FNV check downstream
+  // vouches for the payload either way.
+  if (!(s.buf.length > 2 && s.buf[0] === 0x1f && s.buf[1] === 0x8b)) return;
   s.unzipping = true;
   s.state = 'running';
   (async () => {
