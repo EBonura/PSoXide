@@ -1136,7 +1136,8 @@ impl ApplicationHandler for Shell {
                 // toggle (see `key_is_analog_button`), so quick-save/-load
                 // land on F5/F7 instead of the more conventional F5/F9.
                 // F8 toggles a deterministic port-1 recording saved below the
-                // current game's config directory.
+                // current game's config directory (web: reboots the game and
+                // records from cold boot; stopping downloads a CSV tape).
                 if state == ElementState::Pressed && !repeat {
                     match &logical_key {
                         Key::Named(NamedKey::F5) => self.state.save_state(),

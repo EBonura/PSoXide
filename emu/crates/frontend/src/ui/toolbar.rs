@@ -594,8 +594,16 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn recording_button_copy(recording: bool) -> (&'static str, &'static str) {
+    // Web recordings are cold-boot tapes: starting one reboots the game so
+    // the tape counts from poll 0, and stopping downloads it as a CSV.
     if recording {
-        ("STOP", "Stop and save input recording (F8)")
+        if cfg!(target_arch = "wasm32") {
+            ("STOP", "Stop recording and download the input CSV (F8)")
+        } else {
+            ("STOP", "Stop and save input recording (F8)")
+        }
+    } else if cfg!(target_arch = "wasm32") {
+        ("REC", "Reboot the game and record input from boot (F8)")
     } else {
         ("REC", "Start input recording (F8)")
     }

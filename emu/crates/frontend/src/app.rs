@@ -517,6 +517,30 @@ pub struct AppState {
     /// The payload itself stays in IndexedDB and is only read for F7/load.
     #[cfg(target_arch = "wasm32")]
     web_quick_save: Option<(String, u64, u64)>,
+    /// Web build: how the current game was booted, holding what a cold reboot
+    /// needs. Input recording and replay reboot through this so tapes align
+    /// with poll 0 of a fresh machine.
+    #[cfg(target_arch = "wasm32")]
+    web_boot: Option<WebBoot>,
+    /// Web build: [`emulator_core::game_image_hash`] of the current game
+    /// image. Recorded into input tapes; compared on replay so a changed
+    /// build gets flagged to the user.
+    #[cfg(target_arch = "wasm32")]
+    web_game_hash: Option<u64>,
+}
+
+/// How the web build booted the current game (see `AppState::web_boot`).
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+enum WebBoot {
+    /// Homebrew PS-EXE; small enough to keep the bytes for reboot.
+    Exe(Vec<u8>),
+    /// Uploaded raw disc booted through the uploaded real BIOS. The disc
+    /// itself is taken back out of the outgoing bus at reboot time.
+    DiscBios,
+    /// Streamed disc booted through HLE fast boot (no BIOS), same reboot
+    /// path as `DiscBios`.
+    DiscHle,
 }
 
 impl Default for AppState {
@@ -656,6 +680,10 @@ impl AppState {
             web_games: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             web_quick_save: None,
+            #[cfg(target_arch = "wasm32")]
+            web_boot: None,
+            #[cfg(target_arch = "wasm32")]
+            web_game_hash: None,
         };
         // Startup auto-rescan: always run when a developer-facing build dir
         // exists so stale `library.ron` entries (e.g. cargo
@@ -1826,6 +1854,88 @@ impl AppState {
         self.status_message_set("Reconnecting saved BIOS / games...");
     }
 
+    /// Web: open the browser file picker for a recorded input tape. The pick
+    /// completes asynchronously and lands in [`Self::poll_web_uploads`].
+    #[cfg(target_arch = "wasm32")]
+    pub fn pick_web_replay(&mut self) {
+        if self.web_boot.is_none() {
+            self.status_message_set("Launch a game before loading an input replay");
+            return;
+        }
+        crate::web_files::pick_tape();
+        self.status_message_set("Pick an input recording (.csv / .pxtape)...");
+    }
+
+    /// Web: parse an uploaded input tape, reboot the current game so the tape
+    /// aligns with a cold boot, and start replaying it. Advisory only on a
+    /// game-hash mismatch: a changed build may still replay fine.
+    #[cfg(target_arch = "wasm32")]
+    fn load_web_replay(&mut self, name: &str, bytes: &[u8]) {
+        if self.playtest_input_tape.is_recording() {
+            self.status_message_set("Stop input recording before loading a replay");
+            return;
+        }
+        let tape = match emulator_core::tape_from_bytes(bytes) {
+            Ok(tape) => tape,
+            Err(error) => {
+                self.status_message_set(format!("{name}: {error}"));
+                return;
+            }
+        };
+        let hash_note = match (tape.game_hash, self.web_game_hash) {
+            (Some(tape_hash), Some(game_hash)) if tape_hash != game_hash => {
+                "; note: the game changed since this tape was recorded, replay may diverge"
+            }
+            _ => "",
+        };
+        if let Err(error) = self.reboot_current_web_game() {
+            self.status_message_set(format!("Replay unavailable: {error}"));
+            return;
+        }
+        match self.playtest_input_tape.start_replay_from_tape(tape) {
+            Ok(frames) => {
+                self.running = true;
+                self.menu.open = false;
+                self.menu.sync_run_label(true);
+                self.status_message_set(format!(
+                    "Game rebooted; replaying {frames} frames{hash_note}"
+                ));
+            }
+            Err(error) => self.status_message_set(format!("{name}: {error}")),
+        }
+    }
+
+    /// Web: cold-boot the current game again from what was kept at launch.
+    /// Recording and replay both start from this reboot so a tape's poll
+    /// clock counts from poll 0 of a deterministic fresh machine.
+    #[cfg(target_arch = "wasm32")]
+    fn reboot_current_web_game(&mut self) -> Result<(), String> {
+        let boot = self
+            .web_boot
+            .clone()
+            .ok_or_else(|| "launch a game first".to_string())?;
+        // The boot helpers clear `current_game` (they serve first launches);
+        // a reboot keeps the game's identity, so save and restore it.
+        let saved_game = self.current_game.take();
+        let result = match boot {
+            WebBoot::Exe(bytes) => self.boot_exe_bytes(bytes),
+            WebBoot::DiscBios | WebBoot::DiscHle => {
+                let disc = self
+                    .bus
+                    .as_mut()
+                    .and_then(|bus| bus.cdrom.take_disc())
+                    .ok_or_else(|| "no disc image to reboot".to_string());
+                match (disc, boot) {
+                    (Err(error), _) => Err(error),
+                    (Ok(disc), WebBoot::DiscBios) => self.boot_disc_with_bios(disc),
+                    (Ok(disc), _) => self.boot_disc(disc),
+                }
+            }
+        };
+        self.current_game = saved_game;
+        result
+    }
+
     /// Web: drain any BIOS / game files the user picked and apply them. Called
     /// once per frame from the shell (uploads complete asynchronously).
     #[cfg(target_arch = "wasm32")]
@@ -1848,12 +1958,17 @@ impl AppState {
                     self.status_message_set(format!("BIOS loaded: {} ({kib} KiB)", loaded.name));
                 }
                 crate::web_files::Upload::Game => {
+                    // One tape belongs to one bootable disc identity (the
+                    // native launch path holds the same rule): download the
+                    // outgoing recording before replacing the machine.
+                    self.stop_input_recording_if_active();
                     let size = loaded.bytes.len() as u64;
                     let kind = if loaded.bytes.starts_with(b"PS-X EXE") {
                         GameKind::Exe
                     } else {
                         GameKind::DiscBin
                     };
+                    let game_hash = emulator_core::game_image_hash(&loaded.bytes);
                     let game_id = loaded
                         .game_id
                         .unwrap_or_else(|| format!("web:{}", loaded.name));
@@ -1864,18 +1979,30 @@ impl AppState {
                         .to_string();
                     // PS-EXE homebrew boots via HLE (no BIOS); anything else is
                     // treated as a raw disc image and needs the real BIOS.
-                    let result = if kind == GameKind::Exe {
-                        self.boot_exe_bytes(loaded.bytes)
+                    let (result, boot) = if kind == GameKind::Exe {
+                        let reboot_bytes = loaded.bytes.clone();
+                        (
+                            self.boot_exe_bytes(loaded.bytes),
+                            WebBoot::Exe(reboot_bytes),
+                        )
                     } else {
-                        self.boot_disc_bytes_with_bios(loaded.bytes)
+                        (
+                            self.boot_disc_bytes_with_bios(loaded.bytes),
+                            WebBoot::DiscBios,
+                        )
                     };
                     match result {
                         Ok(()) => {
+                            self.web_boot = Some(boot);
+                            self.web_game_hash = Some(game_hash);
                             self.set_web_current_game(game_id, title, kind, size);
                             self.status_message_set(format!("Launched: {}", loaded.name));
                         }
                         Err(e) => self.status_message_set(e),
                     }
+                }
+                crate::web_files::Upload::Tape => {
+                    self.load_web_replay(&loaded.name, &loaded.bytes);
                 }
             }
         }
@@ -1911,7 +2038,9 @@ impl AppState {
                 }
             }
             Status::Done { disc, cue, bin } => {
+                self.stop_input_recording_if_active();
                 let size = bin.len() as u64;
+                let game_hash = emulator_core::game_image_hash(&bin);
                 // A streamed disc is one CUE and one BIN; the reader hands the
                 // image over once and refuses a second file by construction.
                 let mut bin = Some(bin);
@@ -1922,6 +2051,8 @@ impl AppState {
                 .and_then(|modelled| self.boot_disc(modelled));
                 match result {
                     Ok(()) => {
+                        self.web_boot = Some(WebBoot::DiscHle);
+                        self.web_game_hash = Some(game_hash);
                         self.set_web_current_game(
                             disc.id.to_string(),
                             disc.title.to_string(),
@@ -2037,15 +2168,22 @@ impl AppState {
     /// memcard -- the web build uses a blank in-memory card).
     #[cfg(target_arch = "wasm32")]
     fn boot_disc_bytes_with_bios(&mut self, bytes: Vec<u8>) -> Result<(), String> {
-        let Some(bios) = self.bios_bytes.clone() else {
-            return Err("Load a BIOS first (Settings -> Load BIOS file)".to_string());
-        };
         if bytes.len() < SECTOR_BYTES {
             return Err("disc image too small to be valid".to_string());
         }
+        self.boot_disc_with_bios(Disc::from_bin(bytes))
+    }
+
+    /// Web: boot an already-modelled disc through the uploaded real BIOS.
+    /// Split from the bytes wrapper so a replay reboot can reuse the disc
+    /// taken back out of the outgoing bus instead of keeping a second copy.
+    #[cfg(target_arch = "wasm32")]
+    fn boot_disc_with_bios(&mut self, disc: Disc) -> Result<(), String> {
+        let Some(bios) = self.bios_bytes.clone() else {
+            return Err("Load a BIOS first (Settings -> Load BIOS file)".to_string());
+        };
         let mut bus = Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))?;
         let mut cpu = Cpu::new();
-        let disc = Disc::from_bin(bytes);
         maybe_fast_boot_disc_path(
             &mut bus,
             &mut cpu,
@@ -2987,7 +3125,7 @@ impl AppState {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let (frames, csv) = self.playtest_input_tape.stop_recording_csv();
+            let (frames, csv) = self.playtest_input_tape.stop_recording_csv(self.web_game_hash);
             let default_stem = path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -3089,7 +3227,9 @@ impl AppState {
         )
     }
 
-    /// Start a fresh recording, or stop and save the active one.
+    /// Start a fresh recording, or stop and persist the active one. On the
+    /// web the start side reboots the game first (cold-boot tape, poll 0)
+    /// and the stop side downloads the tape as a CSV.
     pub fn toggle_input_recording(&mut self) {
         if self.playtest_input_tape.is_recording() {
             self.stop_input_recording_if_active();
@@ -3104,6 +3244,14 @@ impl AppState {
         };
         #[cfg(target_arch = "wasm32")]
         let _ = &path;
+        // Web recordings are cold-boot tapes: reboot the game first so the
+        // tape's poll clock counts from 0 and a later replay upload can
+        // reproduce the whole run from the same fresh machine.
+        #[cfg(target_arch = "wasm32")]
+        if let Err(error) = self.reboot_current_web_game() {
+            self.status_message_set(format!("Input recording unavailable: {error}"));
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(parent) = path.parent() {
             if let Err(error) = self.paths.ensure_dir(parent) {
@@ -3124,7 +3272,7 @@ impl AppState {
         self.menu.sync_run_label(true);
         self.menu.sync_input_recording_label(true);
         #[cfg(target_arch = "wasm32")]
-        self.status_message_set("Input recording started (F8 to download CSV)");
+        self.status_message_set("Game rebooted; recording input from boot (F8 to download CSV)");
         #[cfg(not(target_arch = "wasm32"))]
         self.status_message_set(format!(
             "Input recording started (F8 to stop): {}",
@@ -3132,8 +3280,8 @@ impl AppState {
         ));
     }
 
-    /// Persist an active recording. Safe in every exit path; a no-op while
-    /// idle or replaying.
+    /// Persist an active recording (native: tape file; web: CSV download).
+    /// Safe in every exit path; a no-op while idle or replaying.
     pub fn stop_input_recording_if_active(&mut self) {
         if !self.playtest_input_tape.is_recording() {
             return;
