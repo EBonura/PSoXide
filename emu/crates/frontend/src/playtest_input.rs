@@ -18,8 +18,9 @@ use psxed_ui::{EditorPlaytestTapeMode, EditorPlaytestTapeStatus};
 /// format live in the core crate.
 pub(crate) use emulator_core::input_tape::PadSample as Port1PadSample;
 
-/// Read a persisted input tape. Only the headless CLI (`--input-tape`) reads
-/// tapes from a path; that CLI is compiled out on wasm, so this is dead there.
+/// Read a persisted input tape. The headless CLI (`--input-tape`) and the
+/// native GUI's "Load input replay" read tapes from a path; wasm has no
+/// filesystem, so this is dead there.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn read_input_tape(path: &Path) -> Result<emulator_core::input_tape::Tape, String> {
     read_tape_full(path)
@@ -145,7 +146,12 @@ impl PlaytestInputTape {
         let frames = self.finish_recording();
         (
             frames,
-            tape_to_csv(&self.samples, TapeClock::PadPoll, self.start_poll, game_hash),
+            tape_to_csv(
+                &self.samples,
+                TapeClock::PadPoll,
+                self.start_poll,
+                game_hash,
+            ),
         )
     }
 
@@ -169,10 +175,9 @@ impl PlaytestInputTape {
     }
 
     /// Start replaying an in-memory tape against a machine that was just
-    /// cold-booted (the browser upload path). Poll-bound tapes feed an idle
-    /// pad until the guest completes `start_poll` polls, mirroring the
-    /// headless CLI's cold-boot alignment.
-    #[cfg(any(target_arch = "wasm32", test))]
+    /// cold-booted (the browser upload and the native "Load input replay"
+    /// paths). Poll-bound tapes feed an idle pad until the guest completes
+    /// `start_poll` polls, mirroring the headless CLI's cold-boot alignment.
     pub(crate) fn start_replay_from_tape(
         &mut self,
         tape: emulator_core::input_tape::Tape,
@@ -444,6 +449,9 @@ mod tests {
         assert_eq!(replay.sample_for_frame(live).0, recorded);
         replay.note_polls(live, 1);
         let (_, event) = replay.sample_for_frame(live);
-        assert_eq!(event, Some(PlaytestInputEvent::ReplayFinished { frames: 1 }));
+        assert_eq!(
+            event,
+            Some(PlaytestInputEvent::ReplayFinished { frames: 1 })
+        );
     }
 }

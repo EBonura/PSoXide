@@ -56,9 +56,9 @@ pub enum MenuAction {
     /// tree; the web build reboots the game first so the tape counts from
     /// poll 0 of a cold boot, and stopping downloads it as a CSV.
     ToggleInputRecording,
-    /// Web: upload a recorded input tape (CSV / `.pxtape`) and replay it
-    /// against a fresh boot of the current game.
-    #[cfg(target_arch = "wasm32")]
+    /// Load a recorded input tape (CSV / `.pxtape`) and replay it against a
+    /// fresh boot of the current game. Native opens a file dialog; the web
+    /// build opens the browser upload picker.
     LoadInputReplay,
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
@@ -2613,8 +2613,6 @@ fn build_system_category(running: bool, save_count: usize) -> Category {
             burn_action: None,
             value: Some("F8".into()),
         },
-        // Web only: replay a downloaded recording against a fresh boot.
-        #[cfg(target_arch = "wasm32")]
         MenuItem {
             label: "Load input replay".into(),
             action: MenuAction::LoadInputReplay,

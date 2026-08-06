@@ -44,7 +44,8 @@ pub use fastboot::{
 pub use freelook::FreelookState;
 pub use gpu::{DisplayArea, Gpu};
 pub use input_tape::{
-    game_image_hash, read_tape, tape_from_bytes, tape_from_csv, tape_to_csv, write_tape, PadSample,
+    game_image_hash, game_image_hash_parts, read_tape, tape_from_bytes, tape_from_csv, tape_to_csv,
+    write_tape, PadSample,
 };
 pub use pad::{button, ButtonState};
 pub use psx_gte_core::GteProfileSnapshot;
