@@ -62,6 +62,22 @@ jobs:
           RUSTFLAGS: -C target-feature=+simd128 -C link-arg=-zstack-size=16777216
         run: trunk build --release --public-url "/PSoXide/"
 
+      # The demo disc is streamed at runtime, not baked into the wasm: the
+      # image is ~200 MB, which is both past GitHub's 100 MB file limit and
+      # far past what an include_bytes! wasm payload tolerates. The demo-disc
+      # repo keeps a rolling `web-disc` release current (its `make release-web`
+      # uploads there); this stages the pair as plain static files beside the
+      # wasm, so the frontend's fetch is same-origin.
+      - name: Stage the streamed demo disc
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download web-disc \
+            --repo EBonura/PSoXide-demo-disc \
+            --pattern 'demo-disc.*' \
+            --dir emu/crates/frontend/dist
+          ls -la emu/crates/frontend/dist/demo-disc.*
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: emu/crates/frontend/dist
