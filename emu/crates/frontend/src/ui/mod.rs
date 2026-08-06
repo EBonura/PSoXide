@@ -122,9 +122,8 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.toggle_input_recording();
             MenuOutcome::None
         }
-        #[cfg(target_arch = "wasm32")]
         LoadInputReplay => {
-            state.pick_web_replay();
+            state.pick_input_replay();
             MenuOutcome::None
         }
         ToggleFastBoot => {

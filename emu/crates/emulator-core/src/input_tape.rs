@@ -72,10 +72,18 @@ pub struct Tape {
 /// FNV-1a 64 over a game image, recorded into tapes so replay can tell the
 /// user when the game build changed since the recording.
 pub fn game_image_hash(bytes: &[u8]) -> u64 {
+    game_image_hash_parts([bytes])
+}
+
+/// [`game_image_hash`] over several buffers, hashed as if concatenated.
+/// Multi-track (cue/ccd) discs hash their tracks in order through this.
+pub fn game_image_hash_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for part in parts {
+        for &byte in part {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
     hash
 }
@@ -539,5 +547,11 @@ mod tests {
         assert_eq!(game_image_hash(b""), 0xcbf2_9ce4_8422_2325);
         assert_ne!(game_image_hash(b"abc"), game_image_hash(b"abd"));
         assert_eq!(game_image_hash(b"abc"), game_image_hash(b"abc"));
+        // Split buffers hash as their concatenation, so a multi-track disc
+        // matches the same image hashed as one file.
+        assert_eq!(
+            game_image_hash_parts([b"ab".as_slice(), b"c".as_slice()]),
+            game_image_hash(b"abc")
+        );
     }
 }

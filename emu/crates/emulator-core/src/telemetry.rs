@@ -27,7 +27,10 @@ const KIND_SHIFT: u32 = 24;
 const KIND_MASK: u32 = 0xFF;
 const ID_MASK: u32 = 0xFFFF;
 
-pub use psx_telemetry::{counter, stage, task, COUNTER_COUNT, STAGE_COUNT, TASK_COUNT};
+pub use psx_telemetry::{
+    counter, counter_desc, stage, stage_desc, task, task_desc, COUNTER_COUNT, STAGE_COUNT,
+    TASK_COUNT,
+};
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -859,6 +862,32 @@ mod tests {
             summary.counter_latest_values[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
             1
         );
+    }
+
+    #[test]
+    fn every_named_telemetry_id_has_a_description() {
+        // Host tooltips show `*_desc(id)`; a named id without one renders a
+        // metric with no explanation. The descriptions come from the id
+        // rustdoc in psx-telemetry, so this only fails if a name is added
+        // for an id that does not exist there.
+        for id in 0..STAGE_COUNT as u16 {
+            if stage_name(id) != "unknown" {
+                assert!(!stage_desc(id).trim().is_empty(), "stage {id} lacks a desc");
+            }
+        }
+        for id in 0..TASK_COUNT as u16 {
+            if task_name(id) != "unknown" {
+                assert!(!task_desc(id).trim().is_empty(), "task {id} lacks a desc");
+            }
+        }
+        for id in 0..COUNTER_COUNT as u16 {
+            if counter_name(id) != "unknown" {
+                assert!(
+                    !counter_desc(id).trim().is_empty(),
+                    "counter {id} lacks a desc"
+                );
+            }
+        }
     }
 
     #[test]
