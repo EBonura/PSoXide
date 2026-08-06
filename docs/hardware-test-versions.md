@@ -4,10 +4,10 @@ A capture is only interpretable if you know what its record ids meant when it
 was taken. This file is that record.
 
 The **suite version** and the **transport schema** are different things. The
-schema (PX5/PX6/PX7) says how bytes are laid out. The suite version says what a
-record id *means*. A record id can be redefined while the byte layout stays
-identical, which is exactly the case a schema version cannot catch, so both are
-written into every payload.
+schema (PX5/PX6/PX7/PX8) says how bytes are laid out. The suite version says
+what a record id *means*. A record id can be redefined while the byte layout
+stays identical, which is exactly the case a schema version cannot catch, so
+both are written into every payload.
 
 ## Bump rule
 
@@ -23,12 +23,101 @@ tool notes the difference without failing.
 The version lives in `SUITE_VERSION_MAJOR` / `SUITE_VERSION_MINOR` in
 `engine/examples/hardware-tests/src/main.rs`, with `SUITE_VERSION` as the
 display string. Baseline files are named by version
-(`docs/hardware-refs/px7-emulator-v<version>.txt`) because the version, not the
-date, is what determines comparability; re-baselining the same version
+(`docs/hardware-refs/px8-emulator-v<version>.txt` and
+`docs/hardware-refs/hwtest-machine-code-v<version>.txt`) because the version,
+not the date, is what determines comparability; re-baselining the same version
 overwrites rather than accumulating files, and the capture date is in the file
-header.
+header. A version bump orphans both baselines until they are regenerated, and
+`make hwtest-verify-code` now says so instead of crashing; v1.9 through v1.13
+shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
+
+### v1.14 (2026-08-05, schema PX8)
+
+The transport reworked around what a capture is for. Every block after the
+header is optional behind a flags byte: a routine run emits verdicts plus one
+record per FAILING case (383 bytes, a single QR at 173 cases), while the new
+FULL CHARACTERISATION CAPTURE menu row emits every block PX7 carried, in PX7's
+field order, so archived `px7-*` references still describe the same run a full
+PX8 does. Failure records name their case by `TestSpec::id` rather than array
+position (ids checked unique at compile time), header counts widened to u16,
+pages counted from the payload, and QR symbols size themselves to it.
+
+No record redefined, so minor: v1.8 PX7 captures remain comparable, and the
+emulator baseline is unchanged from v1.8 (24 of 173 fail, 20 of them GTE
+NCLIP). `hwtest-report.py` reads PX8 and the archived px7 references, and its
+regression gate names a failure that appeared and one that stopped
+reproducing rather than only a moved digest.
+
+Two repairs landed after the bump (2026-08-06): the audio link had been
+silently dead since this commit because the capture handed it the whole
+worst-case buffer instead of the encoded slice, and its FSK frame no longer
+fit SPU RAM; and `hwtest-audio-decode.py --emit-pages` still emitted a PX7
+page prefix. Both fixed; `docs/hardware-refs/hwtest-machine-code-v1.14.txt`
+was generated against the repaired EXE, so the pristine 2026-08-05 build
+differs from it in total word count (probe spans are identical).
+
+### v1.13 (2026-08-04, schema PX7)
+
+The tone ladder gains three segments (the commit history calls this stretch
+SB3; captures still carry the `SB2/` payload prefix), each a bug that shipped
+and that nothing measured: KEYVOL (does key-on restore a voice silenced by a volume
+write, the v0.11 mute-blip), RETRIG (re-key every 12 frames, the carousel
+lean), XFERLIVE (upload to far SPU RAM mid-playback, the hl-psx/VoXide
+streaming shape). SB2's QR moves from version 19 to 21 (667 of 711 bytes),
+still behind the const asserts. Records only added.
+
+### v1.12 (2026-08-04, schema PX7)
+
+SB2's ladder gains the termination pair, the measurement SB2 could not make:
+the repeat register read correct on 2026-08-03 while voices audibly ran past
+their END block, because it says where the hardware WOULD jump, not whether it
+did. PARKED and UNPARKED play identical four-block one-shots, one followed by
+a self-looping silent park block, one by a loud neighbour; ENDXBIT keys voice
+1 to catch a stale flag; ENVZERO reads the envelope late. These segments
+report ENDX (`psx-spu` gains `voices_ended`/`clear_ended` for it) instead of
+an early sample. Records only added.
+
+### v1.11 (2026-08-03, schema PX7)
+
+The 2026-08-03 console run drew QR ENCODE FAILED: SMALLTAB pushed SB2's
+payload from 491 to 519 characters against version 17's 504. SB2's QR moves
+to version 19, its size derives from the version number, and two const
+asserts (capacity, screen height) make an oversized payload a build error
+rather than a wasted burn.
+
+This bump also rolls up the SB2 refinement stretch that shipped under the
+v1.10 label: REPEXPL (does silicon latch the loop-start flag at all), the
+64-block table (transfer size as the remaining suspect), SMALLTAB (the
+32-byte control), the transfer-type-NORMAL fix, and the readable-screen
+reorder. The SB2 segment list changed under one version label during
+2026-08-02/03, so SB2 captures from those days must be identified by burn
+date, not by version. That is exactly the failure this file exists to
+prevent; bump on payload change, even mid-investigation.
+
+### v1.10 (2026-08-02, schema PX7)
+
+SB2, the SPU diagnostic, for the shape where Celeste's wavetables and
+VoXide's bank are wrong on console while CD-DA is fine. Pass 1 uploads a
+self-locating pattern and reads it back over seven upload/readback routes so
+a bad upload, a bad readback, and an unstable reader are told apart; on the
+emulator every word read back wrong, so pass 1 is documented as a comparison
+instrument, not a verdict. Pass 2 plays a synthesised square table at known
+pitches so an OBS capture measures the speaker while the QR carries the
+registers. Fitting it cost CDTEST 600 to 500 sectors (opt-level changes
+either crashed rustc or built a binary that never reached its menu). PX7
+records unchanged.
+
+### v1.9 (2026-08-02, schema PX7)
+
+SB1, the UI sample end/loop probe, for the launcher browse blip that repeats
+aggressively on console while every emulator plays it once. A silent audit of
+the shipped ui_beep's terminator flags plus an SPU RAM readback, then four
+keyed stages (the launcher path, a retrigger mash, a key-off, the percussive
+preset) tracing envelope and ENDX at eight checkpoints each. Emulator
+baseline: END+mute on the final block only, envelope 7FFF then 0, ENDX inside
+8 frames. PX7 records unchanged.
 
 ### v1.8 (2026-08-02, schema PX7)
 
