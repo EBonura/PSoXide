@@ -190,11 +190,10 @@ fn embedded_playtest_disc_image(
         builder = builder
             .system_area(system_area)
             .map_err(|_| "PSOXIDE_SYSTEM_AREA did not decode to exactly 16 cooked sectors")?;
-    } else {
-        eprintln!(
-            "warning: no PS1 system area supplied; emulators may boot this, real hardware may not"
-        );
     }
+    // No system area is the normal, permanent configuration: this project
+    // ships no Sony data. Unlicensed discs boot in emulators and on
+    // unlocked/ODE consoles, which is the supported target set.
     // Canonical playtest-disc layout, shared with the mkisopsx CLI via
     // psx_iso::add_playtest_files so the on-disc file order (and therefore the
     // cooked WORLD_PACK_START_LBA / UI_PACK_START_LBA) cannot drift between the

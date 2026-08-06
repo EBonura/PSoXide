@@ -275,11 +275,10 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-    } else {
-        eprintln!(
-            "warning: no PS1 system area supplied; emulators may boot this, real hardware may not"
-        );
     }
+    // No system area is the normal, permanent configuration: this project
+    // ships no Sony data. Unlicensed discs boot in emulators and on
+    // unlocked/ODE consoles, which is the supported target set.
     let world_pack =
         if args.world_pack_rooms_dir.is_some() || !args.world_pack_extra_dirs.is_empty() {
             match build_world_pack_from_inputs(
