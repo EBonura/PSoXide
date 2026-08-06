@@ -18,10 +18,11 @@ pipeline is designed to author content, cook PS1-ready assets, build CUE/BIN
 disc images, and run them in emulators or on original hardware.
 
 **Try it now:** the emulator runs in your browser at
-[ebonura.github.io/PSoXide](https://ebonura.github.io/PSoXide/), booting the
-bundled homebrew Celeste Classic Collection. The SDK and engine samples are
-baked in too, under **Examples**, so there is something to run without supplying
-a disc. No install, no BIOS; it rebuilds and redeploys from `main` on every push.
+[ebonura.github.io/PSoXide](https://ebonura.github.io/PSoXide/). Under
+**Games**, the PSoXide Demo Disc (eleven homebrew programs, CD audio and all)
+streams in on demand; the SDK and engine samples are baked in under
+**Examples**, so there is something to run without supplying a disc. No
+install, no BIOS; it rebuilds and redeploys from `main` on every push.
 
 The primary reference project is a dark, third-person PS1 action-RPG vertical
 slice. The public tools are built around proving the full workflow end to end.

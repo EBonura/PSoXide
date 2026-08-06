@@ -177,8 +177,10 @@ enum EditorBuildCompletion {
 
 /// Top-level app state. Owns the emulator state directly -- no Arc/Mutex,
 /// single-threaded, UI reads state in-place per frame.
-/// Discs baked into the web build. They appear in the menu (under Games) and
-/// boot via the no-BIOS HLE path; the first one auto-boots on page load.
+/// Payloads baked into the web build. They appear in the menu and boot via
+/// the no-BIOS HLE path. Full disc images are not baked here -- they stream
+/// on demand instead (`web_stream`), because `include_bytes!` puts the image
+/// inside the wasm every visitor downloads up front.
 pub mod bundled {
     /// What a baked-in payload is, which decides both how it boots and which
     /// menu column it lands in.
@@ -212,13 +214,6 @@ pub mod bundled {
     /// tests. They are separate columns in the menu, so a sample never shows up
     /// beside a real game.
     pub static DISCS: &[BundledDisc] = &[
-        BundledDisc {
-            id: "bundled:celeste",
-            title: "Celeste Classic Collection",
-            subtitle: "homebrew",
-            kind: BundledKind::DiscBin,
-            bytes: include_bytes!("../assets/celeste-collection.bin"),
-        },
         BundledDisc {
             id: "bundled:game-breakout",
             title: "game-breakout",
@@ -744,9 +739,15 @@ impl AppState {
         if bytes.len() < SECTOR_BYTES {
             return Err("disc image too small to be valid".to_string());
         }
+        self.boot_disc(Disc::from_bin(bytes))
+    }
+
+    /// Boot an already-modelled disc via the same no-BIOS HLE path. Split out
+    /// of [`Self::boot_disc_bytes`] so the web build's streamed CUE+BIN discs
+    /// (multi-track, CD-DA) reach the identical boot sequence.
+    pub fn boot_disc(&mut self, disc: Disc) -> Result<(), String> {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
-        let disc = Disc::from_bin(bytes);
         fast_boot_disc_with_hle(&mut bus, &mut cpu, &disc, true)
             .map_err(|e| format!("boot disc: {e:?}"))?;
         bus.cdrom.insert_disc(Some(disc));
@@ -1242,6 +1243,14 @@ impl AppState {
             let _ = kind;
             return Ok(());
         }
+        // Web streamed discs: kick off the fetch; boot happens on a later
+        // frame via `poll_web_uploads` once the bytes are in.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(disc) = crate::web_stream::find(id) {
+            crate::web_stream::start(disc);
+            self.status_message_set(format!("Downloading {}...", disc.title));
+            return Ok(());
+        }
         // Web folder-scanned games: read the file's bytes asynchronously, then
         // boot on a later frame via `poll_web_uploads`.
         #[cfg(target_arch = "wasm32")]
@@ -1693,6 +1702,18 @@ impl AppState {
                 launchable: true,
             });
         }
+        // Streamed discs sit beside the baked ones; the subtitle says the
+        // download out loud so the click is informed.
+        #[cfg(target_arch = "wasm32")]
+        for disc in crate::web_stream::DISCS {
+            games.push(MenuLibraryItem {
+                id: disc.id.to_string(),
+                title: disc.title.to_string(),
+                subtitle: disc.subtitle.to_string(),
+                burnable: false,
+                launchable: true,
+            });
+        }
         #[cfg(target_arch = "wasm32")]
         for (id, title, subtitle) in &self.web_games {
             games.push(MenuLibraryItem {
@@ -1809,6 +1830,7 @@ impl AppState {
     /// once per frame from the shell (uploads complete asynchronously).
     #[cfg(target_arch = "wasm32")]
     pub fn poll_web_uploads(&mut self) {
+        self.poll_streamed_disc();
         // A folder scan finished: rebuild the Games list and jump to it.
         if let Some(scanned) = crate::web_files::take_scanned() {
             let n = scanned.len();
@@ -1859,6 +1881,61 @@ impl AppState {
         }
         for event in crate::web_files::drain_quick_states() {
             self.apply_web_quick_state_event(event);
+        }
+    }
+
+    /// Advance an in-flight streamed-disc fetch: progress in the status bar
+    /// while bytes arrive, then model the CUE+BIN and boot. The CUE goes
+    /// through the same track/LBA math the native library uses
+    /// (`disc_from_cue_str`), so CD-DA tracks come out addressable rather
+    /// than swallowed by a single data track.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_streamed_disc(&mut self) {
+        use crate::web_stream::Status;
+        match crate::web_stream::poll() {
+            Status::Idle => {}
+            Status::Running {
+                disc,
+                received,
+                total,
+            } => {
+                let mb = received / (1024 * 1024);
+                if total > 0 {
+                    let total_mb = total.div_ceil(1024 * 1024);
+                    self.status_message_set(format!(
+                        "Downloading {}... {mb} / {total_mb} MB",
+                        disc.title
+                    ));
+                } else {
+                    self.status_message_set(format!("Downloading {}... {mb} MB", disc.title));
+                }
+            }
+            Status::Done { disc, cue, bin } => {
+                let size = bin.len() as u64;
+                // A streamed disc is one CUE and one BIN; the reader hands the
+                // image over once and refuses a second file by construction.
+                let mut bin = Some(bin);
+                let result = psoxide_settings::library::disc_from_cue_str(&cue, &mut |path| {
+                    bin.take()
+                        .ok_or_else(|| format!("{}: cue references a second file", path.display()))
+                })
+                .and_then(|modelled| self.boot_disc(modelled));
+                match result {
+                    Ok(()) => {
+                        self.set_web_current_game(
+                            disc.id.to_string(),
+                            disc.title.to_string(),
+                            GameKind::DiscBin,
+                            size,
+                        );
+                        self.status_message_set(format!("Launched: {}", disc.title));
+                    }
+                    Err(e) => self.status_message_set(format!("{}: {e}", disc.title)),
+                }
+            }
+            Status::Failed { disc, message } => {
+                self.status_message_set(format!("{}: {message}", disc.title));
+            }
         }
     }
 
