@@ -96,12 +96,33 @@ class RateDecoder:
         self.floor = reference * SILENCE_FRACTION
         # -1 = silence / no signal, else the decided bit.
         self.bits = np.where(energy < self.floor, -1, (one > zero).astype(np.int8))
+        # Signed discrimination toward bit 1, kept for phase refinement: a
+        # window straddling a tone boundary still DECIDES correctly on clean
+        # audio, so the bit array alone cannot tell an aligned lock from one
+        # half a bit off. This can.
+        self.diff = one - zero
         self.valid = self.bits.size
 
     def bit(self, start: int) -> int:
         if start < 0 or start >= self.valid:
             return -1
         return int(self.bits[start])
+
+    def preamble_quality(self, start: int) -> float:
+        """Aggregate discrimination of the alternating preamble at `start`.
+
+        Maximised when block windows align with transmitted block boundaries:
+        a misaligned window mixes both tones and its discrimination collapses
+        even while the decision stays right, so this peaks sharply at the true
+        phase where the bit-match score alone plateaus half a bit wide.
+        """
+        total = 0.0
+        for i in range(PREAMBLE_BITS):
+            at = start + i * self.span
+            if 0 <= at < self.diff.size:
+                d = float(self.diff[at])
+                total += d if i % 2 == 0 else -d
+        return total
 
     def read(self, start: int, count: int) -> list[int]:
         return [self.bit(start + i * self.span) for i in range(count)]
@@ -142,18 +163,29 @@ def find_frames(decoder: RateDecoder, limit: int) -> list[int]:
     candidates = np.flatnonzero(score >= PREAMBLE_MIN_MATCH)
     starts: list[int] = []
     last = -(10**9)
-    for position in candidates.tolist():
-        # One preamble produces a run of adjacent hits; keep the first.
-        if position - last < span * PREAMBLE_BITS:
+    positions = candidates.tolist()
+    index = 0
+    while index < len(positions) and len(starts) < limit:
+        # One preamble produces a run of adjacent hits. The first hit is the
+        # WORST lock, not the best: on clean audio the fuzzy score crosses the
+        # threshold about half a bit early, where every tone-transition window
+        # still decides correctly but at a margin any real noise flips. That
+        # mislock cost the chain matrix its noise_25pct tier while every clean
+        # decode passed. Pick the phase that discriminates best instead.
+        end = index
+        while end + 1 < len(positions) and positions[end + 1] - positions[end] <= span:
+            end += 1
+        run = positions[index : end + 1]
+        index = end + 1
+        best = max(run, key=decoder.preamble_quality)
+        if best - last < span * PREAMBLE_BITS:
             continue
-        window = decoder.read(position, PREAMBLE_BITS + 16)
+        window = decoder.read(best, PREAMBLE_BITS + 16)
         sync = bits_to_int([max(b, 0) for b in window], PREAMBLE_BITS, 16)
         if bin(sync ^ SYNC_WORD).count("1") > SYNC_MAX_ERRORS:
             continue
-        starts.append(position)
-        last = position
-        if len(starts) >= limit:
-            break
+        starts.append(best)
+        last = best
     return starts
 
 
