@@ -548,7 +548,16 @@ HWTEST_CODE_BASELINE := docs/hardware-refs/hwtest-machine-code-v$(HWTEST_SUITE).
 
 # Audit the linked EXE: the instructions between each probe's markers must be
 # the ones the source asked for, or its cycle count measures something else.
+# The baseline is named by suite version, so a version bump orphans the old
+# file until a new one is generated; fail that case with instructions rather
+# than a Python traceback. It went unnoticed from v1.9 to v1.14.
 hwtest-verify-code: hardware-tests
+	@test -f $(HWTEST_CODE_BASELINE) || { \
+		echo "hwtest-verify-code: $(HWTEST_CODE_BASELINE) does not exist."; \
+		echo "  The suite version bumped without a machine-code baseline."; \
+		echo "  Review the spans, then pin them with:"; \
+		echo "    python3 tools/verify-hwtest-machine-code.py $(EXAMPLE_OUT)/hardware-tests.exe > $(HWTEST_CODE_BASELINE)"; \
+		exit 2; }
 	python3 tools/verify-hwtest-machine-code.py $(EXAMPLE_OUT)/hardware-tests.exe \
 		--baseline $(HWTEST_CODE_BASELINE) --fail-on-change
 
