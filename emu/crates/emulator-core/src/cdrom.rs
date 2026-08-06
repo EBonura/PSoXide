@@ -851,6 +851,13 @@ impl CdRom {
     /// `insert_disc(None)` "ejects" -- disc_present flips false, the
     /// motor stops, any in-flight read is cancelled, and the next
     /// `GetID` returns the no-disc response again.
+    /// Mutable access to the mounted disc, for streaming CD-DA payloads in
+    /// after the fact. Geometry-preserving byte patches only; anything that
+    /// changes the TOC belongs in [`Self::insert_disc`].
+    pub fn disc_mut(&mut self) -> Option<&mut Disc> {
+        self.disc.as_mut()
+    }
+
     pub fn insert_disc(&mut self, disc: Option<Disc>) {
         self.disc = disc;
         self.disc_present = self.disc.is_some();

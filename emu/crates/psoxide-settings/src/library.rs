@@ -944,6 +944,55 @@ pub fn disc_from_cue_str(
     disc_from_cue_specs(&specs, read_file)
 }
 
+/// Build a disc from a CUE sheet plus one byte buffer per track, each
+/// holding that track's file extent exactly as the single-BIN layout would
+/// slice it. This is the streaming web build's path: the delivery splits the
+/// pressed BIN at track boundaries, ships the pieces separately, and hands
+/// them here (zero-filled placeholders for tracks still in flight -- silence
+/// until the download lands). The LBA math is [`disc_from_cue_specs`]'s,
+/// applied to pre-cut extents.
+pub fn disc_from_cue_pieces(
+    contents: &str,
+    mut piece: impl FnMut(u8) -> Result<Vec<u8>, String>,
+) -> Result<psx_iso::Disc, String> {
+    let specs = parse_cue_tracks_str(contents, Path::new(""))?;
+    let mut tracks = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let track_bytes = piece(spec.number)?;
+        if !track_bytes.len().is_multiple_of(psx_iso::SECTOR_BYTES) || track_bytes.is_empty() {
+            return Err(format!(
+                "track {}: piece is not a whole number of raw sectors",
+                spec.number
+            ));
+        }
+        let mut file_pregap = spec.file_pregap;
+        let mut pregap = spec.pregap;
+        if spec.number == 1 && file_pregap == 0 {
+            file_pregap = detect_track1_embedded_pregap(&track_bytes);
+            pregap = pregap.max(file_pregap);
+        }
+        let track_file_sectors = track_bytes.len() / psx_iso::SECTOR_BYTES;
+        if file_pregap as usize >= track_file_sectors {
+            return Err(format!("track {} has no INDEX 01 sectors", spec.number));
+        }
+        let sector_count = track_file_sectors.saturating_sub(file_pregap as usize) as u32;
+        let start_lba = tracks
+            .last()
+            .map(|prev: &psx_iso::Track| prev.start_lba + prev.sector_count + pregap)
+            .unwrap_or(0);
+        tracks.push(psx_iso::Track {
+            number: spec.number,
+            track_type: spec.track_type,
+            start_lba,
+            sector_count,
+            pregap,
+            file_pregap,
+            bytes: track_bytes,
+        });
+    }
+    Ok(psx_iso::Disc::from_tracks(tracks))
+}
+
 /// Shared back half of the CUE loaders: slice per-track bytes out of the
 /// referenced files and lay the tracks onto the disc LBA line.
 fn disc_from_cue_specs(
@@ -1684,6 +1733,41 @@ mod tests {
         assert_eq!(disc.read_sector_raw(9).unwrap()[0], 0x11);
         assert!(disc.read_cdda_sector(10).is_none());
         assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xAB);
+    }
+
+    // The streaming path: the same sheet with the image pre-cut at track
+    // boundaries must model identically to the whole-image loader.
+    #[test]
+    fn disc_from_cue_pieces_matches_the_single_bin_loader() {
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * (10 + 150 + 4)];
+        image[9 * psx_iso::SECTOR_BYTES] = 0x11;
+        image[160 * psx_iso::SECTOR_BYTES] = 0xAB;
+        let cue = concat!(
+            "FILE \"disc.bin\" BINARY\n",
+            "  TRACK 01 MODE2/2352\n",
+            "    INDEX 01 00:00:00\n",
+            "  TRACK 02 AUDIO\n",
+            "    INDEX 00 00:00:10\n",
+            "    INDEX 01 00:02:10\n",
+        );
+        let mut whole = Some(image.clone());
+        let reference = disc_from_cue_str(cue, &mut |_| {
+            whole.take().ok_or_else(|| "second file".to_string())
+        })
+        .unwrap();
+
+        let cut = 10 * psx_iso::SECTOR_BYTES;
+        let pieces = disc_from_cue_pieces(cue, |n| match n {
+            1 => Ok(image[..cut].to_vec()),
+            2 => Ok(image[cut..].to_vec()),
+            other => Err(format!("unexpected track {other}")),
+        })
+        .unwrap();
+
+        assert_eq!(reference.track_count(), pieces.track_count());
+        for n in 1..=2 {
+            assert_eq!(reference.track(n), pieces.track(n), "track {n}");
+        }
     }
 
     // The web build's path: same sheet, same image, no filesystem. Must slice

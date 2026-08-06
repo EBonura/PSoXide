@@ -517,16 +517,22 @@ pub struct AppState {
     /// The payload itself stays in IndexedDB and is only read for F7/load.
     #[cfg(target_arch = "wasm32")]
     web_quick_save: Option<(String, u64, u64)>,
+    /// Streamed CD-DA tracks waiting to be copied into the mounted disc, as
+    /// `(track, pcm, bytes_copied)`. Copied a slice per frame: one 40 MB
+    /// memcpy in a single frame underruns the CD audio, and the launcher's
+    /// stall watchdog answers an underrun by restarting the song.
+    #[cfg(target_arch = "wasm32")]
+    web_track_patches: Vec<(u8, Vec<u8>, usize)>,
     /// Web build: how the current game was booted, holding what a cold reboot
     /// needs. Input recording and replay reboot through this so tapes align
     /// with poll 0 of a fresh machine.
     #[cfg(target_arch = "wasm32")]
     web_boot: Option<WebBoot>,
-    /// Web build: [`emulator_core::game_image_hash`] of the current game
-    /// image. Recorded into input tapes; compared on replay so a changed
-    /// build gets flagged to the user.
-    #[cfg(target_arch = "wasm32")]
-    web_game_hash: Option<u64>,
+    /// [`emulator_core::game_image_hash`] of the current game image, both
+    /// targets. Recorded into browser tape CSVs; compared when a replay
+    /// loads so a changed build gets flagged to the user. `None` when the
+    /// image bytes were never in hand (e.g. a bundled example boot).
+    current_game_hash: Option<u64>,
 }
 
 /// How the web build booted the current game (see `AppState::web_boot`).
@@ -681,9 +687,10 @@ impl AppState {
             #[cfg(target_arch = "wasm32")]
             web_quick_save: None,
             #[cfg(target_arch = "wasm32")]
-            web_boot: None,
+            web_track_patches: Vec::new(),
             #[cfg(target_arch = "wasm32")]
-            web_game_hash: None,
+            web_boot: None,
+            current_game_hash: None,
         };
         // Startup auto-rescan: always run when a developer-facing build dir
         // exists so stale `library.ron` entries (e.g. cargo
@@ -804,12 +811,16 @@ impl AppState {
         }
         let mut cpu = Cpu::new();
         let mut boot_mode = "EXE";
+        // Image hash for input-tape change detection, computed where the
+        // bytes are already in hand so no path re-reads the file.
+        let mut game_hash = None;
 
         let bus = match entry.kind {
             GameKind::Exe => {
                 let mut bus = Bus::new_without_bios();
                 let bytes = std::fs::read(&entry.path)
                     .map_err(|e| format!("{}: {e}", entry.path.display()))?;
+                game_hash = Some(emulator_core::game_image_hash(&bytes));
                 let exe = Exe::parse(&bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
                 bus.load_exe_payload(exe.load_addr, &exe.payload);
                 bus.clear_exe_bss(exe.bss_addr, exe.bss_size);
@@ -838,6 +849,7 @@ impl AppState {
                         entry.path.display()
                     ));
                 }
+                game_hash = Some(emulator_core::game_image_hash(&bytes));
                 let disc = Disc::from_bin(bytes);
                 boot_mode = maybe_fast_boot_disc(
                     &mut bus,
@@ -866,6 +878,7 @@ impl AppState {
                     GameKind::DiscCcd => psoxide_settings::library::load_disc_from_ccd(&entry.path),
                     _ => unreachable!(),
                 }?;
+                game_hash = Some(disc_image_hash(&disc));
                 boot_mode = maybe_fast_boot_disc(
                     &mut bus,
                     &mut cpu,
@@ -905,6 +918,7 @@ impl AppState {
         self.exec_history.clear();
         self.gpr_snapshot = None;
         self.current_game = Some(entry.clone());
+        self.current_game_hash = game_hash;
         self.refresh_save_state_menu_rows();
         self.menu.sync_run_label(true);
         #[cfg(feature = "editor")]
@@ -1854,16 +1868,81 @@ impl AppState {
         self.status_message_set("Reconnecting saved BIOS / games...");
     }
 
-    /// Web: open the browser file picker for a recorded input tape. The pick
-    /// completes asynchronously and lands in [`Self::poll_web_uploads`].
-    #[cfg(target_arch = "wasm32")]
-    pub fn pick_web_replay(&mut self) {
-        if self.web_boot.is_none() {
-            self.status_message_set("Launch a game before loading an input replay");
+    /// Pick a recorded input tape (CSV or `.pxtape`) and replay it against a
+    /// fresh cold boot of the current game. Native opens a blocking file
+    /// dialog and loads immediately; the web build opens the browser picker
+    /// and the upload lands in `poll_web_uploads` a frame later.
+    pub fn pick_input_replay(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.web_boot.is_none() {
+                self.status_message_set("Launch a game before loading an input replay");
+                return;
+            }
+            crate::web_files::pick_tape();
+            self.status_message_set("Pick an input recording (.csv / .pxtape)...");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(entry) = self.current_game.clone() else {
+                self.status_message_set("Launch a game before loading an input replay");
+                return;
+            };
+            if self.playtest_input_tape.is_recording() {
+                self.status_message_set("Stop input recording before loading a replay");
+                return;
+            }
+            let mut dialog = rfd::FileDialog::new()
+                .set_title("Load input replay")
+                .add_filter("Input tapes", &["csv", "pxtape"]);
+            // Start where F8 recordings for this game land.
+            if let Some(dir) = self
+                .paths
+                .latest_input_tape_file(&entry.id)
+                .parent()
+                .filter(|dir| dir.is_dir())
+            {
+                dialog = dialog.set_directory(dir);
+            }
+            let Some(path) = dialog.pick_file() else {
+                return;
+            };
+            self.load_native_replay(&entry, &path);
+        }
+    }
+
+    /// Native: parse a tape file, relaunch the current game from disk so the
+    /// tape's poll clock aligns with poll 0 of a cold boot, and start
+    /// replaying. Advisory only on a game-hash mismatch: a changed build may
+    /// still replay fine.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_native_replay(&mut self, entry: &LibraryEntry, path: &Path) {
+        let tape = match crate::playtest_input::read_input_tape(path) {
+            Ok(tape) => tape,
+            Err(error) => {
+                self.status_message_set(format!("Replay load failed: {error}"));
+                return;
+            }
+        };
+        let hash_note = match (tape.game_hash, self.current_game_hash) {
+            (Some(tape_hash), Some(game_hash)) if tape_hash != game_hash => {
+                "; note: the game changed since this tape was recorded, replay may diverge"
+            }
+            _ => "",
+        };
+        if let Err(error) = self.launch_entry(entry) {
+            self.status_message_set(format!("Replay relaunch failed: {error}"));
             return;
         }
-        crate::web_files::pick_tape();
-        self.status_message_set("Pick an input recording (.csv / .pxtape)...");
+        match self.playtest_input_tape.start_replay_from_tape(tape) {
+            Ok(frames) => {
+                self.menu.open = false;
+                self.status_message_set(format!(
+                    "Game relaunched; replaying {frames} frames{hash_note}"
+                ));
+            }
+            Err(error) => self.status_message_set(format!("Replay failed: {error}")),
+        }
     }
 
     /// Web: parse an uploaded input tape, reboot the current game so the tape
@@ -1882,7 +1961,7 @@ impl AppState {
                 return;
             }
         };
-        let hash_note = match (tape.game_hash, self.web_game_hash) {
+        let hash_note = match (tape.game_hash, self.current_game_hash) {
             (Some(tape_hash), Some(game_hash)) if tape_hash != game_hash => {
                 "; note: the game changed since this tape was recorded, replay may diverge"
             }
@@ -1994,7 +2073,7 @@ impl AppState {
                     match result {
                         Ok(()) => {
                             self.web_boot = Some(boot);
-                            self.web_game_hash = Some(game_hash);
+                            self.current_game_hash = Some(game_hash);
                             self.set_web_current_game(game_id, title, kind, size);
                             self.status_message_set(format!("Launched: {}", loaded.name));
                         }
@@ -2011,62 +2090,101 @@ impl AppState {
         }
     }
 
-    /// Advance an in-flight streamed-disc fetch: progress in the status bar
-    /// while bytes arrive, then model the CUE+BIN and boot. The CUE goes
-    /// through the same track/LBA math the native library uses
-    /// (`disc_from_cue_str`), so CD-DA tracks come out addressable rather
-    /// than swallowed by a single data track.
+    /// Advance the streamed disc: progress lines while the boot payload
+    /// assembles, then model-and-boot on the data track plus first song, then
+    /// patch the remaining CD-DA tracks into the mounted disc as their
+    /// downloads decode. Placeholder tracks are zero-filled, which the drive
+    /// plays as silence until the real sectors land -- geometry is complete
+    /// from the first frame, so nothing the CD state machine sees is ever
+    /// impossible on real hardware.
     #[cfg(target_arch = "wasm32")]
     fn poll_streamed_disc(&mut self) {
-        use crate::web_stream::Status;
-        match crate::web_stream::poll() {
-            Status::Idle => {}
-            Status::Running {
+        use crate::web_stream::{BgEvent, BootStatus};
+        match crate::web_stream::poll_boot() {
+            BootStatus::Idle => {}
+            BootStatus::Progress(line) => self.status_message_set(line),
+            BootStatus::Ready {
                 disc,
-                received,
-                total,
+                cue,
+                data,
+                first_pcm,
+                first_number,
+                layout,
             } => {
-                let mb = received / (1024 * 1024);
-                if total > 0 {
-                    let total_mb = total.div_ceil(1024 * 1024);
-                    self.status_message_set(format!(
-                        "Downloading {}... {mb} / {total_mb} MB",
-                        disc.title
-                    ));
-                } else {
-                    self.status_message_set(format!("Downloading {}... {mb} MB", disc.title));
-                }
-            }
-            Status::Done { disc, cue, bin } => {
-                self.stop_input_recording_if_active();
-                let size = bin.len() as u64;
-                let game_hash = emulator_core::game_image_hash(&bin);
-                // A streamed disc is one CUE and one BIN; the reader hands the
-                // image over once and refuses a second file by construction.
-                let mut bin = Some(bin);
-                let result = psoxide_settings::library::disc_from_cue_str(&cue, &mut |path| {
-                    bin.take()
-                        .ok_or_else(|| format!("{}: cue references a second file", path.display()))
+                let total = data.len() + layout.iter().map(|(_, n)| n).sum::<usize>();
+                let mut data = Some(data);
+                let mut first = Some(first_pcm);
+                let result = psoxide_settings::library::disc_from_cue_pieces(&cue, |n| {
+                    if n == 1 {
+                        data.take().ok_or_else(|| "data piece taken twice".to_string())
+                    } else if n == first_number {
+                        first
+                            .take()
+                            .ok_or_else(|| "first track taken twice".to_string())
+                    } else {
+                        layout
+                            .iter()
+                            .find(|(num, _)| *num == n)
+                            .map(|(_, bytes)| vec![0u8; *bytes])
+                            .ok_or_else(|| format!("track {n} not in the manifest"))
+                    }
                 })
                 .and_then(|modelled| self.boot_disc(modelled));
                 match result {
                     Ok(()) => {
-                        self.web_boot = Some(WebBoot::DiscHle);
-                        self.web_game_hash = Some(game_hash);
                         self.set_web_current_game(
                             disc.id.to_string(),
                             disc.title.to_string(),
                             GameKind::DiscBin,
-                            size,
+                            total as u64,
                         );
                         self.status_message_set(format!("Launched: {}", disc.title));
                     }
                     Err(e) => self.status_message_set(format!("{}: {e}", disc.title)),
                 }
             }
-            Status::Failed { disc, message } => {
-                self.status_message_set(format!("{}: {message}", disc.title));
+            BootStatus::Failed(message) => self.status_message_set(message),
+        }
+
+        for BgEvent::TrackReady(number, pcm) in crate::web_stream::poll_background() {
+            self.web_track_patches.push((number, pcm, 0));
+        }
+        // Copy pending tracks into the disc a slice at a time. The audible
+        // consequence of a track landing must be music, not a hitch.
+        const PATCH_BYTES_PER_FRAME: usize = 2 * 1024 * 1024;
+        let mut landed = false;
+        if let Some((number, pcm, copied)) = self.web_track_patches.first_mut() {
+            let target = self
+                .bus
+                .as_mut()
+                .and_then(|bus| bus.cdrom.disc_mut())
+                .and_then(|disc| disc.track_bytes_mut(*number));
+            match target {
+                Some(buf) if buf.len() == pcm.len() => {
+                    let end = (*copied + PATCH_BYTES_PER_FRAME).min(pcm.len());
+                    buf[*copied..end].copy_from_slice(&pcm[*copied..end]);
+                    *copied = end;
+                    if *copied == pcm.len() {
+                        landed = true;
+                        self.web_track_patches.remove(0);
+                    }
+                }
+                _ => {
+                    // The user booted something else while the track was in
+                    // flight, or sizes disagree; the download is dropped and
+                    // that track stays silent.
+                    eprintln!("[web] track {number}: no matching disc to patch");
+                    self.web_track_patches.remove(0);
+                }
             }
+        }
+        let all_done = landed && self.web_track_patches.is_empty();
+        match crate::web_stream::progress_line() {
+            Some(line) => self.status_message_set(line),
+            // The frame the last track lands, the line disappears; say so
+            // once instead of leaving a stale percentage on screen.
+            None if all_done => self.status_message_set("All music tracks loaded"),
+            None => {}
         }
     }
 
@@ -3125,7 +3243,9 @@ impl AppState {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let (frames, csv) = self.playtest_input_tape.stop_recording_csv(self.web_game_hash);
+            let (frames, csv) = self
+                .playtest_input_tape
+                .stop_recording_csv(self.current_game_hash);
             let default_stem = path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -3827,6 +3947,15 @@ pub(crate) fn fast_boot_embedded_playtest_disc(
     }
 }
 
+/// Input-tape change-detection hash for a modelled disc: every track's raw
+/// bytes in order, hashed as one stream. A single-track bin matches
+/// [`emulator_core::game_image_hash`] of the raw file.
+fn disc_image_hash(disc: &Disc) -> u64 {
+    emulator_core::game_image_hash_parts(
+        (0u8..=99).filter_map(|number| disc.track(number).map(|track| track.bytes.as_slice())),
+    )
+}
+
 fn maybe_fast_boot_disc(
     bus: &mut Bus,
     cpu: &mut Cpu,
@@ -4409,5 +4538,53 @@ mod baked_example_merge_tests {
         let before = keys.len();
         keys.dedup();
         assert_eq!(keys.len(), before, "no example may appear twice");
+    }
+}
+
+// The streamed delivery's decode invariant: claxon must reproduce the flac
+// CLI's bytes exactly, decoding whole blocks with the reader recreated
+// between budget slices the way the web build does. Dormant without the env
+// vars; point them at any track piece to re-verify (this caught a real bug:
+// a sample iterator dropped mid-block silently discards the block's tail).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod claxon_parity {
+    #[test]
+    fn claxon_matches_the_flac_cli() {
+        let Ok(flac_path) = std::env::var("PROBE_FLAC") else {
+            return;
+        };
+        let Ok(raw_path) = std::env::var("PROBE_RAW") else {
+            return;
+        };
+        let flac_bytes = std::fs::read(&flac_path).unwrap();
+        let reference = std::fs::read(&raw_path).unwrap();
+        // Decode the way the web build does: whole blocks, with the block
+        // reader recreated between budget slices, which must resume cleanly.
+        let mut reader = claxon::FlacReader::new(std::io::Cursor::new(flac_bytes)).unwrap();
+        let mut out = Vec::with_capacity(reference.len());
+        let mut buffer = Vec::new();
+        'outer: loop {
+            let mut frames = reader.blocks();
+            for _ in 0..8 {
+                match frames.read_next_or_eof(core::mem::take(&mut buffer)) {
+                    Ok(Some(block)) => {
+                        for i in 0..block.duration() {
+                            out.extend_from_slice(&(block.sample(0, i) as i16).to_le_bytes());
+                            out.extend_from_slice(&(block.sample(1, i) as i16).to_le_bytes());
+                        }
+                        buffer = block.into_buffer();
+                    }
+                    Ok(None) | Err(_) => break 'outer,
+                }
+            }
+        }
+        eprintln!("PROBE: claxon {} bytes, reference {}", out.len(), reference.len());
+        let diff = out
+            .iter()
+            .zip(reference.iter())
+            .position(|(a, b)| a != b);
+        eprintln!("PROBE: first differing byte {diff:?}");
+        assert_eq!(out.len(), reference.len());
+        assert_eq!(diff, None);
     }
 }
