@@ -70,13 +70,15 @@ jobs:
       # on the rolling `web-disc` release; this stages those pieces as plain
       # static files beside the wasm, so every frontend fetch is same-origin.
       # The full .bin stays on the release as a download mirror but is not
-      # shipped to Pages.
+      # shipped to Pages. The release lives on THIS repo: the demo-disc repo
+      # is private, and the workflow token cannot read another repo's
+      # releases.
       - name: Stage the streamed demo disc
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download web-disc \
-            --repo EBonura/PSoXide-demo-disc \
+            --repo EBonura/PSoXide \
             --pattern 'demo-disc.cue' \
             --pattern 'web-manifest.txt' \
             --pattern 'demo-data.bin.gz' \
