@@ -11,8 +11,8 @@ use std::{collections::VecDeque, fmt::Write as _};
 
 use egui::{Color32, RichText};
 use emulator_core::telemetry::{
-    counter, counter_name, stage, stage_name, task_name, GuestTelemetryEvent, COUNTER_COUNT,
-    STAGE_COUNT, TASK_COUNT,
+    counter, counter_desc, counter_name, stage, stage_desc, stage_name, task_desc, task_name,
+    GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT, TASK_COUNT,
 };
 
 use crate::theme;
@@ -229,6 +229,443 @@ const PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
         counter::PORTAL_VIS_VISIBLE_MISSING_RESIDENT,
         "stream_missing_v",
     ),
+];
+
+// ---- Metric documentation registry ----------------------------------------
+// Every chip and bar the panel renders points at one of these defs, and the
+// hover tooltip is built from it, so a metric cannot ship undocumented (the
+// test at the bottom of this module enforces non-empty descriptions). Guest
+// stage/task/counter rows are documented separately through the id registry
+// in `psx-telemetry` (`stage_desc`/`task_desc`/`counter_desc`).
+
+/// Where a metric's numbers come from. Shown in every tooltip so host
+/// timings can never be misread as PS1 performance, or the reverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetricSource {
+    /// Wall-clock time of this application's own pipeline.
+    HostClock,
+    /// The emulator's modeled guest clock (33.8688 MHz bus cycles).
+    ModelCycles,
+    /// Events the emulator observed while stepping (packets, vblanks, ops).
+    EventCount,
+    /// Markers/counters emitted by the game through the telemetry port,
+    /// timestamped on the modeled guest clock.
+    GameTelemetry,
+}
+
+impl MetricSource {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::HostClock => "source: host wall clock (this app, not the PS1)",
+            Self::ModelCycles => "source: modeled guest cycles (emulated PS1 clock)",
+            Self::EventCount => "source: emulator-observed event counts",
+            Self::GameTelemetry => "source: game-emitted telemetry, model-clocked",
+        }
+    }
+}
+
+/// One documented profiler metric: the chip/row label, a full name, and a
+/// description stating what it measures, its units, and how to read it.
+struct MetricDef {
+    chip: &'static str,
+    name: &'static str,
+    desc: &'static str,
+    source: MetricSource,
+}
+
+const M_EMU_HZ: MetricDef = MetricDef {
+    chip: "EMU Hz",
+    name: "Emulated vblank rate",
+    desc: "Vblank IRQs raised per host second. 59.94 means the emulator is \
+           delivering full NTSC speed; lower means the host cannot keep up \
+           (check the Host section).",
+    source: MetricSource::EventCount,
+};
+const M_VIS_HZ: MetricDef = MetricDef {
+    chip: "VIS Hz",
+    name: "Game visual frame rate",
+    desc: "Rendered visual frames per second, from the interval between the \
+           game's own visual-frame markers. The game's true frame rate: 30 \
+           for every-other-vblank pacing.",
+    source: MetricSource::GameTelemetry,
+};
+const M_DRAW_HZ: MetricDef = MetricDef {
+    chip: "DRAW Hz",
+    name: "Draw-producing vblank rate",
+    desc: "Emulated refresh scaled by the share of vblanks that emitted at \
+           least one GP0 draw packet. A crude visual-rate estimate that works \
+           without game telemetry.",
+    source: MetricSource::EventCount,
+};
+const M_STEP: MetricDef = MetricDef {
+    chip: "STEP",
+    name: "Cycle budget executed",
+    desc: "Modeled bus cycles executed as a share of the PS1 cycle budget for \
+           the frames stepped this redraw. 100% = real-time PS1 speed; below \
+           100% with CAP > 0 means host slowdown.",
+    source: MetricSource::ModelCycles,
+};
+const M_VBL_R: MetricDef = MetricDef {
+    chip: "VBL/R",
+    name: "Vblanks per redraw",
+    desc: "Emulated vblanks stepped during one host redraw. 1 when the host \
+           runs at 60 Hz; higher when the host redraws slower and the \
+           emulator batches catch-up work.",
+    source: MetricSource::EventCount,
+};
+const M_CYC_F: MetricDef = MetricDef {
+    chip: "CYC/F",
+    name: "Bus cycles per guest frame",
+    desc: "Modeled guest cycles executed per emulated video frame. One NTSC \
+           vblank is 564,480 cycles at 33.8688 MHz.",
+    source: MetricSource::ModelCycles,
+};
+const M_BUD_F: MetricDef = MetricDef {
+    chip: "BUD/F",
+    name: "Budget cycles per guest frame",
+    desc: "Target cycle budget per emulated frame (one vblank period). CYC/F \
+           tracking BUD/F means the machine runs full frames.",
+    source: MetricSource::ModelCycles,
+};
+const M_INS_F: MetricDef = MetricDef {
+    chip: "INS/F",
+    name: "Instructions per guest frame",
+    desc: "CPU instructions retired per emulated frame. Cycles exceed \
+           instructions by the modeled stalls: icache refills, muldiv \
+           latency, GTE hazards.",
+    source: MetricSource::EventCount,
+};
+const M_GPU_V: MetricDef = MetricDef {
+    chip: "GPU/V",
+    name: "Draw vblanks per redraw",
+    desc: "Stepped vblanks that produced at least one draw packet during \
+           this redraw.",
+    source: MetricSource::EventCount,
+};
+const M_CMD_F: MetricDef = MetricDef {
+    chip: "CMD/F",
+    name: "GP0 packets per guest frame",
+    desc: "GPU command packets captured per emulated frame, draws and VRAM \
+           transfers combined.",
+    source: MetricSource::EventCount,
+};
+const M_DRAW_F: MetricDef = MetricDef {
+    chip: "DRAW/F",
+    name: "Draw packets per guest frame",
+    desc: "Polygon, line, and rectangle GP0 packets per emulated frame.",
+    source: MetricSource::EventCount,
+};
+const M_IMG_F: MetricDef = MetricDef {
+    chip: "IMG/F",
+    name: "Image packets per guest frame",
+    desc: "VRAM copy/upload GP0 packets per emulated frame (texture and CLUT \
+           traffic).",
+    source: MetricSource::EventCount,
+};
+const M_GTE_F: MetricDef = MetricDef {
+    chip: "GTE/F",
+    name: "GTE ops per guest frame",
+    desc: "Recognised GTE function commands executed per emulated frame.",
+    source: MetricSource::EventCount,
+};
+const M_GTEC_F: MetricDef = MetricDef {
+    chip: "GTEC/F",
+    name: "Estimated GTE cycles per guest frame",
+    desc: "Internal GTE load from documented per-command latency tables. \
+           Informational only; never charged to the bus clock, so it does \
+           not appear in CYC/F.",
+    source: MetricSource::ModelCycles,
+};
+const M_HOST_FPS: MetricDef = MetricDef {
+    chip: "HOST FPS",
+    name: "Host redraw rate",
+    desc: "Redraw callbacks per second of this application on your machine.",
+    source: MetricSource::HostClock,
+};
+const M_HOST_AVG: MetricDef = MetricDef {
+    chip: "HOST AVG",
+    name: "Host frame time (average)",
+    desc: "Average wall-clock time of one full redraw, all stages included.",
+    source: MetricSource::HostClock,
+};
+const M_HOST_LAST: MetricDef = MetricDef {
+    chip: "HOST LAST",
+    name: "Host frame time (latest)",
+    desc: "Wall-clock time of the most recent redraw.",
+    source: MetricSource::HostClock,
+};
+const M_UI_MS: MetricDef = MetricDef {
+    chip: "UI",
+    name: "UI render time",
+    desc: "egui build, tessellate, paint, and present, wall clock.",
+    source: MetricSource::HostClock,
+};
+const M_HW_MS: MetricDef = MetricDef {
+    chip: "HW",
+    name: "Hardware-render time",
+    desc: "GP0 packet translation and wgpu submit for the hardware renderer, \
+           wall clock.",
+    source: MetricSource::HostClock,
+};
+const M_SCALE: MetricDef = MetricDef {
+    chip: "SCALE",
+    name: "Hardware-renderer scale",
+    desc: "Current internal resolution multiplier of the hardware renderer.",
+    source: MetricSource::EventCount,
+};
+const M_CAP: MetricDef = MetricDef {
+    chip: "CAP",
+    name: "Step-cap hits",
+    desc: "Guest frames stopped early by the frontend's per-redraw \
+           instruction safety cap. Non-zero means the host is too slow to \
+           finish the frame's cycle budget; a host symptom the game never \
+           sees.",
+    source: MetricSource::EventCount,
+};
+const M_GFR_R: MetricDef = MetricDef {
+    chip: "GFR/R",
+    name: "Guest frames per redraw",
+    desc: "Game frame-begin markers observed during one host redraw.",
+    source: MetricSource::GameTelemetry,
+};
+const M_UPD_F: MetricDef = MetricDef {
+    chip: "UPD/F",
+    name: "Update cycles per guest frame",
+    desc: "Cycles inside the game's update stage per frame, from its own \
+           stage markers on the modeled clock.",
+    source: MetricSource::GameTelemetry,
+};
+const M_REN: MetricDef = MetricDef {
+    chip: "REN",
+    name: "Render cycles per pass",
+    desc: "Cycles per completed Scene::render span.",
+    source: MetricSource::GameTelemetry,
+};
+const M_MOD: MetricDef = MetricDef {
+    chip: "MOD",
+    name: "Model cycles per pass",
+    desc: "Cycles per completed model-instances render span.",
+    source: MetricSource::GameTelemetry,
+};
+const M_SIM: MetricDef = MetricDef {
+    chip: "SIM",
+    name: "Sim ticks per redraw",
+    desc: "Fixed simulation ticks the game's cadence layer ran during this \
+           redraw (the 60 Hz gameplay clock).",
+    source: MetricSource::GameTelemetry,
+};
+const M_VIS: MetricDef = MetricDef {
+    chip: "VIS",
+    name: "Visual frames per redraw",
+    desc: "Rendered visual frames the game produced during this redraw.",
+    source: MetricSource::GameTelemetry,
+};
+const M_INT: MetricDef = MetricDef {
+    chip: "INT",
+    name: "Visual interval (vblanks)",
+    desc: "Measured vblanks between the game's visual frames. 2 = 30 fps \
+           pacing, 1 = 60 fps.",
+    source: MetricSource::GameTelemetry,
+};
+const M_MISS: MetricDef = MetricDef {
+    chip: "MISS",
+    name: "Visual deadline misses",
+    desc: "Visual frames that missed their cadence slot, counted by the \
+           game. The real pacing health signal; a render frame merely over \
+           one vblank is not a miss.",
+    source: MetricSource::GameTelemetry,
+};
+const M_LATE: MetricDef = MetricDef {
+    chip: "LATE",
+    name: "Worst visual lateness",
+    desc: "Largest observed lateness of a visual frame, in vblanks, as \
+           reported by the game.",
+    source: MetricSource::GameTelemetry,
+};
+const M_REN_V: MetricDef = MetricDef {
+    chip: "REN/V",
+    name: "Render cycles per visual frame",
+    desc: "Guest render-stage cycles per rendered visual frame.",
+    source: MetricSource::GameTelemetry,
+};
+const M_VBUD: MetricDef = MetricDef {
+    chip: "VBUD",
+    name: "Visual budget status",
+    desc: "Whether the render cost fits the paced visual slot (interval \
+           times one vblank of cycles).",
+    source: MetricSource::GameTelemetry,
+};
+
+/// Host pipeline stage rows, in [`FrameProfileSample::stage_rows`] order.
+const HOST_STAGE_DEFS: [MetricDef; 18] = [
+    MetricDef {
+        chip: "input/menu",
+        name: "Input and menu handling",
+        desc: "Menu, gamepad, and input processing at the top of the redraw.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "emu step",
+        name: "Guest stepping",
+        desc: "Wall-clock time running the emulator core for this redraw's \
+               guest frames. How fast YOUR machine emulates; says nothing \
+               about PS1-side load (see Emulated PS1).",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "spu/audio",
+        name: "SPU and host audio",
+        desc: "SPU sample generation and the push into the host audio queue.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "cmd log",
+        name: "GP0 command-log drain",
+        desc: "Draining captured GPU packets for the render sidecars.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "compute",
+        name: "Compute-rasterizer replay",
+        desc: "Optional shadow replay through the compute rasterizer \
+               (--gpu-compute); the row is hidden when it is off.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "vram upload",
+        name: "VRAM texture upload",
+        desc: "CPU VRAM to egui texture upload for the software display path.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "24bpp upload",
+        name: "24bpp display upload",
+        desc: "Direct-24bpp display texture upload (MDEC/movie output).",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "hw scale",
+        name: "Hardware-render scale decision",
+        desc: "Internal-resolution decision and reallocation for the \
+               hardware renderer.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "vram clone",
+        name: "VRAM snapshot clone",
+        desc: "Cloning CPU VRAM for the hardware renderer's snapshot.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "hw render",
+        name: "Hardware-render replay",
+        desc: "Translating GP0 packets and submitting wgpu work for the \
+               hardware renderer.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "ui input",
+        name: "egui input",
+        desc: "egui-winit input conversion.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "ui build",
+        name: "UI build",
+        desc: "Running the UI closure: every panel, including this one.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "ui tess",
+        name: "UI tessellation",
+        desc: "egui shape tessellation.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "ui textures",
+        name: "UI texture updates",
+        desc: "egui texture uploads.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "ui buffers",
+        name: "UI buffer updates",
+        desc: "egui vertex/index buffer updates.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "ui paint",
+        name: "UI paint",
+        desc: "egui render-pass encoding.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "present",
+        name: "Submit and present",
+        desc: "Queue submit and surface present; includes waiting for the \
+               compositor/vsync.",
+        source: MetricSource::HostClock,
+    },
+    MetricDef {
+        chip: "total",
+        name: "Redraw total",
+        desc: "Full redraw-handler wall time: everything above plus glue.",
+        source: MetricSource::HostClock,
+    },
+];
+
+const SEC_EMULATED_DESC: &str = "Cadence and workload of the emulated PS1. \
+    Cycle figures come from the emulator's calibrated model clock, not from \
+    silicon.";
+const SEC_GAME_DESC: &str = "Stages, tasks, and counters the game itself \
+    emits through the telemetry port (emulator-telemetry builds only). The \
+    boundaries are the game's; the timing is the modeled guest clock.";
+const SEC_HOST_DESC: &str = "Wall-clock cost of this application's own \
+    pipeline on your machine. Says nothing about PS1 performance.";
+const SEC_TASKS_DESC: &str = "Cycles per completed run of the game's \
+    scheduled tasks (fixed update, visual render), from its own task markers.";
+const SEC_STAGES_DESC: &str = "Cycles per completed span of each stage the \
+    game marks, averaged over the profiler window. Hover a row for what the \
+    stage covers.";
+const SEC_RENDER_PCT_DESC: &str = "Share of the whole Scene::render span \
+    attributed to each render sub-stage. 'other' is render time no listed \
+    stage covers.";
+
+/// Every chip def the panel renders, for the completeness test.
+#[cfg(test)]
+const ALL_CHIP_DEFS: &[&MetricDef] = &[
+    &M_EMU_HZ,
+    &M_VIS_HZ,
+    &M_DRAW_HZ,
+    &M_STEP,
+    &M_VBL_R,
+    &M_CYC_F,
+    &M_BUD_F,
+    &M_INS_F,
+    &M_GPU_V,
+    &M_CMD_F,
+    &M_DRAW_F,
+    &M_IMG_F,
+    &M_GTE_F,
+    &M_GTEC_F,
+    &M_HOST_FPS,
+    &M_HOST_AVG,
+    &M_HOST_LAST,
+    &M_UI_MS,
+    &M_HW_MS,
+    &M_SCALE,
+    &M_CAP,
+    &M_GFR_R,
+    &M_UPD_F,
+    &M_REN,
+    &M_MOD,
+    &M_SIM,
+    &M_VIS,
+    &M_INT,
+    &M_MISS,
+    &M_LATE,
+    &M_REN_V,
+    &M_VBUD,
 ];
 
 /// Timing breakdown returned by [`crate::gfx::Graphics::render`].
@@ -616,28 +1053,30 @@ pub struct FrameProfileSample {
 }
 
 impl FrameProfileSample {
-    /// Rows shown in the profiler panel.
-    pub fn stage_rows(self) -> [(&'static str, f32); 18] {
-        [
-            ("input/menu", self.input_ms),
-            ("guest emu", self.emu_ms),
-            ("spu/audio", self.audio_ms),
-            ("cmd log", self.cmd_log_ms),
-            ("compute", self.compute_ms),
-            ("vram upload", self.vram_upload_ms),
-            ("24bpp upload", self.display_upload_ms),
-            ("hw scale", self.hw_scale_ms),
-            ("vram clone", self.hw_vram_clone_ms),
-            ("hw render", self.hw_render_ms),
-            ("ui input", self.egui.input_ms),
-            ("ui build", self.egui.ui_ms),
-            ("ui tess", self.egui.tessellate_ms),
-            ("ui textures", self.egui.texture_update_ms),
-            ("ui buffers", self.egui.buffer_update_ms),
-            ("ui paint", self.egui.paint_ms),
-            ("present", self.egui.submit_present_ms),
-            ("total", self.total_ms),
-        ]
+    /// Host pipeline rows shown in the profiler panel, paired with their
+    /// documentation ([`HOST_STAGE_DEFS`] order).
+    fn stage_rows(self) -> [(&'static MetricDef, f32); 18] {
+        let values = [
+            self.input_ms,
+            self.emu_ms,
+            self.audio_ms,
+            self.cmd_log_ms,
+            self.compute_ms,
+            self.vram_upload_ms,
+            self.display_upload_ms,
+            self.hw_scale_ms,
+            self.hw_vram_clone_ms,
+            self.hw_render_ms,
+            self.egui.input_ms,
+            self.egui.ui_ms,
+            self.egui.tessellate_ms,
+            self.egui.texture_update_ms,
+            self.egui.buffer_update_ms,
+            self.egui.paint_ms,
+            self.egui.submit_present_ms,
+            self.total_ms,
+        ];
+        std::array::from_fn(|i| (&HOST_STAGE_DEFS[i], values[i]))
     }
 
     fn accumulate(&mut self, other: Self) {
@@ -1321,101 +1760,72 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
     };
     let latest = profiler.latest().unwrap_or(avg);
 
+    section_label(ui, "Emulated PS1", SEC_EMULATED_DESC);
     ui.horizontal_wrapped(|ui| {
-        metric(ui, "EMU Hz", format!("{:.1}", avg.emulated_vblank_hz()));
+        metric(ui, &M_EMU_HZ, format!("{:.1}", avg.emulated_vblank_hz()));
         if let Some(visual_hz) = avg.guest_visual_frame_hz() {
-            metric(ui, "VIS Hz", format!("{visual_hz:.1}"));
+            metric(ui, &M_VIS_HZ, format!("{visual_hz:.1}"));
         }
-        metric(ui, "DRAW Hz", format!("{:.1}", avg.psx_draw_hz()));
-        metric(ui, "CAP", format!("{:.0}", avg.psx_step_cap_misses));
+        metric(ui, &M_DRAW_HZ, format!("{:.1}", avg.psx_draw_hz()));
+        metric(ui, &M_STEP, format!("{:.0}%", avg.psx_budget_percent()));
+        metric(ui, &M_VBL_R, format!("{:.1}", avg.psx_vblanks));
     });
     ui.horizontal_wrapped(|ui| {
-        metric(ui, "STEP", format!("{:.0}%", avg.psx_budget_percent()));
-        metric(ui, "VBL/R", format!("{:.1}", avg.psx_vblanks));
         metric(
             ui,
-            "CYC/F",
+            &M_CYC_F,
             format!("{:.0}", avg.bus_cycles_per_guest_frame()),
         );
         metric(
             ui,
-            "BUD/F",
+            &M_BUD_F,
             format!("{:.0}", avg.budget_cycles_per_guest_frame()),
         );
         metric(
             ui,
-            "INS/F",
+            &M_INS_F,
             format!("{:.0}", avg.cpu_ticks_per_guest_frame()),
         );
-    });
-    ui.horizontal_wrapped(|ui| {
-        metric(ui, "GPU/V", format!("{:.2}", avg.psx_draw_vblanks));
         metric(
             ui,
-            "CMD/F",
-            format!("{:.0}", avg.gpu_cmds_per_guest_frame()),
+            &M_GTE_F,
+            format!("{:.0}", avg.gte_ops_per_guest_frame()),
         );
         metric(
             ui,
-            "DRAW/F",
-            format!("{:.0}", avg.gpu_draw_cmds_per_guest_frame()),
-        );
-        metric(
-            ui,
-            "IMG/F",
-            format!("{:.0}", avg.gpu_image_cmds_per_guest_frame()),
-        );
-        metric(ui, "GTE/F", format!("{:.0}", avg.gte_ops_per_guest_frame()));
-        metric(
-            ui,
-            "GTEC/F",
+            &M_GTEC_F,
             format!("{:.0}", avg.gte_cycles_per_guest_frame()),
         );
     });
     ui.horizontal_wrapped(|ui| {
-        metric(ui, "HOST FPS", format!("{:.1}", avg.host_fps()));
-        metric(ui, "HOST AVG", format!("{:.2} ms", avg.total_ms));
-        metric(ui, "HOST LAST", format!("{:.2} ms", latest.total_ms));
-        metric(ui, "UI", format!("{:.2} ms", avg.egui.total_ms));
-        metric(ui, "HW", format!("{:.2} ms", avg.hw_render_ms));
-        metric(ui, "SCALE", format!("{:.0}x", latest.hw_scale.max(1.0)));
+        metric(
+            ui,
+            &M_CMD_F,
+            format!("{:.0}", avg.gpu_cmds_per_guest_frame()),
+        );
+        metric(
+            ui,
+            &M_DRAW_F,
+            format!("{:.0}", avg.gpu_draw_cmds_per_guest_frame()),
+        );
+        metric(
+            ui,
+            &M_IMG_F,
+            format!("{:.0}", avg.gpu_image_cmds_per_guest_frame()),
+        );
+        metric(ui, &M_GPU_V, format!("{:.2}", avg.psx_draw_vblanks));
     });
 
-    ui.add_space(4.0);
-    section_label(ui, "Host Frame");
-    draw_history(ui, profiler);
-    ui.add_space(6.0);
-
-    let max_ms = avg.total_ms.max(BUDGET_60_MS).max(1.0);
-    for (label, ms) in avg.stage_rows() {
-        // The compute shadow rasterizer is opt-in (--gpu-compute); hide its
-        // permanently-zero row for everyone else.
-        if label == "compute" && ms <= 0.0 {
-            continue;
-        }
-        let color = if label == "total" {
-            theme::ACCENT
-        } else {
-            theme::TEXT
-        };
-        bar_row(
-            ui,
-            label,
-            color,
-            ms / max_ms,
-            color_for_ms(ms),
-            &[(format!("{ms:6.2}"), VAL_MS_W, false)],
-        );
-    }
-
+    // Game telemetry sits between the model-side headline and the host
+    // diagnostics so the PS1-side story reads top to bottom.
+    ui.add_space(8.0);
+    section_label(ui, "Game telemetry", SEC_GAME_DESC);
     if avg.guest.has_data() {
-        ui.add_space(8.0);
-        section_label(ui, "Guest Runtime");
         ui.horizontal_wrapped(|ui| {
-            metric(ui, "GFR/R", format!("{:.1}", avg.guest.frames));
+            metric(ui, &M_GFR_R, format!("{:.1}", avg.guest.frames));
             metric(
                 ui,
-                "UPD/F",
+                &M_UPD_F,
                 format!(
                     "{:.0}",
                     avg.guest.stage_cycles_per_guest_frame(
@@ -1425,7 +1835,7 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
             );
             metric(
                 ui,
-                "REN",
+                &M_REN,
                 format!(
                     "{:.0}",
                     avg.guest
@@ -1434,7 +1844,7 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
             );
             metric(
                 ui,
-                "MOD",
+                &M_MOD,
                 format!(
                     "{:.0}",
                     avg.guest.stage_cycles_per_hit(
@@ -1447,7 +1857,7 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
             ui.horizontal_wrapped(|ui| {
                 metric(
                     ui,
-                    "SIM",
+                    &M_SIM,
                     format!(
                         "{:.0}",
                         avg.guest
@@ -1456,7 +1866,7 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                 );
                 metric(
                     ui,
-                    "VIS",
+                    &M_VIS,
                     format!(
                         "{:.0}",
                         avg.guest.counter_total(
@@ -1466,12 +1876,12 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                 );
                 metric(
                     ui,
-                    "INT",
+                    &M_INT,
                     format!("{:.2}", avg.guest.visual_interval_vblanks()),
                 );
                 metric(
                     ui,
-                    "MISS",
+                    &M_MISS,
                     format!(
                         "{:.0}",
                         avg.guest.counter_total(
@@ -1481,7 +1891,7 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                 );
                 metric(
                     ui,
-                    "LATE",
+                    &M_LATE,
                     format!(
                         "{:.0}",
                         avg.guest.counter_max_value(
@@ -1491,12 +1901,12 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                 );
                 metric(
                     ui,
-                    "REN/V",
+                    &M_REN_V,
                     format!("{:.0}", avg.guest.render_cycles_per_visual_frame()),
                 );
                 metric(
                     ui,
-                    "VBUD",
+                    &M_VBUD,
                     avg.guest.paced_visual_budget_status().to_string(),
                 );
             });
@@ -1504,6 +1914,50 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
         draw_guest_scheduler_tasks(ui, avg.guest);
         draw_guest_render_breakdown(ui, avg.guest);
         draw_guest_runtime(ui, avg.guest);
+    } else {
+        // Absent telemetry looks identical to a broken build; say why.
+        ui.label(
+            RichText::new("(none: build the game with `emulator-telemetry` to see its stages)")
+                .color(theme::TEXT_DIM)
+                .size(theme::FONT_SIZE_SMALL),
+        );
+    }
+
+    ui.add_space(8.0);
+    section_label(ui, "Host (this app)", SEC_HOST_DESC);
+    ui.horizontal_wrapped(|ui| {
+        metric(ui, &M_HOST_FPS, format!("{:.1}", avg.host_fps()));
+        metric(ui, &M_HOST_AVG, format!("{:.2} ms", avg.total_ms));
+        metric(ui, &M_HOST_LAST, format!("{:.2} ms", latest.total_ms));
+        metric(ui, &M_UI_MS, format!("{:.2} ms", avg.egui.total_ms));
+        metric(ui, &M_HW_MS, format!("{:.2} ms", avg.hw_render_ms));
+        metric(ui, &M_SCALE, format!("{:.0}x", latest.hw_scale.max(1.0)));
+        metric(ui, &M_CAP, format!("{:.0}", avg.psx_step_cap_misses));
+    });
+    draw_history(ui, profiler);
+    ui.add_space(6.0);
+
+    let max_ms = avg.total_ms.max(BUDGET_60_MS).max(1.0);
+    for (def, ms) in avg.stage_rows() {
+        // The compute shadow rasterizer is opt-in (--gpu-compute); hide its
+        // permanently-zero row for everyone else.
+        if def.chip == "compute" && ms <= 0.0 {
+            continue;
+        }
+        let color = if def.chip == "total" {
+            theme::ACCENT
+        } else {
+            theme::TEXT
+        };
+        bar_row(
+            ui,
+            def.chip,
+            color,
+            ms / max_ms,
+            color_for_ms(ms),
+            Some((def.name, def.desc, def.source)),
+            &[(format!("{ms:6.2}"), VAL_MS_W, false)],
+        );
     }
 
     ui.add_space(8.0);
@@ -1517,13 +1971,13 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
     });
 }
 
-fn metric(ui: &mut egui::Ui, label: &str, value: String) {
+fn metric(ui: &mut egui::Ui, def: &MetricDef, value: String) {
     // One atomic chip: the nested horizontal keeps label+value together,
     // so the wrapped parent row wraps BETWEEN chips, never inside one.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(
-            RichText::new(label)
+            RichText::new(def.chip)
                 .color(theme::TEXT_DIM)
                 .size(theme::FONT_SIZE_SMALL),
         );
@@ -1533,17 +1987,47 @@ fn metric(ui: &mut egui::Ui, label: &str, value: String) {
                 .monospace()
                 .size(theme::FONT_SIZE_SMALL),
         );
-    });
+    })
+    .response
+    .on_hover_ui(|ui| metric_hover(ui, def.name, def.desc, def.source));
 }
 
-/// Small accent caption used to group the profiler's tables.
-fn section_label(ui: &mut egui::Ui, text: &str) {
+/// Tooltip card shared by chips, bar rows, and counter rows: full name,
+/// description, and the data-source tag.
+fn metric_hover(ui: &mut egui::Ui, name: &str, desc: &str, source: MetricSource) {
+    ui.set_max_width(320.0);
+    ui.label(RichText::new(name).strong().size(theme::FONT_SIZE_SMALL));
+    if !desc.trim().is_empty() {
+        ui.label(RichText::new(collapse_doc(desc)).size(theme::FONT_SIZE_SMALL));
+    }
     ui.label(
+        RichText::new(source.tag())
+            .color(theme::TEXT_DIM)
+            .size(theme::FONT_SIZE_SMALL),
+    );
+}
+
+/// Squash the line breaks and doc-comment indentation that `psx-telemetry`
+/// descriptions carry into single spaces for tooltip prose.
+fn collapse_doc(desc: &str) -> String {
+    desc.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Small accent caption used to group the profiler's tables. `desc` explains
+/// the section's data class on hover; empty skips the tooltip.
+fn section_label(ui: &mut egui::Ui, text: &str, desc: &str) {
+    let response = ui.label(
         RichText::new(text)
             .color(theme::ACCENT)
             .monospace()
             .size(theme::FONT_SIZE_SMALL),
     );
+    if !desc.is_empty() {
+        response.on_hover_ui(|ui| {
+            ui.set_max_width(320.0);
+            ui.label(RichText::new(desc).size(theme::FONT_SIZE_SMALL));
+        });
+    }
 }
 
 // ---- Responsive bar rows --------------------------------------------------
@@ -1560,17 +2044,20 @@ const VAL_PCT_W: f32 = 46.0;
 const VAL_WORST_W: f32 = 88.0;
 
 /// One `label | bar | values...` row. `values` are (text, cell width, dim).
+/// `hover` documents the row: `(full name, description, source)` shown on
+/// the label and the bar.
 fn bar_row(
     ui: &mut egui::Ui,
     label: &str,
     label_color: egui::Color32,
     frac: f32,
     fill: egui::Color32,
+    hover: Option<(&str, &str, MetricSource)>,
     values: &[(String, f32, bool)],
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.add_sized(
+        let label_response = ui.add_sized(
             [ROW_LABEL_W, ROW_H],
             egui::Label::new(
                 RichText::new(label)
@@ -1580,9 +2067,16 @@ fn bar_row(
             )
             .truncate(),
         );
+        if let Some((name, desc, source)) = hover {
+            label_response.on_hover_ui(|ui| metric_hover(ui, name, desc, source));
+        }
         let reserved: f32 = values.iter().map(|v| v.1 + 6.0).sum();
         let bar_w = (ui.available_width() - reserved).max(BAR_MIN_W);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, BAR_H), egui::Sense::hover());
+        let (rect, bar_response) =
+            ui.allocate_exact_size(egui::vec2(bar_w, BAR_H), egui::Sense::hover());
+        if let Some((name, desc, source)) = hover {
+            bar_response.on_hover_ui(|ui| metric_hover(ui, name, desc, source));
+        }
         let painter = ui.painter();
         painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
         let fill_w = (rect.width() * frac.clamp(0.0, 1.0)).max(1.0);
@@ -1612,7 +2106,7 @@ fn draw_guest_scheduler_tasks(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
     }
 
     ui.add_space(4.0);
-    section_label(ui, "Scheduler Tasks");
+    section_label(ui, "Scheduler Tasks", SEC_TASKS_DESC);
 
     let max_cycles = (0..TASK_COUNT)
         .map(|id| guest.task_cycles_per_hit(id))
@@ -1630,6 +2124,11 @@ fn draw_guest_scheduler_tasks(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
             theme::TEXT,
             cycles / max_cycles,
             theme::ACCENT_HOVER,
+            Some((
+                task_name(id as u16),
+                task_desc(id as u16),
+                MetricSource::GameTelemetry,
+            )),
             &[
                 (format!("{cycles:7.0} cyc"), VAL_CYC_W, false),
                 (
@@ -1649,7 +2148,7 @@ fn draw_guest_scheduler_tasks(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
 
 fn draw_guest_runtime(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
     ui.add_space(4.0);
-    section_label(ui, "Guest Stages");
+    section_label(ui, "Guest Stages", SEC_STAGES_DESC);
     let max_cycles = (1..STAGE_COUNT)
         .map(|id| guest.stage_cycles_per_hit(id))
         .fold(guest.cycle_budget_per_guest_frame() / 4.0, f32::max)
@@ -1666,6 +2165,11 @@ fn draw_guest_runtime(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
             theme::TEXT,
             cycles / max_cycles,
             theme::ACCENT_HOVER,
+            Some((
+                stage_name(id as u16),
+                stage_desc(id as u16),
+                MetricSource::GameTelemetry,
+            )),
             &[
                 (format!("{cycles:7.0} cyc"), VAL_CYC_W, false),
                 (
@@ -1703,19 +2207,22 @@ fn draw_guest_runtime(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
                     if value <= 0.0 {
                         continue;
                     }
-                    counter_row(ui, counter_name(id as u16), value);
+                    counter_row(ui, counter_name(id as u16), counter_desc(id as u16), value);
                 }
             });
     });
 }
 
-fn counter_row(ui: &mut egui::Ui, label: &str, value: f32) {
-    ui.label(
+fn counter_row(ui: &mut egui::Ui, label: &str, desc: &str, value: f32) {
+    let response = ui.label(
         RichText::new(label)
             .color(theme::TEXT_DIM)
             .monospace()
             .size(theme::FONT_SIZE_SMALL),
     );
+    if !desc.trim().is_empty() {
+        response.on_hover_ui(|ui| metric_hover(ui, label, desc, MetricSource::GameTelemetry));
+    }
     ui.label(
         RichText::new(format!("{value:.0}"))
             .color(theme::TEXT)
@@ -1732,7 +2239,7 @@ fn draw_guest_render_breakdown(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
     }
 
     ui.add_space(4.0);
-    section_label(ui, "Render %");
+    section_label(ui, "Render %", SEC_RENDER_PCT_DESC);
 
     let mut accounted = 0.0;
     for &(stage_id, label) in GUEST_RENDER_BREAKDOWN_STAGES {
@@ -1741,15 +2248,27 @@ fn draw_guest_render_breakdown(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
             continue;
         }
         accounted += cycles;
-        guest_render_percent_row(ui, label, cycles, render_cycles);
+        guest_render_percent_row(ui, label, stage_desc(stage_id), cycles, render_cycles);
     }
     let other = (render_cycles - accounted).max(0.0);
     if other > render_cycles * 0.005 {
-        guest_render_percent_row(ui, "other", other, render_cycles);
+        guest_render_percent_row(
+            ui,
+            "other",
+            "Render cycles not covered by any listed sub-stage.",
+            other,
+            render_cycles,
+        );
     }
 }
 
-fn guest_render_percent_row(ui: &mut egui::Ui, label: &str, cycles: f32, render_cycles: f32) {
+fn guest_render_percent_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    desc: &str,
+    cycles: f32,
+    render_cycles: f32,
+) {
     let percent = cycles * 100.0 / render_cycles.max(1.0);
     bar_row(
         ui,
@@ -1757,6 +2276,7 @@ fn guest_render_percent_row(ui: &mut egui::Ui, label: &str, cycles: f32, render_
         theme::TEXT,
         percent / 100.0,
         theme::ACCENT_HOVER,
+        Some((label, desc, MetricSource::GameTelemetry)),
         &[
             (format!("{percent:5.1}%"), VAL_PCT_W, false),
             (
@@ -2478,5 +2998,36 @@ mod tests {
         assert!(line.contains("gte_f=96"));
         assert!(line.contains("draw_f=32"));
         assert!(line.contains("guest_vbud=?"));
+    }
+
+    #[test]
+    fn every_panel_metric_is_documented() {
+        // Tooltips are built from these defs; an empty field renders a chip
+        // that cannot explain itself, which is how the old panel got its
+        // cryptic-abbreviation reputation. New chips must arrive documented.
+        let mut chips = std::collections::HashSet::new();
+        for def in ALL_CHIP_DEFS.iter().copied().chain(HOST_STAGE_DEFS.iter()) {
+            assert!(!def.chip.trim().is_empty(), "def with empty chip label");
+            assert!(!def.name.trim().is_empty(), "{} lacks a name", def.chip);
+            assert!(!def.desc.trim().is_empty(), "{} lacks a desc", def.chip);
+            assert!(chips.insert(def.chip), "duplicate chip label {}", def.chip);
+        }
+    }
+
+    #[test]
+    fn stage_rows_pair_values_with_matching_defs() {
+        let sample = FrameProfileSample {
+            emu_ms: 4.0,
+            total_ms: 9.0,
+            ..FrameProfileSample::default()
+        };
+        let rows = sample.stage_rows();
+        assert_eq!(rows.len(), HOST_STAGE_DEFS.len());
+        assert!(rows
+            .iter()
+            .any(|(def, ms)| def.chip == "emu step" && *ms == 4.0));
+        assert!(rows
+            .iter()
+            .any(|(def, ms)| def.chip == "total" && *ms == 9.0));
     }
 }

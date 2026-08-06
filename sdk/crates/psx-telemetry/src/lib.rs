@@ -12,8 +12,47 @@
 
 pub mod emit;
 
-/// Runtime stage ids.
-pub mod stage {
+/// Declares one id module plus a `*_desc(id)` lookup returning each id's own
+/// rustdoc as a runtime string. Host tooling (the frame profiler's tooltips)
+/// reads descriptions through the lookup, so the docs here are the single
+/// source and cannot drift from what the UI shows. The const declarations
+/// inside the braces are ordinary Rust, passed through verbatim.
+macro_rules! id_table {
+    (
+        $(#[$mod_attr:meta])*
+        pub mod $module:ident;
+        pub fn $desc_fn:ident;
+        {
+            $(
+                $(#[doc = $doc:literal])+
+                pub const $name:ident: u16 = $value:expr;
+            )+
+        }
+    ) => {
+        $(#[$mod_attr])*
+        pub mod $module {
+            $(
+                $(#[doc = $doc])+
+                pub const $name: u16 = $value;
+            )+
+        }
+
+        /// Host-tooling description for an id: the id's doc comment from this
+        /// crate, verbatim. Returns `""` for unknown ids.
+        pub fn $desc_fn(id: u16) -> &'static str {
+            match id {
+                $( $module::$name => concat!($($doc),+), )+
+                _ => "",
+            }
+        }
+    };
+}
+
+id_table! {
+    /// Runtime stage ids.
+    pub mod stage;
+    pub fn stage_desc;
+    {
     /// Per-frame gameplay/update work.
     pub const UPDATE: u16 = 1;
     /// Framebuffer clear before scene rendering.
@@ -121,6 +160,7 @@ pub mod stage {
     /// Budgeted at 60k cycles per 30 fps frame in
     /// docs/game-runtime-plan.md ("Phase 3 budget").
     pub const GAME_LOGIC: u16 = 51;
+    }
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
@@ -134,19 +174,26 @@ pub const STAGE_COUNT: usize = 52;
 // update both the count and this guard.
 const _: () = assert!(stage::GAME_LOGIC as usize == STAGE_COUNT - 1);
 
-/// Runtime task ids.
-pub mod task {
+id_table! {
+    /// Runtime task ids.
+    pub mod task;
+    pub fn task_desc;
+    {
     /// Built-in fixed simulation/update task.
     pub const FIXED_UPDATE: u16 = 0;
     /// Built-in visual render/present task.
     pub const VISUAL_RENDER: u16 = 1;
+    }
 }
 
 /// Number of task slots, including reserved future scheduler jobs.
 pub const TASK_COUNT: usize = 16;
 
-/// Runtime counter ids.
-pub mod counter {
+id_table! {
+    /// Runtime counter ids.
+    pub mod counter;
+    pub fn counter_desc;
+    {
     /// Textured primitive packets allocated this frame.
     pub const TRI_PRIMITIVES: u16 = 1;
     /// World render commands queued before flush.
@@ -709,6 +756,7 @@ pub mod counter {
     /// surface body no counter reaches; `stage - cell_setup - call` is the
     /// loop's own overhead. Together these close the attribution.
     pub const ROOM_SURF_CALL_CYCLES: u16 = 252;
+    }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
