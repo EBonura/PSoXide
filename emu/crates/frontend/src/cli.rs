@@ -3132,6 +3132,14 @@ fn dump_hw_ppm(
 
     let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
     hw.set_texture_filter(texture_filter);
+    // PSOXIDE_HW_DUMP_SCALE=2..4 renders the dump at that internal-resolution
+    // multiplier (clamped to MAX_SCALE); unset keeps the native 1x behaviour.
+    if let Some(scale) = std::env::var("PSOXIDE_HW_DUMP_SCALE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        hw.set_internal_scale(scale, None);
+    }
     let initial_vram =
         vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
     hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
