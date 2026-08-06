@@ -8,7 +8,7 @@
   <a href="LICENSE"><img alt="License: GPL-2.0-or-later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg"></a>
   <img alt="Rust: nightly" src="https://img.shields.io/badge/rust-nightly-orange.svg">
   <img alt="Platforms: macOS · Linux · Windows" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey.svg">
-  <a href="https://ebonura.github.io/PSoXide/"><img alt="Web emulator: live" src="https://img.shields.io/badge/web%20emulator-live-brightgreen.svg"></a>
+  <a href="https://bonnie-studios.itch.io/psoxide"><img alt="Web emulator: live" src="https://img.shields.io/badge/web%20emulator-live-brightgreen.svg"></a>
 </p>
 
 **PSoXide is an open-source PlayStation 1 development stack written in Rust.**
@@ -17,12 +17,12 @@ It brings together an accuracy-focused **emulator** and debugger, a bare-metal
 pipeline is designed to author content, cook PS1-ready assets, build CUE/BIN
 disc images, and run them in emulators or on original hardware.
 
-**Try it now:** the emulator runs in your browser at
-[ebonura.github.io/PSoXide](https://ebonura.github.io/PSoXide/). Under
-**Games**, the PSoXide Demo Disc (eleven homebrew programs, CD audio and all)
-streams in on demand; the SDK and engine samples are baked in under
-**Examples**, so there is something to run without supplying a disc. No
-install, no BIOS; it rebuilds and redeploys from `main` on every push.
+**Try it now:** the emulator runs in your browser on
+[the itch.io page](https://bonnie-studios.itch.io/psoxide). Press play and the
+[PSoXide Demo Disc](https://bonnie-studios.itch.io/psoxide-demo-disc) (ten
+homebrew programs, CD audio and all) streams in on demand; the SDK and engine
+samples are baked in under **Examples**, so there is something to run without
+supplying a disc. No install, no BIOS.
 
 The primary reference project is a dark, third-person PS1 action-RPG vertical
 slice. The public tools are built around proving the full workflow end to end.
@@ -35,9 +35,9 @@ slice. The public tools are built around proving the full workflow end to end.
 > **Pre-release software.** The end-to-end pipeline works, but APIs, file
 > formats, and editor workflows may still change. There are no native release
 > binaries yet; build from source, or try the
-> [web emulator](https://ebonura.github.io/PSoXide/) without installing
+> [web emulator](https://bonnie-studios.itch.io/psoxide) without installing
 > anything. Project page:
-> [bonnie-games.itch.io/psoxide](https://bonnie-games.itch.io/psoxide).
+> [bonnie-studios.itch.io/psoxide](https://bonnie-studios.itch.io/psoxide).
 
 ## Features
 
@@ -279,7 +279,7 @@ small games (Pong, Breakout, Space Invaders). Build them all with
 [`engine/`](engine/README.md) READMEs.
 
 They are also baked into the emulator itself, under **Examples** in the menu, so
-the [web build](https://ebonura.github.io/PSoXide/) and a binary with no source
+the [web build](https://bonnie-studios.itch.io/psoxide) and a binary with no source
 tree beside it both have something to run without supplying a disc.
 
 | ![showcase-3d](assets/media/readme/examples/showcase-3d.png) | ![showcase-fog](assets/media/readme/examples/showcase-fog.png) | ![showcase-model](assets/media/readme/examples/showcase-model.png) |
