@@ -417,6 +417,18 @@ impl Disc {
         self.tracks.iter().find(|track| track.number == number)
     }
 
+    /// Mutable access to a track's raw sector bytes, for callers that stream
+    /// payloads in after the disc is mounted (the web build boots on the data
+    /// track and fills the CD-DA tracks as their downloads land). The track's
+    /// geometry is fixed at construction; only the bytes may be patched, and
+    /// a zero-filled span plays as digital silence until it is.
+    pub fn track_bytes_mut(&mut self, number: u8) -> Option<&mut [u8]> {
+        self.tracks
+            .iter_mut()
+            .find(|track| track.number == number)
+            .map(|track| track.bytes.as_mut_slice())
+    }
+
     /// Track start LBA by 1-based track number.
     pub fn track_start_lba(&self, number: u8) -> Option<u32> {
         self.track(number).map(|track| track.start_lba)

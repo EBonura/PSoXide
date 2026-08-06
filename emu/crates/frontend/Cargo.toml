@@ -84,6 +84,8 @@ base64 = { version = "0.22", optional = true }
 cpal = { workspace = true, features = ["wasm-bindgen"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+# Lossless FLAC decode for the streamed demo disc audio tracks; pure Rust.
+claxon = "0.4"
 console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Element", "Navigator", "Gamepad", "GamepadButton", "HtmlInputElement", "HtmlElement", "File", "FileList", "FileReader", "Blob"] }
 js-sys = "0.3"
@@ -93,3 +95,6 @@ wgpu = { workspace = true, features = ["webgl"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSData"] }
+
+[dev-dependencies]
+claxon = "0.4"
