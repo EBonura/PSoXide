@@ -97,3 +97,8 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # The artifact carries the demo disc's streamed delivery (~130 MB
+          # of FLAC), and Pages takes longer than the default ten minutes to
+          # settle a deployment that size.
+          timeout: 1800000
