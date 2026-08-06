@@ -63,20 +63,26 @@ jobs:
         run: trunk build --release --public-url "/PSoXide/"
 
       # The demo disc is streamed at runtime, not baked into the wasm: the
-      # image is ~200 MB, which is both past GitHub's 100 MB file limit and
-      # far past what an include_bytes! wasm payload tolerates. The demo-disc
-      # repo keeps a rolling `web-disc` release current (its `make release-web`
-      # uploads there); this stages the pair as plain static files beside the
-      # wasm, so the frontend's fetch is same-origin.
+      # image is ~200 MB, past GitHub's file limit and past what an
+      # include_bytes! payload tolerates. The demo-disc repo's `make
+      # release-web` presses the disc and splits it into the delivery set
+      # (gzipped data track, FLAC per audio track, manifest with checksums)
+      # on the rolling `web-disc` release; this stages those pieces as plain
+      # static files beside the wasm, so every frontend fetch is same-origin.
+      # The full .bin stays on the release as a download mirror but is not
+      # shipped to Pages.
       - name: Stage the streamed demo disc
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download web-disc \
             --repo EBonura/PSoXide-demo-disc \
-            --pattern 'demo-disc.*' \
+            --pattern 'demo-disc.cue' \
+            --pattern 'web-manifest.txt' \
+            --pattern 'demo-data.bin.gz' \
+            --pattern 'track-*.flac' \
             --dir emu/crates/frontend/dist
-          ls -la emu/crates/frontend/dist/demo-disc.*
+          ls -la emu/crates/frontend/dist/
 
       - uses: actions/upload-pages-artifact@v3
         with:
