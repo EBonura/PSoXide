@@ -176,9 +176,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 15;
+const SUITE_VERSION_MINOR: u8 = 16;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.15";
+const SUITE_VERSION: &str = "HWTEST v1.16";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -366,7 +366,7 @@ impl Mode {
     const fn description(self) -> &'static str {
         match self {
             Self::Menu => "SELECT A TEST - NOTHING RUNS UNTIL CHOSEN",
-            Self::MemoryCard => "NON-DESTRUCTIVE FULL-CARD READ/WRITE TEST",
+            Self::MemoryCard => "CARD READ/WRITE TEST - LIMITED TESTING, RISKY",
             Self::ReverbProbe => "BIOS REVERB STATE + MAP DMA RESET VARIANTS QR",
             Self::HandoffProbe => "SELECTABLE MENU-VOICE SHUTDOWN + BANK SPLIT QR",
             Self::CdChainProbe => "CD READ MECHANISM MATRIX QR (CL2)",
@@ -712,7 +712,7 @@ const ROOT_MENU: [(&str, MenuAction); 11] = [
         "CONTROLLER TEST (P1 + P2)",
         MenuAction::Open(Mode::ControllerTest),
     ),
-    ("MEMORY CARD (SAFE)", MenuAction::Open(Mode::MemoryCard)),
+    ("MEMORY CARD (AT OWN RISK)", MenuAction::Open(Mode::MemoryCard)),
     ("VIEW CAPTURE (QR PAGES)", MenuAction::Open(Mode::TimingScan)),
     ("RESULTS BY SECTION", MenuAction::Submenu(MenuPage::Results)),
     ("HARDWARE SCANS", MenuAction::Submenu(MenuPage::Scans)),
@@ -1935,6 +1935,10 @@ struct HardwareTests {
     audio_probe: AudioProbe,
     controller_test: ControllerTest,
     memory_card: MemoryCardDiagnostic,
+    /// The memory-card test touches the operator's real card and has had
+    /// limited testing on silicon. Nothing talks to the card until the
+    /// warning screen is accepted, and entering the mode always re-asks.
+    memcard_armed: bool,
     pass_count: u8,
     fail_count: u8,
     warn_count: u8,
@@ -2008,6 +2012,7 @@ impl HardwareTests {
             audio_probe: AudioProbe::new(),
             controller_test: ControllerTest::new(),
             memory_card: MemoryCardDiagnostic::new(),
+            memcard_armed: false,
             pass_count: 0,
             fail_count: 0,
             warn_count: 0,
@@ -2157,7 +2162,10 @@ impl HardwareTests {
         self.mode = mode;
         self.page = 0;
         match mode {
-            Mode::MemoryCard => self.memory_card = MemoryCardDiagnostic::new(),
+            Mode::MemoryCard => {
+                self.memory_card = MemoryCardDiagnostic::new();
+                self.memcard_armed = false;
+            }
             Mode::ReverbProbe => self.reverb_probe.start(),
             Mode::HandoffProbe => self.handoff_probe.start(),
             Mode::CdChainProbe => self.cd_chain_probe.start(),
@@ -2296,6 +2304,22 @@ impl Scene for HardwareTests {
             // let the global START shortcut consume either button first.
             return;
         } else if matches!(self.mode, Mode::MemoryCard) {
+            if !self.memcard_armed {
+                // No card traffic of any kind behind the warning: the scan
+                // starts reading the card on its first step, and consent has
+                // to come before the first read, not before the first write.
+                // CIRCLE accepts rather than CROSS, because CROSS is what
+                // just selected the menu row and a bounced press must not
+                // blow through a risk gate.
+                if ctx.just_pressed(button::CIRCLE) {
+                    self.memcard_armed = true;
+                } else if ctx.just_pressed(button::START)
+                    || ctx.just_pressed(button::TRIANGLE)
+                {
+                    self.open_menu_page(MenuPage::Root);
+                }
+                return;
+            }
             // The engine's controller poll has fully completed before this
             // card transaction starts. Pad and card share SIO0, but are never
             // accessed concurrently.
@@ -2540,7 +2564,13 @@ impl Scene for HardwareTests {
                 Mode::SpuScan => draw_scan_report(font, self.mode, self.spu_scan),
                 Mode::TimingScan => photo::draw_capture_page(font, &self.timing_capture, self.page),
                 Mode::VideoLevels => draw_video_levels(font, self.page),
-                Mode::MemoryCard => self.memory_card.draw(font),
+                Mode::MemoryCard => {
+                    if self.memcard_armed {
+                        self.memory_card.draw(font);
+                    } else {
+                        draw_memcard_warning(font);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2721,6 +2751,29 @@ fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
         visible_index += 1;
         row += 1;
     }
+}
+
+/// The consent screen in front of the memory-card test. It blocks ALL card
+/// traffic, not just writes: the scan reads the card from its first step,
+/// and "use at your own risk" said after the first read is theatre.
+fn draw_memcard_warning(font: &FontAtlas) {
+    gpu::draw_rect_flat(8, 32, 304, 20, 200, 24, 24);
+    font.draw_text(104, 38, "!!  WARNING  !!", (255, 240, 96));
+    let body: [&str; 5] = [
+        "THIS TEST HAS ONLY HAD LIMITED TESTING",
+        "ON REAL HARDWARE. IT READS AND WRITES",
+        "YOUR MEMORY CARD, AND I CANNOT",
+        "GUARANTEE IT WILL NOT CORRUPT YOUR",
+        "SAVES. USE AT YOUR OWN RISK.",
+    ];
+    let mut y = 64;
+    for line in body {
+        font.draw_text(8, y, line, (232, 236, 244));
+        y += 14;
+    }
+    font.draw_text(8, y + 8, "IF YOU HAVE A SPARE CARD, USE IT.", (255, 216, 96));
+    font.draw_text(8, y + 36, "CIRCLE = I ACCEPT THE RISK", (96, 240, 128));
+    font.draw_text(8, y + 50, "TRIANGLE OR START = BACK TO MENU", (150, 170, 200));
 }
 
 fn draw_scan_report(font: &FontAtlas, mode: Mode, report: ScanReport) {

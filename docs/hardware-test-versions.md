@@ -33,6 +33,23 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.16 (2026-08-06, schema PX8)
+
+The memory-card test goes behind a consent screen. It has had limited
+testing on real hardware, it reads and writes the operator's card, and
+its menu row used to say SAFE, which was a promise this project cannot
+make. The row now says AT OWN RISK; selecting it shows a full-screen
+warning and nothing touches the card, reads included, until CIRCLE
+accepts. CIRCLE rather than CROSS, so the press that selected the menu
+row cannot bounce through the gate; TRIANGLE or START backs out, and
+re-entering always re-asks. Verified both ways in the emulator with
+route screenshots: the warning holds indefinitely without consent, and
+the scan starts only after it.
+
+No measurement changed: the v1.16 emulator capture is identical to
+v1.15's (24 of 173 fail, drift=0 cross-version). Records untouched;
+minor because the linked EXE changes. All three baselines regenerated.
+
 ### v1.15 (2026-08-06, schema PX8)
 
 SB4, the capture-ring readback: the first digital tap on a voice's decoded
