@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode a hardware-test audio-link capture back into the PX7 payload.
+"""Decode a hardware-test audio-link capture back into the capture payload.
 
 The disc streams its whole capture out of the SPU as binary FSK and loops it
 forever, so a recording made through a capture card carries the payload
@@ -192,6 +192,15 @@ BASE64_CHARS_PER_PAGE = 828
 
 
 def emit_pages(payload: bytes) -> str:
+    # The payload's own magic (b"PX7B", b"PX8B", ...) names the schema. The
+    # page prefix must match it, or hwtest-report.py applies the wrong page
+    # rules: this once emitted a hardcoded PX7 prefix on a PX8 payload and the
+    # report refused the single page a PX8 conformance capture costs.
+    magic = payload[:4]
+    if magic[:2] == b"PX" and magic[3:4] == b"B":
+        prefix = magic[:3].decode("ascii")
+    else:
+        prefix = "PX8"
     encoded = base64.b64encode(payload).decode("ascii")
     chunks = [
         encoded[i : i + BASE64_CHARS_PER_PAGE]
@@ -200,7 +209,7 @@ def emit_pages(payload: bytes) -> str:
     lines = []
     for number, chunk in enumerate(chunks, start=1):
         crc = binascii.crc32(chunk.encode("ascii")) & 0xFFFF_FFFF
-        lines.append(f"PX7/{number:02X}{len(chunks):02X}/{chunk}/C:{crc:08X}")
+        lines.append(f"{prefix}/{number:02X}{len(chunks):02X}/{chunk}/C:{crc:08X}")
     return "\n".join(lines) + "\n"
 
 
@@ -315,7 +324,7 @@ def main() -> int:
     parser.add_argument("--out", help="write the recovered payload here")
     parser.add_argument(
         "--emit-pages",
-        help="re-encode the payload as PX7 page lines for hwtest-report.py",
+        help="re-encode the payload as page lines for hwtest-report.py",
     )
     parser.add_argument(
         "--max-frames",

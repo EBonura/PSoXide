@@ -565,7 +565,8 @@ HWTEST_AUDIO_PAGES := build/hwtest-audio-pages.txt
 # FSK and loops it, so this records the emulator's SPU output, decodes it back,
 # and runs the recovered bytes through the SAME report pipeline a scanned QR
 # capture uses. Needs a longer run than hwtest-capture because the payload
-# takes ~11.6 s of audio to transmit once.
+# takes ~2 s of audio per repetition for a routine conformance capture (a full
+# characterisation capture is several times that).
 hwtest-audio: hardware-tests-disc
 	@mkdir -p $(dir $(HWTEST_WAV))
 	cd emu && cargo run -q -p frontend --release -- launch \
@@ -575,7 +576,7 @@ hwtest-audio: hardware-tests-disc
 		--dump-audio ../$(HWTEST_WAV) > /dev/null
 	python3 tools/hwtest-audio-decode.py $(HWTEST_WAV) --emit-pages $(HWTEST_AUDIO_PAGES)
 	python3 tools/hwtest-report.py $(HWTEST_AUDIO_PAGES) > /dev/null
-	@echo "audio link OK: payload recovered from audio and parsed as PX7"
+	@echo "audio link OK: payload recovered from audio and parsed as PX8"
 
 # Robustness matrix for the audio link. A clean emulator recording proves the
 # encoding; this degrades it the way a real capture chain does (resampling to
