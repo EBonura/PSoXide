@@ -17,6 +17,9 @@ mod burn;
 // Browser file upload (BIOS + game). wasm-only: the native build uses rfd.
 #[cfg(target_arch = "wasm32")]
 mod web_files;
+// Same-origin streamed discs (the demo disc). wasm-only: native has a library.
+#[cfg(target_arch = "wasm32")]
+mod web_stream;
 // The headless CLI (`scan`/`list`/`launch`/...) is a native developer tool:
 // it reads argv, the filesystem, and spins up its own offscreen wgpu device.
 // None of that applies in the browser, so it is compiled out on wasm and the

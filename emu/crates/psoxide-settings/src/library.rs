@@ -840,7 +840,12 @@ fn parse_cue_tracks(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
     let dir = cue_path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", cue_path.display()))?;
+    parse_cue_tracks_str(&contents, dir).map_err(|e| format!("{}: {e}", cue_path.display()))
+}
 
+/// The pure half of [`parse_cue_tracks`]: no filesystem, so the web build can
+/// feed it a fetched CUE sheet. `dir` is only joined onto FILE names.
+fn parse_cue_tracks_str(contents: &str, dir: &Path) -> Result<Vec<CueTrackSpec>, String> {
     let mut tracks: Vec<CueTrackSpec> = Vec::new();
     let mut current_file: Option<PathBuf> = None;
     let mut current_track_num: Option<u8> = None;
@@ -911,10 +916,7 @@ fn parse_cue_tracks(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
     }
 
     if tracks.is_empty() {
-        Err(format!(
-            "{} contains no INDEX 01 tracks",
-            cue_path.display()
-        ))
+        Err("contains no INDEX 01 tracks".to_string())
     } else {
         Ok(tracks)
     }
@@ -924,13 +926,36 @@ fn parse_cue_tracks(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
 /// comes from the CUE; per-track bytes come from the referenced files.
 pub fn load_disc_from_cue(cue_path: &Path) -> Result<psx_iso::Disc, String> {
     let specs = parse_cue_tracks(cue_path)?;
+    disc_from_cue_specs(&specs, &mut |path| {
+        fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+    })
+}
+
+/// Build a disc from a CUE sheet already in memory, reading the referenced
+/// files through `read_file`. This is the web build's path: the CUE and BIN
+/// arrive over HTTP, so there is no filesystem to consult. The track/LBA math
+/// is exactly [`load_disc_from_cue`]'s -- both funnel through
+/// [`disc_from_cue_specs`], so the two targets cannot drift.
+pub fn disc_from_cue_str(
+    contents: &str,
+    read_file: &mut dyn FnMut(&Path) -> Result<Vec<u8>, String>,
+) -> Result<psx_iso::Disc, String> {
+    let specs = parse_cue_tracks_str(contents, Path::new(""))?;
+    disc_from_cue_specs(&specs, read_file)
+}
+
+/// Shared back half of the CUE loaders: slice per-track bytes out of the
+/// referenced files and lay the tracks onto the disc LBA line.
+fn disc_from_cue_specs(
+    specs: &[CueTrackSpec],
+    read_file: &mut dyn FnMut(&Path) -> Result<Vec<u8>, String>,
+) -> Result<psx_iso::Disc, String> {
     let mut tracks = Vec::with_capacity(specs.len());
     let mut file_cache: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 
     for (index, spec) in specs.iter().enumerate() {
         if !file_cache.contains_key(&spec.path) {
-            let bytes =
-                fs::read(&spec.path).map_err(|e| format!("{}: {e}", spec.path.display()))?;
+            let bytes = read_file(&spec.path)?;
             file_cache.insert(spec.path.clone(), bytes);
         }
         let bytes = file_cache.get(&spec.path).expect("cached cue file bytes");
@@ -1652,6 +1677,37 @@ mod tests {
         .unwrap();
 
         let disc = load_disc_from_cue(&cue_path).unwrap();
+        assert_eq!(disc.track_count(), 2);
+        assert_eq!(disc.track(1).unwrap().sector_count, 10);
+        assert_eq!(disc.track(2).unwrap().start_lba, 160);
+        assert_eq!(disc.track(2).unwrap().sector_count, 4);
+        assert_eq!(disc.read_sector_raw(9).unwrap()[0], 0x11);
+        assert!(disc.read_cdda_sector(10).is_none());
+        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xAB);
+    }
+
+    // The web build's path: same sheet, same image, no filesystem. Must slice
+    // identically to `load_disc_from_cue` above, and take the image from the
+    // reader exactly once.
+    #[test]
+    fn disc_from_cue_str_matches_the_fs_loader_on_a_single_bin() {
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * (10 + 150 + 4)];
+        image[9 * psx_iso::SECTOR_BYTES] = 0x11;
+        image[160 * psx_iso::SECTOR_BYTES] = 0xAB;
+        let cue = concat!(
+            "FILE \"disc.bin\" BINARY\n",
+            "  TRACK 01 MODE2/2352\n",
+            "    INDEX 01 00:00:00\n",
+            "  TRACK 02 AUDIO\n",
+            "    INDEX 00 00:00:10\n",
+            "    INDEX 01 00:02:10\n",
+        );
+
+        let mut handed = Some(image);
+        let disc = disc_from_cue_str(cue, &mut |_| {
+            handed.take().ok_or_else(|| "second file".to_string())
+        })
+        .unwrap();
         assert_eq!(disc.track_count(), 2);
         assert_eq!(disc.track(1).unwrap().sector_count, 10);
         assert_eq!(disc.track(2).unwrap().start_lba, 160);
