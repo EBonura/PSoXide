@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1440" viewBox="0 0 2560 1440" role="img" aria-label="Bonnie Studios YouTube banner">
+  <!-- YouTube channel art for the Bonnie Studios channel. Same visual
+       language as the PSoXide branding kit (dark, cyan accent, PS1 grid
+       floor), with the studio as the headline and the product line as the
+       tagline. Safe area: 1546x423 centred (x 507-2053, y 508-931). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#11161c"/>
+      <stop offset="58%" stop-color="#0c1015"/>
+      <stop offset="100%" stop-color="#06080b"/>
+    </linearGradient>
+    <radialGradient id="cyanGlow" cx="50%" cy="45%" r="55%">
+      <stop offset="0%" stop-color="#00bfe6" stop-opacity="0.20"/>
+      <stop offset="42%" stop-color="#00bfe6" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#00bfe6" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="floorClip">
+      <rect x="0" y="1000" width="2560" height="440"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0" y="0" width="2560" height="1440" fill="url(#bg)"/>
+  <ellipse cx="1280" cy="640" rx="980" ry="520" fill="url(#cyanGlow)"/>
+
+  <g clip-path="url(#floorClip)">
+    <path d="M0 1010 H2560 M0 1035 H2560 M0 1070 H2560 M0 1120 H2560 M0 1190 H2560 M0 1280 H2560 M0 1390 H2560" stroke="#25313c" stroke-width="2" stroke-opacity="0.85"/>
+    <path d="M599 1000 L-400 1440 M761 1000 L0 1440 M923 1000 L400 1440 M1085 1000 L800 1440 M1280 1000 L1280 1440 M1475 1000 L1760 1440 M1637 1000 L2160 1440 M1799 1000 L2560 1440 M1961 1000 L2960 1440" stroke="#17242e" stroke-width="2" stroke-opacity="0.95"/>
+    <path d="M0 1002 H2560" stroke="#00bfe6" stroke-width="1.6" stroke-opacity="0.12"/>
+  </g>
+
+  <text x="1280" y="706" text-anchor="middle"
+        font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="122" font-weight="700" letter-spacing="9">
+    <tspan fill="#ffffff">BONNIE</tspan><tspan dx="44" fill="#8e9aa8">STUDIOS</tspan>
+  </text>
+
+  <text x="1280" y="826" text-anchor="middle"
+        font-family="Arial, Helvetica, sans-serif" font-size="42" letter-spacing="7">
+    <tspan fill="#00c4ec">PSOXIDE</tspan><tspan dx="18" fill="#8e9aa8">· PS1 GAMES · PORTS · DEV TOOLS</tspan>
+  </text>
+</svg>
