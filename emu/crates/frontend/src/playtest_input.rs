@@ -53,6 +53,11 @@ pub(crate) struct PlaytestInputTape {
     /// tapes cannot be replayed deterministically across builds of differing
     /// speed, so they are advanced one sample per frame, as before.
     frame_clocked: bool,
+    /// Poll-bound replay from a cold boot: guest polls still to elapse before
+    /// sample 0 is due. While non-zero the replay feeds an idle pad, exactly
+    /// like the headless CLI's pre-`start_poll` window. Zero for in-place
+    /// replay (editor), where the session is already at the recording point.
+    polls_before_start: u64,
 }
 
 impl PlaytestInputTape {
@@ -110,9 +115,13 @@ impl PlaytestInputTape {
                 }
             }
             PlaytestInputMode::Replaying if !self.frame_clocked => {
+                // The pre-start window absorbs polls first; only the excess
+                // advances the tape.
+                let gated = self.polls_before_start.min(polls);
+                self.polls_before_start -= gated;
                 self.replay_cursor = self
                     .replay_cursor
-                    .saturating_add(polls as usize)
+                    .saturating_add((polls - gated) as usize)
                     .min(self.samples.len());
             }
             _ => {}
@@ -128,14 +137,21 @@ impl PlaytestInputTape {
     }
 
     /// Stop recording without touching a host filesystem and return the CSV
-    /// payload used by the browser download path.
+    /// payload used by the browser download path. Poll-clocked (v2) so the
+    /// tape replays on the guest's own input clock, plus the recorder's game
+    /// hash so replay can flag a changed build.
     #[cfg(any(target_arch = "wasm32", test))]
-    pub(crate) fn stop_recording_csv(&mut self) -> (usize, String) {
+    pub(crate) fn stop_recording_csv(&mut self, game_hash: Option<u64>) -> (usize, String) {
         let frames = self.finish_recording();
-        (frames, tape_to_csv(&self.samples))
+        (
+            frames,
+            tape_to_csv(&self.samples, TapeClock::PadPoll, self.start_poll, game_hash),
+        )
     }
 
-    /// Start replaying a persisted tape, falling back to memory.
+    /// Start replaying a persisted tape, falling back to memory. In-place
+    /// replay: the session is assumed to already be at the recording point,
+    /// so no pre-`start_poll` idle window applies.
     pub(crate) fn start_replay(&mut self, path: &Path) -> Result<usize, String> {
         if path.is_file() {
             let tape = read_tape_full(path)?;
@@ -146,6 +162,32 @@ impl PlaytestInputTape {
         if self.samples.is_empty() {
             return Err("no recorded input tape found".to_string());
         }
+        self.polls_before_start = 0;
+        self.replay_cursor = 0;
+        self.mode = PlaytestInputMode::Replaying;
+        Ok(self.samples.len())
+    }
+
+    /// Start replaying an in-memory tape against a machine that was just
+    /// cold-booted (the browser upload path). Poll-bound tapes feed an idle
+    /// pad until the guest completes `start_poll` polls, mirroring the
+    /// headless CLI's cold-boot alignment.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn start_replay_from_tape(
+        &mut self,
+        tape: emulator_core::input_tape::Tape,
+    ) -> Result<usize, String> {
+        if tape.samples.is_empty() {
+            return Err("input tape has no frames".to_string());
+        }
+        self.frame_clocked = tape.clock == TapeClock::VideoFrame;
+        self.start_poll = tape.start_poll;
+        self.polls_before_start = if self.frame_clocked {
+            0
+        } else {
+            tape.start_poll
+        };
+        self.samples = tape.samples;
         self.replay_cursor = 0;
         self.mode = PlaytestInputMode::Replaying;
         Ok(self.samples.len())
@@ -167,6 +209,12 @@ impl PlaytestInputTape {
             PlaytestInputMode::Idle => (live_sample, None),
             PlaytestInputMode::Recording => (live_sample, None),
             PlaytestInputMode::Replaying if !self.frame_clocked => {
+                // Cold-boot alignment: until the guest reaches the tape's
+                // start poll, feed a released pad (the same nothing the CLI
+                // applies before `start_poll`), not the user's live input.
+                if self.polls_before_start > 0 {
+                    return (Port1PadSample::from_buttons(0), None);
+                }
                 let Some(sample) = self.samples.get(self.replay_cursor).copied() else {
                     let frames = self.samples.len();
                     self.mode = PlaytestInputMode::Idle;
@@ -358,10 +406,44 @@ mod tests {
         tape.start_recording(0);
         tape.note_polls(frame, 1);
 
-        let (frames, csv) = tape.stop_recording_csv();
+        let (frames, csv) = tape.stop_recording_csv(Some(0xabcd));
 
         assert_eq!(frames, 1);
         assert!(!tape.is_recording());
-        assert_eq!(emulator_core::tape_from_csv(&csv).unwrap(), [frame]);
+        let parsed = emulator_core::tape_from_csv(&csv).unwrap();
+        assert_eq!(parsed.samples, [frame]);
+        assert_eq!(parsed.clock, TapeClock::PadPoll);
+        assert_eq!(parsed.start_poll, 0);
+        assert_eq!(parsed.game_hash, Some(0xabcd));
+    }
+
+    #[test]
+    fn cold_boot_replay_feeds_idle_until_the_tape_start_poll() {
+        let recorded = Port1PadSample {
+            buttons: 0x4000,
+            ..Port1PadSample::from_buttons(0)
+        };
+        let tape = emulator_core::input_tape::Tape {
+            samples: vec![recorded],
+            clock: TapeClock::PadPoll,
+            start_poll: 2,
+            game_hash: None,
+        };
+        let mut replay = PlaytestInputTape::default();
+        assert_eq!(replay.start_replay_from_tape(tape).unwrap(), 1);
+
+        // Live input must not leak through the pre-start window.
+        let live = Port1PadSample::from_buttons(0x1234);
+        let idle = Port1PadSample::from_buttons(0);
+        assert_eq!(replay.sample_for_frame(live).0, idle);
+        replay.note_polls(live, 1);
+        assert_eq!(replay.sample_for_frame(live).0, idle);
+        replay.note_polls(live, 1);
+
+        // Poll 2 reached: sample 0 is due.
+        assert_eq!(replay.sample_for_frame(live).0, recorded);
+        replay.note_polls(live, 1);
+        let (_, event) = replay.sample_for_frame(live);
+        assert_eq!(event, Some(PlaytestInputEvent::ReplayFinished { frames: 1 }));
     }
 }

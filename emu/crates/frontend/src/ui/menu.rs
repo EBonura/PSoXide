@@ -51,9 +51,15 @@ pub enum MenuAction {
     StepOne,
     /// Reseat the CPU at its reset vector.
     Reset,
-    /// Start a new video-frame-exact port-1 recording, or stop and save the
-    /// active recording under the current game's config tree.
+    /// Start a new poll-exact port-1 recording, or stop and persist the
+    /// active one. Native saves the tape under the current game's config
+    /// tree; the web build reboots the game first so the tape counts from
+    /// poll 0 of a cold boot, and stopping downloads it as a CSV.
     ToggleInputRecording,
+    /// Web: upload a recorded input tape (CSV / `.pxtape`) and replay it
+    /// against a fresh boot of the current game.
+    #[cfg(target_arch = "wasm32")]
+    LoadInputReplay,
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
     ToggleFastBoot,
@@ -538,10 +544,17 @@ impl MenuState {
                 .find(|item| item.action == MenuAction::ToggleInputRecording)
             {
                 item.label = if recording {
-                    "Stop input recording".into()
+                    if cfg!(target_arch = "wasm32") {
+                        "Stop recording (download CSV)"
+                    } else {
+                        "Stop input recording"
+                    }
+                } else if cfg!(target_arch = "wasm32") {
+                    "Record input from boot"
                 } else {
-                    "Record input".into()
-                };
+                    "Record input"
+                }
+                .into();
             }
         }
     }
@@ -2589,10 +2602,24 @@ fn build_system_category(running: bool, save_count: usize) -> Category {
             value: None,
         },
         MenuItem {
-            label: "Record input".into(),
+            // Web recordings reboot the game first (cold-boot tapes).
+            label: if cfg!(target_arch = "wasm32") {
+                "Record input from boot"
+            } else {
+                "Record input"
+            }
+            .into(),
             action: MenuAction::ToggleInputRecording,
             burn_action: None,
             value: Some("F8".into()),
+        },
+        // Web only: replay a downloaded recording against a fresh boot.
+        #[cfg(target_arch = "wasm32")]
+        MenuItem {
+            label: "Load input replay".into(),
+            action: MenuAction::LoadInputReplay,
+            burn_action: None,
+            value: None,
         },
         MenuItem {
             label: "Fast boot discs".into(),
