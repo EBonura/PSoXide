@@ -33,6 +33,31 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.15 (2026-08-06, schema PX8)
+
+SB4, the capture-ring readback: the first digital tap on a voice's decoded
+output. The SPU writes voice 1's and voice 3's post-envelope samples into
+two 512-sample rings at SPU RAM 0x800/0xC00; the probe syncs on SPUSTAT
+bit 11, keys a voice on the half-flag edge, and DMA-reads the keyed half
+while the writer is in the other. Five segments: SQUARE (decode and
+key-on latency), IMPULSE at half pitch (the interpolation kernel, sample
+by sample), ENVRAMP (per-tick envelope stepping under a slow linear
+attack), NOISE (the LFSR sequence), VOICE3 (the other ring). Per segment
+the SB4 payload carries SPUSTAT, late ENVX, first-nonzero index, a CRC-32
+of the 256-sample half, and the first 32 raw samples; the whole payload
+also mirrors to the TTY so a headless emulator run needs no QR.
+
+The emulator's first capture already earns the probe's keep: its
+interpolation kernel reads out as 185/2131/6977/10046/6936/2103/180, its
+ENVRAMP window is at full amplitude from sample 0 (hash identical to
+SQUARE, so the linear attack is not applied per tick where the ring can
+see it), and its NOISE segment is the constant 0x3F8B rather than an LFSR
+sequence. Silicon values are pending a burn; the payload is deterministic
+across emulator boots, so `sb4-emulator-*` baselines are meaningful.
+
+PX8 records unchanged; the battery is untouched (24 of 173 fail, same as
+v1.14). Machine-code and emulator baselines regenerated for v1.15.
+
 ### v1.14 (2026-08-05, schema PX8)
 
 The transport reworked around what a capture is for. Every block after the

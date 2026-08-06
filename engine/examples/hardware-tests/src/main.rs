@@ -36,6 +36,7 @@ mod cpu_tests;
 mod handoff_probe;
 mod photo;
 mod reverb_probe;
+mod ring_probe;
 mod sample_probe;
 mod spu_probe;
 mod transition_probe;
@@ -47,6 +48,7 @@ use controller_test::ControllerTest;
 use handoff_probe::HandoffProbe;
 use photo::PhotoCapture;
 use reverb_probe::{ReverbProbe, ReverbSnapshot};
+use ring_probe::RingProbe;
 use transition_probe::TransitionProbe;
 use voice_probe::VoiceProbe;
 use sample_probe::SampleProbe;
@@ -174,9 +176,9 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 14;
+const SUITE_VERSION_MINOR: u8 = 15;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.14";
+const SUITE_VERSION: &str = "HWTEST v1.15";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -264,6 +266,9 @@ enum Mode {
     SampleProbe,
     /// SPU RAM integrity then a controlled tone ladder (SB2).
     SpuProbe,
+    /// Voice-1/voice-3 capture-ring snapshots: decoded voice output in
+    /// numbers (SB4).
+    RingProbe,
     /// Friendly operator-facing pad and analog-drift diagnostic. Kept
     /// separate from `ControllerProbe`, which measures SIO handshake timing.
     ControllerTest,
@@ -302,6 +307,7 @@ impl Mode {
             Self::AudioProbe => "CD/SPU AUDIO",
             Self::SampleProbe => "UI SAMPLE PROBE",
             Self::SpuProbe => "SPU DIAGNOSTIC",
+            Self::RingProbe => "CAPTURE RINGS",
             Self::ControllerTest => "CONTROLLER TEST",
             Self::ControllerProbe => "CONTROLLER PROBE",
             Self::AllChecks => "ALL CHECKS",
@@ -334,7 +340,8 @@ impl Mode {
             | Self::VoiceProbe
             | Self::AudioProbe
             | Self::SampleProbe
-            | Self::SpuProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
+            | Self::SpuProbe
+            | Self::RingProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
             Self::ControllerTest => "LIVE P1+P2  HOLD START+SELECT FOR MENU",
             Self::ControllerProbe => "DOWN=TESTS  NO PAD NEEDED TO READ THIS",
             Self::AllChecks
@@ -368,6 +375,7 @@ impl Mode {
             Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
             Self::SampleProbe => "UI BLIP END/LOOP FLAGS + ENVELOPE TRACE QR (SB1)",
             Self::SpuProbe => "SPU RAM + TONES + TERMINATION QR (SB3)",
+            Self::RingProbe => "VOICE 1/3 RING SNAPSHOTS QR (SB4)",
             Self::ControllerTest => "BUTTON HISTORY + ANALOG CENTRE/DRIFT TEST",
             Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
@@ -400,7 +408,8 @@ impl Mode {
             | Self::VoiceProbe
             | Self::AudioProbe
             | Self::SampleProbe
-            | Self::SpuProbe => "CAPTURE",
+            | Self::SpuProbe
+            | Self::RingProbe => "CAPTURE",
             Self::ControllerTest => "LIVE",
             Self::ControllerProbe => "ACK",
             Self::AllChecks
@@ -441,6 +450,9 @@ impl Mode {
             // the frozen conformance report schema.
             Self::SampleProbe => u8::MAX - 5,
             Self::SpuProbe => u8::MAX - 6,
+            // Bespoke SPU instrument like SampleProbe/SpuProbe: never part
+            // of the frozen conformance report schema.
+            Self::RingProbe => u8::MAX - 7,
             // Same reasoning as Menu: this draws a chart for the operator's
             // display, it never produces a result row or a report.
             Self::VideoLevels => u8::MAX - 1,
@@ -740,8 +752,9 @@ const SCANS_MENU: [(&str, MenuAction); 4] = [
     ("BACK", MenuAction::Back),
 ];
 
-const PROBES_MENU: [(&str, MenuAction); 10] = [
+const PROBES_MENU: [(&str, MenuAction); 11] = [
     ("SPU DIAGNOSTIC (SB2)", MenuAction::Open(Mode::SpuProbe)),
+    ("CAPTURE RINGS (SB4)", MenuAction::Open(Mode::RingProbe)),
     ("UI SAMPLE END/LOOP (SB1)", MenuAction::Open(Mode::SampleProbe)),
     ("CD READ MECHANISM (CL2)", MenuAction::Open(Mode::CdChainProbe)),
     ("CONTROLLER SIO TIMING", MenuAction::Open(Mode::ControllerProbe)),
@@ -1918,6 +1931,7 @@ struct HardwareTests {
     voice_probe: VoiceProbe,
     sample_probe: SampleProbe,
     spu_probe: SpuProbe,
+    ring_probe: RingProbe,
     audio_probe: AudioProbe,
     controller_test: ControllerTest,
     memory_card: MemoryCardDiagnostic,
@@ -1990,6 +2004,7 @@ impl HardwareTests {
             voice_probe: VoiceProbe::new(),
             sample_probe: SampleProbe::new(),
             spu_probe: SpuProbe::new(),
+            ring_probe: RingProbe::new(),
             audio_probe: AudioProbe::new(),
             controller_test: ControllerTest::new(),
             memory_card: MemoryCardDiagnostic::new(),
@@ -2151,6 +2166,7 @@ impl HardwareTests {
             Mode::AudioProbe => self.audio_probe.start(),
             Mode::SampleProbe => self.sample_probe.start(),
             Mode::SpuProbe => self.spu_probe.start(),
+            Mode::RingProbe => self.ring_probe.start(),
             Mode::ControllerTest => self.controller_test.start(),
             _ => {}
         }
@@ -2225,6 +2241,7 @@ impl HardwareTests {
             Mode::AudioProbe => self.audio_probe.restart(),
             Mode::SampleProbe => self.sample_probe.restart(),
             Mode::SpuProbe => self.spu_probe.restart(),
+            Mode::RingProbe => self.ring_probe.restart(),
             Mode::VideoLevels => self.page = (self.page + 1) % VIDEO_FIELDS.len(),
             _ => self.run_section(self.mode),
         }
@@ -2335,6 +2352,8 @@ impl Scene for HardwareTests {
             self.sample_probe.update(ctx.sim_tick.as_u32());
         } else if matches!(self.mode, Mode::SpuProbe) {
             self.spu_probe.update(ctx.sim_tick.as_u32());
+        } else if matches!(self.mode, Mode::RingProbe) {
+            self.ring_probe.update(ctx.sim_tick.as_u32());
         }
 
         if matches!(self.mode, Mode::ControllerProbe) {
@@ -2513,6 +2532,7 @@ impl Scene for HardwareTests {
                 Mode::AudioProbe => self.audio_probe.draw(font),
                 Mode::SampleProbe => self.sample_probe.draw(font),
                 Mode::SpuProbe => self.spu_probe.draw(font),
+                Mode::RingProbe => self.ring_probe.draw(font),
                 Mode::ControllerTest => self.controller_test.draw(font),
                 Mode::ControllerProbe => draw_controller_probe(font, self),
                 Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
