@@ -34,6 +34,7 @@
 	showcase-particles showcase-particles-disc run-showcase-particles \
 	hardware-tests hardware-tests-disc run-hardware-tests \
 	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio hwtest-audio-chain \
+	hwtest-sb4-capture hwtest-sb4 hwtest-sb4-baseline \
 	hello-engine hello-engine-disc run-hello-engine \
 	cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
@@ -623,6 +624,53 @@ hwtest-baseline: hwtest-capture
 hwtest-silicon: hwtest-capture
 	@test -n "$(SILICON)" || { echo "usage: make hwtest-silicon SILICON=<payload.txt>"; exit 2; }
 	python3 tools/hwtest-report.py --baseline $(SILICON) $(HWTEST_CAPTURE)
+
+# --- SB4 capture-ring pipeline ------------------------------------------
+# Drives the menu to TARGETED PROBES -> CAPTURE RINGS (SB4) and lets the
+# probe mirror its payload to the TTY. Row positions are baked into the
+# pulse frames the same way hwtest-capture bakes row 0; moving either menu
+# entry moves this sequence or the run opens something else.
+SB4_CAPTURE  := build/hwtest-sb4.log
+SB4_BASELINE := docs/hardware-refs/sb4-emulator-v$(HWTEST_SUITE).txt
+SB4_PULSES   := 0x40@30+2,0x40@38+2,0x40@46+2,0x40@54+2,0x40@62+2,0x40@70+2,0x40@78+2,0x4000@90+2,0x40@100+2,0x4000@110+2
+SB4_STEPS    := 500000000
+
+hwtest-sb4-capture: hardware-tests-disc
+	@mkdir -p $(dir $(SB4_CAPTURE))
+	cd emu && cargo run -q -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/hardware-tests.exe \
+		--disc ../$(EXAMPLE_OUT)/hardware-tests.cue \
+		--steps $(SB4_STEPS) --pad-pulses '$(SB4_PULSES)' > ../$(SB4_CAPTURE)
+	@grep -q 'sb4 SB4/' $(SB4_CAPTURE) || { \
+		echo "hwtest-sb4-capture: no SB4 payload in $(SB4_CAPTURE)"; exit 2; }
+
+# Gate: any segment hash, stat, envelope, latency, or raw sample that moves
+# against the baseline fails the build and is named.
+hwtest-sb4: hwtest-sb4-capture
+	@test -f $(SB4_BASELINE) || { \
+		echo "hwtest-sb4: $(SB4_BASELINE) does not exist."; \
+		echo "  Review the capture, then pin it with: make hwtest-sb4-baseline"; \
+		exit 2; }
+	python3 tools/hwtest-sb4-report.py --baseline $(SB4_BASELINE) \
+		--fail-on-change $(SB4_CAPTURE)
+
+# Deliberate re-baseline; review hwtest-sb4's drift output first.
+hwtest-sb4-baseline: hwtest-sb4-capture
+	@{ \
+		echo "# PSoXide SB4 capture-ring baseline"; \
+		echo "#"; \
+		echo "# SOURCE: PSoXide EMULATOR, headless. This is NOT a silicon capture."; \
+		echo "#   It detects emulator-side drift only. It is not hardware truth and"; \
+		echo "#   must never be cited as a console measurement."; \
+		echo "#"; \
+		echo "# captured:  $$(date -u +%Y-%m-%d)"; \
+		echo "# git:       $$(git describe --always --dirty)"; \
+		echo "# guest exe: sha256:$$(shasum -a 256 $(EXAMPLE_OUT)/hardware-tests.exe | cut -c1-16)"; \
+		echo "# emulator:  frontend launch --steps $(SB4_STEPS) (menu pulses to SB4)"; \
+		echo "#"; \
+		grep 'sb4 SB4/' $(SB4_CAPTURE) | sed 's/^hardware-tests: sb4 //'; \
+	} > $(SB4_BASELINE)
+	@echo "re-baselined $(SB4_BASELINE)"
 
 # PA5 snapshots BIOS reverb state and selects reset variants before PA4's
 # proven map-DMA trigger. PA3/PA2 retain prior fixtures and PA1 reads a deterministic 600-sector
