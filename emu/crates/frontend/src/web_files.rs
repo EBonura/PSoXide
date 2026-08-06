@@ -31,6 +31,8 @@ pub enum Upload {
     Bios,
     /// A game image (raw `.bin` disc, or a homebrew `.exe`).
     Game,
+    /// A recorded input tape (browser CSV or native `.pxtape`).
+    Tape,
 }
 
 /// One game in the current list. `file` is `Some` for the `<input>` backend
@@ -397,6 +399,12 @@ pub fn pick_games() {
     }
 }
 
+/// Pick a recorded input tape. Always the one-shot `<input>` picker: a tape
+/// is read once and never needs a persistent handle.
+pub fn pick_tape() {
+    pick_input(Upload::Tape);
+}
+
 /// Reconnect previously-saved handles (File System Access only). No-op
 /// otherwise. Re-grants permission then re-reads the BIOS + relists the folder.
 pub fn reconnect() {
@@ -584,6 +592,7 @@ fn pick_input(kind: Upload) {
     let accept = match kind {
         Upload::Bios => ".bin,.rom",
         Upload::Game => ".bin,.exe",
+        Upload::Tape => ".csv,.pxtape",
     };
     let Some(input) = make_file_input() else {
         return;
