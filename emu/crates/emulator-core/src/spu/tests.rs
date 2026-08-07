@@ -2030,18 +2030,18 @@ fn kon_applies_after_sample_emit_not_before_for_hardware_parity() {
         "envelope must not have advanced on the KON tick (voice keyed at tick end)"
     );
 
-    // Ticks #2..#8: SB4 silicon 2026-08-07 adds a ~7-tick start delay on
-    // top of the end-of-tick KON latch; the voice stays silent, envelope
-    // included, until the delay drains.
-    for t in 2..=8u64 {
+    // Ticks #2..#9: the v1.17 SB4 capture shows nine zero samples before the
+    // first envelope step, so a keyed voice stays silent, envelope included,
+    // until that delay drains.
+    for t in 2..=9u64 {
         s.tick_sample(t * SAMPLE_CYCLES);
     }
     assert_eq!(
         s.voices[0].envelope, 0,
         "envelope must not advance during the silicon start delay"
     );
-    // Tick #9: the first Attack step lands.
-    s.tick_sample(9 * SAMPLE_CYCLES);
+    // Tick #10: the first Attack step lands.
+    s.tick_sample(10 * SAMPLE_CYCLES);
     assert!(
         s.voices[0].envelope > 0,
         "first Attack step must land once the start delay has drained"
