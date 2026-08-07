@@ -372,7 +372,10 @@ fn font_atlas_dims(font: &BitmapFont) -> (u16, u16, u16, u16) {
     let glyph_rows = font.glyph_count.div_ceil(glyphs_per_row);
     let atlas_w = glyphs_per_row * cell_w;
     let atlas_h = glyph_rows * glyph_h;
-    let halfwords_per_row = atlas_w.div_ceil(4);
+    // Even stride: `upload_16bpp` moves whole words and rejects an odd
+    // pixel count, and cell padding can leave an odd halfword row (KENNEY
+    //_PIXEL lands on 63). The spare column stays zero.
+    let halfwords_per_row = atlas_w.div_ceil(4).next_multiple_of(2);
     (glyphs_per_row, atlas_w, atlas_h, halfwords_per_row)
 }
 
@@ -550,7 +553,11 @@ impl FontAtlas {
 
         // Pack 1bpp source → 4bpp VRAM texture into a stack buffer.
         // Each 16-bit halfword holds 4 texels (nibble 0 = leftmost).
-        let halfwords_per_row = atlas_w.div_ceil(4);
+        // The stride is rounded to an even number of halfwords because
+        // `upload_16bpp` moves whole words and rejects an odd pixel count;
+        // cell padding can otherwise leave an odd row (KENNEY_PIXEL lands
+        // on 63). The spare column stays zero.
+        let halfwords_per_row = atlas_w.div_ceil(4).next_multiple_of(2);
         let total_halfwords = halfwords_per_row as usize * atlas_h as usize;
         assert!(
             total_halfwords <= Self::MAX_PACK_HALFWORDS,
