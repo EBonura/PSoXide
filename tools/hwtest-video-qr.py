@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recover PX7 capture pages from a console video recording.
+"""Recover PX7/PX8 capture pages and probe payloads from a console recording.
 
 The QR pages are photographed off a TV, so a still frame is only readable if it
 happens to land between the capture card's scaling and interlacing artifacts.
@@ -14,10 +14,21 @@ same page numbers, so combining a page 1 from one run with a page 3 from another
 produces a payload that fails its binary CRC. Every distinct chunk seen for a
 page is kept, and the combination satisfying the whole-binary CRC is written.
 
+Targeted-probe QRs (PA1-PA5, SB1-SB4) seen in the same recording are written as
+sidecar files next to the output: pages-pa5.txt, pages-sb4.txt, and so on, one
+payload line each, ready for tools/hwtest-audio-report.py /
+tools/hwtest-sb4-report.py. A probe payload is accepted when its decoded
+binary's trailing CRC32 checks out (the wire text's /C: field is not the chunk
+CRC for probes, so the binary self-check is the validation that matters).
+
 Install zxing-cpp (`pip install zxing-cpp`). OpenCV's detector is the fallback
 and is markedly weaker on a photographed CRT: on one console recording it read
 3 of 5 pages after minutes of preprocessing, while zxing read all 5 in twenty
 seconds from raw frames.
+
+Known limit: SB2's symbol is denser than the rest and has never decoded from a
+640x480 capture; use its TTY mirror or give it a paged transport before relying
+on video for SB2.
 """
 
 from __future__ import annotations
@@ -88,10 +99,32 @@ def renderings(gray: np.ndarray):
         yield cv2.threshold(big, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
 
 
-def scan(video: pathlib.Path, verbose: bool = True) -> tuple[dict[int, set[str]], int | None]:
+PAGE_SCHEMAS = ("PX7", "PX8")
+PROBE_PREFIXES = tuple(f"PA{n}" for n in range(1, 6)) + tuple(f"SB{n}" for n in range(1, 5))
+
+
+def probe_payload_valid(chunk: str) -> bool:
+    """A probe payload is valid when its decoded binary's trailing CRC32
+    matches the rest of the binary. The /C: field on the wire is not the
+    chunk CRC for probes, so this is the check that matters."""
+    try:
+        binary = base64.b64decode(chunk + "=" * (-len(chunk) % 4))
+    except binascii.Error:
+        return False
+    if len(binary) < 8:
+        return False
+    claimed = int.from_bytes(binary[-4:], "little")
+    return claimed == (binascii.crc32(binary[:-4]) & 0xFFFF_FFFF)
+
+
+def scan(
+    video: pathlib.Path, verbose: bool = True
+) -> tuple[dict[int, set[str]], int | None, str, dict[str, set[str]]]:
     capture = cv2.VideoCapture(str(video))
     seen: dict[int, set[str]] = {}
+    probes: dict[str, set[str]] = {}
     total_pages: int | None = None
+    schema = ""
     frame_no = 0
 
     while True:
@@ -105,24 +138,43 @@ def scan(video: pathlib.Path, verbose: bool = True) -> tuple[dict[int, set[str]]
         if gray.mean() < 25:
             continue
         for data in read_symbols(gray):
-            if not data.startswith("PX7/"):
+            prefix = data.split("/", 1)[0]
+            if prefix in PROBE_PREFIXES and "/C:" in data:
+                chunk = data.rsplit("/C:", 1)[0].split("/", 1)[1]
+                if probe_payload_valid(chunk):
+                    bucket = probes.setdefault(prefix, set())
+                    if data not in bucket:
+                        bucket.add(data)
+                        if verbose:
+                            print(f"probe {prefix} at frame {frame_no}", flush=True)
+                continue
+            if prefix not in PAGE_SCHEMAS:
+                continue
+            if schema and prefix != schema:
+                if verbose:
+                    print(
+                        f"# skipping {prefix} page at frame {frame_no}: "
+                        f"recording already yielded {schema} pages",
+                        flush=True,
+                    )
                 continue
             body, claimed = data.rsplit("/C:", 1)
             _, page_field, chunk = body.split("/", 2)
             number, total = int(page_field[:2], 16), int(page_field[2:], 16)
             if int(claimed, 16) != (binascii.crc32(chunk.encode()) & 0xFFFF_FFFF):
                 continue
+            schema = prefix
             total_pages = total
             bucket = seen.setdefault(number, set())
             if chunk not in bucket:
                 bucket.add(chunk)
                 if verbose:
-                    print(f"page {number}/{total} at frame {frame_no}", flush=True)
+                    print(f"{schema} page {number}/{total} at frame {frame_no}", flush=True)
 
     capture.release()
     if verbose:
         print(f"# frames scanned: {frame_no}")
-    return seen, total_pages
+    return seen, total_pages, schema, probes
 
 
 def combine(seen: dict[int, set[str]], total_pages: int) -> list[str] | None:
@@ -146,15 +198,25 @@ def combine(seen: dict[int, set[str]], total_pages: int) -> list[str] | None:
     return None
 
 
+def write_probe_files(out: pathlib.Path, probes: dict[str, set[str]]) -> None:
+    for prefix, payloads in sorted(probes.items()):
+        sidecar = out.with_name(f"{out.stem}-{prefix.lower()}{out.suffix or '.txt'}")
+        sidecar.write_text("\n".join(sorted(payloads)) + "\n")
+        extra = "" if len(payloads) == 1 else f" ({len(payloads)} distinct payloads)"
+        print(f"# probe {prefix} -> {sidecar}{extra}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video", help="recording of the console showing the capture pages")
-    parser.add_argument("out", help="write PX7 page lines here")
+    parser.add_argument("out", help="write capture page lines here (probe sidecars go next to it)")
     args = parser.parse_args()
 
-    seen, total_pages = scan(pathlib.Path(args.video))
+    out = pathlib.Path(args.out)
+    seen, total_pages, schema, probes = scan(pathlib.Path(args.video))
+    write_probe_files(out, probes)
     if not seen or total_pages is None:
-        print("FAIL: no PX7 page decoded from any frame", file=sys.stderr)
+        print("FAIL: no PX7/PX8 page decoded from any frame", file=sys.stderr)
         return 1
 
     missing = [n for n in range(1, total_pages + 1) if n not in seen]
@@ -180,12 +242,12 @@ def main() -> int:
         return 1
 
     lines = [
-        f"PX7/{n:02X}{total_pages:02X}/{chunk}/C:"
+        f"{schema}/{n:02X}{total_pages:02X}/{chunk}/C:"
         f"{binascii.crc32(chunk.encode()) & 0xFFFF_FFFF:08X}"
         for n, chunk in enumerate(chosen, start=1)
     ]
-    pathlib.Path(args.out).write_text("\n".join(lines) + "\n")
-    print(f"# recovered all {total_pages} pages -> {args.out}")
+    out.write_text("\n".join(lines) + "\n")
+    print(f"# recovered all {total_pages} {schema} pages -> {out}")
     return 0
 
 
