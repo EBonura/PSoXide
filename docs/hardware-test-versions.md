@@ -33,6 +33,71 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.17 (2026-08-07, schema PX8)
+
+The first version informed by a same-day console-vs-emulator diff of the
+same suite build (v1.16 burn, QR decoded from video). Three kinds of
+change, all conformance-semantics:
+
+- SPU RAM round-trips `0xA6`/`0xA7` fixed: their oracle `spu_dma_read`
+  read SPU RAM back with the memory controller's SPU DMA timing override
+  (1F801014h bits 24-27) still at the BIOS boot value of zero, the
+  documented-unstable mode whose FIFO-boundary corruption both silicon
+  and the emulator faithfully produce. The read now arms the override
+  and restores it after. `0xA7` additionally waits for the SPUSTAT mode
+  mirror before pushing FIFO halfwords, drains before leaving
+  Manual-Write, and parks TRANSFER_CTRL at NORMAL (0004h) instead of 0,
+  which the SB2 finding showed poisons later sample-RAM access. These
+  cases had never passed on silicon; they now pass in the emulator and
+  the next burn arbitrates the console side.
+- History-dependent GTE cases reclassified from conformance to INFO:
+  scenes `0x50`-`0x52`, immediate-read OP `0x5C`/`0x61`, the settle
+  probes `0x7E`-`0x86`, the magnitude ladder `0x87`-`0x89`, and
+  controlled scene-B `0x8A`. Their compiled or settled-reference
+  expectations are snapshots of one binary's GTE history (the v1.16
+  console run measured 0xFFFF752C where the calibration-era binary
+  measured 0x2764 on the same machine), so pass/fail carried no signal.
+  The raw values still travel; `hwtest-silicon` diffs them host-side.
+  Controlled scene-C `0x8B` stays conformance: silicon computes the full
+  cross in both phases, so reference==probe is a real invariant there.
+- Two constants re-pinned to measured silicon: OTC variants `0x0B`
+  0x3F -> 0x33 (start-only kick does not complete on this console;
+  SCPH-9902's 0x3F kept on record as per-model variance) and NCLIP
+  winding `0x16` 0x0F -> 0x0E (positive-winding MAC0 reads 0 on
+  silicon, stable across three burns).
+
+Conformance totals move accordingly; the regenerated
+`px8-emulator-v1.17.txt` baseline is the number that counts.
+
+v1.17 adds three text-pipeline replica cases (`0xB3`-`0xB5`) for the
+demo-disc "lowercase f renders as a bare crossbar" console bug: SPLEEN 5x8
+uploaded at the launcher's exact geometry (4bpp atlas at 448,0, CLUT at
+416,256), then the glyph pass into the 15bpp cache rect at (512,0)
+raster-hashed (`0xB3`), the blit of that cache hashed (`0xB4`), and the
+same text drawn directly hashed (`0xB5`). Expected values are pinned from
+the emulator, where the blit round trip is pixel-exact (B4 == B5 ==
+0x3B208994); on console, whichever case fails names the corrupt stage and
+its observed hash is the finding.
+
+v1.17 adds two CLUT-cache conformance cases (`0xB1`/`0xB2`, console-proven
+by proxy through the demo-disc shot panel): the CLUT cache must NOT reload
+when palette data is rewritten in place under an unchanged clut word, and
+the 240-entry 8bpp line must survive an interleaved 4bpp draw with a
+different clut word (per-line reload tracking, not a shared register).
+The emulator's CLUT cache was split into the two PSX-SPX lines to match;
+that is what let the demo-disc shot-colour bug reproduce headlessly.
+
+v1.17 also adds four NCLIP-mechanism discriminators (`0xAD`-`0xB0`,
+cases 174-177, all characterisation): the scene-C replica written via
+SXYP (does the commit hazard track the write port?), eighth- and
+sixteenth-scale magnitude rungs (where does the partial-sum regime
+begin?), and a Timer 2 bracket around nclip+immediate-mfc2 (does the
+documented CPU read interlock exist on this silicon at all? psx-spx and
+DuckStation say reads stall until completion; the measured settle
+partials suggest otherwise). None has ever run on a console; the next
+burn gives them their first silicon answers, which is the missing
+context for closing 0x8B properly.
+
 ### v1.16 (2026-08-06, schema PX8)
 
 The memory-card test goes behind a consent screen. It has had limited

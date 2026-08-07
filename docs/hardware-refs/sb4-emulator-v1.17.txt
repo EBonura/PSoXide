@@ -1,0 +1,12 @@
+# PSoXide SB4 capture-ring baseline
+#
+# SOURCE: PSoXide EMULATOR, headless. This is NOT a silicon capture.
+#   It detects emulator-side drift only. It is not hardware truth and
+#   must never be cited as a console measurement.
+#
+# captured:  2026-08-07
+# git:       f5fbfaa1-dirty
+# guest exe: sha256:6bdb65b8325d5d26
+# emulator:  frontend launch --steps 500000000 (menu pulses to SB4)
+#
+SB4/U0I0QgEFIAEACP9/CACWUHprAAAAAAAAAAAAAAAAAAAAAM8UzzDHN+MbSzTHN8c3xzfHN8c3xzfHN8c38SXa0UDAQMBAwEDAQMBAwEDAQMBAwAAA/38IAAmVDygAAAAAAAAAAAAAAAAAAAAAKxG1FzYIWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMADAcQgAQlYyfAAAAAAAAAAAAAAAAAAAAAApAGEAkgDDAPQAJAFVAYYBtwHoARgCSQJ6AtABov2D/Ev8E/zc+6T7bPs0+/36xfoACP9/CACny5L+AAAAAAAAAAAAAAAAAAAAAE3kmshigbHAlwLDAogFiAURCxELIxYjFkgsSCySWJJYJ7EnsU5iTmKfxJ/EP4k/iQAI/38IAJZQemsAAAAAAAAAAAAAAAAAAAAAzxTPMMc34xtLNMc3xzfHN8c3xzfHN8c3xzfxJdrRQMBAwEDAQMBAwEDAQMBAwEDAt8Vjgg==/C:8263C5B7

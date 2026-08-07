@@ -17,7 +17,10 @@ use core::ptr;
 
 use hello_memcard_recovery::Diagnostic as MemoryCardDiagnostic;
 use psx_engine::{button, App, Config, Ctx, Scene};
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::{
+    fonts::{BASIC, SPLEEN_5X8},
+    FontAtlas,
+};
 use psx_gpu::{self as gpu, prim, Resolution, VideoMode};
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::ops as gte_ops;
@@ -176,16 +179,16 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 16;
+const SUITE_VERSION_MINOR: u8 = 17;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.16";
+const SUITE_VERSION: &str = "HWTEST v1.17";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 173;
+const TEST_COUNT: usize = 182;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -1912,6 +1915,78 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "SIO",
         name: "DualShock analog enable handshake",
         run: test_pad_analog_handshake,
+    },
+    // v1.17 NCLIP-mechanism discriminators (all characterisation; silicon
+    // has never answered any of them, so there is nothing to pass or fail
+    // yet). Together they separate the three candidate models for the
+    // settle/winding anomalies: write-port commit hazard (SXYP variant),
+    // magnitude-dependent MAC pipeline passes (ladder extension), and the
+    // documented-but-unverified CPU read interlock (Timer 2 bracket).
+    TestSpec {
+        id: 0x00ad,
+        group: "GTE",
+        name: "NCLIP controlled scene-C +2 via SXYP",
+        run: test_mac0_ctrl_c_sxyp,
+    },
+    TestSpec {
+        id: 0x00ae,
+        group: "GTE",
+        name: "NCLIP magnitude eighth +4",
+        run: test_mac0_mag_eighth,
+    },
+    TestSpec {
+        id: 0x00af,
+        group: "GTE",
+        name: "NCLIP magnitude sixteenth +4",
+        run: test_mac0_mag_sixteenth,
+    },
+    TestSpec {
+        id: 0x00b0,
+        group: "GTE",
+        name: "NCLIP read-interlock T2 bracket",
+        run: test_gte_nclip_read_interlock,
+    },
+    // CLUT-cache semantics, console-proven by proxy on 2026-08-07: the
+    // demo-disc launcher rewrote its shot palette in place under a constant
+    // clut word and real hardware kept showing the first palette for 8bpp
+    // colors 10h-FFh even with 4bpp text (different clut words) interleaved
+    // every frame. These two cases turn that observation into first-class
+    // records: 0xb1 pins the no-reload-on-data-rewrite half, 0xb2 pins the
+    // per-line half (an interleaved 4bpp draw with a different clut word
+    // must NOT refresh the 240-entry 8bpp line).
+    TestSpec {
+        id: 0x00b1,
+        group: "GPU",
+        name: "CLUT stale after in-place rewrite",
+        run: test_gpu_clut_inplace_rewrite_stale,
+    },
+    TestSpec {
+        id: 0x00b2,
+        group: "GPU",
+        name: "CLUT 8bpp line survives 4bpp interleave",
+        run: test_gpu_clut_stale_across_4bpp_interleave,
+    },
+    // Demo-disc text-pipeline replica: the console renders SPLEEN 'f' as a
+    // bare crossbar through this exact pipeline while emulators draw it
+    // whole. Expected values pinned from the emulator; a console FAIL
+    // names the corrupt stage and its observed hash is the finding.
+    TestSpec {
+        id: 0x00b3,
+        group: "GPU",
+        name: "text cache glyph pass lands",
+        run: test_gpu_text_cache_glyphs_land,
+    },
+    TestSpec {
+        id: 0x00b4,
+        group: "GPU",
+        name: "text cache 15bpp blit output",
+        run: test_gpu_text_cache_blit,
+    },
+    TestSpec {
+        id: 0x00b5,
+        group: "GPU",
+        name: "direct SPLEEN glyph draw",
+        run: test_gpu_text_direct_draw,
     },
 ];
 
@@ -5479,7 +5554,11 @@ fn test_dma_otc_clear() -> TestResult {
         observed |= (done as u32) << (index * 2);
         observed |= (ok as u32) << (index * 2 + 1);
     }
-    expect_eq(0x3F, observed, "otc variants (done,ok) pairs")
+    // V1 (start only, no trigger) does not complete on this console --
+    // stable across the v1.7 and v1.16 burns -- and the emulator agrees.
+    // SCPH-9902 measured 0x3F, so keep that on record as per-model
+    // variance; the reference silicon for this suite reads 0x33.
+    expect_eq(0x33, observed, "otc variants (done,ok) pairs")
 }
 
 fn test_dma_channel_register_roundtrip() -> TestResult {
@@ -5911,7 +5990,11 @@ fn test_gte_nclip_mac0() -> TestResult {
         | (((negative == -100) as u32) << 1)
         | ((positive_flag_clear as u32) << 2)
         | ((negative_flag_clear as u32) << 3);
-    expect_eq(0x0F, observed, "nclip")
+    // Bit 0 stays clear on silicon: the positive-winding triangle reads
+    // MAC0 = 0 (see the companion nclip-mac0-value INFO case), stable
+    // across the v1.5, v1.7 and v1.16 burns, and the emulator reproduces
+    // it. 0x0F was the pre-measurement aspiration, not a measured value.
+    expect_eq(0x0E, observed, "nclip")
 }
 
 /// Companion measurement for the NCLIP winding failure. Runs the
@@ -6221,22 +6304,28 @@ fn scene_nclip_mac0(s0: u32, s1: u32, s2: u32) -> u32 {
     unsafe { gte_ops::nclip() };
     mfc2!(24)
 }
+// Scene NCLIP results are history-dependent (the SCPH-9902 sweep produced
+// 0x2764, 0xFFFFB964 and 0x7674 for the SAME scene depending on what
+// preceded it), so a compiled expectation is a snapshot of one binary's GTE
+// history and rots on every rebuild: v1.16 measured 0xFFFF752C on the same
+// console the 0x2764 calibration came from. Characterisation, not
+// conformance; hwtest-silicon diffs the raw values host-side.
 fn test_gte_scene_nclip_a() -> TestResult {
-    expect_eq(
+    TestResult::info(
         0x0000_2764,
         scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc),
         "scene nclip A",
     )
 }
 fn test_gte_scene_nclip_b() -> TestResult {
-    expect_eq(
+    TestResult::info(
         0x0000_30ba,
         scene_nclip_mac0(0x0073_00d5, 0xffde_00dc, 0xffd8_0130),
         "scene nclip B",
     )
 }
 fn test_gte_scene_nclip_c() -> TestResult {
-    expect_eq(
+    TestResult::info(
         0x0000_3e7e,
         scene_nclip_mac0(0x0079_011f, 0xffd8_0130, 0xffd2_0194),
         "scene nclip C",
@@ -6326,7 +6415,11 @@ fn run_op() {
 }
 fn test_gte_op_mac1() -> TestResult {
     run_op();
-    expect_eq(0xffff_fd00, mfc2!(25), "op MAC1")
+    // Immediate-read OP results sit inside the input/control-commitment
+    // window (SCPH-9902: MAC3 reads 0 immediately, -768 settled), so the
+    // observed value depends on issue timing, not arithmetic.
+    // Characterisation, not conformance.
+    TestResult::info(0xffff_fd00, mfc2!(25), "op MAC1")
 }
 fn test_gte_op_mac2() -> TestResult {
     run_op();
@@ -6386,7 +6479,9 @@ fn test_gte_op_full_seed_mac2() -> TestResult {
 }
 fn test_gte_op_full_seed_mac3() -> TestResult {
     run_op_full_seed();
-    expect_eq(0xffff_fd00, mfc2!(27), "op fs MAC3")
+    // Same commitment-window dependence as op MAC1: both current platforms
+    // read the immediate 0 here where the settled value is -768.
+    TestResult::info(0xffff_fd00, mfc2!(27), "op fs MAC3")
 }
 fn test_gte_avsz3() -> TestResult {
     ctc2!(31, 0);
@@ -6708,7 +6803,11 @@ macro_rules! mac0_big_settle_case {
             unsafe { gte_ops::nclip() };
             gte_nops!($gap);
             let got = mfc2!(24);
-            expect_eq(expected, got, "nclip big-value settle gap")
+            // These probes MEASURE the settle window; on silicon the window
+            // is real (partial sums at small gaps is the documented
+            // behavior), so "settled == probed" can never be a pass
+            // criterion. Characterisation, not conformance.
+            TestResult::info(expected, got, "nclip big-value settle gap")
         }
     };
 }
@@ -6724,8 +6823,12 @@ mac0_big_settle_case!(test_mac0_big_settle_gap8, 8);
 // (magnitude ladder at +4)? And do the in-situ scene B/C values reproduce
 // under a CONTROLLED prestate (replicas with in-test poison at +2), or were
 // they contaminated by whatever the harness left in the GTE?
+// `$finish` picks the verdict path: `expect_eq` where "reference == probe"
+// is a genuine invariant (scene-C: silicon computes the full cross in both
+// phases), `TestResult::info` for the settle-window probes, whose whole
+// point is that the probe reads a partial sum on silicon.
 macro_rules! mac0_ctrl_case {
-    ($name:ident, $gap:tt, $s0:literal, $s1:literal, $s2:literal) => {
+    ($name:ident, $finish:path, $gap:tt, $s0:literal, $s1:literal, $s2:literal) => {
         fn $name() -> TestResult {
             // Settled reference.
             ctc2!(31, 0);
@@ -6746,13 +6849,14 @@ macro_rules! mac0_ctrl_case {
             unsafe { gte_ops::nclip() };
             gte_nops!($gap);
             let got = mfc2!(24);
-            expect_eq(expected, got, "nclip controlled settle")
+            $finish(expected, got, "nclip controlled settle")
         }
     };
 }
 // Gap bisect with the scene-A coordinates (0x874 regime).
 mac0_ctrl_case!(
     test_mac0_big_gap12,
+    TestResult::info,
     12,
     0x006e_0095,
     0xffe2_0094,
@@ -6760,6 +6864,7 @@ mac0_ctrl_case!(
 );
 mac0_ctrl_case!(
     test_mac0_big_gap16,
+    TestResult::info,
     16,
     0x006e_0095,
     0xffe2_0094,
@@ -6767,6 +6872,7 @@ mac0_ctrl_case!(
 );
 mac0_ctrl_case!(
     test_mac0_big_gap24,
+    TestResult::info,
     24,
     0x006e_0095,
     0xffe2_0094,
@@ -6774,6 +6880,7 @@ mac0_ctrl_case!(
 );
 mac0_ctrl_case!(
     test_mac0_big_gap32,
+    TestResult::info,
     32,
     0x006e_0095,
     0xffe2_0094,
@@ -6781,6 +6888,7 @@ mac0_ctrl_case!(
 );
 mac0_ctrl_case!(
     test_mac0_big_gap48,
+    TestResult::info,
     48,
     0x006e_0095,
     0xffe2_0094,
@@ -6789,22 +6897,300 @@ mac0_ctrl_case!(
 // Magnitude ladder at +4: quarter / half / double scale of scene-A.
 mac0_ctrl_case!(
     test_mac0_mag_quarter,
+    TestResult::info,
     4,
     0x001c_0025,
     0xfff8_0025,
     0xfff7_0037
 );
-mac0_ctrl_case!(test_mac0_mag_half, 4, 0x0037_004a, 0xfff1_004a, 0xffef_006e);
+mac0_ctrl_case!(
+    test_mac0_mag_half,
+    TestResult::info,
+    4,
+    0x0037_004a,
+    0xfff1_004a,
+    0xffef_006e
+);
 mac0_ctrl_case!(
     test_mac0_mag_double,
+    TestResult::info,
     4,
     0x00dc_012a,
     0xffc4_0128,
     0xffbc_01b8
 );
 // Controlled-prestate replicas of scene B and C at the in-situ +2 distance.
-mac0_ctrl_case!(test_mac0_ctrl_b, 2, 0x0073_00d5, 0xffde_00dc, 0xffd8_0130);
-mac0_ctrl_case!(test_mac0_ctrl_c, 2, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
+// Scene-B still reads a partial on silicon (v1.16 console: 0xAFE), so it is
+// characterisation; scene-C computes the full cross in both phases on
+// silicon and stays a conformance invariant.
+mac0_ctrl_case!(
+    test_mac0_ctrl_b,
+    TestResult::info,
+    2,
+    0x0073_00d5,
+    0xffde_00dc,
+    0xffd8_0130
+);
+mac0_ctrl_case!(
+    test_mac0_ctrl_c,
+    expect_eq,
+    2,
+    0x0079_011f,
+    0xffd8_0130,
+    0xffd2_0194
+);
+// Magnitude ladder extension downward: eighth and sixteenth scale of
+// scene-A (round-half-away halving of the quarter constants). The ladder's
+// point is finding WHERE the partial-sum regime begins; quarter still
+// showed partials at +4 while the tiny winding triangle settles instantly,
+// so the threshold sits below quarter scale.
+mac0_ctrl_case!(
+    test_mac0_mag_eighth,
+    TestResult::info,
+    4,
+    0x000e_0013,
+    0xfffc_0013,
+    0xfffc_001c
+);
+mac0_ctrl_case!(
+    test_mac0_mag_sixteenth,
+    TestResult::info,
+    4,
+    0x0007_0009,
+    0xfffe_0009,
+    0xfffe_000e
+);
+
+/// Scene-C replica with every SXY write going through SXYP (data reg 15,
+/// the FIFO-push mirror: a push moves SXY1->SXY0, SXY2->SXY1, then lands
+/// in SXY2), the other documented write path. 0x8b's direct SXY2 writes
+/// pass on silicon (full cross in both phases); if the commit hazard
+/// tracks the write port, this variant reads differently.
+fn test_mac0_ctrl_c_sxyp() -> TestResult {
+    // Settled reference, all three vertices pushed in order.
+    ctc2!(31, 0);
+    mtc2!(15, 0x0079_011f);
+    mtc2!(15, 0xffd8_0130);
+    mtc2!(15, 0xffd2_0194);
+    unsafe { gte_ops::nclip() };
+    gte_nops!(64);
+    let expected = mfc2!(24);
+    // Poison: far vertices swapped (negated cross), settled.
+    mtc2!(15, 0x0079_011f);
+    mtc2!(15, 0xffd2_0194);
+    mtc2!(15, 0xffd8_0130);
+    unsafe { gte_ops::nclip() };
+    gte_nops!(64);
+    // Probe at +2 via the same push path.
+    mtc2!(15, 0x0079_011f);
+    mtc2!(15, 0xffd8_0130);
+    mtc2!(15, 0xffd2_0194);
+    unsafe { gte_ops::nclip() };
+    gte_nops!(2);
+    let got = mfc2!(24);
+    TestResult::info(expected, got, "nclip ctrl scene-C via SXYP")
+}
+
+/// Does an MFC2 issued while NCLIP executes stall the CPU until the
+/// command completes? psx-spx and DuckStation say yes (read interlock);
+/// the measured settle-window partials on this console suggest otherwise.
+/// Timer 2 at sysclock brackets nclip+immediate-mfc2; the same bracket
+/// around two nops calibrates the overhead. With a real interlock the low
+/// half cannot sit near the high half plus one; without one it can.
+fn test_gte_nclip_read_interlock() -> TestResult {
+    seed_nclip_pos_triangle();
+    timers::set_mode(timers::Timer::Timer2, 0x0000);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    let t0 = timers::counter(timers::Timer::Timer2);
+    unsafe { gte_ops::nclip() };
+    let _ = mfc2!(24);
+    let t1 = timers::counter(timers::Timer::Timer2);
+    let with_gte = t1.wrapping_sub(t0);
+    let t2 = timers::counter(timers::Timer::Timer2);
+    unsafe { core::arch::asm!("nop", "nop") };
+    let t3 = timers::counter(timers::Timer::Timer2);
+    let baseline = t3.wrapping_sub(t2);
+    TestResult::info(
+        0,
+        ((baseline as u32) << 16) | with_gte as u32,
+        "hi=2-nop bracket lo=nclip+mfc2",
+    )
+}
+
+/// Shared setup for the CLUT staleness pair: 16x16 8bpp indices plus a
+/// deterministic 256-entry palette at `clut`, returning the primitive that
+/// samples them into the scratch region.
+fn clut_stale_setup(clut: Clut) -> prim::TriTextured {
+    let mut idx = [0u8; 16 * 16];
+    for (i, b) in idx.iter_mut().enumerate() {
+        // Indices 16..255 only: colors 00-0F live in the SHARED 16-entry
+        // line, which legitimately refreshes through interleaved 4bpp
+        // draws. Staying above 0x10 makes both cases read the 240-entry
+        // 8bpp-only line exclusively, which is the line under test.
+        *b = 16 + ((i * 7) % 240) as u8;
+    }
+    // Rows 288.. of the (832,256) page: clear of 0xa2's block at v=0..15.
+    psx_vram::upload_bytes(psx_vram::VramRect::new(832, 288, 8, 16), &idx);
+    let mut pal = [psx_vram::Color555::raw(0); 256];
+    for (i, c) in pal.iter_mut().enumerate() {
+        let n = i as u8;
+        *c = psx_vram::Color555::rgb5(n & 0x1f, (n >> 1) & 0x1f, (n >> 2) & 0x1f);
+    }
+    psx_vram::upload_clut(clut, &pal);
+    let tpage = Tpage::new(832, 256, TexDepth::Bit8).uv_tpage_word(0);
+    prim::TriTextured::new(
+        [(8, 8), (88, 16), (40, 88)],
+        [(0, 32), (15, 32), (8, 47)],
+        clut.uv_clut_word(),
+        tpage,
+        (0x80, 0x80, 0x80),
+    )
+}
+
+/// Rewrite the palette under `clut` IN PLACE with a visibly different
+/// mapping (channels rotated). A fresh CLUT fetch after this produces a
+/// different raster hash; a stale cache reproduces the first draw exactly.
+fn clut_stale_rewrite(clut: Clut) {
+    let mut pal = [psx_vram::Color555::raw(0); 256];
+    for (i, c) in pal.iter_mut().enumerate() {
+        let n = i as u8;
+        *c = psx_vram::Color555::rgb5((n >> 2) & 0x1f, n & 0x1f, (n >> 1) & 0x1f);
+    }
+    psx_vram::upload_clut(clut, &pal);
+}
+
+/// GPU: the CLUT cache must NOT reload when the palette data is rewritten
+/// in place under an unchanged clut word (the reload key is the clut WORD,
+/// not the VRAM content; the VRAM copy flushes the texture cache only).
+fn test_gpu_clut_inplace_rewrite_stale() -> TestResult {
+    let clut = Clut::new(0, 501);
+    let tri = clut_stale_setup(clut);
+    let first = gpu_draw_and_hash(&tri, prim::TriTextured::WORDS);
+    clut_stale_rewrite(clut);
+    let second = gpu_draw_and_hash(&tri, prim::TriTextured::WORDS);
+    expect_eq(first, second, "stale clut after in-place rewrite")
+}
+
+/// GPU: the 240-entry 8bpp CLUT line tracks its own last-load address; a
+/// 4bpp primitive with a DIFFERENT clut word between the rewrite and the
+/// redraw must not refresh it. (A single shared reload register would.)
+fn test_gpu_clut_stale_across_4bpp_interleave() -> TestResult {
+    let clut = Clut::new(0, 501);
+    let tri = clut_stale_setup(clut);
+    let first = gpu_draw_and_hash(&tri, prim::TriTextured::WORDS);
+    clut_stale_rewrite(clut);
+    // Interleave: a 4bpp textured draw with a different clut word, into the
+    // scratch region (cleared again by the final draw-and-hash).
+    let mut idx4 = [0u8; 8];
+    for (i, b) in idx4.iter_mut().enumerate() {
+        *b = (i as u8) | ((i as u8) << 4);
+    }
+    psx_vram::upload_bytes(psx_vram::VramRect::new(832, 306, 2, 2), &idx4);
+    let mut pal16 = [psx_vram::Color555::raw(0); 16];
+    for (i, c) in pal16.iter_mut().enumerate() {
+        *c = psx_vram::Color555::rgb5(i as u8 * 2, 0x1f - i as u8, 8);
+    }
+    let clut4 = Clut::new(0, 502);
+    psx_vram::upload_clut(clut4, &pal16);
+    let tpage4 = Tpage::new(832, 256, TexDepth::Bit4).uv_tpage_word(0);
+    let interleave = prim::TriTextured::new(
+        [(4, 4), (12, 4), (8, 12)],
+        [(0, 50), (7, 50), (4, 51)],
+        clut4.uv_clut_word(),
+        tpage4,
+        (0x80, 0x80, 0x80),
+    );
+    let _ = gpu_draw_and_hash(&interleave, prim::TriTextured::WORDS);
+    let second = gpu_draw_and_hash(&tri, prim::TriTextured::WORDS);
+    expect_eq(first, second, "8bpp clut line survives 4bpp interleave")
+}
+
+// ---- v0.17 demo-disc text-pipeline replica -------------------------------
+//
+// The launcher's description text (SPLEEN 5x8, drawn into a 15bpp cache at
+// (512,0) and blitted) renders lowercase 'f' as a bare crossbar on real
+// hardware while every emulator draws it whole. These three cases rebuild
+// that pipeline stage by stage at the launcher's EXACT VRAM geometry:
+// whichever case's hash diverges on console names the corrupt stage
+// (glyph rects into the cache, the 15bpp blit of it, or the same glyph
+// rects drawn directly). Expected values are pinned from the emulator, so
+// on silicon a FAIL is the finding and the observed hash is the data.
+
+/// The launcher's small-font geometry, exactly: SPLEEN 5x8 as 4bpp at
+/// (448,0) with its two-entry CLUT at (416,256).
+fn spleen_replica() -> FontAtlas {
+    FontAtlas::upload(
+        &SPLEEN_5X8,
+        Tpage::new(448, 0, TexDepth::Bit4),
+        Clut::new(416, 256),
+    )
+}
+
+/// Probe text, f-dense with in-word/leading/trailing forms plus controls
+/// ('t' shares the crossbar shape, '-' is what the console shows instead).
+const TEXT_LINE_1: &str = "for office fluffy staff";
+const TEXT_LINE_2: &str = "the quick fox left -- tt";
+
+/// Replicate TextCache::begin + the glyph pass: GP0(02) fill of the
+/// 115x92 cache rect (NOT 16-aligned in width -- silicon rounds fill
+/// widths up to 16, one of the candidate divergences), draw area and
+/// offset pointed into it, two lines of SPLEEN rects.
+fn text_cache_glyph_pass(small: &FontAtlas) {
+    gpu::fill_rect(512, 0, 115, 92, 0, 0, 0);
+    gpu::set_draw_area(512, 0, 512 + 115 - 1, 92 - 1);
+    gpu::set_draw_offset(512, 0);
+    small.draw_text(2, 2, TEXT_LINE_1, (255, 255, 255));
+    small.draw_text(2, 12, TEXT_LINE_2, (255, 255, 255));
+    gpu::draw_sync();
+}
+
+/// GPU: the glyph pass must LAND in the cache region correctly.
+fn test_gpu_text_cache_glyphs_land() -> TestResult {
+    let small = spleen_replica();
+    text_cache_glyph_pass(&small);
+    gpu_draw_env_scratch();
+    // 115x92 is odd-area for the word reader; hash the even 114x92 span
+    // (glyphs start at x=2, nothing lives in the last column).
+    expect_eq(
+        0xC14F_EAD9,
+        gpu_hash_rect(512, 0, 114, 92),
+        "text cache glyph pass VRAM",
+    )
+}
+
+/// GPU: the 15bpp blit of the cache region must reproduce it on screen.
+fn test_gpu_text_cache_blit() -> TestResult {
+    let small = spleen_replica();
+    text_cache_glyph_pass(&small);
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    let tpage = Tpage::new(512, 0, TexDepth::Bit15);
+    gpu::draw_sprite_material(
+        0,
+        0,
+        96,
+        24,
+        (0, 0),
+        psx_gpu::material::TextureMaterial::opaque(0, tpage.uv_tpage_word(0), (128, 128, 128)),
+    );
+    gpu_io::wait_cmd_ready();
+    // Same value as the direct draw's hash: the blit round trip is
+    // pixel-exact in the emulator, which is the property under test.
+    expect_eq(0x3B20_8994, gpu_hash_scratch(), "text cache blit output")
+}
+
+/// GPU: the same two lines drawn STRAIGHT into the scratch, no cache
+/// indirection. If this diverges on console too, the fault is the glyph
+/// rect path itself, not the render-to-VRAM round trip.
+fn test_gpu_text_direct_draw() -> TestResult {
+    let small = spleen_replica();
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    small.draw_text(2, 2, TEXT_LINE_1, (255, 255, 255));
+    small.draw_text(2, 12, TEXT_LINE_2, (255, 255, 255));
+    gpu::draw_sync();
+    expect_eq(0x3B20_8994, gpu_hash_scratch(), "direct glyph draw")
+}
 
 // --- SXY state dumps -----------------------------------------------------
 // Every NCLIP result in the poison->probe shape matches "cross with the SY0
@@ -7000,11 +7386,17 @@ fn gpu_send_prim<T>(prim_ref: &T, words: u8) {
 
 /// Read the scratch rect back (GP0 0xC0 + GPUREAD) and FNV-1a hash the pixels.
 fn gpu_hash_scratch() -> u32 {
+    gpu_hash_rect(GPU_SX, GPU_SY, GPU_SW, GPU_SH)
+}
+
+/// FNV-hash an arbitrary VRAM rect over the C0 readback path. `w * h`
+/// must be even (two 16bpp pixels per GPUREAD word).
+fn gpu_hash_rect(x: u16, y: u16, w: u16, h: u16) -> u32 {
     gpu_io::wait_cmd_ready();
     gpu_io::write_gp0(0xC000_0000);
-    gpu_io::write_gp0(((GPU_SY as u32) << 16) | GPU_SX as u32);
-    gpu_io::write_gp0(((GPU_SH as u32) << 16) | GPU_SW as u32);
-    let words = (GPU_SW as u32 * GPU_SH as u32) / 2; // two 16bpp pixels per word
+    gpu_io::write_gp0(((y as u32) << 16) | x as u32);
+    gpu_io::write_gp0(((h as u32) << 16) | w as u32);
+    let words = (w as u32 * h as u32) / 2;
     let mut hash = 0x811C_9DC5u32;
     for _ in 0..words {
         let mut guard = 0u32;
@@ -7495,7 +7887,21 @@ pub(crate) fn spu_dma_read(addr: u32, out: &mut [u32]) {
     } else {
         1
     };
-    let _ = spu_dma_read_shape(addr, out, block_size);
+    // SPU->RAM DMA is only trustworthy with the memory controller's DMA
+    // timing override armed (1F801014h bits 24-27 non-zero). The BIOS boot
+    // value 0x200931E1 leaves it zero; in that mode silicon corrupts FIFO
+    // block boundaries and the emulator reproduces the measured corruption
+    // since the SCPH-9902 checkpoint. PX7 precision values 036-038 prove the
+    // override reads RAM back faithfully on silicon. Restored afterwards so
+    // the boot-mode shape stays observable to the precision scan, which
+    // calls spu_dma_read_shape directly.
+    const SPU_DELAY: u32 = 0x1F80_1014;
+    unsafe {
+        let boot = psx_io::read32(SPU_DELAY);
+        psx_io::write32(SPU_DELAY, boot | 0x0200_0000);
+        let _ = spu_dma_read_shape(addr, out, block_size);
+        psx_io::write32(SPU_DELAY, boot);
+    }
 }
 
 /// SPU->RAM DMA with an explicit BCR shape. Hardware's unstable read mode
@@ -7572,7 +7978,7 @@ fn test_spu_ram_dma_roundtrip() -> TestResult {
 /// (it never armed Manual-Write mode, so the FIFO writes were dropped).
 /// Arm mode 01, push 8 halfwords, DMA them back, hash-compare.
 fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
-    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
+    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
     let mut src = [0u16; 8];
     let mut i = 0;
     while i < 8 {
@@ -7581,16 +7987,29 @@ fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
     }
     let dest: u32 = 0x3400;
     unsafe {
-        psx_io::write16(TRANSFER_CTRL, 0x0000);
         psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
         psx_io::write16(TRANSFER_CTRL, 0x0004);
         let spucnt = psx_io::read16(SPUCNT) & !0x0030;
         psx_io::write16(SPUCNT, spucnt | 0x0010); // transfer mode = Manual Write
+        // The SPUCNT low-6-bit SPUSTAT mirror takes 24-27 polls to settle on
+        // silicon; FIFO halfwords pushed before Manual-Write mode is active
+        // are dropped -- the very bug this test exists to catch.
+        let mut settle = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0010) & 0x003F && settle < 0xFFFF {
+            settle += 1;
+        }
         for &hw in src.iter() {
             psx_io::write16(TRANSFER_DATA, hw);
         }
+        // Let the FIFO drain (SPUSTAT bit 10) before leaving the mode.
+        let mut drain = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && drain < 0xFFFF {
+            drain += 1;
+        }
         psx_io::write16(SPUCNT, spucnt); // back to Stop
-        psx_io::write16(TRANSFER_CTRL, 0x0000);
+        // Leave the transfer type NORMAL (0004h): parking it at 0 poisons all
+        // later sample-RAM access on silicon (SB2 finding, 2026-08-02).
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
     }
     spin(4000); // let the FIFO drain to SPU RAM on hardware
     let mut back = [0u32; 4];
