@@ -179,16 +179,16 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 18;
+const SUITE_VERSION_MINOR: u8 = 19;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.18";
+const SUITE_VERSION: &str = "HWTEST v1.19";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 188;
+const TEST_COUNT: usize = 191;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -2023,6 +2023,24 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GPU",
         name: "SPLEEN atlas VRAM readback",
         run: test_gpu_glyph_atlas_readback,
+    },
+    TestSpec {
+        id: 0x00bc,
+        group: "SPU",
+        name: "SPU RAM read is repeatable",
+        run: test_spu_read_is_repeatable,
+    },
+    TestSpec {
+        id: 0x00bd,
+        group: "SPU",
+        name: "SPU DMA and FIFO writes agree",
+        run: test_spu_dma_and_fifo_agree,
+    },
+    TestSpec {
+        id: 0x00be,
+        group: "SPU",
+        name: "SPU upload, addr after mode",
+        run: test_spu_upload_addr_after_mode,
     },
 ];
 
@@ -7237,6 +7255,142 @@ fn draw_one_glyph_hash(ch: char) -> u32 {
     small.draw_text(2, 2, s, (255, 255, 255));
     gpu::draw_sync();
     gpu_hash_scratch()
+}
+
+// ---- Why 0xA6/0xA7 still fail on silicon ------------------------------
+//
+// The v1.18 console capture narrowed this a long way. Precision 036-038 show
+// that with the DMA timing override armed the readback is SELF-CONSISTENT on
+// silicon: the single-block and four-block hashes come back identical
+// (0x083B6E3D). The boot-mode words show the documented unstable shape, an
+// 0xFFFF inserted at every DMA block start (words 00/04/08/12 of the
+// four-block read). So the read path is understood and behaving; what is not
+// established is whether the WRITE landed. 0xA7's readback is deterministic
+// across two different builds while 0xA6's moves, which is what stale RAM
+// under a write that never arrived would look like.
+//
+// These three separate the two halves, so one burn settles it.
+
+/// The 64-byte pattern 0xA6 uploads, so the probes below can reuse it.
+fn spu_probe_pattern() -> [u32; 16] {
+    let mut src = [0u32; 16];
+    let mut i = 0;
+    while i < 16 {
+        src[i] = 0xC0DE_0000u32.wrapping_add((i as u32) * 0x111);
+        i += 1;
+    }
+    src
+}
+
+/// SPU: reading the same SPU RAM twice must give the same answer. Nothing
+/// writes between the two reads, so a mismatch means the READ path is
+/// unstable and no upload test above it can be trusted.
+fn test_spu_read_is_repeatable() -> TestResult {
+    let mut a = [0u32; 16];
+    let mut b = [0u32; 16];
+    spu_dma_read(0x3000, &mut a);
+    spu_dma_read(0x3000, &mut b);
+    expect_eq(fnv32_words(&a), fnv32_words(&b), "spu read repeatable")
+}
+
+/// SPU: the same bytes uploaded by DMA and by the manual FIFO must leave SPU
+/// RAM in the same state. Both land through the same read path, so this
+/// compares the two WRITE paths against each other without depending on the
+/// read being faithful. A pass with 0xA6/0xA7 failing means both writes agree
+/// and the readback is what diverges from expectation; a fail names the
+/// write path that is wrong.
+fn test_spu_dma_and_fifo_agree() -> TestResult {
+    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
+    let src = spu_probe_pattern();
+    let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
+    psx_spu::upload_adpcm(SpuAddr::new(0x3800), bytes);
+
+    // The same 64 bytes again, by hand through the FIFO, at 0x3C00.
+    let halfwords = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u16, 32) };
+    unsafe {
+        psx_io::write16(TRANSFER_ADDR, (0x3C00u32 / 8) as u16);
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
+        psx_io::write16(SPUCNT, spucnt | 0x0010);
+        let mut settle = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0010) & 0x003F && settle < 0xFFFF {
+            settle += 1;
+        }
+        for &hw in halfwords.iter() {
+            psx_io::write16(TRANSFER_DATA, hw);
+        }
+        let mut drain = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && drain < 0xFFFF {
+            drain += 1;
+        }
+        psx_io::write16(SPUCNT, spucnt);
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+    }
+
+    let mut via_dma = [0u32; 16];
+    let mut via_fifo = [0u32; 16];
+    spu_dma_read(0x3800, &mut via_dma);
+    spu_dma_read(0x3C00, &mut via_fifo);
+    expect_eq(
+        fnv32_words(&via_dma),
+        fnv32_words(&via_fifo),
+        "spu dma vs fifo write",
+    )
+}
+
+/// SPU: the same DMA upload, but with the transfer address written AFTER the
+/// transfer mode is armed rather than before.
+///
+/// This is the candidate fix. psx-spx documents the write to 1F801DA6 as
+/// latching the SPU's internal current address; if arming DMA-write mode
+/// re-latches it from somewhere else, the SDK's order (address, then mode)
+/// would leave the transfer pointed at the wrong place, which is exactly a
+/// write that never arrives. If this PASSES on console while 0xA6 fails, the
+/// ordering is the bug and psx-spu's `upload_adpcm` gets the same swap.
+fn test_spu_upload_addr_after_mode() -> TestResult {
+    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    let src = spu_probe_pattern();
+    let dest: u32 = 0x4400;
+    unsafe {
+        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
+        psx_io::write16(SPUCNT, spucnt);
+        let mut settle = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F && settle < 0xFFFF {
+            settle += 1;
+        }
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        // Mode first...
+        psx_io::write16(SPUCNT, spucnt | 0x0020);
+        let mut armed = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0020) & 0x003F && armed < 0xFFFF {
+            armed += 1;
+        }
+        // ...then the address.
+        psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
+
+        dma::enable_channel(dma::Channel::Spu);
+        dma::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
+        dma::set_bcr_block(dma::Channel::Spu, 4, 4);
+        dma::set_chcr(
+            dma::Channel::Spu,
+            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+        );
+        if !dma::wait_done(dma::Channel::Spu, 200_000) {
+            dma::abort(dma::Channel::Spu);
+        }
+        let mut idle = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && idle < 0xFFFF {
+            idle += 1;
+        }
+        psx_io::write16(SPUCNT, spucnt);
+    }
+    let mut back = [0u32; 16];
+    spu_dma_read(dest, &mut back);
+    expect_eq(
+        fnv32_words(&src),
+        fnv32_words(&back),
+        "spu upload addr-after-mode",
+    )
 }
 
 /// Read the uploaded SPLEEN atlas straight back out of VRAM and hash it.
