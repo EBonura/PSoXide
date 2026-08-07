@@ -251,12 +251,43 @@ fn wait_spu_status(want: u16) {
 /// RAM. Changing the transfer mode before this clears cuts the tail of
 /// the upload off.
 fn wait_transfer_idle() {
+    // Bit 10 clearing once is not enough on silicon. The 2026-08-07 console
+    // capture reconstructs a 64-byte DMA upload as having landed only its
+    // first 6 bytes, with the boundary MOVING between builds while a
+    // manual-FIFO upload of the same shape lands identically every time. A
+    // head that arrives, a tail that does not, and a boundary that wanders is
+    // a race on the drain rather than a wrong address or a dropped mode: the
+    // DMA controller has handed its words over, this flag reads clear, and
+    // the SPU is still writing them into sound RAM when the caller puts the
+    // transfer mode back to Stop underneath it.
+    //
+    // So require the flag to stay clear rather than to be clear once, and
+    // then leave a settle behind it. Timing record 0x65 puts 512 halfwords at
+    // roughly 32 cycles each, so a whole 32-halfword FIFO drains in about a
+    // thousand; the margin below is several times that and costs nothing
+    // against an upload measured in kilobytes.
+    const CONSECUTIVE_CLEAR: u32 = 16;
+    let mut clear = 0u32;
     for _ in 0..SPU_HANDSHAKE_SPINS {
         if read_reg16(SPUSTAT) & 0x0400 == 0 {
-            return;
+            clear += 1;
+            if clear >= CONSECUTIVE_CLEAR {
+                break;
+            }
+        } else {
+            clear = 0;
         }
     }
+    // Settle. `read_reg16` is a volatile MMIO read, so this cannot be
+    // optimised away into nothing.
+    for _ in 0..SPU_DRAIN_SETTLE_READS {
+        let _ = read_reg16(SPUSTAT);
+    }
 }
+
+/// Status reads spent letting the SPU finish writing sound RAM after its
+/// transfer-busy flag goes clear. See [`wait_transfer_idle`].
+const SPU_DRAIN_SETTLE_READS: u32 = 256;
 
 // ======================================================================
 // Typed primitives
