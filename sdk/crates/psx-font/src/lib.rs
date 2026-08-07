@@ -355,15 +355,22 @@ pub struct FontSetVram {
     pub clut: VramHandle,
 }
 
+/// Atlas cell width: the glyph width rounded up to a whole halfword (4
+/// texels at 4bpp), so every glyph starts on a halfword boundary. See the
+/// note in [`FontAtlas::upload`] for why that matters on real hardware.
+pub(crate) fn cell_width(font: &BitmapFont) -> u16 {
+    (font.glyph_w as u16).max(1).div_ceil(4) * 4
+}
+
 /// Atlas layout for `font`: `(glyphs_per_row, atlas_w_texels, atlas_h_texels,
 /// halfwords_per_row)`. Mirrors the layout [`FontAtlas::upload`] computes.
 fn font_atlas_dims(font: &BitmapFont) -> (u16, u16, u16, u16) {
-    let glyph_w = (font.glyph_w as u16).max(1);
+    let cell_w = cell_width(font);
     let glyph_h = font.glyph_h as u16;
-    let max_cols = (FontAtlas::MAX_ATLAS_W_TEXELS / glyph_w).max(1);
+    let max_cols = (FontAtlas::MAX_ATLAS_W_TEXELS / cell_w).max(1);
     let glyphs_per_row = font.glyph_count.min(max_cols).max(1);
     let glyph_rows = font.glyph_count.div_ceil(glyphs_per_row);
-    let atlas_w = glyphs_per_row * glyph_w;
+    let atlas_w = glyphs_per_row * cell_w;
     let atlas_h = glyph_rows * glyph_h;
     let halfwords_per_row = atlas_w.div_ceil(4);
     (glyphs_per_row, atlas_w, atlas_h, halfwords_per_row)
@@ -439,7 +446,7 @@ pub fn upload_fonts<R: VramRegionSource>(
         for gi in 0..font.glyph_count {
             let atlas_col = gi % glyphs_per_row;
             let atlas_row = gi / glyphs_per_row;
-            let base_x = atlas_col * font.glyph_w as u16;
+            let base_x = atlas_col * cell_width(font);
             let base_y = atlas_row * font.glyph_h as u16;
             for row in 0..font.glyph_h {
                 let row_bits = font.glyph_row_packed(gi, row);
@@ -523,12 +530,22 @@ impl FontAtlas {
         let glyph_h = font.glyph_h as u16;
         let glyph_count = font.glyph_count;
 
-        // Atlas width = glyphs_per_row × glyph_w, capped at the
+        // Cells are padded to a whole halfword (4 texels at 4bpp) so every
+        // glyph STARTS on a halfword boundary. A 5-wide font otherwise puts
+        // each glyph at an arbitrary nibble, and on real hardware the demo
+        // disc's SPLEEN 5x8 description text rendered lowercase 'f' as a
+        // bare crossbar while every emulator drew it whole (hwtest 0xB3-
+        // 0xB5, 2026-08-07 console capture). The padding costs VRAM and
+        // changes nothing about the drawn pixels: `draw_text` still emits
+        // glyph_w-wide rects, only the atlas coordinates move.
+        let cell_w = glyph_w.div_ceil(4) * 4;
+
+        // Atlas width = glyphs_per_row × cell_w, capped at the
         // MAX to stay within a single 4bpp tpage.
-        let max_cols = Self::MAX_ATLAS_W_TEXELS / glyph_w;
+        let max_cols = (Self::MAX_ATLAS_W_TEXELS / cell_w).max(1);
         let glyphs_per_row = glyph_count.min(max_cols);
         let glyph_rows = glyph_count.div_ceil(glyphs_per_row);
-        let atlas_w = glyphs_per_row * glyph_w;
+        let atlas_w = glyphs_per_row * cell_w;
         let atlas_h = glyph_rows * glyph_h;
 
         // Pack 1bpp source → 4bpp VRAM texture into a stack buffer.
@@ -544,7 +561,7 @@ impl FontAtlas {
         for gi in 0..glyph_count {
             let atlas_col = gi % glyphs_per_row;
             let atlas_row = gi / glyphs_per_row;
-            let base_x = atlas_col * glyph_w;
+            let base_x = atlas_col * cell_w;
             let base_y = atlas_row * glyph_h;
             for row in 0..glyph_h as u8 {
                 let row_bits = font.glyph_row_packed(gi, row);
@@ -617,7 +634,7 @@ impl FontAtlas {
         let idx = (cp - first) as u16;
         let col = idx % self.glyphs_per_row;
         let row = idx / self.glyphs_per_row;
-        let u = col * self.font.glyph_w as u16;
+        let u = col * cell_width(self.font);
         let v = row * self.font.glyph_h as u16;
         Some((u as u8, v as u8))
     }

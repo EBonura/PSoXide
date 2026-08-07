@@ -7243,11 +7243,12 @@ fn draw_one_glyph_hash(ch: char) -> u32 {
 /// This splits the glyph corruption cleanly in two: if the atlas readback
 /// differs on console, the CPU->VRAM upload is dropping or duplicating
 /// data and the rasteriser is innocent; if it matches while the drawn
-/// glyphs still differ, the fault is in texel fetch. 64 halfwords by 16
-/// rows, exactly the rect `FontAtlas::upload` writes.
+/// glyphs still differ, the fault is in texel fetch. 64 halfwords by 24
+/// rows, exactly the rect `FontAtlas::upload` writes for SPLEEN's padded
+/// 8-texel cells (32 glyphs per row, three rows).
 fn test_gpu_glyph_atlas_readback() -> TestResult {
     let _ = spleen_replica();
-    expect_eq(0x9CF5_706E, gpu_hash_rect(448, 0, 64, 16), "spleen atlas VRAM")
+    expect_eq(0x7D60_40C4, gpu_hash_rect(448, 0, 64, 24), "spleen atlas VRAM")
 }
 
 fn test_gpu_glyph_f() -> TestResult {
