@@ -188,7 +188,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 187;
+const TEST_COUNT: usize = 188;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -2017,6 +2017,12 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GPU",
         name: "glyph f after r (cache aliasing)",
         run: test_gpu_glyph_f_after_r,
+    },
+    TestSpec {
+        id: 0x00bb,
+        group: "GPU",
+        name: "SPLEEN atlas VRAM readback",
+        run: test_gpu_glyph_atlas_readback,
     },
 ];
 
@@ -7231,6 +7237,17 @@ fn draw_one_glyph_hash(ch: char) -> u32 {
     small.draw_text(2, 2, s, (255, 255, 255));
     gpu::draw_sync();
     gpu_hash_scratch()
+}
+
+/// Read the uploaded SPLEEN atlas straight back out of VRAM and hash it.
+/// This splits the glyph corruption cleanly in two: if the atlas readback
+/// differs on console, the CPU->VRAM upload is dropping or duplicating
+/// data and the rasteriser is innocent; if it matches while the drawn
+/// glyphs still differ, the fault is in texel fetch. 64 halfwords by 16
+/// rows, exactly the rect `FontAtlas::upload` writes.
+fn test_gpu_glyph_atlas_readback() -> TestResult {
+    let _ = spleen_replica();
+    expect_eq(0x9CF5_706E, gpu_hash_rect(448, 0, 64, 16), "spleen atlas VRAM")
 }
 
 fn test_gpu_glyph_f() -> TestResult {
