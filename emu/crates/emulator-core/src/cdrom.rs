@@ -1982,6 +1982,15 @@ impl CdRom {
             self.schedule_error_response(vec![stat]);
             return;
         };
+        if std::env::var_os("PSOXIDE_TRACE_CDDA_PLAY").is_some() {
+            match params.first() {
+                Some(&bcd) => eprintln!(
+                    "[cdda] play track bcd=0x{bcd:02X} (decimal {})",
+                    (bcd >> 4) * 10 + (bcd & 0x0F)
+                ),
+                None => eprintln!("[cdda] play resume (no track parameter)"),
+            }
+        }
         if let Some(&track_bcd) = params.first() {
             let track = bcd_to_bin(track_bcd);
             if track == 0xFF {
