@@ -548,10 +548,10 @@ struct Voice {
     /// pitch modulation consumers.
     last_sample: i16,
     /// Ticks remaining before a freshly keyed voice starts stepping its
-    /// envelope and producing output. SB4 silicon 2026-08-07: the first
-    /// envelope step lands ~8 ticks after the KON write; the KON-applied-
-    /// at-end-of-tick model accounts for 1 of those. Calibrate the exact
-    /// constant on the next burn.
+    /// envelope and producing output. Calibrated against the v1.17 SB4
+    /// capture (2026-08-07), where every segment's ring shows nine zero
+    /// samples and the first envelope step landing at ring index 9; the
+    /// KON-applied-at-end-of-tick model accounts for one of those.
     #[serde(default)]
     start_delay: u8,
 }
@@ -595,7 +595,7 @@ impl Voice {
     /// start decoding from `start_addr` on the next sample tick.
     fn key_on(&mut self) {
         self.phase = AdsrPhase::Attack;
-        self.start_delay = 7;
+        self.start_delay = 8;
         self.envelope = 0;
         self.envelope_sub = 0;
         self.current_addr = self.start_addr;
