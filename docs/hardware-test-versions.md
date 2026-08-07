@@ -33,6 +33,34 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.19 (2026-08-07, schema PX8)
+
+Three probes aimed at the last two conformance failures on silicon,
+`0xA6`/`0xA7`, the SPU RAM round-trips. The v1.18 console capture had
+already narrowed them: precision 036-038 show the readback is
+self-consistent with the DMA timing override armed (single-block and
+four-block hashes both 0x083B6E3D), and the boot-mode words show the
+documented unstable shape, an 0xFFFF inserted at every DMA block start.
+`0xA7`'s wrong readback is deterministic across two builds while
+`0xA6`'s moves, which is what stale RAM under a write that never
+arrived looks like.
+
+- `0xBC` reads the same SPU RAM twice with nothing writing in between.
+  A mismatch would mean the read path is unstable and nothing above it
+  can be trusted.
+- `0xBD` uploads the same 64 bytes by DMA and by the manual FIFO to two
+  addresses and compares the two readbacks to EACH OTHER, so it tests
+  the write paths without assuming the read is faithful.
+- `0xBE` is the candidate fix: the same DMA upload with the transfer
+  address written AFTER the mode is armed instead of before. If it
+  passes on console while `0xA6` fails, the SDK's ordering is the bug
+  and `psx_spu::upload_adpcm` gets the same swap.
+
+This matters beyond the suite. psx-sfx uploads a 16-byte parking block
+after every sample, and NitroXide's console recording had two voices
+audibly looping theirs, which is what an upload that does not land
+would sound like.
+
 ### v1.18 (2026-08-07, schema PX8)
 
 Everything the v1.17 console capture settled, folded back in, plus the
