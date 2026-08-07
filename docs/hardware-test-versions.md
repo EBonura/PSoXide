@@ -35,7 +35,18 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ### v1.18 (2026-08-07, schema PX8)
 
-Everything the v1.17 console capture settled, folded back in.
+Everything the v1.17 console capture settled, folded back in, plus the
+font-atlas change that fixes the demo disc's corrupted 'f'.
+
+- **Atlas cells are padded to a whole halfword.** `FontAtlas` laid 5-wide
+  SPLEEN glyphs at 5-texel pitch, so every glyph began at an arbitrary
+  nibble inside a 4bpp halfword. Cells are now `glyph_w` rounded up to 4
+  texels, so each glyph starts on a halfword boundary. Nothing about the
+  drawn output changes: `draw_text` still emits `glyph_w`-wide rects and
+  the whole `0xB3`-`0xBA` family of hashes is byte-identical across the
+  change, with only the atlas readback `0xBB` moving. Verified on the
+  demo-disc launcher too: the description panel renders pixel-identical.
+  8-wide fonts (BASIC) were already aligned and are untouched.
 
 - **LZCR settle window widened to match silicon.** Conformance `0x79`
   (one nop between the LZCS write and the LZCR read) returns the PRIOR
