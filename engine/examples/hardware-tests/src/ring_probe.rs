@@ -69,8 +69,12 @@ const POLL_BOUND: u32 = 2_000_000;
 
 // ---- Sources -------------------------------------------------------------
 
-/// Upload area: past the rings and the hardware-reserved low kilobyte.
-const SPU_SQUARE_ADDR: u32 = 0x1100;
+/// Upload area. NOT 0x1100: that sits inside the standard sample-bank
+/// region (banks start at 0x1010), and the v1.16 console run captured a
+/// stale leftover instrument instead of these tables, invalidating the
+/// tone-segment hashes as decode references. 0x4000 is clear of the rings,
+/// the banks, and the A6/A7 round-trip area at 0x3000/0x3400.
+const SPU_SQUARE_ADDR: u32 = 0x4000;
 const SPU_IMPULSE_ADDR: u32 = SPU_SQUARE_ADDR + TABLE_BYTES as u32;
 const TABLE_BLOCKS: usize = 4;
 const TABLE_BYTES: usize = TABLE_BLOCKS * 16;
@@ -133,7 +137,11 @@ const _: () = assert!(
     "SB4 QR too tall"
 );
 
-const NOISE_SHIFT: u8 = 8;
+// Shift 13 clocks the LFSR fast enough that the 32 raw window words read
+// out an actual sequence; at the old shift 8 / step 2 the LFSR stepped only
+// every ~128 ticks and the window saw a constant on both platforms. The
+// payload header carries shift/step, so decoders need no flag day.
+const NOISE_SHIFT: u8 = 13;
 const NOISE_STEP: u8 = 2;
 
 /// One captured half, as the payload will carry it.
@@ -405,7 +413,14 @@ fn run_segment(segment: usize) -> Snapshot {
         4 => (Voice::new(3), RING_V3),
         _ => (Voice::new(1), RING_V1),
     };
-    voice.set_volume(TONE_VOLUME, TONE_VOLUME);
+    // VOICE3 runs at HALF volume against V1's quarter: identical rings mean
+    // the tap is pre-volume, a 2x ring means post-volume. The v1.16 data
+    // could not distinguish them because both voices used the same volume.
+    if segment == 4 {
+        voice.set_volume(Volume::linear(1, 2), Volume::linear(1, 2));
+    } else {
+        voice.set_volume(TONE_VOLUME, TONE_VOLUME);
+    }
     match segment {
         1 => {
             voice.set_pitch(Pitch::raw(IMPULSE_PITCH));
