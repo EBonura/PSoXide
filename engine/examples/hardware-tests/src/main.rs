@@ -188,7 +188,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 191;
+const TEST_COUNT: usize = 192;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -2041,6 +2041,12 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "SPU",
         name: "SPU upload, addr after mode",
         run: test_spu_upload_addr_after_mode,
+    },
+    TestSpec {
+        id: 0x00bf,
+        group: "SPU",
+        name: "SPU upload, four small blocks",
+        run: test_spu_upload_small_blocks,
     },
 ];
 
@@ -7391,6 +7397,59 @@ fn test_spu_upload_addr_after_mode() -> TestResult {
         fnv32_words(&back),
         "spu upload addr-after-mode",
     )
+}
+
+/// SPU: the same 64-byte DMA upload paced as four 4-word blocks instead of
+/// one 16-word block.
+///
+/// The v1.18 capture says the write is what fails, not the read: precision
+/// 002-017 reconstruct to only the first 6 bytes of a 64-byte DMA upload
+/// having landed, and 039-042 show a manual-FIFO upload landing not at all,
+/// both read back through a path whose two block shapes agree with each
+/// other. `upload_adpcm` picks the LARGEST block size dividing the payload,
+/// so 64 bytes go as a single 16-word block -- exactly the SPU's whole
+/// 32-halfword transfer FIFO, with no DRQ pause anywhere in it for the SPU to
+/// drain. Smaller blocks give the device a say between each one. If this
+/// passes on console while 0xA6 fails, block sizing is the bug and
+/// `upload_adpcm` should cap it rather than maximise it.
+fn test_spu_upload_small_blocks() -> TestResult {
+    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    let src = spu_probe_pattern();
+    let dest: u32 = 0x4800;
+    unsafe {
+        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
+        psx_io::write16(SPUCNT, spucnt);
+        let mut settle = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F && settle < 0xFFFF {
+            settle += 1;
+        }
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
+        psx_io::write16(SPUCNT, spucnt | 0x0020);
+        let mut armed = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0020) & 0x003F && armed < 0xFFFF {
+            armed += 1;
+        }
+        dma::enable_channel(dma::Channel::Spu);
+        dma::set_madr(dma::Channel::Spu, src.as_ptr() as u32);
+        // Four blocks of four words, rather than one block of sixteen.
+        dma::set_bcr_block(dma::Channel::Spu, 4, 4);
+        dma::set_chcr(
+            dma::Channel::Spu,
+            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+        );
+        if !dma::wait_done(dma::Channel::Spu, 200_000) {
+            dma::abort(dma::Channel::Spu);
+        }
+        let mut idle = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x0400 != 0 && idle < 0xFFFF {
+            idle += 1;
+        }
+        psx_io::write16(SPUCNT, spucnt);
+    }
+    let mut back = [0u32; 16];
+    spu_dma_read(dest, &mut back);
+    expect_eq(fnv32_words(&src), fnv32_words(&back), "spu upload 4x4 blocks")
 }
 
 /// Read the uploaded SPLEEN atlas straight back out of VRAM and hash it.

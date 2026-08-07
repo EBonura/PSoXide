@@ -321,6 +321,41 @@ recording. This is the capture the note at the bottom of this file was
 waiting for, and most of what it found has already been fixed in v1.18.
 What it leaves open:
 
+### SPU RAM uploads do not land on silicon (the WRITE, not the read)
+
+The v1.18 capture settles which half is broken, and it is the write.
+
+Precision 002-017 are the raw words of a 64-byte DMA upload read straight
+back. Undoing the documented unstable-read shape (one `0xFFFF` inserted
+per DMA block, everything after it shifted by a halfword) reconstructs
+SPU RAM as `0000 C0DE 0111 9C00 DD65 ...` against an uploaded `0000 C0DE
+0111 C0DE 0222 ...`. **Only the first 6 bytes of 64 arrived.** Precision
+039-042 read back a region written through the manual FIFO and match it
+in **zero of 8 halfwords**.
+
+Both readings are trustworthy: precision 037/038 hash the same region
+through two different block shapes with the override armed and agree
+exactly (`0x083B6E3D`), so the read path is self-consistent. A read that
+were itself corrupting would not reproduce the same content twice at two
+shapes.
+
+This is the same fault as the demo disc's NitroXide tone. psx-sfx writes
+a 16-byte parking block after every sample; a voice that finishes parks
+on it and loops it forever. Emulator-side tests
+(`a_correct_parking_block_is_silent_however_long_it_loops` and its
+corrupted counterpart) show a correct block renders an exact 0 while one
+whose header was replaced by `0xFFFF` self-loops audibly at 44100/28 Hz
+= 1575 Hz -- the tone the console recording carries.
+
+What is still open is WHY the write stops. `upload_adpcm` picks the
+largest DMA block size dividing the payload, so 64 bytes go as a single
+16-word block, which is the SPU's entire 32-halfword transfer FIFO with
+no DRQ pause inside it. Conformance `0xBC`-`0xBF` ask the four questions
+that separate the candidates: is the read stable, do the DMA and FIFO
+writes agree with each other, does writing the transfer address after
+arming the mode fix it, and does pacing the same payload as four
+4-word blocks fix it.
+
 ### SPU RAM readback is lossy on silicon even with the DMA override armed
 
 Conformance `0xA6` (DMA round trip) and `0xA7` (manual-FIFO round trip)
