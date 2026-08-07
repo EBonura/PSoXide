@@ -2318,3 +2318,79 @@ fn default_capture_half_flag_uses_conventional_polarity() {
     s.tick_sample(256 * SAMPLE_CYCLES);
     assert_eq!(s.read16(SPUSTAT) & 0x800, 0x800);
 }
+
+// ---- the demo-disc parked-voice tone ------------------------------------
+//
+// psx-sfx appends a parking block after every sample so a finished one-shot
+// lands on something instead of running into the next sample: shift/filter 0,
+// flags LOOP_START|REPEAT|END, then zero nibbles. Decoded correctly that is
+// exact silence, which is why a voice left parked on it is inaudible here.
+//
+// On console the 2026-08-07 NitroXide recording had two voices audibly
+// looping theirs, at exactly 44100/28 Hz and a harmonic of it -- one ADPCM
+// block per cycle. These two tests pin both halves of that: a correct parking
+// block is silent, and a block whose header has been corrupted the way the
+// unstable SPU transfer corrupts data (0xFFFF in the first halfword, which
+// sets every flag bit including REPEAT and LOOP_START) self-loops and is
+// LOUD. The audible difference is the whole bug; what remains open is which
+// step corrupts the block on the way in, which conformance 0xBC-0xBE ask.
+
+fn park_voice_and_render(block: &[u8; 16], samples: usize) -> Vec<i16> {
+    let mut s = Spu::new();
+    s.write16(SPUCNT, SPUCNT_UNMUTE);
+    s.main_vol_l.write(0x3FFF);
+    s.main_vol_r.write(0x3FFF);
+    write_adpcm_block(&mut s, 0x1000, block);
+    let base = VOICE_BASE;
+    s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
+    s.write16(base + voice_offset::VOLUME_R, 0x3FFF);
+    s.write16(base + voice_offset::PITCH, 0x1000); // unity: 28 samples/block
+    s.write16(base + voice_offset::START_ADDR, (0x1000 >> 3) as u16);
+    s.write16(base + voice_offset::ADSR_LO, 0x00FF); // instant attack, full sustain
+    s.write16(base + voice_offset::ADSR_HI, 0x0000);
+    s.write16(KON_LO, 0x0001);
+    let mut out = Vec::with_capacity(samples);
+    for t in 1..=samples as u64 {
+        s.tick_sample(t * SAMPLE_CYCLES);
+    }
+    for (l, _r) in s.drain_audio() {
+        out.push(l);
+    }
+    out
+}
+
+#[test]
+fn a_correct_parking_block_is_silent_however_long_it_loops() {
+    // shift/filter 0, LOOP_START|REPEAT|END, zero nibbles.
+    let block = [0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let out = park_voice_and_render(&block, 600);
+    let peak = out.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+    assert_eq!(peak, 0, "a parked voice on a zero block must be silent");
+}
+
+#[test]
+fn a_corrupted_parking_block_self_loops_and_sounds() {
+    // The same block with 0xFFFF as its first halfword, which is what the
+    // unstable SPU transfer inserts at a block boundary. Flags 0xFF carry
+    // REPEAT and LOOP_START, so the voice parks on it exactly as before --
+    // but the data nibbles are no longer zero.
+    let block = [0xFF, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x11, 0x22, 0x33, 0x44,
+                 0x55, 0x66, 0x77];
+    let out = park_voice_and_render(&block, 600);
+    let peak = out.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+    // Around 831 here: shift 0xF is reserved and decodes as 9, so the block is
+    // heavily attenuated but plainly not silent. Against the zero block's
+    // exact 0, that difference is the whole audible bug.
+    assert!(peak > 200, "a corrupted parking block must be audible, peak was {peak}");
+    // And it must still be looping at the end of the window rather than having
+    // decayed: one block per 28 samples, forever.
+    let tail_peak = out[out.len() - 112..]
+        .iter()
+        .map(|s| s.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        tail_peak > 200,
+        "the loop must sustain, tail peak was {tail_peak}"
+    );
+}
