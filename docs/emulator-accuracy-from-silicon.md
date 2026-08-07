@@ -314,6 +314,64 @@ there; the read paths need the current cycle and video parameters threaded in.
 numbers across the suite, so the emulator baseline will need re-pinning and the
 change wants checking against the timing records rather than landing blind.
 
+## The first FULL characterisation capture (2026-08-07)
+
+HWTEST v1.17, all five PX8 pages plus SB4 recovered from one console
+recording. This is the capture the note at the bottom of this file was
+waiting for, and most of what it found has already been fixed in v1.18.
+What it leaves open:
+
+### SPU RAM readback is lossy on silicon even with the DMA override armed
+
+Conformance `0xA6` (DMA round trip) and `0xA7` (manual-FIFO round trip)
+upload a known block to SPU RAM and read it back. Both still FAIL on
+console (`B00FF59A` / `736B7C0F` against the analytic `D24F8305` /
+`574B8A35`) after the v1.17 fix that arms the memory controller's SPU DMA
+timing override (`1F801014h` bits 24-27) around the readback. The
+emulator now PASSES both, so it is the permissive one.
+
+The override was the right fix for the emulator, and PX7 precision values
+036-038 show stable-mode reads being faithful on silicon, so the residual
+corruption is NOT the unstable-read shape this suite already models. The
+write side is the remaining suspect. The observed hashes move between
+builds while staying stable within one, which points at content rather
+than timing.
+
+### NCLIP positive-winding anomaly (`0x8B`)
+
+The one conformance case still failing in the emulator, and the console
+passes it. The console computes the full cross product in both phases of
+the controlled scene-C replica; the emulator's hazard model substitutes
+an old Y in the settled reference phase, so its two phases disagree.
+Two narrow fixes were tried and reverted: keying the spaced-cadence rule
+on the SXY1->SXY2 gap alone, and restricting history establishment to
+RTPT. Each repaired `0x8B` and broke the small-value settle cases
+`0x74`-`0x78`, which the console passes. The model needs the
+positive-winding anomaly itself, not another calibrated special case.
+The v1.17 discriminators `0xAD`-`0xB0` were added for exactly this and
+their console values are now in hand, including the read-interlock
+result below.
+
+### The CPU does not stall on COP2 reads
+
+`0xB0` brackets `nclip` plus an immediate `mfc2` against a two-nop
+baseline on Timer 2 and reads `lo=8, hi=9`: reading MAC0 the instruction
+after issuing NCLIP costs no more than two NOPs. psx-spx and DuckStation
+both describe a read interlock that stalls until the command completes;
+this console has none, which is precisely why partial MAC0 values are
+observable at all. Any future GTE latency work has to start here.
+
+### The demo-disc glyph corruption is in the glyph rect path
+
+`0xB3`-`0xB5` all fail on console. `0xB4` (blit of the render-to-VRAM
+text cache) and `0xB5` (the same text drawn directly) return the SAME
+hash on silicon, exactly as they do in the emulator, so the cache round
+trip is faithful and the corruption happens when the 4bpp glyph
+rectangles are rasterised. Per-glyph probes `0xB6`-`0xBA` landed in v1.18
+to name the guilty glyph; alignment alone does not explain it, since 'r'
+shares 'f''s atlas row and its `u&3==3` start and renders correctly on
+screen.
+
 ## How these get found
 
 The hardware-test disc is the instrument: `make hwtest-silicon SILICON=<pages>`
@@ -321,8 +379,8 @@ diffs a console capture against the emulator record by record. A gap that shows
 up as a moved number there is far cheaper to act on than one inferred from a
 game misbehaving.
 
-No capture has been recovered in FULL yet, for reasons tracked in
-`hardware-test-disc.md`, so the timing records and precision values have never
-been compared. The conformance findings above come from a single recovered QR
-page; the SPU ADSR gap came from the *shape* of a failed capture rather than its
-contents.
+A full characterisation capture was finally recovered on 2026-08-07 (all five
+PX8 pages plus SB4, from one recording, decoded by `hwtest-video-qr.py` in a
+single pass). The older findings above predate it and came from a single
+recovered QR page; the SPU ADSR gap came from the *shape* of a failed capture
+rather than its contents.
