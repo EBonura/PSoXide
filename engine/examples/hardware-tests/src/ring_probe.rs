@@ -37,10 +37,12 @@
 //! first 32 raw samples. The full payload also goes to the TTY, so a
 //! headless emulator run needs no QR scanning.
 //!
-//! The rings capture the voice BEFORE its volume registers apply -- that is
-//! the documented hardware claim, and this probe is how it stops being a
-//! claim: the voice plays at quarter volume, so a ring that scales with it
-//! is itself a finding.
+//! The rings capture the voice BEFORE its volume registers apply. That was
+//! the documented claim; the 2026-08-07 console capture settled it, because
+//! VOICE3 runs at half volume against V1's quarter and their rings come back
+//! bit-identical (hash BACBD7D9 both). A post-volume tap could not do that.
+//! Key-on alignment came out of the same capture: every segment shows nine
+//! zero samples before the first envelope step.
 
 use psx_font::FontAtlas;
 use psx_gpu as gpu;

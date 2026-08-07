@@ -45,9 +45,12 @@ const CACHE_CONTROL_BIOS_NORMAL: u32 = 0x0001_E988;
 /// (data reg 31) is readable. A read inside this window returns the prior
 /// count -- the off-by-one observed on real hardware for a back-to-back
 /// `mtc2 lzcs; mfc2 lzcr`.
-/// Final burned-EXE capture on a PAL SCPH-9902 (2026-07-15): one intervening
-/// instruction is sufficient; only the truly back-to-back read is stale.
-const LZCR_RESULT_LATENCY: u64 = 2;
+/// Superseded measurement: a 2026-07-15 SCPH-9902 capture read this as one
+/// intervening instruction being sufficient. The 2026-08-07 v1.17 capture on
+/// the suite's reference console measures the window one instruction wider:
+/// conformance 0x79 (one nop between the write and the read) returns the
+/// PRIOR count 8, while 0x7A-0x7D (two or more nops) return the fresh 31.
+const LZCR_RESULT_LATENCY: u64 = 3;
 /// Short result window for commands that write MAC0.
 const MAC0_RESULT_LATENCY: u64 = 2;
 
@@ -2904,7 +2907,9 @@ mod tests {
     }
 
     #[test]
-    fn lzcr_is_stale_only_for_back_to_back_read() {
+    fn lzcr_is_stale_until_two_instructions_after_the_write() {
+        // 2026-08-07 console capture (conformance 0x79 vs 0x7A-0x7D): one
+        // intervening instruction still reads the prior count; two settle.
         let mut cpu = Cpu::new();
         let bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         cpu.cop2.write_data(30, 0x00ff_ffff); // old LZCR = 8
@@ -2915,6 +2920,8 @@ mod tests {
         cpu.tick = 11;
         assert_eq!(cpu.gte_read_data_latency(&bus, 31), 8);
         cpu.tick = 12;
+        assert_eq!(cpu.gte_read_data_latency(&bus, 31), 8);
+        cpu.tick = 13;
         assert_eq!(cpu.gte_read_data_latency(&bus, 31), 31);
     }
 

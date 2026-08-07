@@ -179,16 +179,16 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 17;
+const SUITE_VERSION_MINOR: u8 = 18;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.17";
+const SUITE_VERSION: &str = "HWTEST v1.18";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 182;
+const TEST_COUNT: usize = 187;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -1987,6 +1987,36 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GPU",
         name: "direct SPLEEN glyph draw",
         run: test_gpu_text_direct_draw,
+    },
+    TestSpec {
+        id: 0x00b6,
+        group: "GPU",
+        name: "lone glyph f",
+        run: test_gpu_glyph_f,
+    },
+    TestSpec {
+        id: 0x00b7,
+        group: "GPU",
+        name: "lone glyph r",
+        run: test_gpu_glyph_r,
+    },
+    TestSpec {
+        id: 0x00b8,
+        group: "GPU",
+        name: "lone glyph t",
+        run: test_gpu_glyph_t,
+    },
+    TestSpec {
+        id: 0x00b9,
+        group: "GPU",
+        name: "lone glyph o",
+        run: test_gpu_glyph_o,
+    },
+    TestSpec {
+        id: 0x00ba,
+        group: "GPU",
+        name: "glyph f after r (cache aliasing)",
+        run: test_gpu_glyph_f_after_r,
     },
 ];
 
@@ -6753,7 +6783,7 @@ mac0_settle_case!(test_mac0_settle_gap4, 4);
 mac0_settle_case!(test_mac0_settle_gap6, 6);
 
 macro_rules! lzcr_settle_case {
-    ($name:ident, $gap:tt) => {
+    ($name:ident, $gap:tt, $want:expr) => {
         fn $name() -> TestResult {
             // Prime the stale slot: LZCS 0x00ffffff -> LZCR 8, settled.
             mtc2!(30, 0x00ff_ffff);
@@ -6763,15 +6793,18 @@ macro_rules! lzcr_settle_case {
             mtc2!(30, 0x0000_0001);
             gte_nops!($gap);
             let got = mfc2!(31);
-            expect_eq(31, got, "lzcr settle gap")
+            expect_eq($want, got, "lzcr settle gap")
         }
     };
 }
-lzcr_settle_case!(test_lzcr_settle_gap1, 1);
-lzcr_settle_case!(test_lzcr_settle_gap2, 2);
-lzcr_settle_case!(test_lzcr_settle_gap3, 3);
-lzcr_settle_case!(test_lzcr_settle_gap4, 4);
-lzcr_settle_case!(test_lzcr_settle_gap6, 6);
+// One intervening nop is NOT enough on the reference console (2026-08-07
+// capture): the read still returns the PRIOR count, 8. Two or more settle.
+// The expectation records that measured window rather than the ideal.
+lzcr_settle_case!(test_lzcr_settle_gap1, 1, 8);
+lzcr_settle_case!(test_lzcr_settle_gap2, 2, 31);
+lzcr_settle_case!(test_lzcr_settle_gap3, 3, 31);
+lzcr_settle_case!(test_lzcr_settle_gap4, 4, 31);
+lzcr_settle_case!(test_lzcr_settle_gap6, 6, 31);
 
 // Magnitude-dependent settle probe: the guest disassembly shows the scene
 // NCLIP A/B/C reads sit at the SAME +2-instruction distance as the small-
@@ -7177,6 +7210,54 @@ fn test_gpu_text_cache_blit() -> TestResult {
     // Same value as the direct draw's hash: the blit round trip is
     // pixel-exact in the emulator, which is the property under test.
     expect_eq(0x3B20_8994, gpu_hash_scratch(), "text cache blit output")
+}
+
+/// Draw ONE glyph, alone, into a cleared scratch and hash it. The v1.17
+/// console run proved the corruption lives in the glyph rect path (0xB4 and
+/// 0xB5 agree on silicon, so the cache round trip is faithful), but an
+/// aggregate hash over a whole line cannot say WHICH glyph is wrong. These
+/// isolate one character each, so the next capture reads as a per-glyph
+/// verdict: 'f' is the reported bad one, 'r' and 't' share its atlas row and
+/// its awkward u&3==3 alignment and look fine on screen, and 'o' straddles a
+/// 16-texel boundary the way 'f' does. Expected values are pinned from the
+/// emulator; on console a FAIL names a corrupt glyph and the observed hash
+/// says how it differs.
+fn draw_one_glyph_hash(ch: char) -> u32 {
+    let small = spleen_replica();
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    let mut buf = [0u8; 4];
+    let s: &str = ch.encode_utf8(&mut buf);
+    small.draw_text(2, 2, s, (255, 255, 255));
+    gpu::draw_sync();
+    gpu_hash_scratch()
+}
+
+fn test_gpu_glyph_f() -> TestResult {
+    expect_eq(0x492F_734F, draw_one_glyph_hash('f'), "lone glyph f")
+}
+fn test_gpu_glyph_r() -> TestResult {
+    expect_eq(0x71C6_3DDB, draw_one_glyph_hash('r'), "lone glyph r")
+}
+fn test_gpu_glyph_t() -> TestResult {
+    expect_eq(0x7AAF_034F, draw_one_glyph_hash('t'), "lone glyph t")
+}
+fn test_gpu_glyph_o() -> TestResult {
+    expect_eq(0x6F95_5773, draw_one_glyph_hash('o'), "lone glyph o")
+}
+
+/// The same lone 'f', but drawn immediately after another glyph so the
+/// texture cache is already populated from a different part of the atlas.
+/// If 'f' alone is clean and 'f'-after-'r' is not, the fault is cache
+/// aliasing between atlas columns rather than the glyph itself.
+fn test_gpu_glyph_f_after_r() -> TestResult {
+    let small = spleen_replica();
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    small.draw_text(2, 2, "r", (255, 255, 255));
+    small.draw_text(2, 12, "f", (255, 255, 255));
+    gpu::draw_sync();
+    expect_eq(0x98B4_BD65, gpu_hash_scratch(), "glyph f after r")
 }
 
 /// GPU: the same two lines drawn STRAIGHT into the scratch, no cache

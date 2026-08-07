@@ -33,6 +33,36 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.18 (2026-08-07, schema PX8)
+
+Everything the v1.17 console capture settled, folded back in.
+
+- **LZCR settle window widened to match silicon.** Conformance `0x79`
+  (one nop between the LZCS write and the LZCR read) returns the PRIOR
+  count on the reference console, while `0x7A`-`0x7D` (two or more nops)
+  return the fresh one. The emulator settled one instruction early;
+  `LZCR_RESULT_LATENCY` is now 3 and `0x79` expects the measured stale
+  value rather than the ideal. This supersedes the 2026-07-15 SCPH-9902
+  reading of the same window.
+- **SPU key-on delay calibrated.** Every SB4 segment shows nine zero
+  samples before the first envelope step, so the modelled start delay
+  goes from 7 to 8 ticks.
+- **The ring tap is confirmed PRE-volume.** VOICE3 ran at half volume
+  against V1's quarter and both rings came back bit-identical, which a
+  post-volume tap cannot produce. The probe's prose no longer calls this
+  a claim.
+- **Per-glyph text probes `0xB6`-`0xBA`.** `0xB3`-`0xB5` proved the
+  demo-disc 'f' corruption lives in the glyph rect path (silicon's
+  `0xB4` and `0xB5` agree, so the render-to-VRAM round trip is faithful),
+  but an aggregate hash cannot say which glyph is wrong. These draw one
+  glyph alone -- 'f' (reported bad), 'r' and 't' (same atlas row, same
+  u&3==3 alignment, look fine on screen), 'o' (straddles a 16-texel
+  boundary like 'f') -- plus 'f' drawn after 'r' to separate a cache
+  aliasing fault from a glyph fault.
+
+Battery is 187 cases: 138 pass, 1 fail (`0x8B`, the documented NCLIP
+positive-winding gap), 48 info.
+
 ### v1.17 (2026-08-07, schema PX8)
 
 The first version informed by a same-day console-vs-emulator diff of the
