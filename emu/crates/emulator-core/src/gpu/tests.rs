@@ -1659,9 +1659,16 @@ fn sample_texture_8bpp_zero_clut_is_transparent_regardless_of_idx() {
     gpu.update_clut_if_needed(0x10);
     assert_eq!(gpu.sample_texture(0, 0), None);
     // Flip CLUT[42] non-zero in VRAM. Same clut word -> the cache stays stale
-    // (faithful PS1 behaviour), so force a reload to read the new palette.
+    // (faithful PS1 behaviour; index 42 lives in the 240-entry 8bpp-only
+    // line), so force a reload to read the new palette.
     gpu.vram.set_pixel(0x100 + 42, 0, 0x1234);
-    gpu.clut_cache_reg = u32::MAX;
+    gpu.update_clut_if_needed(0x10);
+    assert_eq!(
+        gpu.sample_texture(0, 0),
+        None,
+        "in-place CLUT rewrite with an unchanged clut word must stay stale"
+    );
+    gpu.clut_line_b_reg = u32::MAX;
     gpu.update_clut_if_needed(0x10);
     assert_eq!(gpu.sample_texture(0, 0), Some(0x1234));
 }

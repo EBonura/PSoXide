@@ -1301,6 +1301,16 @@ impl Cpu {
                 }
             }
             match instr & 0x3F {
+                // KNOWN GAP (conformance 0x8b): silicon computes the full
+                // cross in BOTH phases of the controlled scene-C replica,
+                // while this model's phases classify differently (spaced
+                // first-materialization vs packed register-reuse cadence)
+                // and 0x8b fails. Restricting establishment to RTPT fixes
+                // 0x8b's invariant but breaks the small-value settle cases
+                // 0x74-0x78 through the same substitution arms; no simple
+                // write-side-effect model covers both (see the SXY dump
+                // notes in hardware-tests). The real fix is modeling the
+                // positive-winding anomaly itself.
                 0x30 | 0x06 => {
                     self.gte_nclip_rtpt_history = true;
                     self.gte_nclip_history_tick = self.tick;
