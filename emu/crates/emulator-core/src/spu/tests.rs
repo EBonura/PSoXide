@@ -613,10 +613,24 @@ fn adsr_release_stops_when_envelope_reaches_zero() {
 }
 
 #[test]
-fn adsr_mix_uses_redux_ten_bit_volume() {
-    assert_eq!(apply_adsr_volume(0x4000, 31), 0);
-    assert_eq!(apply_adsr_volume(1023, 0x7FFF), 1023);
+fn adsr_mix_uses_full_q15_envelope() {
+    // SB4 silicon 2026-08-07: (sample * env) >> 15, floor rounding. Seven
+    // consecutive NOISE onset samples pinned this against the previous
+    // ten-bit (env>>5)/1023 form.
+    assert_eq!(apply_adsr_volume(0x4000, 31), 15);
+    assert_eq!(apply_adsr_volume(1023, 0x7FFF), 1022);
     assert_eq!(apply_adsr_volume(-1023, 0x7FFF), -1023);
+    // The console-measured onset: LFSR value 2472 through the FLAT_ADSR
+    // attack/decay/sustain envelope sequence.
+    for (env, want) in [
+        (0x3800, 1081),
+        (0x7000, 2163),
+        (0x7FFF, 2471),
+        (0x3FFF, 1235),
+        (0x77FF, 2317),
+    ] {
+        assert_eq!(apply_adsr_volume(2472, env), want);
+    }
 }
 
 // -- Output mixing --
@@ -2016,13 +2030,21 @@ fn kon_applies_after_sample_emit_not_before_for_hardware_parity() {
         "envelope must not have advanced on the KON tick (voice keyed at tick end)"
     );
 
-    // Tick #2: now the voice is sampled in Attack and the envelope advances
-    // -- the first non-zero Attack sample appears here, one tick later than
-    // the old (start-of-tick) ordering would have produced it.
-    s.tick_sample(2 * SAMPLE_CYCLES);
+    // Ticks #2..#8: SB4 silicon 2026-08-07 adds a ~7-tick start delay on
+    // top of the end-of-tick KON latch; the voice stays silent, envelope
+    // included, until the delay drains.
+    for t in 2..=8u64 {
+        s.tick_sample(t * SAMPLE_CYCLES);
+    }
+    assert_eq!(
+        s.voices[0].envelope, 0,
+        "envelope must not advance during the silicon start delay"
+    );
+    // Tick #9: the first Attack step lands.
+    s.tick_sample(9 * SAMPLE_CYCLES);
     assert!(
         s.voices[0].envelope > 0,
-        "first Attack step must land on the tick AFTER KON, not the KON tick"
+        "first Attack step must land once the start delay has drained"
     );
 }
 
@@ -2195,14 +2217,15 @@ fn spustat_control_mirror_updates_on_next_sample_boundary() {
 }
 
 #[test]
-fn dma_read_control_mirror_waits_for_channel_arm() {
+fn dma_read_control_mirror_crosses_without_channel_arm() {
+    // SB4 silicon 2026-08-07: the mode-3 SPUSTAT mirror settles at the next
+    // sample boundary (24-27 polls) with the DMA channel verifiably not yet
+    // armed. The earlier wait-for-arm pin came from a capture that could not
+    // separate the mirror from the arm.
     let mut s = Spu::new();
     s.write16_at(SPUCNT, 0x0030, 100);
-    assert_eq!(s.spustat_at(10_000) & 0x3f, 0);
-
-    s.begin_dma(10_000);
-    assert_eq!(s.spustat_at(10_751) & 0x3f, 0);
-    assert_eq!(s.spustat_at(10_752) & 0x3f, 0x30);
+    assert_eq!(s.spustat_at(767) & 0x3f, 0);
+    assert_eq!(s.spustat_at(768) & 0x3f, 0x30);
 }
 
 #[test]
@@ -2270,7 +2293,10 @@ fn spustat_capture_half_flag_toggles_at_ring_midpoint() {
     for tick in 1..=512u32 {
         s.tick_sample(tick as u64 * SAMPLE_CYCLES);
         let pos = (tick * 2) % 0x400;
-        let want = if pos < 0x200 { 0x800 } else { 0 };
+        // SB4 silicon 2026-08-07 (edge-keyed, both phases exercised):
+        // bit 11 = 1 while the SECOND half is being written, on the
+        // SCPH-9902 profile too.
+        let want = if pos >= 0x200 { 0x800 } else { 0 };
         assert_eq!(
             s.read16(SPUSTAT) & 0x800,
             want,

@@ -57,6 +57,10 @@ fn default_u32_256() -> [u32; 256] {
     [0; 256]
 }
 
+fn clut_line_invalid() -> u32 {
+    u32::MAX
+}
+
 fn default_u64_256() -> [u64; 256] {
     [0; 256]
 }
@@ -131,12 +135,24 @@ pub struct Gpu {
     /// the CLUT *register* (the clut word in a textured primitive) changes --
     /// NOT when the CLUT data in VRAM is overwritten. A game that recolours by
     /// re-uploading the *same* CLUT (e.g. PICO-8 `pal()`) keeps sampling the
-    /// stale cache until the clut word actually changes. `clut_cache_reg` is
-    /// `u32::MAX` while invalid, forcing a reload on the next textured draw.
+    /// stale cache until the clut word actually changes.
+    ///
+    /// PSX-SPX: the cache is TWO lines with independent reload tracking --
+    /// one 16-halfword line (colors 00-0F, shared by 4bpp and 8bpp) and one
+    /// 240-halfword line used solely by 8bpp colors 10-FF. Each line reloads
+    /// only when the incoming clut word differs from the address that last
+    /// loaded THAT line. The demo-disc launcher proved the per-line half on
+    /// silicon (2026-08-07): its only 8bpp primitive rewrites the CLUT data
+    /// in place at a constant address, and the console keeps showing the
+    /// first-ever palette for colors 10-FF while interleaved 4bpp text
+    /// keeps the low line current. A single shared reload register cannot
+    /// reproduce that. `u32::MAX` marks a line invalid (reload next draw).
     #[serde(with = "crate::serde_big_array::array")]
     clut_cache: [u16; 256],
-    clut_cache_reg: u32,
-    clut_cache_8bit: bool,
+    #[serde(default = "clut_line_invalid")]
+    clut_line_a_reg: u32,
+    #[serde(default = "clut_line_invalid")]
+    clut_line_b_reg: u32,
     /// Semi-transparency mode from the current texpage (bits 5-6 of
     /// GP0 0xE1 or of a textured-primitive's tpage override). Kept
     /// as a [`BlendMode`] so primitives can plug it straight into
@@ -295,6 +311,15 @@ pub struct Gpu {
     /// it. While non-zero GPUSTAT's command/DMA-ready bits are clear,
     /// so command submission is paced by the real GPU throughput.
     busy_credit: u64,
+    /// Command-input-path settle credit. Silicon re-asserts GPUSTAT.26
+    /// once a packet is fully ingested (SCPH-9902 GP0(1F) capture: ready
+    /// returns on the second read, ~12 cycles); it does not track the
+    /// raster tail of already-accepted work. Refreshed per charged
+    /// packet, drained with bus cycles. (Conformance case 0x10: the
+    /// console reads bit 26 set right after a small fully-ingested
+    /// packet while the raster backlog is still draining.)
+    #[serde(default)]
+    cmd_ingest_credit: u64,
     /// Virtual GP0 FIFO occupancy for the overflow diagnostic: CPU
     /// stores that arrived while the GPU was busy, reset whenever a
     /// store finds it idle. The stall model paces every write, so
@@ -516,8 +541,8 @@ impl Gpu {
             vram_2mb_addressing_enabled: false,
             tex_depth: 0,
             clut_cache: [0; 256],
-            clut_cache_reg: u32::MAX,
-            clut_cache_8bit: false,
+            clut_line_a_reg: u32::MAX,
+            clut_line_b_reg: u32::MAX,
             tex_blend_mode: BlendMode::Average,
             tex_window_mask_x: 0,
             tex_window_mask_y: 0,
@@ -543,6 +568,7 @@ impl Gpu {
             cmd_log_enabled: false,
             current_cmd_index: 0,
             busy_credit: 0,
+            cmd_ingest_credit: 0,
             dma_busy_credit: 0,
             gp0_burst_words: 0,
             gp0_overflow_count: 0,
@@ -953,7 +979,7 @@ impl Gpu {
             GP1_ADDR => {
                 let mut value = self.status.read(
                     self.vram_download.is_some(),
-                    !self.is_busy(),
+                    !self.is_cmd_busy(),
                     !self.is_dma_busy(),
                 );
                 // IRQ1 first deasserts the two ready signals. The DMA-request
@@ -1117,6 +1143,9 @@ impl Gpu {
     /// Add CPU/bus-cycle work to the GPU execution backlog.
     pub fn charge_busy(&mut self, cost: u64) {
         self.busy_credit = self.busy_credit.saturating_add(cost);
+        if cost > 0 {
+            self.cmd_ingest_credit = self.cmd_ingest_credit.max(GP1_STATUS_LATCH_CYCLES);
+        }
     }
 
     /// Add DMA-fed work and retain the queue prefix through it. Later CPU
@@ -1124,6 +1153,9 @@ impl Gpu {
     fn charge_dma_busy(&mut self, cost: u64) {
         self.busy_credit = self.busy_credit.saturating_add(cost);
         self.dma_busy_credit = self.busy_credit;
+        if cost > 0 {
+            self.cmd_ingest_credit = self.cmd_ingest_credit.max(GP1_STATUS_LATCH_CYCLES);
+        }
     }
 
     /// Drain busy credit over time. Called by the bus each tick
@@ -1132,6 +1164,17 @@ impl Gpu {
     pub fn decay_busy(&mut self, cycles: u64) {
         self.busy_credit = self.busy_credit.saturating_sub(cycles);
         self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
+        self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(cycles);
+    }
+
+    /// GPUSTAT.26 gate: input path occupied. Unlike `is_busy`, a fully
+    /// ingested packet's raster tail does not hold this low; DMA-fed
+    /// work and the wedge diagnostic still do.
+    fn is_cmd_busy(&self) -> bool {
+        if Self::gpu_wedged() {
+            return true;
+        }
+        self.cmd_ingest_credit > 0 || self.is_dma_busy()
     }
 
     /// Is the GPU currently "busy"? Used to gate GPUSTAT ready
@@ -1662,7 +1705,8 @@ impl Gpu {
                 self.mask_check_before_draw = false;
                 // GP1(00) drops the GPU's CLUT cache; force a reload on the
                 // next textured draw (PSX-SPX reset behaviour).
-                self.clut_cache_reg = u32::MAX;
+                self.clut_line_a_reg = u32::MAX;
+                self.clut_line_b_reg = u32::MAX;
                 self.status.raw &= !0x1800;
                 self.texture_window_raw = 0;
                 // GP1(00) is defined by the PSX-SPX spec as equivalent to
@@ -1893,8 +1937,8 @@ impl Gpu {
             // cached CLUT as well: the next textured primitive must reload
             // palette data even when it reuses the same CLUT word.
             0x01 => {
-                self.clut_cache_reg = u32::MAX;
-                self.clut_cache_8bit = false;
+                self.clut_line_a_reg = u32::MAX;
+                self.clut_line_b_reg = u32::MAX;
             }
             // GP0 0x1F -- request GPU IRQ1. Rare in games, but BIOS and
             // hardware test suites can observe both GPUSTAT.24 and I_STAT.1.
@@ -2447,29 +2491,35 @@ impl Gpu {
     /// With the default (all zeroes) that's a no-op; games that use
     /// tiling set non-zero mask/offset to reuse a sub-rectangle of
     /// the tpage across multiple primitives.
-    /// Reload the CLUT cache from VRAM when the CLUT register (the clut word
-    /// of a textured primitive) changes -- or when a 4bpp-loaded cache is
-    /// reused for an 8bpp draw. Crucially the cache is NOT reloaded when VRAM
-    /// is overwritten, so a game that re-uploads the same CLUT keeps sampling
-    /// the stale palette until the clut word changes. Call once per textured
-    /// primitive before sampling. 15bpp (direct) has no CLUT.
+    /// Reload the CLUT cache lines from VRAM per PSX-SPX semantics: the
+    /// 16-entry line (colors 00-0F, shared 4bpp/8bpp) and the 240-entry
+    /// line (solely 8bpp colors 10-FF) each reload only when the incoming
+    /// clut word differs from the address that last loaded THAT line.
+    /// Crucially neither line reloads when VRAM is overwritten, so software
+    /// that re-uploads CLUT data in place keeps sampling the stale palette
+    /// until its clut word changes -- for an 8bpp primitive interleaved with
+    /// 4bpp draws this means colors 10-FF stay stale indefinitely (console-
+    /// confirmed by the demo-disc shot panel, 2026-08-07). Call once per
+    /// textured primitive before sampling. 15bpp (direct) has no CLUT.
     fn update_clut_if_needed(&mut self, clut_word: u16) {
         if self.tex_depth >= 2 {
             return;
         }
-        let is_8bit = self.tex_depth == 1;
         let reg = clut_word as u32;
-        if reg == self.clut_cache_reg && (!is_8bit || self.clut_cache_8bit) {
-            return; // cache still valid for this CLUT word
-        }
         let clut_x = (clut_word & 0x3F) * 16;
         let clut_y = (clut_word >> 6) & 0x1FF;
-        let n = if is_8bit { 256 } else { 16 };
-        for i in 0..n {
-            self.clut_cache[i] = self.vram.get_pixel(clut_x + i as u16, clut_y);
+        if reg != self.clut_line_a_reg {
+            for i in 0..16 {
+                self.clut_cache[i] = self.vram.get_pixel(clut_x + i as u16, clut_y);
+            }
+            self.clut_line_a_reg = reg;
         }
-        self.clut_cache_reg = reg;
-        self.clut_cache_8bit = is_8bit;
+        if self.tex_depth == 1 && reg != self.clut_line_b_reg {
+            for i in 16..256 {
+                self.clut_cache[i] = self.vram.get_pixel(clut_x + i as u16, clut_y);
+            }
+            self.clut_line_b_reg = reg;
+        }
     }
 
     fn sample_texture(&self, u: u16, v: u16) -> Option<u16> {
