@@ -547,6 +547,13 @@ struct Voice {
     /// pre-volume). Kept for reads of the ADSR_CURRENT register and
     /// pitch modulation consumers.
     last_sample: i16,
+    /// Ticks remaining before a freshly keyed voice starts stepping its
+    /// envelope and producing output. SB4 silicon 2026-08-07: the first
+    /// envelope step lands ~8 ticks after the KON write; the KON-applied-
+    /// at-end-of-tick model accounts for 1 of those. Calibrate the exact
+    /// constant on the next burn.
+    #[serde(default)]
+    start_delay: u8,
 }
 
 impl Default for Voice {
@@ -578,6 +585,7 @@ impl Default for Voice {
             endx_pending: false,
             decoded_block_count: 0,
             last_sample: 0,
+            start_delay: 0,
         }
     }
 }
@@ -587,6 +595,7 @@ impl Voice {
     /// start decoding from `start_addr` on the next sample tick.
     fn key_on(&mut self) {
         self.phase = AdsrPhase::Attack;
+        self.start_delay = 7;
         self.envelope = 0;
         self.envelope_sub = 0;
         self.current_addr = self.start_addr;
@@ -1133,7 +1142,7 @@ impl Spu {
     /// Select the transfer/capture behavior measured on a late PAL PSone.
     pub fn apply_scph_9902_profile(&mut self) {
         self.scph_9902_timing = true;
-        if self.capture_buffer_pos < 0x200 {
+        if self.capture_buffer_pos >= 0x200 {
             self.spustat |= 1 << 11;
         } else {
             self.spustat &= !(1 << 11);
@@ -1597,35 +1606,32 @@ impl Spu {
         self.spucnt = value;
         let transfer_mode = (value >> 4) & 3;
         if self.scph_9902_timing {
-            // DMA-read mode does not become the current SPUSTAT mode merely
-            // from the control write on SCPH-9902. Other modes cross at the
-            // next sample, while Stop has the measured asynchronous settle.
+            // All transfer modes cross into SPUSTAT at the next sample
+            // boundary (SB4 2026-08-07: the mode-3 mirror settles in 24-27
+            // polls with DMA verifiably not yet armed); Stop keeps its
+            // measured asynchronous settle.
             if transfer_mode != 0 {
                 self.last_active_transfer_mode = transfer_mode as u8;
             }
-            if transfer_mode != 3 {
-                let next_sample = if transfer_mode == 0 {
-                    let settle_cycles = if self.last_active_transfer_mode == 3 {
-                        832
-                    } else {
-                        928
-                    };
-                    now.saturating_add(settle_cycles)
+            let next_sample = if transfer_mode == 0 {
+                let settle_cycles = if self.last_active_transfer_mode == 3 {
+                    832
                 } else {
-                    now.saturating_div(SAMPLE_CYCLES)
-                        .saturating_add(1)
-                        .saturating_mul(SAMPLE_CYCLES)
+                    928
                 };
-                self.spustat_control_pending = Some((value & 0x3F, next_sample));
-            }
-        } else {
-            if transfer_mode != 3 {
-                let next_sample = now
-                    .saturating_div(SAMPLE_CYCLES)
+                now.saturating_add(settle_cycles)
+            } else {
+                now.saturating_div(SAMPLE_CYCLES)
                     .saturating_add(1)
-                    .saturating_mul(SAMPLE_CYCLES);
-                self.spustat_control_pending = Some((value & 0x3F, next_sample));
-            }
+                    .saturating_mul(SAMPLE_CYCLES)
+            };
+            self.spustat_control_pending = Some((value & 0x3F, next_sample));
+        } else {
+            let next_sample = now
+                .saturating_div(SAMPLE_CYCLES)
+                .saturating_add(1)
+                .saturating_mul(SAMPLE_CYCLES);
+            self.spustat_control_pending = Some((value & 0x3F, next_sample));
             if transfer_mode == 1 {
                 self.drain_transfer_fifo_to_ram();
             }
@@ -2232,13 +2238,11 @@ impl Spu {
         self.write_to_capture(2, self.voices[1].last_sample as u16);
         self.write_to_capture(3, self.voices[3].last_sample as u16);
         self.capture_buffer_pos = (self.capture_buffer_pos + 2) & 0x3FF;
-        let first_half_high = self.capture_buffer_pos < 0x200;
-        let capture_flag_high = if self.scph_9902_timing {
-            first_half_high
-        } else {
-            !first_half_high
-        };
-        if capture_flag_high {
+        // SB4 silicon 2026-08-07: bit 11 = 1 while the second half is being
+        // written, on SCPH-9902 too (edge-keyed measurement with both
+        // phases exercised). The previous 9902 inversion came from a single
+        // snapshot against a free-running ring index.
+        if self.capture_buffer_pos >= 0x200 {
             self.spustat |= 1 << 11;
         } else {
             self.spustat &= !(1 << 11);
@@ -2330,6 +2334,13 @@ impl Spu {
     /// Advance one voice by one output sample. Returns `(l, r)`
     /// pre-main-volume, post-voice-volume contribution in i16 scale.
     fn tick_voice(&mut self, v: usize) -> (i16, i16) {
+        // SB4 silicon 2026-08-07: a freshly keyed voice is silent, envelope
+        // included, for ~7 ticks after KON lands before it starts stepping.
+        if self.voices[v].start_delay > 0 {
+            self.voices[v].start_delay -= 1;
+            self.voices[v].last_sample = 0;
+            return (0, 0);
+        }
         // Fetch raw sample using the SPU's Gaussian interpolation path.
         let sample_i16 = self.fetch_voice_sample(v);
 
@@ -2693,11 +2704,15 @@ fn read_adpcm_block(ram: &[u16], addr: u32) -> [u8; ADPCM_BLOCK_BYTES] {
 }
 
 fn apply_adsr_volume(sample: i16, envelope: i32) -> i16 {
-    // Redux stores the 15-bit ADSR envelope, but the audible multiply
-    // uses `EnvelopeVol >> 5` as a 0..1023 volume:
-    // `mixedSample = (m_adsr.mix(...) * sample) / 1023`.
-    let volume = (envelope.clamp(0, 0x7FFF) >> 5).min(1023);
-    saturate_i16((sample as i32 * volume) / 1023)
+    // SB4 silicon 2026-08-07: the voice output is the full 15-bit envelope
+    // applied as (sample * env) >> 15 with floor rounding. Seven
+    // consecutive attack/decay/sustain onset samples in the NOISE capture
+    // match this exactly; the previous (env>>5)/1023 form was off by 1-2
+    // LSB on five of them. No saturation needed: |result| <= 32767, and
+    // Rust's >> on i32 is arithmetic, matching the floor behavior the
+    // 0x3FFF decay sample confirms.
+    let env = envelope.clamp(0, 0x7FFF);
+    (((sample as i32) * env) >> 15) as i16
 }
 
 /// Clamp a 32-bit sample to signed 16-bit range.
