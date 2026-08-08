@@ -282,6 +282,11 @@ pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> RtptInFlight {
                 ".word 0x488b1800",
                 ".word 0x488c2000",
                 ".word 0x488d2800",
+                // HWB-010/011 input-commit gap for the final V2 write.
+                // RTPT reads V2 as part of this operation; issuing it
+                // immediately can consume the previous vertex on silicon.
+                ".word 0",
+                ".word 0",
                 // RTPT.
                 ".word 0x4a080030",
                 in("$8") v0_xy,
@@ -421,6 +426,12 @@ fn project_triangle_mips(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3
             ".word 0x488b1800",
             ".word 0x488c2000",
             ".word 0x488d2800",
+            // HWB-010/011 input-commit gap. RTPT consumes V2 after the
+            // final MTC2 above, so V0/V1 having ample distance does not make
+            // this schedule safe: without these two slots real silicon can
+            // project a stale V2. Keep this in sync with project_vertex_mips.
+            ".word 0",
+            ".word 0",
             // RTPT.
             ".word 0x4a080030",
             // Read SXY0/SXY1/SXY2/SZ1/SZ2/SZ3. Each MFC2's
@@ -603,6 +614,117 @@ pub fn average_z_triangle() -> u16 {
     mfc2!(7) as u16
 }
 
+/// Reload three cached projected depths into the GTE SZ FIFO and compute OTZ.
+///
+/// This is the indexed-mesh counterpart to [`average_z_triangle`]. It keeps
+/// cached vertex projection while using the PS1's AVSZ3 unit instead of a
+/// software 64-bit multiply for every face. The configured ZSF3 weight is
+/// read from GTE control register 29.
+#[inline(always)]
+pub fn average_cached_z3(depths: [u16; 3]) -> u16 {
+    #[cfg(target_arch = "mips")]
+    {
+        let mut otz = depths[0] as u32;
+        unsafe {
+            asm!(
+                // Load SZ1..SZ3, then leave the hardware-safe two-slot MTC2
+                // commit gap before AVSZ3 consumes the final write.
+                ".word 0x48888800",
+                ".word 0x48899000",
+                ".word 0x488a9800",
+                ".word 0",
+                ".word 0",
+                ".word 0x4a00002d",
+                // MFC2 has one CPU load-delay slot.
+                ".word 0x48083800",
+                ".word 0",
+                inlateout("$8") otz,
+                in("$9") depths[1] as u32,
+                in("$10") depths[2] as u32,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        otz as u16
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        mtc2!(17, depths[0] as u32);
+        mtc2!(18, depths[1] as u32);
+        mtc2!(19, depths[2] as u32);
+        // SAFETY: SZ1, SZ2 and SZ3 were loaded immediately above.
+        unsafe { ops::avsz3() };
+        mfc2!(7) as u16
+    }
+}
+
+/// Reload four cached projected depths into the GTE SZ FIFO and compute OTZ.
+///
+/// This is the AVSZ4 counterpart to [`average_cached_z3`]. The configured
+/// ZSF4 weight is read from GTE control register 30.
+#[inline(always)]
+pub fn average_cached_z4(depths: [u16; 4]) -> u16 {
+    #[cfg(target_arch = "mips")]
+    {
+        let mut otz = depths[0] as u32;
+        unsafe {
+            asm!(
+                // Load SZ0..SZ3, then leave the hardware-safe two-slot MTC2
+                // commit gap before AVSZ4 consumes the final write.
+                ".word 0x48888000",
+                ".word 0x48898800",
+                ".word 0x488a9000",
+                ".word 0x488b9800",
+                ".word 0",
+                ".word 0",
+                ".word 0x4a00002e",
+                // MFC2 has one CPU load-delay slot.
+                ".word 0x48083800",
+                ".word 0",
+                inlateout("$8") otz,
+                in("$9") depths[1] as u32,
+                in("$10") depths[2] as u32,
+                in("$11") depths[3] as u32,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        otz as u16
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        mtc2!(16, depths[0] as u32);
+        mtc2!(17, depths[1] as u32);
+        mtc2!(18, depths[2] as u32);
+        mtc2!(19, depths[3] as u32);
+        // SAFETY: SZ0 through SZ3 were loaded immediately above.
+        unsafe { ops::avsz4() };
+        mfc2!(7) as u16
+    }
+}
+
+/// Compute AVSZ3's saturated OTZ result from three cached projected depths.
+///
+/// This pure-software form is useful for host processing and for callers that
+/// cannot disturb the live GTE FIFO. MIPS render loops should normally prefer
+/// [`average_cached_z3`]. The arithmetic is exactly the GTE operation: sum the
+/// unsigned 16-bit depths, multiply by signed `ZSF3`, shift right by 12, then
+/// saturate to OTZ's unsigned 16-bit range.
+#[inline]
+pub fn average_z3_otz(depths: [u16; 3], zsf3: i16) -> u16 {
+    let sum = depths[0] as i64 + depths[1] as i64 + depths[2] as i64;
+    ((sum * zsf3 as i64) >> 12).clamp(0, u16::MAX as i64) as u16
+}
+
+/// Compute AVSZ4's saturated OTZ result from four cached projected depths.
+///
+/// This is the four-vertex counterpart to [`average_z3_otz`] and matches the
+/// GTE's `AVSZ4` operation with the supplied `ZSF4` value. MIPS render loops
+/// should normally prefer [`average_cached_z4`].
+#[inline]
+pub fn average_z4_otz(depths: [u16; 4], zsf4: i16) -> u16 {
+    let sum = depths[0] as i64 + depths[1] as i64 + depths[2] as i64 + depths[3] as i64;
+    ((sum * zsf4 as i64) >> 12).clamp(0, u16::MAX as i64) as u16
+}
+
 /// Signed screen-space area of a triangle -- the same value GTE `NCLIP`
 /// writes to MAC0: `SX0*(SY1-SY2) + SX1*(SY2-SY0) + SX2*(SY0-SY1)`.
 /// Positive = front-facing, `<= 0` = back-facing/degenerate.
@@ -764,5 +886,17 @@ mod host_smoke {
             screen_area_mac0_scheduled(vertices),
             screen_area_mac0(vertices)
         );
+    }
+
+    #[test]
+    fn cached_average_z_matches_avsz_saturation_rules() {
+        assert_eq!(average_z3_otz([100, 200, 300], 1_365), 199);
+        assert_eq!(average_z4_otz([100, 200, 300, 400], 1_024), 250);
+        assert_eq!(average_z3_otz([u16::MAX; 3], i16::MAX), u16::MAX);
+        assert_eq!(average_z4_otz([u16::MAX; 4], -1), 0);
+
+        set_avsz_weights(1_365, 1_024);
+        assert_eq!(average_cached_z3([100, 200, 300]), 199);
+        assert_eq!(average_cached_z4([100, 200, 300, 400]), 250);
     }
 }
