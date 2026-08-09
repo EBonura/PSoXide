@@ -603,14 +603,27 @@ unsafe fn subdivide_twice(
     if root0.depth >= underdraw_at || root1.depth >= underdraw_at || root2.depth >= underdraw_at {
         let underdraw = root_otz.saturating_add(writer.profile.underdraw_slot_bias);
         unsafe {
-            writer.emit_tri([root0, root1, &v[0]], [root0, root1, &v[0]], underdraw);
-            writer.emit_tri([root0, &v[0], &v[3]], [root0, &v[0], &v[3]], underdraw);
+            // GP0(3Ch) splits [a,b,c,d] into [b,d,c] then [a,b,c].
+            // These orders are cyclic rotations of the two old triangles in
+            // their exact OT draw order, so the crack-sealing raster stays
+            // bit-identical while each edge pair needs one packet setup.
+            writer.emit_quad(
+                [root1, &v[0], root0, &v[3]],
+                [root1, &v[0], root0, &v[3]],
+                underdraw,
+            );
             writer.emit_tri([&v[0], root1, &v[4]], [&v[0], root1, &v[4]], underdraw);
-            writer.emit_tri([root1, root2, &v[1]], [root1, root2, &v[1]], underdraw);
-            writer.emit_tri([root1, &v[1], &v[5]], [root1, &v[1], &v[5]], underdraw);
+            writer.emit_quad(
+                [root2, &v[1], root1, &v[5]],
+                [root2, &v[1], root1, &v[5]],
+                underdraw,
+            );
             writer.emit_tri([&v[1], root2, &v[6]], [&v[1], root2, &v[6]], underdraw);
-            writer.emit_tri([root0, root2, &v[2]], [root0, root2, &v[2]], underdraw);
-            writer.emit_tri([root0, &v[2], &v[8]], [root0, &v[2], &v[8]], underdraw);
+            writer.emit_quad(
+                [root2, &v[2], root0, &v[8]],
+                [root2, &v[2], root0, &v[8]],
+                underdraw,
+            );
             writer.emit_tri([&v[2], root2, &v[7]], [&v[2], root2, &v[7]], underdraw);
         }
     }
