@@ -109,6 +109,19 @@ pub unsafe fn sqr() {
     cofun!(0x4A08_0028)
 }
 
+/// SQR -- squares the current IR vector into MAC1/2/3 without the
+/// fractional right shift (`sf=0`).
+///
+/// This form is useful for integer vector lengths: the MAC registers retain
+/// the exact component squares while the CPU prepares a reciprocal scale.
+///
+/// # Safety
+/// IR1, IR2 and IR3 must contain the vector to square.
+#[inline(always)]
+pub unsafe fn sqr_sf0() {
+    cofun!(0x4A00_0028)
+}
+
 /// NCDS -- normal-colour depth-cue single vertex. `sf=1, lm=0`.
 ///
 /// # Safety
@@ -224,6 +237,16 @@ pub unsafe fn cdp() {
 #[inline(always)]
 pub unsafe fn gpf() {
     cofun!(0x4A08_003D)
+}
+
+/// GPF -- `MAC = IR * IR0`, FIFO-push, without the fractional right shift
+/// (`sf=0`).
+///
+/// # Safety
+/// IR0 through IR3 must contain the scalar and vector inputs.
+#[inline(always)]
+pub unsafe fn gpf_sf0() {
+    cofun!(0x4A00_003D)
 }
 
 /// GPL -- `MAC = MAC + IR * IR0`, FIFO-push, `sf=1`.

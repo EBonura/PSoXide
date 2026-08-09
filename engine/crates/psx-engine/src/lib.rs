@@ -56,6 +56,7 @@
 pub mod angle;
 pub mod app;
 pub mod character_motor;
+pub mod classic_affine;
 pub mod fixed;
 mod floor_sample;
 pub mod frames;
@@ -82,6 +83,15 @@ pub use character_motor::{
     commit_body_step, BodyStep, CharacterCollision, CharacterCollisionAabb,
     CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAction, CharacterMotorAnim,
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
+};
+pub use classic_affine::{
+    project_classic_affine_indexed_vertices, submit_classic_affine_batch,
+    submit_classic_affine_fan, submit_classic_affine_packed_fan,
+    submit_classic_affine_projected_fan, submit_classic_alias_model,
+    submit_classic_alias_view_model, ClassicAffineBatchSurface, ClassicAffinePosition,
+    ClassicAffineProfile, ClassicAffineProjectedVertex, ClassicAffineSourceVertex,
+    ClassicAffineSubmit, ClassicAffineVertex, ClassicAliasFace, ClassicAliasProjectedVertex,
+    ClassicAliasVertex,
 };
 pub use fixed::{Q12, Q8};
 pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};
