@@ -252,7 +252,6 @@ fn classic_position_vec3(position: ClassicAffinePosition) -> Vec3I16 {
 struct PacketWriter {
     next: *mut u32,
     packets: u32,
-    hardware_triangles: u32,
     clut_high_word: u32,
     tpage_high_word: u32,
     profile: ClassicAffineProfile,
@@ -297,7 +296,6 @@ impl PacketWriter {
                 .add(size_of::<ClassicTriTexturedGouraud>() / size_of::<u32>())
         };
         self.packets = self.packets.wrapping_add(1);
-        self.hardware_triangles = self.hardware_triangles.wrapping_add(1);
     }
 
     #[inline(always)]
@@ -341,7 +339,6 @@ impl PacketWriter {
                 .add(size_of::<ClassicQuadTexturedGouraud>() / size_of::<u32>())
         };
         self.packets = self.packets.wrapping_add(1);
-        self.hardware_triangles = self.hardware_triangles.wrapping_add(2);
     }
 
     #[inline(always)]
@@ -379,7 +376,23 @@ impl PacketWriter {
                 .add(size_of::<ClassicTriTexturedGouraud>() / size_of::<u32>())
         };
         self.packets = self.packets.wrapping_add(1);
-        self.hardware_triangles = self.hardware_triangles.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    unsafe fn finish(self, output: *mut u32) -> ClassicAffineSubmit {
+        let words = unsafe { self.next.offset_from(output) as u32 };
+        let tri_words = (size_of::<ClassicTriTexturedGouraud>() / size_of::<u32>()) as u32;
+        let quad_words = (size_of::<ClassicQuadTexturedGouraud>() / size_of::<u32>()) as u32;
+        // Every packet is either one hardware triangle or one quad. Recover
+        // the quad count from the final stream length so emitters only update
+        // the packet count in the hot path.
+        let quads =
+            words.wrapping_sub(self.packets.wrapping_mul(tri_words)) / (quad_words - tri_words);
+        ClassicAffineSubmit {
+            next_packet: self.next,
+            packets: self.packets,
+            hardware_triangles: self.packets.wrapping_add(quads),
+        }
     }
 }
 
@@ -412,25 +425,6 @@ fn midpoint(a: &ClassicAffineVertex, b: &ClassicAffineVertex) -> ClassicAffineVe
         screen: [0; 2],
         depth: 0,
     }
-}
-
-#[inline(always)]
-fn projected(mut vertex: ClassicAffineVertex, out: Projected) -> ClassicAffineVertex {
-    vertex.screen = [out.sx, out.sy];
-    vertex.depth = out.sz as i32;
-    vertex
-}
-
-#[inline(always)]
-fn project_three(vertices: &mut [ClassicAffineVertex], indices: [usize; 3]) {
-    let out = scene::project_triangle_scheduled(
-        vec3(vertices[indices[0]]),
-        vec3(vertices[indices[1]]),
-        vec3(vertices[indices[2]]),
-    );
-    vertices[indices[0]] = projected(vertices[indices[0]], out[0]);
-    vertices[indices[1]] = projected(vertices[indices[1]], out[1]);
-    vertices[indices[2]] = projected(vertices[indices[2]], out[2]);
 }
 
 #[inline(always)]
@@ -468,25 +462,10 @@ unsafe fn store_classic_projection(vertex: *mut ClassicAffineVertex, out: Projec
 }
 
 #[inline(always)]
-fn vec3(vertex: ClassicAffineVertex) -> Vec3I16 {
-    Vec3I16::new(vertex.position[0], vertex.position[1], vertex.position[2])
-}
-
-#[inline(always)]
 fn average3(vertices: [&ClassicAffineVertex; 3]) -> u16 {
     let sum = vertices[0].depth as u16 as u32
         + vertices[1].depth as u16 as u32
         + vertices[2].depth as u16 as u32;
-    scene::classic_otz3_from_sum(sum)
-}
-
-#[inline(always)]
-fn average3_refs(
-    first: &ClassicAffineVertex,
-    second: &ClassicAffineVertex,
-    third: &ClassicAffineVertex,
-) -> u16 {
-    let sum = first.depth as u16 as u32 + second.depth as u16 as u32 + third.depth as u16 as u32;
     scene::classic_otz3_from_sum(sum)
 }
 
@@ -520,66 +499,75 @@ unsafe fn sorted_quad(
 
 unsafe fn subdivide_once(
     writer: &mut PacketWriter,
-    root: [&ClassicAffineVertex; 3],
-    scratch: &mut [ClassicAffineVertex],
+    root0: &ClassicAffineVertex,
+    root1: &ClassicAffineVertex,
+    root2: &ClassicAffineVertex,
+    scratch: *mut ClassicAffineVertex,
     root_otz: u16,
 ) {
-    scratch[0] = midpoint(root[0], root[1]);
-    scratch[1] = midpoint(root[1], root[2]);
-    scratch[2] = midpoint(root[2], root[0]);
-    project_three(scratch, [0, 1, 2]);
-    let h01 = &scratch[0];
-    let h12 = &scratch[1];
-    let h20 = &scratch[2];
     unsafe {
-        sorted_quad(writer, [root[0], h01, h20, h12], [root[0], h01, h20, h12]);
-        sorted_tri(writer, [h01, root[1], h12], [h01, root[1], h12]);
-        sorted_tri(writer, [h12, root[2], h20], [h12, root[2], h20]);
+        ptr::write(scratch, midpoint(root0, root1));
+        ptr::write(scratch.add(1), midpoint(root1, root2));
+        ptr::write(scratch.add(2), midpoint(root2, root0));
+        project_three_consecutive(scratch);
     }
-    if root
-        .iter()
-        .map(|vertex| vertex.depth)
-        .max()
-        .unwrap_or_default()
-        >= i32::from(writer.profile.subdivide_once_at)
-    {
+    let h01 = unsafe { &*scratch };
+    let h12 = unsafe { &*scratch.add(1) };
+    let h20 = unsafe { &*scratch.add(2) };
+    unsafe {
+        sorted_quad(writer, [root0, h01, h20, h12], [root0, h01, h20, h12]);
+        sorted_tri(writer, [h01, root1, h12], [h01, root1, h12]);
+        sorted_tri(writer, [h12, root2, h20], [h12, root2, h20]);
+    }
+    let underdraw_at = i32::from(writer.profile.subdivide_once_at);
+    if root0.depth >= underdraw_at || root1.depth >= underdraw_at || root2.depth >= underdraw_at {
         let underdraw = root_otz.saturating_add(writer.profile.underdraw_slot_bias);
         unsafe {
-            writer.emit_tri([root[0], root[1], h01], [root[0], root[1], h01], underdraw);
-            writer.emit_tri([root[1], root[2], h12], [root[0], root[1], h12], underdraw);
-            writer.emit_tri([root[2], root[0], h20], [root[2], root[0], h20], underdraw);
+            writer.emit_tri([root0, root1, h01], [root0, root1, h01], underdraw);
+            writer.emit_tri([root1, root2, h12], [root0, root1, h12], underdraw);
+            writer.emit_tri([root2, root0, h20], [root2, root0, h20], underdraw);
         }
     }
 }
 
 unsafe fn subdivide_twice(
     writer: &mut PacketWriter,
-    root: [&ClassicAffineVertex; 3],
-    scratch: &mut [ClassicAffineVertex],
+    root0: &ClassicAffineVertex,
+    root1: &ClassicAffineVertex,
+    root2: &ClassicAffineVertex,
+    scratch: *mut ClassicAffineVertex,
     root_otz: u16,
 ) {
-    scratch[0] = midpoint(root[0], root[1]);
-    scratch[1] = midpoint(root[1], root[2]);
-    scratch[2] = midpoint(root[0], root[2]);
-    scratch[3] = midpoint(root[0], &scratch[0]);
-    scratch[4] = midpoint(root[1], &scratch[0]);
-    scratch[5] = midpoint(root[1], &scratch[1]);
-    scratch[6] = midpoint(&scratch[1], root[2]);
-    scratch[7] = midpoint(&scratch[2], root[2]);
-    scratch[8] = midpoint(&scratch[2], root[0]);
-    scratch[9] = midpoint(&scratch[2], &scratch[0]);
-    scratch[10] = midpoint(&scratch[9], &scratch[5]);
-    scratch[11] = midpoint(&scratch[2], &scratch[1]);
-    project_three(scratch, [0, 1, 2]);
-    project_three(scratch, [3, 4, 5]);
-    project_three(scratch, [6, 7, 8]);
-    project_three(scratch, [9, 10, 11]);
-    let v = &scratch[..12];
     unsafe {
-        sorted_tri(writer, [root[0], &v[3], &v[8]], [root[0], &v[3], &v[8]]);
+        ptr::write(scratch, midpoint(root0, root1));
+        ptr::write(scratch.add(1), midpoint(root1, root2));
+        ptr::write(scratch.add(2), midpoint(root0, root2));
+        ptr::write(scratch.add(3), midpoint(root0, &*scratch));
+        ptr::write(scratch.add(4), midpoint(root1, &*scratch));
+        ptr::write(scratch.add(5), midpoint(root1, &*scratch.add(1)));
+        ptr::write(scratch.add(6), midpoint(&*scratch.add(1), root2));
+        ptr::write(scratch.add(7), midpoint(&*scratch.add(2), root2));
+        ptr::write(scratch.add(8), midpoint(&*scratch.add(2), root0));
+        ptr::write(scratch.add(9), midpoint(&*scratch.add(2), &*scratch));
+        ptr::write(
+            scratch.add(10),
+            midpoint(&*scratch.add(9), &*scratch.add(5)),
+        );
+        ptr::write(
+            scratch.add(11),
+            midpoint(&*scratch.add(2), &*scratch.add(1)),
+        );
+        project_three_consecutive(scratch);
+        project_three_consecutive(scratch.add(3));
+        project_three_consecutive(scratch.add(6));
+        project_three_consecutive(scratch.add(9));
+    }
+    let v = unsafe { core::slice::from_raw_parts(scratch, EXTRA_VERTICES) };
+    unsafe {
+        sorted_tri(writer, [root0, &v[3], &v[8]], [root0, &v[3], &v[8]]);
         sorted_tri(writer, [&v[8], &v[9], &v[2]], [&v[8], &v[9], &v[2]]);
         sorted_tri(writer, [&v[2], &v[11], &v[7]], [&v[2], &v[11], &v[7]]);
-        sorted_tri(writer, [&v[7], &v[6], root[2]], [&v[7], &v[6], root[2]]);
+        sorted_tri(writer, [&v[7], &v[6], root2], [&v[7], &v[6], root2]);
         sorted_quad(
             writer,
             [&v[3], &v[0], &v[8], &v[9]],
@@ -592,8 +580,8 @@ unsafe fn subdivide_twice(
         );
         sorted_quad(
             writer,
-            [&v[4], root[1], &v[10], &v[5]],
-            [&v[4], root[1], &v[10], &v[5]],
+            [&v[4], root1, &v[10], &v[5]],
+            [&v[4], root1, &v[10], &v[5]],
         );
         sorted_quad(
             writer,
@@ -611,36 +599,19 @@ unsafe fn subdivide_twice(
             [&v[11], &v[1], &v[7], &v[6]],
         );
     }
-    if root
-        .iter()
-        .map(|vertex| vertex.depth)
-        .max()
-        .unwrap_or_default()
-        >= i32::from(writer.profile.subdivide_twice_at)
-    {
+    let underdraw_at = i32::from(writer.profile.subdivide_twice_at);
+    if root0.depth >= underdraw_at || root1.depth >= underdraw_at || root2.depth >= underdraw_at {
         let underdraw = root_otz.saturating_add(writer.profile.underdraw_slot_bias);
         unsafe {
-            writer.emit_tri(
-                [root[0], root[1], &v[0]],
-                [root[0], root[1], &v[0]],
-                underdraw,
-            );
-            writer.emit_tri([root[0], &v[0], &v[3]], [root[0], &v[0], &v[3]], underdraw);
-            writer.emit_tri([&v[0], root[1], &v[4]], [&v[0], root[1], &v[4]], underdraw);
-            writer.emit_tri(
-                [root[1], root[2], &v[1]],
-                [root[1], root[2], &v[1]],
-                underdraw,
-            );
-            writer.emit_tri([root[1], &v[1], &v[5]], [root[1], &v[1], &v[5]], underdraw);
-            writer.emit_tri([&v[1], root[2], &v[6]], [&v[1], root[2], &v[6]], underdraw);
-            writer.emit_tri(
-                [root[0], root[2], &v[2]],
-                [root[0], root[2], &v[2]],
-                underdraw,
-            );
-            writer.emit_tri([root[0], &v[2], &v[8]], [root[0], &v[2], &v[8]], underdraw);
-            writer.emit_tri([&v[2], root[2], &v[7]], [&v[2], root[2], &v[7]], underdraw);
+            writer.emit_tri([root0, root1, &v[0]], [root0, root1, &v[0]], underdraw);
+            writer.emit_tri([root0, &v[0], &v[3]], [root0, &v[0], &v[3]], underdraw);
+            writer.emit_tri([&v[0], root1, &v[4]], [&v[0], root1, &v[4]], underdraw);
+            writer.emit_tri([root1, root2, &v[1]], [root1, root2, &v[1]], underdraw);
+            writer.emit_tri([root1, &v[1], &v[5]], [root1, &v[1], &v[5]], underdraw);
+            writer.emit_tri([&v[1], root2, &v[6]], [&v[1], root2, &v[6]], underdraw);
+            writer.emit_tri([root0, root2, &v[2]], [root0, root2, &v[2]], underdraw);
+            writer.emit_tri([root0, &v[2], &v[8]], [root0, &v[2], &v[8]], underdraw);
+            writer.emit_tri([&v[2], root2, &v[7]], [&v[2], root2, &v[7]], underdraw);
         }
     }
 }
@@ -745,7 +716,6 @@ unsafe fn submit_classic_affine_projected_fan_with_scratch(
     let mut writer = PacketWriter {
         next: output,
         packets: 0,
-        hardware_triangles: 0,
         clut_high_word: (clut as u32) << 16,
         tpage_high_word: (tpage as u32) << 16,
         profile,
@@ -758,11 +728,7 @@ unsafe fn submit_classic_affine_projected_fan_with_scratch(
             &mut writer,
         );
     }
-    ClassicAffineSubmit {
-        next_packet: writer.next,
-        packets: writer.packets,
-        hardware_triangles: writer.hardware_triangles,
-    }
+    unsafe { writer.finish(output) }
 }
 
 #[inline(always)]
@@ -783,20 +749,25 @@ unsafe fn submit_classic_affine_projected_fan_into_writer(
         return;
     }
 
-    let scratch = unsafe { core::slice::from_raw_parts_mut(generated, EXTRA_VERTICES) };
     let root = unsafe { &*vertices };
+    let root_depth = root.depth as u16 as u32;
     let end = unsafe { vertices.add(vertex_count) };
     let mut previous = unsafe { vertices.add(1) };
     let mut current = unsafe { vertices.add(2) };
     while current != end {
         let previous_ref = unsafe { &*previous };
         let current_ref = unsafe { &*current };
-        let otz = average3_refs(root, previous_ref, current_ref);
+        let otz = scene::classic_otz3_from_sum(
+            root_depth + previous_ref.depth as u16 as u32 + current_ref.depth as u16 as u32,
+        );
         if otz > 0 && otz < profile.ot_depth {
             let next = unsafe { current.add(1) };
             if otz >= profile.subdivide_once_at && next != end {
                 let next_ref = unsafe { &*next };
-                if average3_refs(root, current_ref, next_ref) == otz {
+                if scene::classic_otz3_from_sum(
+                    root_depth + current_ref.depth as u16 as u32 + next_ref.depth as u16 as u32,
+                ) == otz
+                {
                     // GP0 quads split on q1-q2. Reorder two adjacent fan
                     // triangles so that edge lands on the fan's shared 0-2
                     // diagonal and its two internal triangles match the
@@ -810,11 +781,9 @@ unsafe fn submit_classic_affine_projected_fan_into_writer(
                 }
             }
             if otz < profile.subdivide_twice_at {
-                let root_refs = [root, previous_ref, current_ref];
-                unsafe { subdivide_twice(writer, root_refs, scratch, otz) };
+                unsafe { subdivide_twice(writer, root, previous_ref, current_ref, generated, otz) };
             } else if otz < profile.subdivide_once_at {
-                let root_refs = [root, previous_ref, current_ref];
-                unsafe { subdivide_once(writer, root_refs, scratch, otz) };
+                unsafe { subdivide_once(writer, root, previous_ref, current_ref, generated, otz) };
             } else {
                 let root_refs = [root, previous_ref, current_ref];
                 unsafe { writer.emit_tri(root_refs, root_refs, otz) };
@@ -874,7 +843,6 @@ pub unsafe fn submit_classic_affine_batch(
     let mut writer = PacketWriter {
         next: output,
         packets: 0,
-        hardware_triangles: 0,
         clut_high_word: 0,
         tpage_high_word: 0,
         profile,
@@ -900,11 +868,7 @@ pub unsafe fn submit_classic_affine_batch(
         surface_ptr = unsafe { surface_ptr.add(1) };
     }
 
-    ClassicAffineSubmit {
-        next_packet: writer.next,
-        packets: writer.packets,
-        hardware_triangles: writer.hardware_triangles,
-    }
+    unsafe { writer.finish(output) }
 }
 
 /// Project and submit a convex fan directly from a packed retained-world
@@ -959,11 +923,9 @@ pub unsafe fn submit_classic_affine_packed_fan(
     }
 
     let generated_ptr = unsafe { scratch.add(vertex_count).cast::<ClassicAffineVertex>() };
-    let generated = unsafe { core::slice::from_raw_parts_mut(generated_ptr, EXTRA_VERTICES) };
     let mut writer = PacketWriter {
         next: output,
         packets: 0,
-        hardware_triangles: 0,
         clut_high_word: (clut as u32) << 16,
         tpage_high_word: (tpage as u32) << 16,
         profile,
@@ -988,11 +950,28 @@ pub unsafe fn submit_classic_affine_packed_fan(
                     expand_source(source[1], root[1]),
                     expand_source(source[2], root[2]),
                 ];
-                let expanded_refs = [&expanded[0], &expanded[1], &expanded[2]];
                 if otz < profile.subdivide_twice_at {
-                    unsafe { subdivide_twice(&mut writer, expanded_refs, generated, otz) };
+                    unsafe {
+                        subdivide_twice(
+                            &mut writer,
+                            &expanded[0],
+                            &expanded[1],
+                            &expanded[2],
+                            generated_ptr,
+                            otz,
+                        )
+                    };
                 } else {
-                    unsafe { subdivide_once(&mut writer, expanded_refs, generated, otz) };
+                    unsafe {
+                        subdivide_once(
+                            &mut writer,
+                            &expanded[0],
+                            &expanded[1],
+                            &expanded[2],
+                            generated_ptr,
+                            otz,
+                        )
+                    };
                 }
             } else {
                 unsafe { writer.emit_compact_tri(root, otz) };
@@ -1001,11 +980,7 @@ pub unsafe fn submit_classic_affine_packed_fan(
         fan += 1;
     }
 
-    ClassicAffineSubmit {
-        next_packet: writer.next,
-        packets: writer.packets,
-        hardware_triangles: writer.hardware_triangles,
-    }
+    unsafe { writer.finish(output) }
 }
 
 #[inline(always)]
@@ -1127,7 +1102,6 @@ unsafe fn submit_classic_alias_model_inner<const SCREEN_SPACE: bool>(
     }
 
     let mut next = output;
-    let mut packets = 0u32;
     let mut face_index = 0usize;
     while face_index < face_count {
         let corners = unsafe { ptr::read(faces.add(face_index)) }.corners;
@@ -1183,12 +1157,13 @@ unsafe fn submit_classic_alias_model_inner<const SCREEN_SPACE: bool>(
                 );
                 unsafe { ptr::write(next.cast::<ClassicTriTextured>(), packet) };
                 next = unsafe { next.add(size_of::<ClassicTriTextured>() / size_of::<u32>()) };
-                packets = packets.wrapping_add(1);
             }
         }
         face_index += 1;
     }
 
+    let packets = unsafe { next.offset_from(output) as u32 }
+        / (size_of::<ClassicTriTextured>() / size_of::<u32>()) as u32;
     ClassicAffineSubmit {
         next_packet: next,
         packets,
@@ -1281,6 +1256,10 @@ fn classic_clip_code(screen: [i16; 2], profile: ClassicAffineProfile) -> u8 {
     let right = profile.screen_width as i32 - 2;
     let bottom = profile.screen_height as i32 - 2;
 
+    if (x as u32) <= right as u32 && (y as u32) <= bottom as u32 {
+        return 0;
+    }
+
     // Projected coordinates and viewport extents fit comfortably in i32.
     ((x as u32 >> 31) as u8)
         | ((((right - x) as u32 >> 31) as u8) << 1)
@@ -1371,6 +1350,30 @@ mod tests {
                 let expected = ((a as u16 + b as u16) >> 1) as u8;
                 assert_eq!(midpoint(&left, &right).uv, [expected; 2]);
             }
+        }
+    }
+
+    #[test]
+    fn packet_writer_derives_hardware_triangles_from_stream_length() {
+        let tri_words = size_of::<ClassicTriTexturedGouraud>() / size_of::<u32>();
+        let quad_words = size_of::<ClassicQuadTexturedGouraud>() / size_of::<u32>();
+        let mut storage = [0u32; 128];
+        let output = storage.as_mut_ptr();
+
+        for (triangles, quads) in [(0usize, 0usize), (1, 0), (0, 1), (2, 3)] {
+            let packets = triangles + quads;
+            let words = triangles * tri_words + quads * quad_words;
+            let writer = PacketWriter {
+                next: unsafe { output.add(words) },
+                packets: packets as u32,
+                clut_high_word: 0,
+                tpage_high_word: 0,
+                profile: ClassicAffineProfile::QUAKE_REFERENCE,
+            };
+            let submit = unsafe { writer.finish(output) };
+            assert_eq!(submit.next_packet, unsafe { output.add(words) });
+            assert_eq!(submit.packets, packets as u32);
+            assert_eq!(submit.hardware_triangles, (triangles + quads * 2) as u32);
         }
     }
 
