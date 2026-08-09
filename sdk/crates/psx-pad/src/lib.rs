@@ -218,6 +218,31 @@ pub struct Deadzone {
 /// Full deflection on one axis, from a stick that reads 0..=255 about 128.
 pub const STICK_FULL: i16 = 127;
 
+/// Fine-aim response shared by first-person games.
+///
+/// The centre is deliberately gentle while full deflection remains near the
+/// full input range: 45% linear plus 55% cubic. This is the response used by
+/// `hl-psx`, promoted here so other PSoXide games do not grow subtly different
+/// controller curves.
+#[inline]
+pub const fn aim_curve(value: i16) -> i16 {
+    let value = if value < -128 {
+        -128
+    } else if value > 127 {
+        127
+    } else {
+        value
+    };
+    let sign = if value < 0 { -1 } else { 1 };
+    let magnitude = if value < 0 {
+        -(value as i32)
+    } else {
+        value as i32
+    };
+    let cubic = magnitude * magnitude / 128 * magnitude / 128;
+    (sign * ((magnitude * 45 + cubic * 55) / 100)) as i16
+}
+
 impl Deadzone {
     /// A dead region of `radius` counts around centre. Typical radii are 12 to
     /// 30 of the 127 counts a healthy stick reaches.
@@ -1021,6 +1046,17 @@ mod tests {
         assert_eq!(worn.scaled(100, 0), Some((STICK_FULL, 0)));
         // And past the outer edge it saturates rather than overshooting.
         assert_eq!(worn.scaled(120, 0), Some((STICK_FULL, 0)));
+    }
+
+    #[test]
+    fn aim_curve_is_gentle_at_center_and_near_full_at_the_edge() {
+        assert_eq!(aim_curve(0), 0);
+        assert_eq!(aim_curve(16), 7);
+        assert_eq!(aim_curve(-16), -7);
+        assert_eq!(aim_curve(127), 125);
+        assert_eq!(aim_curve(-128), -128);
+        assert!(aim_curve(64) < 64);
+        assert_eq!(aim_curve(-64), -aim_curve(64));
     }
 
     use super::*;
