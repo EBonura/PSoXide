@@ -585,6 +585,9 @@ CPU path around those primitives must stay lean.
 - Use compact packets only when texture-window state is constant.
 - Pack compatible subdivision leaves into GPU quads when the topology and
   winding are identical to the triangle pair.
+- Average two independent `u8` UV lanes as one `u16` with a carry-isolating
+  mask. Exhaustively verify all byte pairs, and do not assume the same packed
+  formula wins for wider color fields without measuring it.
 - Keep visibility and coarse surface rejection outside the inner leaf emitter.
 - Measure fused data-preparation paths. Fewer language crossings do not
   guarantee fewer guest cycles.
@@ -630,6 +633,16 @@ complete 3,400-frame Episode 1 emulator regression covers every map,
 transition, weapon, enemy, required animation range, and boss behavior.
 Physical-console validation is still required before calling the result
 silicon-verified.
+
+Packing the two midpoint UV averages into one carry-isolated halfword operation
+then reduced the complete 3,400-frame route's average update-plus-render work
+from 1,033,300 to 1,026,561 cycles, its 95th percentile from 1,605,051 to
+1,601,003, and its over-budget frames from 836 to 818. Route time fell from
+14,486 to 14,392 VBlank ticks. The first 49 presented frames were pixel-exact
+before the faster cadence advanced animation timing, the complete functional
+regression passed, and an exhaustive host test proves all 65,536 input-byte
+pairs match the original independent floor averages. Applying an analogous
+packed operation to the RGB midpoint was slower and was rejected.
 
 The original corrected PSoXide comparison ran at 11.8516 fps versus 11.8580 fps
 for the historical C SDK build, with 99.948 percent of pixels byte-identical at
