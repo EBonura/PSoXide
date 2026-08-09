@@ -306,6 +306,104 @@ impl<const N: usize> OrderingTable<N> {
         }
     }
 
+    /// Insert a contiguous stream of classic tagged GPU packets.
+    ///
+    /// Before this call, each packet tag stores its GPU data-word count in
+    /// bits 24..31 and its target OT slot in bits 0..15. Packets are walked
+    /// from `first` to `end` and prepended in that order, exactly matching a
+    /// sequence of classic `addPrim` calls. A slot value of `0xffff` skips the
+    /// packet, which lets callers keep separately ordered HUD packets in the
+    /// same arena.
+    ///
+    /// This format lets C and retained-mode renderers stage depth keys in the
+    /// packet tags without a cross-language call or a separate command array
+    /// per primitive. The final link pass remains owned by PSoXide.
+    ///
+    /// # Safety
+    /// `first..end` must be a writable, contiguous sequence of complete GPU
+    /// packets. Every packet's word count must describe the next packet
+    /// exactly, and every non-sentinel slot must be less than `N`.
+    #[inline]
+    pub unsafe fn insert_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
+        if first >= end {
+            return;
+        }
+        debug_assert!(N > 0);
+
+        #[cfg(target_arch = "mips")]
+        {
+            let entries = self.entries.as_mut_ptr();
+            unsafe {
+                core::arch::asm!(
+                    ".set noreorder",
+                    // Persistent constants: low-24-bit DMA address mask and
+                    // the screen-packet sentinel staged by retained callers.
+                    "lui $15, 0x00ff",
+                    "ori $15, $15, 0xffff",
+                    "ori $17, $0, 0xffff",
+                    "2:",
+                    "lw $9, 0($8)",
+                    "nop",
+                    // tag>>22 is the packet byte count excluding its tag;
+                    // add four bytes while filling the sentinel branch slot.
+                    "srl $10, $9, 22",
+                    "andi $11, $9, 0xffff",
+                    "addu $10, $8, $10",
+                    "beq $11, $17, 3f",
+                    "addiu $10, $10, 4",
+                    // Prepend the packet to its already-bounded OT slot. The
+                    // packet-address shifts fill the OT-head load delay.
+                    "sll $13, $11, 2",
+                    "addu $13, $12, $13",
+                    "lw $14, 0($13)",
+                    "sll $11, $8, 8",
+                    "srl $9, $9, 24",
+                    "and $14, $14, $15",
+                    "sll $9, $9, 24",
+                    "or $14, $14, $9",
+                    "sw $14, 0($8)",
+                    "srl $11, $11, 8",
+                    "sw $11, 0($13)",
+                    "3:",
+                    "move $8, $10",
+                    "bne $8, $16, 2b",
+                    "nop",
+                    ".set reorder",
+                    inout("$8") first => _,
+                    in("$12") entries,
+                    in("$16") end,
+                    lateout("$9") _,
+                    lateout("$10") _,
+                    lateout("$11") _,
+                    lateout("$13") _,
+                    lateout("$14") _,
+                    lateout("$15") _,
+                    lateout("$17") _,
+                    options(nostack),
+                );
+            }
+        }
+
+        #[cfg(not(target_arch = "mips"))]
+        {
+            let mut packet = first;
+            while packet < end {
+                let staged_tag = unsafe { ptr::read(packet) };
+                let words = (staged_tag >> 24) as usize;
+                let slot = (staged_tag & u16::MAX as u32) as usize;
+                let next = unsafe { packet.add(words + 1) };
+                if slot != u16::MAX as usize {
+                    debug_assert!(slot < N);
+                    unsafe {
+                        self.insert_unchecked_tag_high(slot, packet, staged_tag & 0xFF00_0000)
+                    };
+                }
+                packet = next;
+            }
+            debug_assert_eq!(packet, end);
+        }
+    }
+
     /// Insert a primitive struct. The struct must be `#[repr(C)]`
     /// with its first field being the tag `u32`. `words` is the
     /// number of data words that follow the tag.
@@ -491,6 +589,34 @@ mod tests {
         assert_eq!(iter.next().unwrap().0, b.as_ptr());
         assert_eq!(iter.next().unwrap().0, a.as_ptr());
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn tagged_packet_stream_matches_prepend_and_skips_sentinel_packets() {
+        let mut ot: OrderingTable<8> = OrderingTable::new();
+        ot.clear();
+        let mut packets = [
+            (1 << 24) | 4,
+            0xAAAA_AAAA,
+            (2 << 24) | u16::MAX as u32,
+            0xBBBB_BBBB,
+            0xCCCC_CCCC,
+            (1 << 24) | 4,
+            0xDDDD_DDDD,
+        ];
+
+        unsafe {
+            ot.insert_tagged_packet_stream_unchecked(
+                packets.as_mut_ptr(),
+                packets.as_mut_ptr().add(packets.len()),
+            );
+        }
+
+        let mut iter = unsafe { ot.iter_packets() };
+        assert_eq!(iter.next().unwrap().0, unsafe { packets.as_ptr().add(5) });
+        assert_eq!(iter.next().unwrap().0, packets.as_ptr());
+        assert!(iter.next().is_none());
+        assert_eq!(packets[2] & 0x00ff_ffff, u16::MAX as u32);
     }
 
     /// Build a primitive packet by hand (one tag word + N data words),

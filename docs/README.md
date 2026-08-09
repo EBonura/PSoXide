@@ -27,6 +27,7 @@ the [root README](../README.md) and the per-area READMEs
 | [floors-plan.md](floors-plan.md) | Vertical levels within a room. |
 | [floors-editor-architecture.md](floors-editor-architecture.md) | Editor-side floors design. |
 | [playtest-profiling.md](playtest-profiling.md) | Playtest capture, headless replay, per-vblank profiling. |
+| [classic-affine-rendering-2026-08-08.md](classic-affine-rendering-2026-08-08.md) | Reusable camera-space subdivision and compact packet path for near-perspective-correct PS1 texturing. |
 | [downstream-projects.md](downstream-projects.md) | Canonical structure for game repos built on PSoXide. |
 | [game-states-plan.md](game-states-plan.md) | Game-state system plan. |
 | [multi-gameplay-scenes.md](multi-gameplay-scenes.md) | Design note: more than one gameplay Scene in GameFlow. |
