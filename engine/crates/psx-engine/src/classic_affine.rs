@@ -396,16 +396,18 @@ const fn uv_compact_word(vertex: &ClassicAffineProjectedVertex) -> u16 {
 #[inline(always)]
 fn midpoint(a: &ClassicAffineVertex, b: &ClassicAffineVertex) -> ClassicAffineVertex {
     let light = ((a.color as u8 as u16 + b.color as u8 as u16) >> 1) as u32;
+    let a_uv = u16::from_le_bytes(a.uv);
+    let b_uv = u16::from_le_bytes(b.uv);
+    // Average both packed bytes independently. Clearing each byte's low bit
+    // before the shift prevents a carry from U into V.
+    let uv = (a_uv & b_uv).wrapping_add(((a_uv ^ b_uv) & 0xfefe) >> 1);
     ClassicAffineVertex {
         position: [
             ((a.position[0] as i32 + b.position[0] as i32) >> 1) as i16,
             ((a.position[1] as i32 + b.position[1] as i32) >> 1) as i16,
             ((a.position[2] as i32 + b.position[2] as i32) >> 1) as i16,
         ],
-        uv: [
-            ((a.uv[0] as u16 + b.uv[0] as u16) >> 1) as u8,
-            ((a.uv[1] as u16 + b.uv[1] as u16) >> 1) as u8,
-        ],
+        uv: uv.to_le_bytes(),
         color: light | (light << 8) | (light << 16),
         screen: [0; 2],
         depth: 0,
@@ -1352,6 +1354,24 @@ mod tests {
         assert_eq!(mid.position, [-1, 12, 20]);
         assert_eq!(mid.uv, [2, 130]);
         assert_eq!(mid.color, 0x0018_1818);
+    }
+
+    #[test]
+    fn midpoint_packed_uv_matches_independent_byte_averages() {
+        for a in u8::MIN..=u8::MAX {
+            for b in u8::MIN..=u8::MAX {
+                let left = ClassicAffineVertex {
+                    uv: [a, b],
+                    ..ClassicAffineVertex::default()
+                };
+                let right = ClassicAffineVertex {
+                    uv: [b, a],
+                    ..ClassicAffineVertex::default()
+                };
+                let expected = ((a as u16 + b as u16) >> 1) as u8;
+                assert_eq!(midpoint(&left, &right).uv, [expected; 2]);
+            }
+        }
     }
 
     #[test]
