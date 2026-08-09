@@ -2280,7 +2280,12 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                         link(
                             ui,
                             "How to dump your own BIOS and discs",
-                            "https://emulation.gametechwiki.com/index.php/Sony_PlayStation",
+                            // The old Sony_PlayStation page is gone. This one is
+                            // the wiki's dumping guide, and it opens by saying
+                            // to dump what you own -- which is the point of the
+                            // line above it. Emulator_files, the other live
+                            // candidate, is a BIOS download index instead.
+                            "https://emulation.gametechwiki.com/index.php/Ripping_games",
                         );
                         ui.add_space(16.0);
                         link(
