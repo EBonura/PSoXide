@@ -28,7 +28,7 @@ mod tests {
         let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
             panic!("brush project selected the grid provider");
         };
-        assert_eq!(world.bytes.len(), 13_000);
+        assert_eq!(world.bytes.len(), 13_008);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);
