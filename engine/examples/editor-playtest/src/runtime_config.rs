@@ -353,11 +353,13 @@ pub(super) const PREBUILT_ROOM_QUAD_SLOTS: usize = 8;
 pub(super) const PREBUILT_ROOM_QUAD_CAP: usize = 256;
 
 /// Per-frame packet budget sizing the primitive arena and world command list.
-/// The earlier 1,024 cap covered the room benchmark but not a 529-face player
-/// drawn in two material passes: Cortex reaches about 1,080 commands with the
-/// room present. 1,536 keeps useful headroom without restoring the old 3,328
-/// allocation; overflow still degrades safely and is reported by telemetry.
-pub(super) const MAX_TEXTURED_TRIS: usize = 1536;
+/// The cooked manifest derives this per project from its conservative packet
+/// envelope (floor 1,536, ceiling 4,096), so heavy content sizes its own
+/// arena instead of silently degrading against a fixed cap. The earlier
+/// 1,024 cap covered the room benchmark but not a 529-face player drawn in
+/// two material passes; overflow beyond the derived capacity still degrades
+/// safely and is reported by telemetry.
+pub(super) const MAX_TEXTURED_TRIS: usize = PLAYTEST_PACKET_CAPACITY;
 
 /// Cap on the per-room material slot count. Single source of truth is
 /// `psx_level::MAX_ROOM_MATERIALS` (the cook<->runtime contract): the cook now

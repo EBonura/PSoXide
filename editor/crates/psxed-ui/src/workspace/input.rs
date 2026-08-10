@@ -1958,8 +1958,7 @@ impl EditorWorkspace {
                 ));
                 ui.monospace(format!(
                     "Packets   {}/{}",
-                    budget.packet_count,
-                    psxed_project::playtest::PLAYTEST_PACKET_LIMIT,
+                    budget.packet_count, budget.packet_limit,
                 ));
                 if let Some(issue) = budget.first_actionable_issue() {
                     ui.separator();
