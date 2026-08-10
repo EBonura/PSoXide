@@ -28,6 +28,8 @@ use psx_level::{
 };
 use psx_math::atan2_q12;
 
+use crate::actor_pose::ActorPoseSnapshot;
+
 /// One animated combat capsule in room-local world space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldCombatCapsule {
@@ -60,6 +62,21 @@ pub fn transform_combat_capsule(
         end: transform_joint_local_point(joint, record.end),
         radius: record.radius,
     }
+}
+
+/// Transform one authored capsule through the shared per-tick actor pose.
+///
+/// This is the preferred gameplay entry point: it prevents combat from
+/// rebuilding animation phase or presentation transforms separately from the
+/// visible body and its equipment sockets.
+pub fn transform_actor_combat_capsule(
+    record: &CombatCapsuleRecord,
+    pose: ActorPoseSnapshot,
+) -> Option<WorldCombatCapsule> {
+    Some(transform_combat_capsule(
+        record,
+        pose.joint_world_transform(u16::from(record.joint))?,
+    ))
 }
 
 fn transform_joint_local_point(joint: JointWorldTransform, local: [i16; 3]) -> [i32; 3] {

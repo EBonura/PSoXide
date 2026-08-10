@@ -272,13 +272,8 @@ fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color:
 /// context so they can never drift from the body.
 pub(super) struct InstancePoseContext {
     pub model: RuntimeModelAsset,
-    pub anim: Animation<'static>,
     pub clip_local: ModelClipIndex,
-    pub phase: u32,
-    pub pose_translation: ModelPoseTranslation,
-    pub rotation: Mat3I16,
-    pub origin: WorldVertex,
-    pub local_to_world: LocalToWorldScale,
+    pub pose: ActorPoseSnapshot,
 }
 
 pub(super) fn instance_pose_context<
@@ -367,13 +362,17 @@ pub(super) fn instance_pose_context<
     let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
     Some(InstancePoseContext {
         model: runtime_model,
-        anim,
         clip_local,
-        phase,
-        pose_translation,
-        rotation,
-        origin,
-        local_to_world,
+        pose: ActorPoseSnapshot::new(
+            elapsed_tick,
+            anim,
+            phase,
+            None,
+            origin,
+            rotation,
+            local_to_world,
+            pose_translation,
+        ),
     })
 }
 
@@ -418,13 +417,8 @@ pub fn draw_model_instances<
         }
         let Some(InstancePoseContext {
             model: runtime_model,
-            anim,
             clip_local,
-            phase,
-            pose_translation,
-            rotation: model_rotation,
-            origin,
-            local_to_world,
+            pose,
         }) = instance_pose_context(
             tables,
             models,
@@ -438,6 +432,12 @@ pub fn draw_model_instances<
         else {
             continue;
         };
+        let anim = pose.animation();
+        let phase = pose.phase_q12();
+        let pose_translation = pose.pose_translation();
+        let model_rotation = pose.rotation();
+        let origin = pose.origin();
+        let local_to_world = pose.local_to_world();
         let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
         let bounds_origin =
             model_pose_translated_origin(origin, model_rotation, local_to_world, pose_translation);
