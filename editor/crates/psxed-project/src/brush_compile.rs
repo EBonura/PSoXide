@@ -475,6 +475,14 @@ pub(crate) fn pack_plane(plane: &Plane) -> Option<([u8; 14], bool)> {
     let unit = [n[0] / len, n[1] / len, n[2] / len];
     let dist_world = plane.dist as f64 / len;
 
+    pack_normalized_plane(unit, dist_world)
+}
+
+pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<([u8; 14], bool)> {
+    if !unit.into_iter().all(f64::is_finite) || !dist_world.is_finite() {
+        return None;
+    }
+
     let axis = (0..3).find(|&a| {
         unit[a].abs() > 1.0 - 1e-9 && (0..3).all(|other| other == a || unit[other].abs() < 1e-9)
     });
