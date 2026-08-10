@@ -388,6 +388,27 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         };
     }
 
+    /// Insert a contiguous stream of classic packets whose temporary tag
+    /// carries its target ordering-table slot.
+    ///
+    /// # Safety
+    ///
+    /// `first..end` must be a writable sequence of complete tagged packets,
+    /// and every non-sentinel slot encoded in that sequence must be less than
+    /// `DEPTH`. The packet storage must remain live and unmodified until the
+    /// submitted ordering-table DMA has completed.
+    #[inline(always)]
+    pub unsafe fn add_tagged_packet_stream_unchecked(
+        &mut self,
+        first: *mut u32,
+        end: *mut u32,
+    ) {
+        unsafe {
+            self.ot
+                .insert_tagged_packet_stream_unchecked(first, end)
+        };
+    }
+
     /// Insert a known SDK GPU packet at a raw OT slot.
     pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &mut T) {
         self.add(slot, prim, T::WORDS);
