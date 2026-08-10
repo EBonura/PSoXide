@@ -797,7 +797,7 @@ mod tests {
     use crate::brush_compile::{build_surface_bsp, compile_csg_surfaces};
     use crate::brush_pack::{pack_bsp_geometry, BspLighting};
     use crate::brush_portal::{classify_bsp_leaves, portalize_surface_bsp};
-    use psx_bsp::collision::CollisionHull;
+    use psx_bsp::collision::{CollisionHull, Trace, TraceScratch};
     use psx_bsp::pxbsp::{PxbspEntityTable, PxbspIndex};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
     use psx_bsp::{BrushModel, ClipNode, Plane, RecordSlice, SliceReader, Vec3I16, Vec3I32};
@@ -810,6 +810,17 @@ mod tests {
         mins: [-32, 0, -32],
         maxs: [32, 96, 32],
     };
+
+    fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
+        let mut output = Trace::default();
+        assert!(hull.trace_into(
+            &start,
+            &end,
+            &mut TraceScratch::new(),
+            &mut output,
+        ));
+        output
+    }
 
     fn compiled_room() -> CompiledPxbsp {
         let brushes = Brush::cuboid([0, 0, 0], [1024, 512, 1024])
@@ -923,20 +934,19 @@ mod tests {
             RecordSlice::<ClipNode>::new(bytes(PxbspLumpKind::ClipNodes)).expect("clipnodes"),
             world.head_nodes[2],
         );
-        let trace = hull
-            .trace(
-                Vec3I32 {
-                    x: 512 * 4096,
-                    y: 256 * 4096,
-                    z: 512 * 4096,
-                },
-                Vec3I32 {
-                    x: 512 * 4096,
-                    y: -64 * 4096,
-                    z: 512 * 4096,
-                },
-            )
-            .expect("trace");
+        let trace = trace(
+            &hull,
+            Vec3I32 {
+                x: 512 * 4096,
+                y: 256 * 4096,
+                z: 512 * 4096,
+            },
+            Vec3I32 {
+                x: 512 * 4096,
+                y: -64 * 4096,
+                z: 512 * 4096,
+            },
+        );
         let end_y = trace.end.y as f64 / 4096.0;
         assert!((63.0..64.1).contains(&end_y));
     }
@@ -1024,20 +1034,19 @@ mod tests {
         }));
 
         let door_hull = CollisionHull::new(map.planes(), map.clip_nodes(), door.head_nodes[1]);
-        let trace = door_hull
-            .trace(
-                Vec3I32 {
-                    x: 0,
-                    y: 48 * 4096,
-                    z: 32 * 4096,
-                },
-                Vec3I32 {
-                    x: 0,
-                    y: 48 * 4096,
-                    z: -32 * 4096,
-                },
-            )
-            .expect("door-local trace");
+        let trace = trace(
+            &door_hull,
+            Vec3I32 {
+                x: 0,
+                y: 48 * 4096,
+                z: 32 * 4096,
+            },
+            Vec3I32 {
+                x: 0,
+                y: 48 * 4096,
+                z: -32 * 4096,
+            },
+        );
         let end_z = trace.end.z as f64 / 4096.0;
         assert!((7.9..8.1).contains(&end_z), "end z was {end_z}");
     }
