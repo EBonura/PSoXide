@@ -696,6 +696,40 @@ fn mono_line_packet_size_is_three() {
 }
 
 #[test]
+fn dither_stable_point_line_matches_one_pixel_rect() {
+    let mut gpu = Gpu::new();
+    gpu.gp0_push(0xE300_0000); // draw area top-left (0, 0)
+    gpu.gp0_push(0xE400_0000 | 1023 | (511 << 10));
+    gpu.gp0_push(0xE500_0000); // draw offset (0, 0)
+    gpu.gp0_push(0xE100_0200); // dither enabled
+
+    for channel in 0..32u32 {
+        let tile_rgb = (channel << 3) * 0x0001_0101;
+        let line_rgb = tile_rgb | 0x0004_0404;
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let tile_xy = ((y + 16) << 16) | (x + 16);
+                let line_xy = ((y + 16) << 16) | (x + 24);
+
+                gpu.gp0_push(0x6000_0000 | tile_rgb);
+                gpu.gp0_push(tile_xy);
+                gpu.gp0_push(0x0001_0001);
+
+                gpu.gp0_push(0x4000_0000 | line_rgb);
+                gpu.gp0_push(line_xy);
+                gpu.gp0_push(line_xy);
+
+                assert_eq!(
+                    gpu.vram.get_pixel((x + 16) as u16, (y + 16) as u16),
+                    gpu.vram.get_pixel((x + 24) as u16, (y + 16) as u16),
+                    "5-bit channel {channel} at dither cell ({x}, {y})",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn shaded_line_packet_size_is_four() {
     for op in 0x50..=0x57 {
         assert_eq!(gp0_packet_size(op), 4, "opcode 0x{op:02X}");
