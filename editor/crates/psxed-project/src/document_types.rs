@@ -166,6 +166,62 @@ pub struct EditorWorkspaceState {
     pub active: EditorWorkspaceView,
 }
 
+/// Which orthographic projection the 2D viewport shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EditorOrthographicView {
+    /// XZ plane, looking down -Y.
+    #[default]
+    Top,
+    /// XY plane, looking down +Z.
+    Front,
+    /// ZY plane, looking down -X.
+    Side,
+}
+
+/// Editor-only viewport layout persisted with a project: whether the
+/// 2D view is active, which projection it shows, where it looks, how
+/// zoomed it is, and the shared grid snap step. Authoring metadata
+/// only; cooked runtime output must not depend on it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EditorViewportState {
+    /// True when the central viewport shows the orthographic view.
+    #[serde(default)]
+    pub view_2d: bool,
+    /// Active orthographic projection.
+    #[serde(default)]
+    pub orthographic_view: EditorOrthographicView,
+    /// Shared world-space focus of the orthographic views.
+    #[serde(default)]
+    pub orthographic_focus: [f32; 3],
+    /// Orthographic zoom, pixels per world sector-unit. The editor
+    /// clamps this into its interactive zoom range on load.
+    #[serde(default = "default_editor_viewport_zoom")]
+    pub viewport_zoom: f32,
+    /// Grid snap step in world units, shared by every drag/create op.
+    #[serde(default = "default_editor_snap_units")]
+    pub snap_units: u16,
+}
+
+pub(crate) fn default_editor_viewport_zoom() -> f32 {
+    96.0
+}
+
+pub(crate) fn default_editor_snap_units() -> u16 {
+    16
+}
+
+impl Default for EditorViewportState {
+    fn default() -> Self {
+        Self {
+            view_2d: false,
+            orthographic_view: EditorOrthographicView::default(),
+            orthographic_focus: [0.0; 3],
+            viewport_zoom: default_editor_viewport_zoom(),
+            snap_units: default_editor_snap_units(),
+        }
+    }
+}
+
 /// Runtime depth sorting policy for cooked cached room geometry.
 ///
 /// This affects embedded play and generated runtime manifests. The editor
@@ -332,6 +388,9 @@ pub struct ProjectDocument {
     /// Editor-only workspace preferences.
     #[serde(default)]
     pub editor_workspace: EditorWorkspaceState,
+    /// Editor-only 2D/orthographic viewport layout.
+    #[serde(default)]
+    pub editor_viewport: EditorViewportState,
     /// BSP compiler quality used by Build, Play, and Rebuild. Persisting this
     /// in the project keeps GUI and CLI cooks on one deterministic policy.
     #[serde(default)]
@@ -394,6 +453,7 @@ impl ProjectDocument {
             editor_camera: EditorCameraState::default(),
             editor_visibility: EditorVisibilityState::default(),
             editor_workspace: EditorWorkspaceState::default(),
+            editor_viewport: EditorViewportState::default(),
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
             runtime_texture_split_mode: RuntimeTextureSplitMode::default(),

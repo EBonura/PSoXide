@@ -2601,6 +2601,7 @@ impl EditorWorkspace {
         }
         workspace.apply_project_editor_camera();
         workspace.apply_project_editor_visibility();
+        workspace.apply_project_editor_viewport();
         Ok(workspace)
     }
 
@@ -2875,6 +2876,49 @@ impl EditorWorkspace {
         }
     }
 
+    fn current_editor_viewport_state(&self) -> psxed_project::EditorViewportState {
+        psxed_project::EditorViewportState {
+            view_2d: self.view_2d,
+            orthographic_view: match self.orthographic_view {
+                OrthographicView::Top => psxed_project::EditorOrthographicView::Top,
+                OrthographicView::Front => psxed_project::EditorOrthographicView::Front,
+                OrthographicView::Side => psxed_project::EditorOrthographicView::Side,
+            },
+            orthographic_focus: self.orthographic_focus,
+            viewport_zoom: self.viewport_zoom,
+            snap_units: self.snap_units,
+        }
+    }
+
+    fn persist_editor_viewport_state(&mut self) {
+        let editor_viewport = self.current_editor_viewport_state();
+        if self.project.editor_viewport != editor_viewport {
+            self.project.editor_viewport = editor_viewport;
+            self.dirty = true;
+        }
+    }
+
+    fn apply_project_editor_viewport(&mut self) {
+        let editor_viewport = self.project.editor_viewport;
+        self.view_2d = editor_viewport.view_2d;
+        self.orthographic_view = match editor_viewport.orthographic_view {
+            psxed_project::EditorOrthographicView::Top => OrthographicView::Top,
+            psxed_project::EditorOrthographicView::Front => OrthographicView::Front,
+            psxed_project::EditorOrthographicView::Side => OrthographicView::Side,
+        };
+        self.orthographic_focus = editor_viewport
+            .orthographic_focus
+            .map(|value| if value.is_finite() { value } else { 0.0 });
+        self.viewport_zoom = if editor_viewport.viewport_zoom.is_finite() {
+            editor_viewport
+                .viewport_zoom
+                .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM)
+        } else {
+            DEFAULT_VIEWPORT_ZOOM
+        };
+        self.snap_units = editor_viewport.snap_units.max(1);
+    }
+
     fn persist_editor_workspace_state(&mut self) {
         let editor_workspace = self.current_editor_workspace_state();
         if self.project.editor_workspace != editor_workspace {
@@ -2931,6 +2975,7 @@ impl EditorWorkspace {
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
         self.persist_editor_workspace_state();
+        self.persist_editor_viewport_state();
         if self.floating_geometry.is_some() {
             return Err("Place or cancel the duplicate preview before saving".to_string());
         }
@@ -2984,6 +3029,7 @@ impl EditorWorkspace {
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
         self.persist_editor_workspace_state();
+        self.persist_editor_viewport_state();
         if !self.dirty {
             return Ok(false);
         }
@@ -3027,6 +3073,7 @@ impl EditorWorkspace {
                 self.apply_project_editor_camera();
                 self.apply_project_editor_visibility();
                 self.apply_project_editor_workspace();
+                self.apply_project_editor_viewport();
             }
             Err(error) => {
                 self.status = format!("Reload failed: {error}");
