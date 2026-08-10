@@ -392,7 +392,19 @@ impl EditorWorkspace {
             |ui| self.draw_tool_group_menu(ui),
         );
         match self.active_tool {
-            ViewTool::Brush => {}
+            ViewTool::Brush => {
+                if let Some(index) = self.selected_brush {
+                    ui.separator();
+                    if ui
+                        .button(icons::label(icons::TRASH, "Delete brush"))
+                        .clicked()
+                    {
+                        self.push_undo();
+                        self.project.active_scene_mut().brushes.remove(index);
+                        self.selected_brush = None;
+                    }
+                }
+            }
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
             ViewTool::Water => self.draw_water_toolbar_controls(ui),

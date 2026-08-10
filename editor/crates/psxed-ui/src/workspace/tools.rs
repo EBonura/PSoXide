@@ -186,20 +186,41 @@ impl EditorWorkspace {
         Some([snap(origin[0] + dir[0] * t), 0, snap(origin[2] + dir[2] * t)])
     }
 
-    /// Nearest brush under the pointer, via the kernel's convex raycast.
-    fn pick_brush(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
+    /// Nearest brush face under the pointer, via the kernel's convex
+    /// raycast: `(brush_index, face_index)`.
+    fn pick_brush_face(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<(usize, usize)> {
         let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
         let origin = origin.map(f64::from);
         let dir = dir.map(f64::from);
-        let mut best: Option<(f64, usize)> = None;
+        let mut best: Option<(f64, usize, usize)> = None;
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            if let Some((t, _)) = brush.raycast(origin, dir) {
-                if best.is_none_or(|(best_t, _)| t < best_t) {
-                    best = Some((t, index));
+            if let Some((t, face)) = brush.raycast(origin, dir) {
+                if best.is_none_or(|(best_t, _, _)| t < best_t) {
+                    best = Some((t, index, face));
                 }
             }
         }
-        best.map(|(_, index)| index)
+        best.map(|(_, index, face)| (index, face))
+    }
+
+    fn pick_brush(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
+        self.pick_brush_face(rect, pointer).map(|(index, _)| index)
+    }
+
+    /// Unsnapped camera-ray ground intersection (y = 0).
+    fn brush_ground_point_raw(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<[f32; 3]> {
+        let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
+        if dir[1].abs() < 1e-6 {
+            return None;
+        }
+        let t = -origin[1] / dir[1];
+        (t > 0.0).then(|| {
+            [
+                origin[0] + dir[0] * t,
+                0.0,
+                origin[2] + dir[2] * t,
+            ]
+        })
     }
 
     /// The cuboid a brush drag would commit, if it has area.
@@ -253,12 +274,47 @@ impl EditorWorkspace {
     }
 }
 
+/// Vertical extrude sensitivity, world units per pixel (matches the
+/// primitive height-drag feel: 8 px per 64-unit quantum).
+const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
+
 impl ViewportTool3d for BrushTool {
     fn primary_pressed(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
         let Some(pointer) = frame.pointer_interact else {
             return;
         };
-        if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
+        // Pressing on a brush face starts a face extrude on that brush;
+        // pressing empty ground starts a create drag.
+        if let Some((index, face)) = ws.pick_brush_face(frame.rect, pointer) {
+            let base = ws.project.active_scene().brushes[index].clone();
+            let Some(plane) =
+                psxed_project::brush::Plane::from_points(base.faces[face].points)
+            else {
+                return;
+            };
+            let n = plane.normal.map(|v| v as f64);
+            let mut axis = 0;
+            for candidate in 1..3 {
+                if n[candidate].abs() > n[axis].abs() {
+                    axis = candidate;
+                }
+            }
+            let dir = if n[axis] >= 0.0 { 1 } else { -1 };
+            let press_ground = ws
+                .brush_ground_point_raw(frame.rect, pointer)
+                .unwrap_or([0.0; 3]);
+            ws.selected_brush = Some(index);
+            ws.brush_extrude = Some(BrushExtrude {
+                index,
+                face,
+                base,
+                axis,
+                dir,
+                press_y: pointer.y,
+                press_ground,
+                applied: 0,
+            });
+        } else if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
             ws.brush_drag = Some(BrushDrag {
                 anchor: point,
                 current: point,
@@ -270,7 +326,42 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
-        if let (Some(drag), Some(point)) = (ws.brush_drag, ws.brush_ground_point(frame.rect, pointer))
+        if let Some(extrude) = ws.brush_extrude.clone() {
+            let step = (ws.snap_units.max(1)) as f32;
+            let raw_units = if extrude.axis == 1 {
+                // Vertical faces follow pixel drag (up = out for +Y).
+                (extrude.press_y - pointer.y) * EXTRUDE_UNITS_PER_PIXEL * extrude.dir as f32
+            } else {
+                // Horizontal faces follow the ground-plane pointer along
+                // the face's dominant axis.
+                match ws.brush_ground_point_raw(frame.rect, pointer) {
+                    Some(ground) => ground[extrude.axis] - extrude.press_ground[extrude.axis],
+                    None => return,
+                }
+            };
+            let snapped = ((raw_units / step).round() * step) as i32;
+            if snapped == extrude.applied {
+                return;
+            }
+            let mut delta = [0i32; 3];
+            // ponytail: dominant-axis extrude; exact for axis faces (all
+            // created cuboids), approximate for slopes until face-normal
+            // stepping is needed.
+            delta[extrude.axis] = if extrude.axis == 1 {
+                snapped * extrude.dir
+            } else {
+                snapped
+            };
+            let mut preview = extrude.base.clone();
+            preview.translate_face(extrude.face, delta);
+            if preview.solve().is_valid() {
+                ws.project.active_scene_mut().brushes[extrude.index] = preview;
+                if let Some(state) = ws.brush_extrude.as_mut() {
+                    state.applied = snapped;
+                }
+            }
+        } else if let (Some(drag), Some(point)) =
+            (ws.brush_drag, ws.brush_ground_point(frame.rect, pointer))
         {
             ws.brush_drag = Some(BrushDrag {
                 current: point,
@@ -280,6 +371,17 @@ impl ViewportTool3d for BrushTool {
     }
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
+        if let Some(extrude) = ws.brush_extrude.take() {
+            // Restore the base, then record one undo step and re-apply
+            // the final shape so a full drag is a single undo entry.
+            let live = ws.project.active_scene().brushes[extrude.index].clone();
+            ws.project.active_scene_mut().brushes[extrude.index] = extrude.base;
+            if extrude.applied != 0 {
+                ws.push_undo();
+                ws.project.active_scene_mut().brushes[extrude.index] = live;
+            }
+            return;
+        }
         let Some(drag) = ws.brush_drag.take() else {
             return;
         };
