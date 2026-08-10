@@ -69,6 +69,8 @@ dependencies = [
 name = "psx-bsp"
 version = "0.1.0"
 dependencies = [
+ "psx-engine",
+ "psx-math",
  "psx-pack",
 ]
 
