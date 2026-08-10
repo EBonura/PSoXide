@@ -1,8 +1,5 @@
 use super::*;
-use psx_engine::{
-    apply_model_pose_translation, compute_joint_world_basis, compute_joint_world_transform,
-    JointWorldTransform,
-};
+use psx_engine::JointWorldTransform;
 use psx_level::equipment_flags;
 
 #[derive(Copy, Clone)]
@@ -44,48 +41,80 @@ pub(super) fn draw_player_equipment<
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
-    let mut out = EquipmentDrawStats::default();
-    let Some(character_model) = models.get(character.model.to_usize()).copied().flatten() else {
-        return out;
-    };
-    let Some(character_anim) = character_model.clip(clips, clip_local) else {
-        return out;
-    };
-    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
-    let character_phase = animation_phase_at_tick_q12(
-        character_anim,
-        local_tick,
-        video_hz,
-        character.action_loops(anim_action),
-        character.action_speed(anim_action),
-        character.action_frame_range(anim_action),
-    );
-    let blend_from = super::player_pose_blend(character, character_model, clips, blend, video_hz);
-    let character_anchor = model_clip_anchor(tables, character_model, clip_local);
-    let reference_anchor = model_clip_anchor(
+    let Some(player_pose) = resolve_player_actor_pose(
         tables,
-        character_model,
-        character.clip_for(PlayerAnim::Idle),
-    );
-    let character_pose_translation = model_pose_anchor_translation(
-        character_anim,
-        character_phase,
-        character_anchor,
-        reference_anchor,
-        character.action_in_place_override(anim_action),
-    );
-    let character_model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
-    let character_origin = visual_model_origin(
+        character,
+        models,
+        clips,
         x,
         y,
         z,
-        character_model.world_height,
-        character.visual_offset,
-        character.visual_scale_q8,
-        &character_model_rotation,
-    );
-    let character_local_to_world =
-        visual_model_local_to_world(character_model, character.visual_scale_q8);
+        yaw,
+        anim_action,
+        clip_local,
+        anim_start_tick,
+        blend,
+        elapsed_tick,
+        video_hz,
+    ) else {
+        return EquipmentDrawStats::default();
+    };
+    draw_player_equipment_from_pose::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        PROFILE,
+    >(
+        tables,
+        knobs,
+        scratch,
+        player_pose,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        triangles,
+        world,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_player_equipment_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    player_pose: PlayerActorPoseSnapshot,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    let mut out = EquipmentDrawStats::default();
+    let character_model = player_pose.model();
+    let character_pose = player_pose.pose();
 
     let mut drawn = 0usize;
     for equipment in tables.equipment {
@@ -107,17 +136,7 @@ pub(super) fn draw_player_equipment<
         else {
             continue;
         };
-        let Some(socket_pose) = attachment_socket_pose(
-            character_model,
-            character_anim,
-            character_phase,
-            blend_from,
-            character_origin,
-            character_model_rotation,
-            character_local_to_world,
-            character_pose_translation,
-            socket,
-        ) else {
+        let Some(socket_pose) = attachment_socket_pose(character_pose, socket) else {
             continue;
         };
         if let Some(stats) = submit_equipped_weapon::<
@@ -301,17 +320,7 @@ pub(super) fn draw_instance_equipment<
         };
         // Instances render without crossfades, so the socket samples
         // the same single clip the body draws with.
-        let Some(socket_pose) = attachment_socket_pose(
-            context.model,
-            context.anim,
-            context.phase,
-            None,
-            context.origin,
-            context.rotation,
-            context.local_to_world,
-            context.pose_translation,
-            socket,
-        ) else {
+        let Some(socket_pose) = attachment_socket_pose(context.pose, socket) else {
             continue;
         };
         let Some(stats) = submit_equipped_weapon::<
@@ -366,26 +375,10 @@ fn find_model_socket(
 }
 
 fn attachment_socket_pose(
-    _model: RuntimeModelAsset,
-    animation: Animation<'static>,
-    phase_q12: u32,
-    blend_from: Option<ModelPoseBlend<'static>>,
-    origin: WorldVertex,
-    instance_rotation: Mat3I16,
-    local_to_world: LocalToWorldScale,
-    pose_translation: ModelPoseTranslation,
+    pose: ActorPoseSnapshot,
     socket: &LevelModelSocketRecord,
 ) -> Option<AttachmentPose> {
-    let raw_pose = animation.pose_looped_q12(phase_q12, socket.joint)?;
-    // The socket must ride the same crossfaded pose the body renders
-    // with, or the held weapon visibly detaches from the hand mid-blend.
-    let raw_pose = match &blend_from {
-        Some(blend) => blend.blend_toward(raw_pose, socket.joint),
-        None => raw_pose,
-    };
-    let pose = apply_model_pose_translation(raw_pose, pose_translation);
-    let joint = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
-    let basis = compute_joint_world_basis(pose, instance_rotation);
+    let (joint, basis) = pose.joint_world_transform_and_basis(socket.joint)?;
     Some(compose_socket_pose(
         joint,
         basis,
