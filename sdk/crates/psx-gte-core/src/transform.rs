@@ -57,6 +57,51 @@ impl Mat3I16 {
         Self { m: out }
     }
 
+    /// Compose X, then Y, then Z rotations using the PS1 matrix convention.
+    ///
+    /// Angles use the same 256-per-revolution units as [`Self::rotate_x`].
+    /// The explicit order matters for camera/model transforms with more than
+    /// one non-zero Euler component.
+    #[inline]
+    pub fn rotate_xyz(x: u16, y: u16, z: u16) -> Self {
+        Self::rotate_x(x)
+            .mul(&Self::rotate_y(y))
+            .mul(&Self::rotate_z(z))
+    }
+
+    /// Scale matrix rows by independent Q12 factors.
+    ///
+    /// This matches the classic PS1 `ScaleMatrixL` convention: row 0 receives
+    /// X, row 1 receives Y, and row 2 receives Z. Results saturate like the
+    /// GTE IR registers instead of wrapping at `i16` boundaries.
+    pub fn scale_rows_q12(&self, scale: [i32; 3]) -> Self {
+        let mut out = self.m;
+        for row in 0..3 {
+            for col in 0..3 {
+                let value = ((self.m[row][col] as i64 * scale[row] as i64) >> 12)
+                    .clamp(i16::MIN as i64, i16::MAX as i64);
+                out[row][col] = value as i16;
+            }
+        }
+        Self { m: out }
+    }
+
+    /// Scale matrix columns by independent Q12 factors.
+    ///
+    /// This matches the classic PS1 `ScaleMatrix` convention: column 0
+    /// receives X, column 1 receives Y, and column 2 receives Z.
+    pub fn scale_columns_q12(&self, scale: [i32; 3]) -> Self {
+        let mut out = self.m;
+        for row in 0..3 {
+            for col in 0..3 {
+                let value = ((self.m[row][col] as i64 * scale[col] as i64) >> 12)
+                    .clamp(i16::MIN as i64, i16::MAX as i64);
+                out[row][col] = value as i16;
+            }
+        }
+        Self { m: out }
+    }
+
     /// Matrix × vector, with 1.3.12 scaling. Returns `i32` per
     /// component so the caller can inspect the un-saturated product
     /// (useful for normal generation / light calculations before
@@ -347,6 +392,53 @@ mod tests {
     #[test]
     fn rotate_y_zero_is_identity() {
         assert_eq!(Mat3I16::rotate_y(0), Mat3I16::IDENTITY);
+    }
+
+    #[test]
+    fn rotate_xyz_uses_x_then_y_then_z_order() {
+        let expected = Mat3I16::rotate_x(17)
+            .mul(&Mat3I16::rotate_y(39))
+            .mul(&Mat3I16::rotate_z(73));
+        assert_eq!(Mat3I16::rotate_xyz(17, 39, 73), expected);
+        assert_ne!(
+            Mat3I16::rotate_xyz(17, 39, 73),
+            Mat3I16::rotate_z(73)
+                .mul(&Mat3I16::rotate_y(39))
+                .mul(&Mat3I16::rotate_x(17))
+        );
+    }
+
+    #[test]
+    fn row_and_column_scaling_are_explicit_and_saturating() {
+        let matrix = Mat3I16 {
+            m: [
+                [0x1000, 0x0800, 0],
+                [0, 0x1000, 0x0400],
+                [0x0200, 0, 0x1000],
+            ],
+        };
+        assert_eq!(
+            matrix.scale_rows_q12([0x0800, 0x1000, 0x2000]).m,
+            [
+                [0x0800, 0x0400, 0],
+                [0, 0x1000, 0x0400],
+                [0x0400, 0, 0x2000]
+            ]
+        );
+        assert_eq!(
+            matrix.scale_columns_q12([0x0800, 0x1000, 0x2000]).m,
+            [
+                [0x0800, 0x0800, 0],
+                [0, 0x1000, 0x0800],
+                [0x0100, 0, 0x2000]
+            ]
+        );
+        assert_eq!(
+            Mat3I16::IDENTITY
+                .scale_rows_q12([i32::MAX, 0x1000, 0x1000])
+                .m[0][0],
+            i16::MAX
+        );
     }
 
     #[test]
