@@ -531,6 +531,10 @@ pub struct EditorWorkspace {
     /// click samples its logical material into the shared brush/resource
     /// selection, then automatically returns to painting.
     material_paint_sampling: bool,
+    /// Index into the active scene's brushes, when one is selected.
+    selected_brush: Option<usize>,
+    /// In-flight brush-create drag (Brush tool primary held).
+    brush_drag: Option<BrushDrag>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -1972,6 +1976,29 @@ impl ViewportCameraState {
         }
     }
 
+    /// Inverse of [`Self::ray_for_normalized_panel_point`]: project a
+    /// world position to normalized panel coordinates (`[-1, 1]`, centre
+    /// origin). `None` when at or behind the camera plane.
+    pub fn normalized_panel_point_for_world(self, world: [f32; 3]) -> Option<(f32, f32)> {
+        let basis = self.basis();
+        let v = [
+            world[0] - basis.position[0],
+            world[1] - basis.position[1],
+            world[2] - basis.position[2],
+        ];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let depth = dot(v, basis.forward);
+        if depth <= 1.0 {
+            return None;
+        }
+        let half_fov_x: f32 = 0.5;
+        let half_fov_y: f32 = 0.5 * 240.0 / 320.0;
+        Some((
+            dot(v, basis.right) / depth / half_fov_x,
+            -dot(v, basis.up) / depth / half_fov_y,
+        ))
+    }
+
     /// Build a world-space ray from normalized panel coordinates.
     ///
     /// `nx` and `ny` are in `[-1, 1]`, where `0, 0` is the panel
@@ -2018,6 +2045,17 @@ enum ViewTool {
     /// Drop a child entity node into the sector under the cursor.
     /// The kind of node placed is controlled by `place_kind`.
     Place,
+    /// Drag a world-space convex brush footprint on the ground plane;
+    /// click selects the nearest brush under the cursor.
+    Brush,
+}
+
+/// In-flight brush-create drag: press anchor and current corner on the
+/// ground plane, snapped world units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrushDrag {
+    pub(crate) anchor: [i32; 3],
+    pub(crate) current: [i32; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2152,6 +2190,7 @@ impl ViewTool {
             Self::Water => "Water",
             Self::Erase => "Erase",
             Self::Place => "Place",
+            Self::Brush => "Brush",
         }
     }
 
@@ -2165,6 +2204,7 @@ impl ViewTool {
             Self::Water => icons::BLEND,
             Self::Erase => icons::TRASH,
             Self::Place => icons::PLUS,
+            Self::Brush => icons::BOX,
         }
     }
 
@@ -2557,6 +2597,8 @@ impl EditorWorkspace {
             brush_material: None,
             material_paint_blend: false,
             material_paint_sampling: false,
+            selected_brush: None,
+            brush_drag: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
