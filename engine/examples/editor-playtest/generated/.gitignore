@@ -6,6 +6,9 @@
 # stays as a buildable placeholder with no references to these
 # ignored files.
 level_manifest.cooked.rs
+brush_manifest.cooked.rs
+brush_world.pxbsp
+brush_textures/*.psxt
 cdda_tracks.txt
 world_pack_order.txt
 ui_pack_order.txt

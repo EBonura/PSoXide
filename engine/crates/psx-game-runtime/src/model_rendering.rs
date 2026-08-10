@@ -1818,7 +1818,7 @@ mod tests {
     #[test]
     fn atlas_override_preserves_texture_binding_and_changes_optics() {
         let atlas = TextureMaterial::opaque(0x4321, 0x018F, (128, 128, 128))
-            .with_texture_window(TextureWindow::power_of_two_tile(64, 32, 128, 128));
+            .with_texture_window(TextureWindow::power_of_two_tile(128, 128, 128, 128));
         let mut override_record = override_record(model_override_blend::AVERAGE, 0);
         override_record.texture_asset = None;
         let material = model_override_atlas_material(atlas, override_record);
