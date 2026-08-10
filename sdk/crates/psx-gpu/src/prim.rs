@@ -372,6 +372,58 @@ impl TriTextured {
     }
 }
 
+/// Classic flat-tinted textured triangle without an inline GP0(E2)
+/// texture-window command. Renderers that keep one texture-window state for
+/// the whole pass can use this compact GP0(24h) packet. 8 words (tag + 7
+/// data).
+#[repr(C, align(4))]
+#[derive(Copy, Clone)]
+pub struct ClassicTriTextured {
+    /// Staged OT tag or final DMA linkage.
+    pub tag: u32,
+    /// GP0(24h) plus the flat tint.
+    pub color_cmd: u32,
+    /// Vertex-zero screen coordinate.
+    pub v0: u32,
+    /// Vertex-zero UV and CLUT.
+    pub uv0_clut: u32,
+    /// Vertex-one screen coordinate.
+    pub v1: u32,
+    /// Vertex-one UV and tpage.
+    pub uv1_tpage: u32,
+    /// Vertex-two screen coordinate.
+    pub v2: u32,
+    /// Vertex-two UV.
+    pub uv2: u32,
+}
+
+impl ClassicTriTextured {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 7;
+
+    /// Build a compact packet whose tag temporarily carries `ot_slot` for a
+    /// later tagged-stream OT linking pass.
+    pub const fn with_staged_slot(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        tint: u32,
+        clut: u16,
+        tpage: u16,
+        ot_slot: u16,
+    ) -> Self {
+        Self {
+            tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
+            color_cmd: 0x2400_0000 | (tint & 0x00ff_ffff),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: uv_words[0] as u32 | ((clut as u32) << 16),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: uv_words[1] as u32 | ((tpage as u32) << 16),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+        }
+    }
+}
+
 /// Textured **Gouraud-shaded** triangle. 11 words (tag + 10 data).
 ///
 /// Per-vertex tint: the GPU multiplies each texel by the
@@ -594,6 +646,226 @@ impl TriTexturedGouraud {
         self.color0_cmd = (self.color0_cmd & 0xFF00_0000) | pack_color(r0, g0, b0);
         self.color1 = pack_color(r1, g1, b1);
         self.color2 = pack_color(r2, g2, b2);
+    }
+}
+
+/// Classic textured Gouraud triangle without an inline GP0(E2) texture-window
+/// command. This is the compact GP0(34h) packet used by renderers that keep a
+/// single texture-window state for the whole pass. 10 words (tag + 9 data).
+#[repr(C, align(4))]
+#[derive(Copy, Clone)]
+pub struct ClassicTriTexturedGouraud {
+    /// Staged OT tag or final DMA linkage.
+    pub tag: u32,
+    /// GP0(34h) plus vertex-zero RGB.
+    pub color0_cmd: u32,
+    /// Vertex-zero screen coordinate.
+    pub v0: u32,
+    /// Vertex-zero UV and CLUT.
+    pub uv0_clut: u32,
+    /// Vertex-one RGB.
+    pub color1: u32,
+    /// Vertex-one screen coordinate.
+    pub v1: u32,
+    /// Vertex-one UV and tpage.
+    pub uv1_tpage: u32,
+    /// Vertex-two RGB.
+    pub color2: u32,
+    /// Vertex-two screen coordinate.
+    pub v2: u32,
+    /// Vertex-two UV.
+    pub uv2: u32,
+}
+
+impl ClassicTriTexturedGouraud {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 9;
+
+    /// Build a compact packet whose tag temporarily carries `ot_slot` for a
+    /// later [`crate::ot::OrderingTable::insert_tagged_packet_stream_unchecked`]
+    /// pass.
+    pub const fn with_staged_slot(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut: u16,
+        tpage: u16,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_material(
+            verts,
+            uv_words,
+            colors,
+            (clut as u32) << 16,
+            (tpage as u32) << 16,
+            ot_slot,
+        )
+    }
+
+    /// Build a staged compact packet from CLUT and tpage words that have
+    /// already been shifted into their GP0 high-halfword positions.
+    pub const fn with_staged_slot_prepacked_material(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self {
+            tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
+            color0_cmd: 0x3400_0000 | (colors[0] & 0x00ff_ffff),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: uv_words[0] as u32 | clut_high_word,
+            color1: colors[1] & 0x00ff_ffff,
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: uv_words[1] as u32 | tpage_high_word,
+            color2: colors[2] & 0x00ff_ffff,
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+        }
+    }
+
+    /// Build a staged packet without masking the supplied packet RGB words.
+    ///
+    /// # Safety
+    /// Every color must have its high byte clear. `clut_high_word` and
+    /// `tpage_high_word` must contain only their intended high halfwords.
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self {
+            tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
+            color0_cmd: 0x3400_0000 | colors[0],
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: uv_words[0] as u32 | clut_high_word,
+            color1: colors[1],
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: uv_words[1] as u32 | tpage_high_word,
+            color2: colors[2],
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+        }
+    }
+}
+
+/// Classic textured Gouraud quad without inline texture-window state. This
+/// is the compact GP0(3Ch) packet paired with
+/// [`ClassicTriTexturedGouraud`]. 13 words (tag + 12 data).
+#[repr(C, align(4))]
+#[derive(Copy, Clone)]
+pub struct ClassicQuadTexturedGouraud {
+    /// Staged OT tag or final DMA linkage.
+    pub tag: u32,
+    /// GP0(3Ch) plus vertex-zero RGB.
+    pub color0_cmd: u32,
+    /// Vertex-zero screen coordinate.
+    pub v0: u32,
+    /// Vertex-zero UV and CLUT.
+    pub uv0_clut: u32,
+    /// Vertex-one RGB.
+    pub color1: u32,
+    /// Vertex-one screen coordinate.
+    pub v1: u32,
+    /// Vertex-one UV and tpage.
+    pub uv1_tpage: u32,
+    /// Vertex-two RGB.
+    pub color2: u32,
+    /// Vertex-two screen coordinate.
+    pub v2: u32,
+    /// Vertex-two UV.
+    pub uv2: u32,
+    /// Vertex-three RGB.
+    pub color3: u32,
+    /// Vertex-three screen coordinate.
+    pub v3: u32,
+    /// Vertex-three UV.
+    pub uv3: u32,
+}
+
+impl ClassicQuadTexturedGouraud {
+    /// Data-word count after the tag.
+    pub const WORDS: u8 = 12;
+
+    /// Build a compact packet with a staged OT slot.
+    pub const fn with_staged_slot(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut: u16,
+        tpage: u16,
+        ot_slot: u16,
+    ) -> Self {
+        Self::with_staged_slot_prepacked_material(
+            verts,
+            uv_words,
+            colors,
+            (clut as u32) << 16,
+            (tpage as u32) << 16,
+            ot_slot,
+        )
+    }
+
+    /// Build a staged compact packet from CLUT and tpage words that have
+    /// already been shifted into their GP0 high-halfword positions.
+    pub const fn with_staged_slot_prepacked_material(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self {
+            tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
+            color0_cmd: 0x3c00_0000 | (colors[0] & 0x00ff_ffff),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: uv_words[0] as u32 | clut_high_word,
+            color1: colors[1] & 0x00ff_ffff,
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: uv_words[1] as u32 | tpage_high_word,
+            color2: colors[2] & 0x00ff_ffff,
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+            color3: colors[3] & 0x00ff_ffff,
+            v3: pack_vertex(verts[3].0, verts[3].1),
+            uv3: uv_words[3] as u32,
+        }
+    }
+
+    /// Build a staged packet without masking the supplied packet RGB words.
+    ///
+    /// # Safety
+    /// Every color must have its high byte clear. `clut_high_word` and
+    /// `tpage_high_word` must contain only their intended high halfwords.
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self {
+            tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
+            color0_cmd: 0x3c00_0000 | colors[0],
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: uv_words[0] as u32 | clut_high_word,
+            color1: colors[1],
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: uv_words[1] as u32 | tpage_high_word,
+            color2: colors[2],
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+            color3: colors[3],
+            v3: pack_vertex(verts[3].0, verts[3].1),
+            uv3: uv_words[3] as u32,
+        }
     }
 }
 
@@ -990,5 +1262,108 @@ mod tests {
         assert_eq!(words[11], pack_color(0xAA, 0xBB, 0xCC));
         assert_eq!(words[12], pack_vertex(10, 90));
         assert_eq!(words[13], 0x0240);
+    }
+
+    #[test]
+    fn classic_packets_omit_texture_window_and_stage_ot_slot() {
+        let tri = ClassicTriTexturedGouraud::with_staged_slot(
+            [(1, 2), (3, 4), (5, 6)],
+            [0x0201, 0x0403, 0x0605],
+            [0x0033_2211, 0x0066_5544, 0x0099_8877],
+            0x1234,
+            0x0105,
+            77,
+        );
+        assert_eq!(core::mem::size_of::<ClassicTriTexturedGouraud>(), 10 * 4);
+        assert_eq!(tri.tag, (9 << 24) | 77);
+        assert_eq!(tri.color0_cmd, 0x3433_2211);
+        assert_eq!(tri.uv0_clut, 0x1234_0201);
+        assert_eq!(tri.uv1_tpage, 0x0105_0403);
+
+        let quad = ClassicQuadTexturedGouraud::with_staged_slot(
+            [(1, 2), (3, 4), (5, 6), (7, 8)],
+            [0x0201, 0x0403, 0x0605, 0x0807],
+            [0x0033_2211, 0x0066_5544, 0x0099_8877, 0x00cc_bbaa],
+            0x1234,
+            0x0105,
+            88,
+        );
+        assert_eq!(core::mem::size_of::<ClassicQuadTexturedGouraud>(), 13 * 4);
+        assert_eq!(quad.tag, (12 << 24) | 88);
+        assert_eq!(quad.color0_cmd, 0x3c33_2211);
+        assert_eq!(quad.uv3, 0x0807);
+    }
+
+    #[test]
+    fn classic_unchecked_packets_match_checked_packets_for_valid_words() {
+        let tri_verts = [(1, 2), (3, 4), (5, 6)];
+        let tri_uvs = [0x0201, 0x0403, 0x0605];
+        let tri_colors = [0x0033_2211, 0x0066_5544, 0x0099_8877];
+        let checked_tri = ClassicTriTexturedGouraud::with_staged_slot_prepacked_material(
+            tri_verts,
+            tri_uvs,
+            tri_colors,
+            0x1234_0000,
+            0x0105_0000,
+            77,
+        );
+        let unchecked_tri = unsafe {
+            ClassicTriTexturedGouraud::with_staged_slot_prepacked_unchecked(
+                tri_verts,
+                tri_uvs,
+                tri_colors,
+                0x1234_0000,
+                0x0105_0000,
+                77,
+            )
+        };
+        let checked_tri_words = unsafe {
+            core::slice::from_raw_parts(
+                (&raw const checked_tri).cast::<u32>(),
+                core::mem::size_of::<ClassicTriTexturedGouraud>() / core::mem::size_of::<u32>(),
+            )
+        };
+        let unchecked_tri_words = unsafe {
+            core::slice::from_raw_parts(
+                (&raw const unchecked_tri).cast::<u32>(),
+                core::mem::size_of::<ClassicTriTexturedGouraud>() / core::mem::size_of::<u32>(),
+            )
+        };
+        assert_eq!(checked_tri_words, unchecked_tri_words);
+
+        let quad_verts = [(1, 2), (3, 4), (5, 6), (7, 8)];
+        let quad_uvs = [0x0201, 0x0403, 0x0605, 0x0807];
+        let quad_colors = [0x0033_2211, 0x0066_5544, 0x0099_8877, 0x00cc_bbaa];
+        let checked_quad = ClassicQuadTexturedGouraud::with_staged_slot_prepacked_material(
+            quad_verts,
+            quad_uvs,
+            quad_colors,
+            0x1234_0000,
+            0x0105_0000,
+            88,
+        );
+        let unchecked_quad = unsafe {
+            ClassicQuadTexturedGouraud::with_staged_slot_prepacked_unchecked(
+                quad_verts,
+                quad_uvs,
+                quad_colors,
+                0x1234_0000,
+                0x0105_0000,
+                88,
+            )
+        };
+        let checked_quad_words = unsafe {
+            core::slice::from_raw_parts(
+                (&raw const checked_quad).cast::<u32>(),
+                core::mem::size_of::<ClassicQuadTexturedGouraud>() / core::mem::size_of::<u32>(),
+            )
+        };
+        let unchecked_quad_words = unsafe {
+            core::slice::from_raw_parts(
+                (&raw const unchecked_quad).cast::<u32>(),
+                core::mem::size_of::<ClassicQuadTexturedGouraud>() / core::mem::size_of::<u32>(),
+            )
+        };
+        assert_eq!(checked_quad_words, unchecked_quad_words);
     }
 }
