@@ -58,6 +58,7 @@ pub mod angle;
 pub mod app;
 pub mod character_motor;
 pub mod classic_affine;
+pub mod collision_query;
 pub mod fixed;
 mod floor_sample;
 pub mod frames;
@@ -96,6 +97,10 @@ pub use classic_affine::{
     ClassicAffineSourceVertex, ClassicAffineSubmit, ClassicAffineVertex,
     ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
     ClassicAliasProjectedVertex, ClassicAliasVertex,
+};
+pub use collision_query::{
+    trace_collision, CollisionQueryError, CollisionTrace, CollisionTraceProvider,
+    CollisionTraceQuery, CollisionTraceShape, COLLISION_FRACTION_ONE_Q12,
 };
 pub use fixed::{div_q12_i32, Q12, Q8};
 pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};
