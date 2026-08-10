@@ -3,7 +3,7 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    EntityRecord, EquipmentRecord, FlowState, GameFlow, InteractableMessageRecord,
+    AssetId, CombatCapsuleRecord, EntityRecord, EquipmentRecord, FlowState, GameFlow, InteractableMessageRecord,
     InteractableRecord, LevelAssetRecord, LevelBoxPropRecord, LevelBoxPropSurfaceRecord,
     LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelArchPropCollisionRecord,
     LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelCachedRoomCellRecord,
@@ -24,6 +24,11 @@ pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = 0;
 pub const WORLD_STREAM_SLOT_COUNT: usize = 1;
 pub const WORLD_RESIDENT_PAGE_COUNT: usize = 1;
 pub const PERSISTENT_ASSET_SLOT_COUNT: usize = 1;
+pub const UI_PACK_MAX_CHUNK_BYTES: usize = 0;
+pub const UI_PACK_IMAGE_CACHE_SLOTS: usize = 1;
+pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = 0;
+pub const UI_PACK_START_LBA: u32 = 1024;
+pub static UI_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
 
 pub const BOX_PROP_STATE_COUNT: usize = 1;
 pub const PERSISTENT_ASSET_PAGE_COUNT: usize = 1;
@@ -51,6 +56,7 @@ pub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];
 pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];
 pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];
 pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[];
+pub static ROOM_REFLECTION_PROBES: &[Option<AssetId>] = &[];
 
 pub static PLAYER_SPAWN: PlayerSpawnRecord = PlayerSpawnRecord {
     room: RoomIndex(0),
@@ -100,3 +106,17 @@ pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[];
 pub static CHARACTERS: &[LevelCharacterRecord] = &[];
 pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;
 pub static ENTITIES: &[EntityRecord] = &[];
+pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[];
+pub const LOADING_UI_SCENE: u16 = psx_level::UI_SCENE_NONE;
+
+macro_rules! draw_project_cached_room {
+    (
+        $lighting:expr,
+        $draw:path,
+        [$($before:expr),* $(,)?],
+        [$($after:expr),* $(,)?]
+    ) => {
+        $draw($($before,)* $lighting, false, $($after,)*)
+    };
+}
+pub(crate) use draw_project_cached_room;

@@ -92,6 +92,7 @@ ot-2048 = []
 
 [dependencies]
 psx-asset  = { path = "../../../sdk/crates/psx-asset" }
+psx-bsp    = { path = "../../crates/psx-bsp" }
 psx-engine = { path = "../../crates/psx-engine" }
 psx-game-runtime = { path = "../../crates/psx-game-runtime" }
 psx-font   = { path = "../../../sdk/crates/psx-font" }
@@ -100,5 +101,6 @@ psx-gte    = { path = "../../../sdk/crates/psx-gte" }
 psx-io     = { path = "../../../sdk/crates/psx-io", optional = true }
 psx-level  = { path = "../../crates/psx-level" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
-psx-rt     = { path = "../../../sdk/crates/psx-rt" }
+psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc"] }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
+psxed-format = { path = "../../../editor/crates/psxed-format" }

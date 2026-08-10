@@ -152,14 +152,30 @@ pub fn configure_projection() {
 
 /// Build and load the classic XBSP camera transform.
 pub fn load_view(camera: Camera) -> ViewTransform {
+    load_view_with_coordinates(
+        camera,
+        Mat3I16 {
+            m: [[0, -0x3000, 0], [0, 0, -0x3000], [0x3000, 0, 0]],
+        },
+    )
+}
+
+/// Build and load the Y-up camera transform used by PSoXide brush worlds.
+pub fn load_pxbsp_view(camera: Camera) -> ViewTransform {
+    load_view_with_coordinates(
+        camera,
+        Mat3I16 {
+            m: [[0, 0, -0x3000], [0, -0x3000, 0], [0x3000, 0, 0]],
+        },
+    )
+}
+
+fn load_view_with_coordinates(camera: Camera, coordinates: Mat3I16) -> ViewTransform {
     let view = Mat3I16::rotate_xyz(
         (camera.angles[0] as u16) >> 4,
         (camera.angles[1] as u16) >> 4,
         (camera.angles[2] as u16) >> 4,
     );
-    let coordinates = Mat3I16 {
-        m: [[0, -0x3000, 0], [0, 0, -0x3000], [0x3000, 0, 0]],
-    };
     let rotation = scene::compose_rotation_scheduled(&view, &coordinates);
     scene::load_rotation(&rotation);
     scene::load_translation(GteVec3I32::ZERO);
@@ -1275,6 +1291,30 @@ mod tests {
     use crate::SliceReader;
 
     #[test]
+    fn pxbsp_view_projects_y_up_and_turns_toward_positive_z() {
+        psx_gte::host::reset();
+        configure_projection();
+        load_pxbsp_view(Camera {
+            origin: Vec3I32::default(),
+            angles: [0; 3],
+        });
+        let centered = scene::project_vertex(GteVec3I16::new(128, 0, 0));
+        let above = scene::project_vertex(GteVec3I16::new(128, 64, 0));
+        let positive_z = scene::project_vertex(GteVec3I16::new(128, 0, 64));
+        assert_eq!((centered.sx, centered.sy), (160, 120));
+        assert!(above.sy < centered.sy);
+        assert!(positive_z.sx < centered.sx);
+
+        load_pxbsp_view(Camera {
+            origin: Vec3I32::default(),
+            angles: [0, 1024, 0],
+        });
+        let turned = scene::project_vertex(GteVec3I16::new(0, 0, 128));
+        assert_eq!((turned.sx, turned.sy), (160, 120));
+        assert!(turned.sz > 0);
+    }
+
+    #[test]
     fn rejects_zero_length_visibility_runs() {
         let mut output = [0xff; 2];
         assert!(!decompress_visibility(&[0, 0], 0, &mut output));
@@ -1396,7 +1436,7 @@ mod tests {
         let frame = renderer.draw_pxbsp_world(
             &map,
             camera,
-            load_view(camera),
+            load_pxbsp_view(camera),
             &[Some(binding)],
             0,
             &mut packets,
@@ -1468,7 +1508,7 @@ mod tests {
                 1,
                 transform,
                 camera,
-                load_view(camera),
+                load_pxbsp_view(camera),
                 &[Some(binding)],
                 0,
                 &mut packets,
@@ -1484,7 +1524,7 @@ mod tests {
                 2,
                 transform,
                 camera,
-                load_view(camera),
+                load_pxbsp_view(camera),
                 &[Some(binding)],
                 0,
                 &mut packets,
