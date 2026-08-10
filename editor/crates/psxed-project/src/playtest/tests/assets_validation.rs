@@ -337,6 +337,33 @@ fn cook_to_dir_purges_stale_assets() {
 }
 
 #[test]
+fn repeated_brush_cook_replaces_generated_output_for_the_selected_mode() {
+    let root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+    let mut project = ProjectDocument::load_from_path(root.join("project.ron"))
+        .expect("brush first-playable project");
+    let dir = unique_temp_dir("psxed-playtest-repeat-brush");
+
+    project.bsp_cook_mode = crate::brush_world::BrushWorldCookMode::Draft;
+    let draft_report = cook_to_dir(&project, &root, &dir).expect("Draft cook IO");
+    assert!(draft_report.is_ok(), "{draft_report:?}");
+    let draft =
+        std::fs::read(dir.join(crate::brush_playtest::BRUSH_WORLD_FILENAME)).expect("Draft PXBSP");
+
+    project.bsp_cook_mode = crate::brush_world::BrushWorldCookMode::Release;
+    let release_report = cook_to_dir(&project, &root, &dir).expect("Release cook IO");
+    assert!(release_report.is_ok(), "{release_report:?}");
+    let release = std::fs::read(dir.join(crate::brush_playtest::BRUSH_WORLD_FILENAME))
+        .expect("Release PXBSP");
+    let manifest =
+        std::fs::read_to_string(dir.join(COOKED_MANIFEST_FILENAME)).expect("refreshed manifest");
+
+    assert_ne!(draft, release, "re-Play must not reuse the Draft PXBSP");
+    assert!(manifest.contains("pub const BSP_COOK_IS_RELEASE: bool = true;"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn failed_cook_removes_stale_cooked_manifest() {
     let mut project = ProjectDocument::starter();
     demote_player_spawns(&mut project);

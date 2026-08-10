@@ -619,6 +619,9 @@ pub struct EditorWorkspace {
     import_retired_textures: Vec<(u8, egui::TextureHandle)>,
     dirty: bool,
     status: String,
+    /// Most recent host-side PSX envelope. Before a successful cook this is
+    /// the authored estimate; after it, the exact emitted-package report.
+    last_playtest_budget: Option<psxed_project::playtest::PlaytestBudgetReport>,
     /// One-shot request emitted by the editor UI for the frontend
     /// to handle. The frontend owns emulator state and build child
     /// processes, so the editor never launches playtest directly.
@@ -1546,7 +1549,11 @@ enum Modal {
     None,
     /// File → New Project. Carries the live-edited name and the last
     /// submit error, if any.
-    NewProject { name: String, error: Option<String> },
+    NewProject {
+        name: String,
+        cook_mode: psxed_project::brush_world::BrushWorldCookMode,
+        error: Option<String>,
+    },
     /// Delete the current project. Carries the last delete error, if any.
     DeleteProject { error: Option<String> },
 }
@@ -2736,6 +2743,7 @@ impl EditorWorkspace {
             import_retired_textures: Vec::new(),
             dirty: false,
             status: "Editor ready".to_string(),
+            last_playtest_budget: None,
             pending_playtest_request: None,
         }
     }
@@ -2853,6 +2861,22 @@ impl EditorWorkspace {
     /// Current project document.
     pub fn project(&self) -> &ProjectDocument {
         &self.project
+    }
+
+    /// Change the project-authoritative BSP cook policy used by Build, Play,
+    /// Rebuild, and the CLI cooker after the project is saved.
+    pub fn set_bsp_cook_mode(&mut self, mode: psxed_project::brush_world::BrushWorldCookMode) {
+        if self.project.bsp_cook_mode != mode {
+            self.project.bsp_cook_mode = mode;
+            self.last_playtest_budget = None;
+            self.mark_dirty();
+        }
+    }
+
+    /// Exact post-cook report, or the most recent pre-cook estimate when the
+    /// cook failed before producing a package.
+    pub fn playtest_budget_report(&self) -> Option<&psxed_project::playtest::PlaytestBudgetReport> {
+        self.last_playtest_budget.as_ref()
     }
 
     /// Directory containing this project on disk.
@@ -2990,6 +3014,18 @@ impl EditorWorkspace {
     /// already exist. On success the workspace points at the new project; on
     /// failure the workspace is unchanged.
     pub fn create_and_open_project(&mut self, name: &str) -> Result<(), String> {
+        self.create_and_open_project_with_mode(
+            name,
+            psxed_project::brush_world::BrushWorldCookMode::Draft,
+        )
+    }
+
+    /// New Project variant used by the dialog's explicit BSP quality choice.
+    pub fn create_and_open_project_with_mode(
+        &mut self,
+        name: &str,
+        cook_mode: psxed_project::brush_world::BrushWorldCookMode,
+    ) -> Result<(), String> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
             return Err("Project name cannot be empty".to_string());
@@ -3002,6 +3038,7 @@ impl EditorWorkspace {
             .map_err(|error| format!("copy BSP starter project: {error}"))?;
         let mut opened = Self::open_directory(&target)?;
         opened.project.name = trimmed.to_string();
+        opened.project.bsp_cook_mode = cook_mode;
         opened.mark_dirty();
         opened.save()?;
         // New BSP maps open where blockout work begins: the top orthographic
@@ -3440,9 +3477,19 @@ impl EditorWorkspace {
     /// hands back the exact command to run.
     pub fn cook_playtest_to_disk(&mut self) -> Result<String, String> {
         let dir = psxed_project::playtest::default_generated_dir();
+        self.cook_playtest_to_dir(&dir)
+    }
+
+    /// Same cook as [`Self::cook_playtest_to_disk`], with an explicit output
+    /// directory for deterministic tests and host integrations.
+    pub fn cook_playtest_to_dir(&mut self, dir: &Path) -> Result<String, String> {
         let mut project = self.project.clone();
         project.normalize_loaded();
         self.clear_validation_issues();
+        self.last_playtest_budget = Some(psxed_project::playtest::estimate_playtest_budgets(
+            &project,
+            &self.project_dir,
+        ));
         // Build once: Cortex-sized projects have enough materials, animation,
         // world geometry, and portal topology that doing this again merely for
         // the status summary makes every Play launch needlessly expensive.
@@ -3461,8 +3508,13 @@ impl EditorWorkspace {
                 .and_then(|pc| p.characters.get(pc.character as usize))
                 .and_then(|c| project.resource(c.source_resource).map(|r| r.name.clone())),
         });
+        if let Some(package) = package.as_ref() {
+            self.last_playtest_budget = Some(psxed_project::playtest::cooked_playtest_budgets(
+                &project, package,
+            ));
+        }
 
-        psxed_project::playtest::write_cook_result(package.as_ref(), &dir)
+        psxed_project::playtest::write_cook_result(package.as_ref(), dir)
             .map_err(|e| format!("write playtest output: {e}"))?;
         if !report.is_ok() {
             if !report
@@ -3514,11 +3566,27 @@ impl EditorWorkspace {
                 )
             })
             .unwrap_or_default();
+        let budget = self
+            .last_playtest_budget
+            .as_ref()
+            .map(|budget| format!("; {}", budget.concise_summary()))
+            .unwrap_or_default();
+        let budget_issue = self
+            .last_playtest_budget
+            .as_ref()
+            .and_then(|budget| budget.first_actionable_issue())
+            .cloned();
+        if let Some(issue) = budget_issue {
+            if let Some(target) = issue.target {
+                let _ = self.focus_playtest_validation_target(target);
+            }
+        }
         Ok(format!(
-            "Playtest cooked → {}{}{}",
+            "Playtest cooked → {}{}{}{}",
             dir.display(),
             counts,
             warning_suffix,
+            budget,
         ))
     }
 

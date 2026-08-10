@@ -51,7 +51,12 @@ impl EditorWorkspace {
     /// [`Self::create_and_open_project`] and re-targets the
     /// workspace at the new directory.
     pub(crate) fn draw_new_project_dialog(&mut self, ctx: &egui::Context) {
-        let Modal::NewProject { name, error } = &mut self.modal else {
+        let Modal::NewProject {
+            name,
+            cook_mode,
+            error,
+        } = &mut self.modal
+        else {
             return;
         };
         let mut close = false;
@@ -71,6 +76,17 @@ impl EditorWorkspace {
                 };
                 ui.label(
                     RichText::new(format!("→ editor/projects/{}/", preview_stem))
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
+                ui.add_space(8.0);
+                ui.label("BSP cook quality");
+                for mode in psxed_project::brush_world::BrushWorldCookMode::ALL {
+                    ui.radio_value(cook_mode, mode, mode.label())
+                        .on_hover_text(mode.description());
+                }
+                ui.label(
+                    RichText::new(cook_mode.description())
                         .color(STUDIO_TEXT_WEAK)
                         .small(),
                 );
@@ -94,9 +110,13 @@ impl EditorWorkspace {
                 }
             });
         if submit {
-            if let Modal::NewProject { name, .. } = &self.modal {
+            if let Modal::NewProject {
+                name, cook_mode, ..
+            } = &self.modal
+            {
                 let name = name.clone();
-                match self.create_and_open_project(&name) {
+                let cook_mode = *cook_mode;
+                match self.create_and_open_project_with_mode(&name, cook_mode) {
                     Ok(()) => self.modal = Modal::None,
                     Err(error) => {
                         if let Modal::NewProject { error: slot, .. } = &mut self.modal {

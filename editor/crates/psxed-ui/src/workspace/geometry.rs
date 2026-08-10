@@ -2134,6 +2134,7 @@ impl EditorWorkspace {
     pub(crate) fn open_new_project_dialog(&mut self) {
         self.modal = Modal::NewProject {
             name: String::new(),
+            cook_mode: psxed_project::brush_world::BrushWorldCookMode::Draft,
             error: None,
         };
     }
@@ -2286,6 +2287,10 @@ impl EditorWorkspace {
 
     pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
+        // Any authoring change makes the exact last-cook numbers stale. The
+        // Play menu immediately falls back to a fresh authored estimate until
+        // Build/Play replaces it with another exact package report.
+        self.last_playtest_budget = None;
         self.clear_validation_issues();
     }
 
