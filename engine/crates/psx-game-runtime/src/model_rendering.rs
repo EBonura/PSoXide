@@ -945,12 +945,63 @@ pub fn draw_player<
     ) else {
         return PlayerModelDrawStats::default();
     };
+    draw_player_from_pose::<MODEL_VERTEX_CAP, JOINT_CAP, OT_DEPTH, BOUNDS_CULL, PROFILE>(
+        tables,
+        knobs,
+        scratch,
+        character,
+        player_pose,
+        model_faces,
+        model_parts,
+        model_vertices,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        room_reflection_probe,
+        resolve_override_texture,
+        triangles,
+        world,
+    )
+}
+
+/// Draw the player body from a pose already resolved by the gameplay tick.
+///
+/// Pair this with [`draw_player_equipment_from_pose`] so body, weapon sockets,
+/// and combat all consume one [`PlayerActorPoseSnapshot`].
+#[allow(clippy::too_many_arguments)]
+pub fn draw_player_from_pose<
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const BOUNDS_CULL: bool,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    character: RuntimeCharacter,
+    player_pose: PlayerActorPoseSnapshot,
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    room_reflection_probe: Option<VramSlot>,
+    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> PlayerModelDrawStats {
     let runtime_model = player_pose.model();
     let actor_pose = player_pose.pose();
     let anim = actor_pose.animation();
     let phase = actor_pose.phase_q12();
     let blend_from = actor_pose.blend_from();
-    let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
+    let bounds = model_frame_bounds(tables, runtime_model, player_pose.clip_local(), phase);
     let pose_translation = actor_pose.pose_translation();
     let model_rotation = actor_pose.rotation();
     let origin = actor_pose.origin();
@@ -1288,6 +1339,66 @@ pub fn draw_player_equipment<
         clip_local,
         anim_start_tick,
         blend,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        triangles,
+        world,
+    )
+}
+
+/// Draw player equipment from a pose already resolved by the gameplay tick.
+///
+/// This is the snapshot-driven counterpart to [`draw_player_equipment`]. Use
+/// the same [`PlayerActorPoseSnapshot`] with [`draw_player_from_pose`] and
+/// [`crate::combat::transform_actor_combat_capsule`] to keep every consumer on
+/// one animation sample and presentation transform.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn draw_player_equipment_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    player_pose: PlayerActorPoseSnapshot,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    equipment::draw_player_equipment_from_pose::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        PROFILE,
+    >(
+        tables,
+        knobs,
+        scratch,
+        player_pose,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
         elapsed_tick,
         video_hz,
         camera,
