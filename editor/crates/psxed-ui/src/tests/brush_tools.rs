@@ -428,6 +428,134 @@ fn brush_tool_zero_area_drag_commits_nothing() {
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 0);
 }
 
+fn solved_unique_verts(brush: &psxed_project::brush::Brush) -> Vec<[i64; 3]> {
+    let mut verts: Vec<[i64; 3]> = brush
+        .solve()
+        .polygons
+        .iter()
+        .flatten()
+        .flat_map(|polygon| polygon.verts.iter())
+        .map(|v| [v[0].round() as i64, v[1].round() as i64, v[2].round() as i64])
+        .collect();
+    verts.sort_unstable();
+    verts.dedup();
+    verts
+}
+
+#[test]
+fn vertex_mode_corner_drag_reshapes_footprint() {
+    let mut harness = ViewportHarness::floored_room("brush_vertex_drag", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.selection_mode = SelectionMode::Vertex;
+    harness.workspace.set_orthographic_view(OrthographicView::Top);
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    harness.workspace.selected_brush = Some(0);
+
+    // Grab the projected (x=128, z=128) corner column and drag it to
+    // x=64: the +X wall tilts and the footprint becomes a trapezoid.
+    assert!(harness
+        .workspace
+        .begin_brush_vertex_drag_2d([127.0, 126.0], 4.0));
+    let drag = harness.workspace.brush_vertex_drag.clone().expect("drag");
+    assert_eq!(drag.targets.len(), 2, "corner grabs its depth column");
+    harness.workspace.update_brush_vertex_drag_2d([63.0, 126.0]);
+    harness.workspace.commit_brush_gesture_2d();
+
+    let verts = solved_unique_verts(&harness.workspace.project.active_scene().brushes[0]);
+    assert!(verts.contains(&[64, 0, 128]), "corner moved at floor");
+    assert!(verts.contains(&[64, 128, 128]), "corner moved at ceiling");
+    assert!(verts.contains(&[128, 0, 0]), "other corners untouched");
+    assert!(harness.workspace.brush_vertex_drag.is_none());
+    assert!(harness.workspace.is_dirty());
+
+    // The whole drag is one undo step.
+    harness.workspace.do_undo();
+    let verts = solved_unique_verts(&harness.workspace.project.active_scene().brushes[0]);
+    assert!(verts.contains(&[128, 0, 128]), "undo restores the cube");
+}
+
+#[test]
+fn edge_mode_silhouette_drag_slides_whole_side() {
+    let mut harness = ViewportHarness::floored_room("brush_edge_drag", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.selection_mode = SelectionMode::Edge;
+    harness.workspace.set_orthographic_view(OrthographicView::Top);
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    harness.workspace.selected_brush = Some(0);
+
+    // Grab the +X silhouette edge (projected segment x=128, z 0..128)
+    // near its midpoint: both endpoint columns move together, which
+    // slides the whole side without tilting it.
+    assert!(harness
+        .workspace
+        .begin_brush_edge_drag_2d([126.0, 64.0], 4.0));
+    let drag = harness.workspace.brush_vertex_drag.clone().expect("drag");
+    assert_eq!(drag.targets.len(), 4, "edge grabs both depth columns");
+    harness.workspace.update_brush_vertex_drag_2d([158.0, 64.0]);
+    harness.workspace.commit_brush_gesture_2d();
+
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.max[0], 160.0, "side slid out to the snapped drop");
+    assert_eq!(solved.min, [0.0, 0.0, 0.0]);
+    assert_eq!(solved.max[1], 128.0);
+    assert_eq!(solved.max[2], 128.0);
+}
+
+#[test]
+fn vertex_drag_refuses_invalid_shapes_and_escape_cancels() {
+    let mut harness = ViewportHarness::floored_room("brush_vertex_invalid", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.selection_mode = SelectionMode::Edge;
+    harness.workspace.set_orthographic_view(OrthographicView::Top);
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
+    harness.workspace.selected_brush = Some(0);
+    let original = harness.workspace.project.active_scene().brushes[0].clone();
+
+    // Dragging the +X side past the -X plane would invert the brush:
+    // the preview refuses to advance and the commit records nothing.
+    assert!(harness.workspace.begin_brush_edge_drag_2d([63.0, 32.0], 4.0));
+    harness.workspace.update_brush_vertex_drag_2d([-130.0, 32.0]);
+    harness.workspace.commit_brush_gesture_2d();
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0], original,
+        "invalid preview never lands"
+    );
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.status, "Nothing to undo");
+
+    // Escape mid-drag restores the base shape.
+    assert!(harness.workspace.begin_brush_edge_drag_2d([63.0, 32.0], 4.0));
+    harness.workspace.update_brush_vertex_drag_2d([95.0, 32.0]);
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.max[0], 96.0, "preview applied while dragging");
+    harness.workspace.cancel_brush_gestures();
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0], original,
+        "cancel restores the pre-drag brush"
+    );
+}
+
 #[test]
 fn brush_numeric_origin_and_face_plane_edits() {
     let mut harness = ViewportHarness::floored_room("brush_numeric", 4);

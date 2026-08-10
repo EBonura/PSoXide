@@ -268,7 +268,8 @@ impl EditorWorkspace {
     }
 
     /// Cancel every in-flight brush gesture: the create drag, a pending
-    /// clip point, and live extrude/move previews (restoring their base).
+    /// clip point, and live extrude/move/vertex previews (restoring
+    /// their base).
     pub(crate) fn cancel_brush_gestures(&mut self) {
         self.brush_drag = None;
         self.brush_clip_start = None;
@@ -285,6 +286,11 @@ impl EditorWorkspace {
         if let Some(mv) = self.brush_move.take() {
             if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(mv.index) {
                 *slot = mv.base;
+            }
+        }
+        if let Some(drag) = self.brush_vertex_drag.take() {
+            if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(drag.index) {
+                *slot = drag.base;
             }
         }
     }
@@ -1061,6 +1067,165 @@ impl EditorWorkspace {
         }
     }
 
+    /// Unique solved vertices of the selected brush, world f64 (welded
+    /// within half a unit; authored geometry is integer).
+    fn selected_brush_solved_verts(&self) -> Option<(usize, Vec<[f64; 3]>)> {
+        let index = self.selected_brush?;
+        let brush = self.project.active_scene().brushes.get(index)?;
+        let solved = brush.solve();
+        if !solved.is_valid() {
+            return None;
+        }
+        let mut verts: Vec<[f64; 3]> = Vec::new();
+        for vert in solved.polygons.iter().flatten().flat_map(|p| p.verts.iter()) {
+            if !verts
+                .iter()
+                .any(|seen| (0..3).all(|axis| (seen[axis] - vert[axis]).abs() <= 0.5))
+            {
+                verts.push(*vert);
+            }
+        }
+        Some((index, verts))
+    }
+
+    /// Every solved vertex whose projection sits on `projected` (the
+    /// whole depth column behind one on-screen corner).
+    fn brush_vertex_column(
+        view: OrthographicView,
+        verts: &[[f64; 3]],
+        projected: [f64; 2],
+    ) -> Vec<[f64; 3]> {
+        verts
+            .iter()
+            .copied()
+            .filter(|vert| {
+                let p = view.project_f64(*vert);
+                (p[0] - projected[0]).abs() <= 0.5 && (p[1] - projected[1]).abs() <= 0.5
+            })
+            .collect()
+    }
+
+    /// Vertex mode entry: grab the selected brush's projected corner
+    /// nearest `world` (within `tolerance` world units) and start
+    /// dragging its depth column. `false` when nothing is close enough.
+    pub(crate) fn begin_brush_vertex_drag_2d(&mut self, world: [f32; 2], tolerance: f32) -> bool {
+        let Some((index, verts)) = self.selected_brush_solved_verts() else {
+            return false;
+        };
+        let view = self.orthographic_view;
+        let point = world.map(f64::from);
+        let tolerance2 = f64::from(tolerance.max(0.0)).powi(2);
+        let mut best: Option<(f64, [f64; 2])> = None;
+        for vert in &verts {
+            let projected = view.project_f64(*vert);
+            let d2 = (projected[0] - point[0]).powi(2) + (projected[1] - point[1]).powi(2);
+            if d2 <= tolerance2 && best.is_none_or(|(best_d2, _)| d2 < best_d2) {
+                best = Some((d2, projected));
+            }
+        }
+        let Some((_, projected)) = best else {
+            return false;
+        };
+        let targets = Self::brush_vertex_column(view, &verts, projected);
+        self.start_brush_vertex_drag(index, targets, world);
+        true
+    }
+
+    /// Edge mode entry: grab the selected brush's projected edge nearest
+    /// `world` and drag both endpoint columns together.
+    pub(crate) fn begin_brush_edge_drag_2d(&mut self, world: [f32; 2], tolerance: f32) -> bool {
+        let Some((index, verts)) = self.selected_brush_solved_verts() else {
+            return false;
+        };
+        let view = self.orthographic_view;
+        let point = world.map(f64::from);
+        let tolerance2 = f64::from(tolerance.max(0.0)).powi(2);
+        let solved = self.project.active_scene().brushes[index].solve();
+        let mut best: Option<(f64, [f64; 2], [f64; 2])> = None;
+        for polygon in solved.polygons.iter().flatten() {
+            let count = polygon.verts.len();
+            for i in 0..count {
+                let a = view.project_f64(polygon.verts[i]);
+                let b = view.project_f64(polygon.verts[(i + 1) % count]);
+                let d2 = point_segment_distance2(point, a, b);
+                if d2 <= tolerance2 && best.is_none_or(|(best_d2, _, _)| d2 < best_d2) {
+                    best = Some((d2, a, b));
+                }
+            }
+        }
+        let Some((_, a, b)) = best else {
+            return false;
+        };
+        let mut targets = Self::brush_vertex_column(view, &verts, a);
+        for vert in Self::brush_vertex_column(view, &verts, b) {
+            if !targets
+                .iter()
+                .any(|seen| (0..3).all(|axis| (seen[axis] - vert[axis]).abs() <= 0.5))
+            {
+                targets.push(vert);
+            }
+        }
+        self.start_brush_vertex_drag(index, targets, world);
+        true
+    }
+
+    fn start_brush_vertex_drag(&mut self, index: usize, targets: Vec<[f64; 3]>, world: [f32; 2]) {
+        let base = self.project.active_scene().brushes[index].clone();
+        self.selected_brush = Some(index);
+        self.brush_vertex_drag = Some(BrushVertexDrag {
+            index,
+            base,
+            targets,
+            press_ground: self
+                .orthographic_view
+                .unproject(world, self.orthographic_focus),
+            applied: [0; 3],
+        });
+    }
+
+    /// Advance the vertex/edge drag: snapped in-plane delta applied to
+    /// every grabbed vertex's authored points. Previews that stop the
+    /// brush enclosing volume are refused (the last valid preview holds).
+    pub(crate) fn update_brush_vertex_drag_2d(&mut self, world: [f32; 2]) {
+        let Some(drag) = self.brush_vertex_drag.clone() else {
+            return;
+        };
+        let current = self
+            .orthographic_view
+            .unproject(world, self.orthographic_focus);
+        let step = self.snap_units.max(1) as f32;
+        let snap = |value: f32| ((value / step).round() * step) as i32;
+        let mut applied = [0; 3];
+        for axis in self.orthographic_view.plane_axes() {
+            applied[axis] = snap(current[axis] - drag.press_ground[axis]);
+        }
+        if applied == drag.applied {
+            return;
+        }
+        let mut preview = drag.base.clone();
+        let moved = preview.translate_points_near(&drag.targets, applied, 0.5);
+        if moved > 0 && preview.solve().is_valid() {
+            self.project.active_scene_mut().brushes[drag.index] = preview;
+            if let Some(state) = self.brush_vertex_drag.as_mut() {
+                state.applied = applied;
+            }
+        }
+    }
+
+    fn commit_brush_vertex_drag_preview(&mut self) -> bool {
+        let Some(drag) = self.brush_vertex_drag.take() else {
+            return false;
+        };
+        let live = self.project.active_scene().brushes[drag.index].clone();
+        self.project.active_scene_mut().brushes[drag.index] = drag.base;
+        if drag.applied != [0; 3] {
+            self.push_undo();
+            self.project.active_scene_mut().brushes[drag.index] = live;
+            self.mark_dirty();
+        }
+        true
+    }
+
     fn commit_brush_move_preview(&mut self) -> bool {
         let Some(mv) = self.brush_move.take() else {
             return false;
@@ -1098,7 +1263,10 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn commit_brush_gesture_2d(&mut self) {
-        if self.commit_brush_move_preview() || self.commit_brush_extrude_preview() {
+        if self.commit_brush_move_preview()
+            || self.commit_brush_vertex_drag_preview()
+            || self.commit_brush_extrude_preview()
+        {
             return;
         }
         self.commit_brush_drag();
@@ -1178,6 +1346,33 @@ impl EditorWorkspace {
             let projected = view.project_f32(start.map(|value| value as f32));
             let center = transform.world_to_screen(projected);
             painter.circle_stroke(center, 4.0, egui::Stroke::new(1.5, STUDIO_ACCENT));
+        }
+        // Vertex/Edge mode: square handles on the selected brush's
+        // projected corners show what a drag will grab.
+        if matches!(
+            self.selection_mode,
+            SelectionMode::Vertex | SelectionMode::Edge
+        ) {
+            if let Some((_, verts)) = self.selected_brush_solved_verts() {
+                let mut seen: Vec<[f64; 2]> = Vec::new();
+                for vert in verts {
+                    let projected = view.project_f64(vert);
+                    if seen.iter().any(|s| {
+                        (s[0] - projected[0]).abs() <= 0.5 && (s[1] - projected[1]).abs() <= 0.5
+                    }) {
+                        continue;
+                    }
+                    seen.push(projected);
+                    let center =
+                        transform.world_to_screen([projected[0] as f32, projected[1] as f32]);
+                    painter.rect_stroke(
+                        egui::Rect::from_center_size(center, egui::Vec2::splat(6.0)),
+                        0.0,
+                        egui::Stroke::new(1.5, STUDIO_ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
         }
     }
 

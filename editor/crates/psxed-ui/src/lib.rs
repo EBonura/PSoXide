@@ -549,6 +549,9 @@ pub struct EditorWorkspace {
     brush_texture_lock: bool,
     /// In-flight whole-brush move drag (Brush tool, shift-press).
     brush_move: Option<BrushMove>,
+    /// In-flight vertex/edge drag (Brush tool with Vertex or Edge
+    /// selection mode in an orthographic view).
+    brush_vertex_drag: Option<BrushVertexDrag>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -2139,6 +2142,22 @@ pub(crate) struct BrushExtrude {
     pub(crate) applied: i32,
 }
 
+/// In-flight brush vertex/edge drag: the grabbed solved vertices (a
+/// projected corner's whole depth column, or an edge's two columns) move
+/// together in the active orthographic plane. The scene brush previews
+/// live from `base`; one undo records on commit.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushVertexDrag {
+    pub(crate) index: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    /// Solved base-brush vertices being dragged, world f64.
+    pub(crate) targets: Vec<[f64; 3]>,
+    /// Unsnapped plane point at press.
+    pub(crate) press_ground: [f32; 3],
+    /// Last applied snapped delta, world units.
+    pub(crate) applied: [i32; 3],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaterToolMode {
     Add,
@@ -2686,6 +2705,7 @@ impl EditorWorkspace {
             brush_clip_keep: BrushClipKeep::Both,
             brush_texture_lock: true,
             brush_move: None,
+            brush_vertex_drag: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
