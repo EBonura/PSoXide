@@ -1838,8 +1838,16 @@ fn draw_pose_correction_editor(
     }
     state.selected_pose_joint = state.selected_pose_joint.min(joint_count.saturating_sub(1));
     let mut changed = false;
+    let joint_names = state
+        .selected_model
+        .and_then(|model_id| model_skeleton_joint_names(project, model_id));
     let joint_options = (0..joint_count)
-        .map(|joint| (joint, format!("Joint {joint}")))
+        .map(|joint| {
+            (
+                joint,
+                crate::inspector_character_ui::joint_label(joint, joint_names.as_deref()),
+            )
+        })
         .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Joint").color(STUDIO_TEXT_WEAK));
@@ -1848,7 +1856,10 @@ fn draw_pose_correction_editor(
             ui,
             "animation-pose-correction-joint",
             &mut selected,
-            &format!("Joint {}", state.selected_pose_joint),
+            &crate::inspector_character_ui::joint_label(
+                state.selected_pose_joint,
+                joint_names.as_deref(),
+            ),
             &joint_options,
             SearchablePickerConfig::required()
                 .with_width(132.0)
@@ -1997,6 +2008,13 @@ fn draw_combat_capsule_editor(
     assigned_action_clip: Option<&ViewerClipOption>,
 ) -> bool {
     let mut changed = false;
+    let joint_names = project
+        .resource(character_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => character.model,
+            _ => None,
+        })
+        .and_then(|model_id| model_skeleton_joint_names(project, model_id));
     ui.heading("Combat Volumes");
     ui.label(
         RichText::new(
@@ -2177,6 +2195,13 @@ fn draw_combat_capsule_editor(
         changed |= ui
             .add(egui::DragValue::new(&mut capsule.joint).range(0..=max))
             .changed();
+        if let Some(name) = joint_names
+            .as_deref()
+            .and_then(|names| names.get(capsule.joint as usize))
+            .filter(|name| !name.trim().is_empty())
+        {
+            ui.label(RichText::new(name.as_str()).small().color(STUDIO_TEXT_WEAK));
+        }
         if ui
             .button(icons::label(icons::SCAN, "Refit"))
             .on_hover_text("Fit this capsule around the vertices controlled by its joint")
@@ -2328,6 +2353,24 @@ fn combat_u16_editor(ui: &mut egui::Ui, label: &str, value: &mut u16, min: u16, 
     .inner
 }
 
+/// Captured source bone names for a model's skeleton, when the
+/// skeleton resource has them (imports since joint-name capture).
+fn model_skeleton_joint_names(
+    project: &ProjectDocument,
+    model_id: ResourceId,
+) -> Option<Vec<String>> {
+    let skeleton_id = match &project.resource(model_id)?.data {
+        ResourceData::Model(model) => model.skeleton?,
+        _ => return None,
+    };
+    match &project.resource(skeleton_id)?.data {
+        ResourceData::Skeleton(skeleton) if !skeleton.joint_names.is_empty() => {
+            Some(skeleton.joint_names.clone())
+        }
+        _ => None,
+    }
+}
+
 fn draw_attachment_socket_editor(
     ui: &mut egui::Ui,
     project: &mut ProjectDocument,
@@ -2355,6 +2398,7 @@ fn draw_attachment_socket_editor(
     let joint_count = model
         .and_then(|model| psx_asset::Model::from_bytes(&model.model_bytes).ok())
         .map(|model| model.joint_count());
+    let joint_names = model_skeleton_joint_names(project, model_id);
 
     let weapon_options: Vec<(ResourceId, String)> = project
         .resources
@@ -2395,7 +2439,19 @@ fn draw_attachment_socket_editor(
     let socket_options = sockets
         .iter()
         .enumerate()
-        .map(|(index, socket)| (index, format!("{} · joint {}", socket.name, socket.joint)))
+        .map(|(index, socket)| {
+            (
+                index,
+                format!(
+                    "{} · {}",
+                    socket.name,
+                    crate::inspector_character_ui::joint_label(
+                        socket.joint,
+                        joint_names.as_deref()
+                    )
+                ),
+            )
+        })
         .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         let selected_label = sockets
@@ -2447,8 +2503,12 @@ fn draw_attachment_socket_editor(
     );
     ui.separator();
 
-    changed |=
-        crate::inspector_character_ui::attachment_socket_list_editor(ui, sockets, joint_count);
+    changed |= crate::inspector_character_ui::attachment_socket_list_editor(
+        ui,
+        sockets,
+        joint_count,
+        joint_names.as_deref(),
+    );
     if state.selected_attachment_socket >= sockets.len() {
         state.selected_attachment_socket = sockets.len().saturating_sub(1);
     }
@@ -4127,6 +4187,7 @@ mod focus_tests {
                 parents: vec![None],
                 signature: "test-humanoid".to_string(),
                 note: String::new(),
+                joint_names: Vec::new(),
             }),
         );
         let add_model = |project: &mut ProjectDocument, name: &str| {
@@ -4291,6 +4352,7 @@ mod focus_tests {
                 parents: vec![None],
                 signature: "test-humanoid".to_string(),
                 note: String::new(),
+                joint_names: Vec::new(),
             }),
         );
         let model = project.add_resource(
