@@ -466,7 +466,7 @@ pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
 /// Q20.12 distance, axial kind. Returns the bytes and whether the
 /// stored plane is flipped relative to the face's outward normal
 /// (axial planes are canonicalized to positive normals).
-fn pack_plane(plane: &Plane) -> Option<([u8; 14], bool)> {
+pub(crate) fn pack_plane(plane: &Plane) -> Option<([u8; 14], bool)> {
     let n = plane.normal.map(|v| v as f64);
     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
     if len <= 0.0 {
