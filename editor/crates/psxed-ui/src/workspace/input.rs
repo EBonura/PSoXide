@@ -27,6 +27,59 @@ impl EditorWorkspace {
         self.validation_issue_rooms.clear();
     }
 
+    /// Select the concrete authoring object attached to a typed cook
+    /// diagnostic. Returns `false` when the target is stale so the caller can
+    /// fall back to the legacy world-grid diagnostic mapper.
+    pub(crate) fn focus_playtest_validation_target(
+        &mut self,
+        target: psxed_project::playtest::PlaytestValidationTarget,
+    ) -> bool {
+        use psxed_project::playtest::PlaytestValidationTarget;
+
+        match target {
+            PlaytestValidationTarget::Brush { brush, face } => {
+                let Some(authored) = self.project.active_scene().brushes.get(brush) else {
+                    return false;
+                };
+                let face = face.filter(|face| *face < authored.faces.len());
+                self.active_tool = ViewTool::Brush;
+                self.selected_brush = Some(brush);
+                self.selected_brush_face = face;
+                self.clear_node_selection_state();
+                self.clear_resource_selection_state();
+                self.clear_sector_selection();
+                self.clear_primitive_selection_state();
+                self.frame_viewport();
+                true
+            }
+            PlaytestValidationTarget::Node(node) => {
+                if self.project.active_scene().node(node).is_none() {
+                    return false;
+                }
+                self.selected_brush = None;
+                self.selected_brush_face = None;
+                self.replace_node_selection(node);
+                self.clear_resource_selection_state();
+                self.clear_sector_selection();
+                self.clear_primitive_selection_state();
+                self.frame_viewport();
+                true
+            }
+            PlaytestValidationTarget::Resource(resource) => {
+                if self.project.resource(resource).is_none() {
+                    return false;
+                }
+                self.selected_brush = None;
+                self.selected_brush_face = None;
+                self.replace_resource_selection(resource);
+                self.clear_node_selection_state();
+                self.clear_sector_selection();
+                self.clear_primitive_selection_state();
+                true
+            }
+        }
+    }
+
     pub(crate) fn record_first_playtest_world_cook_issue(&mut self, project: &ProjectDocument) {
         let scene = project.active_scene();
         let mut room_nodes: Vec<_> = scene

@@ -3459,7 +3459,12 @@ impl EditorWorkspace {
         psxed_project::playtest::write_cook_result(package.as_ref(), &dir)
             .map_err(|e| format!("write playtest output: {e}"))?;
         if !report.is_ok() {
-            self.record_first_playtest_world_cook_issue(&project);
+            if !report
+                .focus_target
+                .is_some_and(|target| self.focus_playtest_validation_target(target))
+            {
+                self.record_first_playtest_world_cook_issue(&project);
+            }
             return Err(format!(
                 "playtest validation failed: {}",
                 report.errors.join("; ")

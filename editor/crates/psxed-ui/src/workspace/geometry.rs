@@ -2554,6 +2554,12 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn selected_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
+        if self.active_tool == ViewTool::Brush {
+            if let Some(bounds) = self.selected_brush_frame_bounds_3d() {
+                return Some(bounds);
+            }
+        }
+
         let mut bounds: Option<(f32, f32, f32, f32, f32, f32)> = None;
         for &(room, sx, sz) in &self.selection.selected_sectors {
             if let Some((center, half)) = self.sector_bounds_3d(room, sx, sz) {
@@ -2604,6 +2610,28 @@ impl EditorWorkspace {
         None
     }
 
+    fn selected_brush_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
+        let brush = self
+            .project
+            .active_scene()
+            .brushes
+            .get(self.selected_brush?)?;
+        let solved = brush.solve();
+        if !solved.is_valid()
+            || !solved.min.into_iter().all(f64::is_finite)
+            || !solved.max.into_iter().all(f64::is_finite)
+        {
+            return None;
+        }
+        let mut center = [0.0; 3];
+        let mut half = [0.0; 3];
+        for axis in 0..3 {
+            center[axis] = ((solved.min[axis] + solved.max[axis]) * 0.5) as f32;
+            half[axis] = ((solved.max[axis] - solved.min[axis]) * 0.5) as f32;
+        }
+        Some((center, half))
+    }
+
     pub(crate) fn selection_bounds_3d(&self, selection: Selection) -> Option<([f32; 3], [f32; 3])> {
         let grid = self.room_grid_view(selection.room())?;
         let mut bounds: Option<(f32, f32, f32, f32, f32, f32)> = None;
@@ -2619,6 +2647,12 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn current_frame_bounds_2d(&self) -> Option<([f32; 2], [f32; 2])> {
+        if self.active_tool == ViewTool::Brush {
+            if let Some((center, half)) = self.selected_brush_frame_bounds_3d() {
+                return Some(([center[0], center[2]], [half[0], half[2]]));
+            }
+        }
+
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
         for &(room, sx, sz) in &self.selection.selected_sectors {
             if let Some((center, half)) = self.sector_bounds_2d(room, sx, sz) {
