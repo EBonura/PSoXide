@@ -172,6 +172,11 @@ pub struct ClassicAffineWindowedBatchSurface {
     pub tpage: u16,
     /// CLUT word used by this surface.
     pub clut: u16,
+    /// Wrapping U/V offset applied while materializing this surface's packets.
+    ///
+    /// Multiple material layers can therefore share projected positions while
+    /// selecting independently scrolling regions of one texture page.
+    pub uv_offset: [u8; 2],
     /// Fully encoded GP0(E2) texture-window command.
     pub texture_window_word: u32,
 }
@@ -602,6 +607,7 @@ struct WindowedPacketWriter {
     packets: u32,
     clut_high_word: u32,
     tpage_high_word: u32,
+    uv_offset: [u8; 2],
     texture_window_word: u32,
     profile: ClassicAffineProfile,
 }
@@ -630,9 +636,9 @@ impl AffinePacketWriter for WindowedPacketWriter {
                     (projected[2].screen[0], projected[2].screen[1]),
                 ],
                 [
-                    uv_word(attributes[0]),
-                    uv_word(attributes[1]),
-                    uv_word(attributes[2]),
+                    offset_uv_word(attributes[0], self.uv_offset),
+                    offset_uv_word(attributes[1], self.uv_offset),
+                    offset_uv_word(attributes[2], self.uv_offset),
                 ],
                 [
                     attributes[0].color,
@@ -672,10 +678,10 @@ impl AffinePacketWriter for WindowedPacketWriter {
                     (projected[3].screen[0], projected[3].screen[1]),
                 ],
                 [
-                    uv_word(attributes[0]),
-                    uv_word(attributes[1]),
-                    uv_word(attributes[2]),
-                    uv_word(attributes[3]),
+                    offset_uv_word(attributes[0], self.uv_offset),
+                    offset_uv_word(attributes[1], self.uv_offset),
+                    offset_uv_word(attributes[2], self.uv_offset),
+                    offset_uv_word(attributes[3], self.uv_offset),
                 ],
                 [
                     attributes[0].color,
@@ -717,6 +723,12 @@ impl WindowedPacketWriter {
 #[inline(always)]
 const fn uv_word(vertex: &ClassicAffineVertex) -> u16 {
     vertex.uv[0] as u16 | ((vertex.uv[1] as u16) << 8)
+}
+
+#[inline(always)]
+const fn offset_uv_word(vertex: &ClassicAffineVertex, offset: [u8; 2]) -> u16 {
+    vertex.uv[0].wrapping_add(offset[0]) as u16
+        | ((vertex.uv[1].wrapping_add(offset[1]) as u16) << 8)
 }
 
 #[inline(always)]
@@ -1249,6 +1261,7 @@ pub unsafe fn submit_classic_affine_windowed_fan(
         packets: 0,
         clut_high_word: (clut as u32) << 16,
         tpage_high_word: (tpage as u32) << 16,
+        uv_offset: [0; 2],
         texture_window_word,
         profile,
     };
@@ -1311,6 +1324,7 @@ pub unsafe fn submit_classic_affine_windowed_batch(
         packets: 0,
         clut_high_word: 0,
         tpage_high_word: 0,
+        uv_offset: [0; 2],
         texture_window_word: 0,
         profile,
     };
@@ -1324,6 +1338,7 @@ pub unsafe fn submit_classic_affine_windowed_batch(
         debug_assert!(first_vertex + surface_vertices <= vertex_count);
         writer.tpage_high_word = (surface.tpage as u32) << 16;
         writer.clut_high_word = (surface.clut as u32) << 16;
+        writer.uv_offset = surface.uv_offset;
         writer.texture_window_word = surface.texture_window_word;
         unsafe {
             submit_classic_affine_projected_fan_into_writer(
@@ -1777,7 +1792,7 @@ mod tests {
         assert_eq!(core::mem::align_of::<ClassicAffinePosition>(), 2);
         assert_eq!(size_of::<ClassicAffineBatchSurface>(), 8);
         assert_eq!(core::mem::align_of::<ClassicAffineBatchSurface>(), 2);
-        assert_eq!(size_of::<ClassicAffineWindowedBatchSurface>(), 12);
+        assert_eq!(size_of::<ClassicAffineWindowedBatchSurface>(), 16);
         assert_eq!(
             core::mem::align_of::<ClassicAffineWindowedBatchSurface>(),
             4
@@ -1788,6 +1803,15 @@ mod tests {
         assert_eq!(core::mem::align_of::<ClassicAliasVertex>(), 1);
         assert_eq!(size_of::<ClassicAliasProjectedVertex>(), 8);
         assert_eq!(core::mem::align_of::<ClassicAliasProjectedVertex>(), 4);
+    }
+
+    #[test]
+    fn windowed_surface_uv_offsets_wrap_each_component() {
+        let vertex = ClassicAffineVertex {
+            uv: [250, 255],
+            ..ClassicAffineVertex::default()
+        };
+        assert_eq!(offset_uv_word(&vertex, [10, 2]), 0x0104);
     }
 
     #[test]
