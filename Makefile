@@ -263,6 +263,7 @@ PSX_TARGET := mipsel-sony-psx
 EXAMPLE_TARGET_DIR := $(CURDIR)/build/examples
 EXAMPLE_OUT := build/examples/$(PSX_TARGET)/release
 PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem
+EDITOR_PLAYTEST_PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
 SDK_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../psoxide.ld -Clink-arg=--oformat=binary"
 ENGINE_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 EDITOR_PLAYTEST_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
@@ -716,7 +717,7 @@ EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS ?= --features "$(EDITOR_PLAYTEST_FEATURES)"
 EDITOR_PLAYTEST_HARDWARE_FEATURES ?= cd-stream-bench world-order-bucketed world-grid-visible ot-2048 vis-anchor-pvs-candidates
 
 build-editor-playtest:
-	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
+	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
 
 profile-demo3:
 	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_HW)
