@@ -391,6 +391,30 @@ fn texture_lock_compensates_face_uv_on_move() {
 }
 
 #[test]
+fn escape_cancels_gestures_and_delete_removes_brush() {
+    let mut harness = ViewportHarness::floored_room("brush_keys", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+
+    // Cancel a create drag: nothing commits.
+    harness.workspace.begin_brush_drag_2d([0.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([256.0, 256.0]);
+    harness.workspace.cancel_brush_gestures();
+    harness.workspace.commit_brush_drag();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 0);
+
+    // Create one, then delete it (one undo step).
+    harness.workspace.begin_brush_drag_2d([0.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([256.0, 256.0]);
+    harness.workspace.commit_brush_drag();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
+    harness.workspace.delete_selected_brush();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 0);
+    assert_eq!(harness.workspace.selected_brush, None);
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
+}
+
+#[test]
 fn brush_tool_zero_area_drag_commits_nothing() {
     let mut harness = ViewportHarness::floored_room("brush_tool_zero", 4);
     harness.frame(harness.room_center(), 3000.0);

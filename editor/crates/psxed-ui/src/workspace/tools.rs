@@ -265,6 +265,65 @@ impl EditorWorkspace {
         self.project.active_scene_mut().brushes[index] = snapped;
     }
 
+    /// Cancel every in-flight brush gesture: the create drag, a pending
+    /// clip point, and live extrude/move previews (restoring their base).
+    pub(crate) fn cancel_brush_gestures(&mut self) {
+        self.brush_drag = None;
+        self.brush_clip_start = None;
+        if let Some(extrude) = self.brush_extrude.take() {
+            if let Some(slot) = self
+                .project
+                .active_scene_mut()
+                .brushes
+                .get_mut(extrude.index)
+            {
+                *slot = extrude.base;
+            }
+        }
+        if let Some(mv) = self.brush_move.take() {
+            if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(mv.index) {
+                *slot = mv.base;
+            }
+        }
+    }
+
+    /// Delete the selected brush as one undo step.
+    pub(crate) fn delete_selected_brush(&mut self) {
+        let Some(index) = self.selected_brush.take() else {
+            return;
+        };
+        self.selected_brush_face = None;
+        if self.project.active_scene().brushes.get(index).is_some() {
+            self.push_undo();
+            self.project.active_scene_mut().brushes.remove(index);
+        }
+    }
+
+    /// Keyboard for the Brush tool: Escape cancels the in-flight gesture,
+    /// Delete or Backspace removes the selected brush. Inert while a text
+    /// field owns focus.
+    pub(crate) fn brush_tool_keyboard(&mut self, ui: &egui::Ui) {
+        if self.active_tool != ViewTool::Brush {
+            return;
+        }
+        if ui.ctx().memory(|memory| memory.focused().is_some()) {
+            return;
+        }
+        let (escape, delete) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::Escape),
+                input.key_pressed(egui::Key::Delete)
+                    || input.key_pressed(egui::Key::Backspace),
+            )
+        });
+        if escape {
+            self.cancel_brush_gestures();
+        }
+        if delete {
+            self.delete_selected_brush();
+        }
+    }
+
     /// Numeric UV controls for the selected brush face: offset, rotation,
     /// per-axis scale, reset.
     // ponytail: one undo per widget change; a slider drag records several
