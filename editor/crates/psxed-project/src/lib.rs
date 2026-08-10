@@ -19,6 +19,7 @@ pub mod brush_light;
 pub mod brush_pack;
 pub mod brush_portal;
 pub mod brush_pxbsp;
+pub mod brush_world;
 pub mod floor_view;
 pub use animation_pose_correction::*;
 mod import_util;
