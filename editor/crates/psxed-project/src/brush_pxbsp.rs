@@ -4,7 +4,7 @@ use crate::brush_collision_hulls::CompiledCollisionHulls;
 use crate::brush_pack::PackedBspGeometry;
 
 use psx_bsp::pxbsp::{
-    PxbspEntity, PxbspLumpKind, PxbspMaterial, PXBSP_DIRECTORY_ENTRY_BYTES,
+    PxbspEntity, PxbspLumpKind, PxbspMaterial, PxbspMaterialError, PXBSP_DIRECTORY_ENTRY_BYTES,
     PXBSP_ENTITY_TABLE_HEADER_BYTES, PXBSP_HEADER_BYTES, PXBSP_LUMP_COUNT, PXBSP_MAGIC,
     PXBSP_VERSION,
 };
@@ -47,6 +47,10 @@ pub enum PxbspBuildError {
         expected: usize,
         found: usize,
     },
+    InvalidMaterial {
+        index: usize,
+        error: PxbspMaterialError,
+    },
     MisalignedRecords(&'static str),
     LimitExceeded {
         kind: &'static str,
@@ -75,7 +79,7 @@ pub fn build_pxbsp(
     }
     let clipnodes = merge_collision_planes(&mut geometry.planes, &collision)?;
     let models = pack_world_model(&geometry, &collision.head_nodes);
-    let materials = pack_materials(payloads.materials);
+    let materials = pack_materials(payloads.materials)?;
     let entities = pack_entities(payloads.entities)?;
 
     let mut lumps: [Vec<u8>; PXBSP_LUMP_COUNT] = core::array::from_fn(|_| Vec::new());
@@ -176,9 +180,12 @@ fn pack_world_model(geometry: &PackedBspGeometry, collision_heads: &[i16]) -> Ve
     output
 }
 
-fn pack_materials(materials: &[PxbspMaterial]) -> Vec<u8> {
+fn pack_materials(materials: &[PxbspMaterial]) -> Result<Vec<u8>, PxbspBuildError> {
     let mut output = Vec::with_capacity(materials.len() * PxbspMaterial::SIZE);
-    for material in materials {
+    for (index, material) in materials.iter().enumerate() {
+        material
+            .validate()
+            .map_err(|error| PxbspBuildError::InvalidMaterial { index, error })?;
         push_u16(&mut output, material.texture_asset);
         push_u16(&mut output, material.flags);
         output.extend_from_slice(&material.tint);
@@ -186,7 +193,7 @@ fn pack_materials(materials: &[PxbspMaterial]) -> Vec<u8> {
         output.push(material.animation_kind);
         output.extend_from_slice(&material.animation_data);
     }
-    output
+    Ok(output)
 }
 
 fn pack_entities(entities: &[PxbspEntityInput]) -> Result<Vec<u8>, PxbspBuildError> {
@@ -457,5 +464,46 @@ mod tests {
     #[test]
     fn complete_map_build_is_deterministic() {
         assert_eq!(compiled_room(), compiled_room());
+    }
+
+    #[test]
+    fn invalid_material_recipe_is_rejected_before_write() {
+        let brushes = Brush::cuboid([0, 0, 0], [1024, 512, 1024])
+            .hollow(64)
+            .expect("room");
+        let surfaces = compile_csg_surfaces(&brushes);
+        let mut bsp = build_surface_bsp(&surfaces);
+        let portals = portalize_surface_bsp(&bsp);
+        classify_bsp_leaves(&mut bsp, &portals, &brushes);
+        let geometry =
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright).expect("geometry");
+        let collision =
+            compile_collision_hulls(&brushes, &[CollisionHullBounds::POINT, PLAYER, BIG])
+                .expect("collision");
+        let materials = [PxbspMaterial {
+            blend_mode: 9,
+            ..PxbspMaterial::default()
+        }];
+        let error = build_pxbsp(
+            geometry,
+            collision,
+            PxbspMapPayloads {
+                materials: &materials,
+                entities: &[],
+                texture_data: &[],
+                sound_data: &[],
+                model_data: &[],
+                strings: &[],
+                streaming_index: &[],
+            },
+        )
+        .expect_err("invalid material");
+        assert_eq!(
+            error,
+            PxbspBuildError::InvalidMaterial {
+                index: 0,
+                error: PxbspMaterialError::InvalidBlendMode(9),
+            }
+        );
     }
 }

@@ -7,7 +7,7 @@ use psx_math::int32::mul_q12_i32;
 
 use crate::pxbsp::{
     PxbspEntityTable, PxbspEntityTableError, PxbspError, PxbspIndex, PxbspLumpKind, PxbspMaterial,
-    PXBSP_LUMP_COUNT,
+    PxbspMaterialError, PXBSP_LUMP_COUNT,
 };
 use crate::{
     BrushModel, ClipNode, CookedRecord, Face, Leaf, LumpRange, Node, Plane, ReadAt, RecordSlice,
@@ -40,6 +40,7 @@ pub enum PxbspMapLoadError<E> {
     Read(E),
     TooLarge { required: usize, capacity: usize },
     BadVertexData,
+    BadMaterial(usize, PxbspMaterialError),
     BadEntityTable(PxbspEntityTableError),
     BadFace(usize),
     BadMarkSurface(usize),
@@ -61,6 +62,9 @@ impl<E: fmt::Display> fmt::Display for PxbspMapLoadError<E> {
                 "resident PXBSP needs {required} bytes, capacity is {capacity} bytes"
             ),
             Self::BadVertexData => output.write_str("vertex data is not four-byte aligned"),
+            Self::BadMaterial(index, error) => {
+                write!(output, "material {index} is invalid: {error:?}")
+            }
             Self::BadEntityTable(error) => {
                 write!(output, "PXBSP entity table is invalid: {error:?}")
             }
@@ -316,6 +320,12 @@ impl PxbspResidentMap {
         let leaves = self.leaves();
         let nodes = self.nodes();
         let clip_nodes = self.clip_nodes();
+
+        for (index, material) in materials.iter().enumerate() {
+            material
+                .validate()
+                .map_err(|error| PxbspMapLoadError::BadMaterial(index, error))?;
+        }
 
         for (index, face) in faces.iter().enumerate() {
             let first = usize::try_from(face.first_vertex).ok();
@@ -594,6 +604,17 @@ mod tests {
         lumps[PxbspLumpKind::Materials as usize].clear();
         let error = load(&write_file(&lumps)).expect_err("bad map");
         assert_eq!(error, PxbspMapLoadError::BadFace(0));
+    }
+
+    #[test]
+    fn rejects_invalid_material_recipe() {
+        let mut lumps = valid_lumps();
+        lumps[PxbspLumpKind::Materials as usize][7] = 9;
+        let error = load(&write_file(&lumps)).expect_err("bad map");
+        assert_eq!(
+            error,
+            PxbspMapLoadError::BadMaterial(0, PxbspMaterialError::InvalidBlendMode(9))
+        );
     }
 
     #[test]
