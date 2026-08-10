@@ -11,8 +11,8 @@
 // qbsp-style balanced build with outer sealing replaces this when the
 // full compiler lands.
 
-use crate::brush::{Brush, FaceUv, Plane};
 use crate::ResourceId;
+use crate::brush::{Brush, FaceUv, Plane};
 
 /// Fixed-point scale shared with the runtime: positions and plane
 /// distances are Q20.12, normals Q3.12.
@@ -48,6 +48,45 @@ pub struct CompiledSurface {
     pub source_brush: usize,
     /// Source face index within `source_brush`.
     pub source_face: usize,
+}
+
+/// One child of a compiled surface BSP node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BspChild {
+    Node(usize),
+    Leaf(usize),
+}
+
+/// One plane partition in the compiled surface BSP.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompiledBspNode {
+    /// Exact splitter plane inherited from an authored face.
+    pub plane: Plane,
+    /// First coplanar polygon in `CompiledSurfaceBsp::surfaces`.
+    pub first_surface: usize,
+    /// Number of contiguous coplanar polygons owned by this node.
+    pub surface_count: usize,
+    /// Child in front of the splitter plane.
+    pub front: BspChild,
+    /// Child behind the splitter plane.
+    pub back: BspChild,
+}
+
+/// One terminal cell in the compiled surface BSP.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompiledBspLeaf {
+    /// Conservative surface marks inherited from the leaf's split path.
+    pub mark_surfaces: Vec<usize>,
+}
+
+/// Deterministic plane partition of exterior CSG polygons.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompiledSurfaceBsp {
+    pub root: BspChild,
+    pub nodes: Vec<CompiledBspNode>,
+    pub leaves: Vec<CompiledBspLeaf>,
+    /// Polygons reordered by node, with split fragments inserted.
+    pub surfaces: Vec<CompiledSurface>,
 }
 
 /// Compile the exterior boundary of the union of every valid brush.
@@ -117,6 +156,113 @@ pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
         }
     }
     output
+}
+
+/// Recursively partition exterior CSG polygons into a render BSP.
+///
+/// Splitter selection minimizes polygon splits first and tree imbalance
+/// second. Input order is the final tie breaker, so identical inputs
+/// always produce identical node, leaf and surface ordering.
+pub fn build_surface_bsp(surfaces: &[CompiledSurface]) -> CompiledSurfaceBsp {
+    let mut bsp = CompiledSurfaceBsp {
+        root: BspChild::Leaf(0),
+        nodes: Vec::new(),
+        leaves: Vec::new(),
+        surfaces: Vec::new(),
+    };
+    bsp.root = build_surface_bsp_branch(surfaces.to_vec(), &[], &mut bsp);
+    bsp
+}
+
+fn build_surface_bsp_branch(
+    surfaces: Vec<CompiledSurface>,
+    boundary_surfaces: &[usize],
+    bsp: &mut CompiledSurfaceBsp,
+) -> BspChild {
+    if surfaces.is_empty() {
+        let index = bsp.leaves.len();
+        bsp.leaves.push(CompiledBspLeaf {
+            mark_surfaces: boundary_surfaces.to_vec(),
+        });
+        return BspChild::Leaf(index);
+    }
+
+    let splitter = choose_splitter(&surfaces);
+    let splitter_plane = surfaces[splitter].plane;
+    let mut coplanar = Vec::new();
+    let mut front = Vec::new();
+    let mut back = Vec::new();
+    for surface in surfaces {
+        match split_polygon(&surface.vertices, splitter_plane) {
+            PolygonSplit::Front(vertices) => front.push(with_vertices(&surface, vertices)),
+            PolygonSplit::Back(vertices) => back.push(with_vertices(&surface, vertices)),
+            PolygonSplit::Coplanar => coplanar.push(surface),
+            PolygonSplit::Split {
+                front: front_vertices,
+                back: back_vertices,
+            } => {
+                front.push(with_vertices(&surface, front_vertices));
+                back.push(with_vertices(&surface, back_vertices));
+            }
+        }
+    }
+
+    debug_assert!(!coplanar.is_empty(), "splitter must own a polygon");
+    let node_index = bsp.nodes.len();
+    let first_surface = bsp.surfaces.len();
+    let surface_count = coplanar.len();
+    bsp.surfaces.extend(coplanar);
+    bsp.nodes.push(CompiledBspNode {
+        plane: splitter_plane,
+        first_surface,
+        surface_count,
+        front: BspChild::Leaf(0),
+        back: BspChild::Leaf(0),
+    });
+
+    // ponytail: ancestor split surfaces conservatively over-mark each
+    // terminal cell until portal clipping supplies exact leaf windings.
+    let mut child_boundaries = boundary_surfaces.to_vec();
+    child_boundaries.extend(first_surface..first_surface + surface_count);
+    let front_child = build_surface_bsp_branch(front, &child_boundaries, bsp);
+    let back_child = build_surface_bsp_branch(back, &child_boundaries, bsp);
+    bsp.nodes[node_index].front = front_child;
+    bsp.nodes[node_index].back = back_child;
+    BspChild::Node(node_index)
+}
+
+fn choose_splitter(surfaces: &[CompiledSurface]) -> usize {
+    surfaces
+        .iter()
+        .enumerate()
+        .map(|(candidate, surface)| {
+            let mut front = 0usize;
+            let mut back = 0usize;
+            let mut splits = 0usize;
+            for classified in surfaces {
+                match split_polygon(&classified.vertices, surface.plane) {
+                    PolygonSplit::Front(_) => front += 1,
+                    PolygonSplit::Back(_) => back += 1,
+                    PolygonSplit::Coplanar => {}
+                    PolygonSplit::Split { .. } => {
+                        front += 1;
+                        back += 1;
+                        splits += 1;
+                    }
+                }
+            }
+            let imbalance = front.abs_diff(back);
+            ((splits, imbalance, candidate), candidate)
+        })
+        .min_by_key(|(score, _)| *score)
+        .map(|(_, candidate)| candidate)
+        .expect("non-empty surface set")
+}
+
+fn with_vertices(surface: &CompiledSurface, vertices: Vec<[f64; 3]>) -> CompiledSurface {
+    let mut fragment = surface.clone();
+    fragment.vertices = vertices;
+    fragment
 }
 
 fn subtract_convex_brush(polygon: &[[f64; 3]], planes: &[Plane]) -> Vec<Vec<[f64; 3]>> {
@@ -351,7 +497,7 @@ fn pack_plane(plane: &Plane) -> Option<([u8; 14], bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use psx_bsp::collision::{CollisionHull, CONTENTS_EMPTY, CONTENTS_SOLID};
+    use psx_bsp::collision::{CONTENTS_EMPTY, CONTENTS_SOLID, CollisionHull};
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
 
     fn hull(compiled: &CompiledCollision) -> CollisionHull<'_> {
@@ -379,6 +525,16 @@ mod tests {
         (normal[axis].abs() > 1.0 - CSG_EPSILON
             && (0..3).all(|other| other == axis || normal[other].abs() <= CSG_EPSILON))
         .then(|| distance / normal[axis])
+    }
+
+    fn bsp_depth(child: BspChild, bsp: &CompiledSurfaceBsp) -> usize {
+        match child {
+            BspChild::Leaf(_) => 0,
+            BspChild::Node(index) => {
+                let node = &bsp.nodes[index];
+                1 + bsp_depth(node.front, bsp).max(bsp_depth(node.back, bsp))
+            }
+        }
     }
 
     #[test]
@@ -433,6 +589,119 @@ mod tests {
             .expect("source face survives");
         assert_eq!(face.uv.offset_texels, [17, -9]);
         assert_eq!(face.uv.rotation_deg, 45);
+    }
+
+    #[test]
+    fn surface_bsp_empty_input_is_one_leaf() {
+        let bsp = build_surface_bsp(&[]);
+        assert_eq!(bsp.root, BspChild::Leaf(0));
+        assert!(bsp.nodes.is_empty());
+        assert_eq!(bsp.leaves, vec![CompiledBspLeaf::default()]);
+        assert!(bsp.surfaces.is_empty());
+    }
+
+    #[test]
+    fn surface_bsp_cuboid_builds_six_partitions_and_seven_leaves() {
+        let surfaces = compile_csg_surfaces(&[Brush::cuboid([0, 0, 0], [128, 64, 256])]);
+        let bsp = build_surface_bsp(&surfaces);
+        assert_eq!(bsp.nodes.len(), 6);
+        assert_eq!(bsp.leaves.len(), 7);
+        assert_eq!(bsp.surfaces.len(), 6);
+        assert!(bsp.nodes.iter().all(|node| node.surface_count == 1));
+        assert!(
+            bsp.surfaces
+                .iter()
+                .all(|surface| surface.vertices.len() >= 3)
+        );
+    }
+
+    #[test]
+    fn surface_bsp_groups_coplanar_csg_fragments() {
+        let surfaces = compile_csg_surfaces(&[
+            Brush::cuboid([0, 0, 0], [128, 128, 128]),
+            Brush::cuboid([128, 0, 0], [256, 128, 128]),
+        ]);
+        let bsp = build_surface_bsp(&surfaces);
+        assert_eq!(bsp.surfaces.len(), surfaces.len());
+        assert!(bsp.nodes.iter().any(|node| node.surface_count > 1));
+        for node in &bsp.nodes {
+            let end = node.first_surface + node.surface_count;
+            assert!(end <= bsp.surfaces.len());
+            assert!(
+                bsp.surfaces[node.first_surface..end]
+                    .iter()
+                    .all(|surface| matches!(
+                        split_polygon(&surface.vertices, node.plane),
+                        PolygonSplit::Coplanar
+                    ))
+            );
+        }
+    }
+
+    #[test]
+    fn surface_bsp_balances_separated_solids() {
+        let surfaces = compile_csg_surfaces(&[
+            Brush::cuboid([0, 0, 0], [128, 128, 128]),
+            Brush::cuboid([512, 0, 0], [640, 128, 128]),
+        ]);
+        let bsp = build_surface_bsp(&surfaces);
+        assert!(bsp.nodes.len() > 6);
+        assert!(bsp_depth(bsp.root, &bsp) < bsp.nodes.len());
+    }
+
+    #[test]
+    fn surface_bsp_splits_crossing_polygons() {
+        let horizontal = CompiledSurface {
+            plane: Plane::from_points([[-64, 0, -64], [64, 0, -64], [64, 0, 64]])
+                .expect("horizontal plane"),
+            vertices: vec![
+                [-64.0, 0.0, -64.0],
+                [64.0, 0.0, -64.0],
+                [64.0, 0.0, 64.0],
+                [-64.0, 0.0, 64.0],
+            ],
+            material: None,
+            uv: FaceUv::default(),
+            source_brush: 0,
+            source_face: 0,
+        };
+        let vertical = CompiledSurface {
+            plane: Plane::from_points([[0, -64, -64], [0, 64, -64], [0, 64, 64]])
+                .expect("vertical plane"),
+            vertices: vec![
+                [0.0, -64.0, -64.0],
+                [0.0, 64.0, -64.0],
+                [0.0, 64.0, 64.0],
+                [0.0, -64.0, 64.0],
+            ],
+            material: None,
+            uv: FaceUv::default(),
+            source_brush: 1,
+            source_face: 0,
+        };
+        let bsp = build_surface_bsp(&[horizontal, vertical]);
+        assert_eq!(bsp.surfaces.len(), 3);
+        assert_eq!(
+            bsp.surfaces
+                .iter()
+                .filter(|surface| surface.source_brush == 1)
+                .count(),
+            2
+        );
+        assert!(
+            bsp.surfaces
+                .iter()
+                .all(|surface| surface.vertices.len() >= 3)
+        );
+    }
+
+    #[test]
+    fn surface_bsp_build_is_deterministic() {
+        let surfaces = compile_csg_surfaces(&[
+            Brush::cuboid([0, 0, 0], [128, 128, 128]),
+            Brush::cuboid([64, 64, 64], [192, 192, 192]),
+        ]);
+        assert_eq!(build_surface_bsp(&surfaces), build_surface_bsp(&surfaces));
     }
 
     #[test]
