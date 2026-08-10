@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod animation_pose_correction;
 pub mod brush;
+pub mod brush_compile;
 pub mod floor_view;
 pub use animation_pose_correction::*;
 mod import_util;
