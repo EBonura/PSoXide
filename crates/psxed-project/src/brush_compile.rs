@@ -57,6 +57,15 @@ pub enum BspChild {
     Leaf(usize),
 }
 
+/// Brush-union contents assigned after BSP portalization.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BspLeafContents {
+    #[default]
+    Unclassified,
+    Empty,
+    Solid,
+}
+
 /// One plane partition in the compiled surface BSP.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompiledBspNode {
@@ -75,6 +84,8 @@ pub struct CompiledBspNode {
 /// One terminal cell in the compiled surface BSP.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompiledBspLeaf {
+    /// Cell contents, filled by the portal and classification pass.
+    pub contents: BspLeafContents,
     /// Conservative surface marks inherited from the leaf's split path.
     pub mark_surfaces: Vec<usize>,
 }
@@ -182,6 +193,7 @@ fn build_surface_bsp_branch(
     if surfaces.is_empty() {
         let index = bsp.leaves.len();
         bsp.leaves.push(CompiledBspLeaf {
+            contents: BspLeafContents::Unclassified,
             mark_surfaces: boundary_surfaces.to_vec(),
         });
         return BspChild::Leaf(index);
@@ -286,7 +298,7 @@ fn subtract_convex_brush(polygon: &[[f64; 3]], planes: &[Plane]) -> Vec<Vec<[f64
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum PolygonSplit {
+pub(crate) enum PolygonSplit {
     Front(Vec<[f64; 3]>),
     Back(Vec<[f64; 3]>),
     Coplanar,
@@ -296,7 +308,7 @@ enum PolygonSplit {
     },
 }
 
-fn split_polygon(vertices: &[[f64; 3]], plane: Plane) -> PolygonSplit {
+pub(crate) fn split_polygon(vertices: &[[f64; 3]], plane: Plane) -> PolygonSplit {
     let (normal, distance) = normalized_plane(plane);
     let distances: Vec<f64> = vertices
         .iter()
@@ -350,7 +362,7 @@ fn same_facing_plane(left: Plane, right: Plane) -> bool {
         && (left_distance - right_distance).abs() <= CSG_EPSILON
 }
 
-fn normalized_plane(plane: Plane) -> ([f64; 3], f64) {
+pub(crate) fn normalized_plane(plane: Plane) -> ([f64; 3], f64) {
     let normal = plane.normal.map(|component| component as f64);
     let length = dot(normal, normal).sqrt();
     (
