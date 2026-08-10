@@ -1,6 +1,7 @@
 use super::*;
 use psx_engine::{
-    apply_model_pose_translation, compute_joint_world_transform, JointWorldTransform,
+    apply_model_pose_translation, compute_joint_world_basis, compute_joint_world_transform,
+    JointWorldTransform,
 };
 use psx_level::{equipment_flags, WeaponHitShapeRecord};
 
@@ -223,8 +224,10 @@ fn attachment_socket_pose(
     };
     let pose = apply_model_pose_translation(raw_pose, pose_translation);
     let joint = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
+    let basis = compute_joint_world_basis(pose, instance_rotation);
     Some(compose_socket_pose(
         joint,
+        basis,
         socket.translation,
         socket.rotation_q12,
     ))
@@ -232,10 +235,16 @@ fn attachment_socket_pose(
 
 fn compose_socket_pose(
     joint: JointWorldTransform,
+    basis: Mat3I16,
     translation: [i32; 3],
     rotation_q12: [i16; 3],
 ) -> AttachmentPose {
+    // Socket offsets are model-local units: the scaled joint matrix
+    // takes them to world units (same convention as combat capsules).
     let offset = rotate_offset_q12(&joint.rotation, translation);
+    // Orientation uses the unscaled basis: the attached model applies
+    // its own local-to-world, so a scaled basis would shrink it to
+    // sub-pixel size (every face then culls as zero-area).
     let local_rotation = euler_q12_rotation(rotation_q12);
     AttachmentPose {
         origin: WorldVertex::new(
@@ -243,7 +252,7 @@ fn compose_socket_pose(
             joint.translation.y.saturating_add(offset[1]),
             joint.translation.z.saturating_add(offset[2]),
         ),
-        rotation: joint.rotation.mul(&local_rotation),
+        rotation: basis.mul(&local_rotation),
     }
 }
 

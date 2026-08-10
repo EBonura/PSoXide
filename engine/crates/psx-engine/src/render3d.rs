@@ -2273,6 +2273,31 @@ pub fn compute_joint_world_transform(
     }
 }
 
+/// Compose the orthonormal world-space basis for one animated model
+/// joint: `instance_rotation × pose_rotation`, without the model's
+/// local-to-world scale.
+///
+/// [`compute_joint_world_transform`] folds that scale into its matrix,
+/// which is what vertex pipelines and joint-local offsets need, but it
+/// is wrong as an orientation basis for a socketed child model: the
+/// child applies its own local-to-world, so inheriting the host's
+/// scale collapses it to sub-pixel size. Use this for socket, grip,
+/// and attached-model orientation.
+pub fn compute_joint_world_basis(pose: JointPose, instance_rotation: Mat3I16) -> Mat3I16 {
+    let mut model = [[0i16; 3]; 3];
+    let mut row = 0;
+    while row < 3 {
+        let mut col = 0;
+        while col < 3 {
+            // Same transposition as `scaled_pose_matrix`, scale omitted.
+            model[row][col] = pose.matrix[col][row];
+            col += 1;
+        }
+        row += 1;
+    }
+    mat3_mul_q12(&instance_rotation, &Mat3I16 { m: model })
+}
+
 /// Apply a model-local translation to a sampled joint pose.
 pub fn apply_model_pose_translation(
     mut pose: JointPose,
