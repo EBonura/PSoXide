@@ -428,6 +428,7 @@ impl EditorWorkspace {
                     {
                         self.apply_material_to_selected_brush_face();
                     }
+                    self.draw_brush_face_uv_controls(ui);
                 }
                 if self.selected_brush.is_some() {
                     if ui
@@ -446,12 +447,21 @@ impl EditorWorkspace {
                         self.snap_selected_brush();
                     }
                 }
+                ui.checkbox(&mut self.brush_texture_lock, "Tex lock")
+                    .on_hover_text("Keep face textures anchored to the brush when it moves");
                 if let Some(index) = self.selected_brush {
                     if ui.button(icons::label(icons::PLUS, "Duplicate")).clicked() {
                         self.push_undo();
                         let step = (self.snap_units.max(1)) as i32;
                         let mut copy = self.project.active_scene().brushes[index].clone();
-                        copy.translate([step, 0, step]);
+                        if self.brush_texture_lock {
+                            copy.translate_with_uv_lock(
+                                [step, 0, step],
+                                psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                            );
+                        } else {
+                            copy.translate([step, 0, step]);
+                        }
                         let scene = self.project.active_scene_mut();
                         scene.brushes.push(copy);
                         let new_index = scene.brushes.len() - 1;

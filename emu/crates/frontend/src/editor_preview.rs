@@ -1159,9 +1159,7 @@ fn walk_image_props(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Texel density for brush paraxial UVs: world units per texel, matching
-/// the grid default (64 texels across a 1024-unit sector).
-const BRUSH_UV_UNITS_PER_TEXEL: f64 = 16.0;
+use psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL;
 
 /// Flat fallback tint for unmaterialed brush faces: neutral greys varied
 /// per face so adjacent faces stay distinguishable.
@@ -1218,11 +1216,12 @@ fn walk_brushes(
                     .map(preview_projected_from_engine);
                 let uvs = match shade {
                     FaceShade::Textured { .. } => tri.map(|v| {
-                        let uv = paraxial_uv(&plane, v);
-                        (
-                            (uv[0] / BRUSH_UV_UNITS_PER_TEXEL).rem_euclid(256.0) as u8,
-                            (uv[1] / BRUSH_UV_UNITS_PER_TEXEL).rem_euclid(256.0) as u8,
-                        )
+                        let raw = paraxial_uv(&plane, v);
+                        let uv = face.uv.apply([
+                            raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                            raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                        ]);
+                        (uv[0].rem_euclid(256.0) as u8, uv[1].rem_euclid(256.0) as u8)
                     }),
                     FaceShade::Flat { .. } => [(0, 0); 3],
                 };

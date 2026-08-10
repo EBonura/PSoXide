@@ -10,8 +10,65 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Per-face texture placement over the paraxial projection:
+/// `uv' = rotate(rotation_deg, uv * 256 / scale_q8) + offset_texels`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaceUv {
+    /// Texel offset added after rotation/scale.
+    pub offset_texels: [i16; 2],
+    /// Free rotation in degrees.
+    pub rotation_deg: i16,
+    /// Per-axis scale, Q8 (256 = 1.0). Larger = texture appears bigger.
+    pub scale_q8: [i16; 2],
+}
+
+impl Default for FaceUv {
+    fn default() -> Self {
+        Self {
+            offset_texels: [0, 0],
+            rotation_deg: 0,
+            scale_q8: [256, 256],
+        }
+    }
+}
+
+impl FaceUv {
+    /// Whether this is the identity placement.
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Compensate the offset so a raw-texel shift of the underlying
+    /// surface leaves applied UVs unchanged (texture lock). Exact up to
+    /// the i16 offset rounding.
+    pub fn compensate_shift(&mut self, raw_shift: [f64; 2]) {
+        let with_offset = self.apply(raw_shift);
+        let linear = [
+            with_offset[0] - f64::from(self.offset_texels[0]),
+            with_offset[1] - f64::from(self.offset_texels[1]),
+        ];
+        self.offset_texels[0] =
+            (f64::from(self.offset_texels[0]) - linear[0]).round() as i16;
+        self.offset_texels[1] =
+            (f64::from(self.offset_texels[1]) - linear[1]).round() as i16;
+    }
+
+    /// Apply to a raw paraxial texel coordinate.
+    pub fn apply(&self, uv: [f64; 2]) -> [f64; 2] {
+        let sx = f64::from(self.scale_q8[0].max(1)) / 256.0;
+        let sy = f64::from(self.scale_q8[1].max(1)) / 256.0;
+        let scaled = [uv[0] / sx, uv[1] / sy];
+        let radians = f64::from(self.rotation_deg).to_radians();
+        let (sin, cos) = radians.sin_cos();
+        [
+            scaled[0] * cos - scaled[1] * sin + f64::from(self.offset_texels[0]),
+            scaled[0] * sin + scaled[1] * cos + f64::from(self.offset_texels[1]),
+        ]
+    }
+}
+
 /// One brush face: three integer points defining the plane, plus the
-/// face's material (None = untextured default).
+/// face's material (None = untextured default) and texture placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrushFace {
     /// Plane points, counter-clockwise viewed from outside the brush.
@@ -19,14 +76,18 @@ pub struct BrushFace {
     /// Material applied to this face.
     #[serde(default)]
     pub material: Option<crate::ResourceId>,
+    /// Texture placement over the paraxial projection.
+    #[serde(default)]
+    pub uv: FaceUv,
 }
 
 impl BrushFace {
-    /// Face from plane points with no material.
-    pub const fn from_points(points: [[i32; 3]; 3]) -> Self {
+    /// Face from plane points with no material and identity UVs.
+    pub fn from_points(points: [[i32; 3]; 3]) -> Self {
         Self {
             points,
             material: None,
+            uv: FaceUv::default(),
         }
     }
 }
@@ -203,6 +264,29 @@ impl Brush {
         }
     }
 
+    /// Translate while keeping each face's texture anchored to the brush
+    /// (texture lock): every face's UV offset is compensated by the
+    /// paraxial shift the move causes. Exact for any rotation/scale up to
+    /// the i16 offset rounding; `units_per_texel` is the paraxial texel
+    /// density the renderer uses.
+    pub fn translate_with_uv_lock(&mut self, delta: [i32; 3], units_per_texel: f64) {
+        let delta_f = [
+            f64::from(delta[0]),
+            f64::from(delta[1]),
+            f64::from(delta[2]),
+        ];
+        for face in &mut self.faces {
+            if let Some(plane) = Plane::from_points(face.points) {
+                // Paraxial projection is linear, so the raw shift of any
+                // surface point equals the projection of the delta itself.
+                let raw = paraxial_uv(&plane, delta_f);
+                let shift = [raw[0] / units_per_texel, raw[1] / units_per_texel];
+                face.uv.compensate_shift(shift);
+            }
+        }
+        self.translate(delta);
+    }
+
     /// Translate one face's plane by an integer delta (the extrude/resize
     /// core: the tool constrains `delta` to the face normal's direction;
     /// the kernel only moves the plane and lets `solve` reshape the brush).
@@ -360,6 +444,10 @@ impl Brush {
         ])
     }
 }
+
+/// World units per paraxial texel, the renderer's brush texel density
+/// (matches the grid default: 64 texels across a 1024-unit sector).
+pub const BRUSH_UV_UNITS_PER_TEXEL: f64 = 16.0;
 
 /// Paraxial (dominant-axis) texture projection of a world position for a
 /// face with the given plane: the Quake-style default mapping. Returns
@@ -678,6 +766,48 @@ mod tests {
         }
         // Too-thin brushes refuse to hollow.
         assert!(Brush::cuboid([0, 0, 0], [30, 128, 256]).hollow(16).is_none());
+    }
+
+    #[test]
+    fn face_uv_apply_offset_scale_rotation() {
+        assert_eq!(FaceUv::default().apply([3.0, 4.0]), [3.0, 4.0]);
+        let uv = FaceUv {
+            offset_texels: [10, -5],
+            rotation_deg: 0,
+            scale_q8: [512, 256],
+        };
+        // Scale 512 = 2x texture size = raw texels halve, then offset.
+        assert_eq!(uv.apply([8.0, 4.0]), [14.0, -1.0]);
+        let rot = FaceUv {
+            rotation_deg: 90,
+            ..Default::default()
+        };
+        let r = rot.apply([1.0, 0.0]);
+        assert!(r[0].abs() < 1e-9 && (r[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn texture_lock_keeps_applied_uv_through_moves() {
+        let mut brush = Brush::cuboid([0, 0, 0], [128, 64, 128]);
+        brush.faces[5].uv = FaceUv {
+            offset_texels: [7, 3],
+            rotation_deg: 30,
+            scale_q8: [512, 256],
+        };
+        let sample = |brush: &Brush, world: [f64; 3]| {
+            let plane = Plane::from_points(brush.faces[5].points).unwrap();
+            let raw = paraxial_uv(&plane, world);
+            brush.faces[5].uv.apply([
+                raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+            ])
+        };
+        let before = sample(&brush, [32.0, 64.0, 48.0]);
+        brush.translate_with_uv_lock([160, 0, -96], BRUSH_UV_UNITS_PER_TEXEL);
+        let after = sample(&brush, [192.0, 64.0, -48.0]);
+        // Exact up to i16 offset rounding.
+        assert!((after[0] - before[0]).abs() <= 1.0);
+        assert!((after[1] - before[1]).abs() <= 1.0);
     }
 
     #[test]
