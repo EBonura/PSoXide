@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::{LumpRange, ReadAt};
+use crate::{CookedRecord, LumpRange, ReadAt, Vec3I16, Vec3I32};
 
 /// `PXB%` in little-endian byte order.
 pub const PXBSP_MAGIC: u32 = 0x2542_5850;
@@ -57,6 +57,7 @@ impl PxbspLumpKind {
         match self {
             Self::Vertices => Some(12),
             Self::Planes => Some(14),
+            Self::Materials => Some(PxbspMaterial::SIZE as u32),
             Self::Faces => Some(14),
             Self::MarkSurfaces => Some(2),
             Self::Leaves => Some(26),
@@ -67,11 +68,177 @@ impl PxbspLumpKind {
             Self::TextureData
             | Self::SoundData
             | Self::ModelData
-            | Self::Materials
             | Self::Visibility
             | Self::Entities
             | Self::StreamingIndex => None,
         }
+    }
+}
+
+/// World-material slot resolved through PSoXide's asset table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PxbspMaterial {
+    pub texture_asset: u16,
+    pub flags: u16,
+    pub tint: [u8; 3],
+    pub blend_mode: u8,
+    pub animation_kind: u8,
+    /// Kind-specific fixed payload. UV scroll and flipbook recipes fit here.
+    pub animation_data: [u8; 7],
+}
+
+impl CookedRecord for PxbspMaterial {
+    const SIZE: usize = 16;
+
+    fn decode(bytes: &[u8]) -> Self {
+        Self {
+            texture_asset: u16::from_le_bytes([bytes[0], bytes[1]]),
+            flags: u16::from_le_bytes([bytes[2], bytes[3]]),
+            tint: [bytes[4], bytes[5], bytes[6]],
+            blend_mode: bytes[7],
+            animation_kind: bytes[8],
+            animation_data: bytes[9..16].try_into().unwrap(),
+        }
+    }
+}
+
+pub mod material_animation {
+    pub const STATIC: u8 = 0;
+    pub const UV_SCROLL: u8 = 1;
+    pub const FLIPBOOK: u8 = 2;
+}
+
+/// Fixed world-space base shared by every PSoXide entity class.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PxbspEntity {
+    pub class_id: u16,
+    pub flags: u16,
+    /// Brush or skeletal model index, or `u16::MAX` when absent.
+    pub model: u16,
+    /// Runtime empty-leaf index used for PVS activation.
+    pub leaf: u16,
+    /// Q20.12 world position.
+    pub origin: Vec3I32,
+    /// Q0.12 turn angles.
+    pub angles: Vec3I16,
+    /// Byte offset from the entity table's payload start.
+    pub payload_offset: u32,
+    pub payload_size: u16,
+}
+
+impl CookedRecord for PxbspEntity {
+    const SIZE: usize = 32;
+
+    fn decode(bytes: &[u8]) -> Self {
+        Self {
+            class_id: u16::from_le_bytes([bytes[0], bytes[1]]),
+            flags: u16::from_le_bytes([bytes[2], bytes[3]]),
+            model: u16::from_le_bytes([bytes[4], bytes[5]]),
+            leaf: u16::from_le_bytes([bytes[6], bytes[7]]),
+            origin: Vec3I32 {
+                x: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                y: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+                z: i32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            },
+            angles: Vec3I16 {
+                x: i16::from_le_bytes(bytes[20..22].try_into().unwrap()),
+                y: i16::from_le_bytes(bytes[22..24].try_into().unwrap()),
+                z: i16::from_le_bytes(bytes[24..26].try_into().unwrap()),
+            },
+            payload_offset: u32::from_le_bytes(bytes[26..30].try_into().unwrap()),
+            payload_size: u16::from_le_bytes([bytes[30], bytes[31]]),
+        }
+    }
+}
+
+pub const PXBSP_ENTITY_TABLE_HEADER_BYTES: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PxbspEntityTableError {
+    TooSmall,
+    WrongRecordSize(u16),
+    BadPayloadOffset(u32),
+    TruncatedRecords,
+    BadPayloadRange(usize),
+}
+
+/// Checked zero-copy view of the variable-payload entity lump.
+#[derive(Clone, Copy)]
+pub struct PxbspEntityTable<'a> {
+    bytes: &'a [u8],
+    count: usize,
+    payload_offset: usize,
+}
+
+impl<'a> PxbspEntityTable<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, PxbspEntityTableError> {
+        if bytes.len() < PXBSP_ENTITY_TABLE_HEADER_BYTES {
+            return Err(PxbspEntityTableError::TooSmall);
+        }
+        let count = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+        let record_size = u16::from_le_bytes([bytes[2], bytes[3]]);
+        if record_size as usize != PxbspEntity::SIZE {
+            return Err(PxbspEntityTableError::WrongRecordSize(record_size));
+        }
+        let payload_offset = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let records_end = PXBSP_ENTITY_TABLE_HEADER_BYTES
+            .checked_add(
+                count
+                    .checked_mul(PxbspEntity::SIZE)
+                    .ok_or(PxbspEntityTableError::TruncatedRecords)?,
+            )
+            .ok_or(PxbspEntityTableError::TruncatedRecords)?;
+        let expected_payload = (records_end + 3) & !3;
+        if payload_offset != expected_payload || payload_offset > bytes.len() {
+            return Err(PxbspEntityTableError::BadPayloadOffset(
+                payload_offset as u32,
+            ));
+        }
+        if records_end > bytes.len() {
+            return Err(PxbspEntityTableError::TruncatedRecords);
+        }
+        let table = Self {
+            bytes,
+            count,
+            payload_offset,
+        };
+        let payload_len = bytes.len() - payload_offset;
+        for index in 0..count {
+            let entity = table.get(index).expect("index is in table");
+            let start = entity.payload_offset as usize;
+            let end = start
+                .checked_add(entity.payload_size as usize)
+                .ok_or(PxbspEntityTableError::BadPayloadRange(index))?;
+            if end > payload_len {
+                return Err(PxbspEntityTableError::BadPayloadRange(index));
+            }
+        }
+        Ok(table)
+    }
+
+    pub const fn len(self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.count == 0
+    }
+
+    pub fn get(self, index: usize) -> Option<PxbspEntity> {
+        if index >= self.count {
+            return None;
+        }
+        let start = PXBSP_ENTITY_TABLE_HEADER_BYTES + index * PxbspEntity::SIZE;
+        Some(PxbspEntity::decode(
+            &self.bytes[start..start + PxbspEntity::SIZE],
+        ))
+    }
+
+    pub fn payload(self, index: usize) -> Option<&'a [u8]> {
+        let entity = self.get(index)?;
+        let start = self.payload_offset + entity.payload_offset as usize;
+        let end = start + entity.payload_size as usize;
+        self.bytes.get(start..end)
     }
 }
 
@@ -400,6 +567,87 @@ mod tests {
                 kind: PxbspLumpKind::Faces,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn decodes_psoxide_material_slot() {
+        let bytes = [
+            0x34,
+            0x12,
+            0x02,
+            0x00,
+            96,
+            112,
+            128,
+            3,
+            material_animation::UV_SCROLL,
+            0xfe,
+            0xff,
+            0x20,
+            0x00,
+            7,
+            9,
+            0,
+        ];
+        assert_eq!(
+            PxbspMaterial::decode(&bytes),
+            PxbspMaterial {
+                texture_asset: 0x1234,
+                flags: 2,
+                tint: [96, 112, 128],
+                blend_mode: 3,
+                animation_kind: material_animation::UV_SCROLL,
+                animation_data: [0xfe, 0xff, 0x20, 0x00, 7, 9, 0],
+            }
+        );
+    }
+
+    fn entity_table(payload_size: u16) -> Vec<u8> {
+        let payload_offset = PXBSP_ENTITY_TABLE_HEADER_BYTES + PxbspEntity::SIZE;
+        let mut bytes = vec![0; payload_offset + 4];
+        bytes[0..2].copy_from_slice(&1u16.to_le_bytes());
+        bytes[2..4].copy_from_slice(&(PxbspEntity::SIZE as u16).to_le_bytes());
+        bytes[4..8].copy_from_slice(&(payload_offset as u32).to_le_bytes());
+        let record = PXBSP_ENTITY_TABLE_HEADER_BYTES;
+        bytes[record..record + 2].copy_from_slice(&7u16.to_le_bytes());
+        bytes[record + 4..record + 6].copy_from_slice(&3u16.to_le_bytes());
+        bytes[record + 6..record + 8].copy_from_slice(&11u16.to_le_bytes());
+        bytes[record + 8..record + 12].copy_from_slice(&4096i32.to_le_bytes());
+        bytes[record + 12..record + 16].copy_from_slice(&8192i32.to_le_bytes());
+        bytes[record + 16..record + 20].copy_from_slice(&(-4096i32).to_le_bytes());
+        bytes[record + 22..record + 24].copy_from_slice(&1024i16.to_le_bytes());
+        bytes[record + 30..record + 32].copy_from_slice(&payload_size.to_le_bytes());
+        bytes[payload_offset..].copy_from_slice(&[1, 2, 3, 4]);
+        bytes
+    }
+
+    #[test]
+    fn validates_world_entity_records_and_payloads() {
+        let bytes = entity_table(4);
+        let table = PxbspEntityTable::new(&bytes).expect("entity table");
+        let entity = table.get(0).expect("entity");
+        assert_eq!(entity.class_id, 7);
+        assert_eq!(entity.model, 3);
+        assert_eq!(entity.leaf, 11);
+        assert_eq!(
+            entity.origin,
+            Vec3I32 {
+                x: 4096,
+                y: 8192,
+                z: -4096
+            }
+        );
+        assert_eq!(entity.angles.y, 1024);
+        assert_eq!(table.payload(0), Some(&[1, 2, 3, 4][..]));
+    }
+
+    #[test]
+    fn rejects_entity_payload_outside_lump() {
+        let bytes = entity_table(5);
+        assert!(matches!(
+            PxbspEntityTable::new(&bytes),
+            Err(PxbspEntityTableError::BadPayloadRange(0))
         ));
     }
 }
