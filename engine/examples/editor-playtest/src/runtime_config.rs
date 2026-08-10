@@ -655,6 +655,12 @@ pub(super) const MAX_LOGIC_EVENTS: usize = 32;
 /// entity cap.
 pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<MAX_GAME_ENTITIES>;
 
+/// Caller-owned one-tick handoff between entity state advancement and the
+/// retained-pose combat pass. At most every live entity can attack in one
+/// tick, though the combat director normally grants a single slot.
+pub(super) type RuntimeDeferredEnemyAttacks =
+    psx_game_runtime::entities::DeferredGameEntityAttacks<MAX_GAME_ENTITIES>;
+
 /// The crate logic-entity runtime instantiated with this example's
 /// record/word/event caps.
 pub(super) type RuntimeLogic =

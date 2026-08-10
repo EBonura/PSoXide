@@ -13,10 +13,12 @@
 //! goes through a [`GameEntityMover`] the owning game backs with the
 //! engine motor's [`commit_body_step`] -- the exact grid-collision
 //! stand/slide/step rules the player uses. Attack CONTACT resolution
-//! is the combat slice (see [`crate::combat`]): an entity's Attack
-//! active window tests the player against its Character-derived reach
-//! inside a front arc (once per swing, whiffing on roll i-frames),
-//! and the player's swings come back through [`Self::apply_melee_arc`].
+//! is the combat slice (see [`crate::combat`]). Games with retained
+//! actor poses use [`Self::tick_delta_deferred`] to freeze each active
+//! swing's exact attack clip/phase, resolve authored capsules from the
+//! same pose the body and equipment consume, and then latch the hit
+//! through [`Self::connect_deferred_attack`]. The legacy immediate
+//! front arc remains for games without retained-pose combat.
 //! With zero cooked records every entry point returns immediately, so
 //! a record-free game pays a handful of cycles per tick (measured in
 //! the phase-3 budget's idle A/B).
@@ -277,6 +279,116 @@ pub struct GameEntityClip {
     pub one_shot: bool,
 }
 
+/// One attack contact opportunity frozen by [`GameEntities::tick_delta_deferred`].
+///
+/// The token captures the exact attack clip/phase and root transform before an
+/// Attack-to-Recover transition can change the live state. It is valid only
+/// until the next entity tick: both [`GameEntities::connect_deferred_attack`]
+/// and [`GameEntities::deferred_attack_legacy_arc_hits`] reject stale tokens by
+/// generation and swing sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeferredGameEntityAttack {
+    entity: u16,
+    tick_generation: u16,
+    swing_sequence: u16,
+    clip: GameEntityClip,
+    position: [i32; 3],
+    yaw: u16,
+    room: RoomIndex,
+}
+
+impl DeferredGameEntityAttack {
+    const EMPTY: Self = Self {
+        entity: 0,
+        tick_generation: 0,
+        swing_sequence: 0,
+        clip: GameEntityClip {
+            clip: 0,
+            phase_ticks: 0,
+            one_shot: false,
+        },
+        position: [0; 3],
+        yaw: 0,
+        room: RoomIndex(0),
+    };
+
+    /// Cooked game-entity index whose swing produced this token.
+    pub const fn entity(self) -> usize {
+        self.entity as usize
+    }
+
+    /// Exact model clip/phase that body, equipment, and hit geometry use.
+    pub const fn clip(self) -> GameEntityClip {
+        self.clip
+    }
+
+    /// Frozen room of the attacker for the contact tick.
+    pub const fn room(self) -> RoomIndex {
+        self.room
+    }
+}
+
+/// Caller-owned fixed-capacity contact handoff for one entity tick.
+///
+/// `EMPTY` is all-zero and safe in `.bss`. A frame is overwritten by every
+/// [`GameEntities::tick_delta_deferred`] call; overflow is reported explicitly
+/// and never causes heap allocation.
+pub struct DeferredGameEntityAttacks<const MAX_ATTACKS: usize> {
+    attacks: [DeferredGameEntityAttack; MAX_ATTACKS],
+    count: u16,
+    overflow: u16,
+}
+
+impl<const MAX_ATTACKS: usize> DeferredGameEntityAttacks<MAX_ATTACKS> {
+    /// All-zero fixed-capacity frame.
+    pub const EMPTY: Self = Self {
+        attacks: [DeferredGameEntityAttack::EMPTY; MAX_ATTACKS],
+        count: 0,
+        overflow: 0,
+    };
+
+    /// Forget the previous tick's tokens.
+    pub fn clear(&mut self) {
+        self.count = 0;
+        self.overflow = 0;
+    }
+
+    /// Valid contact tokens in deterministic cooked-entity order.
+    pub fn as_slice(&self) -> &[DeferredGameEntityAttack] {
+        &self.attacks[..usize::from(self.count)]
+    }
+
+    /// Number of valid tokens in this frame.
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Whether this frame contains no attack contact opportunities.
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Copy one token out without retaining a borrow of the frame owner.
+    pub fn get(&self, index: usize) -> Option<DeferredGameEntityAttack> {
+        self.as_slice().get(index).copied()
+    }
+
+    /// Active attacks that could not fit this frame.
+    pub const fn overflow_count(&self) -> u16 {
+        self.overflow
+    }
+
+    fn push(&mut self, attack: DeferredGameEntityAttack) {
+        let count = usize::from(self.count);
+        if count < MAX_ATTACKS && count < usize::from(u16::MAX) {
+            self.attacks[count] = attack;
+            self.count += 1;
+        } else {
+            self.overflow = self.overflow.saturating_add(1);
+        }
+    }
+}
+
 /// Aggregate outcome of one [`GameEntities::apply_melee_arc`] sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MeleeArcStats {
@@ -317,6 +429,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// 1 while the current Attack window already connected (one hit
     /// per swing); cleared on entering Attack.
     attack_hit: [u8; MAX_ENTITIES],
+    /// Wrapping identity of each entity's current swing. Deferred tokens use
+    /// it to reject a contact retained across a later attack.
+    attack_sequence: [u16; MAX_ENTITIES],
     /// Free-movement combat choice ([`GameEntityIntent`] as raw u8).
     intent: [u8; MAX_ENTITIES],
     /// Remaining local post-attack cooldown in 60 Hz ticks.
@@ -327,6 +442,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     attack_owner_plus_one: u16,
     /// Remaining shared delay before another attack slot may be granted.
     director_delay_ticks: u16,
+    /// Wrapping identity of the latest tick/tick-delta call. Deferred contact
+    /// tokens are deliberately one-call capabilities.
+    attack_tick_generation: u16,
 }
 
 impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
@@ -346,11 +464,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         poise_damage: [0; MAX_ENTITIES],
         patrol_leg: [0; MAX_ENTITIES],
         attack_hit: [0; MAX_ENTITIES],
+        attack_sequence: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
         attack_cooldown: [0; MAX_ENTITIES],
         attack_wait_ticks: [0; MAX_ENTITIES],
         attack_owner_plus_one: 0,
         director_delay_ticks: 0,
+        attack_tick_generation: 0,
     };
 
     /// Reset and spawn entity state 1:1 from the cooked records
@@ -640,7 +760,41 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         mover: &mut impl GameEntityMover,
         delta_ticks: u16,
     ) -> GameEntityTickStats {
+        self.tick_delta_impl::<0>(records, input, mover, delta_ticks, None)
+    }
+
+    /// Advance entity behaviour while deferring attack contact to the owner of
+    /// the retained actor poses.
+    ///
+    /// Every active attack writes one [`DeferredGameEntityAttack`] containing
+    /// the exact attack clip/phase and transform sampled before any
+    /// Attack-to-Recover transition. The caller resolves body/equipment poses,
+    /// evaluates authored combat capsules, and latches a connection with
+    /// [`Self::connect_deferred_attack`]. `player_hits` and `player_damage` in
+    /// the returned stats are therefore zero; the caller reports those after
+    /// pose-backed contact resolution.
+    pub fn tick_delta_deferred<const MAX_ATTACKS: usize>(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
+        delta_ticks: u16,
+        attacks: &mut DeferredGameEntityAttacks<MAX_ATTACKS>,
+    ) -> GameEntityTickStats {
+        attacks.clear();
+        self.tick_delta_impl(records, input, mover, delta_ticks, Some(attacks))
+    }
+
+    fn tick_delta_impl<const MAX_ATTACKS: usize>(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
+        delta_ticks: u16,
+        mut deferred: Option<&mut DeferredGameEntityAttacks<MAX_ATTACKS>>,
+    ) -> GameEntityTickStats {
         let delta_ticks = delta_ticks.max(1);
+        self.attack_tick_generation = self.attack_tick_generation.wrapping_add(1);
         let mut stats = GameEntityTickStats::default();
         let count = self.count().min(records.len());
         self.update_combat_director(records, input, delta_ticks, &mut stats);
@@ -679,7 +833,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 }
                 GameEntityState::Attack => {
                     stats.attacking += 1;
-                    self.resolve_attack_contact(record, index, input, &mut stats);
+                    match deferred.as_deref_mut() {
+                        Some(attacks) => attacks.push(self.deferred_attack(record, index)),
+                        None => self.resolve_attack_contact(record, index, input, &mut stats),
+                    }
                     if self.state_ticks[index] >= GAME_ENTITY_ATTACK_ACTIVE_TICKS {
                         self.enter_state(index, GameEntityState::Recover, &mut stats);
                     }
@@ -707,6 +864,80 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             index += 1;
         }
         stats
+    }
+
+    fn deferred_attack(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+    ) -> DeferredGameEntityAttack {
+        DeferredGameEntityAttack {
+            entity: index.min(u16::MAX as usize) as u16,
+            tick_generation: self.attack_tick_generation,
+            swing_sequence: self.attack_sequence[index],
+            clip: GameEntityClip {
+                clip: record.attack_clip,
+                phase_ticks: u16::from(record.windup_ticks).saturating_add(self.state_ticks[index]),
+                one_shot: true,
+            },
+            position: [self.x[index], self.y[index], self.z[index]],
+            yaw: self.yaw[index] as u16,
+            room: record.room,
+        }
+    }
+
+    /// Whether `attack` still names this tick and has not connected during its
+    /// current swing. Invalid/stale tokens fail closed.
+    pub fn deferred_attack_can_connect(&self, attack: DeferredGameEntityAttack) -> bool {
+        let index = attack.entity();
+        index < self.count()
+            && attack.tick_generation == self.attack_tick_generation
+            && attack.swing_sequence == self.attack_sequence[index]
+            && self.attack_hit[index] == 0
+    }
+
+    /// Test the explicitly legacy Character-radius/front-arc contact policy for
+    /// a deferred token. Games should call this only when authored attacker
+    /// hitboxes or defender hurtboxes are absent; an authored inactive frame or
+    /// authored geometric miss is authoritative and must not fall back here.
+    pub fn deferred_attack_legacy_arc_hits(
+        &self,
+        records: &[LevelGameEntityRecord],
+        attack: DeferredGameEntityAttack,
+        player: [i32; 3],
+        player_room: RoomIndex,
+        player_radius: i32,
+    ) -> bool {
+        let index = attack.entity();
+        if !self.deferred_attack_can_connect(attack)
+            || records.get(index).is_none()
+            || player_room != attack.room
+        {
+            return false;
+        }
+        let record = &records[index];
+        let arc = MeleeArc {
+            room: attack.room,
+            x: attack.position[0],
+            z: attack.position[2],
+            yaw: attack.yaw,
+            reach: i32::from(record.radius)
+                .saturating_add(player_radius.max(0))
+                .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN),
+            half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
+        };
+        arc_hits_circle(&arc, player[0], player[2], 0)
+    }
+
+    /// Latch one verified deferred contact. Returns `false` for stale tokens or
+    /// a swing that already connected, preserving one-hit-per-swing even if a
+    /// caller accidentally evaluates the same frame twice.
+    pub fn connect_deferred_attack(&mut self, attack: DeferredGameEntityAttack) -> bool {
+        if !self.deferred_attack_can_connect(attack) {
+            return false;
+        }
+        self.attack_hit[attack.entity()] = 1;
+        true
     }
 
     /// Update cooldown clocks and grant the single shared attack slot. The
@@ -825,6 +1056,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 stats.attack_enters += 1;
                 // A fresh swing gets one connection.
                 self.attack_hit[index] = 0;
+                self.attack_sequence[index] = self.attack_sequence[index].wrapping_add(1);
             }
             _ => {}
         }
@@ -1947,5 +2179,204 @@ mod tests {
         let toward = MeleeArc { yaw: 3072, ..away };
         let stats = entities.apply_melee_arc(&IDLE_ENEMY, &toward, 30, 40, &mut swing);
         assert_eq!(stats.hits, 1);
+    }
+
+    /// Deferred twin of [`advance_into_attack`]: same grammar, tokens routed
+    /// through `attacks`.
+    fn advance_into_attack_deferred(
+        entities: &mut GameEntities<8>,
+        attacks: &mut DeferredGameEntityAttacks<8>,
+    ) {
+        for _ in 0..5 {
+            entities.tick_delta_deferred(
+                &IDLE_ENEMY,
+                near_input(&ACTIVE),
+                &mut NoClipMover,
+                1,
+                attacks,
+            );
+        }
+        assert_eq!(entities.state(0), GameEntityState::Attack);
+        // The Windup -> Attack transition tick runs the Windup arm; the
+        // first token appears on the first ACTIVE tick, not here.
+        assert!(attacks.is_empty());
+    }
+
+    #[test]
+    fn deferred_tokens_freeze_active_boundary_frames_and_recover_is_dry() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        advance_into_attack_deferred(&mut entities, &mut attacks);
+        let windup = u16::from(IDLE_ENEMY[0].windup_ticks);
+
+        // Every active tick freezes exactly one token whose clip/phase is the
+        // attack one-shot the pose overrides play, and the deferred tick
+        // never applies immediate player damage.
+        for active_tick in 1..=GAME_ENTITY_ATTACK_ACTIVE_TICKS {
+            let stats = entities.tick_delta_deferred(
+                &IDLE_ENEMY,
+                near_input(&ACTIVE),
+                &mut NoClipMover,
+                1,
+                &mut attacks,
+            );
+            assert_eq!(stats.attacking, 1);
+            assert_eq!(stats.player_hits, 0);
+            assert_eq!(stats.player_damage, 0);
+            assert_eq!(attacks.len(), 1);
+            let token = attacks.get(0).unwrap();
+            assert_eq!(token.entity(), 0);
+            assert_eq!(token.room(), RoomIndex(0));
+            assert_eq!(token.clip().clip, IDLE_ENEMY[0].attack_clip);
+            assert!(token.clip().one_shot);
+            assert_eq!(token.clip().phase_ticks, windup + active_tick);
+            assert!(entities.deferred_attack_can_connect(token));
+        }
+
+        // The final active tick froze its token BEFORE transitioning to
+        // Recover, so the boundary frame still resolves against the retained
+        // attack pose even though the live state moved on.
+        assert_eq!(entities.state(0), GameEntityState::Recover);
+        let boundary = attacks.get(0).unwrap();
+        assert_eq!(
+            boundary.clip().phase_ticks,
+            windup + GAME_ENTITY_ATTACK_ACTIVE_TICKS
+        );
+        assert!(entities.connect_deferred_attack(boundary));
+
+        // The first Recover tick emits nothing.
+        let stats = entities.tick_delta_deferred(
+            &IDLE_ENEMY,
+            near_input(&ACTIVE),
+            &mut NoClipMover,
+            1,
+            &mut attacks,
+        );
+        assert_eq!(stats.attacking, 0);
+        assert!(attacks.is_empty());
+    }
+
+    #[test]
+    fn deferred_tokens_reject_stale_generation_and_swing_sequence() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        advance_into_attack_deferred(&mut entities, &mut attacks);
+        entities.tick_delta_deferred(
+            &IDLE_ENEMY,
+            near_input(&ACTIVE),
+            &mut NoClipMover,
+            1,
+            &mut attacks,
+        );
+        let token = attacks.get(0).unwrap();
+        let player = [1200, 0, 1000];
+
+        // A token from another swing of this entity fails closed even when
+        // its generation is current.
+        let stale_swing = DeferredGameEntityAttack {
+            swing_sequence: token.swing_sequence.wrapping_sub(1),
+            ..token
+        };
+        assert!(!entities.deferred_attack_can_connect(stale_swing));
+        assert!(!entities.connect_deferred_attack(stale_swing));
+        assert!(!entities.deferred_attack_legacy_arc_hits(
+            &IDLE_ENEMY,
+            stale_swing,
+            player,
+            RoomIndex(0),
+            192,
+        ));
+
+        // The next entity tick retires the previous tick's tokens wholesale:
+        // contact may only finalize against the poses retained for the tick
+        // that emitted the token.
+        entities.tick_delta_deferred(
+            &IDLE_ENEMY,
+            near_input(&ACTIVE),
+            &mut NoClipMover,
+            1,
+            &mut attacks,
+        );
+        assert!(!entities.deferred_attack_can_connect(token));
+        assert!(!entities.connect_deferred_attack(token));
+        assert!(!entities.deferred_attack_legacy_arc_hits(
+            &IDLE_ENEMY,
+            token,
+            player,
+            RoomIndex(0),
+            192,
+        ));
+        let fresh = attacks.get(0).unwrap();
+        assert!(entities.deferred_attack_can_connect(fresh));
+    }
+
+    #[test]
+    fn deferred_connection_latches_once_and_suppresses_the_legacy_arc() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        let mut attacks = DeferredGameEntityAttacks::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        advance_into_attack_deferred(&mut entities, &mut attacks);
+        entities.tick_delta_deferred(
+            &IDLE_ENEMY,
+            near_input(&ACTIVE),
+            &mut NoClipMover,
+            1,
+            &mut attacks,
+        );
+        let token = attacks.get(0).unwrap();
+        let player = [1200, 0, 1000];
+
+        // Legacy arc geometry (frozen origin/yaw/reach) agrees the player is
+        // reachable before any connection, whiffs behind the committed
+        // facing, and never crosses rooms.
+        assert!(entities.deferred_attack_legacy_arc_hits(
+            &IDLE_ENEMY,
+            token,
+            player,
+            RoomIndex(0),
+            192,
+        ));
+        assert!(!entities.deferred_attack_legacy_arc_hits(
+            &IDLE_ENEMY,
+            token,
+            [800, 0, 1000],
+            RoomIndex(0),
+            192,
+        ));
+        assert!(!entities.deferred_attack_legacy_arc_hits(
+            &IDLE_ENEMY,
+            token,
+            player,
+            RoomIndex(2),
+            192,
+        ));
+
+        // An authored-capsule connection latches the swing: the same token
+        // cannot finalize twice, and the legacy arc goes dead with it, so one
+        // swing can never damage through both policies.
+        assert!(entities.connect_deferred_attack(token));
+        assert!(!entities.connect_deferred_attack(token));
+        assert!(!entities.deferred_attack_legacy_arc_hits(
+            &IDLE_ENEMY,
+            token,
+            player,
+            RoomIndex(0),
+            192,
+        ));
+
+        // The latch spans the remaining active ticks of the SAME swing.
+        entities.tick_delta_deferred(
+            &IDLE_ENEMY,
+            near_input(&ACTIVE),
+            &mut NoClipMover,
+            1,
+            &mut attacks,
+        );
+        let later = attacks.get(0).unwrap();
+        assert_eq!(later.swing_sequence, token.swing_sequence);
+        assert!(!entities.deferred_attack_can_connect(later));
+        assert!(!entities.connect_deferred_attack(later));
     }
 }
