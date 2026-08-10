@@ -39,6 +39,18 @@ pub(crate) struct PreviewSocket {
     pub selected: bool,
 }
 
+/// Character material override for the preview: replaces the model's
+/// own atlas with a resolved material texture (the same bytes the cook
+/// ships) plus the material's animated UV motion, advanced on the
+/// preview clock exactly like the runtime advances it on sim ticks.
+/// Sampling tiles the override so byte-space model UVs repeat a
+/// smaller generated texture, the way the crystal/hologram skins read
+/// in Play.
+pub(crate) struct PreviewMaterialLayer<'a> {
+    pub atlas: &'a ColorImage,
+    pub motion: psx_level::LevelMaterialUvMotion,
+}
+
 /// Equipped-weapon overlay: a second rigid model rendered riding a
 /// socket, placed with the runtime equipment composition (socket pose
 /// times grip inverse) so the preview equals what Play shows.
@@ -189,6 +201,7 @@ pub(crate) fn render_import_model_preview_with_orientation_at_size(
         &[],
         None,
         None,
+        None,
     )
     .map(|render| render.image)
 }
@@ -205,6 +218,7 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     combat_capsules: &[PreviewCombatCapsule],
     sockets: &[PreviewSocket],
     equipped_weapon: Option<&PreviewEquippedWeapon<'_>>,
+    character_material: Option<&PreviewMaterialLayer<'_>>,
     selected_joint: Option<u16>,
 ) -> Option<ImportPreviewRender> {
     let model = Model::from_bytes(model_bytes).ok()?;
@@ -319,6 +333,19 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     }
 
     let double_sided = model.double_sided();
+    let (character_atlas, character_uv_offset, character_wrap_uv) = match character_material {
+        Some(layer) => {
+            // Same tick source as `frame_q12` above, so scrubbing the
+            // clip advances the material scroll in lockstep with Play.
+            let tick = (options.time_seconds.max(0.0) * PREVIEW_PLAYBACK_HZ as f64) as u32;
+            (
+                layer.atlas,
+                layer.motion.offset_at_tick(tick, PREVIEW_PLAYBACK_HZ),
+                true,
+            )
+        }
+        None => (atlas, [0, 0], false),
+    };
     for part_index in 0..model.part_count() {
         let Some(part) = model.part(part_index) else {
             continue;
@@ -342,13 +369,14 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             raster_textured_triangle(
                 &mut image,
                 &mut z_buffer,
-                atlas,
+                character_atlas,
                 [
-                    PreviewVertex::from_projected(pa, a.uv),
-                    PreviewVertex::from_projected(pb, b.uv),
-                    PreviewVertex::from_projected(pc, c.uv),
+                    PreviewVertex::from_projected(pa, a.uv).with_uv_offset(character_uv_offset),
+                    PreviewVertex::from_projected(pb, b.uv).with_uv_offset(character_uv_offset),
+                    PreviewVertex::from_projected(pc, c.uv).with_uv_offset(character_uv_offset),
                 ],
                 double_sided,
+                character_wrap_uv,
             );
         }
     }
@@ -950,6 +978,14 @@ struct PreviewVertex {
 }
 
 impl PreviewVertex {
+    /// Shift byte-space UVs before interpolation; sampling wraps, so a
+    /// triangle crossing the seam tiles instead of smearing.
+    fn with_uv_offset(mut self, offset: [u8; 2]) -> Self {
+        self.u += offset[0] as f32;
+        self.v += offset[1] as f32;
+        self
+    }
+
     fn from_projected(projected: ProjectedVertex, uv: (u8, u8)) -> Self {
         Self {
             x: projected.sx as f32,
@@ -1023,6 +1059,7 @@ fn raster_textured_triangle(
     atlas: &ColorImage,
     tri: [PreviewVertex; 3],
     double_sided: bool,
+    wrap_uv: bool,
 ) {
     let width = image.size[0];
     let height = image.size[1];
@@ -1104,7 +1141,11 @@ fn raster_textured_triangle(
 
             let u = tri[0].u * b0 + tri[1].u * b1 + tri[2].u * b2;
             let v = tri[0].v * b0 + tri[1].v * b1 + tri[2].v * b2;
-            image.pixels[index] = sample_atlas(atlas, u, v);
+            image.pixels[index] = if wrap_uv {
+                sample_atlas_wrapped(atlas, u, v)
+            } else {
+                sample_atlas(atlas, u, v)
+            };
             z_buffer[index] = depth;
         }
     }
@@ -1117,6 +1158,14 @@ fn edge(a: PreviewVertex, b: PreviewVertex, c: PreviewVertex) -> f32 {
 fn sample_atlas(atlas: &ColorImage, u: f32, v: f32) -> Color32 {
     let x = (u.round() as i32).clamp(0, atlas.size[0] as i32 - 1) as usize;
     let y = (v.round() as i32).clamp(0, atlas.size[1] as i32 - 1) as usize;
+    atlas.pixels[y * atlas.size[0] + x]
+}
+
+/// Tiled sampling for material-override atlases: byte-space model UVs
+/// repeat a smaller generated texture (the PS1 texture-window look).
+fn sample_atlas_wrapped(atlas: &ColorImage, u: f32, v: f32) -> Color32 {
+    let x = (u.round() as i32).rem_euclid(atlas.size[0].max(1) as i32) as usize;
+    let y = (v.round() as i32).rem_euclid(atlas.size[1].max(1) as i32) as usize;
     atlas.pixels[y * atlas.size[0] + x]
 }
 
@@ -1335,6 +1384,7 @@ fn draw_equipped_weapon_overlay(
                     PreviewVertex::from_projected(pc, c.uv),
                 ],
                 double_sided,
+                false,
             );
         }
     }
@@ -1666,6 +1716,7 @@ mod tests {
                 sockets,
                 None,
                 None,
+                None,
             )
             .expect("preview renders")
             .image
@@ -1742,13 +1793,28 @@ mod tests {
                 size: [8, 8],
                 pixels: vec![Color32::from_rgb(150, 155, 170); 64],
             });
+        // Optional character material override so inspection dumps show
+        // the real in-game skin (e.g. the generated crystal hologram)
+        // instead of the flat placeholder atlas.
+        let material_atlas = std::env::var("DUMP_OVERRIDE_ATLAS").ok().and_then(|path| {
+            crate::model_animation_viewer::decode_psxt_image(
+                &std::fs::read(path).expect("override atlas"),
+            )
+        });
+        let material_layer = material_atlas.as_ref().map(|atlas| PreviewMaterialLayer {
+            atlas,
+            motion: psx_level::LevelMaterialUvMotion::default(),
+        });
         let options = ImportPreviewOptions {
             world_height: 1024,
             visual_scale_q8: MODEL_SCALE_ONE_Q8,
             visual_yaw_q12: 0,
             collision_radius: 192,
             time_seconds: 0.0,
-            yaw_q12: 340,
+            yaw_q12: std::env::var("DUMP_YAW")
+                .ok()
+                .and_then(|yaw| yaw.parse().ok())
+                .unwrap_or(340),
             pitch_q12: 350,
             radius: 1536,
             focus_on_animated_bounds: true,
@@ -1769,6 +1835,7 @@ mod tests {
                 &[],
                 &[],
                 weapon,
+                material_layer.as_ref(),
                 None,
             )
             .expect("preview renders")
@@ -1952,6 +2019,7 @@ mod tests {
                 selected: true,
             }],
             &[],
+            None,
             None,
             None,
         )
