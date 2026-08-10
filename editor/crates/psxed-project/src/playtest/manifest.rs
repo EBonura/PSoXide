@@ -372,6 +372,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             crate::brush_world::BrushWorldCookMode::Release
         )
     );
+    let _ = writeln!(
+        out,
+        "pub const PLAYTEST_PACKET_CAPACITY: usize = {};\n",
+        super::budget::cooked_manifest_packet_capacity(package)
+    );
     let has_room_fog = package
         .rooms
         .iter()
