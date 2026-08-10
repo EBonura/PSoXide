@@ -41,7 +41,6 @@ pub(super) fn draw_player_equipment<
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
-    let mut out = EquipmentDrawStats::default();
     let Some(player_pose) = resolve_player_actor_pose(
         tables,
         character,
@@ -58,8 +57,62 @@ pub(super) fn draw_player_equipment<
         elapsed_tick,
         video_hz,
     ) else {
-        return out;
+        return EquipmentDrawStats::default();
     };
+    draw_player_equipment_from_pose::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        PROFILE,
+    >(
+        tables,
+        knobs,
+        scratch,
+        player_pose,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        triangles,
+        world,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_player_equipment_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    player_pose: PlayerActorPoseSnapshot,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    let mut out = EquipmentDrawStats::default();
     let character_model = player_pose.model();
     let character_pose = player_pose.pose();
 
