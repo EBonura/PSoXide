@@ -152,6 +152,11 @@ fn render_brush_manifest_source(textures: &[CompiledBrushTexture]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_bsp::collision::Q12_ONE;
+    use psx_bsp::mover::BrushDoorSet;
+    use psx_bsp::pxbsp::{entity_class, entity_flags};
+    use psx_bsp::pxbsp_resident::PxbspResidentMap;
+    use psx_bsp::{SliceReader, Vec3I32};
 
     #[test]
     fn manifest_keeps_texture_asset_ids_aligned_with_blobs() {
@@ -173,5 +178,107 @@ mod tests {
         assert!(source.contains("BRUSH_TEXTURE_ASSET_IDS: &[u16] = &[7, 11]"));
         assert!(source.contains("brush_textures/texture_000.psxt"));
         assert!(source.contains("brush_textures/texture_001.psxt"));
+    }
+
+    #[test]
+    fn first_playable_fixture_opens_a_player_hull_route_through_its_door() {
+        let project = ProjectDocument::from_ron_str(include_str!(
+            "../../../projects/brush-first-playable/project.ron"
+        ))
+        .expect("brush first-playable fixture");
+        let fixture_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+        let compiled = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: &fixture_dir,
+                mode: BrushWorldCookMode::Draft,
+                ambient: DRAFT_AMBIENT,
+                texture_asset_base: 0,
+            },
+        )
+        .expect("compile brush first-playable fixture");
+        let mut map = PxbspResidentMap::with_capacity(compiled.pxbsp.bytes.len());
+        map.load(0, &mut SliceReader::new(&compiled.pxbsp.bytes))
+            .expect("load brush first-playable fixture");
+
+        let entities = map.entities();
+        let spawn = (0..entities.len())
+            .filter_map(|index| entities.get(index))
+            .find(|entity| {
+                entity.class_id == entity_class::PLAYER_SPAWN
+                    && entity.flags & entity_flags::ENABLED != 0
+            })
+            .expect("enabled player spawn");
+        let destination = Vec3I32 {
+            x: 768 * 4096,
+            ..spawn.origin
+        };
+        let world_trace = map
+            .model_collision_hull(0, 1)
+            .expect("world player hull")
+            .trace(spawn.origin, destination)
+            .expect("world trace");
+        assert_eq!(world_trace.fraction, Q12_ONE, "static doorway is clear");
+
+        let mut doors = BrushDoorSet::<1>::default();
+        doors.init_from_map(&map).expect("one runtime door");
+        assert_eq!(doors.len(), 1);
+        let closed_trace = map
+            .model_collision_hull(1, 1)
+            .expect("door player hull")
+            .transformed(doors.get(0).expect("door").transform())
+            .trace(spawn.origin, destination)
+            .expect("closed door trace");
+        assert!(
+            closed_trace.fraction < Q12_ONE,
+            "closed door blocks the route"
+        );
+
+        doors.get_mut(0).expect("door").set_open(true);
+        for _ in 0..60 {
+            doors.tick();
+        }
+        let open_trace = map
+            .model_collision_hull(1, 1)
+            .expect("door player hull")
+            .transformed(doors.get(0).expect("door").transform())
+            .trace(spawn.origin, destination)
+            .expect("open door trace");
+        assert_eq!(open_trace.fraction, Q12_ONE, "open door clears the route");
+
+        let mut tape_doors = BrushDoorSet::<1>::default();
+        tape_doors.init_from_map(&map).expect("one tape door");
+        let mut tape_origin = spawn.origin;
+        for tick in 0..150 {
+            if tick == 24 {
+                tape_doors.get_mut(0).expect("tape door").toggle();
+            }
+            tape_doors.tick();
+            let candidate = Vec3I32 {
+                x: tape_origin.x + 4 * 4096,
+                ..tape_origin
+            };
+            let mut trace = map
+                .model_collision_hull(0, 1)
+                .expect("world player hull")
+                .trace(tape_origin, candidate)
+                .expect("tape world trace");
+            let door_trace = map
+                .model_collision_hull(1, 1)
+                .expect("door player hull")
+                .transformed(tape_doors.get(0).expect("tape door").transform())
+                .trace(tape_origin, candidate)
+                .expect("tape door trace");
+            if door_trace.fraction < trace.fraction {
+                trace = door_trace;
+            }
+            tape_origin = trace.end;
+        }
+        assert!(
+            tape_origin.x >= 768 * 4096,
+            "walkthrough tape reaches the second room: x={}",
+            tape_origin.x >> 12
+        );
     }
 }

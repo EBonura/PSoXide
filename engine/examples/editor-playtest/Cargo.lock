@@ -13,6 +13,7 @@ name = "editor-playtest"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
+ "psx-bsp",
  "psx-engine",
  "psx-font",
  "psx-game-runtime",
@@ -23,6 +24,7 @@ dependencies = [
  "psx-math",
  "psx-rt",
  "psx-vram",
+ "psxed-format",
 ]
 
 [[package]]
@@ -31,6 +33,16 @@ version = "0.1.0"
 dependencies = [
  "psx-gte",
  "psxed-format",
+]
+
+[[package]]
+name = "psx-bsp"
+version = "0.1.0"
+dependencies = [
+ "psx-engine",
+ "psx-gpu",
+ "psx-gte",
+ "psx-math",
 ]
 
 [[package]]
