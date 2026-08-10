@@ -1282,7 +1282,8 @@ fn one_click_play_and_rebuild_recook_the_persisted_bsp_mode() {
 #[test]
 fn exceeded_budget_target_can_focus_the_offending_brush() {
     let mut project = ProjectDocument::new("budget target");
-    for index in 0..300 {
+    // Enough cuboids to overflow even the derived-capacity ceiling.
+    for index in 0..400 {
         project
             .active_scene_mut()
             .brushes
@@ -1302,7 +1303,7 @@ fn exceeded_budget_target_can_focus_the_offending_brush() {
         .expect("actionable packet target");
 
     assert!(workspace.focus_playtest_validation_target(target));
-    assert_eq!(workspace.selected_brush, Some(299));
+    assert_eq!(workspace.selected_brush, Some(399));
     assert_eq!(workspace.active_tool, ViewTool::Brush);
 }
 
