@@ -45,11 +45,14 @@ fn brush_tool_drag_creates_selectable_undoable_brush() {
     );
     assert!(harness.workspace.brush_drag.is_none(), "drag state cleared");
 
-    // Clicking over the middle of the dragged footprint re-picks it.
+    // Clicking over the middle of the dragged footprint re-picks it and
+    // selects the face the ray entered.
     harness.workspace.selected_brush = None;
+    harness.workspace.selected_brush_face = None;
     let click = brush_frame(&harness, Pos2::new(400.0, 350.0));
     tool.primary_clicked(&mut harness.workspace, &click);
     assert_eq!(harness.workspace.selected_brush, Some(0));
+    assert!(harness.workspace.selected_brush_face.is_some());
 
     // Clicking empty sky clears the selection.
     let sky = brush_frame(&harness, Pos2::new(400.0, 10.0));
