@@ -232,6 +232,22 @@ pub mod material_animation {
     pub const FLIPBOOK: u8 = 2;
 }
 
+/// Stable PSoXide entity classes stored in [`PxbspEntity::class_id`].
+pub mod entity_class {
+    /// A translated brush submodel driven between closed and open endpoints.
+    pub const BRUSH_DOOR: u16 = 1;
+}
+
+/// Common flags stored in [`PxbspEntity::flags`].
+pub mod entity_flags {
+    /// Entity participates in gameplay.
+    pub const ENABLED: u16 = 1 << 0;
+    /// A brush door begins at its open endpoint.
+    pub const START_OPEN: u16 = 1 << 1;
+    /// Flags assigned by PXBSP version one.
+    pub const KNOWN: u16 = ENABLED | START_OPEN;
+}
+
 /// Fixed world-space base shared by every PSoXide entity class.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PxbspEntity {
@@ -271,6 +287,72 @@ impl CookedRecord for PxbspEntity {
             },
             payload_offset: u32::from_le_bytes(bytes[26..30].try_into().unwrap()),
             payload_size: u16::from_le_bytes([bytes[30], bytes[31]]),
+        }
+    }
+}
+
+/// Fixed payload for [`entity_class::BRUSH_DOOR`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PxbspBrushDoor {
+    /// Q20.12 translation from the closed endpoint to the open endpoint.
+    pub open_offset: Vec3I32,
+    /// Number of fixed 60 Hz simulation ticks between endpoints.
+    pub travel_ticks: u16,
+    reserved: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PxbspBrushDoorError {
+    ZeroOpenOffset,
+    ZeroTravelTicks,
+    NonZeroReserved(u16),
+}
+
+impl PxbspBrushDoor {
+    pub const fn new(open_offset: Vec3I32, travel_ticks: u16) -> Self {
+        Self {
+            open_offset,
+            travel_ticks,
+            reserved: 0,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), PxbspBrushDoorError> {
+        if self.open_offset == (Vec3I32 { x: 0, y: 0, z: 0 }) {
+            return Err(PxbspBrushDoorError::ZeroOpenOffset);
+        }
+        if self.travel_ticks == 0 {
+            return Err(PxbspBrushDoorError::ZeroTravelTicks);
+        }
+        if self.reserved != 0 {
+            return Err(PxbspBrushDoorError::NonZeroReserved(self.reserved));
+        }
+        Ok(())
+    }
+
+    pub fn to_le_bytes(self) -> [u8; Self::SIZE] {
+        let mut bytes = [0; Self::SIZE];
+        bytes[0..4].copy_from_slice(&self.open_offset.x.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.open_offset.y.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.open_offset.z.to_le_bytes());
+        bytes[12..14].copy_from_slice(&self.travel_ticks.to_le_bytes());
+        bytes[14..16].copy_from_slice(&self.reserved.to_le_bytes());
+        bytes
+    }
+}
+
+impl CookedRecord for PxbspBrushDoor {
+    const SIZE: usize = 16;
+
+    fn decode(bytes: &[u8]) -> Self {
+        Self {
+            open_offset: Vec3I32 {
+                x: i32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+                y: i32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+                z: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            },
+            travel_ticks: u16::from_le_bytes([bytes[12], bytes[13]]),
+            reserved: u16::from_le_bytes([bytes[14], bytes[15]]),
         }
     }
 }
@@ -363,6 +445,12 @@ impl<'a> PxbspEntityTable<'a> {
         let start = self.payload_offset + entity.payload_offset as usize;
         let end = start + entity.payload_size as usize;
         self.bytes.get(start..end)
+    }
+
+    /// Decode one fixed-size class payload without copying its table storage.
+    pub fn payload_record<T: CookedRecord>(self, index: usize) -> Option<T> {
+        let payload = self.payload(index)?;
+        (payload.len() == T::SIZE).then(|| T::decode(payload))
     }
 }
 
@@ -839,5 +927,64 @@ mod tests {
             PxbspEntityTable::new(&bytes),
             Err(PxbspEntityTableError::BadPayloadRange(0))
         ));
+    }
+
+    #[test]
+    fn brush_door_payload_round_trips_through_entity_table() {
+        let door = PxbspBrushDoor::new(
+            Vec3I32 {
+                x: 0,
+                y: 128 * 4096,
+                z: -32 * 4096,
+            },
+            45,
+        );
+        let payload = door.to_le_bytes();
+        let payload_offset = PXBSP_ENTITY_TABLE_HEADER_BYTES + PxbspEntity::SIZE;
+        let mut bytes = vec![0; payload_offset + payload.len()];
+        bytes[0..2].copy_from_slice(&1u16.to_le_bytes());
+        bytes[2..4].copy_from_slice(&(PxbspEntity::SIZE as u16).to_le_bytes());
+        bytes[4..8].copy_from_slice(&(payload_offset as u32).to_le_bytes());
+        let record = PXBSP_ENTITY_TABLE_HEADER_BYTES;
+        bytes[record..record + 2].copy_from_slice(&entity_class::BRUSH_DOOR.to_le_bytes());
+        bytes[record + 2..record + 4]
+            .copy_from_slice(&(entity_flags::ENABLED | entity_flags::START_OPEN).to_le_bytes());
+        bytes[record + 4..record + 6].copy_from_slice(&1u16.to_le_bytes());
+        bytes[record + 30..record + 32].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+        bytes[payload_offset..].copy_from_slice(&payload);
+
+        let table = PxbspEntityTable::new(&bytes).expect("entity table");
+        let entity = table.get(0).expect("door entity");
+        assert_eq!(entity.class_id, entity_class::BRUSH_DOOR);
+        assert_eq!(entity.model, 1);
+        assert_eq!(
+            entity.flags,
+            entity_flags::ENABLED | entity_flags::START_OPEN
+        );
+        let decoded = table
+            .payload_record::<PxbspBrushDoor>(0)
+            .expect("door payload");
+        assert_eq!(decoded, door);
+        assert_eq!(decoded.validate(), Ok(()));
+    }
+
+    #[test]
+    fn brush_door_payload_rejects_motionless_recipes() {
+        assert_eq!(
+            PxbspBrushDoor::new(Vec3I32 { x: 0, y: 0, z: 0 }, 30).validate(),
+            Err(PxbspBrushDoorError::ZeroOpenOffset)
+        );
+        assert_eq!(
+            PxbspBrushDoor::new(
+                Vec3I32 {
+                    x: 0,
+                    y: 4096,
+                    z: 0
+                },
+                0
+            )
+            .validate(),
+            Err(PxbspBrushDoorError::ZeroTravelTicks)
+        );
     }
 }
