@@ -401,6 +401,38 @@ impl Brush {
 }
 
 impl Brush {
+    /// Translate every authored face point within `epsilon` of any
+    /// `target` by `delta`; returns how many points moved. The vertex
+    /// and edge tools build on this: solved corners of tool-authored
+    /// brushes coincide with authored points, so dragging a corner
+    /// re-tilts exactly the planes anchored there. A face with no
+    /// coincident authored point keeps its plane, and the corner slides
+    /// along it as the neighbouring planes move.
+    pub fn translate_points_near(
+        &mut self,
+        targets: &[[f64; 3]],
+        delta: [i32; 3],
+        epsilon: f64,
+    ) -> usize {
+        let mut moved = 0;
+        for face in &mut self.faces {
+            for point in &mut face.points {
+                let hit = targets.iter().any(|target| {
+                    (0..3).all(|axis| (f64::from(point[axis]) - target[axis]).abs() <= epsilon)
+                });
+                if hit {
+                    for axis in 0..3 {
+                        point[axis] += delta[axis];
+                    }
+                    moved += 1;
+                }
+            }
+        }
+        moved
+    }
+}
+
+impl Brush {
     /// Hollow an axis-aligned brush into six wall slabs of `thickness`,
     /// keeping the outer bounds. Returns `None` when the brush is too
     /// small to hollow or has no volume. Face materials carry to every
@@ -775,6 +807,35 @@ mod tests {
         }
         // Too-thin brushes refuse to hollow.
         assert!(Brush::cuboid([0, 0, 0], [30, 128, 256]).hollow(16).is_none());
+    }
+
+    #[test]
+    fn translate_points_near_retilts_only_anchored_planes() {
+        // Drag the top +X/+Z corner column of a cube inward along X:
+        // the two vertical faces anchored there tilt, the rest stay.
+        let mut brush = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        let column = [[128.0, 0.0, 128.0], [128.0, 128.0, 128.0]];
+        let moved = brush.translate_points_near(&column, [-64, 0, 0], 0.5);
+        // Authored points at that column: +Z holds two, +X / -Y / +Y one
+        // each. Only +X actually tilts; the others slide the point within
+        // their own (unchanged) plane, which is what keeps the drag exact.
+        assert_eq!(moved, 5);
+        let solved = brush.solve();
+        assert!(solved.is_valid());
+        // The dragged corners moved; the opposite corners stayed.
+        let verts = unique_verts(&solved);
+        assert!(verts.contains(&[64, 0, 128]));
+        assert!(verts.contains(&[64, 128, 128]));
+        assert!(verts.contains(&[0, 0, 0]));
+        assert!(verts.contains(&[128, 0, 0]));
+
+        // No target within epsilon: nothing moves.
+        let mut untouched = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        assert_eq!(
+            untouched.translate_points_near(&[[500.0, 0.0, 0.0]], [8, 0, 0], 0.5),
+            0
+        );
+        assert_eq!(untouched, Brush::cuboid([0, 0, 0], [64, 64, 64]));
     }
 
     #[test]

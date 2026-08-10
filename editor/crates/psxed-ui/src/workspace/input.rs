@@ -43,8 +43,7 @@ impl EditorWorkspace {
                 };
                 let face = face.filter(|face| *face < authored.faces.len());
                 self.active_tool = ViewTool::Brush;
-                self.selected_brush = Some(brush);
-                self.selected_brush_face = face;
+                self.replace_brush_selection(brush, face);
                 self.clear_node_selection_state();
                 self.clear_resource_selection_state();
                 self.clear_sector_selection();
@@ -56,8 +55,7 @@ impl EditorWorkspace {
                 if self.project.active_scene().node(node).is_none() {
                     return false;
                 }
-                self.selected_brush = None;
-                self.selected_brush_face = None;
+                self.clear_brush_selection();
                 self.replace_node_selection(node);
                 self.clear_resource_selection_state();
                 self.clear_sector_selection();
@@ -69,8 +67,7 @@ impl EditorWorkspace {
                 if self.project.resource(resource).is_none() {
                     return false;
                 }
-                self.selected_brush = None;
-                self.selected_brush_face = None;
+                self.clear_brush_selection();
                 self.replace_resource_selection(resource);
                 self.clear_node_selection_state();
                 self.clear_sector_selection();

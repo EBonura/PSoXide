@@ -240,13 +240,29 @@ impl EditorWorkspace {
                                 if let Some(pos) = response.interact_pointer_pos() {
                                     let world = transform.screen_to_world(pos);
                                     let modifiers = ui.input(|input| input.modifiers);
+                                    let tolerance = 8.0 / self.viewport_zoom;
                                     if modifiers.shift {
                                         self.begin_brush_move_2d(world);
-                                    } else if !self
-                                        .begin_brush_resize_2d(world, 8.0 / self.viewport_zoom)
-                                        && self.pick_brush_face_at_2d(world).is_none()
-                                    {
-                                        self.begin_brush_drag_2d(world);
+                                    } else {
+                                        // The Selection group picks the drag
+                                        // grammar: Face resizes planes, Vertex
+                                        // and Edge reshape corners/columns.
+                                        let grabbed = match self.selection_mode {
+                                            SelectionMode::Face => {
+                                                self.begin_brush_resize_2d(world, tolerance)
+                                            }
+                                            SelectionMode::Edge => {
+                                                self.begin_brush_edge_drag_2d(world, tolerance)
+                                            }
+                                            SelectionMode::Vertex => {
+                                                self.begin_brush_vertex_drag_2d(world, tolerance)
+                                            }
+                                        };
+                                        if !grabbed
+                                            && self.pick_brush_face_at_2d(world).is_none()
+                                        {
+                                            self.begin_brush_drag_2d(world);
+                                        }
                                     }
                                 }
                             }
@@ -257,6 +273,8 @@ impl EditorWorkspace {
                                     let world = transform.screen_to_world(pos);
                                     if self.brush_move.is_some() {
                                         self.update_brush_move_2d(world);
+                                    } else if self.brush_vertex_drag.is_some() {
+                                        self.update_brush_vertex_drag_2d(world);
                                     } else if self.brush_extrude.is_some() {
                                         self.update_brush_resize_2d(world);
                                     } else {
@@ -465,6 +483,18 @@ impl EditorWorkspace {
         match self.active_tool {
             ViewTool::Brush => {
                 ui.separator();
+                // The shared Face/Edge/Vertex group doubles as the brush
+                // drag grammar: Face resizes planes, Edge and Vertex
+                // reshape the selected brush's corners in ortho views.
+                toolbar_group_menu(
+                    ui,
+                    4,
+                    self.shortcut_group_glow(ShortcutGroup::Selection),
+                    self.selection_mode.icon(),
+                    "Selection",
+                    self.selection_mode.label(),
+                    |ui| self.draw_selection_group_menu(ui),
+                );
                 if ui
                     .button(format!("Clip keeps: {}", self.brush_clip_keep.label()))
                     .on_hover_text("Which side(s) a two-point clip keeps")
@@ -476,6 +506,16 @@ impl EditorWorkspace {
                 // lives in the inspector (draw_brush_inspector).
                 ui.checkbox(&mut self.brush_texture_lock, "Tex lock")
                     .on_hover_text("Keep face textures anchored to the brush when it moves");
+                // The one grid step every brush drag/create/clip snaps to
+                // (shared with the Tool menu's Snap interval).
+                ui.label("Grid");
+                ui.add_sized(
+                    [52.0, 22.0],
+                    egui::DragValue::new(&mut self.snap_units)
+                        .speed(1.0)
+                        .range(1..=256),
+                )
+                .on_hover_text("Grid snap step, world units. All brush drags snap to it.");
             }
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
