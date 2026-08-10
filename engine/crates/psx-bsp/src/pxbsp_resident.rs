@@ -417,7 +417,7 @@ const fn align_up_4(value: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use alloc::vec;
 
     use super::*;
@@ -466,7 +466,7 @@ mod tests {
         output
     }
 
-    fn valid_lumps() -> [Vec<u8>; PXBSP_LUMP_COUNT] {
+    pub(crate) fn valid_lumps() -> [Vec<u8>; PXBSP_LUMP_COUNT] {
         let mut lumps: [Vec<u8>; PXBSP_LUMP_COUNT] = core::array::from_fn(|_| Vec::new());
 
         let mut vertices = Vec::new();
@@ -535,7 +535,7 @@ mod tests {
         lumps
     }
 
-    fn write_file(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT]) -> Vec<u8> {
+    pub(crate) fn write_file(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT]) -> Vec<u8> {
         let directory_end =
             PXBSP_HEADER_BYTES as usize + PXBSP_DIRECTORY_ENTRY_BYTES as usize * PXBSP_LUMP_COUNT;
         let mut output = vec![0; directory_end];
