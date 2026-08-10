@@ -974,7 +974,6 @@ impl Scene for Playtest {
                 } else {
                     player_lighting.map_or(EquipmentDrawStats::default(), |lighting| {
                         draw_player_equipment(
-                            self.room_index,
                             character,
                             &self.models,
                             &self.model_faces[..self.model_face_count],
@@ -1003,14 +1002,6 @@ impl Scene for Playtest {
                 telemetry::counter(
                     telemetry::counter::EQUIPMENT_DRAWS,
                     equipment_stats.draws as u32,
-                );
-                telemetry::counter(
-                    telemetry::counter::EQUIPMENT_ACTIVE_HITBOXES,
-                    equipment_stats.active_hitboxes as u32,
-                );
-                telemetry::counter(
-                    telemetry::counter::EQUIPMENT_TARGET_HITS,
-                    equipment_stats.target_hits as u32,
                 );
                 emit_model_counters(
                     equipment_stats.stats,

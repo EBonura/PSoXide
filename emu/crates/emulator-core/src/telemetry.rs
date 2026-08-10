@@ -503,8 +503,6 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_CELLS_CULLED => "room cells culled",
         counter::ROOM_SURFACES_CONSIDERED => "room surfaces",
         counter::EQUIPMENT_DRAWS => "equipment draws",
-        counter::EQUIPMENT_ACTIVE_HITBOXES => "weapon hitboxes",
-        counter::EQUIPMENT_TARGET_HITS => "weapon hits",
         counter::EQUIPMENT_PROJECTED_VERTICES => "equipment verts",
         counter::EQUIPMENT_SUBMITTED_TRIS => "equipment tris",
         counter::EQUIPMENT_CULLED_TRIS => "equipment culled",
