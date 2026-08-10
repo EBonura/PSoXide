@@ -29,6 +29,7 @@ impl Playtest {
         let player_pos = [player.x, player.y, player.z];
         let (player_radius, player_height) = match self.character {
             Some(character) => (character.radius, character.height),
+            None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
             None => (0, 0),
         };
         let now = ctx.sim_tick.as_u32();
@@ -56,7 +57,12 @@ impl Playtest {
                 entity_dead[index] = self.game_entities.state(index)
                     == psx_game_runtime::entities::GameEntityState::Dead;
             }
+            // Souls i-frames: query before this tick's player motor update so
+            // attack contact matches the frames the motor reports. Resolve it
+            // before lending the BSP scratch to the entity mover.
+            let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
             let mut mover = SceneEntityMover {
+                bsp: self.bsp.as_mut(),
                 window: &self.window,
                 box_props: &self.box_props,
                 models: &self.models,
@@ -67,9 +73,6 @@ impl Playtest {
                 player_radius,
                 player_height,
             };
-            // Souls i-frames: query before this tick's player motor update so
-            // attack contact matches the frames the motor reports.
-            let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
             self.game_entities.tick_delta(
                 GAME_ENTITIES,
                 psx_game_runtime::entities::GameEntityTickInput {
@@ -453,17 +456,25 @@ impl Playtest {
         }
         telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
         telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
+        let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
+        let blocker_count = self.collect_collision_blockers(&mut blockers);
         let motor_frame = if self.bsp.is_some() {
             // The resident provider owns its bounded hull scratch and mover
-            // transforms, so BSP frames do not build the legacy grid-room
-            // collision set. Dynamic blocker composition remains a later,
-            // explicit provider layer rather than a hidden grid fallback.
+            // transforms. Actor cylinders compose over that provider in their
+            // stable cooked/live order; BSP frames never build a grid-room
+            // collision set.
             telemetry::stage_end(telemetry::stage::SIM_COLLISION);
             telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
             self.bsp
                 .as_mut()
                 .expect("checked resident BSP backend")
-                .update_motor(&mut self.motor, input, config, delta_vblanks)
+                .update_motor(
+                    &mut self.motor,
+                    input,
+                    config,
+                    delta_vblanks,
+                    &blockers[..blocker_count],
+                )
                 .expect("PXBSP player trace failed")
         } else {
             let mut collision_rooms =
@@ -490,8 +501,6 @@ impl Playtest {
                 1 => single_collision_room.as_ref().map(|room| room.collision()),
                 _ => None,
             };
-            let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
-            let blocker_count = self.collect_collision_blockers(&mut blockers);
             let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
             let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
             let collision = if collision_room_count <= 1 {
