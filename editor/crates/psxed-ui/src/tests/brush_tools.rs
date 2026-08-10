@@ -429,6 +429,58 @@ fn brush_tool_zero_area_drag_commits_nothing() {
 }
 
 #[test]
+fn brush_edits_mark_the_project_dirty_for_save_and_cook() {
+    let mut harness = ViewportHarness::floored_room("brush_dirty", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    assert!(!harness.workspace.is_dirty(), "fresh workspace is clean");
+
+    // Create.
+    harness.workspace.begin_brush_drag_2d([0.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([256.0, 256.0]);
+    harness.workspace.commit_brush_drag();
+    assert!(harness.workspace.is_dirty(), "create marks dirty");
+
+    // Every other committed brush mutation must mark dirty too, or the
+    // Play flow's save_if_dirty cooks stale on-disk data.
+    let ops: [(&str, fn(&mut EditorWorkspace)); 4] = [
+        ("duplicate", |ws| ws.duplicate_selected_brush()),
+        ("snap", |ws| {
+            ws.project.active_scene_mut().brushes[0] =
+                psxed_project::brush::Brush::cuboid([1, 0, -1], [65, 63, 62]);
+            ws.selected_brush = Some(0);
+            ws.snap_selected_brush();
+        }),
+        ("hollow", |ws| {
+            ws.selected_brush = Some(0);
+            ws.hollow_selected_brush(16);
+        }),
+        ("delete", |ws| {
+            ws.selected_brush = Some(0);
+            ws.delete_selected_brush();
+        }),
+    ];
+    for (label, op) in ops {
+        harness.workspace.dirty = false;
+        op(&mut harness.workspace);
+        assert!(harness.workspace.is_dirty(), "{label} marks dirty");
+    }
+
+    // Gesture commits (move preview path) mark dirty as well.
+    harness.workspace.dirty = false;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]));
+    harness.workspace.set_orthographic_view(OrthographicView::Top);
+    assert!(harness.workspace.begin_brush_move_2d([64.0, 64.0]));
+    harness.workspace.update_brush_move_2d([128.0, 64.0]);
+    harness.workspace.commit_brush_gesture_2d();
+    assert!(harness.workspace.is_dirty(), "move commit marks dirty");
+}
+
+#[test]
 fn brush_mover_binding_accepts_doors_and_is_undoable() {
     let mut harness = ViewportHarness::floored_room("brush_mover_binding", 4);
     harness
