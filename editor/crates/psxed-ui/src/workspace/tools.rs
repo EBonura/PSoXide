@@ -223,6 +223,29 @@ impl EditorWorkspace {
         })
     }
 
+    /// Apply the paint material to the selected brush face, as one undo
+    /// step. No-op when no brush face is selected or no material chosen.
+    pub(crate) fn apply_material_to_selected_brush_face(&mut self) {
+        let (Some(index), Some(face), Some(material)) = (
+            self.selected_brush,
+            self.selected_brush_face,
+            self.brush_material,
+        ) else {
+            return;
+        };
+        let scene = self.project.active_scene();
+        if scene
+            .brushes
+            .get(index)
+            .and_then(|brush| brush.faces.get(face))
+            .is_none()
+        {
+            return;
+        }
+        self.push_undo();
+        self.project.active_scene_mut().brushes[index].faces[face].material = Some(material);
+    }
+
     /// The cuboid a brush drag would commit, if it has area.
     fn brush_drag_cuboid(drag: BrushDrag) -> Option<psxed_project::brush::Brush> {
         psxed_project::brush::Brush::cuboid_from_corners(
@@ -267,6 +290,24 @@ impl EditorWorkspace {
                 egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
             };
             draw(brush, stroke);
+            // Emphasize the selected face's polygon on the selected brush.
+            if selected {
+                if let Some(face) = self.selected_brush_face {
+                    if let Some(Some(polygon)) = brush.solve().polygons.get(face) {
+                        let count = polygon.verts.len();
+                        for i in 0..count {
+                            let a = project(polygon.verts[i]);
+                            let b = project(polygon.verts[(i + 1) % count]);
+                            if let (Some(a), Some(b)) = (a, b) {
+                                painter.line_segment(
+                                    [a, b],
+                                    egui::Stroke::new(3.5, STUDIO_ACCENT),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
             draw(&preview, egui::Stroke::new(1.5, STUDIO_ACCENT));
@@ -321,6 +362,7 @@ impl ViewportTool3d for BrushTool {
                 .brush_ground_point_raw(frame.rect, pointer)
                 .unwrap_or([0.0; 3]);
             ws.selected_brush = Some(index);
+            ws.selected_brush_face = Some(face);
             ws.brush_extrude = Some(BrushExtrude {
                 index,
                 face,
@@ -483,7 +525,16 @@ impl ViewportTool3d for BrushTool {
             return;
         }
         ws.brush_clip_start = None;
-        ws.selected_brush = ws.pick_brush(frame.rect, pointer);
+        match ws.pick_brush_face(frame.rect, pointer) {
+            Some((index, face)) => {
+                ws.selected_brush = Some(index);
+                ws.selected_brush_face = Some(face);
+            }
+            None => {
+                ws.selected_brush = None;
+                ws.selected_brush_face = None;
+            }
+        }
     }
 }
 

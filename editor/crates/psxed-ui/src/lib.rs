@@ -533,6 +533,8 @@ pub struct EditorWorkspace {
     material_paint_sampling: bool,
     /// Index into the active scene's brushes, when one is selected.
     selected_brush: Option<usize>,
+    /// Selected face index within the selected brush.
+    selected_brush_face: Option<usize>,
     /// In-flight brush-create drag (Brush tool primary held).
     brush_drag: Option<BrushDrag>,
     /// In-flight brush face-extrude drag (Brush tool primary held on a
@@ -2663,6 +2665,7 @@ impl EditorWorkspace {
             material_paint_blend: false,
             material_paint_sampling: false,
             selected_brush: None,
+            selected_brush_face: None,
             brush_drag: None,
             brush_extrude: None,
             brush_clip_start: None,
