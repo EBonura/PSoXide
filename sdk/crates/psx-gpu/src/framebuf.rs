@@ -16,6 +16,8 @@ pub struct FrameBuffer {
     pub width: u16,
     /// Display height in pixels.
     pub height: u16,
+    /// Vertical distance in VRAM rows between the two buffers.
+    pub stride: u16,
     /// Index (0 or 1) of the buffer currently drawn TO.
     pub drawing: u8,
 }
@@ -27,6 +29,21 @@ impl FrameBuffer {
         Self {
             width,
             height,
+            stride: height,
+            drawing: 0,
+        }
+    }
+
+    /// Create vertically stacked buffers with an explicit row stride.
+    ///
+    /// This supports layouts which reserve rows between the visible buffers,
+    /// such as a 320x240 display at Y=0 and Y=256 with palettes in the gap.
+    /// A stride smaller than `height` is clamped so the buffers cannot overlap.
+    pub const fn new_strided(width: u16, height: u16, stride: u16) -> Self {
+        Self {
+            width,
+            height,
+            stride: if stride < height { height } else { stride },
             drawing: 0,
         }
     }
@@ -37,7 +54,7 @@ impl FrameBuffer {
         if idx == 0 {
             0
         } else {
-            self.height
+            self.stride
         }
     }
 
@@ -89,5 +106,31 @@ impl FrameBuffer {
             g,
             b,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_layout_stacks_buffers_at_visible_height() {
+        let framebuffer = FrameBuffer::new(320, 240);
+        assert_eq!(framebuffer.buffer_y(0), 0);
+        assert_eq!(framebuffer.buffer_y(1), 240);
+    }
+
+    #[test]
+    fn strided_layout_preserves_reserved_vram_rows() {
+        let framebuffer = FrameBuffer::new_strided(320, 240, 256);
+        assert_eq!(framebuffer.buffer_y(0), 0);
+        assert_eq!(framebuffer.buffer_y(1), 256);
+        assert_eq!(framebuffer.height, 240);
+    }
+
+    #[test]
+    fn strided_layout_prevents_buffer_overlap() {
+        let framebuffer = FrameBuffer::new_strided(320, 240, 128);
+        assert_eq!(framebuffer.stride, 240);
     }
 }
