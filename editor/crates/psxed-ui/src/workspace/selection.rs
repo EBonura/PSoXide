@@ -712,6 +712,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn reconcile_selection_after_document_change(&mut self) {
+        self.reconcile_brush_selection();
         let valid_nodes: HashSet<NodeId> = self
             .project
             .active_scene()

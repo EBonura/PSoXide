@@ -407,7 +407,7 @@ fn escape_cancels_gestures_and_delete_removes_brush() {
     harness.workspace.update_brush_drag_2d([256.0, 256.0]);
     harness.workspace.commit_brush_drag();
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
-    harness.workspace.delete_selected_brush();
+    harness.workspace.delete_selected_brushes();
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 0);
     assert_eq!(harness.workspace.selected_brush, None);
     harness.workspace.do_undo();
@@ -426,6 +426,171 @@ fn brush_tool_zero_area_drag_commits_nothing() {
     tool.primary_released(&mut harness.workspace, &press);
 
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 0);
+}
+
+#[test]
+fn shift_click_builds_multi_selection_and_group_moves() {
+    let mut harness = ViewportHarness::floored_room("brush_multi_move", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.set_orthographic_view(OrthographicView::Top);
+    let scene = harness.workspace.project.active_scene_mut();
+    scene
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
+    scene
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([256, 0, 0], [320, 64, 64]));
+
+    // Plain click selects one; shift-click adds the second (through the
+    // real 2D click dispatch); shift-click again removes it.
+    harness
+        .workspace
+        .handle_viewport_click([32.0, 32.0], &[], egui::Modifiers::default());
+    assert_eq!(harness.workspace.selected_brush, Some(0));
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    harness.workspace.handle_viewport_click([288.0, 32.0], &[], shift);
+    assert_eq!(harness.workspace.selected_brush, Some(1));
+    assert_eq!(harness.workspace.selected_brush_set(), vec![0, 1]);
+    harness.workspace.handle_viewport_click([288.0, 32.0], &[], shift);
+    assert_eq!(harness.workspace.selected_brush_set(), vec![0]);
+    harness.workspace.handle_viewport_click([288.0, 32.0], &[], shift);
+
+    // A move grabbed on one member drags the whole selection, commits
+    // as one undo step, and undo restores both.
+    assert!(harness.workspace.begin_brush_move_2d([32.0, 32.0]));
+    harness.workspace.update_brush_move_2d([96.0, 32.0]);
+    harness.workspace.commit_brush_gesture_2d();
+    let a = harness.workspace.project.active_scene().brushes[0].solve();
+    let b = harness.workspace.project.active_scene().brushes[1].solve();
+    assert_eq!(a.min[0], 64.0, "grabbed brush moved");
+    assert_eq!(b.min[0], 320.0, "selected rider moved by the same delta");
+
+    harness.workspace.do_undo();
+    let a = harness.workspace.project.active_scene().brushes[0].solve();
+    let b = harness.workspace.project.active_scene().brushes[1].solve();
+    assert_eq!(a.min[0], 0.0);
+    assert_eq!(b.min[0], 256.0, "one undo restores the whole group");
+
+    // Grabbing an unselected brush replaces the selection and moves it alone.
+    harness.workspace.clear_brush_selection();
+    assert!(harness.workspace.begin_brush_move_2d([288.0, 32.0]));
+    harness.workspace.update_brush_move_2d([352.0, 32.0]);
+    harness.workspace.commit_brush_gesture_2d();
+    let a = harness.workspace.project.active_scene().brushes[0].solve();
+    let b = harness.workspace.project.active_scene().brushes[1].solve();
+    assert_eq!(a.min[0], 0.0, "unselected brush stays put");
+    assert_eq!(b.min[0], 320.0);
+    assert_eq!(harness.workspace.selected_brush_set(), vec![1]);
+}
+
+#[test]
+fn multi_selection_delete_and_duplicate_are_grouped() {
+    let mut harness = ViewportHarness::floored_room("brush_multi_edit", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    let scene = harness.workspace.project.active_scene_mut();
+    scene
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
+    scene
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([256, 0, 0], [320, 64, 64]));
+    scene
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([512, 0, 0], [576, 64, 64]));
+
+    // Select brushes 0 and 2, duplicate: two copies appended, the copies
+    // become the selection (Cmd+D routes here for the Brush tool).
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.toggle_brush_selection(2);
+    harness.workspace.duplicate_current_selection();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 5);
+    assert_eq!(harness.workspace.selected_brush_set(), vec![3, 4]);
+    assert_eq!(harness.workspace.selected_brush, Some(4), "primary follows its copy");
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 3);
+
+    // Delete both members in one undo step.
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.toggle_brush_selection(2);
+    harness.workspace.delete_selected_brushes();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
+    assert_eq!(harness.workspace.selected_brush, None);
+    let survivor = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(survivor.min[0], 256.0, "the unselected brush survives");
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 3);
+}
+
+#[test]
+fn undo_reconciles_stale_brush_selection_and_clip_never_panics() {
+    let mut harness = ViewportHarness::floored_room("brush_stale_sel", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+
+    // Create two brushes, select the second, then undo its creation:
+    // the selection must fall back instead of dangling past the end.
+    harness.workspace.begin_brush_drag_2d([0.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([128.0, 128.0]);
+    harness.workspace.commit_brush_drag();
+    harness.workspace.begin_brush_drag_2d([256.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([384.0, 128.0]);
+    harness.workspace.commit_brush_drag();
+    assert_eq!(harness.workspace.selected_brush, Some(1));
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
+    assert!(harness
+        .workspace
+        .selected_brush
+        .is_none_or(|index| index < 1));
+
+    // A stale index left behind must not panic the clip path.
+    harness.workspace.selected_brush = Some(7);
+    harness.workspace.brush_clip_click([0, 0, 0]);
+    harness.workspace.brush_clip_click([0, 0, 128]);
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
+}
+
+#[test]
+fn shift_click_in_3d_toggles_multi_selection() {
+    let mut harness = ViewportHarness::floored_room("brush_multi_3d", 4);
+    harness.frame(harness.room_center(), 3000.0);
+    harness.workspace.active_tool = ViewTool::Brush;
+    let tool = tool_impl_3d(ViewTool::Brush);
+
+    // Two brushes created through the tool.
+    for (from, to) in [
+        (Pos2::new(280.0, 300.0), Pos2::new(380.0, 360.0)),
+        (Pos2::new(430.0, 300.0), Pos2::new(530.0, 360.0)),
+    ] {
+        let press = brush_frame(&harness, from);
+        let drag = brush_frame(&harness, to);
+        tool.primary_pressed(&mut harness.workspace, &press);
+        tool.primary_dragged(&mut harness.workspace, &drag);
+        tool.primary_released(&mut harness.workspace, &drag);
+    }
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 2);
+
+    // Click the first, shift-click the second: both selected.
+    let click_a = brush_frame(&harness, Pos2::new(330.0, 330.0));
+    tool.primary_clicked(&mut harness.workspace, &click_a);
+    assert_eq!(harness.workspace.selected_brush, Some(0));
+    let mut click_b = brush_frame(&harness, Pos2::new(480.0, 330.0));
+    click_b.modifiers.shift = true;
+    tool.primary_clicked(&mut harness.workspace, &click_b);
+    assert_eq!(harness.workspace.selected_brush_set(), vec![0, 1]);
+    assert!(harness.workspace.brush_is_selected(0));
+    assert!(harness.workspace.brush_is_selected(1));
+
+    // Shift-click on empty sky keeps the selection; plain click clears.
+    let mut sky_shift = brush_frame(&harness, Pos2::new(400.0, 10.0));
+    sky_shift.modifiers.shift = true;
+    tool.primary_clicked(&mut harness.workspace, &sky_shift);
+    assert_eq!(harness.workspace.selected_brush_set(), vec![0, 1]);
+    let sky = brush_frame(&harness, Pos2::new(400.0, 10.0));
+    tool.primary_clicked(&mut harness.workspace, &sky);
+    assert!(harness.workspace.selected_brush_set().is_empty());
 }
 
 fn solved_unique_verts(brush: &psxed_project::brush::Brush) -> Vec<[i64; 3]> {
@@ -647,7 +812,7 @@ fn brush_edits_mark_the_project_dirty_for_save_and_cook() {
     // Every other committed brush mutation must mark dirty too, or the
     // Play flow's save_if_dirty cooks stale on-disk data.
     let ops: [(&str, fn(&mut EditorWorkspace)); 4] = [
-        ("duplicate", |ws| ws.duplicate_selected_brush()),
+        ("duplicate", |ws| ws.duplicate_selected_brushes()),
         ("snap", |ws| {
             ws.project.active_scene_mut().brushes[0] =
                 psxed_project::brush::Brush::cuboid([1, 0, -1], [65, 63, 62]);
@@ -660,7 +825,7 @@ fn brush_edits_mark_the_project_dirty_for_save_and_cook() {
         }),
         ("delete", |ws| {
             ws.selected_brush = Some(0);
-            ws.delete_selected_brush();
+            ws.delete_selected_brushes();
         }),
     ];
     for (label, op) in ops {
