@@ -506,6 +506,16 @@ impl EditorWorkspace {
                 // lives in the inspector (draw_brush_inspector).
                 ui.checkbox(&mut self.brush_texture_lock, "Tex lock")
                     .on_hover_text("Keep face textures anchored to the brush when it moves");
+                // The one grid step every brush drag/create/clip snaps to
+                // (shared with the Tool menu's Snap interval).
+                ui.label("Grid");
+                ui.add_sized(
+                    [52.0, 22.0],
+                    egui::DragValue::new(&mut self.snap_units)
+                        .speed(1.0)
+                        .range(1..=256),
+                )
+                .on_hover_text("Grid snap step, world units. All brush drags snap to it.");
             }
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
