@@ -324,6 +324,129 @@ impl EditorWorkspace {
         }
     }
 
+    /// Inspector content for the selected brush: summary, actions, and
+    /// the face section (material + UV placement) when a face is
+    /// selected. Mirrors the classic face-inspector shape: material name
+    /// and texture size above offset/scale/rotation controls.
+    pub(crate) fn draw_brush_inspector(&mut self, ui: &mut egui::Ui) {
+        let Some(index) = self.selected_brush else {
+            return;
+        };
+        let Some(brush) = self.project.active_scene().brushes.get(index).cloned() else {
+            return;
+        };
+        let solved = brush.solve();
+        ui.label(
+            egui::RichText::new(format!("Brush {index}"))
+                .strong()
+                .size(14.0),
+        );
+        ui.label(format!(
+            "{} faces, {:.0} x {:.0} x {:.0}",
+            brush.faces.len(),
+            solved.max[0] - solved.min[0],
+            solved.max[1] - solved.min[1],
+            solved.max[2] - solved.min[2],
+        ));
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Duplicate").clicked() {
+                self.duplicate_selected_brush();
+            }
+            if ui.button("Hollow").clicked() {
+                let thickness = (self.snap_units.max(1)) as i32;
+                self.hollow_selected_brush(thickness);
+            }
+            if ui.button("Snap to grid").clicked() {
+                self.snap_selected_brush();
+            }
+            if ui.button("Delete").clicked() {
+                self.delete_selected_brush();
+            }
+        });
+
+        ui.separator();
+        let Some(face) = self.selected_brush_face else {
+            ui.label("Click a face to edit its material and UVs.");
+            return;
+        };
+        let Some(face_data) = brush.faces.get(face) else {
+            return;
+        };
+        let plane_label = psxed_project::brush::Plane::from_points(face_data.points)
+            .map(|plane| {
+                let n = plane.normal;
+                let abs = [n[0].abs(), n[1].abs(), n[2].abs()];
+                let axis = if abs[1] >= abs[0] && abs[1] >= abs[2] {
+                    if n[1] > 0 {
+                        "floor-facing (+Y)"
+                    } else {
+                        "ceiling-facing (-Y)"
+                    }
+                } else if abs[0] >= abs[2] {
+                    if n[0] > 0 {
+                        "wall (+X)"
+                    } else {
+                        "wall (-X)"
+                    }
+                } else if n[2] > 0 {
+                    "wall (+Z)"
+                } else {
+                    "wall (-Z)"
+                };
+                axis.to_string()
+            })
+            .unwrap_or_else(|| "degenerate".to_string());
+        ui.label(
+            egui::RichText::new(format!("Face {face} of {}", brush.faces.len())).strong(),
+        );
+        ui.label(plane_label);
+        let material_name = face_data.material.and_then(|id| {
+            self.project
+                .material_options()
+                .into_iter()
+                .find(|(option, _)| *option == id)
+                .map(|(_, name)| name)
+        });
+        ui.label(match material_name {
+            Some(name) => format!("Material: {name}"),
+            None => "Material: none (flat grey)".to_string(),
+        });
+        self.draw_brush_material_picker(ui);
+        if ui
+            .button(icons::label(icons::PALETTE, "Apply to face"))
+            .clicked()
+        {
+            self.apply_material_to_selected_brush_face();
+        }
+        self.draw_brush_face_uv_controls(ui);
+    }
+
+    /// Duplicate the selected brush (offset by one grid step, honouring
+    /// texture lock) and select the copy. One undo step.
+    pub(crate) fn duplicate_selected_brush(&mut self) {
+        let Some(index) = self.selected_brush else {
+            return;
+        };
+        let Some(mut copy) = self.project.active_scene().brushes.get(index).cloned() else {
+            return;
+        };
+        self.push_undo();
+        let step = (self.snap_units.max(1)) as i32;
+        if self.brush_texture_lock {
+            copy.translate_with_uv_lock(
+                [step, 0, step],
+                psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+            );
+        } else {
+            copy.translate([step, 0, step]);
+        }
+        let scene = self.project.active_scene_mut();
+        scene.brushes.push(copy);
+        let new_index = scene.brushes.len() - 1;
+        self.selected_brush = Some(new_index);
+        self.selected_brush_face = None;
+    }
+
     /// Numeric UV controls for the selected brush face: offset, rotation,
     /// per-axis scale, reset.
     // ponytail: one undo per widget change; a slider drag records several
