@@ -205,6 +205,23 @@ impl EditorWorkspace {
                             draw_axes_gizmo(&painter, rect);
                             return;
                         }
+                        if !dnd_active && matches!(self.active_tool, ViewTool::Brush) {
+                            if response.drag_started_by(egui::PointerButton::Primary) {
+                                if let Some(pos) = response.interact_pointer_pos() {
+                                    self.begin_brush_drag_2d(transform.screen_to_world(pos));
+                                }
+                            }
+                            if response.dragged_by(egui::PointerButton::Primary) {
+                                if let Some(pos) =
+                                    response.interact_pointer_pos().or(response.hover_pos())
+                                {
+                                    self.update_brush_drag_2d(transform.screen_to_world(pos));
+                                }
+                            }
+                            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                                self.commit_brush_drag();
+                            }
+                        }
                         if !dnd_active
                             && matches!(self.active_tool, ViewTool::Select)
                             && response.drag_started_by(egui::PointerButton::Primary)
@@ -254,6 +271,7 @@ impl EditorWorkspace {
                             self.snap_units,
                         );
                         draw_viewport_box_select_marquee(&painter, self.viewport_box_select_rect());
+                        self.draw_brush_footprints_2d(&painter, transform);
                         draw_axes_gizmo(&painter, rect);
                         if resource_drop_hovered || prefab_drop_hovered {
                             painter.rect_stroke(
