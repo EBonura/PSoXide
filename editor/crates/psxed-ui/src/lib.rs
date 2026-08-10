@@ -545,6 +545,8 @@ pub struct EditorWorkspace {
     brush_clip_start: Option<[i32; 3]>,
     /// Which side(s) the next brush clip keeps.
     brush_clip_keep: BrushClipKeep,
+    /// Keep face textures anchored to the brush when it moves.
+    brush_texture_lock: bool,
     /// In-flight whole-brush move drag (Brush tool, shift-press).
     brush_move: Option<BrushMove>,
     /// Percentage of the painted material kept by generated Paint blends.
@@ -2670,6 +2672,7 @@ impl EditorWorkspace {
             brush_extrude: None,
             brush_clip_start: None,
             brush_clip_keep: BrushClipKeep::Both,
+            brush_texture_lock: true,
             brush_move: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,

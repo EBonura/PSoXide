@@ -265,6 +265,72 @@ impl EditorWorkspace {
         self.project.active_scene_mut().brushes[index] = snapped;
     }
 
+    /// Numeric UV controls for the selected brush face: offset, rotation,
+    /// per-axis scale, reset.
+    // ponytail: one undo per widget change; a slider drag records several
+    // steps. Coalesce with the inspector-transaction wrapper when brush
+    // UVs move into a proper inspector panel.
+    pub(crate) fn draw_brush_face_uv_controls(&mut self, ui: &mut egui::Ui) {
+        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
+            return;
+        };
+        let Some(current) = self
+            .project
+            .active_scene()
+            .brushes
+            .get(index)
+            .and_then(|brush| brush.faces.get(face))
+            .map(|face| face.uv)
+        else {
+            return;
+        };
+        let mut edited = current;
+        ui.horizontal(|ui| {
+            ui.label("UV");
+            let mut off_u = i32::from(edited.offset_texels[0]);
+            let mut off_v = i32::from(edited.offset_texels[1]);
+            let mut rot = i32::from(edited.rotation_deg);
+            let mut scale_u = i32::from(edited.scale_q8[0]) * 100 / 256;
+            let mut scale_v = i32::from(edited.scale_q8[1]) * 100 / 256;
+            ui.add(egui::DragValue::new(&mut off_u).speed(1).prefix("U "));
+            ui.add(egui::DragValue::new(&mut off_v).speed(1).prefix("V "));
+            ui.add(
+                egui::DragValue::new(&mut rot)
+                    .speed(1)
+                    .range(-359..=359)
+                    .suffix("\u{b0}"),
+            );
+            ui.add(
+                egui::DragValue::new(&mut scale_u)
+                    .speed(1)
+                    .range(10..=1600)
+                    .suffix("% U"),
+            );
+            ui.add(
+                egui::DragValue::new(&mut scale_v)
+                    .speed(1)
+                    .range(10..=1600)
+                    .suffix("% V"),
+            );
+            edited.offset_texels = [
+                off_u.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                off_v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+            ];
+            edited.rotation_deg = rot as i16;
+            edited.scale_q8 = [
+                (scale_u * 256 / 100).clamp(1, i32::from(i16::MAX)) as i16,
+                (scale_v * 256 / 100).clamp(1, i32::from(i16::MAX)) as i16,
+            ];
+            if ui.button("Reset").clicked() {
+                edited = psxed_project::brush::FaceUv::default();
+            }
+        });
+        if edited != current {
+            self.push_undo();
+            self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
+        }
+    }
+
     /// Apply the paint material to the selected brush face, as one undo
     /// step. No-op when no brush face is selected or no material chosen.
     pub(crate) fn apply_material_to_selected_brush_face(&mut self) {
@@ -647,11 +713,22 @@ impl ViewportTool3d for BrushTool {
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
         if let Some(mv) = ws.brush_move.take() {
-            let live = ws.project.active_scene().brushes[mv.index].clone();
-            ws.project.active_scene_mut().brushes[mv.index] = mv.base;
+            // Restore the base, then rebuild the final position through
+            // the lock-aware translate so the undo step captures it.
+            ws.project.active_scene_mut().brushes[mv.index] = mv.base.clone();
             if mv.applied != [0, 0] {
                 ws.push_undo();
-                ws.project.active_scene_mut().brushes[mv.index] = live;
+                let mut moved = mv.base;
+                let delta = [mv.applied[0], 0, mv.applied[1]];
+                if ws.brush_texture_lock {
+                    moved.translate_with_uv_lock(
+                        delta,
+                        psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                    );
+                } else {
+                    moved.translate(delta);
+                }
+                ws.project.active_scene_mut().brushes[mv.index] = moved;
             }
             return;
         }
