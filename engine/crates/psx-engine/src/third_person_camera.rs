@@ -10,10 +10,14 @@
 
 use crate::floor_sample::{height_at_local, triangle_heights_to_quad};
 use crate::{
-    fixed::div_q12_i32, Angle, CharacterCollisionRoom, RoomCollision, RoomPoint, WorldCamera,
-    WorldProjection, Q12,
+    collision_query::{
+        trace_collision, CollisionQueryError, CollisionTraceProvider, CollisionTraceQuery,
+        COLLISION_FRACTION_ONE_Q12,
+    },
+    fixed::div_q12_i32,
+    Angle, CharacterCollisionRoom, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12,
 };
-use psx_math::int32::{abs_i16, abs_i32, isqrt_i32};
+use psx_math::int32::{abs_i16, abs_i32, isqrt_i32, mul_q12_i32};
 
 const RAY_STEPS_MAX: i32 = 8;
 const RAY_STEPS_MIN: i32 = 3;
@@ -23,6 +27,8 @@ const CHECKED_CAMERA_CELL_BITS: usize = 512;
 const CHECKED_CAMERA_CELL_WORDS: usize = CHECKED_CAMERA_CELL_BITS / 32;
 const MAX_CAMERA_COLLISION_ROOMS: usize = 4;
 const MAX_CAMERA_CATCHUP_VBLANKS: u16 = 4;
+const TRACE_CAMERA_FLOOR_PROBE_DOWN: i32 = 32_767;
+const TRACE_CAMERA_FLOOR_PROBE_LIFT: i32 = 1;
 
 // Mirrors psxed_format::world::direction::* without adding a direct
 // psxed-format dependency just for byte constants.
@@ -280,9 +286,7 @@ impl ThirdPersonCameraState {
         input: ThirdPersonCameraInput,
         config: ThirdPersonCameraConfig,
     ) -> ThirdPersonCameraFrame {
-        let config = normalize_config(config);
-        self.advance_one_vblank(CameraCollision::Single(collision), target, input, config);
-        self.current_frame(projection)
+        self.update_vblanks(projection, collision, target, input, config, 1)
     }
 
     /// Advance the controller by elapsed display ticks and build a render camera.
@@ -299,14 +303,20 @@ impl ThirdPersonCameraState {
         config: ThirdPersonCameraConfig,
         delta_vblanks: u16,
     ) -> ThirdPersonCameraFrame {
-        let steps = delta_vblanks.clamp(1, MAX_CAMERA_CATCHUP_VBLANKS);
-        let config = normalize_config(config);
-        let mut i = 0;
-        while i < steps {
-            self.advance_one_vblank(CameraCollision::Single(collision), target, input, config);
-            i += 1;
+        let mut collision = GridCameraCollision {
+            collision: CameraCollision::Single(collision),
+        };
+        match self.update_vblanks_with_backend(
+            projection,
+            &mut collision,
+            target,
+            input,
+            config,
+            delta_vblanks,
+        ) {
+            Ok(frame) => frame,
+            Err(_) => unreachable!("grid camera collision queries are infallible"),
         }
-        self.current_frame(projection)
     }
 
     /// Advance the controller against a fixed active-room collision set.
@@ -325,28 +335,81 @@ impl ThirdPersonCameraState {
         config: ThirdPersonCameraConfig,
         delta_vblanks: u16,
     ) -> ThirdPersonCameraFrame {
+        let mut collision = GridCameraCollision {
+            collision: CameraCollision::Rooms(collision_rooms),
+        };
+        match self.update_vblanks_with_backend(
+            projection,
+            &mut collision,
+            target,
+            input,
+            config,
+            delta_vblanks,
+        ) {
+            Ok(frame) => frame,
+            Err(_) => unreachable!("grid camera collision queries are infallible"),
+        }
+    }
+
+    /// Advance the camera through an allocation-free point-trace provider.
+    ///
+    /// The spring arm and floor-clearance probe share the provider's
+    /// caller-owned scratch. Provider failure restores the complete controller
+    /// state and returns an error instead of treating malformed world data as
+    /// either a clear path or an occluder.
+    pub fn update_vblanks_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
+        &mut self,
+        projection: WorldProjection,
+        provider: &mut P,
+        target: ThirdPersonCameraTarget,
+        input: ThirdPersonCameraInput,
+        config: ThirdPersonCameraConfig,
+        delta_vblanks: u16,
+    ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
+        let saved = *self;
+        let mut collision = TraceCameraCollision { provider };
+        match self.update_vblanks_with_backend(
+            projection,
+            &mut collision,
+            target,
+            input,
+            config,
+            delta_vblanks,
+        ) {
+            Ok(frame) => Ok(frame),
+            Err(error) => {
+                *self = saved;
+                Err(error)
+            }
+        }
+    }
+
+    fn update_vblanks_with_backend<C: CameraCollisionBackend>(
+        &mut self,
+        projection: WorldProjection,
+        collision: &mut C,
+        target: ThirdPersonCameraTarget,
+        input: ThirdPersonCameraInput,
+        config: ThirdPersonCameraConfig,
+        delta_vblanks: u16,
+    ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
         let steps = delta_vblanks.clamp(1, MAX_CAMERA_CATCHUP_VBLANKS);
         let config = normalize_config(config);
         let mut i = 0;
         while i < steps {
-            self.advance_one_vblank(
-                CameraCollision::Rooms(collision_rooms),
-                target,
-                input,
-                config,
-            );
+            self.advance_one_vblank(collision, target, input, config)?;
             i += 1;
         }
-        self.current_frame(projection)
+        Ok(self.current_frame(projection))
     }
 
-    fn advance_one_vblank(
+    fn advance_one_vblank<C: CameraCollisionBackend>(
         &mut self,
-        collision: CameraCollision<'_, '_, '_>,
+        collision: &mut C,
         target: ThirdPersonCameraTarget,
         input: ThirdPersonCameraInput,
         config: ThirdPersonCameraConfig,
-    ) {
+    ) -> Result<(), CollisionQueryError> {
         if !self.initialized {
             self.snap_to_player(target, config);
         }
@@ -422,14 +485,13 @@ impl ThirdPersonCameraState {
             self.solve_phase = 0;
         }
         let collision_solve = if solve_now {
-            let solve = solve_camera_collision_context(
-                collision,
+            let solve = collision.solve(
                 self.focus,
                 self.yaw,
                 self.pitch_q12,
                 locked_camera_y_goal,
                 config,
-            );
+            )?;
             self.cached_solve = solve;
             solve
         } else {
@@ -478,14 +540,14 @@ impl ThirdPersonCameraState {
             );
         }
         self.position.y = self.base_position_y.saturating_add(self.lock_height_offset);
-        self.position =
-            clamp_camera_to_floor_context(collision, self.position, config.min_floor_clearance);
+        self.position = collision.clamp_to_floor(self.position, config.min_floor_clearance)?;
         self.frame_pitch_q12 = self
             .pitch_q12
             .saturating_add(lock_pitch_offset_q12(config, self.lock_height_offset));
 
         self.last_pull_in = collision_solve.pull_in;
         self.last_rotated = false;
+        Ok(())
     }
 
     fn current_frame(&self, projection: WorldProjection) -> ThirdPersonCameraFrame {
@@ -545,6 +607,84 @@ struct CameraRay {
 enum CameraCollision<'room, 'room_ref, 'rooms> {
     Single(Option<RoomCollision<'room, 'room_ref>>),
     Rooms(&'rooms [CharacterCollisionRoom<'room>]),
+}
+
+trait CameraCollisionBackend {
+    fn solve(
+        &mut self,
+        focus: RoomPoint,
+        yaw: Angle,
+        pitch_q12: i16,
+        camera_y: i32,
+        config: ThirdPersonCameraConfig,
+    ) -> Result<CollisionSolve, CollisionQueryError>;
+
+    fn clamp_to_floor(
+        &mut self,
+        position: RoomPoint,
+        min_floor_clearance: i32,
+    ) -> Result<RoomPoint, CollisionQueryError>;
+}
+
+struct GridCameraCollision<'room, 'room_ref, 'rooms> {
+    collision: CameraCollision<'room, 'room_ref, 'rooms>,
+}
+
+impl CameraCollisionBackend for GridCameraCollision<'_, '_, '_> {
+    fn solve(
+        &mut self,
+        focus: RoomPoint,
+        yaw: Angle,
+        pitch_q12: i16,
+        camera_y: i32,
+        config: ThirdPersonCameraConfig,
+    ) -> Result<CollisionSolve, CollisionQueryError> {
+        Ok(solve_camera_collision_context(
+            self.collision,
+            focus,
+            yaw,
+            pitch_q12,
+            camera_y,
+            config,
+        ))
+    }
+
+    fn clamp_to_floor(
+        &mut self,
+        position: RoomPoint,
+        min_floor_clearance: i32,
+    ) -> Result<RoomPoint, CollisionQueryError> {
+        Ok(clamp_camera_to_floor_context(
+            self.collision,
+            position,
+            min_floor_clearance,
+        ))
+    }
+}
+
+struct TraceCameraCollision<'provider, P: ?Sized> {
+    provider: &'provider mut P,
+}
+
+impl<P: CollisionTraceProvider + ?Sized> CameraCollisionBackend for TraceCameraCollision<'_, P> {
+    fn solve(
+        &mut self,
+        focus: RoomPoint,
+        yaw: Angle,
+        pitch_q12: i16,
+        camera_y: i32,
+        config: ThirdPersonCameraConfig,
+    ) -> Result<CollisionSolve, CollisionQueryError> {
+        solve_camera_collision_trace(self.provider, focus, yaw, pitch_q12, camera_y, config)
+    }
+
+    fn clamp_to_floor(
+        &mut self,
+        position: RoomPoint,
+        min_floor_clearance: i32,
+    ) -> Result<RoomPoint, CollisionQueryError> {
+        clamp_camera_to_floor_trace(self.provider, position, min_floor_clearance)
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -652,6 +792,59 @@ fn camera_focus_goal(
                 .clamp(-max_offset, max_offset),
         ),
     )
+}
+
+fn clamp_camera_to_floor_trace<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    position: RoomPoint,
+    min_floor_clearance: i32,
+) -> Result<RoomPoint, CollisionQueryError> {
+    if min_floor_clearance <= 0 {
+        return Ok(position);
+    }
+    let start = position.with_y(position.y.saturating_add(TRACE_CAMERA_FLOOR_PROBE_LIFT));
+    let end = position.with_y(position.y.saturating_sub(TRACE_CAMERA_FLOOR_PROBE_DOWN));
+    let trace = trace_collision(provider, CollisionTraceQuery::point(start, end))?;
+    if trace.start_solid
+        || trace.all_solid
+        || trace.fraction_q12 >= COLLISION_FRACTION_ONE_Q12
+        || trace.normal_q12[1] <= 0
+    {
+        return Ok(position);
+    }
+    let Some(min_y) = trace.end.y.checked_add(min_floor_clearance) else {
+        return Ok(position);
+    };
+    if position.y < min_y {
+        Ok(position.with_y(min_y))
+    } else {
+        Ok(position)
+    }
+}
+
+fn solve_camera_collision_trace<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    focus: RoomPoint,
+    yaw: Angle,
+    pitch_q12: i16,
+    camera_y: i32,
+    config: ThirdPersonCameraConfig,
+) -> Result<CollisionSolve, CollisionQueryError> {
+    let desired = camera_position_at_height(focus, config.distance, yaw, pitch_q12, camera_y);
+    let trace = trace_collision(provider, CollisionTraceQuery::point(focus, desired))?;
+    let fraction = trace.fraction_q12.clamp(0, COLLISION_FRACTION_ONE_Q12);
+    let clear = if trace.start_solid || trace.all_solid {
+        0
+    } else {
+        mul_q12_i32(config.distance.max(1), fraction)
+    };
+    let distance = clear
+        .saturating_sub(config.collision_margin)
+        .clamp(config.min_distance, config.distance);
+    Ok(CollisionSolve {
+        distance,
+        pull_in: distance < config.distance,
+    })
 }
 
 fn clamp_camera_to_floor(
@@ -1410,6 +1603,87 @@ fn lerp_vertex(from: RoomPoint, to: RoomPoint, num: i32, den: i32) -> RoomPoint 
 mod tests {
     use super::*;
     use crate::RuntimeRoom;
+
+    struct HalfDistanceTraceProvider {
+        fail: bool,
+        calls: u8,
+    }
+
+    impl CollisionTraceProvider for HalfDistanceTraceProvider {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
+            self.calls = self.calls.saturating_add(1);
+            if self.fail {
+                return false;
+            }
+            let mut trace = crate::CollisionTrace::unobstructed(query.end);
+            trace.fraction_q12 = COLLISION_FRACTION_ONE_Q12 / 2;
+            trace.end = RoomPoint::new(
+                query.start.x + (query.end.x - query.start.x) / 2,
+                query.start.y + (query.end.y - query.start.y) / 2,
+                query.start.z + (query.end.z - query.start.z) / 2,
+            );
+            *output = trace;
+            true
+        }
+    }
+
+    fn trace_target() -> ThirdPersonCameraTarget {
+        ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        }
+    }
+
+    #[test]
+    fn trace_provider_shortens_camera_spring_arm() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut provider = HalfDistanceTraceProvider {
+            fail: false,
+            calls: 0,
+        };
+        let frame = camera
+            .update_vblanks_with_trace_provider(
+                WorldProjection::new(160, 120, 320, 64),
+                &mut provider,
+                trace_target(),
+                ThirdPersonCameraInput::default(),
+                ThirdPersonCameraConfig::character(1400, 700, 0),
+                1,
+            )
+            .expect("trace camera update");
+        assert!(frame.collision_pull_in);
+        assert_eq!(frame.distance, 540);
+        assert_eq!(provider.calls, 1);
+    }
+
+    #[test]
+    fn trace_provider_failure_rolls_back_complete_camera_state() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let before = camera;
+        let mut provider = HalfDistanceTraceProvider {
+            fail: true,
+            calls: 0,
+        };
+        let result = camera.update_vblanks_with_trace_provider(
+            WorldProjection::new(160, 120, 320, 64),
+            &mut provider,
+            trace_target(),
+            ThirdPersonCameraInput {
+                yaw_delta_q12: 64,
+                ..ThirdPersonCameraInput::default()
+            },
+            ThirdPersonCameraConfig::character(1400, 700, 0),
+            1,
+        );
+        assert_eq!(result, Err(CollisionQueryError));
+        assert_eq!(camera, before);
+    }
 
     fn test_ray(
         from: RoomPoint,

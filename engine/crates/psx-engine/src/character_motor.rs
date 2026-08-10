@@ -8,7 +8,12 @@
 
 use crate::floor_sample::{height_at_local, triangle_heights_to_quad};
 use crate::{
-    fixed::div_q12_i32, Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12,
+    collision_query::{
+        trace_collision, CollisionQueryError, CollisionTraceProvider, CollisionTraceQuery,
+        CollisionTraceShape, COLLISION_FRACTION_ONE_Q12,
+    },
+    fixed::div_q12_i32,
+    Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12,
 };
 use psx_math::int32::{abs_i32, isqrt_i32, square_i32_saturating};
 
@@ -38,6 +43,10 @@ const MAX_WEIGHT_Q8: u16 = 4096;
 /// bounded and deterministic.
 const MAX_FALL_SPEED: i32 = 768;
 const MAX_MOTOR_CATCHUP_VBLANKS: u16 = 4;
+/// Maximum downward BSP/provider probe in engine world units.
+const TRACE_FLOOR_PROBE_DOWN: i32 = 32_767;
+/// Lift a grounded trace origin clear of the supporting plane's epsilon band.
+const TRACE_FLOOR_PROBE_LIFT: i32 = 1;
 const DIR_NORTH: u8 = 0;
 const DIR_EAST: u8 = 1;
 const DIR_SOUTH: u8 = 2;
@@ -243,6 +252,115 @@ impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers
             blockers: &[],
             aabb_blockers: &[],
         }
+    }
+}
+
+trait CharacterCollisionBackend {
+    fn supporting_floor(
+        &mut self,
+        position: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<i32>, CollisionQueryError>;
+
+    fn stand_position(
+        &mut self,
+        start: RoomPoint,
+        target: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<RoomPoint>, CollisionQueryError>;
+
+    fn recovery_position(
+        &mut self,
+        start: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<RoomPoint>, CollisionQueryError>;
+
+    fn has_world_collision(&self) -> bool;
+}
+
+struct GridCharacterCollision<'room, 'room_ref, 'blockers> {
+    collision: CharacterCollision<'room, 'room_ref, 'blockers>,
+}
+
+impl CharacterCollisionBackend for GridCharacterCollision<'_, '_, '_> {
+    fn supporting_floor(
+        &mut self,
+        position: RoomPoint,
+        _shape: CollisionTraceShape,
+    ) -> Result<Option<i32>, CollisionQueryError> {
+        Ok(supporting_floor_height(
+            &self.collision,
+            position.x,
+            position.z,
+            position.y,
+        ))
+    }
+
+    fn stand_position(
+        &mut self,
+        _start: RoomPoint,
+        target: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+        let CollisionTraceShape::Body { radius, height } = shape else {
+            return Err(CollisionQueryError);
+        };
+        Ok(body_stand_position(self.collision, target, radius, height))
+    }
+
+    fn recovery_position(
+        &mut self,
+        start: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+        let CollisionTraceShape::Body { height, .. } = shape else {
+            return Err(CollisionQueryError);
+        };
+        Ok(body_stand_position(self.collision, start, 0, height))
+    }
+
+    fn has_world_collision(&self) -> bool {
+        self.collision.room.is_some()
+            || !self.collision.rooms.is_empty()
+            || !self.collision.blockers.is_empty()
+            || !self.collision.aabb_blockers.is_empty()
+    }
+}
+
+struct TraceCharacterCollision<'provider, P: ?Sized> {
+    provider: &'provider mut P,
+}
+
+impl<P: CollisionTraceProvider + ?Sized> CharacterCollisionBackend
+    for TraceCharacterCollision<'_, P>
+{
+    fn supporting_floor(
+        &mut self,
+        position: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<i32>, CollisionQueryError> {
+        trace_supporting_floor(self.provider, position, shape)
+    }
+
+    fn stand_position(
+        &mut self,
+        start: RoomPoint,
+        target: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+        trace_stand_position(self.provider, start, target, shape)
+    }
+
+    fn recovery_position(
+        &mut self,
+        start: RoomPoint,
+        shape: CollisionTraceShape,
+    ) -> Result<Option<RoomPoint>, CollisionQueryError> {
+        trace_stand_position(self.provider, start, start, shape)
+    }
+
+    fn has_world_collision(&self) -> bool {
+        true
     }
 }
 
@@ -556,6 +674,44 @@ impl CharacterMotorState {
         config: CharacterMotorConfig,
         delta_vblanks: u16,
     ) -> CharacterMotorFrame {
+        let mut collision = GridCharacterCollision { collision };
+        match self.update_vblanks_with_backend(&mut collision, input, config, delta_vblanks) {
+            Ok(frame) => frame,
+            Err(_) => unreachable!("grid collision queries are infallible"),
+        }
+    }
+
+    /// Advance the motor through an allocation-free trace provider.
+    ///
+    /// The provider receives upright body traces using `config.radius` and
+    /// `config.height`. On provider failure the complete motor state is restored
+    /// and the error is returned; malformed BSP data or scratch exhaustion can
+    /// therefore never commit a partial locomotion/action update.
+    pub fn update_vblanks_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
+        &mut self,
+        provider: &mut P,
+        input: CharacterMotorInput,
+        config: CharacterMotorConfig,
+        delta_vblanks: u16,
+    ) -> Result<CharacterMotorFrame, CollisionQueryError> {
+        let saved = *self;
+        let mut collision = TraceCharacterCollision { provider };
+        match self.update_vblanks_with_backend(&mut collision, input, config, delta_vblanks) {
+            Ok(frame) => Ok(frame),
+            Err(error) => {
+                *self = saved;
+                Err(error)
+            }
+        }
+    }
+
+    fn update_vblanks_with_backend<C: CharacterCollisionBackend>(
+        &mut self,
+        collision: &mut C,
+        input: CharacterMotorInput,
+        config: CharacterMotorConfig,
+        delta_vblanks: u16,
+    ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         let config = normalize_config(config);
         let steps = delta_vblanks.clamp(1, MAX_MOTOR_CATCHUP_VBLANKS);
         let mut final_frame: Option<CharacterMotorFrame> = None;
@@ -565,7 +721,7 @@ impl CharacterMotorState {
             if step > 0 {
                 step_input.evade = false;
             }
-            let frame = self.update_one_frame(collision, step_input, config);
+            let frame = self.update_one_frame(collision, step_input, config)?;
             final_frame = Some(match final_frame {
                 Some(mut aggregate) => {
                     aggregate.position = frame.position;
@@ -584,7 +740,7 @@ impl CharacterMotorState {
             });
         }
 
-        final_frame.unwrap_or_else(|| {
+        Ok(final_frame.unwrap_or_else(|| {
             self.frame(
                 CharacterMotorAnim::Idle,
                 self.action,
@@ -594,17 +750,17 @@ impl CharacterMotorState {
                 false,
                 false,
             )
-        })
+        }))
     }
 
-    fn update_one_frame(
+    fn update_one_frame<C: CharacterCollisionBackend>(
         &mut self,
-        collision: CharacterCollision<'_, '_, '_>,
+        collision: &mut C,
         input: CharacterMotorInput,
         config: CharacterMotorConfig,
-    ) -> CharacterMotorFrame {
+    ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         self.stamina_q12 = self.stamina_q12.clamp(0, config.stamina_max_q12);
-        self.apply_vertical(&collision, config);
+        self.apply_vertical(collision, config)?;
 
         if self.action.is_idle() && input.evade {
             self.try_start_evade(input, config);
@@ -665,7 +821,7 @@ impl CharacterMotorState {
                 speed,
                 config.radius,
                 config.height,
-            );
+            )?;
 
             if sprinting && moved {
                 self.spend_sprint_stamina(config);
@@ -682,7 +838,7 @@ impl CharacterMotorState {
                 directional_anim
             };
 
-            return self.frame(
+            return Ok(self.frame(
                 anim,
                 CharacterMotorAction::Idle,
                 moved,
@@ -690,7 +846,7 @@ impl CharacterMotorState {
                 sprinting,
                 false,
                 false,
-            );
+            ));
         }
 
         if input.turn > 0 {
@@ -711,7 +867,7 @@ impl CharacterMotorState {
         let signed_speed = if input.walk < 0 { -speed } else { speed };
 
         let (moved, blocked) = if moving_intent {
-            self.try_move(collision, signed_speed, config.radius, config.height)
+            self.try_move(collision, signed_speed, config.radius, config.height)?
         } else {
             (false, false)
         };
@@ -730,7 +886,7 @@ impl CharacterMotorState {
             CharacterMotorAnim::Walk
         };
 
-        self.frame(
+        Ok(self.frame(
             anim,
             CharacterMotorAction::Idle,
             moved,
@@ -738,7 +894,7 @@ impl CharacterMotorState {
             sprinting,
             false,
             false,
-        )
+        ))
     }
 
     /// Current root position.
@@ -814,11 +970,11 @@ impl CharacterMotorState {
         self.action_frame = 0;
     }
 
-    fn update_action(
+    fn update_action<C: CharacterCollisionBackend>(
         &mut self,
-        collision: CharacterCollision<'_, '_, '_>,
+        collision: &mut C,
         config: CharacterMotorConfig,
-    ) -> CharacterMotorFrame {
+    ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         let profile = ActionProfile::for_action(self.action, config);
         let frame = self.action_frame;
         let active = frame < profile.active_frames;
@@ -833,7 +989,7 @@ impl CharacterMotorState {
                 signed_speed,
                 config.radius,
                 config.height,
-            )
+            )?
         } else {
             (false, false)
         };
@@ -852,29 +1008,29 @@ impl CharacterMotorState {
             CharacterMotorAction::Roll => self.action_anim,
             CharacterMotorAction::Quickstep => CharacterMotorAnim::Quickstep,
         };
-        self.frame(anim, action, moved, blocked, false, invulnerable, recovery)
+        Ok(self.frame(anim, action, moved, blocked, false, invulnerable, recovery))
     }
 
-    fn try_move(
+    fn try_move<C: CharacterCollisionBackend>(
         &mut self,
-        collision: CharacterCollision<'_, '_, '_>,
+        collision: &mut C,
         signed_speed: i32,
         radius: i32,
         height: i32,
-    ) -> (bool, bool) {
+    ) -> Result<(bool, bool), CollisionQueryError> {
         self.try_move_at_yaw(collision, self.yaw, signed_speed, radius, height)
     }
 
-    fn try_move_at_yaw(
+    fn try_move_at_yaw<C: CharacterCollisionBackend>(
         &mut self,
-        collision: CharacterCollision<'_, '_, '_>,
+        collision: &mut C,
         yaw: Angle,
         signed_speed: i32,
         radius: i32,
         height: i32,
-    ) -> (bool, bool) {
+    ) -> Result<(bool, bool), CollisionQueryError> {
         if signed_speed == 0 {
-            return (false, false);
+            return Ok((false, false));
         }
         let sin_yaw = yaw.sin();
         let cos_yaw = yaw.cos();
@@ -890,22 +1046,22 @@ impl CharacterMotorState {
         self.try_commit_move(collision, target, radius, height)
     }
 
-    fn try_move_vector(
+    fn try_move_vector<C: CharacterCollisionBackend>(
         &mut self,
-        collision: CharacterCollision<'_, '_, '_>,
+        collision: &mut C,
         move_x: Q12,
         move_z: Q12,
         speed: i32,
         radius: i32,
         height: i32,
-    ) -> (bool, bool) {
+    ) -> Result<(bool, bool), CollisionQueryError> {
         if speed == 0 {
-            return (false, false);
+            return Ok((false, false));
         }
         let dx = move_x.mul_i32(speed);
         let dz = move_z.mul_i32(speed);
         if dx == 0 && dz == 0 {
-            return (false, false);
+            return Ok((false, false));
         }
         let target = RoomPoint::new(
             self.position.x.saturating_add(dx),
@@ -915,29 +1071,30 @@ impl CharacterMotorState {
         self.try_commit_move(collision, target, radius, height)
     }
 
-    fn try_commit_move(
+    fn try_commit_move<C: CharacterCollisionBackend>(
         &mut self,
-        collision: CharacterCollision<'_, '_, '_>,
+        collision: &mut C,
         target: RoomPoint,
         radius: i32,
         height: i32,
-    ) -> (bool, bool) {
-        if let Some(position) = body_stand_position(collision, target, radius, height) {
+    ) -> Result<(bool, bool), CollisionQueryError> {
+        let shape = CollisionTraceShape::Body { radius, height };
+        if let Some(position) = collision.stand_position(self.position, target, shape)? {
             self.position = position;
-            return (true, false);
+            return Ok((true, false));
         }
 
         let start = self.position;
         let x_only = RoomPoint::new(target.x, start.y, start.z);
-        if let Some(position) = body_stand_position(collision, x_only, radius, height) {
+        if let Some(position) = collision.stand_position(start, x_only, shape)? {
             self.position = position;
-            return (position.x != start.x || position.z != start.z, true);
+            return Ok((position.x != start.x || position.z != start.z, true));
         }
 
         let z_only = RoomPoint::new(start.x, start.y, target.z);
-        if let Some(position) = body_stand_position(collision, z_only, radius, height) {
+        if let Some(position) = collision.stand_position(start, z_only, shape)? {
             self.position = position;
-            return (position.x != start.x || position.z != start.z, true);
+            return Ok((position.x != start.x || position.z != start.z, true));
         }
 
         // `apply_vertical` validated and anchored this exact X/Z at the start
@@ -945,29 +1102,26 @@ impl CharacterMotorState {
         // grounded position instead of repeating two full floor/wall scans.
         // The recovery probes below remain for airborne/no-floor edge cases.
         if self.grounded {
-            return (false, true);
+            return Ok((false, true));
         }
 
-        if body_stand_position(collision, start, radius, height).is_some() {
-            return (false, true);
+        if collision.stand_position(start, start, shape)?.is_some() {
+            return Ok((false, true));
         }
 
-        if collision.room.is_none()
-            && collision.blockers.is_empty()
-            && collision.aabb_blockers.is_empty()
-        {
+        if !collision.has_world_collision() {
             self.position = target;
-            return (true, false);
+            return Ok((true, false));
         }
 
         if target == start {
-            return (false, false);
+            return Ok((false, false));
         }
-        let Some(position) = body_stand_position(collision, start, 0, height) else {
-            return (false, true);
+        let Some(position) = collision.recovery_position(start, shape)? else {
+            return Ok((false, true));
         };
         self.position = position;
-        (false, true)
+        Ok((false, true))
     }
 
     fn recover_stamina(&mut self, config: CharacterMotorConfig) {
@@ -1019,11 +1173,11 @@ impl CharacterMotorState {
     /// Probing only the centre column is intentional: a prior move already
     /// validated the cylinder footprint, so for the per-tick settle just the
     /// centre floor height is needed to stay grounded on slopes and steps.
-    fn apply_vertical(
+    fn apply_vertical<C: CharacterCollisionBackend>(
         &mut self,
-        collision: &CharacterCollision<'_, '_, '_>,
+        collision: &mut C,
         config: CharacterMotorConfig,
-    ) {
+    ) -> Result<(), CollisionQueryError> {
         // Grounded fast path: a body that is grounded and has not moved in XZ
         // sits on the same (static) floor as last tick, so reuse the cached
         // height and skip the multi-room ground query (no divide, no room
@@ -1035,19 +1189,21 @@ impl CharacterMotorState {
         {
             self.position.y = self.ground_floor;
             self.velocity_y = 0;
-            return;
+            return Ok(());
         }
 
         // Cold path: resolve the supporting floor (highest floor at/below the
         // feet plus a step, across the active rooms).
-        let Some(floor) =
-            supporting_floor_height(collision, self.position.x, self.position.z, self.position.y)
-        else {
+        let shape = CollisionTraceShape::Body {
+            radius: config.radius,
+            height: config.height,
+        };
+        let Some(floor) = collision.supporting_floor(self.position, shape)? else {
             // No floor anywhere below (open void): hold rather than fall
             // forever. Matches the legacy no-room behaviour.
             self.grounded = false;
             self.velocity_y = 0;
-            return;
+            return Ok(());
         };
 
         if self.position.y.saturating_sub(floor) <= STEP_DOWN_HEIGHT {
@@ -1056,7 +1212,7 @@ impl CharacterMotorState {
             self.position.y = floor;
             self.velocity_y = 0;
             self.set_grounded(floor);
-            return;
+            return Ok(());
         }
 
         // Airborne: the floor is more than a step below (a ledge or hole).
@@ -1076,6 +1232,7 @@ impl CharacterMotorState {
         } else {
             self.position.y = next;
         }
+        Ok(())
     }
 
     /// Mark the body grounded on `floor` and anchor the ground cache to the
@@ -1186,6 +1343,94 @@ fn normalize_config(mut config: CharacterMotorConfig) -> CharacterMotorConfig {
             .saturating_add(config.backstep_recovery_frames),
     );
     config
+}
+
+fn trace_supporting_floor<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    position: RoomPoint,
+    shape: CollisionTraceShape,
+) -> Result<Option<i32>, CollisionQueryError> {
+    let start = position.with_y(position.y.saturating_add(TRACE_FLOOR_PROBE_LIFT));
+    let end = position.with_y(position.y.saturating_sub(TRACE_FLOOR_PROBE_DOWN));
+    let trace = trace_collision(provider, CollisionTraceQuery { start, end, shape })?;
+    if trace.start_solid
+        || trace.all_solid
+        || trace.fraction_q12 >= COLLISION_FRACTION_ONE_Q12
+        || trace.normal_q12[1] <= 0
+    {
+        return Ok(None);
+    }
+    Ok(Some(trace.end.y))
+}
+
+fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    start: RoomPoint,
+    target: RoomPoint,
+    shape: CollisionTraceShape,
+) -> Result<Option<RoomPoint>, CollisionQueryError> {
+    let direct = trace_collision(
+        provider,
+        CollisionTraceQuery {
+            start,
+            end: target,
+            shape,
+        },
+    )?;
+    if !direct.hit() {
+        let Some(floor) = trace_supporting_floor(provider, target, shape)? else {
+            return Ok(None);
+        };
+        if floor > target.y.saturating_add(STEP_UP_HEIGHT) {
+            return Ok(None);
+        }
+        return Ok(Some(target.with_y(resolve_step_down(target.y, floor))));
+    }
+
+    // A direct body sweep that hits a low riser gets one bounded step attempt:
+    // lift, sweep at the raised height, then settle back onto an upward-facing
+    // floor. Tall walls/ceilings reject either the lift or raised sweep.
+    let raised_start = start.with_y(start.y.saturating_add(STEP_UP_HEIGHT));
+    let lift = trace_collision(
+        provider,
+        CollisionTraceQuery {
+            start,
+            end: raised_start,
+            shape,
+        },
+    )?;
+    if lift.hit() {
+        return Ok(None);
+    }
+    let raised_target = target.with_y(raised_start.y);
+    let across = trace_collision(
+        provider,
+        CollisionTraceQuery {
+            start: raised_start,
+            end: raised_target,
+            shape,
+        },
+    )?;
+    if across.hit() {
+        return Ok(None);
+    }
+    let settle_end = target.with_y(target.y.saturating_sub(STEP_DOWN_HEIGHT));
+    let settle = trace_collision(
+        provider,
+        CollisionTraceQuery {
+            start: raised_target,
+            end: settle_end,
+            shape,
+        },
+    )?;
+    if settle.start_solid
+        || settle.all_solid
+        || settle.fraction_q12 >= COLLISION_FRACTION_ONE_Q12
+        || settle.normal_q12[1] <= 0
+    {
+        return Ok(None);
+    }
+    Ok(Some(settle.end))
 }
 
 /// Resolve the supporting floor height under `(x, z)` in the motor's
@@ -1914,8 +2159,85 @@ mod tests {
     use super::*;
     use crate::RuntimeRoom;
 
+    struct FlatTraceProvider {
+        calls: u8,
+        fail_on_call: Option<u8>,
+    }
+
+    impl FlatTraceProvider {
+        const fn new(fail_on_call: Option<u8>) -> Self {
+            Self {
+                calls: 0,
+                fail_on_call,
+            }
+        }
+    }
+
+    impl CollisionTraceProvider for FlatTraceProvider {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
+            self.calls = self.calls.saturating_add(1);
+            if self.fail_on_call == Some(self.calls) {
+                return false;
+            }
+            let mut trace = crate::CollisionTrace::unobstructed(query.end);
+            if query.start.y > 0 && query.end.y <= 0 {
+                let distance = query.start.y.saturating_sub(query.end.y).max(1);
+                trace.fraction_q12 =
+                    query.start.y.saturating_mul(COLLISION_FRACTION_ONE_Q12) / distance;
+                trace.end = RoomPoint::new(query.end.x, 0, query.end.z);
+                trace.normal_q12 = [0, COLLISION_FRACTION_ONE_Q12 as i16, 0];
+            }
+            *output = trace;
+            true
+        }
+    }
+
     fn config() -> CharacterMotorConfig {
         CharacterMotorConfig::character(64, 32, 64, Angle::from_q12(16))
+    }
+
+    #[test]
+    fn trace_provider_advances_motor_on_flat_floor() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut provider = FlatTraceProvider::new(None);
+        let frame = motor
+            .update_vblanks_with_trace_provider(
+                &mut provider,
+                CharacterMotorInput {
+                    walk: 1,
+                    ..CharacterMotorInput::default()
+                },
+                config(),
+                1,
+            )
+            .expect("trace update");
+        assert!(frame.moved);
+        assert!(!frame.blocked);
+        assert_eq!(frame.position, RoomPoint::new(0, 0, 32));
+        assert_eq!(provider.calls, 3);
+    }
+
+    #[test]
+    fn trace_provider_failure_rolls_back_complete_motor_state() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let before = motor;
+        let mut provider = FlatTraceProvider::new(Some(2));
+        let result = motor.update_vblanks_with_trace_provider(
+            &mut provider,
+            CharacterMotorInput {
+                walk: 1,
+                turn: 1,
+                ..CharacterMotorInput::default()
+            },
+            config(),
+            1,
+        );
+        assert_eq!(result, Err(CollisionQueryError));
+        assert_eq!(motor, before);
     }
 
     #[test]
