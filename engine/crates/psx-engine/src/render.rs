@@ -398,14 +398,33 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     /// `DEPTH`. The packet storage must remain live and unmodified until the
     /// submitted ordering-table DMA has completed.
     #[inline(always)]
-    pub unsafe fn add_tagged_packet_stream_unchecked(
+    pub unsafe fn add_tagged_packet_stream_unchecked(&mut self, first: *mut u32, end: *mut u32) {
+        unsafe { self.ot.insert_tagged_packet_stream_unchecked(first, end) };
+    }
+
+    /// Insert a tagged stream committed from the shared primitive packet
+    /// arena.
+    ///
+    /// Unlike [`add_tagged_packet_stream_unchecked`](Self::add_tagged_packet_stream_unchecked),
+    /// this form carries the exact committed range and cannot accidentally
+    /// link unused reservation capacity into the ordering table.
+    ///
+    /// # Safety
+    ///
+    /// The arena storage represented by `stream` must remain live and
+    /// unmodified until the ordering-table DMA has completed. Every
+    /// non-sentinel slot encoded in the stream must be less than `DEPTH`.
+    #[inline(always)]
+    pub unsafe fn add_committed_tagged_packet_stream_unchecked(
         &mut self,
-        first: *mut u32,
-        end: *mut u32,
+        stream: PrimitivePacketStream,
     ) {
+        if stream.is_empty() {
+            return;
+        }
         unsafe {
             self.ot
-                .insert_tagged_packet_stream_unchecked(first, end)
+                .insert_tagged_packet_stream_unchecked(stream.first, stream.end)
         };
     }
 
@@ -705,6 +724,111 @@ impl<const SLOTS: usize> PrimitivePacketScratch<SLOTS> {
     }
 }
 
+/// Exact tagged-packet range committed from [`PrimitivePacketArena`].
+///
+/// The pointers remain valid only while the arena's backing
+/// [`PrimitivePacketScratch`] remains live and unmodified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "link the committed stream into the frame ordering table"]
+pub struct PrimitivePacketStream {
+    first: *mut u32,
+    end: *mut u32,
+    words: usize,
+    packets: usize,
+}
+
+impl PrimitivePacketStream {
+    /// Number of contiguous words in the committed stream.
+    pub const fn word_count(self) -> usize {
+        self.words
+    }
+
+    /// Number of tagged GPU packets reported by the producer.
+    pub const fn packet_count(self) -> usize {
+        self.packets
+    }
+
+    /// True when the committed stream contains no words or packets.
+    pub const fn is_empty(self) -> bool {
+        self.words == 0
+    }
+
+    /// First word in the committed packet stream.
+    pub const fn first_ptr(self) -> *mut u32 {
+        self.first
+    }
+
+    /// One-past-the-end word in the committed packet stream.
+    pub const fn end_ptr(self) -> *mut u32 {
+        self.end
+    }
+}
+
+/// Exclusive contiguous-word reservation from [`PrimitivePacketArena`].
+///
+/// Dropping a reservation without committing it leaves the arena cursor
+/// unchanged. A successful commit advances by the slots needed for the words
+/// actually used, not by the reservation's maximum capacity.
+#[must_use = "commit the written prefix or drop the reservation without advancing the arena"]
+pub struct PrimitivePacketWordReservation<'arena, 'storage> {
+    arena: &'arena mut PrimitivePacketArena<'storage>,
+    first_slot: usize,
+    capacity_words: usize,
+}
+
+impl PrimitivePacketWordReservation<'_, '_> {
+    /// Maximum number of contiguous words writable through this reservation.
+    pub const fn capacity_words(&self) -> usize {
+        self.capacity_words
+    }
+
+    /// Borrow the reserved words for a retained renderer to materialize a
+    /// tightly packed tagged stream.
+    pub fn words_mut(&mut self) -> &mut [u32] {
+        let first = unsafe {
+            self.arena
+                .storage
+                .as_mut_ptr()
+                .add(self.first_slot)
+                .cast::<u32>()
+        };
+        unsafe { core::slice::from_raw_parts_mut(first, self.capacity_words) }
+    }
+
+    /// Commit the exact prefix written by the producer.
+    ///
+    /// Returns `None` without advancing the arena if the word count exceeds
+    /// the reservation or if only one of `used_words` and `packet_count` is
+    /// zero.
+    pub fn commit(self, used_words: usize, packet_count: usize) -> Option<PrimitivePacketStream> {
+        if used_words > self.capacity_words || (used_words == 0) != (packet_count == 0) {
+            return None;
+        }
+        let used_slots = used_words.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
+        let next_used_slots = self.arena.used_slots.checked_add(used_slots)?;
+        if next_used_slots > self.arena.storage.len() {
+            return None;
+        }
+        let next_packet_count = self.arena.packet_count.checked_add(packet_count)?;
+        let first = unsafe {
+            self.arena
+                .storage
+                .as_mut_ptr()
+                .add(self.first_slot)
+                .cast::<u32>()
+        };
+        let end = unsafe { first.add(used_words) };
+        self.arena.used_slots = next_used_slots;
+        self.arena.packet_count = next_packet_count;
+        Some(PrimitivePacketStream {
+            first,
+            end,
+            words: used_words,
+            packets: packet_count,
+        })
+    }
+}
+
 /// Type-erased packet arena over [`PrimitivePacketScratch`].
 ///
 /// Packets of different concrete types are written into fixed slots
@@ -714,7 +838,8 @@ impl<const SLOTS: usize> PrimitivePacketScratch<SLOTS> {
 /// [`PrimitiveArena`].
 pub struct PrimitivePacketArena<'a> {
     storage: &'a mut [PrimitivePacketSlot],
-    len: usize,
+    used_slots: usize,
+    packet_count: usize,
 }
 
 impl<'a> PrimitivePacketArena<'a> {
@@ -722,13 +847,14 @@ impl<'a> PrimitivePacketArena<'a> {
     pub fn new<const SLOTS: usize>(scratch: &'a mut PrimitivePacketScratch<SLOTS>) -> Self {
         Self {
             storage: &mut scratch.slots,
-            len: 0,
+            used_slots: 0,
+            packet_count: 0,
         }
     }
 
     /// Number of mixed packets written this frame.
     pub const fn len(&self) -> usize {
-        self.len
+        self.packet_count
     }
 
     /// Packet capacity expressed in worst-case Gouraud triangle slots.
@@ -736,14 +862,48 @@ impl<'a> PrimitivePacketArena<'a> {
         self.storage.len()
     }
 
+    /// Physical fixed-size slots consumed by typed packets and committed raw
+    /// streams.
+    pub const fn used_slots(&self) -> usize {
+        self.used_slots
+    }
+
     /// Remaining worst-case packet slots.
     pub fn remaining(&self) -> usize {
-        self.capacity().saturating_sub(self.len())
+        self.capacity().saturating_sub(self.used_slots)
+    }
+
+    /// Remaining storage as a contiguous word capacity.
+    pub fn remaining_words(&self) -> usize {
+        self.remaining().saturating_mul(PRIMITIVE_PACKET_SLOT_WORDS)
     }
 
     /// True when no packets have been written.
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        self.packet_count == 0
+    }
+
+    /// Reserve a contiguous word range from the unconsumed arena tail.
+    ///
+    /// The reservation does not advance the arena until
+    /// [`commit`](PrimitivePacketWordReservation::commit) succeeds.
+    pub fn reserve_packet_words(
+        &mut self,
+        capacity_words: usize,
+    ) -> Option<PrimitivePacketWordReservation<'_, 'a>> {
+        if capacity_words == 0 {
+            return None;
+        }
+        let reserved_slots = capacity_words.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
+        if reserved_slots > self.remaining() {
+            return None;
+        }
+        let first_slot = self.used_slots;
+        Some(PrimitivePacketWordReservation {
+            arena: self,
+            first_slot,
+            capacity_words,
+        })
     }
 
     fn push_packet<T>(&mut self, prim: T) -> Option<&mut T> {
@@ -754,13 +914,14 @@ impl<'a> PrimitivePacketArena<'a> {
         if core::mem::align_of::<T>() > core::mem::align_of::<PrimitivePacketSlot>() {
             return None;
         }
-        if self.len >= self.storage.len() {
+        if self.used_slots >= self.storage.len() {
             return None;
         }
-        let ptr = self.storage[self.len].words.as_mut_ptr().cast::<T>();
+        let ptr = self.storage[self.used_slots].words.as_mut_ptr().cast::<T>();
         unsafe {
             ptr.write(prim);
-            self.len += 1;
+            self.used_slots += 1;
+            self.packet_count += 1;
             Some(&mut *ptr)
         }
     }
@@ -780,22 +941,23 @@ impl<'a> PrimitivePacketArena<'a> {
         if core::mem::align_of::<T>() > core::mem::align_of::<PrimitivePacketSlot>() {
             return None;
         }
-        if self.len >= self.storage.len() {
+        if self.used_slots >= self.storage.len() {
             return None;
         }
-        let ptr = self.storage[self.len].words.as_mut_ptr().cast::<T>();
-        self.len += 1;
+        let ptr = self.storage[self.used_slots].words.as_mut_ptr().cast::<T>();
+        self.used_slots += 1;
+        self.packet_count += 1;
         Some(unsafe { &mut *ptr })
     }
 }
 
 impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
     fn len(&self) -> usize {
-        self.len
+        self.packet_count
     }
 
     fn capacity(&self) -> usize {
-        self.storage.len()
+        self.packet_count.saturating_add(self.remaining())
     }
 
     fn push(&mut self, prim: T) -> Option<&mut T> {
@@ -806,8 +968,9 @@ impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
         debug_assert!(core::mem::size_of::<T>() > 0);
         debug_assert!(core::mem::size_of::<T>() <= core::mem::size_of::<PrimitivePacketSlot>());
         debug_assert!(core::mem::align_of::<T>() <= core::mem::align_of::<PrimitivePacketSlot>());
-        let index = self.len;
-        self.len += 1;
+        let index = self.used_slots;
+        self.used_slots += 1;
+        self.packet_count += 1;
         // SAFETY: the trait contract proves `index` is in range; the slot
         // alignment/size assertions are compile-time properties of `T`.
         let ptr = unsafe { self.storage.get_unchecked_mut(index) }
@@ -952,5 +1115,108 @@ mod tests {
         assert_eq!(words.len(), 2 * PRIMITIVE_PACKET_SLOT_WORDS);
         words[PRIMITIVE_PACKET_SLOT_WORDS] = 0x1234_5678;
         assert_eq!(scratch.slots[1].words[0], 0x1234_5678);
+    }
+
+    #[test]
+    fn packet_arena_commits_tight_stream_then_continues_with_typed_slot() {
+        #[derive(Clone, Copy)]
+        #[repr(C)]
+        struct Packet {
+            tag: u32,
+            command: u32,
+            payload: u32,
+        }
+
+        let mut scratch = PrimitivePacketScratch::<4>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        arena
+            .push(Packet {
+                tag: 0,
+                command: 1,
+                payload: 2,
+            })
+            .expect("typed prefix");
+
+        let remaining_words = arena.remaining_words();
+        let mut reservation = arena
+            .reserve_packet_words(remaining_words)
+            .expect("contiguous tail");
+        let first = reservation.words_mut().as_mut_ptr();
+        reservation.words_mut()[0] = 0x1111_1111;
+        reservation.words_mut()[14] = 0x2222_2222;
+        let stream = reservation.commit(15, 2).expect("valid stream prefix");
+
+        assert_eq!(stream.first_ptr(), first);
+        assert_eq!(stream.end_ptr(), unsafe { first.add(15) });
+        assert_eq!(stream.word_count(), 15);
+        assert_eq!(stream.packet_count(), 2);
+        assert_eq!(arena.len(), 3);
+        assert_eq!(arena.remaining(), 1);
+
+        arena
+            .push(Packet {
+                tag: 3,
+                command: 4,
+                payload: 5,
+            })
+            .expect("typed suffix");
+        assert_eq!(arena.len(), 4);
+        assert_eq!(arena.remaining(), 0);
+    }
+
+    #[test]
+    fn invalid_packet_word_commit_does_not_advance_arena() {
+        let mut scratch = PrimitivePacketScratch::<2>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        {
+            let mut reservation = arena.reserve_packet_words(8).expect("reservation");
+            assert_eq!(reservation.capacity_words(), 8);
+            reservation.words_mut()[0] = 0xfeed_beef;
+        }
+        assert_eq!(arena.len(), 0);
+        assert_eq!(arena.used_slots(), 0);
+        assert_eq!(arena.remaining(), 2);
+
+        let reservation = arena.reserve_packet_words(8).expect("reservation");
+        assert!(reservation.commit(9, 1).is_none());
+        assert_eq!(arena.len(), 0);
+        assert_eq!(arena.used_slots(), 0);
+        assert_eq!(arena.remaining(), 2);
+
+        let reservation = arena.reserve_packet_words(8).expect("reservation");
+        assert!(reservation.commit(4, 0).is_none());
+        assert_eq!(arena.len(), 0);
+        assert_eq!(arena.used_slots(), 0);
+        assert_eq!(arena.remaining(), 2);
+    }
+
+    #[test]
+    fn dense_packet_stream_keeps_typed_sink_remaining_capacity_sound() {
+        #[derive(Clone, Copy)]
+        #[repr(C)]
+        struct Packet {
+            words: [u32; 3],
+        }
+
+        let mut scratch = PrimitivePacketScratch::<2>::ZERO;
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        let stream = arena
+            .reserve_packet_words(10)
+            .expect("one-slot stream")
+            .commit(10, 3)
+            .expect("dense packets");
+        assert_eq!(stream.packet_count(), 3);
+        assert_eq!(arena.len(), 3);
+        assert_eq!(arena.capacity(), 2);
+        assert_eq!(arena.used_slots(), 1);
+        assert_eq!(arena.remaining(), 1);
+        assert_eq!(
+            <PrimitivePacketArena<'_> as PrimitiveSink<Packet>>::capacity(&arena),
+            4
+        );
+        assert_eq!(
+            <PrimitivePacketArena<'_> as PrimitiveSink<Packet>>::remaining(&arena),
+            1
+        );
     }
 }
