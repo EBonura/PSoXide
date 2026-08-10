@@ -398,6 +398,33 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
+        // Modifier-click places clip points: two ground points define a
+        // vertical clip plane that splits the selected brush in two.
+        if frame.modifiers.command {
+            let Some(selected) = ws.selected_brush else {
+                return;
+            };
+            let Some(point) = ws.brush_ground_point(frame.rect, pointer) else {
+                return;
+            };
+            match ws.brush_clip_start.take() {
+                None => ws.brush_clip_start = Some(point),
+                Some(start) if start == point => {}
+                Some(start) => {
+                    let up = [start[0], BRUSH_CREATE_HEIGHT, start[2]];
+                    let clipped = ws.project.active_scene().brushes[selected]
+                        .clip([start, point, up]);
+                    if let (Some(back), Some(front)) = (clipped.back, clipped.front) {
+                        ws.push_undo();
+                        let scene = ws.project.active_scene_mut();
+                        scene.brushes[selected] = back;
+                        scene.brushes.push(front);
+                    }
+                }
+            }
+            return;
+        }
+        ws.brush_clip_start = None;
         ws.selected_brush = ws.pick_brush(frame.rect, pointer);
     }
 }
