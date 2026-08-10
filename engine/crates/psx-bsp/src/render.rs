@@ -22,6 +22,7 @@ use psx_gte::scene::{self, AabbClipPlane};
 use psx_math::int32::mul_q12_i32;
 use psx_math::{cos_q12, sin_q12};
 
+use crate::collision::BrushTransform;
 use crate::pxbsp::{material_blend, material_flags, PxbspMaterial, PxbspMaterialAnimation};
 use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
@@ -118,6 +119,28 @@ pub struct RenderStats {
 pub struct RenderFrame {
     pub stats: RenderStats,
     pub packet_words: usize,
+}
+
+#[derive(Copy, Clone)]
+enum PxbspFaceSelection {
+    VisibleWorld,
+    ModelRange { first: usize, end: usize },
+}
+
+impl PxbspFaceSelection {
+    fn range(self, face_count: usize) -> (usize, usize) {
+        match self {
+            Self::VisibleWorld => (0, face_count),
+            Self::ModelRange { first, end } => (first.min(face_count), end.min(face_count)),
+        }
+    }
+
+    fn includes(self, face: usize, visible_faces: &[u8]) -> bool {
+        match self {
+            Self::VisibleWorld => visible_faces.get(face).copied() == Some(1),
+            Self::ModelRange { .. } => true,
+        }
+    }
 }
 
 /// Configure the 320x240 projection used by the lifted XBSP renderer.
@@ -392,120 +415,191 @@ impl Renderer {
         scene::load_rotation(&view.rotation);
         scene::load_translation(view.translation);
 
+        let frame = if self.mark_visible_pxbsp_faces(map, camera.origin) {
+            self.draw_pxbsp_faces(
+                map,
+                camera.origin,
+                materials,
+                material_tick,
+                PxbspFaceSelection::VisibleWorld,
+                packet_storage,
+            )
+        } else {
+            RenderFrame::default()
+        };
+        self.frame = self.frame.wrapping_add(1);
+        frame
+    }
+
+    /// Materialize one transformed brush submodel into caller-owned packets.
+    ///
+    /// The model's vertices and planes remain model-local. `transform` is
+    /// applied to the GTE render path and inverted for plane-side culling, so
+    /// render and [`crate::collision::TransformedCollisionHull`] share one
+    /// rigid-transform contract.
+    pub fn draw_pxbsp_model(
+        &mut self,
+        map: &PxbspResidentMap,
+        model_index: usize,
+        transform: BrushTransform,
+        camera: Camera,
+        view: ViewTransform,
+        materials: &[Option<PxbspTextureBinding>],
+        material_tick: u32,
+        packet_storage: &mut [u32],
+    ) -> Option<RenderFrame> {
+        let model = map.brush_models().get(model_index)?;
+        let first_face = model.first_face as usize;
+        let face_end = first_face.checked_add(model.face_count as usize)?;
+        let local_camera = transform.point_to_local(camera.origin);
+        let (rotation, translation) = compose_classic_alias_transform(
+            view.rotation,
+            view.translation,
+            transform.rotation,
+            GteVec3I16::ZERO,
+            GteVec3I32::new(
+                transform.origin.x >> 12,
+                transform.origin.y >> 12,
+                transform.origin.z >> 12,
+            ),
+            GteVec3I16::new(4096, 4096, 4096),
+        );
+        scene::load_rotation(&rotation);
+        scene::load_translation(translation);
+
+        // ponytail: the first mover slice scans its bounded face range. The
+        // recursive near/far node walker with bounds culling replaces this
+        // together with the world's current PVS-mark scan.
+        let frame = self.draw_pxbsp_faces(
+            map,
+            local_camera,
+            materials,
+            material_tick,
+            PxbspFaceSelection::ModelRange {
+                first: first_face,
+                end: face_end,
+            },
+            packet_storage,
+        );
+        self.frame = self.frame.wrapping_add(1);
+        Some(frame)
+    }
+
+    fn draw_pxbsp_faces(
+        &self,
+        map: &PxbspResidentMap,
+        camera_origin: Vec3I32,
+        materials: &[Option<PxbspTextureBinding>],
+        material_tick: u32,
+        selection: PxbspFaceSelection,
+        packet_storage: &mut [u32],
+    ) -> RenderFrame {
         let start = packet_storage.as_mut_ptr();
         let end = unsafe { start.add(packet_storage.len()) };
         let mut next = start;
         let mut stats = RenderStats::default();
 
-        if self.mark_visible_pxbsp_faces(map, camera.origin) {
-            let mut batch_vertices =
-                [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES];
-            let mut batch_surfaces =
-                [ClassicAffineWindowedBatchSurface::default(); BATCH_MAX_SURFACES];
-            let mut batch_vertex_count = 0usize;
-            let mut batch_surface_count = 0usize;
-            let mut batch_worst_words = 0usize;
+        let mut batch_vertices =
+            [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES];
+        let mut batch_surfaces = [ClassicAffineWindowedBatchSurface::default(); BATCH_MAX_SURFACES];
+        let mut batch_vertex_count = 0usize;
+        let mut batch_surface_count = 0usize;
+        let mut batch_worst_words = 0usize;
 
-            let faces = map.faces();
-            let map_materials = map.materials();
-            for face_index in 0..faces.len() {
-                if self.face_visible[face_index] == 0 {
-                    continue;
-                }
-                let face = unsafe { faces.get_unchecked(face_index) };
-                let material_index = face.texture as usize;
-                let material = unsafe { map_materials.get_unchecked(material_index) };
-                let Some(binding) = materials.get(material_index).copied().flatten() else {
-                    stats.unresolved_material_faces =
-                        stats.unresolved_material_faces.saturating_add(1);
-                    continue;
-                };
-                if !pxbsp_material_draws_face(
-                    material,
-                    front_facing_pxbsp(map, face, camera.origin),
-                ) {
-                    continue;
-                }
-
-                let vertex_count = face.vertex_count as usize;
-                if vertex_count > BATCH_MAX_VERTICES {
-                    stats.packet_overflow_avoided = true;
-                    break;
-                }
-                let face_worst_words =
-                    (vertex_count - 2) * WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE;
-                if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
-                    || batch_surface_count == BATCH_MAX_SURFACES
-                    || !packet_capacity(next, end, batch_worst_words + face_worst_words)
-                {
-                    if batch_surface_count != 0 {
-                        stats.surface_batches = stats.surface_batches.saturating_add(1);
-                    }
-                    let submitted = unsafe {
-                        flush_windowed_batch(
-                            &mut batch_vertices,
-                            batch_vertex_count,
-                            &batch_surfaces,
-                            batch_surface_count,
-                            next,
-                        )
-                    };
-                    next = submitted.next_packet;
-                    stats.packets = stats.packets.wrapping_add(submitted.packets);
-                    stats.hardware_triangles = stats
-                        .hardware_triangles
-                        .wrapping_add(submitted.hardware_triangles);
-                    batch_vertex_count = 0;
-                    batch_surface_count = 0;
-                    batch_worst_words = 0;
-                }
-                if !packet_capacity(next, end, face_worst_words) {
-                    stats.packet_overflow_avoided = true;
-                    break;
-                }
-
-                let state = pxbsp_material_state(material, binding, material_tick);
-                batch_surfaces[batch_surface_count] = ClassicAffineWindowedBatchSurface {
-                    first_vertex: batch_vertex_count as u16,
-                    vertex_count: vertex_count as u16,
-                    tpage: state.texture_page,
-                    clut: binding.clut,
-                    texture_window_word: binding.texture_window_word,
-                    color_command_word: state.color_command_word,
-                };
-                self.materialize_pxbsp_face(
-                    map,
-                    face,
-                    state.uv_offset,
-                    &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
-                );
-                batch_vertex_count += vertex_count;
-                batch_surface_count += 1;
-                batch_worst_words += face_worst_words;
-                stats.visible_faces = stats.visible_faces.saturating_add(1);
+        let faces = map.faces();
+        let map_materials = map.materials();
+        let (first_face, face_end) = selection.range(faces.len());
+        for face_index in first_face..face_end {
+            if !selection.includes(face_index, &self.face_visible) {
+                continue;
             }
-
-            if batch_surface_count != 0 {
-                stats.surface_batches = stats.surface_batches.saturating_add(1);
-            }
-            let submitted = unsafe {
-                flush_windowed_batch(
-                    &mut batch_vertices,
-                    batch_vertex_count,
-                    &batch_surfaces,
-                    batch_surface_count,
-                    next,
-                )
+            let face = unsafe { faces.get_unchecked(face_index) };
+            let material_index = face.texture as usize;
+            let material = unsafe { map_materials.get_unchecked(material_index) };
+            let Some(binding) = materials.get(material_index).copied().flatten() else {
+                stats.unresolved_material_faces = stats.unresolved_material_faces.saturating_add(1);
+                continue;
             };
-            next = submitted.next_packet;
-            stats.packets = stats.packets.wrapping_add(submitted.packets);
-            stats.hardware_triangles = stats
-                .hardware_triangles
-                .wrapping_add(submitted.hardware_triangles);
+            if !pxbsp_material_draws_face(material, front_facing_pxbsp(map, face, camera_origin)) {
+                continue;
+            }
+
+            let vertex_count = face.vertex_count as usize;
+            if vertex_count > BATCH_MAX_VERTICES {
+                stats.packet_overflow_avoided = true;
+                break;
+            }
+            let face_worst_words = (vertex_count - 2) * WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE;
+            if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
+                || batch_surface_count == BATCH_MAX_SURFACES
+                || !packet_capacity(next, end, batch_worst_words + face_worst_words)
+            {
+                if batch_surface_count != 0 {
+                    stats.surface_batches = stats.surface_batches.saturating_add(1);
+                }
+                let submitted = unsafe {
+                    flush_windowed_batch(
+                        &mut batch_vertices,
+                        batch_vertex_count,
+                        &batch_surfaces,
+                        batch_surface_count,
+                        next,
+                    )
+                };
+                next = submitted.next_packet;
+                stats.packets = stats.packets.wrapping_add(submitted.packets);
+                stats.hardware_triangles = stats
+                    .hardware_triangles
+                    .wrapping_add(submitted.hardware_triangles);
+                batch_vertex_count = 0;
+                batch_surface_count = 0;
+                batch_worst_words = 0;
+            }
+            if !packet_capacity(next, end, face_worst_words) {
+                stats.packet_overflow_avoided = true;
+                break;
+            }
+
+            let state = pxbsp_material_state(material, binding, material_tick);
+            batch_surfaces[batch_surface_count] = ClassicAffineWindowedBatchSurface {
+                first_vertex: batch_vertex_count as u16,
+                vertex_count: vertex_count as u16,
+                tpage: state.texture_page,
+                clut: binding.clut,
+                texture_window_word: binding.texture_window_word,
+                color_command_word: state.color_command_word,
+            };
+            self.materialize_pxbsp_face(
+                map,
+                face,
+                state.uv_offset,
+                &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
+            );
+            batch_vertex_count += vertex_count;
+            batch_surface_count += 1;
+            batch_worst_words += face_worst_words;
+            stats.visible_faces = stats.visible_faces.saturating_add(1);
         }
 
+        if batch_surface_count != 0 {
+            stats.surface_batches = stats.surface_batches.saturating_add(1);
+        }
+        let submitted = unsafe {
+            flush_windowed_batch(
+                &mut batch_vertices,
+                batch_vertex_count,
+                &batch_surfaces,
+                batch_surface_count,
+                next,
+            )
+        };
+        next = submitted.next_packet;
+        stats.packets = stats.packets.wrapping_add(submitted.packets);
+        stats.hardware_triangles = stats
+            .hardware_triangles
+            .wrapping_add(submitted.hardware_triangles);
+
         let packet_words = unsafe { next.offset_from(start) as usize };
-        self.frame = self.frame.wrapping_add(1);
         RenderFrame {
             stats,
             packet_words,
@@ -1325,5 +1419,76 @@ mod tests {
         }
         assert_eq!(offset, frame.packet_words);
         assert_eq!(packet_count, frame.stats.packets);
+    }
+
+    #[test]
+    fn draws_selected_brush_model_under_world_transform() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        let model_bytes = lumps[PxbspLumpKind::Models as usize].clone();
+        lumps[PxbspLumpKind::Models as usize].extend_from_slice(&model_bytes);
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(8, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 129 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let transform = BrushTransform::translated(Vec3I32 {
+            x: 128 << 12,
+            y: 0,
+            z: 0,
+        });
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            texture_size: [64; 2],
+        };
+        let mut packets = [0u32; 512];
+        let mut renderer = Renderer::new();
+        let frame = renderer
+            .draw_pxbsp_model(
+                &map,
+                1,
+                transform,
+                camera,
+                load_view(camera),
+                &[Some(binding)],
+                0,
+                &mut packets,
+            )
+            .expect("brush model");
+
+        assert_eq!(frame.stats.visible_faces, 1);
+        assert_eq!(frame.stats.unresolved_material_faces, 0);
+        assert!(frame.stats.packets > 0);
+        assert!(renderer
+            .draw_pxbsp_model(
+                &map,
+                2,
+                transform,
+                camera,
+                load_view(camera),
+                &[Some(binding)],
+                0,
+                &mut packets,
+            )
+            .is_none());
     }
 }
