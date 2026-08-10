@@ -228,10 +228,9 @@ id_table! {
     pub const ROOM_SURFACES_CONSIDERED: u16 = 16;
     /// Player-attached equipment visuals drawn.
     pub const EQUIPMENT_DRAWS: u16 = 17;
-    /// Active weapon hitboxes this frame.
-    pub const EQUIPMENT_ACTIVE_HITBOXES: u16 = 18;
-    /// Entity marker hits found by active weapon hitboxes.
-    pub const EQUIPMENT_TARGET_HITS: u16 = 19;
+    // 18 and 19 are retired (the render-path weapon-hitbox counters,
+    // removed with that dead system). Do not reuse: old counter-log
+    // captures still carry them under the old meaning.
     /// Vertices projected for equipment models.
     pub const EQUIPMENT_PROJECTED_VERTICES: u16 = 20;
     /// Triangles submitted for equipment models.

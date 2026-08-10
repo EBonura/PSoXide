@@ -1069,22 +1069,18 @@ fn runtime_model_profile_cycle_counter(index: ModelIndex) -> Option<u16> {
     }
 }
 
-/// Equipment draw outcome: draw count, hitbox activity, and submit
-/// stats.
+/// Equipment draw outcome: draw count and submit stats.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct EquipmentDrawStats {
     /// Weapon models drawn.
     pub draws: u16,
-    /// Hitboxes active on the current animation frame.
-    pub active_hitboxes: u16,
-    /// Entities the active hitboxes overlapped.
-    pub target_hits: u16,
     /// Model submit stats.
     pub stats: TexturedModelRenderStats,
 }
 
-/// Draw the player's attached equipment (weapon models) and evaluate
-/// its active weapon hitboxes against cooked entities.
+/// Draw the player's attached equipment (weapon models). Gameplay hit
+/// resolution lives in the sim, not here: the melee arc and rig
+/// combat capsules (see `crate::combat`).
 #[inline]
 pub fn draw_player_equipment<
     const MAX_RUNTIME_MODELS: usize,
@@ -1097,7 +1093,6 @@ pub fn draw_player_equipment<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -1131,7 +1126,6 @@ pub fn draw_player_equipment<
         tables,
         knobs,
         scratch,
-        current_room,
         character,
         models,
         model_faces,
