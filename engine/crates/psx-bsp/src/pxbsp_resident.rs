@@ -5,6 +5,7 @@ use core::fmt;
 
 use psx_math::int32::mul_q12_i32;
 
+use crate::collision::CollisionHull;
 use crate::pxbsp::{
     PxbspEntityTable, PxbspEntityTableError, PxbspError, PxbspIndex, PxbspLumpKind, PxbspMaterial,
     PxbspMaterialError, PXBSP_LUMP_COUNT,
@@ -259,6 +260,21 @@ impl PxbspResidentMap {
 
     pub fn streaming_index(&self) -> &[u8] {
         self.lump_bytes(PxbspLumpKind::StreamingIndex)
+    }
+
+    /// Borrow one model-local point, player, or big clipnode hull.
+    pub fn model_collision_hull(
+        &self,
+        model_index: usize,
+        hull_index: usize,
+    ) -> Option<CollisionHull<'_>> {
+        let model = self.brush_models().get(model_index)?;
+        let head_node = *model.head_nodes.get(hull_index.checked_add(1)?)?;
+        Some(CollisionHull::new(
+            self.planes(),
+            self.clip_nodes(),
+            head_node,
+        ))
     }
 
     /// Borrow one checked zero-terminated value from the cooked string table.
@@ -596,6 +612,22 @@ pub(crate) mod tests {
             }),
             Some(0)
         );
+    }
+
+    #[test]
+    fn exposes_each_model_collision_hull_by_body_size() {
+        let map = load(&write_file(&valid_lumps())).expect("resident map");
+        let point_hull = map.model_collision_hull(0, 0).expect("point hull");
+        assert_eq!(
+            point_hull.point_contents(Vec3I32 {
+                x: 4096,
+                y: 0,
+                z: 0,
+            }),
+            Some(crate::collision::CONTENTS_EMPTY)
+        );
+        assert!(map.model_collision_hull(0, 3).is_none());
+        assert!(map.model_collision_hull(1, 0).is_none());
     }
 
     #[test]
