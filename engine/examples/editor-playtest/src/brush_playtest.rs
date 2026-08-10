@@ -4,7 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use psx_asset::Texture;
-use psx_bsp::collision::{Trace, Q12_ONE};
+use psx_bsp::collision::{Trace, TraceScratch, Q12_ONE};
 use psx_bsp::mover::BrushDoorSet;
 use psx_bsp::pxbsp::{entity_class, entity_flags, material_blend};
 use psx_bsp::pxbsp_resident::PxbspResidentMap;
@@ -39,6 +39,7 @@ pub struct BrushPlaytest {
     renderer: Renderer,
     doors: BrushDoorSet<MAX_DOORS>,
     materials: Vec<Option<PxbspTextureBinding>>,
+    trace_scratch: TraceScratch,
     player_origin: Vec3I32,
     player_yaw: u16,
 }
@@ -50,6 +51,7 @@ impl BrushPlaytest {
             renderer: Renderer::new(),
             doors: BrushDoorSet::EMPTY,
             materials: Vec::new(),
+            trace_scratch: TraceScratch::new(),
             player_origin: Vec3I32 { x: 0, y: 0, z: 0 },
             player_yaw: 0,
         }
@@ -153,7 +155,15 @@ impl BrushPlaytest {
         // ponytail: this thin adapter proves the new hull source in embedded
         // Play. Replace it with character_motor's PXBSP trace provider when
         // the shared motor rebase lands, restoring gravity, steps and slopes.
-        let moved = self.trace_player(self.player_origin, candidate);
+        let mut moved = Trace::default();
+        assert!(trace_player(
+            &self.map,
+            &self.doors,
+            &mut self.trace_scratch,
+            &self.player_origin,
+            &candidate,
+            &mut moved,
+        ));
         if moved.fraction == Q12_ONE {
             self.player_origin = moved.end;
             return;
@@ -162,35 +172,30 @@ impl BrushPlaytest {
             x: candidate.x,
             ..self.player_origin
         };
-        let x_trace = self.trace_player(self.player_origin, along_x);
+        let mut x_trace = Trace::default();
+        assert!(trace_player(
+            &self.map,
+            &self.doors,
+            &mut self.trace_scratch,
+            &self.player_origin,
+            &along_x,
+            &mut x_trace,
+        ));
         self.player_origin = x_trace.end;
         let along_z = Vec3I32 {
             z: candidate.z,
             ..self.player_origin
         };
-        self.player_origin = self.trace_player(self.player_origin, along_z).end;
-    }
-
-    fn trace_player(&self, start: Vec3I32, end: Vec3I32) -> Trace {
-        let mut best = self
-            .map
-            .model_collision_hull(0, PLAYER_HULL_INDEX)
-            .expect("brush world player hull")
-            .trace(start, end)
-            .expect("validated brush world trace");
-        for door in self.doors.iter() {
-            let trace = self
-                .map
-                .model_collision_hull(door.model_index(), PLAYER_HULL_INDEX)
-                .expect("brush door player hull")
-                .transformed(door.transform())
-                .trace(start, end)
-                .expect("validated brush door trace");
-            if trace.fraction < best.fraction {
-                best = trace;
-            }
-        }
-        best
+        let mut z_trace = Trace::default();
+        assert!(trace_player(
+            &self.map,
+            &self.doors,
+            &mut self.trace_scratch,
+            &self.player_origin,
+            &along_z,
+            &mut z_trace,
+        ));
+        self.player_origin = z_trace.end;
     }
 
     fn camera(&self) -> Camera {
@@ -231,6 +236,40 @@ impl BrushPlaytest {
             u32::from(self.player_yaw),
         );
     }
+}
+
+fn trace_player(
+    map: &PxbspResidentMap,
+    doors: &BrushDoorSet<MAX_DOORS>,
+    scratch: &mut TraceScratch,
+    start: &Vec3I32,
+    end: &Vec3I32,
+    output: &mut Trace,
+) -> bool {
+    let mut best = Trace::default();
+    if !map
+        .model_collision_hull(0, PLAYER_HULL_INDEX)
+        .expect("brush world player hull")
+        .trace_into(start, end, scratch, &mut best)
+    {
+        return false;
+    }
+    for door in doors.iter() {
+        let mut trace = Trace::default();
+        if !map
+            .model_collision_hull(door.model_index(), PLAYER_HULL_INDEX)
+            .expect("brush door player hull")
+            .transformed(door.transform())
+            .trace_into(start, end, scratch, &mut trace)
+        {
+            return false;
+        }
+        if trace.fraction < best.fraction {
+            best = trace;
+        }
+    }
+    *output = best;
+    true
 }
 
 impl Scene for BrushPlaytest {
