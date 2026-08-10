@@ -10,6 +10,7 @@
 
 use core::{mem::size_of, ptr};
 
+use psx_gpu::material::TextureWindow;
 use psx_gpu::prim::{
     ClassicQuadTexturedGouraud, ClassicTriTextured, ClassicTriTexturedGouraud, QuadTexturedGouraud,
     TriTexturedGouraud,
@@ -602,7 +603,7 @@ impl AffinePacketWriter for PacketWriter {
     }
 }
 
-struct WindowedPacketWriter {
+struct WindowedPacketWriter<const RESTORE_WINDOW: bool> {
     next: *mut u32,
     packets: u32,
     clut_high_word: u32,
@@ -612,7 +613,7 @@ struct WindowedPacketWriter {
     profile: ClassicAffineProfile,
 }
 
-impl AffinePacketWriter for WindowedPacketWriter {
+impl<const RESTORE_WINDOW: bool> AffinePacketWriter for WindowedPacketWriter<RESTORE_WINDOW> {
     #[inline(always)]
     fn profile(&self) -> ClassicAffineProfile {
         self.profile
@@ -628,7 +629,7 @@ impl AffinePacketWriter for WindowedPacketWriter {
         debug_assert!(attributes
             .iter()
             .all(|vertex| vertex.color & 0xff00_0000 == 0));
-        let packet = unsafe {
+        let mut packet = unsafe {
             TriTexturedGouraud::with_staged_slot_prepacked_unchecked(
                 [
                     (projected[0].screen[0], projected[0].screen[1]),
@@ -651,11 +652,18 @@ impl AffinePacketWriter for WindowedPacketWriter {
                 otz,
             )
         };
+        if RESTORE_WINDOW {
+            packet.tag = packet.tag.wrapping_add(1 << 24);
+        }
         unsafe { ptr::write(self.next.cast::<TriTexturedGouraud>(), packet) };
         self.next = unsafe {
             self.next
                 .add(size_of::<TriTexturedGouraud>() / size_of::<u32>())
         };
+        if RESTORE_WINDOW {
+            unsafe { ptr::write(self.next, TextureWindow::NONE.word()) };
+            self.next = unsafe { self.next.add(1) };
+        }
         self.packets = self.packets.wrapping_add(1);
     }
 
@@ -669,7 +677,7 @@ impl AffinePacketWriter for WindowedPacketWriter {
         debug_assert!(attributes
             .iter()
             .all(|vertex| vertex.color & 0xff00_0000 == 0));
-        let packet = unsafe {
+        let mut packet = unsafe {
             QuadTexturedGouraud::with_staged_slot_prepacked_unchecked(
                 [
                     (projected[0].screen[0], projected[0].screen[1]),
@@ -695,21 +703,30 @@ impl AffinePacketWriter for WindowedPacketWriter {
                 otz,
             )
         };
+        if RESTORE_WINDOW {
+            packet.tag = packet.tag.wrapping_add(1 << 24);
+        }
         unsafe { ptr::write(self.next.cast::<QuadTexturedGouraud>(), packet) };
         self.next = unsafe {
             self.next
                 .add(size_of::<QuadTexturedGouraud>() / size_of::<u32>())
         };
+        if RESTORE_WINDOW {
+            unsafe { ptr::write(self.next, TextureWindow::NONE.word()) };
+            self.next = unsafe { self.next.add(1) };
+        }
         self.packets = self.packets.wrapping_add(1);
     }
 }
 
-impl WindowedPacketWriter {
+impl<const RESTORE_WINDOW: bool> WindowedPacketWriter<RESTORE_WINDOW> {
     #[inline(always)]
     unsafe fn finish(self, output: *mut u32) -> ClassicAffineSubmit {
         let words = unsafe { self.next.offset_from(output) as u32 };
-        let tri_words = (size_of::<TriTexturedGouraud>() / size_of::<u32>()) as u32;
-        let quad_words = (size_of::<QuadTexturedGouraud>() / size_of::<u32>()) as u32;
+        let restore_words = u32::from(RESTORE_WINDOW);
+        let tri_words = (size_of::<TriTexturedGouraud>() / size_of::<u32>()) as u32 + restore_words;
+        let quad_words =
+            (size_of::<QuadTexturedGouraud>() / size_of::<u32>()) as u32 + restore_words;
         let quads =
             words.wrapping_sub(self.packets.wrapping_mul(tri_words)) / (quad_words - tri_words);
         ClassicAffineSubmit {
@@ -1239,6 +1256,62 @@ pub unsafe fn submit_classic_affine_windowed_fan(
     texture_window_word: u32,
     profile: ClassicAffineProfile,
 ) -> ClassicAffineSubmit {
+    unsafe {
+        submit_classic_affine_windowed_fan_impl::<false>(
+            vertices,
+            vertex_count,
+            output,
+            tpage,
+            clut,
+            texture_window_word,
+            profile,
+        )
+    }
+}
+
+/// Project and submit one convex fan whose packets restore an unwindowed
+/// GP0(E2) state immediately after drawing.
+///
+/// This scoped variant is intended for a windowed material mixed with compact
+/// non-windowed packets in one ordering table. Since depth sorting may place
+/// either packet next, restoring the state inside every special polygon avoids
+/// paying for a redundant GP0(E2) command on every ordinary polygon.
+///
+/// # Safety
+/// The contract matches [`submit_classic_affine_windowed_fan`]. The caller's
+/// worst-case output capacity must include one additional data word per
+/// emitted polygon for the trailing reset command.
+pub unsafe fn submit_classic_affine_scoped_windowed_fan(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    output: *mut u32,
+    tpage: u16,
+    clut: u16,
+    texture_window_word: u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    unsafe {
+        submit_classic_affine_windowed_fan_impl::<true>(
+            vertices,
+            vertex_count,
+            output,
+            tpage,
+            clut,
+            texture_window_word,
+            profile,
+        )
+    }
+}
+
+unsafe fn submit_classic_affine_windowed_fan_impl<const RESTORE_WINDOW: bool>(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    output: *mut u32,
+    tpage: u16,
+    clut: u16,
+    texture_window_word: u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
     if vertices.is_null() || output.is_null() || vertex_count < 3 {
         return ClassicAffineSubmit {
             next_packet: output,
@@ -1256,7 +1329,7 @@ pub unsafe fn submit_classic_affine_windowed_fan(
         index += 1;
     }
 
-    let mut writer = WindowedPacketWriter {
+    let mut writer = WindowedPacketWriter::<RESTORE_WINDOW> {
         next: output,
         packets: 0,
         clut_high_word: (clut as u32) << 16,
@@ -1319,7 +1392,7 @@ pub unsafe fn submit_classic_affine_windowed_batch(
     }
 
     let generated = unsafe { vertices.add(vertex_count) };
-    let mut writer = WindowedPacketWriter {
+    let mut writer = WindowedPacketWriter::<false> {
         next: output,
         packets: 0,
         clut_high_word: 0,
@@ -1923,6 +1996,78 @@ mod tests {
             assert_eq!(submit.packets, packets as u32);
             assert_eq!(submit.hardware_triangles, (triangles + quads * 2) as u32);
         }
+    }
+
+    #[test]
+    fn scoped_window_writer_appends_reset_inside_each_packet() {
+        let vertices = [
+            ClassicAffineVertex {
+                screen: [10, 10],
+                depth: 512,
+                color: 0x0080_8080,
+                ..ClassicAffineVertex::default()
+            },
+            ClassicAffineVertex {
+                screen: [20, 10],
+                depth: 512,
+                color: 0x0080_8080,
+                ..ClassicAffineVertex::default()
+            },
+            ClassicAffineVertex {
+                screen: [10, 20],
+                depth: 512,
+                color: 0x0080_8080,
+                ..ClassicAffineVertex::default()
+            },
+            ClassicAffineVertex {
+                screen: [20, 20],
+                depth: 512,
+                color: 0x0080_8080,
+                ..ClassicAffineVertex::default()
+            },
+        ];
+        let mut storage = [0u32; 64];
+        let output = storage.as_mut_ptr();
+        let window = TextureWindow::power_of_two_tile(64, 64, 64, 64).word();
+        let mut writer = WindowedPacketWriter::<true> {
+            next: output,
+            packets: 0,
+            clut_high_word: 0x1234_0000,
+            tpage_high_word: 0x0160_0000,
+            uv_offset: [0; 2],
+            texture_window_word: window,
+            profile: ClassicAffineProfile::QUAKE_REFERENCE,
+        };
+        unsafe {
+            writer.emit_tri(
+                [&vertices[0], &vertices[1], &vertices[2]],
+                [&vertices[0], &vertices[1], &vertices[2]],
+                17,
+            );
+            writer.emit_quad(
+                [&vertices[0], &vertices[1], &vertices[2], &vertices[3]],
+                [&vertices[0], &vertices[1], &vertices[2], &vertices[3]],
+                23,
+            );
+        }
+        let tri_words = size_of::<TriTexturedGouraud>() / size_of::<u32>() + 1;
+        let quad_words = size_of::<QuadTexturedGouraud>() / size_of::<u32>() + 1;
+        assert_eq!(storage[0] >> 24, TriTexturedGouraud::WORDS as u32 + 1);
+        assert_eq!(storage[tri_words - 1], TextureWindow::NONE.word());
+        assert_eq!(
+            storage[tri_words] >> 24,
+            QuadTexturedGouraud::WORDS as u32 + 1
+        );
+        assert_eq!(
+            storage[tri_words + quad_words - 1],
+            TextureWindow::NONE.word()
+        );
+        let submit = unsafe { writer.finish(output) };
+        assert_eq!(submit.next_packet, unsafe {
+            output.add(tri_words + quad_words)
+        });
+        assert_eq!(submit.packets, 2);
+        assert_eq!(submit.hardware_triangles, 3);
     }
 
     #[test]
