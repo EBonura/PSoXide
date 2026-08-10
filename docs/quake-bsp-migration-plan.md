@@ -223,6 +223,16 @@ follow the existing multi-frame visual-gate rule.
 - **Parallel quake-psx rewrite.** `codex/all-rust-quake` is live uncommitted
   work in another session. We copy quake-formats, we do not touch that tree,
   and we reconcile the two Rust XBSP readers when that branch lands.
+  Coordination agreed 2026-08-10: wire layout is unchanged versus the
+  9e20a1b copy (magic, lump order/count, record sizes); the model-data lump
+  gained a validated structure (u32 count, 68-byte headers, aligned
+  triangle data, compact frame vertices) plus AliasModelTable/View APIs to
+  fold into psx-bsp at convergence. The P1 renderer/asset lift waits for
+  that session's stable-commit ping (resident-lump alignment, validate-once
+  parsing, cached indices, SDK materializer are in flight there). quake-psx
+  adopts psx-bsp only after wire-parity and headless frame-hash tests pass,
+  and its release dependency stays revision-pinned through the hydrated
+  `.psoxide` SDK rather than a developer checkout path.
 
 ## Resolved questions (owner, 2026-08-10)
 
