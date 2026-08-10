@@ -575,12 +575,16 @@ pub struct EditorWorkspace {
     play_debug_terminal_lines: VecDeque<String>,
     shortcut_group_flash: Option<(ShortcutGroup, Instant)>,
     view_2d: bool,
+    /// Active axis-aligned 2D view. Top/Front/Side share this one
+    /// world-space focus so changing planes does not lose the authored
+    /// location, grid scale, or selection context.
+    orthographic_view: OrthographicView,
+    orthographic_focus: [f32; 3],
     active_workspace: WorkspaceView,
     left_dock_open: bool,
     inspector_open: bool,
     resources_open: bool,
     content_browser_view: ContentBrowserView,
-    viewport_pan: Vec2,
     viewport_zoom: f32,
     last_viewport_size: Vec2,
     /// 3D viewport camera rig (orbit + free-fly params, mode, and all the
@@ -2059,17 +2063,18 @@ enum ViewTool {
     /// Drop a child entity node into the sector under the cursor.
     /// The kind of node placed is controlled by `place_kind`.
     Place,
-    /// Drag a world-space convex brush footprint on the ground plane;
-    /// click selects the nearest brush under the cursor.
+    /// Drag a world-space convex brush on the active Top/Front/Side plane;
+    /// click selects the nearest visible brush face under the cursor.
     Brush,
 }
 
-/// In-flight brush-create drag: press anchor and current corner on the
-/// ground plane, snapped world units.
+/// In-flight brush-create drag: press anchor and current corner on one
+/// orthographic plane, snapped in world units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BrushDrag {
     pub(crate) anchor: [i32; 3],
     pub(crate) current: [i32; 3],
+    pub(crate) view: OrthographicView,
 }
 
 /// Which side(s) a two-point brush clip keeps.
@@ -2098,14 +2103,14 @@ impl BrushClipKeep {
     }
 }
 
-/// In-flight whole-brush move drag (shift held on press): the brush
-/// follows the ground-plane pointer on X/Z, snapped.
+/// In-flight whole-brush move drag (shift held on press). The same 3-axis
+/// delta storage serves 3D ground moves and Top/Front/Side plane moves.
 #[derive(Debug, Clone)]
 pub(crate) struct BrushMove {
     pub(crate) index: usize,
     pub(crate) base: psxed_project::brush::Brush,
     pub(crate) press_ground: [f32; 3],
-    pub(crate) applied: [i32; 2],
+    pub(crate) applied: [i32; 3],
 }
 
 /// In-flight brush face-extrude drag: the pressed face slides along its
@@ -2696,12 +2701,13 @@ impl EditorWorkspace {
             // default, but the top-level workspace itself is restored from
             // the project so UI/Animation authoring reopens where it left off.
             view_2d: false,
+            orthographic_view: OrthographicView::Top,
+            orthographic_focus: [0.0; 3],
             active_workspace: WorkspaceView::from_project(editor_workspace.active),
             left_dock_open: true,
             inspector_open: true,
             resources_open: true,
             content_browser_view: ContentBrowserView::Resources,
-            viewport_pan: Vec2::ZERO,
             viewport_zoom: DEFAULT_VIEWPORT_ZOOM,
             last_viewport_size: Vec2::new(1280.0, 720.0),
             camera_rig: CameraRig {

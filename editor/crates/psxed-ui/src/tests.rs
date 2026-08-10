@@ -35,6 +35,7 @@ mod brush_tools;
 mod entity_resources;
 mod geometry_resources;
 mod layer_authoring;
+mod orthographic_brush;
 mod placement_painting;
 mod project_workspace;
 mod scene_tree_selection;

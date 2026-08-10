@@ -1045,13 +1045,40 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn cycle_view_dimension_group(&mut self, reverse: bool) {
-        const VALUES: &[bool] = &[true, false];
-        self.view_2d = cycle_value(VALUES, self.view_2d, reverse);
-        self.status = if self.view_2d {
-            "Viewport: 2D".to_string()
+        let current = if self.view_2d {
+            match self.orthographic_view {
+                OrthographicView::Top => 1,
+                OrthographicView::Front => 2,
+                OrthographicView::Side => 3,
+            }
         } else {
-            "Viewport: 3D".to_string()
+            0
         };
+        let next = if reverse {
+            (current + 3) % 4
+        } else {
+            (current + 1) % 4
+        };
+        match next {
+            0 => {
+                self.view_2d = false;
+                self.status = "Viewport: 3D".to_string();
+            }
+            1 => self.set_orthographic_view(OrthographicView::Top),
+            2 => self.set_orthographic_view(OrthographicView::Front),
+            3 => self.set_orthographic_view(OrthographicView::Side),
+            _ => unreachable!(),
+        }
+        self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+    }
+
+    pub(crate) fn set_orthographic_view(&mut self, view: OrthographicView) {
+        if !self.view_2d || self.orthographic_view != view {
+            self.cancel_brush_gestures();
+        }
+        self.view_2d = true;
+        self.orthographic_view = view;
+        self.status = format!("Viewport: {}", view.label());
         self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
     }
 
