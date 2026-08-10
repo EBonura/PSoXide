@@ -206,6 +206,9 @@ impl EditorWorkspace {
                             return;
                         }
                         if !dnd_active && matches!(self.active_tool, ViewTool::Brush) {
+                            if response.hovered() {
+                                self.brush_tool_keyboard(ui);
+                            }
                             if response.drag_started_by(egui::PointerButton::Primary) {
                                 if let Some(pos) = response.interact_pointer_pos() {
                                     self.begin_brush_drag_2d(transform.screen_to_world(pos));

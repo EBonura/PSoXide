@@ -270,6 +270,7 @@ impl EditorWorkspace {
         }
 
         if response.hovered() {
+            self.brush_tool_keyboard(ui);
             self.update_free_camera_keyboard(ui);
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
