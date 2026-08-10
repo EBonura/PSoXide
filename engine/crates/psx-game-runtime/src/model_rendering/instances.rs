@@ -266,6 +266,117 @@ fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color:
     draw_line_mono(a.0, a.1, b.0, b.1, color.0, color.1, color.2);
 }
 
+/// One instance's live-pose draw context: everything needed to place
+/// geometry on the instance exactly as the draw loop does. The
+/// instance-equipment pass composes ridden weapons from this same
+/// context so they can never drift from the body.
+pub(super) struct InstancePoseContext {
+    pub model: RuntimeModelAsset,
+    pub anim: Animation<'static>,
+    pub clip_local: ModelClipIndex,
+    pub phase: u32,
+    pub pose_translation: ModelPoseTranslation,
+    pub rotation: Mat3I16,
+    pub origin: WorldVertex,
+    pub local_to_world: LocalToWorldScale,
+}
+
+pub(super) fn instance_pose_context<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+>(
+    tables: ModelTables,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    pose_overrides: &[ModelInstancePoseOverride],
+    instance_index: usize,
+    inst: &psx_level::LevelModelInstanceRecord,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+) -> Option<InstancePoseContext> {
+    let runtime_model = models.get(inst.model.to_usize()).copied().flatten()?;
+    let live = pose_override_for(pose_overrides, instance_index);
+    let (inst_x, inst_y, inst_z, inst_yaw) = match live {
+        Some(live) => (live.x, live.y, live.z, live.yaw),
+        None => (inst.x, inst.y, inst.z, inst.yaw),
+    };
+
+    // Clip resolution: live entity state → per-instance override
+    // → model default. The cooker validates the cooked paths end
+    // up `< clip_count`; a live clip that does not (a mis-cooked
+    // record) falls back to the cooked resolution rather than
+    // vanishing the instance.
+    let live_clip = live
+        .and_then(|live| live.clip.to_option())
+        .filter(|clip| clip.raw() < runtime_model.clip_count);
+    let clip_local = live_clip.unwrap_or(inst.clip.unwrap_or(runtime_model.default_clip));
+    let anim = runtime_model.clip(clips, clip_local)?;
+    // A frozen instance (pose_frame != ANIMATE) holds one sampled
+    // frame: phase = frame << 12 lands exactly on it, with no
+    // fractional interpolation. Lets posed props (e.g. corpses) sit
+    // on a chosen frame instead of advancing the clip.
+    let phase = match (live, live_clip) {
+        // A live clip plays on the entity's state clock: looping
+        // states wrap, one-shots clamp at the final frame (the
+        // same frame math the player's action playback uses).
+        (Some(live), Some(_)) => animation_phase_at_tick_q12(
+            anim,
+            u32::from(live.phase_ticks),
+            video_hz,
+            !live.one_shot,
+            psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            psx_level::CharacterActionFrameRange::FULL,
+        ),
+        _ => {
+            if inst.pose_frame == psx_level::MODEL_INSTANCE_POSE_ANIMATE {
+                anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16())
+            } else {
+                (inst.pose_frame.min(anim.frame_count().saturating_sub(1)) as u32) << 12
+            }
+        }
+    };
+    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
+    let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
+    let pose_translation =
+        model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor, None);
+
+    // Instance rotation from the authored transform (or the live
+    // entity pose). The entity yaw and the renderer's visual yaw
+    // share the Y axis; pitch and roll come from the entity
+    // transform and compose as `Rz(roll) * Ry(yaw) * Rx(pitch)`
+    // (the socket convention). The yaw-only case keeps the
+    // cheaper single-axis build.
+    let root_yaw = Angle::from_q12(inst_yaw as u16);
+    let combined_yaw = root_yaw.add_signed_q12(inst.visual_yaw);
+    let rotation = if inst.pitch == 0 && inst.roll == 0 {
+        yaw_rotation_matrix(combined_yaw)
+    } else {
+        euler_q12_rotation([inst.pitch, combined_yaw.as_q12() as i16, inst.roll])
+    };
+    // Authored instance positions are floor anchors; cooked
+    // model vertices are centred around their bounds.
+    let origin = visual_model_origin(
+        inst_x,
+        inst_y,
+        inst_z,
+        runtime_model.world_height,
+        inst.visual_offset,
+        inst.visual_scale_q8,
+        &rotation,
+    );
+    let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
+    Some(InstancePoseContext {
+        model: runtime_model,
+        anim,
+        clip_local,
+        phase,
+        pose_translation,
+        rotation,
+        origin,
+        local_to_world,
+    })
+}
+
 /// Animate + draw the placed model instances of `current_room` that
 /// fall in `depth_pass`.
 #[inline]
@@ -305,82 +416,29 @@ pub fn draw_model_instances<
         if inst.room != current_room || drawn >= knobs.max_model_instances {
             continue;
         }
-        let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
+        let Some(InstancePoseContext {
+            model: runtime_model,
+            anim,
+            clip_local,
+            phase,
+            pose_translation,
+            rotation: model_rotation,
+            origin,
+            local_to_world,
+        }) = instance_pose_context(
+            tables,
+            models,
+            clips,
+            pose_overrides,
+            instance_index,
+            inst,
+            elapsed_tick,
+            video_hz,
+        )
+        else {
             continue;
-        };
-        let live = pose_override_for(pose_overrides, instance_index);
-        let (inst_x, inst_y, inst_z, inst_yaw) = match live {
-            Some(live) => (live.x, live.y, live.z, live.yaw),
-            None => (inst.x, inst.y, inst.z, inst.yaw),
-        };
-
-        // Clip resolution: live entity state → per-instance override
-        // → model default. The cooker validates the cooked paths end
-        // up `< clip_count`; a live clip that does not (a mis-cooked
-        // record) falls back to the cooked resolution rather than
-        // vanishing the instance.
-        let live_clip = live
-            .and_then(|live| live.clip.to_option())
-            .filter(|clip| clip.raw() < runtime_model.clip_count);
-        let clip_local = live_clip.unwrap_or(inst.clip.unwrap_or(runtime_model.default_clip));
-        let Some(anim) = runtime_model.clip(clips, clip_local) else {
-            continue;
-        };
-        // A frozen instance (pose_frame != ANIMATE) holds one sampled
-        // frame: phase = frame << 12 lands exactly on it, with no
-        // fractional interpolation. Lets posed props (e.g. corpses) sit
-        // on a chosen frame instead of advancing the clip.
-        let phase = match (live, live_clip) {
-            // A live clip plays on the entity's state clock: looping
-            // states wrap, one-shots clamp at the final frame (the
-            // same frame math the player's action playback uses).
-            (Some(live), Some(_)) => animation_phase_at_tick_q12(
-                anim,
-                u32::from(live.phase_ticks),
-                video_hz,
-                !live.one_shot,
-                psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
-                psx_level::CharacterActionFrameRange::FULL,
-            ),
-            _ => {
-                if inst.pose_frame == psx_level::MODEL_INSTANCE_POSE_ANIMATE {
-                    anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16())
-                } else {
-                    (inst.pose_frame.min(anim.frame_count().saturating_sub(1)) as u32) << 12
-                }
-            }
         };
         let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
-        let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
-        let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
-        let pose_translation =
-            model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor, None);
-
-        // Instance rotation from the authored transform (or the live
-        // entity pose). The entity yaw and the renderer's visual yaw
-        // share the Y axis; pitch and roll come from the entity
-        // transform and compose as `Rz(roll) * Ry(yaw) * Rx(pitch)`
-        // (the socket convention). The yaw-only case keeps the
-        // cheaper single-axis build.
-        let root_yaw = Angle::from_q12(inst_yaw as u16);
-        let combined_yaw = root_yaw.add_signed_q12(inst.visual_yaw);
-        let model_rotation = if inst.pitch == 0 && inst.roll == 0 {
-            yaw_rotation_matrix(combined_yaw)
-        } else {
-            euler_q12_rotation([inst.pitch, combined_yaw.as_q12() as i16, inst.roll])
-        };
-        // Authored instance positions are floor anchors; cooked
-        // model vertices are centred around their bounds.
-        let origin = visual_model_origin(
-            inst_x,
-            inst_y,
-            inst_z,
-            runtime_model.world_height,
-            inst.visual_offset,
-            inst.visual_scale_q8,
-            &model_rotation,
-        );
-        let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
         let bounds_origin =
             model_pose_translated_origin(origin, model_rotation, local_to_world, pose_translation);
         if !depth_pass.includes(camera.view_vertex(origin).z) {

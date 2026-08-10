@@ -1197,6 +1197,19 @@ pub fn build_package(
                         ) else {
                             return (None, report);
                         };
+                        // The host's visual instance (pushed earlier in
+                        // this node's arm, same last-pushed convention
+                        // as game entities), so the runtime can ride
+                        // the weapon on the LIVE entity pose. The
+                        // player carries no instance; its live pose
+                        // comes from the player context.
+                        let host_instance = if !is_player_controlled
+                            && model_instances.len() > model_instances_before
+                        {
+                            u16::try_from(model_instances.len() - 1).unwrap_or(u16::MAX)
+                        } else {
+                            u16::MAX
+                        };
                         equipment.push(PlaytestEquipment {
                             room: room_index,
                             weapon: weapon_index,
@@ -1206,6 +1219,7 @@ pub fn build_package(
                             yaw,
                             character_socket: equipped.character_socket.to_string(),
                             weapon_grip: equipped.weapon_grip.to_string(),
+                            model_instance: host_instance,
                             flags: if is_player_controlled {
                                 psx_level::equipment_flags::PLAYER
                             } else {
