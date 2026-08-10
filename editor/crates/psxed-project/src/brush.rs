@@ -8,16 +8,18 @@
 //! are solved in f64 (three integer planes meet at rational points) and
 //! snapped by tools, not by the kernel.
 
+use serde::{Deserialize, Serialize};
+
 /// One brush face: three integer points defining the plane. Material and
-/// UV state attach at scene integration (NodeKind::Brush), not here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// UV state attach at scene integration, not here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrushFace {
     /// Plane points, counter-clockwise viewed from outside the brush.
     pub points: [[i32; 3]; 3],
 }
 
 /// A convex brush as an unordered set of faces.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Brush {
     /// Boundary faces; outward normals derived from their points.
     pub faces: Vec<BrushFace>,

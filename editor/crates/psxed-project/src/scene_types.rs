@@ -673,6 +673,11 @@ pub struct Scene {
     pub root: NodeId,
     next_node_id: u64,
     pub(crate) nodes: Vec<SceneNode>,
+    /// World-space convex brushes (docs/brush-editor-integration.md).
+    /// A parallel collection for now; folds into the node tree when
+    /// brushes need hierarchy/visibility.
+    #[serde(default)]
+    pub brushes: Vec<crate::brush::Brush>,
 }
 
 impl Scene {
@@ -684,6 +689,7 @@ impl Scene {
             root: NodeId::ROOT,
             next_node_id: NodeId::ROOT.raw() + 1,
             nodes: vec![root],
+            brushes: Vec::new(),
         }
     }
 

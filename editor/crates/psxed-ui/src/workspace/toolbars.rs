@@ -392,6 +392,7 @@ impl EditorWorkspace {
             |ui| self.draw_tool_group_menu(ui),
         );
         match self.active_tool {
+            ViewTool::Brush => {}
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
             ViewTool::Water => self.draw_water_toolbar_controls(ui),
@@ -977,6 +978,17 @@ impl EditorWorkspace {
                     self.set_active_tool_cycle_value((tool, None));
                 }
             });
+        }
+
+        {
+            let selected = self.active_tool_cycle_value() == (ViewTool::Brush, None);
+            if toolbar_menu_choice(
+                ui,
+                icons::label(ViewTool::Brush.icon(), "Brush"),
+                selected,
+            ) {
+                self.set_active_tool_cycle_value((ViewTool::Brush, None));
+            }
         }
 
         ui.separator();
