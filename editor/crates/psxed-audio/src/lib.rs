@@ -209,10 +209,29 @@ struct CookReport {
 }
 
 #[derive(Clone, Debug)]
-struct WavPcm16 {
+struct WavPcm {
     sample_rate_hz: u32,
     channels: u16,
     samples: Vec<i16>,
+}
+
+/// Raw SPU ADPCM cooked from a WAV for direct bank assembly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpuAdpcmCook {
+    /// Source WAV sample rate.
+    pub source_sample_rate_hz: u32,
+    /// Source WAV channel count before downmixing.
+    pub source_channels: u16,
+    /// Source PCM frame count before downmixing or resampling.
+    pub source_sample_count: u32,
+    /// Output sample rate represented by the ADPCM stream.
+    pub sample_rate_hz: u32,
+    /// Audible mono PCM samples before final block padding.
+    pub sample_count: u32,
+    /// Resampled loop start, when the source declares one externally.
+    pub loop_start: Option<u32>,
+    /// Raw 16-byte SPU ADPCM blocks.
+    pub adpcm: Vec<u8>,
 }
 
 /// Import a source zip using a checked-in JSON manifest.
@@ -322,7 +341,7 @@ pub fn cook_cdda_track_from_wav_at_speed(
     src: &[u8],
     playback_speed_q12: u16,
 ) -> Result<Vec<u8>, Error> {
-    let wav = parse_wav_pcm16(src)?;
+    let wav = parse_wav_pcm(src)?;
     let mut stereo = wav_to_stereo_interleaved(&wav);
     if stereo.is_empty() {
         return Err(Error::EmptyAudio);
@@ -359,6 +378,63 @@ pub fn cook_sfx_from_wav(src: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(cooked.psau)
 }
 
+/// Cook a WAV into raw mono SPU ADPCM at a caller-selected sample rate.
+///
+/// This is the shared low-level path for games that assemble their own sound
+/// banks instead of PSAU assets. `source_loop_start` is measured in source WAV
+/// frames and is rescaled with the audio.
+pub fn cook_spu_adpcm_from_wav(
+    src: &[u8],
+    sample_rate_hz: u32,
+    source_loop_start: Option<u32>,
+) -> Result<SpuAdpcmCook, Error> {
+    if sample_rate_hz == 0 {
+        return Err(Error::InvalidManifest(
+            "SPU ADPCM sample rate must be non-zero".to_string(),
+        ));
+    }
+    let wav = parse_wav_pcm(src)?;
+    let mono = downmix_to_mono(&wav.samples, wav.channels);
+    if mono.is_empty() {
+        return Err(Error::EmptyAudio);
+    }
+    let pcm = resample_linear(&mono, wav.sample_rate_hz, sample_rate_hz);
+    let loop_start = source_loop_start.map(|source| {
+        ((source as u64 * sample_rate_hz as u64) / wav.sample_rate_hz as u64).min(pcm.len() as u64)
+            as u32
+    });
+    let mut adpcm = encode_spu_adpcm(&pcm);
+    apply_spu_loop_flags(&mut adpcm, loop_start);
+    Ok(SpuAdpcmCook {
+        source_sample_rate_hz: wav.sample_rate_hz,
+        source_channels: wav.channels,
+        source_sample_count: (wav.samples.len() / usize::from(wav.channels)) as u32,
+        sample_rate_hz,
+        sample_count: pcm.len() as u32,
+        loop_start,
+        adpcm,
+    })
+}
+
+fn apply_spu_loop_flags(adpcm: &mut [u8], loop_start: Option<u32>) {
+    let blocks = adpcm.len() / ADPCM_BLOCK_BYTES;
+    if blocks == 0 {
+        return;
+    }
+    if blocks == 1 {
+        adpcm[1] = if loop_start.is_some() { 0x07 } else { 0x05 };
+        return;
+    }
+    if let Some(sample) = loop_start {
+        let block = (sample as usize / ADPCM_SAMPLES_PER_BLOCK).min(blocks - 1);
+        adpcm[block * ADPCM_BLOCK_BYTES + 1] = 0x04;
+    } else {
+        adpcm[1] = 0x04;
+    }
+    let last_flags = if loop_start.is_some() { 0x03 } else { 0x01 };
+    adpcm[(blocks - 1) * ADPCM_BLOCK_BYTES + 1] = last_flags;
+}
+
 fn validate_manifest(manifest: &PackManifest) -> Result<(), Error> {
     if manifest.sounds.is_empty() {
         return Err(Error::InvalidManifest(
@@ -374,7 +450,7 @@ fn validate_manifest(manifest: &PackManifest) -> Result<(), Error> {
 }
 
 fn cook_wav(src: &[u8], cfg: &CookConfig) -> Result<CookedAudio, Error> {
-    let wav = parse_wav_pcm16(src)?;
+    let wav = parse_wav_pcm(src)?;
     let input_sample_frames = wav.samples.len() / wav.channels as usize;
     let mono = downmix_to_mono(&wav.samples, wav.channels);
     if mono.is_empty() {
@@ -407,7 +483,7 @@ fn cook_wav(src: &[u8], cfg: &CookConfig) -> Result<CookedAudio, Error> {
     })
 }
 
-fn parse_wav_pcm16(bytes: &[u8]) -> Result<WavPcm16, Error> {
+fn parse_wav_pcm(bytes: &[u8]) -> Result<WavPcm, Error> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(Error::Wav("expected RIFF/WAVE header".to_string()));
     }
@@ -438,7 +514,12 @@ fn parse_wav_pcm16(bytes: &[u8]) -> Result<WavPcm16, Error> {
                 let bits_per_sample = read_u16(bytes, start + 14)?;
                 fmt = Some((audio_format, channels, sample_rate_hz, bits_per_sample));
             }
-            b"data" => data = Some(&bytes[start..end]),
+            b"data" => {
+                data = Some(&bytes[start..end]);
+                // Audio decoding needs no chunks after the PCM payload. Some
+                // legacy game WAVs have malformed editor metadata after data.
+                break;
+            }
             _ => {}
         }
 
@@ -455,22 +536,33 @@ fn parse_wav_pcm16(bytes: &[u8]) -> Result<WavPcm16, Error> {
     if channels == 0 {
         return Err(Error::Wav("channel count is zero".to_string()));
     }
-    if bits_per_sample != 16 {
+    if bits_per_sample != 8 && bits_per_sample != 16 {
         return Err(Error::Wav(format!(
-            "unsupported bit depth {bits_per_sample}; expected 16"
+            "unsupported bit depth {bits_per_sample}; expected 8 or 16"
         )));
     }
     let data = data.ok_or_else(|| Error::Wav("missing data chunk".to_string()))?;
-    if data.len() % 2 != 0 {
-        return Err(Error::Wav("data chunk has odd byte length".to_string()));
+    let bytes_per_sample = usize::from(bits_per_sample / 8);
+    let frame_bytes = usize::from(channels)
+        .checked_mul(bytes_per_sample)
+        .ok_or_else(|| Error::Wav("WAV frame size overflow".to_string()))?;
+    if !data.len().is_multiple_of(frame_bytes) {
+        return Err(Error::Wav(
+            "data chunk does not contain whole PCM frames".to_string(),
+        ));
     }
 
-    let samples = data
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
-        .collect();
+    let samples = if bits_per_sample == 8 {
+        data.iter()
+            .map(|&sample| (i16::from(sample) - 128) << 8)
+            .collect()
+    } else {
+        data.chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect()
+    };
 
-    Ok(WavPcm16 {
+    Ok(WavPcm {
         sample_rate_hz,
         channels,
         samples,
@@ -488,7 +580,7 @@ fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
         .collect()
 }
 
-fn wav_to_stereo_interleaved(wav: &WavPcm16) -> Vec<i16> {
+fn wav_to_stereo_interleaved(wav: &WavPcm) -> Vec<i16> {
     let channels = wav.channels as usize;
     wav.samples
         .chunks_exact(channels)
@@ -863,11 +955,35 @@ mod tests {
     fn mono_wav_roundtrips_through_parser() {
         let src = [0i16, 1200, -1200, 3200];
         let wav = write_wav_mono_i16(22_050, &src);
-        let parsed = parse_wav_pcm16(&wav).unwrap();
+        let parsed = parse_wav_pcm(&wav).unwrap();
 
         assert_eq!(parsed.sample_rate_hz, 22_050);
         assert_eq!(parsed.channels, 1);
         assert_eq!(parsed.samples, src);
+    }
+
+    #[test]
+    fn unsigned_eight_bit_pcm_expands_to_signed_sixteen_bit() {
+        let src = [0u8, 64, 128, 192, 255];
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + src.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&11_025u32.to_le_bytes());
+        wav.extend_from_slice(&11_025u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(src.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&src);
+
+        let parsed = parse_wav_pcm(&wav).unwrap();
+        assert_eq!(parsed.sample_rate_hz, 11_025);
+        assert_eq!(parsed.channels, 1);
+        assert_eq!(parsed.samples, [-32_768, -16_384, 0, 16_384, 32_512]);
     }
 
     #[test]
@@ -943,5 +1059,45 @@ mod tests {
         let b = encode_spu_adpcm(&samples);
 
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn raw_spu_cook_resamples_and_marks_one_shot_blocks() {
+        let samples: Vec<i16> = (0..112).map(|i| (i as i16 - 56) * 128).collect();
+        let wav = write_wav_mono_i16(22_050, &samples);
+        let cooked = cook_spu_adpcm_from_wav(&wav, 11_025, None).unwrap();
+
+        assert_eq!(cooked.source_sample_rate_hz, 22_050);
+        assert_eq!(cooked.source_channels, 1);
+        assert_eq!(cooked.source_sample_count, 112);
+        assert_eq!(cooked.sample_rate_hz, 11_025);
+        assert_eq!(cooked.sample_count, 56);
+        assert_eq!(cooked.loop_start, None);
+        assert_eq!(cooked.adpcm.len(), ADPCM_BLOCK_BYTES * 2);
+        assert_eq!(cooked.adpcm[1], 0x04);
+        assert_eq!(cooked.adpcm[ADPCM_BLOCK_BYTES + 1], 0x01);
+    }
+
+    #[test]
+    fn raw_spu_cook_marks_loop_start_and_looping_end() {
+        let samples: Vec<i16> = (0..112).map(|i| (i as i16 - 56) * 128).collect();
+        let wav = write_wav_mono_i16(22_050, &samples);
+        let cooked = cook_spu_adpcm_from_wav(&wav, 11_025, Some(56)).unwrap();
+
+        assert_eq!(cooked.loop_start, Some(28));
+        assert_eq!(cooked.adpcm.len(), ADPCM_BLOCK_BYTES * 2);
+        assert_eq!(cooked.adpcm[1], 0x00);
+        assert_eq!(cooked.adpcm[ADPCM_BLOCK_BYTES + 1], 0x03);
+    }
+
+    #[test]
+    fn raw_spu_cook_uses_combined_flags_for_single_block() {
+        let wav = write_wav_mono_i16(11_025, &[0; ADPCM_SAMPLES_PER_BLOCK]);
+
+        let one_shot = cook_spu_adpcm_from_wav(&wav, 11_025, None).unwrap();
+        let looping = cook_spu_adpcm_from_wav(&wav, 11_025, Some(0)).unwrap();
+
+        assert_eq!(one_shot.adpcm[1], 0x05);
+        assert_eq!(looping.adpcm[1], 0x07);
     }
 }

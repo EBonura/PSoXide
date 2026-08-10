@@ -10,7 +10,10 @@
 
 use core::{mem::size_of, ptr};
 
-use psx_gpu::prim::{ClassicQuadTexturedGouraud, ClassicTriTextured, ClassicTriTexturedGouraud};
+use psx_gpu::prim::{
+    ClassicQuadTexturedGouraud, ClassicTriTextured, ClassicTriTexturedGouraud, QuadTexturedGouraud,
+    TriTexturedGouraud,
+};
 use psx_gte::{
     math::{Mat3I16, Vec3I16, Vec3I32},
     scene::{self, Projected},
@@ -83,6 +86,27 @@ pub struct ClassicAffineBatchSurface {
     pub tpage: u16,
     /// CLUT word used by this surface.
     pub clut: u16,
+}
+
+/// One independently windowed fan inside a contiguous classic-affine batch.
+///
+/// Unlike [`ClassicAffineBatchSurface`], this descriptor selects the
+/// self-contained packet shape that prefixes every polygon with GP0(E2).
+/// That is necessary when tiled materials with different windows can
+/// interleave at the same ordering-table depths.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassicAffineWindowedBatchSurface {
+    /// First vertex in the batch vertex array.
+    pub first_vertex: u16,
+    /// Number of vertices in this convex fan.
+    pub vertex_count: u16,
+    /// Texture-page word used by this surface.
+    pub tpage: u16,
+    /// CLUT word used by this surface.
+    pub clut: u16,
+    /// Fully encoded GP0(E2) texture-window command.
+    pub texture_window_word: u32,
 }
 
 /// Fixed topology and packet bounds for classic affine submission.
@@ -457,6 +481,172 @@ impl PacketWriter {
     }
 }
 
+/// Packet sink shared by the compact and self-contained-window variants.
+/// Generic subdivision code monomorphises this trait, so the normal compact
+/// path keeps its existing packet shape and does not gain a per-polygon
+/// material branch.
+trait AffinePacketWriter {
+    fn profile(&self) -> ClassicAffineProfile;
+
+    unsafe fn emit_tri(
+        &mut self,
+        projected: [&ClassicAffineVertex; 3],
+        attributes: [&ClassicAffineVertex; 3],
+        otz: u16,
+    );
+
+    unsafe fn emit_quad(
+        &mut self,
+        projected: [&ClassicAffineVertex; 4],
+        attributes: [&ClassicAffineVertex; 4],
+        otz: u16,
+    );
+}
+
+impl AffinePacketWriter for PacketWriter {
+    #[inline(always)]
+    fn profile(&self) -> ClassicAffineProfile {
+        self.profile
+    }
+
+    #[inline(always)]
+    unsafe fn emit_tri(
+        &mut self,
+        projected: [&ClassicAffineVertex; 3],
+        attributes: [&ClassicAffineVertex; 3],
+        otz: u16,
+    ) {
+        unsafe { PacketWriter::emit_tri(self, projected, attributes, otz) };
+    }
+
+    #[inline(always)]
+    unsafe fn emit_quad(
+        &mut self,
+        projected: [&ClassicAffineVertex; 4],
+        attributes: [&ClassicAffineVertex; 4],
+        otz: u16,
+    ) {
+        unsafe { PacketWriter::emit_quad(self, projected, attributes, otz) };
+    }
+}
+
+struct WindowedPacketWriter {
+    next: *mut u32,
+    packets: u32,
+    clut_high_word: u32,
+    tpage_high_word: u32,
+    texture_window_word: u32,
+    profile: ClassicAffineProfile,
+}
+
+impl AffinePacketWriter for WindowedPacketWriter {
+    #[inline(always)]
+    fn profile(&self) -> ClassicAffineProfile {
+        self.profile
+    }
+
+    #[inline(always)]
+    unsafe fn emit_tri(
+        &mut self,
+        projected: [&ClassicAffineVertex; 3],
+        attributes: [&ClassicAffineVertex; 3],
+        otz: u16,
+    ) {
+        debug_assert!(attributes
+            .iter()
+            .all(|vertex| vertex.color & 0xff00_0000 == 0));
+        let packet = unsafe {
+            TriTexturedGouraud::with_staged_slot_prepacked_unchecked(
+                [
+                    (projected[0].screen[0], projected[0].screen[1]),
+                    (projected[1].screen[0], projected[1].screen[1]),
+                    (projected[2].screen[0], projected[2].screen[1]),
+                ],
+                [
+                    uv_word(attributes[0]),
+                    uv_word(attributes[1]),
+                    uv_word(attributes[2]),
+                ],
+                [
+                    attributes[0].color,
+                    attributes[1].color,
+                    attributes[2].color,
+                ],
+                self.clut_high_word,
+                self.tpage_high_word,
+                self.texture_window_word,
+                otz,
+            )
+        };
+        unsafe { ptr::write(self.next.cast::<TriTexturedGouraud>(), packet) };
+        self.next = unsafe {
+            self.next
+                .add(size_of::<TriTexturedGouraud>() / size_of::<u32>())
+        };
+        self.packets = self.packets.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    unsafe fn emit_quad(
+        &mut self,
+        projected: [&ClassicAffineVertex; 4],
+        attributes: [&ClassicAffineVertex; 4],
+        otz: u16,
+    ) {
+        debug_assert!(attributes
+            .iter()
+            .all(|vertex| vertex.color & 0xff00_0000 == 0));
+        let packet = unsafe {
+            QuadTexturedGouraud::with_staged_slot_prepacked_unchecked(
+                [
+                    (projected[0].screen[0], projected[0].screen[1]),
+                    (projected[1].screen[0], projected[1].screen[1]),
+                    (projected[2].screen[0], projected[2].screen[1]),
+                    (projected[3].screen[0], projected[3].screen[1]),
+                ],
+                [
+                    uv_word(attributes[0]),
+                    uv_word(attributes[1]),
+                    uv_word(attributes[2]),
+                    uv_word(attributes[3]),
+                ],
+                [
+                    attributes[0].color,
+                    attributes[1].color,
+                    attributes[2].color,
+                    attributes[3].color,
+                ],
+                self.clut_high_word,
+                self.tpage_high_word,
+                self.texture_window_word,
+                otz,
+            )
+        };
+        unsafe { ptr::write(self.next.cast::<QuadTexturedGouraud>(), packet) };
+        self.next = unsafe {
+            self.next
+                .add(size_of::<QuadTexturedGouraud>() / size_of::<u32>())
+        };
+        self.packets = self.packets.wrapping_add(1);
+    }
+}
+
+impl WindowedPacketWriter {
+    #[inline(always)]
+    unsafe fn finish(self, output: *mut u32) -> ClassicAffineSubmit {
+        let words = unsafe { self.next.offset_from(output) as u32 };
+        let tri_words = (size_of::<TriTexturedGouraud>() / size_of::<u32>()) as u32;
+        let quad_words = (size_of::<QuadTexturedGouraud>() / size_of::<u32>()) as u32;
+        let quads =
+            words.wrapping_sub(self.packets.wrapping_mul(tri_words)) / (quad_words - tri_words);
+        ClassicAffineSubmit {
+            next_packet: self.next,
+            packets: self.packets,
+            hardware_triangles: self.packets.wrapping_add(quads),
+        }
+    }
+}
+
 #[inline(always)]
 const fn uv_word(vertex: &ClassicAffineVertex) -> u16 {
     vertex.uv[0] as u16 | ((vertex.uv[1] as u16) << 8)
@@ -531,8 +721,8 @@ fn average3(vertices: [&ClassicAffineVertex; 3]) -> u16 {
 }
 
 #[inline(always)]
-unsafe fn sorted_tri(
-    writer: &mut PacketWriter,
+unsafe fn sorted_tri<W: AffinePacketWriter>(
+    writer: &mut W,
     projected: [&ClassicAffineVertex; 3],
     attributes: [&ClassicAffineVertex; 3],
 ) {
@@ -543,8 +733,8 @@ unsafe fn sorted_tri(
 }
 
 #[inline(always)]
-unsafe fn sorted_quad(
-    writer: &mut PacketWriter,
+unsafe fn sorted_quad<W: AffinePacketWriter>(
+    writer: &mut W,
     projected: [&ClassicAffineVertex; 4],
     attributes: [&ClassicAffineVertex; 4],
 ) {
@@ -558,8 +748,8 @@ unsafe fn sorted_quad(
     }
 }
 
-unsafe fn subdivide_once(
-    writer: &mut PacketWriter,
+unsafe fn subdivide_once<W: AffinePacketWriter>(
+    writer: &mut W,
     root0: &ClassicAffineVertex,
     root1: &ClassicAffineVertex,
     root2: &ClassicAffineVertex,
@@ -580,9 +770,10 @@ unsafe fn subdivide_once(
         sorted_tri(writer, [h01, root1, h12], [h01, root1, h12]);
         sorted_tri(writer, [h12, root2, h20], [h12, root2, h20]);
     }
-    let underdraw_at = i32::from(writer.profile.subdivide_once_at);
+    let profile = writer.profile();
+    let underdraw_at = i32::from(profile.subdivide_once_at);
     if root0.depth >= underdraw_at || root1.depth >= underdraw_at || root2.depth >= underdraw_at {
-        let underdraw = root_otz.saturating_add(writer.profile.underdraw_slot_bias);
+        let underdraw = root_otz.saturating_add(profile.underdraw_slot_bias);
         unsafe {
             writer.emit_tri([root0, root1, h01], [root0, root1, h01], underdraw);
             writer.emit_tri([root1, root2, h12], [root0, root1, h12], underdraw);
@@ -591,8 +782,8 @@ unsafe fn subdivide_once(
     }
 }
 
-unsafe fn subdivide_twice(
-    writer: &mut PacketWriter,
+unsafe fn subdivide_twice<W: AffinePacketWriter>(
+    writer: &mut W,
     root0: &ClassicAffineVertex,
     root1: &ClassicAffineVertex,
     root2: &ClassicAffineVertex,
@@ -660,9 +851,10 @@ unsafe fn subdivide_twice(
             [&v[11], &v[1], &v[7], &v[6]],
         );
     }
-    let underdraw_at = i32::from(writer.profile.subdivide_twice_at);
+    let profile = writer.profile();
+    let underdraw_at = i32::from(profile.subdivide_twice_at);
     if root0.depth >= underdraw_at || root1.depth >= underdraw_at || root2.depth >= underdraw_at {
-        let underdraw = root_otz.saturating_add(writer.profile.underdraw_slot_bias);
+        let underdraw = root_otz.saturating_add(profile.underdraw_slot_bias);
         unsafe {
             // GP0(3Ch) splits [a,b,c,d] into [b,d,c] then [a,b,c].
             // These orders are cyclic rotations of the two old triangles in
@@ -806,13 +998,13 @@ unsafe fn submit_classic_affine_projected_fan_with_scratch(
 }
 
 #[inline(always)]
-unsafe fn submit_classic_affine_projected_fan_into_writer(
+unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>(
     vertices: *mut ClassicAffineVertex,
     vertex_count: usize,
     generated: *mut ClassicAffineVertex,
-    writer: &mut PacketWriter,
+    writer: &mut W,
 ) {
-    let profile = writer.profile;
+    let profile = writer.profile();
     let mut surface_clip = 0x0fu8;
     let mut clip_index = 0usize;
     while clip_index < vertex_count && surface_clip != 0 {
@@ -931,6 +1123,141 @@ pub unsafe fn submit_classic_affine_batch(
         debug_assert!(first_vertex + surface_vertices <= vertex_count);
         writer.tpage_high_word = (surface.tpage as u32) << 16;
         writer.clut_high_word = (surface.clut as u32) << 16;
+        unsafe {
+            submit_classic_affine_projected_fan_into_writer(
+                vertices.add(first_vertex),
+                surface_vertices,
+                generated,
+                &mut writer,
+            );
+        }
+        surface_ptr = unsafe { surface_ptr.add(1) };
+    }
+
+    unsafe { writer.finish(output) }
+}
+
+/// Project and submit one convex fan with a self-contained GP0(E2) texture
+/// window in every emitted polygon packet.
+///
+/// Use this for repeating sub-rectangles that can interleave with other
+/// materials in the ordering table. The geometry, camera-space subdivision,
+/// quad pairing, and crack sealing are identical to
+/// [`submit_classic_affine_fan`]; only the packet shape gains the inline
+/// texture-window command.
+///
+/// # Safety
+/// The vertex, scratch-tail, output-capacity, and lifetime contract is the
+/// same as [`submit_classic_affine_fan`]. `texture_window_word` must be a
+/// valid GP0(E2) command, normally produced by
+/// [`psx_gpu::material::TextureWindow::word`].
+pub unsafe fn submit_classic_affine_windowed_fan(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    output: *mut u32,
+    tpage: u16,
+    clut: u16,
+    texture_window_word: u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    if vertices.is_null() || output.is_null() || vertex_count < 3 {
+        return ClassicAffineSubmit {
+            next_packet: output,
+            packets: 0,
+            hardware_triangles: 0,
+        };
+    }
+    let mut index = 0usize;
+    while index + 2 < vertex_count {
+        unsafe { project_three_consecutive(vertices.add(index)) };
+        index += 3;
+    }
+    while index < vertex_count {
+        unsafe { project_one(vertices.add(index)) };
+        index += 1;
+    }
+
+    let mut writer = WindowedPacketWriter {
+        next: output,
+        packets: 0,
+        clut_high_word: (clut as u32) << 16,
+        tpage_high_word: (tpage as u32) << 16,
+        texture_window_word,
+        profile,
+    };
+    unsafe {
+        submit_classic_affine_projected_fan_into_writer(
+            vertices,
+            vertex_count,
+            vertices.add(vertex_count),
+            &mut writer,
+        );
+        writer.finish(output)
+    }
+}
+
+/// Project and submit several independently windowed convex fans in one GTE
+/// schedule.
+///
+/// Each descriptor selects its own tpage, CLUT, and GP0(E2) word. Every
+/// emitted polygon therefore restores the correct window even when packets
+/// from different surfaces meet at the same OT depth.
+///
+/// # Safety
+/// The vertex, descriptor, scratch-tail, output-capacity, and lifetime
+/// contract matches [`submit_classic_affine_batch`]. Every descriptor's
+/// `texture_window_word` must be a valid GP0(E2) command.
+pub unsafe fn submit_classic_affine_windowed_batch(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineWindowedBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    if vertices.is_null()
+        || surfaces.is_null()
+        || output.is_null()
+        || vertex_count == 0
+        || surface_count == 0
+    {
+        return ClassicAffineSubmit {
+            next_packet: output,
+            packets: 0,
+            hardware_triangles: 0,
+        };
+    }
+
+    let mut vertex = 0usize;
+    while vertex + 2 < vertex_count {
+        unsafe { project_three_consecutive(vertices.add(vertex)) };
+        vertex += 3;
+    }
+    while vertex < vertex_count {
+        unsafe { project_one(vertices.add(vertex)) };
+        vertex += 1;
+    }
+
+    let generated = unsafe { vertices.add(vertex_count) };
+    let mut writer = WindowedPacketWriter {
+        next: output,
+        packets: 0,
+        clut_high_word: 0,
+        tpage_high_word: 0,
+        texture_window_word: 0,
+        profile,
+    };
+    let surface_end = unsafe { surfaces.add(surface_count) };
+    let mut surface_ptr = surfaces;
+    while surface_ptr != surface_end {
+        let surface = unsafe { ptr::read(surface_ptr) };
+        let first_vertex = surface.first_vertex as usize;
+        let surface_vertices = surface.vertex_count as usize;
+        debug_assert!(surface_vertices >= 3);
+        debug_assert!(first_vertex + surface_vertices <= vertex_count);
+        writer.tpage_high_word = (surface.tpage as u32) << 16;
+        writer.clut_high_word = (surface.clut as u32) << 16;
+        writer.texture_window_word = surface.texture_window_word;
         unsafe {
             submit_classic_affine_projected_fan_into_writer(
                 vertices.add(first_vertex),
@@ -1381,6 +1708,11 @@ mod tests {
         assert_eq!(core::mem::align_of::<ClassicAffinePosition>(), 2);
         assert_eq!(size_of::<ClassicAffineBatchSurface>(), 8);
         assert_eq!(core::mem::align_of::<ClassicAffineBatchSurface>(), 2);
+        assert_eq!(size_of::<ClassicAffineWindowedBatchSurface>(), 12);
+        assert_eq!(
+            core::mem::align_of::<ClassicAffineWindowedBatchSurface>(),
+            4
+        );
         assert_eq!(size_of::<ClassicAliasFace>(), 12);
         assert_eq!(core::mem::align_of::<ClassicAliasFace>(), 4);
         assert_eq!(size_of::<ClassicAliasVertex>(), 3);
