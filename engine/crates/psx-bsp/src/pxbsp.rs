@@ -87,6 +87,68 @@ pub struct PxbspMaterial {
     pub animation_data: [u8; 7],
 }
 
+/// World-material face policy stored in [`PxbspMaterial::flags`].
+pub mod material_flags {
+    /// Bits reserved for face sidedness.
+    pub const FACE_MASK: u16 = 0x0003;
+    /// Draw the authored front face only.
+    pub const FACE_FRONT: u16 = 0x0000;
+    /// Draw the authored back face only.
+    pub const FACE_BACK: u16 = 0x0001;
+    /// Draw both sides of the authored face.
+    pub const FACE_BOTH: u16 = 0x0002;
+    /// All flags understood by PXBSP version one.
+    pub const KNOWN: u16 = FACE_MASK;
+}
+
+/// PSoXide material blend codes stored in [`PxbspMaterial::blend_mode`].
+pub mod material_blend {
+    /// Opaque textured drawing.
+    pub const OPAQUE: u8 = 0;
+    /// Half-background plus half-foreground blending.
+    pub const AVERAGE: u8 = 1;
+    /// Add foreground to background.
+    pub const ADD: u8 = 2;
+    /// Subtract foreground from background.
+    pub const SUBTRACT: u8 = 3;
+    /// Add one quarter of the foreground to the background.
+    pub const ADD_QUARTER: u8 = 4;
+}
+
+/// Decoded one-pass animation for a PXBSP material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PxbspMaterialAnimation {
+    Static,
+    UvScroll {
+        speed_u_q8: i16,
+        speed_v_q8: i16,
+        phase_u: u8,
+        phase_v: u8,
+    },
+    Flipbook {
+        columns: u8,
+        rows: u8,
+        frame_count: u8,
+        ticks_per_frame: u8,
+        phase: u8,
+    },
+}
+
+/// Reason a packed material recipe cannot be submitted safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PxbspMaterialError {
+    /// The flags contain bits not assigned by this format version.
+    UnknownFlags(u16),
+    /// The sidedness field uses its reserved bit pattern.
+    InvalidSidedness(u16),
+    /// The blend mode is not a supported PlayStation GPU recipe.
+    InvalidBlendMode(u8),
+    /// The animation kind is not assigned by this format version.
+    UnknownAnimation(u8),
+    /// The selected animation kind has malformed parameters.
+    InvalidAnimationPayload(u8),
+}
+
 impl CookedRecord for PxbspMaterial {
     const SIZE: usize = 16;
 
@@ -98,6 +160,68 @@ impl CookedRecord for PxbspMaterial {
             blend_mode: bytes[7],
             animation_kind: bytes[8],
             animation_data: bytes[9..16].try_into().unwrap(),
+        }
+    }
+}
+
+impl PxbspMaterial {
+    /// Validate every versioned flag, blend, and animation field.
+    pub fn validate(self) -> Result<(), PxbspMaterialError> {
+        if self.flags & !material_flags::KNOWN != 0 {
+            return Err(PxbspMaterialError::UnknownFlags(self.flags));
+        }
+        if self.flags & material_flags::FACE_MASK == material_flags::FACE_MASK {
+            return Err(PxbspMaterialError::InvalidSidedness(self.flags));
+        }
+        if self.blend_mode > material_blend::ADD_QUARTER {
+            return Err(PxbspMaterialError::InvalidBlendMode(self.blend_mode));
+        }
+        self.animation().map(|_| ())
+    }
+
+    /// Decode the fixed-size animation payload into its typed recipe.
+    pub fn animation(self) -> Result<PxbspMaterialAnimation, PxbspMaterialError> {
+        match self.animation_kind {
+            material_animation::STATIC if self.animation_data == [0; 7] => {
+                Ok(PxbspMaterialAnimation::Static)
+            }
+            material_animation::UV_SCROLL if self.animation_data[6] == 0 => {
+                Ok(PxbspMaterialAnimation::UvScroll {
+                    speed_u_q8: i16::from_le_bytes([
+                        self.animation_data[0],
+                        self.animation_data[1],
+                    ]),
+                    speed_v_q8: i16::from_le_bytes([
+                        self.animation_data[2],
+                        self.animation_data[3],
+                    ]),
+                    phase_u: self.animation_data[4],
+                    phase_v: self.animation_data[5],
+                })
+            }
+            material_animation::FLIPBOOK
+                if self.animation_data[0] > 0
+                    && self.animation_data[1] > 0
+                    && self.animation_data[2] > 0
+                    && self.animation_data[3] > 0
+                    && self.animation_data[2]
+                        <= self.animation_data[0].saturating_mul(self.animation_data[1])
+                    && self.animation_data[5..] == [0; 2] =>
+            {
+                Ok(PxbspMaterialAnimation::Flipbook {
+                    columns: self.animation_data[0],
+                    rows: self.animation_data[1],
+                    frame_count: self.animation_data[2],
+                    ticks_per_frame: self.animation_data[3],
+                    phase: self.animation_data[4],
+                })
+            }
+            material_animation::STATIC
+            | material_animation::UV_SCROLL
+            | material_animation::FLIPBOOK => Err(PxbspMaterialError::InvalidAnimationPayload(
+                self.animation_kind,
+            )),
+            other => Err(PxbspMaterialError::UnknownAnimation(other)),
         }
     }
 }
@@ -600,6 +724,72 @@ mod tests {
                 animation_kind: material_animation::UV_SCROLL,
                 animation_data: [0xfe, 0xff, 0x20, 0x00, 7, 9, 0],
             }
+        );
+    }
+
+    #[test]
+    fn decodes_material_animation_payloads() {
+        let scroll = PxbspMaterial {
+            animation_kind: material_animation::UV_SCROLL,
+            animation_data: [0x00, 0x02, 0x00, 0xff, 7, 9, 0],
+            ..PxbspMaterial::default()
+        };
+        assert_eq!(
+            scroll.animation(),
+            Ok(PxbspMaterialAnimation::UvScroll {
+                speed_u_q8: 512,
+                speed_v_q8: -256,
+                phase_u: 7,
+                phase_v: 9,
+            })
+        );
+        let flipbook = PxbspMaterial {
+            animation_kind: material_animation::FLIPBOOK,
+            animation_data: [4, 2, 7, 3, 5, 0, 0],
+            ..PxbspMaterial::default()
+        };
+        assert_eq!(
+            flipbook.animation(),
+            Ok(PxbspMaterialAnimation::Flipbook {
+                columns: 4,
+                rows: 2,
+                frame_count: 7,
+                ticks_per_frame: 3,
+                phase: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_reserved_material_codes_and_payloads() {
+        let bad_sidedness = PxbspMaterial {
+            flags: material_flags::FACE_MASK,
+            ..PxbspMaterial::default()
+        };
+        assert_eq!(
+            bad_sidedness.validate(),
+            Err(PxbspMaterialError::InvalidSidedness(
+                material_flags::FACE_MASK
+            ))
+        );
+        let bad_blend = PxbspMaterial {
+            blend_mode: 5,
+            ..PxbspMaterial::default()
+        };
+        assert_eq!(
+            bad_blend.validate(),
+            Err(PxbspMaterialError::InvalidBlendMode(5))
+        );
+        let bad_flipbook = PxbspMaterial {
+            animation_kind: material_animation::FLIPBOOK,
+            animation_data: [2, 2, 5, 1, 0, 0, 0],
+            ..PxbspMaterial::default()
+        };
+        assert_eq!(
+            bad_flipbook.validate(),
+            Err(PxbspMaterialError::InvalidAnimationPayload(
+                material_animation::FLIPBOOK
+            ))
         );
     }
 
