@@ -114,17 +114,34 @@ Split the map into an always-resident core and paged payloads:
 - Draft cooks (Play) skip vis and light for iteration speed; release
   cooks run everything.
 
+## Decisions (owner, 2026-08-10)
+
+1. No stopgap: embedded Play waits for the real compiler + BSP runtime.
+   Nothing ships through the old engine's free-surface path.
+2. Baked vertex lighting is part of the first compiler: release cooks
+   light from day one; draft/Play cooks skip it for iteration speed.
+3. Entity authoring adapts psxed's existing node flow (Place tool,
+   scene tree, inspector) to world-space placement in brush maps; no
+   classname/definition-file system.
+4. Movers are in the FIRST playable: doors/platforms/elevators as brush
+   submodels are core to the level design language, so the compiler
+   emits submodels, the runtime transforms/renders/collides them, and
+   the editor binds a brush to a mover entity from the first slice.
+
 ## Sequencing
 
 1. (Blocked on the quake-psx stable ping) Lift renderer + ResidentMap
    into psx-bsp; headless E1M1 camera-flight gate with cycle numbers.
 2. Hull-backed character_motor + third-person camera walking E1M1 under
    tape input; trace-parity and feel gates.
-3. Minimal brush compiler (CSG + BSP + clipnodes + draft PVS) feeding
-   editor Play with the real BSP runtime and the player character. This
-   is the milestone: the first authored brush map you can walk.
+3. The first-playable slice: brush compiler (CSG + BSP + clipnodes +
+   draft PVS + release light bake) INCLUDING brush submodels, editor
+   brush-to-mover binding, and the runtime side (submodel traversal,
+   mover motion + collision). Editor Play boots the real BSP runtime
+   with the player character. Gate: an authored brush map with a
+   working door, walked under tape input.
 4. World-space entities: spawn from the lump, PVS activation, a combat
    slice with one enemy family as the gate.
-5. Light bake, full vis, budget reports; region streaming only after
-   the resident baseline is measured.
-6. Movers/submodels; polish; grid retirement (P7) last.
+5. Full vis, budget reports; region streaming only after the resident
+   baseline is measured.
+6. Polish; grid retirement (P7) last.
