@@ -85,6 +85,16 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // textures.
     purge_models_dir(&models_dir)?;
 
+    let pxbsp_path = generated_dir.join(crate::brush_playtest::BRUSH_WORLD_FILENAME);
+    match &package.world_geometry {
+        PlaytestWorldGeometry::Grid => match std::fs::remove_file(&pxbsp_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        },
+        PlaytestWorldGeometry::Pxbsp(world) => std::fs::write(&pxbsp_path, &world.bytes)?,
+    }
+
     for asset in &package.assets {
         // ModelMesh / ModelAnimation / model-folder Texture
         // asset filenames already include their `models/...`
@@ -485,6 +495,43 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("    _align: [Align; 0],\n");
     out.push_str("    bytes: Bytes,\n");
     out.push_str("}\n\n");
+
+    match &package.world_geometry {
+        PlaytestWorldGeometry::Grid => {
+            out.push_str("pub const PLAYTEST_USES_PXBSP: bool = false;\n");
+            out.push_str("pub static PXBSP_WORLD: &[u8] = &[];\n");
+            out.push_str("pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];\n");
+            out.push_str("pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];\n\n");
+        }
+        PlaytestWorldGeometry::Pxbsp(world) => {
+            out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
+            write_aligned_asset_bytes_static(
+                &mut out,
+                "PXBSP_WORLD",
+                crate::brush_playtest::BRUSH_WORLD_FILENAME,
+            );
+            let node_ids = world
+                .movers
+                .iter()
+                .map(|mover| mover.node.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let model_indices = world
+                .movers
+                .iter()
+                .map(|mover| mover.model_index.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                out,
+                "pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[{node_ids}];"
+            );
+            let _ = writeln!(
+                out,
+                "pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[{model_indices}];\n"
+            );
+        }
+    }
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
@@ -3607,7 +3654,9 @@ pub fn write_cook_result(
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
-    let brush_manifest = generated_dir.join(crate::brush_playtest::BRUSH_MANIFEST_FILENAME);
+    // Remove the pre-unification brush-only manifest if an older checkout
+    // generated one. New cooks always select `level_manifest.cooked.rs`.
+    let brush_manifest = generated_dir.join("brush_manifest.cooked.rs");
     if brush_manifest.exists() {
         std::fs::remove_file(&brush_manifest)?;
     }
