@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod collision;
+pub mod render;
 pub mod resident;
 
 use core::fmt;

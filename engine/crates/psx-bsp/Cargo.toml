@@ -14,6 +14,8 @@ workspace = true
 # editor and quake-psx too, and workspace inheritance only resolves
 # against the engine workspace root.
 psx-engine = { path = "../psx-engine" }
+psx-gpu = { path = "../../../sdk/crates/psx-gpu" }
+psx-gte = { path = "../../../sdk/crates/psx-gte" }
 psx-math = { path = "../../../sdk/crates/psx-math" }
 
 [dev-dependencies]
