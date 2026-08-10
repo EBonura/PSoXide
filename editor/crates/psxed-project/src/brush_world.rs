@@ -689,7 +689,7 @@ fn flat_white_psxt() -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::{MaterialResource, Transform3};
-    use psx_bsp::mover::BrushDoor;
+    use psx_bsp::mover::BrushDoorSet;
     use psx_bsp::pxbsp::{entity_class, entity_flags, PxbspBrushDoor};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
     use psx_bsp::SliceReader;
@@ -820,11 +820,13 @@ mod tests {
         );
         assert_eq!(payload.travel_ticks, 60);
 
-        let mut door = BrushDoor::from_entity(entity, payload).expect("runtime door");
+        let mut doors = BrushDoorSet::<4>::default();
+        doors.init_from_map(&map).expect("runtime doors");
+        assert_eq!(doors.len(), 1);
         let hull = map
             .model_collision_hull(1, 0)
             .expect("door point hull")
-            .transformed(door.transform());
+            .transformed(doors.get(0).expect("runtime door").transform());
         assert_eq!(
             hull.point_contents(Vec3I32 {
                 x: 512 * 4096,
@@ -833,14 +835,14 @@ mod tests {
             }),
             Some(psx_bsp::collision::CONTENTS_SOLID)
         );
-        door.set_open(true);
+        doors.get_mut(0).expect("runtime door").set_open(true);
         for _ in 0..60 {
-            assert!(door.tick());
+            assert_eq!(doors.tick(), 1);
         }
         let open_hull = map
             .model_collision_hull(1, 0)
             .expect("door point hull")
-            .transformed(door.transform());
+            .transformed(doors.get(0).expect("runtime door").transform());
         assert_eq!(
             open_hull.point_contents(Vec3I32 {
                 x: 512 * 4096,
