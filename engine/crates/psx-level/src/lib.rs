@@ -2890,6 +2890,12 @@ pub struct CombatCapsuleRecord {
 }
 
 /// Cooked weapon-local hit shape.
+///
+/// Authoring-only today: no runtime path reads the geometry (the old
+/// render-side evaluator was counter-only and was removed). The live
+/// hit volumes are the melee arc and rig-attached
+/// [`CombatCapsuleRecord`]s; a weapon's [`WeaponHitboxRecord`]
+/// contributes only its active frame window to the melee spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeaponHitShapeRecord {
     /// Box hit volume local to the weapon grip.
@@ -2910,7 +2916,9 @@ pub enum WeaponHitShapeRecord {
     },
 }
 
-/// One weapon hitbox and its active animation-frame window.
+/// One weapon hitbox and its active animation-frame window. The
+/// window bounds the player melee arc's hit frames
+/// (`player_melee_spec`); the shape is authoring-only data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeaponHitboxRecord {
     /// Display name.
@@ -2992,8 +3000,17 @@ pub struct EquipmentRecord {
     pub character_socket: &'static str,
     /// Weapon grip/pivot to align.
     pub weapon_grip: &'static str,
+    /// Host entity's `MODEL_INSTANCES` index, or
+    /// [`EquipmentRecord::NO_INSTANCE`] when the host is the player
+    /// (whose live pose comes from the player context instead).
+    pub model_instance: u16,
     /// Reserved.
     pub flags: u16,
+}
+
+impl EquipmentRecord {
+    /// `model_instance` sentinel: no bound model instance.
+    pub const NO_INSTANCE: u16 = u16::MAX;
 }
 
 /// One placed point light. Coordinates are room-local engine

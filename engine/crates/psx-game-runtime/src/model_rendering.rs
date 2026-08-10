@@ -1069,22 +1069,77 @@ fn runtime_model_profile_cycle_counter(index: ModelIndex) -> Option<u16> {
     }
 }
 
-/// Equipment draw outcome: draw count, hitbox activity, and submit
-/// stats.
+/// Equipment draw outcome: draw count and submit stats.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct EquipmentDrawStats {
     /// Weapon models drawn.
     pub draws: u16,
-    /// Hitboxes active on the current animation frame.
-    pub active_hitboxes: u16,
-    /// Entities the active hitboxes overlapped.
-    pub target_hits: u16,
     /// Model submit stats.
     pub stats: TexturedModelRenderStats,
 }
 
-/// Draw the player's attached equipment (weapon models) and evaluate
-/// its active weapon hitboxes against cooked entities.
+/// Draw weapons riding non-player equipment records on their bound
+/// model instances' live poses. Room-gated; call inside the per-room
+/// instance draw. See `equipment::draw_instance_equipment`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn draw_instance_equipment<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    current_room: RoomIndex,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    pose_overrides: &[ModelInstancePoseOverride],
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    equipment::draw_instance_equipment::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        PROFILE,
+    >(
+        tables,
+        knobs,
+        scratch,
+        current_room,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
+        pose_overrides,
+        triangles,
+        world,
+    )
+}
+
+/// Draw the player's attached equipment (weapon models). Gameplay hit
+/// resolution lives in the sim, not here: the melee arc and rig
+/// combat capsules (see `crate::combat`).
 #[inline]
 pub fn draw_player_equipment<
     const MAX_RUNTIME_MODELS: usize,
@@ -1097,7 +1152,6 @@ pub fn draw_player_equipment<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -1131,7 +1185,6 @@ pub fn draw_player_equipment<
         tables,
         knobs,
         scratch,
-        current_room,
         character,
         models,
         model_faces,

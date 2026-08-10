@@ -115,8 +115,9 @@ pub use render::{
     PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, RoomSurfaceSink,
 };
 pub use render3d::{
-    apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_transform,
-    project_model_vertex_with_joint_transforms, AdaptiveSubdivisionKindMask,
+    apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_basis,
+    compute_joint_world_transform, project_model_vertex_with_joint_transforms,
+    AdaptiveSubdivisionKindMask,
     AdaptiveSubdivisionProfile, CullMode, DepthPolicy, GouraudMeshOptions, GouraudRenderPass,
     GouraudTriCommand, JointViewTransform, JointWorldTransform, LoadedWorldCameraGte,
     LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,

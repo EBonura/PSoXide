@@ -107,6 +107,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             parents: vec![None],
             signature: "test".to_string(),
             note: String::new(),
+            joint_names: Vec::new(),
         }),
     );
     let roll = project.add_resource(

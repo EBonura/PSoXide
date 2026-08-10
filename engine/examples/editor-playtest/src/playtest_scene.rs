@@ -974,7 +974,6 @@ impl Scene for Playtest {
                 } else {
                     player_lighting.map_or(EquipmentDrawStats::default(), |lighting| {
                         draw_player_equipment(
-                            self.room_index,
                             character,
                             &self.models,
                             &self.model_faces[..self.model_face_count],
@@ -1003,14 +1002,6 @@ impl Scene for Playtest {
                 telemetry::counter(
                     telemetry::counter::EQUIPMENT_DRAWS,
                     equipment_stats.draws as u32,
-                );
-                telemetry::counter(
-                    telemetry::counter::EQUIPMENT_ACTIVE_HITBOXES,
-                    equipment_stats.active_hitboxes as u32,
-                );
-                telemetry::counter(
-                    telemetry::counter::EQUIPMENT_TARGET_HITS,
-                    equipment_stats.target_hits as u32,
                 );
                 emit_model_counters(
                     equipment_stats.stats,
@@ -1077,6 +1068,28 @@ impl Scene for Playtest {
                     );
                     telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
                     accumulate_model_instance_draw_stats(&mut total_instance_stats, instance_stats);
+                    // Enemy weapons ride their instances' live poses;
+                    // one pass per room after both instance depth
+                    // passes (the OT depth-sorts the weapon with its
+                    // body).
+                    telemetry::stage_begin(telemetry::stage::EQUIPMENT);
+                    let _ = draw_instance_equipment(
+                        active.index,
+                        self.gameplay_tick(ctx.sim_tick),
+                        ctx.video_hz,
+                        &room_camera,
+                        actor_options,
+                        &lighting,
+                        &self.models,
+                        &self.model_faces[..self.model_face_count],
+                        &self.model_parts[..self.model_part_count],
+                        &self.model_vertices[..self.model_vertex_count],
+                        &self.clips,
+                        entity_poses,
+                        &mut primitive_packets,
+                        &mut world,
+                    );
+                    telemetry::stage_end(telemetry::stage::EQUIPMENT);
                 }
             }
 

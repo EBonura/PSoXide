@@ -1,10 +1,10 @@
 use egui::{Color32, ColorImage};
 use psx_asset::{Animation, JointPose, Model, ModelVertex};
 use psx_engine::{
-    compute_joint_world_transform, Angle, JointWorldTransform, LocalToWorldScale, Mat3I16,
-    ProjectedVertex, WorldCamera, WorldProjection, WorldVertex,
+    compute_joint_world_basis, compute_joint_world_transform, Angle, JointWorldTransform,
+    LocalToWorldScale, Mat3I16, ProjectedVertex, WorldCamera, WorldProjection, WorldVertex,
 };
-use psx_gte::math::Vec3I16;
+use psx_gte::math::{Vec3I16, Vec3I32};
 use psxed_project::MODEL_SCALE_ONE_Q8;
 
 pub const PREVIEW_WIDTH: usize = 320;
@@ -25,6 +25,43 @@ pub(crate) struct PreviewCombatCapsule {
     pub radius: u16,
     pub color: Color32,
     pub selected: bool,
+}
+
+/// One attachment socket drawn over an animated model preview as a
+/// bone-local axis triad. Orientation composes exactly like the runtime
+/// equipment path (unscaled joint basis times the socket's local Euler),
+/// so the triad shows the frame an attached weapon would inherit.
+#[derive(Clone, Debug)]
+pub(crate) struct PreviewSocket {
+    pub joint: u16,
+    pub translation: [i32; 3],
+    pub rotation_q12: [i16; 3],
+    pub selected: bool,
+}
+
+/// Character material override for the preview: replaces the model's
+/// own atlas with a resolved material texture (the same bytes the cook
+/// ships) plus the material's animated UV motion, advanced on the
+/// preview clock exactly like the runtime advances it on sim ticks.
+/// Sampling tiles the override so byte-space model UVs repeat a
+/// smaller generated texture, the way the crystal/hologram skins read
+/// in Play.
+pub(crate) struct PreviewMaterialLayer<'a> {
+    pub atlas: &'a ColorImage,
+    pub motion: psx_level::LevelMaterialUvMotion,
+}
+
+/// Equipped-weapon overlay: a second rigid model rendered riding a
+/// socket, placed with the runtime equipment composition (socket pose
+/// times grip inverse) so the preview equals what Play shows.
+pub(crate) struct PreviewEquippedWeapon<'a> {
+    pub model_bytes: &'a [u8],
+    pub atlas: &'a ColorImage,
+    pub socket_joint: u16,
+    pub socket_translation: [i32; 3],
+    pub socket_rotation_q12: [i16; 3],
+    pub grip_translation: [i32; 3],
+    pub grip_rotation_q12: [i16; 3],
 }
 
 /// Preview image plus projected body-part points used by Animation Studio's
@@ -161,6 +198,9 @@ pub(crate) fn render_import_model_preview_with_orientation_at_size(
         instance_rotation,
         render_size,
         &[],
+        &[],
+        None,
+        None,
         None,
     )
     .map(|render| render.image)
@@ -176,6 +216,9 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     instance_rotation: Mat3I16,
     render_size: [usize; 2],
     combat_capsules: &[PreviewCombatCapsule],
+    sockets: &[PreviewSocket],
+    equipped_weapon: Option<&PreviewEquippedWeapon<'_>>,
+    character_material: Option<&PreviewMaterialLayer<'_>>,
     selected_joint: Option<u16>,
 ) -> Option<ImportPreviewRender> {
     let model = Model::from_bytes(model_bytes).ok()?;
@@ -258,8 +301,11 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     }
     let projected_body_anchor =
         body_anchor_projected(camera, projection, focus.map(|focus| focus.center), origin);
-    let joint_origins: Vec<Option<ProjectedVertex>> =
-        if options.show_bones || !combat_capsules.is_empty() || selected_joint.is_some() {
+    let joint_origins: Vec<Option<ProjectedVertex>> = if options.show_bones
+        || !combat_capsules.is_empty()
+        || !sockets.is_empty()
+        || selected_joint.is_some()
+    {
             estimated_joint_points(&model, &joint_transforms, camera)
         } else {
             Vec::new()
@@ -287,6 +333,19 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     }
 
     let double_sided = model.double_sided();
+    let (character_atlas, character_uv_offset, character_wrap_uv) = match character_material {
+        Some(layer) => {
+            // Same tick source as `frame_q12` above, so scrubbing the
+            // clip advances the material scroll in lockstep with Play.
+            let tick = (options.time_seconds.max(0.0) * PREVIEW_PLAYBACK_HZ as f64) as u32;
+            (
+                layer.atlas,
+                layer.motion.offset_at_tick(tick, PREVIEW_PLAYBACK_HZ),
+                true,
+            )
+        }
+        None => (atlas, [0, 0], false),
+    };
     for part_index in 0..model.part_count() {
         let Some(part) = model.part(part_index) else {
             continue;
@@ -310,15 +369,31 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             raster_textured_triangle(
                 &mut image,
                 &mut z_buffer,
-                atlas,
+                character_atlas,
                 [
-                    PreviewVertex::from_projected(pa, a.uv),
-                    PreviewVertex::from_projected(pb, b.uv),
-                    PreviewVertex::from_projected(pc, c.uv),
+                    PreviewVertex::from_projected(pa, a.uv).with_uv_offset(character_uv_offset),
+                    PreviewVertex::from_projected(pb, b.uv).with_uv_offset(character_uv_offset),
+                    PreviewVertex::from_projected(pc, c.uv).with_uv_offset(character_uv_offset),
                 ],
                 double_sided,
+                character_wrap_uv,
             );
         }
+    }
+
+    if let Some(weapon) = equipped_weapon {
+        draw_equipped_weapon_overlay(
+            &mut image,
+            &mut z_buffer,
+            camera,
+            weapon,
+            &animation,
+            frame_q12,
+            root_delta,
+            options.pose_offset,
+            instance_rotation,
+            &joint_transforms,
+        );
     }
 
     if options.show_animation_root {
@@ -346,6 +421,36 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
             continue;
         };
         draw_joint_combat_capsule(&mut image, camera, projection, joint, capsule);
+    }
+    let socket_axis_length = (visual_height / 6).max(96);
+    for socket in sockets {
+        let Some(joint) = joint_transforms.get(socket.joint as usize).copied() else {
+            continue;
+        };
+        // Same pose sampling as the joint_transforms loop above, but the
+        // marker orientation needs the UNSCALED basis (the runtime's
+        // weapon-orientation composition), not the vertex-space matrix.
+        let Some(mut pose) = animation.pose_looped_q12(frame_q12, socket.joint) else {
+            continue;
+        };
+        if let Some(delta) = root_delta {
+            apply_root_motion_delta(&mut pose, delta);
+        }
+        apply_pose_offset(&mut pose, options.pose_offset);
+        let basis = compute_joint_world_basis(pose, instance_rotation).mul(&euler_rotation_q12([
+            socket.rotation_q12[0] as u16,
+            socket.rotation_q12[1] as u16,
+            socket.rotation_q12[2] as u16,
+        ]));
+        draw_socket_marker(
+            &mut image,
+            camera,
+            projection,
+            joint,
+            &basis,
+            socket,
+            socket_axis_length,
+        );
     }
     if let Some(joint) = selected_joint
         .and_then(|joint| joint_origins.get(joint as usize))
@@ -873,6 +978,14 @@ struct PreviewVertex {
 }
 
 impl PreviewVertex {
+    /// Shift byte-space UVs before interpolation; sampling wraps, so a
+    /// triangle crossing the seam tiles instead of smearing.
+    fn with_uv_offset(mut self, offset: [u8; 2]) -> Self {
+        self.u += offset[0] as f32;
+        self.v += offset[1] as f32;
+        self
+    }
+
     fn from_projected(projected: ProjectedVertex, uv: (u8, u8)) -> Self {
         Self {
             x: projected.sx as f32,
@@ -946,6 +1059,7 @@ fn raster_textured_triangle(
     atlas: &ColorImage,
     tri: [PreviewVertex; 3],
     double_sided: bool,
+    wrap_uv: bool,
 ) {
     let width = image.size[0];
     let height = image.size[1];
@@ -1027,7 +1141,11 @@ fn raster_textured_triangle(
 
             let u = tri[0].u * b0 + tri[1].u * b1 + tri[2].u * b2;
             let v = tri[0].v * b0 + tri[1].v * b1 + tri[2].v * b2;
-            image.pixels[index] = sample_atlas(atlas, u, v);
+            image.pixels[index] = if wrap_uv {
+                sample_atlas_wrapped(atlas, u, v)
+            } else {
+                sample_atlas(atlas, u, v)
+            };
             z_buffer[index] = depth;
         }
     }
@@ -1040,6 +1158,14 @@ fn edge(a: PreviewVertex, b: PreviewVertex, c: PreviewVertex) -> f32 {
 fn sample_atlas(atlas: &ColorImage, u: f32, v: f32) -> Color32 {
     let x = (u.round() as i32).clamp(0, atlas.size[0] as i32 - 1) as usize;
     let y = (v.round() as i32).clamp(0, atlas.size[1] as i32 - 1) as usize;
+    atlas.pixels[y * atlas.size[0] + x]
+}
+
+/// Tiled sampling for material-override atlases: byte-space model UVs
+/// repeat a smaller generated texture (the PS1 texture-window look).
+fn sample_atlas_wrapped(atlas: &ColorImage, u: f32, v: f32) -> Color32 {
+    let x = (u.round() as i32).rem_euclid(atlas.size[0].max(1) as i32) as usize;
+    let y = (v.round() as i32).rem_euclid(atlas.size[1].max(1) as i32) as usize;
     atlas.pixels[y * atlas.size[0] + x]
 }
 
@@ -1155,6 +1281,184 @@ fn draw_joint_combat_capsule(
         let b = joint_local_point(joint, add_i32x3(capsule.end, offset));
         draw_projected_world_line(image, camera, projection, a, b, line);
     }
+}
+
+/// Rasterise an equipped weapon riding a socket into the preview,
+/// sharing the character's z-buffer so occlusion matches Play.
+///
+/// The placement math is the runtime's equipment composition verbatim:
+/// socket pose = unscaled joint basis x socket Euler, weapon rotation =
+/// socket rotation x grip inverse, and the origin backs the scaled grip
+/// offset out of the socket origin. The weapon renders at its bind
+/// pose (cooked static props ship a 1-frame identity `bind_pose`, the
+/// same frame the runtime's clip sampling lands on).
+#[allow(clippy::too_many_arguments)]
+fn draw_equipped_weapon_overlay(
+    image: &mut ColorImage,
+    z_buffer: &mut [f32],
+    camera: WorldCamera,
+    weapon: &PreviewEquippedWeapon<'_>,
+    animation: &Animation<'_>,
+    frame_q12: u32,
+    root_delta: Option<[i32; 3]>,
+    pose_offset: [i32; 3],
+    instance_rotation: Mat3I16,
+    joint_transforms: &[JointWorldTransform],
+) -> Option<()> {
+    let weapon_model = Model::from_bytes(weapon.model_bytes).ok()?;
+    let joint = joint_transforms.get(weapon.socket_joint as usize).copied()?;
+    let mut pose = animation.pose_looped_q12(frame_q12, weapon.socket_joint)?;
+    if let Some(delta) = root_delta {
+        apply_root_motion_delta(&mut pose, delta);
+    }
+    apply_pose_offset(&mut pose, pose_offset);
+
+    let socket_origin = joint_local_point(joint, weapon.socket_translation);
+    let socket_rotation =
+        compute_joint_world_basis(pose, instance_rotation).mul(&euler_rotation_q12([
+            weapon.socket_rotation_q12[0] as u16,
+            weapon.socket_rotation_q12[1] as u16,
+            weapon.socket_rotation_q12[2] as u16,
+        ]));
+    let weapon_rotation =
+        socket_rotation.mul(&euler_rotation_q12_inverse(weapon.grip_rotation_q12));
+    let weapon_local_to_world = LocalToWorldScale::from_q12(weapon_model.local_to_world_q12());
+    let grip = [
+        weapon_local_to_world.apply(weapon.grip_translation[0]),
+        weapon_local_to_world.apply(weapon.grip_translation[1]),
+        weapon_local_to_world.apply(weapon.grip_translation[2]),
+    ];
+    let grip_world = basis_offset_point(WorldVertex::ZERO, &weapon_rotation, grip);
+    let weapon_origin = WorldVertex::new(
+        socket_origin.x.saturating_sub(grip_world.x),
+        socket_origin.y.saturating_sub(grip_world.y),
+        socket_origin.z.saturating_sub(grip_world.z),
+    );
+    let identity_pose = JointPose {
+        matrix: [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]],
+        translation: Vec3I32::new(0, 0, 0),
+    };
+    let weapon_joint = compute_joint_world_transform(
+        identity_pose,
+        weapon_rotation,
+        weapon_local_to_world,
+        weapon_origin,
+    );
+
+    let weapon_transforms = [weapon_joint];
+    let mut projected = vec![None; weapon_model.vertex_count() as usize];
+    for (vertex_index, slot) in projected.iter_mut().enumerate() {
+        let Some(vertex) = weapon_model.vertex(vertex_index as u16) else {
+            continue;
+        };
+        *slot = project_import_model_vertex(vertex, weapon_joint, &weapon_transforms, camera);
+    }
+    let double_sided = weapon_model.double_sided();
+    for part_index in 0..weapon_model.part_count() {
+        let Some(part) = weapon_model.part(part_index) else {
+            continue;
+        };
+        let first_face = part.first_face();
+        let last_face = first_face.saturating_add(part.face_count());
+        for face_index in first_face..last_face {
+            let Some(face) = weapon_model.face(face_index) else {
+                continue;
+            };
+            let [a, b, c] = face.corners;
+            let Some(pa) = projected.get(a.vertex_index as usize).and_then(|v| *v) else {
+                continue;
+            };
+            let Some(pb) = projected.get(b.vertex_index as usize).and_then(|v| *v) else {
+                continue;
+            };
+            let Some(pc) = projected.get(c.vertex_index as usize).and_then(|v| *v) else {
+                continue;
+            };
+            raster_textured_triangle(
+                image,
+                z_buffer,
+                weapon.atlas,
+                [
+                    PreviewVertex::from_projected(pa, a.uv),
+                    PreviewVertex::from_projected(pb, b.uv),
+                    PreviewVertex::from_projected(pc, c.uv),
+                ],
+                double_sided,
+                false,
+            );
+        }
+    }
+    Some(())
+}
+
+/// Inverse of [`euler_rotation_q12`]: negate each angle and compose in
+/// the opposite order, matching the runtime's grip-inverse helper.
+fn euler_rotation_q12_inverse(rotation_q12: [i16; 3]) -> Mat3I16 {
+    let inv_x = (-(rotation_q12[0] as i32)) as u16;
+    let inv_y = (-(rotation_q12[1] as i32)) as u16;
+    let inv_z = (-(rotation_q12[2] as i32)) as u16;
+    let rx = Mat3I16::rotate_x(Angle::from_q12(inv_x).rotate_y_arg());
+    let ry = Mat3I16::rotate_y(Angle::from_q12(inv_y).rotate_y_arg());
+    let rz = Mat3I16::rotate_z(Angle::from_q12(inv_z).rotate_y_arg());
+    rx.mul(&ry).mul(&rz)
+}
+
+/// Draw a socket as a bone-local axis triad: X red, Y green, Z blue
+/// whiskers from the socket origin, plus a short white origin cross on
+/// the selected socket. `basis` is the composed orthonormal socket
+/// orientation; the origin rides the SCALED joint matrix (same offset
+/// convention as the runtime and the combat capsules).
+fn draw_socket_marker(
+    image: &mut ColorImage,
+    camera: WorldCamera,
+    projection: WorldProjection,
+    joint: JointWorldTransform,
+    basis: &Mat3I16,
+    socket: &PreviewSocket,
+    axis_length: i32,
+) {
+    let origin = joint_local_point(joint, socket.translation);
+    let dim = |color: Color32| {
+        if socket.selected {
+            color
+        } else {
+            Color32::from_rgb(color.r() / 2, color.g() / 2, color.b() / 2)
+        }
+    };
+    let axes = [
+        ([axis_length, 0, 0], dim(Color32::from_rgb(240, 92, 92))),
+        ([0, axis_length, 0], dim(Color32::from_rgb(110, 226, 110))),
+        ([0, 0, axis_length], dim(Color32::from_rgb(116, 160, 255))),
+    ];
+    for (local, color) in axes {
+        let end = basis_offset_point(origin, basis, local);
+        draw_projected_world_line(image, camera, projection, origin, end, color);
+    }
+    if socket.selected {
+        let arm = (axis_length / 4).max(24);
+        for local in [[arm, 0, 0], [0, arm, 0], [0, 0, arm]] {
+            let negative = [-local[0], -local[1], -local[2]];
+            let a = basis_offset_point(origin, basis, negative);
+            let b = basis_offset_point(origin, basis, local);
+            draw_projected_world_line(image, camera, projection, a, b, Color32::WHITE);
+        }
+    }
+}
+
+/// Offset a world point along an orthonormal Q12 basis.
+fn basis_offset_point(origin: WorldVertex, basis: &Mat3I16, local: [i32; 3]) -> WorldVertex {
+    let rotate = |row: [i16; 3]| {
+        i32::from(row[0])
+            .saturating_mul(local[0])
+            .saturating_add(i32::from(row[1]).saturating_mul(local[1]))
+            .saturating_add(i32::from(row[2]).saturating_mul(local[2]))
+            >> 12
+    };
+    WorldVertex::new(
+        origin.x.saturating_add(rotate(basis.m[0])),
+        origin.y.saturating_add(rotate(basis.m[1])),
+        origin.z.saturating_add(rotate(basis.m[2])),
+    )
 }
 
 fn add_i32x3(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
@@ -1364,6 +1668,230 @@ mod tests {
     }
 
     #[test]
+    fn socket_markers_draw_over_the_wraith_preview() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let model = std::fs::read(
+            std::env::var("DUMP_MODEL").unwrap_or_else(|_| {
+                root.join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl")
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+        )
+        .expect("tracked model fixture");
+        let clip = std::fs::read(std::env::var("DUMP_CLIP").unwrap_or_else(|_| {
+            root.join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim")
+                .to_string_lossy()
+                .into_owned()
+        }))
+        .expect("tracked animation fixture");
+        let atlas = ColorImage {
+            size: [128, 128],
+            pixels: vec![Color32::from_rgb(210, 90, 70); 128 * 128],
+        };
+        let options = ImportPreviewOptions {
+            world_height: 1024,
+            visual_scale_q8: MODEL_SCALE_ONE_Q8,
+            visual_yaw_q12: 0,
+            collision_radius: 192,
+            time_seconds: 0.0,
+            yaw_q12: 340,
+            pitch_q12: 350,
+            radius: 1536,
+            focus_on_animated_bounds: true,
+            preview_in_place: true,
+            pose_offset: [0, 0, 0],
+            show_animation_root: false,
+            show_collision_guides: false,
+            show_bones: false,
+        };
+        let render = |sockets: &[PreviewSocket]| {
+            render_import_model_preview_with_combat_capsules_at_size(
+                &model,
+                &clip,
+                &atlas,
+                options,
+                yaw_rotation_matrix(0),
+                [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+                &[],
+                sockets,
+                None,
+                None,
+                None,
+            )
+            .expect("preview renders")
+            .image
+        };
+        let socket_joint = std::env::var("DUMP_SOCKET_JOINT")
+            .ok()
+            .and_then(|joint| joint.parse().ok())
+            .unwrap_or(0u16);
+        let plain = render(&[]);
+        let marked = render(&[PreviewSocket {
+            joint: socket_joint,
+            translation: [0, 0, 0],
+            rotation_q12: [0, 0, 0],
+            selected: true,
+        }]);
+        assert_ne!(
+            plain.pixels, marked.pixels,
+            "the socket triad must paint over the preview"
+        );
+        // Optional visual-inspection dump, same convention as
+        // dump_preview_for_inspection.
+        if let Ok(path) = std::env::var("DUMP_SOCKET_PREVIEW") {
+            let mut out =
+                format!("P6\n{} {}\n255\n", marked.size[0], marked.size[1]).into_bytes();
+            for pixel in &marked.pixels {
+                out.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
+            }
+            std::fs::write(path, out).expect("write socket preview ppm");
+        }
+    }
+
+    fn env_vec3(name: &str) -> Option<[i32; 3]> {
+        let value = std::env::var(name).ok()?;
+        let parts: Vec<i32> = value
+            .split(',')
+            .filter_map(|part| part.trim().parse().ok())
+            .collect();
+        (parts.len() == 3).then(|| [parts[0], parts[1], parts[2]])
+    }
+
+    #[test]
+    fn equipped_weapon_overlay_rides_the_socket() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let model = std::fs::read(std::env::var("DUMP_MODEL").unwrap_or_else(|_| {
+            root.join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl")
+                .to_string_lossy()
+                .into_owned()
+        }))
+        .expect("tracked model fixture");
+        let clip = std::fs::read(std::env::var("DUMP_CLIP").unwrap_or_else(|_| {
+            root.join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim")
+                .to_string_lossy()
+                .into_owned()
+        }))
+        .expect("tracked animation fixture");
+        let atlas = ColorImage {
+            size: [128, 128],
+            pixels: vec![Color32::from_rgb(210, 90, 70); 128 * 128],
+        };
+        // Default: the wraith doubles as its own weapon; env overrides
+        // point at a real weapon model + atlas for visual inspection.
+        let weapon_bytes = std::env::var("DUMP_WEAPON_MODEL")
+            .ok()
+            .map(|path| std::fs::read(path).expect("weapon model"));
+        let weapon_model: &[u8] = weapon_bytes.as_deref().unwrap_or(&model);
+        let weapon_atlas = std::env::var("DUMP_WEAPON_ATLAS")
+            .ok()
+            .and_then(|path| {
+                crate::model_animation_viewer::decode_psxt_image(
+                    &std::fs::read(path).expect("weapon atlas"),
+                )
+            })
+            .unwrap_or_else(|| ColorImage {
+                size: [8, 8],
+                pixels: vec![Color32::from_rgb(150, 155, 170); 64],
+            });
+        // Optional character material override so inspection dumps show
+        // the real in-game skin (e.g. the generated crystal hologram)
+        // instead of the flat placeholder atlas.
+        let material_atlas = std::env::var("DUMP_OVERRIDE_ATLAS").ok().and_then(|path| {
+            crate::model_animation_viewer::decode_psxt_image(
+                &std::fs::read(path).expect("override atlas"),
+            )
+        });
+        let material_layer = material_atlas.as_ref().map(|atlas| PreviewMaterialLayer {
+            atlas,
+            motion: psx_level::LevelMaterialUvMotion::default(),
+        });
+        let options = ImportPreviewOptions {
+            world_height: 1024,
+            visual_scale_q8: MODEL_SCALE_ONE_Q8,
+            visual_yaw_q12: 0,
+            collision_radius: 192,
+            time_seconds: 0.0,
+            yaw_q12: std::env::var("DUMP_YAW")
+                .ok()
+                .and_then(|yaw| yaw.parse().ok())
+                .unwrap_or(340),
+            pitch_q12: 350,
+            radius: 1536,
+            focus_on_animated_bounds: true,
+            preview_in_place: true,
+            pose_offset: [0, 0, 0],
+            show_animation_root: false,
+            show_collision_guides: false,
+            show_bones: false,
+        };
+        let render = |weapon: Option<&PreviewEquippedWeapon<'_>>| {
+            render_import_model_preview_with_combat_capsules_at_size(
+                &model,
+                &clip,
+                &atlas,
+                options,
+                yaw_rotation_matrix(0),
+                [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+                &[],
+                &[],
+                weapon,
+                material_layer.as_ref(),
+                None,
+            )
+            .expect("preview renders")
+            .image
+        };
+        let socket_joint = std::env::var("DUMP_SOCKET_JOINT")
+            .ok()
+            .and_then(|joint| joint.parse().ok())
+            .unwrap_or(0u16);
+        let socket_translation = env_vec3("DUMP_SOCKET_T").unwrap_or([0, 0, 0]);
+        let socket_rotation = env_vec3("DUMP_SOCKET_R")
+            .map(|r| [r[0] as i16, r[1] as i16, r[2] as i16])
+            .unwrap_or([0, 0, 0]);
+
+        let bare = render(None);
+        let with_weapon = render(Some(&PreviewEquippedWeapon {
+            model_bytes: weapon_model,
+            atlas: &weapon_atlas,
+            socket_joint,
+            socket_translation,
+            socket_rotation_q12: socket_rotation,
+            grip_translation: [0, 0, 0],
+            grip_rotation_q12: [0, 0, 0],
+        }));
+        assert_ne!(
+            bare.pixels, with_weapon.pixels,
+            "the equipped weapon must draw over the preview"
+        );
+        let moved = render(Some(&PreviewEquippedWeapon {
+            model_bytes: weapon_model,
+            atlas: &weapon_atlas,
+            socket_joint,
+            socket_translation: [
+                socket_translation[0].saturating_add(12_000),
+                socket_translation[1],
+                socket_translation[2],
+            ],
+            socket_rotation_q12: socket_rotation,
+            grip_translation: [0, 0, 0],
+            grip_rotation_q12: [0, 0, 0],
+        }));
+        assert_ne!(
+            with_weapon.pixels, moved.pixels,
+            "the weapon must track the socket offset"
+        );
+        if let Ok(path) = std::env::var("DUMP_WEAPON_PREVIEW") {
+            let mut out =
+                format!("P6\n{} {}\n255\n", with_weapon.size[0], with_weapon.size[1]).into_bytes();
+            for pixel in &with_weapon.pixels {
+                out.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
+            }
+            std::fs::write(path, out).expect("write weapon preview ppm");
+        }
+    }
+
+    #[test]
     fn tracked_wraith_model_renders_nonblank_preview() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let model =
@@ -1490,6 +2018,9 @@ mod tests {
                 color: Color32::CYAN,
                 selected: true,
             }],
+            &[],
+            None,
+            None,
             None,
         )
         .expect("rig fixture should render");

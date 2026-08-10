@@ -1,8 +1,9 @@
 use super::*;
 use psx_engine::{
-    apply_model_pose_translation, compute_joint_world_transform, JointWorldTransform,
+    apply_model_pose_translation, compute_joint_world_basis, compute_joint_world_transform,
+    JointWorldTransform,
 };
-use psx_level::{equipment_flags, WeaponHitShapeRecord};
+use psx_level::equipment_flags;
 
 #[derive(Copy, Clone)]
 struct AttachmentPose {
@@ -21,7 +22,6 @@ pub(super) fn draw_player_equipment<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -74,7 +74,6 @@ pub(super) fn draw_player_equipment<
         reference_anchor,
         character.action_in_place_override(anim_action),
     );
-    let character_frame = (character_phase >> 12) as u16;
     let character_model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let character_origin = visual_model_origin(
         x,
@@ -90,10 +89,12 @@ pub(super) fn draw_player_equipment<
 
     let mut drawn = 0usize;
     for equipment in tables.equipment {
-        if equipment.room != current_room
-            || equipment.flags & equipment_flags::PLAYER == 0
-            || drawn >= knobs.max_equipment_draws
-        {
+        // Player equipment follows the player across rooms, matching the
+        // room-agnostic melee spec (combat::player_melee_spec): the
+        // record's `room` field is only the spawn room, so filtering on
+        // it made the weapon vanish outside that room while its damage
+        // kept working.
+        if equipment.flags & equipment_flags::PLAYER == 0 || drawn >= knobs.max_equipment_draws {
             continue;
         }
         let Some(weapon) = tables.weapons.get(equipment.weapon.to_usize()) else {
@@ -119,73 +120,234 @@ pub(super) fn draw_player_equipment<
         ) else {
             continue;
         };
-        let weapon_rotation = socket_pose
-            .rotation
-            .mul(&euler_q12_rotation_inverse(weapon.grip_rotation_q12));
-
-        if let Some(model_index) = weapon.model {
-            let Some(weapon_model) = models.get(model_index.to_usize()).copied().flatten() else {
-                continue;
-            };
-            let grip = scaled_offset(weapon_model.local_to_world, weapon.grip_translation);
-            let grip_world = rotate_offset_q12(&weapon_rotation, grip);
-            let origin = WorldVertex::new(
-                socket_pose.origin.x.saturating_sub(grip_world[0]),
-                socket_pose.origin.y.saturating_sub(grip_world[1]),
-                socket_pose.origin.z.saturating_sub(grip_world[2]),
-            );
-            if let Some(anim) = weapon_model.clip(clips, weapon_model.default_clip) {
-                let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
-                let material = lighting.shade_model_material(origin, weapon_model.material);
-                let model_options = options
-                    .with_depth_policy(DepthPolicy::Average)
-                    .with_cull_mode(CullMode::Back)
-                    .with_material_layer(material)
-                    .with_textured_triangle_splitting(true)
-                    .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
-                let faces = runtime_model_faces(weapon_model, model_faces);
-                let stats = submit_runtime_model_predecoded(
-                    world,
-                    triangles,
-                    weapon_model,
-                    anim,
-                    phase,
-                    None,
-                    *camera,
-                    origin,
-                    weapon_rotation,
-                    weapon_model.local_to_world,
-                    ModelPoseTranslation::ZERO,
-                    material,
-                    None,
-                    model_options,
-                    faces,
-                    model_parts,
-                    model_vertices,
-                    PROFILE,
-                    scratch,
-                );
-                accumulate_model_stats(&mut out.stats, stats);
-                if stats.primitive_overflow || stats.command_overflow {
-                    out.draws = drawn as u16;
-                    return out;
-                }
-                drawn += 1;
+        if let Some(stats) = submit_equipped_weapon::<
+            MAX_RUNTIME_MODELS,
+            MAX_RUNTIME_MODEL_CLIPS,
+            MODEL_VERTEX_CAP,
+            JOINT_CAP,
+            OT_DEPTH,
+            PROFILE,
+        >(
+            weapon,
+            socket_pose,
+            knobs,
+            scratch,
+            models,
+            model_faces,
+            model_parts,
+            model_vertices,
+            clips,
+            elapsed_tick,
+            video_hz,
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
+        ) {
+            accumulate_model_stats(&mut out.stats, stats);
+            if stats.primitive_overflow || stats.command_overflow {
                 out.draws = drawn as u16;
+                return out;
             }
-        };
+            drawn += 1;
+            out.draws = drawn as u16;
+        }
+    }
+    out
+}
 
-        let (active, hits) = evaluate_weapon_hitboxes(
+/// Place and submit one weapon model on a composed socket pose,
+/// shared by the player and instance equipment passes. `None` when
+/// the weapon has no model, the model is not loaded, or it has no
+/// clip (cooked static props always ship a bind_pose).
+#[allow(clippy::too_many_arguments)]
+fn submit_equipped_weapon<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    weapon: &LevelWeaponRecord,
+    socket_pose: AttachmentPose,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> Option<TexturedModelRenderStats> {
+    let weapon_rotation = socket_pose
+        .rotation
+        .mul(&euler_q12_rotation_inverse(weapon.grip_rotation_q12));
+    let weapon_model = models.get(weapon.model?.to_usize()).copied().flatten()?;
+    let grip = scaled_offset(weapon_model.local_to_world, weapon.grip_translation);
+    let grip_world = rotate_offset_q12(&weapon_rotation, grip);
+    let origin = WorldVertex::new(
+        socket_pose.origin.x.saturating_sub(grip_world[0]),
+        socket_pose.origin.y.saturating_sub(grip_world[1]),
+        socket_pose.origin.z.saturating_sub(grip_world[2]),
+    );
+    let anim = weapon_model.clip(clips, weapon_model.default_clip)?;
+    let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
+    let material = lighting.shade_model_material(origin, weapon_model.material);
+    let model_options = options
+        .with_depth_policy(DepthPolicy::Average)
+        .with_cull_mode(CullMode::Back)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
+    let faces = runtime_model_faces(weapon_model, model_faces);
+    Some(submit_runtime_model_predecoded(
+        world,
+        triangles,
+        weapon_model,
+        anim,
+        phase,
+        None,
+        *camera,
+        origin,
+        weapon_rotation,
+        weapon_model.local_to_world,
+        ModelPoseTranslation::ZERO,
+        material,
+        None,
+        model_options,
+        faces,
+        model_parts,
+        model_vertices,
+        PROFILE,
+        scratch,
+    ))
+}
+
+/// Draw weapons riding NON-player equipment records: each record bound
+/// to a model instance composes its socket from the instance's LIVE
+/// pose (position, yaw, state clip, phase, via
+/// [`super::instances::instance_pose_context`]), so a wandering
+/// enemy's sword follows its hand. Instances are room-resident, so
+/// unlike the player pass this one is room-gated and runs inside the
+/// per-room draw.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_instance_equipment<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    current_room: RoomIndex,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    pose_overrides: &[super::instances::ModelInstancePoseOverride],
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    let mut out = EquipmentDrawStats::default();
+    let mut drawn = 0usize;
+    for equipment in tables.equipment {
+        if equipment.flags & equipment_flags::PLAYER != 0
+            || equipment.model_instance == psx_level::EquipmentRecord::NO_INSTANCE
+            || equipment.room != current_room
+            || drawn >= knobs.max_equipment_draws
+        {
+            continue;
+        }
+        let instance_index = equipment.model_instance as usize;
+        let Some(inst) = tables.model_instances.get(instance_index) else {
+            continue;
+        };
+        let Some(context) = super::instances::instance_pose_context(
             tables,
-            current_room,
-            weapon.hitbox_first.to_usize(),
-            weapon.hitbox_count,
-            character_frame,
-            socket_pose.origin,
-            socket_pose.rotation,
-        );
-        out.active_hitboxes = out.active_hitboxes.saturating_add(active);
-        out.target_hits = out.target_hits.saturating_add(hits);
+            models,
+            clips,
+            pose_overrides,
+            instance_index,
+            inst,
+            elapsed_tick,
+            video_hz,
+        ) else {
+            continue;
+        };
+        let Some(weapon) = tables.weapons.get(equipment.weapon.to_usize()) else {
+            continue;
+        };
+        let Some(socket) = find_model_socket(tables, context.model, equipment.character_socket)
+            .or_else(|| find_model_socket(tables, context.model, weapon.default_character_socket))
+        else {
+            continue;
+        };
+        // Instances render without crossfades, so the socket samples
+        // the same single clip the body draws with.
+        let Some(socket_pose) = attachment_socket_pose(
+            context.model,
+            context.anim,
+            context.phase,
+            None,
+            context.origin,
+            context.rotation,
+            context.local_to_world,
+            context.pose_translation,
+            socket,
+        ) else {
+            continue;
+        };
+        let Some(stats) = submit_equipped_weapon::<
+            MAX_RUNTIME_MODELS,
+            MAX_RUNTIME_MODEL_CLIPS,
+            MODEL_VERTEX_CAP,
+            JOINT_CAP,
+            OT_DEPTH,
+            PROFILE,
+        >(
+            weapon,
+            socket_pose,
+            knobs,
+            scratch,
+            models,
+            model_faces,
+            model_parts,
+            model_vertices,
+            clips,
+            elapsed_tick,
+            video_hz,
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
+        ) else {
+            continue;
+        };
+        accumulate_model_stats(&mut out.stats, stats);
+        if stats.primitive_overflow || stats.command_overflow {
+            out.draws = drawn as u16;
+            return out;
+        }
+        drawn += 1;
+        out.draws = drawn as u16;
     }
     out
 }
@@ -223,8 +385,10 @@ fn attachment_socket_pose(
     };
     let pose = apply_model_pose_translation(raw_pose, pose_translation);
     let joint = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
+    let basis = compute_joint_world_basis(pose, instance_rotation);
     Some(compose_socket_pose(
         joint,
+        basis,
         socket.translation,
         socket.rotation_q12,
     ))
@@ -232,10 +396,16 @@ fn attachment_socket_pose(
 
 fn compose_socket_pose(
     joint: JointWorldTransform,
+    basis: Mat3I16,
     translation: [i32; 3],
     rotation_q12: [i16; 3],
 ) -> AttachmentPose {
+    // Socket offsets are model-local units: the scaled joint matrix
+    // takes them to world units (same convention as combat capsules).
     let offset = rotate_offset_q12(&joint.rotation, translation);
+    // Orientation uses the unscaled basis: the attached model applies
+    // its own local-to-world, so a scaled basis would shrink it to
+    // sub-pixel size (every face then culls as zero-area).
     let local_rotation = euler_q12_rotation(rotation_q12);
     AttachmentPose {
         origin: WorldVertex::new(
@@ -243,77 +413,8 @@ fn compose_socket_pose(
             joint.translation.y.saturating_add(offset[1]),
             joint.translation.z.saturating_add(offset[2]),
         ),
-        rotation: joint.rotation.mul(&local_rotation),
+        rotation: basis.mul(&local_rotation),
     }
-}
-
-fn evaluate_weapon_hitboxes(
-    tables: ModelTables,
-    current_room: RoomIndex,
-    first: usize,
-    count: u16,
-    frame: u16,
-    origin: WorldVertex,
-    rotation: Mat3I16,
-) -> (u16, u16) {
-    let mut active = 0u16;
-    let mut hits = 0u16;
-    let Some(hitboxes) = tables
-        .weapon_hitboxes
-        .get(first..first.saturating_add(count as usize))
-    else {
-        return (0, 0);
-    };
-    for hitbox in hitboxes {
-        if frame < hitbox.active_start_frame || frame > hitbox.active_end_frame {
-            continue;
-        }
-        active = active.saturating_add(1);
-        for entity in tables.entities {
-            if entity.room != current_room {
-                continue;
-            }
-            if weapon_hit_shape_hits_point(hitbox.shape, origin, rotation, entity.x, entity.z) {
-                hits = hits.saturating_add(1);
-            }
-        }
-    }
-    (active, hits)
-}
-
-fn weapon_hit_shape_hits_point(
-    shape: WeaponHitShapeRecord,
-    origin: WorldVertex,
-    rotation: Mat3I16,
-    px: i32,
-    pz: i32,
-) -> bool {
-    match shape {
-        WeaponHitShapeRecord::Box {
-            center,
-            half_extents,
-        } => {
-            let c = transform_local_point(origin, rotation, center);
-            let radius = half_extents[0].max(half_extents[2]) as i32;
-            distance_xz_sq(RoomPoint::new(px, 0, pz), RoomPoint::new(c.x, 0, c.z))
-                <= square_i32_saturating(radius)
-        }
-        WeaponHitShapeRecord::Capsule { start, end, radius } => {
-            let a = transform_local_point(origin, rotation, start);
-            let b = transform_local_point(origin, rotation, end);
-            point_segment_xz_distance_sq(px, pz, a.x, a.z, b.x, b.z)
-                <= square_i32_saturating(radius as i32)
-        }
-    }
-}
-
-fn transform_local_point(origin: WorldVertex, rotation: Mat3I16, point: [i32; 3]) -> WorldVertex {
-    let offset = rotate_offset_q12(&rotation, point);
-    WorldVertex::new(
-        origin.x.saturating_add(offset[0]),
-        origin.y.saturating_add(offset[1]),
-        origin.z.saturating_add(offset[2]),
-    )
 }
 
 fn scaled_offset(scale: LocalToWorldScale, offset: [i32; 3]) -> [i32; 3] {
@@ -332,23 +433,4 @@ fn euler_q12_rotation_inverse(rotation_q12: [i16; 3]) -> Mat3I16 {
     let ry = Mat3I16::rotate_y(Angle::from_q12(inv_y).rotate_y_arg());
     let rz = Mat3I16::rotate_z(Angle::from_q12(inv_z).rotate_y_arg());
     rx.mul(&ry).mul(&rz)
-}
-
-fn point_segment_xz_distance_sq(px: i32, pz: i32, ax: i32, az: i32, bx: i32, bz: i32) -> i32 {
-    let abx = bx.saturating_sub(ax);
-    let abz = bz.saturating_sub(az);
-    let apx = px.saturating_sub(ax);
-    let apz = pz.saturating_sub(az);
-    let denom = square_i32_saturating(abx).saturating_add(square_i32_saturating(abz));
-    if denom <= 0 {
-        return square_i32_saturating(apx).saturating_add(square_i32_saturating(apz));
-    }
-    let dot = apx
-        .saturating_mul(abx)
-        .saturating_add(apz.saturating_mul(abz));
-    let t_q8 = ratio_q8_i32(dot.clamp(0, denom), denom);
-    let cx = ax.saturating_add((abx.saturating_mul(t_q8)) >> 8);
-    let cz = az.saturating_add((abz.saturating_mul(t_q8)) >> 8);
-    square_i32_saturating(px.saturating_sub(cx))
-        .saturating_add(square_i32_saturating(pz.saturating_sub(cz)))
 }

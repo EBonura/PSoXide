@@ -576,6 +576,12 @@ pub struct RigidModelPackage {
     /// Cooked `.psxt` base-colour texture. Sources with no texture
     /// receive a solid atlas from the first material base colour.
     pub texture: Option<Vec<u8>>,
+    /// Source bone names in cooked-joint order (post-collapse). The
+    /// cooked `.psxmdl` stores only indices; these survive into the
+    /// editor's SkeletonResource so joint pickers can say
+    /// "9 · RightHand" instead of "Joint 9". Unnamed source nodes
+    /// contribute empty strings.
+    pub joint_names: Vec<String>,
     /// Counts and byte sizes useful for build logs and tests.
     pub report: RigidModelReport,
 }
@@ -1121,6 +1127,7 @@ fn finish_static_rigid_model_document(
         model,
         clips,
         texture,
+        joint_names: vec!["root".to_string()],
         report,
     })
 }
@@ -1199,10 +1206,25 @@ fn finish_rigid_model_document(
         texture_bytes: texture.as_ref().map_or(0, Vec::len),
     };
 
+    let gltf_node_names: Vec<Option<String>> = document
+        .nodes()
+        .map(|node| node.name().map(str::to_string))
+        .collect();
+    let joint_names = joints
+        .iter()
+        .map(|&node| {
+            gltf_node_names
+                .get(node)
+                .cloned()
+                .flatten()
+                .unwrap_or_default()
+        })
+        .collect();
     Ok(RigidModelPackage {
         model,
         clips,
         texture,
+        joint_names,
         report,
     })
 }
