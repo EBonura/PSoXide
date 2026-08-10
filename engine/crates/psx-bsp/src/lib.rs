@@ -11,7 +11,10 @@
 // then this allow goes away.
 #![allow(missing_docs)]
 
+extern crate alloc;
+
 pub mod collision;
+pub mod resident;
 
 use core::fmt;
 use core::marker::PhantomData;
