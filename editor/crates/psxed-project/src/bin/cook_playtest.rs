@@ -17,11 +17,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use psxed_project::{
-    brush_playtest::cook_brush_playtest_to_dir,
     default_project_dir,
     playtest::{
         build_package, cook_to_dir, default_generated_dir, playtest_performance_envelope,
-        streamed_room_chunk_memory_report,
+        streamed_room_chunk_memory_report, PlaytestWorldGeometry,
     },
     NodeKind, ProjectDocument,
 };
@@ -55,25 +54,6 @@ fn main() -> ExitCode {
     };
 
     let dir = default_generated_dir();
-    if !project.active_scene().brushes.is_empty() {
-        return match cook_brush_playtest_to_dir(&project, &project_root, &dir) {
-            Ok(compiled) => {
-                println!(
-                    "[cook-playtest] PXBSP: {} bytes  Textures: {}  Movers: {}",
-                    compiled.pxbsp.bytes.len(),
-                    compiled.textures.len(),
-                    compiled.movers.len(),
-                );
-                println!("[cook-playtest] wrote -> {}", dir.display());
-                println!("[cook-playtest] Build: make build-editor-playtest");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("[cook-playtest] {error}");
-                ExitCode::from(1)
-            }
-        };
-    }
     match cook_to_dir(&project, &project_root, &dir) {
         Ok(report) => {
             for warn in &report.warnings {
@@ -90,6 +70,13 @@ fn main() -> ExitCode {
             // cook_to_dir) and gives operators a quick read on
             // what landed in generated/.
             if let (Some(package), _) = build_package(&project, &project_root) {
+                if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
+                    println!(
+                        "[cook-playtest] PXBSP: {} bytes  Movers: {}",
+                        world.bytes.len(),
+                        world.movers.len(),
+                    );
+                }
                 let portal_marker_count = project
                     .active_scene()
                     .nodes()

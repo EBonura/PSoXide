@@ -844,7 +844,7 @@ pub(crate) fn push_arch_prop(
 
 pub(crate) fn push_point_light(
     node_name: &str,
-    grid: &crate::WorldGrid,
+    sector_size: i32,
     room_index: u16,
     pos: [i32; 3],
     color: [u8; 3],
@@ -871,7 +871,7 @@ pub(crate) fn push_point_light(
     // Editor radius is in *sector units* -- convert to world
     // units (engine units) at cook time so the runtime record
     // stays in one canonical unit regardless of room sector size.
-    let radius_world = spatial::light_radius_record_units(grid, radius);
+    let radius_world = (radius * sector_size.max(1) as f32).clamp(1.0, u16::MAX as f32) as u16;
     let intensity_q8 = (intensity * 256.0).clamp(0.0, u16::MAX as f32) as u16;
     lights.push(PlaytestLight {
         room: room_index,
@@ -1060,6 +1060,7 @@ pub(crate) fn push_logic_node(
     delay_ticks: u16,
     wait_ticks: i16,
     enabled: bool,
+    door_link_override: Option<u16>,
     names: &mut NameInterner,
     logic: &mut Vec<PlaytestLogic>,
     pending_door_links: &mut Vec<PendingDoorLink>,
@@ -1148,7 +1149,7 @@ pub(crate) fn push_logic_node(
             start_open,
             ..
         } => {
-            if box_prop.trim().is_empty() {
+            if door_link_override.is_none() && box_prop.trim().is_empty() {
                 report.error(format!(
                     "Door '{node_name}' names no Box Prop - the door's link \
                      is the box it opens"
@@ -1159,11 +1160,15 @@ pub(crate) fn push_logic_node(
             if *start_open {
                 record.flags |= psx_level::logic_flags::START_ON;
             }
-            pending_door_links.push(PendingDoorLink {
-                logic_index: logic.len(),
-                box_prop: box_prop.clone(),
-                node_name: node_name.to_string(),
-            });
+            if let Some(link) = door_link_override {
+                record.link = link;
+            } else {
+                pending_door_links.push(PendingDoorLink {
+                    logic_index: logic.len(),
+                    box_prop: box_prop.clone(),
+                    node_name: node_name.to_string(),
+                });
+            }
         }
     }
     logic.push(record);
