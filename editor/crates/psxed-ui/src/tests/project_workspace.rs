@@ -1147,7 +1147,132 @@ fn create_and_open_project_sets_document_name_and_derived_directory() {
         }));
     let saved = ProjectDocument::load_from_path(target.join("project.ron")).unwrap();
     assert_eq!(saved.name, ws.project().name);
+    assert_eq!(
+        saved.bsp_cook_mode,
+        psxed_project::brush_world::BrushWorldCookMode::Draft
+    );
     let _ = std::fs::remove_dir_all(target);
+}
+
+#[test]
+fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
+    let mut workspace =
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let name = format!(
+        "Release BSP Project {} {}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    let _ = std::fs::remove_dir_all(&target);
+
+    workspace
+        .create_and_open_project_with_mode(
+            &name,
+            psxed_project::brush_world::BrushWorldCookMode::Release,
+        )
+        .unwrap();
+
+    assert_eq!(
+        workspace.project().bsp_cook_mode,
+        psxed_project::brush_world::BrushWorldCookMode::Release
+    );
+    assert!(!workspace.project().active_scene().brushes.is_empty());
+    let saved = ProjectDocument::load_from_path(target.join("project.ron")).unwrap();
+    assert_eq!(
+        saved.bsp_cook_mode,
+        psxed_project::brush_world::BrushWorldCookMode::Release
+    );
+    let _ = std::fs::remove_dir_all(target);
+}
+
+#[test]
+fn one_click_play_and_rebuild_recook_the_persisted_bsp_mode() {
+    let fixture_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+    let project = ProjectDocument::load_from_path(fixture_dir.join("project.ron")).unwrap();
+    let output = test_temp_dir("bsp-mode-replay-output");
+    let _ = std::fs::remove_dir_all(&output);
+    let mut workspace = EditorWorkspace::with_project(fixture_dir, project);
+
+    workspace.set_bsp_cook_mode(psxed_project::brush_world::BrushWorldCookMode::Release);
+    workspace.request_play_or_rebuild(EditorPlaytestStatus::Idle);
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Play)
+    );
+    workspace
+        .cook_playtest_to_dir(&output)
+        .expect("Release Play cook");
+    let release =
+        std::fs::read(output.join(psxed_project::brush_playtest::BRUSH_WORLD_FILENAME)).unwrap();
+    assert_eq!(
+        workspace.playtest_budget_report().unwrap().stage,
+        psxed_project::playtest::PlaytestBudgetStage::Cooked
+    );
+    assert_eq!(
+        workspace.playtest_budget_report().unwrap().mode,
+        psxed_project::brush_world::BrushWorldCookMode::Release
+    );
+
+    workspace.set_bsp_cook_mode(psxed_project::brush_world::BrushWorldCookMode::Draft);
+    assert!(
+        workspace.playtest_budget_report().is_none(),
+        "editing the project must discard stale exact cook diagnostics"
+    );
+    workspace.request_play_or_rebuild(EditorPlaytestStatus::Running {
+        input_captured: false,
+    });
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Rebuild)
+    );
+    workspace
+        .cook_playtest_to_dir(&output)
+        .expect("Draft re-Play cook");
+    let draft =
+        std::fs::read(output.join(psxed_project::brush_playtest::BRUSH_WORLD_FILENAME)).unwrap();
+    let manifest =
+        std::fs::read_to_string(output.join(psxed_project::playtest::COOKED_MANIFEST_FILENAME))
+            .unwrap();
+
+    assert_ne!(release, draft, "Rebuild must replace the previous PXBSP");
+    assert!(manifest.contains("pub const BSP_COOK_IS_RELEASE: bool = false;"));
+    assert_eq!(
+        workspace.playtest_budget_report().unwrap().mode,
+        psxed_project::brush_world::BrushWorldCookMode::Draft
+    );
+    let _ = std::fs::remove_dir_all(output);
+}
+
+#[test]
+fn exceeded_budget_target_can_focus_the_offending_brush() {
+    let mut project = ProjectDocument::new("budget target");
+    for index in 0..300 {
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [index * 4, 0, 0],
+                [index * 4 + 2, 2, 2],
+            ));
+    }
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    let budget = psxed_project::playtest::estimate_playtest_budgets(
+        workspace.project(),
+        workspace.project_root(),
+    );
+    let target = budget
+        .first_actionable_issue()
+        .and_then(|issue| issue.target)
+        .expect("actionable packet target");
+
+    assert!(workspace.focus_playtest_validation_target(target));
+    assert_eq!(workspace.selected_brush, Some(299));
+    assert_eq!(workspace.active_tool, ViewTool::Brush);
 }
 
 #[test]

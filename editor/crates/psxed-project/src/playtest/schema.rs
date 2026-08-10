@@ -1828,6 +1828,8 @@ pub struct PlaytestEntity {
 /// instances, and residency.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestPackage {
+    /// Project-authoritative BSP compiler quality used for this package.
+    pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
     /// Static-world provider used by the normal Play lifecycle.
     pub world_geometry: PlaytestWorldGeometry,
     /// Project-relative paths of every source texture the cook actually

@@ -40,10 +40,31 @@ const BIG_HULL: CollisionHullBounds = CollisionHullBounds {
 const WORLD_HULLS: [CollisionHullBounds; 3] = [CollisionHullBounds::POINT, PLAYER_HULL, BIG_HULL];
 const DEFAULT_LIGHT_RADIUS_UNITS: f64 = 1024.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum BrushWorldCookMode {
+    /// Fast fullbright compile for iteration and embedded Play.
+    #[default]
     Draft,
+    /// Bake authored point lighting into the PXBSP vertex stream.
     Release,
+}
+
+impl BrushWorldCookMode {
+    pub const ALL: [Self; 2] = [Self::Draft, Self::Release];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "Draft",
+            Self::Release => "Release",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Draft => "Fast fullbright BSP compile for blockout iteration.",
+            Self::Release => "Bake authored point lighting into BSP vertices.",
+        }
+    }
 }
 
 pub struct BrushWorldCookOptions<'a> {
