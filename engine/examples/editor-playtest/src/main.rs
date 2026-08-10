@@ -108,9 +108,9 @@ mod active_room_streaming;
 mod active_room_visibility;
 mod active_rooms;
 mod box_props;
+mod bsp_runtime;
 #[cfg(feature = "cd-stream-benchmark")]
 use psx_game_runtime::cd_stream;
-mod brush_playtest;
 mod character_runtime;
 mod debug_runtime;
 mod game_logic_runtime;
@@ -136,6 +136,7 @@ mod water_runtime;
 use active_room_cache::*;
 use active_room_streaming::*;
 use box_props::*;
+use bsp_runtime::*;
 use character_runtime::*;
 use debug_runtime::*;
 use game_logic_runtime::*;
@@ -267,6 +268,10 @@ struct Playtest {
     /// when the manifest had at least one room and its bytes
     /// parsed.
     room: Option<RuntimeRoom<'static>>,
+    /// Explicit resident BSP backend selected by the cooked manifest. `None`
+    /// means the project selected the legacy grid world; invalid BSP data
+    /// fails initialization and never reaches this fallback state.
+    bsp: Option<BspRuntime>,
     /// Active collision room. Streamed builds use a compact
     /// collision-only payload here instead of a full `.psxw`.
     current_collision_room: Option<RuntimeCollisionRoom<'static>>,
@@ -523,6 +528,7 @@ impl Playtest {
         // room/model/font/material `Option`s niche into a payload
         // bool/enum byte, making their `None` a NON-zero byte).
         addr_of_mut!((*scene).room).write(None);
+        addr_of_mut!((*scene).bsp).write(None);
         addr_of_mut!((*scene).current_collision_room).write(None);
         addr_of_mut!((*scene).character).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
@@ -656,6 +662,9 @@ impl Playtest {
             if upload_completed || self.room_materials_unresolved {
                 self.room_materials_unresolved = self.refresh_active_room_materials();
             }
+            if let Some(bsp) = self.bsp.as_mut() {
+                let _ = bsp.refresh_materials();
+            }
             self.reconcile_active_room_window();
         }
     }
@@ -663,7 +672,7 @@ impl Playtest {
     fn initial_world_ready(&mut self) -> bool {
         #[cfg(not(feature = "cd-stream-bench"))]
         {
-            true
+            self.bsp.as_ref().is_none_or(BspRuntime::materials_ready)
         }
         #[cfg(feature = "cd-stream-bench")]
         {
@@ -705,8 +714,9 @@ impl Playtest {
                 ]);
                 return false;
             }
+            let bsp_ready = self.bsp.as_ref().is_none_or(BspRuntime::materials_ready);
             if !self.chunked_level() {
-                return true;
+                return bsp_ready;
             }
             let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
                 return true;
@@ -718,6 +728,7 @@ impl Playtest {
                 ("portal_rooms_active", self.portal_visible_rooms_are_active(record)),
                 ("ring_resident", self.initial_stream_ring_resident()),
                 ("ring_textures", textures_ready),
+                ("bsp_textures", bsp_ready),
                 ("vram_uploads_idle", self.streaming_jobs.vram_uploads_idle()),
                 ("stream_quiet", !streamed_room_stream_active()),
             ];
@@ -983,9 +994,6 @@ static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zer
 
 #[no_mangle]
 fn main() -> ! {
-    if generated::PLAYTEST_USES_PXBSP {
-        brush_playtest::run();
-    }
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
     // any other use (see `SCENE` and `Playtest::init_zeroed`).
     // SAFETY: single-threaded boot path; the raw stamping happens before
