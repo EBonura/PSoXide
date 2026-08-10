@@ -85,6 +85,7 @@ pub(crate) struct ModelAnimationViewerState {
     show_attachment_sockets: bool,
     selected_combat_capsule: usize,
     selected_attachment_socket: usize,
+    preview_weapon: Option<ResourceId>,
     selected_pose_joint: u16,
     selected_action: CharacterAnimationAction,
     capsule_edit_tool: CapsuleEditTool,
@@ -94,6 +95,7 @@ pub(crate) struct ModelAnimationViewerState {
     timeline_pixels_per_frame: f32,
     preview_quality: AnimationPreviewQuality,
     cached_model: Option<CachedModelContext>,
+    cached_weapon_model: Option<CachedModelContext>,
     cached_clip: Option<CachedClipContext>,
     last_time_seconds: f64,
 }
@@ -119,6 +121,7 @@ impl Default for ModelAnimationViewerState {
             show_attachment_sockets: false,
             selected_combat_capsule: 0,
             selected_attachment_socket: 0,
+            preview_weapon: None,
             selected_pose_joint: 0,
             selected_action: CharacterAnimationAction::Idle,
             capsule_edit_tool: CapsuleEditTool::Move,
@@ -128,6 +131,7 @@ impl Default for ModelAnimationViewerState {
             timeline_pixels_per_frame: 12.0,
             preview_quality: AnimationPreviewQuality::Authoring,
             cached_model: None,
+            cached_weapon_model: None,
             cached_clip: None,
             last_time_seconds: 0.0,
         }
@@ -258,6 +262,7 @@ impl ModelAnimationViewerState {
 
     fn invalidate_model_cache(&mut self) {
         self.cached_model = None;
+        self.cached_weapon_model = None;
     }
 
     fn invalidate_clip_cache(&mut self) {
@@ -602,6 +607,42 @@ pub(crate) fn draw_model_animation_viewer(
     } else {
         Vec::new()
     };
+    // The equipped-weapon overlay rides the SELECTED socket, the same
+    // authoring loop the runtime resolves by name at cook time.
+    let weapon_grip = socket_model_id
+        .and_then(|_| state.preview_weapon)
+        .and_then(|weapon_id| project.resource(weapon_id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Weapon(weapon) => weapon.model.map(|model_id| {
+                (
+                    model_id,
+                    weapon.grip.translation,
+                    weapon.grip.rotation_q12,
+                )
+            }),
+            _ => None,
+        })
+        .zip(sockets.get(state.selected_attachment_socket).cloned());
+    let weapon_model_context = weapon_grip.as_ref().and_then(|((model_id, _, _), _)| {
+        load_weapon_model_context(project, project_root, state, *model_id)
+    });
+    let weapon_fallback_atlas = ColorImage {
+        size: [4, 4],
+        pixels: vec![Color32::from_rgb(168, 168, 176); 16],
+    };
+    let equipped_weapon = weapon_grip.as_ref().zip(weapon_model_context.as_ref()).map(
+        |(((_, grip_translation, grip_rotation_q12), socket), context)| {
+            model_import_preview::PreviewEquippedWeapon {
+                model_bytes: &context.model_bytes,
+                atlas: context.atlas.as_ref().unwrap_or(&weapon_fallback_atlas),
+                socket_joint: socket.joint,
+                socket_translation: socket.translation,
+                socket_rotation_q12: socket.rotation_q12,
+                grip_translation: *grip_translation,
+                grip_rotation_q12: *grip_rotation_q12,
+            }
+        },
+    );
     let selected_joint = if state.show_pose_corrections {
         Some(state.selected_pose_joint)
     } else if socket_model_id.is_some() {
@@ -670,6 +711,7 @@ pub(crate) fn draw_model_animation_viewer(
                                 preview_texture,
                                 &preview_capsules,
                                 &preview_sockets,
+                                equipped_weapon.as_ref(),
                                 selected_joint,
                                 joint_picking,
                             );
@@ -732,6 +774,7 @@ pub(crate) fn draw_model_animation_viewer(
                     preview_texture,
                     &[],
                     &[],
+                    None,
                     None,
                     false,
                 );
@@ -2301,6 +2344,33 @@ fn draw_attachment_socket_editor(
         .and_then(|model| psx_asset::Model::from_bytes(&model.model_bytes).ok())
         .map(|model| model.joint_count());
 
+    let weapon_options: Vec<(ResourceId, String)> = project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::Weapon(_) => Some((resource.id, resource.name.clone())),
+            _ => None,
+        })
+        .collect();
+    ui.horizontal(|ui| {
+        ui.label("Preview weapon");
+        let selected_label = state
+            .preview_weapon
+            .and_then(|id| weapon_options.iter().find(|(option, _)| *option == id))
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("None");
+        egui::ComboBox::from_id_salt("animation-socket-preview-weapon")
+            .selected_text(selected_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut state.preview_weapon, None, "None");
+                for (id, name) in &weapon_options {
+                    ui.selectable_value(&mut state.preview_weapon, Some(*id), name);
+                }
+            });
+    })
+    .response
+    .on_hover_text("Render this Weapon riding the selected socket, composed like Play");
+
     let Some(resource) = project.resource_mut(model_id) else {
         ui.colored_label(Color32::from_rgb(220, 120, 100), "Model is missing");
         return false;
@@ -2908,6 +2978,7 @@ fn draw_preview(
     preview_texture: &mut Option<egui::TextureHandle>,
     combat_capsules: &[model_import_preview::PreviewCombatCapsule],
     sockets: &[model_import_preview::PreviewSocket],
+    equipped_weapon: Option<&model_import_preview::PreviewEquippedWeapon<'_>>,
     selected_joint: Option<u16>,
     joint_picking: bool,
 ) -> PreviewInteraction {
@@ -3070,6 +3141,7 @@ fn draw_preview(
         render_size,
         combat_capsules,
         sockets,
+        equipped_weapon,
         selected_joint,
     );
 
@@ -3458,6 +3530,26 @@ fn load_model_context_cached(
     state: &mut ModelAnimationViewerState,
     id: ResourceId,
 ) -> Option<Arc<LoadedModelContext>> {
+    load_model_context_into(project, project_root, &mut state.cached_model, id)
+}
+
+/// The weapon-preview overlay keeps its own cache slot so switching
+/// between weapon and character never thrashes either decode.
+fn load_weapon_model_context(
+    project: &ProjectDocument,
+    project_root: &Path,
+    state: &mut ModelAnimationViewerState,
+    id: ResourceId,
+) -> Option<Arc<LoadedModelContext>> {
+    load_model_context_into(project, project_root, &mut state.cached_weapon_model, id)
+}
+
+fn load_model_context_into(
+    project: &ProjectDocument,
+    project_root: &Path,
+    cache: &mut Option<CachedModelContext>,
+    id: ResourceId,
+) -> Option<Arc<LoadedModelContext>> {
     let resource = project.resource(id)?;
     let ResourceData::Model(model_resource) = &resource.data else {
         return None;
@@ -3482,7 +3574,7 @@ fn load_model_context_cached(
         });
     let visual_scale_q8 = model_resource.scale_q8[1].max(1);
 
-    if let Some(cached) = &state.cached_model {
+    if let Some(cached) = cache.as_ref() {
         if cached.resource == id
             && cached.model_stamp == model_stamp
             && cached.atlas_stamp == atlas_stamp
@@ -3510,7 +3602,7 @@ fn load_model_context_cached(
         authored_rotation_q12,
         orientation_label,
     });
-    state.cached_model = Some(CachedModelContext {
+    *cache = Some(CachedModelContext {
         resource: id,
         model_stamp,
         atlas_stamp,
@@ -3653,7 +3745,7 @@ fn is_cooked_animation_path(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".psxanim") && !path.contains("::")
 }
 
-fn decode_psxt_image(bytes: &[u8]) -> Option<ColorImage> {
+pub(crate) fn decode_psxt_image(bytes: &[u8]) -> Option<ColorImage> {
     let texture = Texture::from_bytes(bytes).ok()?;
     let width = texture.width() as usize;
     let height = texture.height() as usize;
