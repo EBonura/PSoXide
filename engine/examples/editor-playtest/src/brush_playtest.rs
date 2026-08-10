@@ -12,7 +12,7 @@ use psx_bsp::render::{
     configure_projection, load_pxbsp_view, Camera, PxbspTextureBinding, Renderer,
 };
 use psx_bsp::{SliceReader, Vec3I32};
-use psx_engine::{button, telemetry, App, Config, Ctx, OtFrame, Scene};
+use psx_engine::{button, telemetry, App, Config, Ctx, OtFrame, PrimitivePacketArena, Scene};
 use psx_gpu::material::TextureWindow;
 use psx_gpu::VideoMode;
 use psx_math::{cos_q12, sin_q12};
@@ -290,41 +290,52 @@ impl Scene for BrushPlaytest {
     fn render(&mut self, ctx: &mut Ctx) {
         let camera = self.camera();
         let view = load_pxbsp_view(camera);
-        // ponytail: this checkpoint gives the resident brush renderer the
-        // complete packet scratch. Replace it with the shared bounded frame
-        // allocation model during gameplay unification.
-        let packets = unsafe { PRIMITIVE_PACKETS.words_mut() };
-        let mut used = self
-            .renderer
-            .draw_pxbsp_world(
+        let mut primitive_packets = PrimitivePacketArena::new(unsafe { &mut PRIMITIVE_PACKETS });
+        let available_words = primitive_packets.remaining_words();
+        let mut reservation = primitive_packets
+            .reserve_packet_words(available_words)
+            .expect("brush packet arena has no storage");
+        let (used_words, packet_count) = {
+            let packets = reservation.words_mut();
+            let world_frame = self.renderer.draw_pxbsp_world(
                 &self.map,
                 camera,
                 view,
                 &self.materials,
                 ctx.sim_tick.as_u32(),
                 packets,
-            )
-            .packet_words;
-        for door in self.doors.iter() {
-            let Some(frame) = self.renderer.draw_pxbsp_model(
-                &self.map,
-                door.model_index(),
-                door.transform(),
-                camera,
-                view,
-                &self.materials,
-                ctx.sim_tick.as_u32(),
-                &mut packets[used..],
-            ) else {
-                continue;
-            };
-            used = used.saturating_add(frame.packet_words);
-        }
+            );
+            let mut used_words = world_frame.packet_words;
+            let mut packet_count = world_frame.stats.packets as usize;
+            for door in self.doors.iter() {
+                let Some(frame) = self.renderer.draw_pxbsp_model(
+                    &self.map,
+                    door.model_index(),
+                    door.transform(),
+                    camera,
+                    view,
+                    &self.materials,
+                    ctx.sim_tick.as_u32(),
+                    &mut packets[used_words..],
+                ) else {
+                    continue;
+                };
+                used_words = used_words
+                    .checked_add(frame.packet_words)
+                    .expect("brush packet word count overflow");
+                packet_count = packet_count
+                    .checked_add(frame.stats.packets as usize)
+                    .expect("brush packet count overflow");
+            }
+            (used_words, packet_count)
+        };
+        let stream = reservation
+            .commit(used_words, packet_count)
+            .expect("brush renderer reported an invalid packet stream");
 
         let mut ot = OtFrame::begin(unsafe { &mut OT });
         unsafe {
-            let first = packets.as_mut_ptr();
-            ot.add_tagged_packet_stream_unchecked(first, first.add(used));
+            ot.add_committed_tagged_packet_stream_unchecked(stream);
         }
         ot.submit_async().detach();
     }
