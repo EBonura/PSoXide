@@ -453,6 +453,8 @@ fn brush_mover_binding_accepts_doors_and_is_undoable() {
             kind: psxed_project::LogicNodeKind::Door {
                 box_prop: String::new(),
                 start_open: false,
+                open_offset: psxed_project::default_brush_door_open_offset(),
+                travel_ticks: psxed_project::default_brush_door_travel_ticks(),
             },
             target: String::new(),
             killtarget: String::new(),
