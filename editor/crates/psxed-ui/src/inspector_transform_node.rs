@@ -3703,6 +3703,8 @@ pub(crate) fn draw_node_kind_editor(
                             *logic_kind = psxed_project::LogicNodeKind::Door {
                                 box_prop: String::new(),
                                 start_open: false,
+                                open_offset: psxed_project::default_brush_door_open_offset(),
+                                travel_ticks: psxed_project::default_brush_door_travel_ticks(),
                             };
                             changed = true;
                         }
@@ -3752,18 +3754,55 @@ pub(crate) fn draw_node_kind_editor(
                 psxed_project::LogicNodeKind::Door {
                     box_prop,
                     start_open,
+                    open_offset,
+                    travel_ticks,
                 } => {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Box Prop").color(STUDIO_TEXT_WEAK));
+                        ui.label(RichText::new("Grid Box Prop").color(STUDIO_TEXT_WEAK));
                         changed |= ui.text_edit_singleline(box_prop).changed();
                     });
                     if box_prop.trim().is_empty() {
-                        ui.colored_label(
-                            Color32::from_rgb(220, 120, 100),
-                            "Name the Box Prop this door opens (cook will fail)",
+                        ui.weak(
+                            "Optional for brush-bound doors; required by the frozen grid cook.",
                         );
                     }
                     changed |= ui.checkbox(start_open, "Start open").changed();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Open offset").color(STUDIO_TEXT_WEAK));
+                        for (axis, label) in ["X", "Y", "Z"].iter().enumerate() {
+                            let mut value = i32::from(open_offset[axis]);
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut value)
+                                        .speed(8.0)
+                                        .range(i16::MIN as i32..=i16::MAX as i32)
+                                        .prefix(format!("{label} ")),
+                                )
+                                .changed()
+                            {
+                                open_offset[axis] =
+                                    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                                changed = true;
+                            }
+                        }
+                    });
+                    if *open_offset == [0; 3] {
+                        ui.colored_label(
+                            Color32::from_rgb(220, 120, 100),
+                            "Open offset must move on at least one axis",
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Travel (ticks)").color(STUDIO_TEXT_WEAK));
+                        let mut value = i32::from(*travel_ticks);
+                        if ui
+                            .add(egui::DragValue::new(&mut value).speed(0.2).range(1..=3600))
+                            .changed()
+                        {
+                            *travel_ticks = value.clamp(1, u16::MAX as i32) as u16;
+                            changed = true;
+                        }
+                    });
                 }
             }
             ui.separator();

@@ -379,6 +379,9 @@ pub fn build_phase1_frame(
         textures,
     );
     let preview_tick = preview_elapsed_vblanks();
+    // World-space brushes render once, against the camera GTE state
+    // installed above (rooms and their local offsets do not apply).
+    walk_brushes(project, textures, world_camera, &mut scratch);
     for floor_entry in &visible_rooms {
         if scratch.geometry_full() {
             break;
@@ -1156,6 +1159,78 @@ fn walk_image_props(
 }
 
 #[allow(clippy::too_many_arguments)]
+use psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL;
+
+/// Flat fallback tint for unmaterialed brush faces: neutral greys varied
+/// per face so adjacent faces stay distinguishable.
+fn brush_fallback_color(face: usize) -> (u8, u8, u8) {
+    let shade = 0x6c + ((face as u8) % 3) * 0x14;
+    (shade, shade, shade)
+}
+
+/// World-space brush solids: each solved face polygon fans into
+/// triangles with paraxial world-aligned UVs. Unlit and fog-free in v1
+/// (brushes are not room-bound); drawn both-sided like box props until
+/// the outward-winding cull is visually verified on content.
+fn walk_brushes(
+    project: &ProjectDocument,
+    textures: &EditorTextures,
+    camera: psx_engine::WorldCamera,
+    scratch: &mut PreviewScratch,
+) {
+    use psxed_project::brush::{paraxial_uv, Plane};
+    for brush in &project.active_scene().brushes {
+        if scratch.geometry_full() {
+            break;
+        }
+        let solved = brush.solve();
+        for (face_index, polygon) in solved.polygons.iter().enumerate() {
+            let Some(polygon) = polygon else { continue };
+            let face = &brush.faces[face_index];
+            let Some(plane) = Plane::from_points(face.points) else {
+                continue;
+            };
+            let shade = face_shade(
+                project,
+                face.material,
+                brush_fallback_color(face_index),
+                textures,
+            )
+            .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
+            let verts = &polygon.verts;
+            for i in 1..verts.len().saturating_sub(1) {
+                let tri = [verts[0], verts[i], verts[i + 1]];
+                let world = tri.map(|v| {
+                    psx_engine::WorldVertex::new(
+                        v[0].round() as i32,
+                        v[1].round() as i32,
+                        v[2].round() as i32,
+                    )
+                });
+                let Some(projected) =
+                    camera.project_world_quad([world[0], world[1], world[2], world[2]])
+                else {
+                    continue;
+                };
+                let p = [projected[0], projected[1], projected[2]]
+                    .map(preview_projected_from_engine);
+                let uvs = match shade {
+                    FaceShade::Textured { .. } => tri.map(|v| {
+                        let raw = paraxial_uv(&plane, v);
+                        let uv = face.uv.apply([
+                            raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                            raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                        ]);
+                        (uv[0].rem_euclid(256.0) as u8, uv[1].rem_euclid(256.0) as u8)
+                    }),
+                    FaceShade::Flat { .. } => [(0, 0); 3],
+                };
+                let _ = emit_face_tri(scratch, p, uvs, shade);
+            }
+        }
+    }
+}
+
 fn walk_box_props(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,

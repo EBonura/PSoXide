@@ -49,9 +49,9 @@ pub enum NodeKind {
     /// things: the runtime [`crate::portal_rooms::PortalRoom`] the cook
     /// derives by splitting this grid at authored portals (the streaming,
     /// PVS and residency unit, and what the size caps apply to), and the
-    /// chamber a player perceives. A Section is an authoring unit, closer
-    /// to a TrenchBroom layer: you name it, place it, hide it, save it as
-    /// a prefab. One Section usually becomes several runtime rooms.
+    /// chamber a player perceives. A Section is a named, placeable,
+    /// hideable authoring layer that can be saved as a prefab. One Section
+    /// usually becomes several runtime rooms.
     ///
     /// The alias chain keeps every project that was saved as `Map` or
     /// `Room` loading unchanged.
@@ -527,7 +527,8 @@ pub enum LogicNodeKind {
         required: u16,
     },
     /// Toggles the named Box Prop between closed (drawn + solid) and
-    /// open (hidden + passable) when used.
+    /// open (hidden + passable) in frozen grid projects. A brush-bound
+    /// door instead translates its compiled submodel to `open_offset`.
     Door {
         /// Name of the Box Prop node this door drives. Must resolve
         /// to exactly one placed Box Prop at cook time.
@@ -536,6 +537,12 @@ pub enum LogicNodeKind {
         /// Whether the door starts open.
         #[serde(default)]
         start_open: bool,
+        /// World-space translation from closed to open, in engine units.
+        #[serde(default = "default_brush_door_open_offset")]
+        open_offset: [i16; 3],
+        /// Fixed 60 Hz simulation ticks between endpoints.
+        #[serde(default = "default_brush_door_travel_ticks")]
+        travel_ticks: u16,
     },
 }
 
@@ -553,6 +560,14 @@ pub(crate) const fn default_logic_trigger_size() -> [u16; 3] {
 
 pub(crate) const fn default_logic_multisource_required() -> u16 {
     1
+}
+
+pub const fn default_brush_door_open_offset() -> [i16; 3] {
+    [0, 128, 0]
+}
+
+pub const fn default_brush_door_travel_ticks() -> u16 {
+    60
 }
 
 /// Authored collision shape for component-node entities.
@@ -673,6 +688,11 @@ pub struct Scene {
     pub root: NodeId,
     next_node_id: u64,
     pub(crate) nodes: Vec<SceneNode>,
+    /// World-space convex brushes (docs/brush-editor-integration.md).
+    /// A parallel collection for now; folds into the node tree when
+    /// brushes need hierarchy/visibility.
+    #[serde(default)]
+    pub brushes: Vec<crate::brush::Brush>,
 }
 
 impl Scene {
@@ -684,6 +704,7 @@ impl Scene {
             root: NodeId::ROOT,
             next_node_id: NodeId::ROOT.raw() + 1,
             nodes: vec![root],
+            brushes: Vec::new(),
         }
     }
 

@@ -2,6 +2,9 @@
 !.gitignore
 !default/
 !default/**
+!brush-first-playable/
+!brush-first-playable/project.ron
+!brush-first-playable/walk-through-door.pxitape.csv
 !cortex_ignition_v1/
 !cortex_ignition_v1/project.ron
 !cortex_ignition_v1/assets/

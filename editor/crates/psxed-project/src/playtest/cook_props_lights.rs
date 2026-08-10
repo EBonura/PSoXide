@@ -1146,6 +1146,7 @@ pub(crate) fn push_logic_node(
         crate::LogicNodeKind::Door {
             box_prop,
             start_open,
+            ..
         } => {
             if box_prop.trim().is_empty() {
                 report.error(format!(

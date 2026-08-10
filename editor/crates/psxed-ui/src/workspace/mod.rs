@@ -8,5 +8,6 @@ mod painting;
 mod panels;
 mod selection;
 mod toolbars;
+pub(crate) mod tools;
 mod ui_scene;
 mod viewport;
