@@ -97,6 +97,9 @@ impl BrushFace {
 pub struct Brush {
     /// Boundary faces; outward normals derived from their points.
     pub faces: Vec<BrushFace>,
+    /// Logic mover that owns this brush, or `None` for static world geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mover: Option<crate::NodeId>,
 }
 
 /// Exact unnormalized plane `dot(normal, p) == dist` from integer points.
@@ -188,6 +191,7 @@ impl Brush {
         ];
         Self {
             faces: faces.map(BrushFace::from_points).into(),
+            mover: None,
         }
     }
 
@@ -311,6 +315,7 @@ impl Brush {
                 .zip(&solved.polygons)
                 .filter_map(|(face, polygon)| polygon.is_some().then_some(*face))
                 .collect(),
+            mover: self.mover,
         }
     }
 
@@ -422,7 +427,7 @@ impl Brush {
         let inner_min = [min[0] + thickness, min[1] + thickness, min[2] + thickness];
         let inner_max = [max[0] - thickness, max[1] - thickness, max[2] - thickness];
         // Six slabs: floor, ceiling, then four walls between them.
-        Some(vec![
+        let mut slabs = vec![
             Brush::cuboid(min, [max[0], inner_min[1], max[2]]),
             Brush::cuboid([min[0], inner_max[1], min[2]], max),
             Brush::cuboid(
@@ -441,7 +446,11 @@ impl Brush {
                 [inner_min[0], inner_min[1], inner_max[2]],
                 [inner_max[0], inner_max[1], max[2]],
             ),
-        ])
+        ];
+        for slab in &mut slabs {
+            slab.mover = self.mover;
+        }
+        Some(slabs)
     }
 }
 
@@ -766,6 +775,27 @@ mod tests {
         }
         // Too-thin brushes refuse to hollow.
         assert!(Brush::cuboid([0, 0, 0], [30, 128, 256]).hollow(16).is_none());
+    }
+
+    #[test]
+    fn mover_binding_survives_geometry_edits_and_ron_round_trip() {
+        let mover = crate::NodeId(41);
+        let mut brush = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        brush.mover = Some(mover);
+        let clipped = brush.clip([[64, 0, 0], [64, 128, 0], [64, 128, 128]]);
+        assert_eq!(clipped.back.expect("back").mover, Some(mover));
+        assert_eq!(clipped.front.expect("front").mover, Some(mover));
+        assert!(brush
+            .hollow(16)
+            .expect("slabs")
+            .iter()
+            .all(|slab| slab.mover == Some(mover)));
+
+        let encoded = ron::ser::to_string(&brush).expect("serialize brush");
+        let decoded: Brush = ron::from_str(&encoded).expect("deserialize brush");
+        assert_eq!(decoded.mover, Some(mover));
+        let legacy: Brush = ron::from_str("(faces:[])").expect("legacy brush");
+        assert_eq!(legacy.mover, None);
     }
 
     #[test]

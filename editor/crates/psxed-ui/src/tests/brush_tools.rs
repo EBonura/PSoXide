@@ -427,3 +427,55 @@ fn brush_tool_zero_area_drag_commits_nothing() {
 
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 0);
 }
+
+#[test]
+fn brush_mover_binding_accepts_doors_and_is_undoable() {
+    let mut harness = ViewportHarness::floored_room("brush_mover_binding", 4);
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    harness.workspace.selected_brush = Some(0);
+    let non_mover = harness.workspace.project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Decoration",
+        NodeKind::Entity,
+    );
+    let door = harness.workspace.project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Lift Door",
+        NodeKind::Logic {
+            kind: psxed_project::LogicNodeKind::Door {
+                box_prop: String::new(),
+                start_open: false,
+            },
+            target: String::new(),
+            killtarget: String::new(),
+            master: String::new(),
+            delay_ticks: 0,
+            wait_ticks: 0,
+            enabled: true,
+        },
+    );
+
+    harness.workspace.set_selected_brush_mover(Some(non_mover));
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0].mover,
+        None
+    );
+    harness.workspace.set_selected_brush_mover(Some(door));
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0].mover,
+        Some(door)
+    );
+    harness.workspace.do_undo();
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0].mover,
+        None
+    );
+}

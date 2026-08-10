@@ -49,9 +49,9 @@ pub enum NodeKind {
     /// things: the runtime [`crate::portal_rooms::PortalRoom`] the cook
     /// derives by splitting this grid at authored portals (the streaming,
     /// PVS and residency unit, and what the size caps apply to), and the
-    /// chamber a player perceives. A Section is an authoring unit, closer
-    /// to a TrenchBroom layer: you name it, place it, hide it, save it as
-    /// a prefab. One Section usually becomes several runtime rooms.
+    /// chamber a player perceives. A Section is a named, placeable,
+    /// hideable authoring layer that can be saved as a prefab. One Section
+    /// usually becomes several runtime rooms.
     ///
     /// The alias chain keeps every project that was saved as `Map` or
     /// `Room` loading unchanged.

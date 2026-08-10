@@ -364,6 +364,56 @@ impl EditorWorkspace {
             }
         });
 
+        let movers: Vec<_> = self
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                matches!(
+                    &node.kind,
+                    psxed_project::NodeKind::Logic {
+                        kind: psxed_project::LogicNodeKind::Door { .. },
+                        ..
+                    }
+                )
+                .then(|| (node.id, node.name.clone()))
+            })
+            .collect();
+        let mut mover = brush.mover;
+        let mover_label = mover
+            .and_then(|id| {
+                movers
+                    .iter()
+                    .find(|(candidate, _)| *candidate == id)
+                    .map(|(_, name)| name.as_str())
+            })
+            .unwrap_or(if mover.is_some() {
+                "Missing mover"
+            } else {
+                "World (static)"
+            });
+        ui.horizontal(|ui| {
+            ui.label("Model owner");
+            egui::ComboBox::from_id_salt(("brush-mover", index))
+                .selected_text(mover_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mover, None, "World (static)");
+                    for (node, name) in &movers {
+                        ui.selectable_value(&mut mover, Some(*node), name);
+                    }
+                });
+        });
+        if mover != brush.mover {
+            self.set_selected_brush_mover(mover);
+        }
+        if brush.mover.is_some() && mover_label == "Missing mover" {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 120, 100),
+                "The bound mover no longer exists. Rebind this brush before cooking.",
+            );
+        }
+
         ui.separator();
         let Some(face) = self.selected_brush_face else {
             ui.label("Click a face to edit its material and UVs.");
@@ -419,6 +469,40 @@ impl EditorWorkspace {
             self.apply_material_to_selected_brush_face();
         }
         self.draw_brush_face_uv_controls(ui);
+    }
+
+    /// Bind the selected brush to one Door logic node, or return it to model 0.
+    pub(crate) fn set_selected_brush_mover(&mut self, mover: Option<NodeId>) {
+        let Some(index) = self.selected_brush else {
+            return;
+        };
+        if let Some(mover) = mover {
+            let valid = self.project.active_scene().node(mover).is_some_and(|node| {
+                matches!(
+                    &node.kind,
+                    psxed_project::NodeKind::Logic {
+                        kind: psxed_project::LogicNodeKind::Door { .. },
+                        ..
+                    }
+                )
+            });
+            if !valid {
+                return;
+            }
+        }
+        let current = self
+            .project
+            .active_scene()
+            .brushes
+            .get(index)
+            .and_then(|brush| brush.mover);
+        if current == mover {
+            return;
+        }
+        self.push_undo();
+        if let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) {
+            brush.mover = mover;
+        }
     }
 
     /// Duplicate the selected brush (offset by one grid step, honouring
