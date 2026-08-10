@@ -2500,34 +2500,7 @@ fn textured_model_part_gte_transform_with_view_gte_packed_translation(
 
 fn gte_compose_joint_rotation(view_instance: Mat3I16, model: Mat3I16) -> Mat3I16 {
     player_vert_debug::record_compose_input(&model, Vec3I16::ZERO);
-    scene::load_rotation(&view_instance);
-    scene::load_translation(Vec3I32::ZERO);
-
-    // The default transform schedule carries the HWB-011 console-
-    // confirmed MTC2-commit hazard gap (see scene::transform_vertex_mips).
-    let c0 = scene::transform_vertex_scheduled(Vec3I16::new(
-        model.m[0][0],
-        model.m[1][0],
-        model.m[2][0],
-    ));
-    let c1 = scene::transform_vertex_scheduled(Vec3I16::new(
-        model.m[0][1],
-        model.m[1][1],
-        model.m[2][1],
-    ));
-    let c2 = scene::transform_vertex_scheduled(Vec3I16::new(
-        model.m[0][2],
-        model.m[1][2],
-        model.m[2][2],
-    ));
-
-    Mat3I16 {
-        m: [
-            [clamp_i16(c0.x), clamp_i16(c1.x), clamp_i16(c2.x)],
-            [clamp_i16(c0.y), clamp_i16(c1.y), clamp_i16(c2.y)],
-            [clamp_i16(c0.z), clamp_i16(c1.z), clamp_i16(c2.z)],
-        ],
-    }
+    scene::compose_rotation_scheduled(&view_instance, &model)
 }
 
 fn gte_compose_joint_rotation_and_translation(
@@ -2536,38 +2509,10 @@ fn gte_compose_joint_rotation_and_translation(
     pose_translation: Vec3I16,
 ) -> (Mat3I16, Vec3I32) {
     player_vert_debug::record_compose_input(&model, pose_translation);
-    scene::load_rotation(&view_instance);
-    scene::load_translation(Vec3I32::ZERO);
-
-    // The default transform schedule carries the HWB-011 console-
-    // confirmed MTC2-commit hazard gap (see scene::transform_vertex_mips).
-    let c0 = scene::transform_vertex_scheduled(Vec3I16::new(
-        model.m[0][0],
-        model.m[1][0],
-        model.m[2][0],
-    ));
-    let c1 = scene::transform_vertex_scheduled(Vec3I16::new(
-        model.m[0][1],
-        model.m[1][1],
-        model.m[2][1],
-    ));
-    let c2 = scene::transform_vertex_scheduled(Vec3I16::new(
-        model.m[0][2],
-        model.m[1][2],
-        model.m[2][2],
-    ));
+    let rotation = scene::compose_rotation_scheduled(&view_instance, &model);
     let translation = scene::transform_vertex_scheduled(pose_translation);
 
-    (
-        Mat3I16 {
-            m: [
-                [clamp_i16(c0.x), clamp_i16(c1.x), clamp_i16(c2.x)],
-                [clamp_i16(c0.y), clamp_i16(c1.y), clamp_i16(c2.y)],
-                [clamp_i16(c0.z), clamp_i16(c1.z), clamp_i16(c2.z)],
-            ],
-        },
-        translation,
-    )
+    (rotation, translation)
 }
 
 fn compute_view_origin_translation(
