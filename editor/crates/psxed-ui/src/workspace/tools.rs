@@ -244,6 +244,7 @@ impl EditorWorkspace {
         scene.brushes[index] = slabs.next().expect("hollow returns six slabs");
         scene.brushes.extend(slabs);
         self.selected_brush_face = None;
+        self.mark_dirty();
     }
 
     /// Snap every point of the selected brush to the editor grid step,
@@ -263,6 +264,7 @@ impl EditorWorkspace {
         }
         self.push_undo();
         self.project.active_scene_mut().brushes[index] = snapped;
+        self.mark_dirty();
     }
 
     /// Cancel every in-flight brush gesture: the create drag, a pending
@@ -296,6 +298,7 @@ impl EditorWorkspace {
         if self.project.active_scene().brushes.get(index).is_some() {
             self.push_undo();
             self.project.active_scene_mut().brushes.remove(index);
+            self.mark_dirty();
         }
     }
 
@@ -503,6 +506,7 @@ impl EditorWorkspace {
         if let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) {
             brush.mover = mover;
         }
+        self.mark_dirty();
     }
 
     /// Duplicate the selected brush (offset by one grid step, honouring
@@ -529,6 +533,7 @@ impl EditorWorkspace {
         let new_index = scene.brushes.len() - 1;
         self.selected_brush = Some(new_index);
         self.selected_brush_face = None;
+        self.mark_dirty();
     }
 
     /// Numeric UV controls for the selected brush face: offset, rotation,
@@ -594,6 +599,7 @@ impl EditorWorkspace {
         if edited != current {
             self.push_undo();
             self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
+            self.mark_dirty();
         }
     }
 
@@ -618,6 +624,7 @@ impl EditorWorkspace {
         }
         self.push_undo();
         self.project.active_scene_mut().brushes[index].faces[face].material = Some(material);
+        self.mark_dirty();
     }
 
     /// The cuboid a brush drag would commit, if it has area.
@@ -672,6 +679,7 @@ impl EditorWorkspace {
         scene.brushes.push(brush);
         self.selected_brush = Some(self.project.active_scene().brushes.len() - 1);
         self.selected_brush_face = None;
+        self.mark_dirty();
     }
 
     /// One clip click at a snapped ground point: the first click stores
@@ -701,14 +709,17 @@ impl EditorWorkspace {
                         let scene = self.project.active_scene_mut();
                         scene.brushes[selected] = back;
                         scene.brushes.push(front);
+                        self.mark_dirty();
                     }
                     (BrushClipKeep::Back, Some(back), Some(_)) => {
                         self.push_undo();
                         self.project.active_scene_mut().brushes[selected] = back;
+                        self.mark_dirty();
                     }
                     (BrushClipKeep::Front, Some(_), Some(front)) => {
                         self.push_undo();
                         self.project.active_scene_mut().brushes[selected] = front;
+                        self.mark_dirty();
                     }
                     // Plane missed the brush: nothing to keep or drop.
                     _ => {}
@@ -951,6 +962,7 @@ impl EditorWorkspace {
                 moved.translate(mv.applied);
             }
             self.project.active_scene_mut().brushes[mv.index] = moved;
+            self.mark_dirty();
         }
         true
     }
@@ -964,6 +976,7 @@ impl EditorWorkspace {
         if extrude.applied != 0 {
             self.push_undo();
             self.project.active_scene_mut().brushes[extrude.index] = live;
+            self.mark_dirty();
         }
         true
     }
