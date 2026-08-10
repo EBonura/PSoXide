@@ -3686,6 +3686,13 @@ fn room_required_assets(
     if let Some(asset_index) = room.reflection_probe_asset_index {
         push_unique(&mut required_vram, asset_index);
     }
+    if room_index == 0 {
+        if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
+            for &asset_index in &world.texture_asset_indices {
+                push_unique(&mut required_vram, asset_index);
+            }
+        }
+    }
     for prop in &package.image_props {
         if prop.room == room_index as u16 {
             push_unique(&mut required_vram, prop.texture_asset_index);
