@@ -535,6 +535,9 @@ pub struct EditorWorkspace {
     selected_brush: Option<usize>,
     /// In-flight brush-create drag (Brush tool primary held).
     brush_drag: Option<BrushDrag>,
+    /// In-flight brush face-extrude drag (Brush tool primary held on a
+    /// brush face).
+    brush_extrude: Option<BrushExtrude>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -2058,6 +2061,25 @@ pub(crate) struct BrushDrag {
     pub(crate) current: [i32; 3],
 }
 
+/// In-flight brush face-extrude drag: the pressed face slides along its
+/// dominant normal axis; the scene brush previews live and the base is
+/// restored before the single undo-recorded commit on release.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushExtrude {
+    pub(crate) index: usize,
+    pub(crate) face: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    /// Dominant axis of the face normal (0/1/2) and its sign.
+    pub(crate) axis: usize,
+    pub(crate) dir: i32,
+    /// Pointer y at press (vertical faces drag by pixels).
+    pub(crate) press_y: f32,
+    /// Unsnapped ground point at press (horizontal drags measure here).
+    pub(crate) press_ground: [f32; 3],
+    /// Last applied delta along the axis, world units.
+    pub(crate) applied: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaterToolMode {
     Add,
@@ -2599,6 +2621,7 @@ impl EditorWorkspace {
             material_paint_sampling: false,
             selected_brush: None,
             brush_drag: None,
+            brush_extrude: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
