@@ -1,4 +1,4 @@
-//! One-shot sample playback on the SPU.
+//! Sample playback and shared voice management on the SPU.
 //!
 //! Four programs on the PSoXide demo disc grew their own copy of this: the
 //! launcher, VoXide, NitroXide and the Celeste collection. Three of them are
@@ -29,6 +29,8 @@
 //! player.tick(tick);
 //! if pressed { player.play(&OneShot::new(blip, Volume::HALF), tick); }
 //! ```
+//!
+//! Map ambience whose ADPCM carries loop flags uses [`LoopingSample`].
 
 #![no_std]
 
@@ -295,6 +297,79 @@ impl OneShot {
     }
 }
 
+/// A resident ADPCM sample whose cooked block flags form a hardware loop.
+///
+/// The sample must carry a LOOP-START block and an END|REPEAT block. This
+/// handle owns the common voice setup and key-on policy, while the caller may
+/// update the voice's left and right volumes each frame for spatial audio.
+#[derive(Clone, Copy)]
+pub struct LoopingSample {
+    sample: Sample,
+    volume: Volume,
+    adsr: Adsr,
+    pitch: Option<Pitch>,
+}
+
+impl LoopingSample {
+    /// A loop at its recorded rate and a sustained full-level envelope.
+    pub const fn new(sample: Sample, volume: Volume) -> Self {
+        Self {
+            sample,
+            volume,
+            adsr: Adsr::default_tone(),
+            pitch: None,
+        }
+    }
+
+    /// Change the initial equal left/right level used at key-on.
+    pub const fn with_volume(mut self, volume: Volume) -> Self {
+        self.volume = volume;
+        self
+    }
+
+    /// Override the sustained envelope.
+    pub const fn with_adsr(mut self, adsr: Adsr) -> Self {
+        self.adsr = adsr;
+        self
+    }
+
+    /// Override playback pitch. `0x1000` is unity.
+    pub const fn with_pitch(mut self, pitch: Pitch) -> Self {
+        self.pitch = Some(pitch);
+        self
+    }
+
+    /// The resident sample behind this loop.
+    pub const fn sample(&self) -> Sample {
+        self.sample
+    }
+
+    /// Configure `voice` without starting it.
+    pub fn configure(&self, voice: Voice) {
+        voice.configure_sample(
+            self.sample.addr,
+            self.sample.rate_hz,
+            self.volume,
+            self.adsr,
+        );
+        if let Some(pitch) = self.pitch {
+            voice.set_pitch(pitch);
+        }
+    }
+
+    /// Configure and start this hardware loop on `voice`.
+    pub fn play(&self, voice: Voice) {
+        self.configure(voice);
+        Voice::key_on(voice.mask());
+    }
+
+    /// Stop a loop and silence its voice immediately.
+    pub fn stop(voice: Voice) {
+        voice.set_volume(Volume::SILENCE, Volume::SILENCE);
+        Voice::key_off(voice.mask());
+    }
+}
+
 /// Has `now` reached `deadline`, on a tick counter that wraps?
 ///
 /// Split out so the wrap is testable off-hardware. A plain `now >= deadline`
@@ -459,6 +534,15 @@ mod tests {
         let s = Sample::resident(SpuAddr::new(0x1010), 22050, 0);
         assert_eq!(s.ticks_at(60), None);
         assert_eq!(OneShot::new(s, Volume::MAX).ticks(60), None);
+    }
+
+    #[test]
+    fn a_loop_keeps_its_resident_sample() {
+        let resident = sample(11025, 73);
+        assert_eq!(
+            LoopingSample::new(resident, Volume::HALF).sample(),
+            resident
+        );
     }
 
     #[test]
