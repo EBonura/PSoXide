@@ -12,6 +12,7 @@ psxed-audio  = { path = "../psxed-audio" }
 psxed-gltf   = { path = "../psxed-gltf" }
 psxed-tex    = { path = "../psxed-tex" }
 psx-asset    = { path = "../../../sdk/crates/psx-asset" }
+psx-bsp      = { path = "../../../engine/crates/psx-bsp" }
 psx-engine   = { path = "../../../engine/crates/psx-engine" }
 psx-iso      = { path = "../../../crates/psx-iso" }
 psx-level    = { path = "../../../engine/crates/psx-level" }
