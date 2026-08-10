@@ -3,7 +3,7 @@ use psx_engine::{
     apply_model_pose_translation, compute_joint_world_basis, compute_joint_world_transform,
     JointWorldTransform,
 };
-use psx_level::{equipment_flags, WeaponHitShapeRecord};
+use psx_level::equipment_flags;
 
 #[derive(Copy, Clone)]
 struct AttachmentPose {
@@ -22,7 +22,6 @@ pub(super) fn draw_player_equipment<
     tables: ModelTables,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
-    current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -75,7 +74,6 @@ pub(super) fn draw_player_equipment<
         reference_anchor,
         character.action_in_place_override(anim_action),
     );
-    let character_frame = (character_phase >> 12) as u16;
     let character_model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let character_origin = visual_model_origin(
         x,
@@ -91,10 +89,12 @@ pub(super) fn draw_player_equipment<
 
     let mut drawn = 0usize;
     for equipment in tables.equipment {
-        if equipment.room != current_room
-            || equipment.flags & equipment_flags::PLAYER == 0
-            || drawn >= knobs.max_equipment_draws
-        {
+        // Player equipment follows the player across rooms, matching the
+        // room-agnostic melee spec (combat::player_melee_spec): the
+        // record's `room` field is only the spawn room, so filtering on
+        // it made the weapon vanish outside that room while its damage
+        // kept working.
+        if equipment.flags & equipment_flags::PLAYER == 0 || drawn >= knobs.max_equipment_draws {
             continue;
         }
         let Some(weapon) = tables.weapons.get(equipment.weapon.to_usize()) else {
@@ -175,18 +175,6 @@ pub(super) fn draw_player_equipment<
                 out.draws = drawn as u16;
             }
         };
-
-        let (active, hits) = evaluate_weapon_hitboxes(
-            tables,
-            current_room,
-            weapon.hitbox_first.to_usize(),
-            weapon.hitbox_count,
-            character_frame,
-            socket_pose.origin,
-            socket_pose.rotation,
-        );
-        out.active_hitboxes = out.active_hitboxes.saturating_add(active);
-        out.target_hits = out.target_hits.saturating_add(hits);
     }
     out
 }
@@ -256,75 +244,6 @@ fn compose_socket_pose(
     }
 }
 
-fn evaluate_weapon_hitboxes(
-    tables: ModelTables,
-    current_room: RoomIndex,
-    first: usize,
-    count: u16,
-    frame: u16,
-    origin: WorldVertex,
-    rotation: Mat3I16,
-) -> (u16, u16) {
-    let mut active = 0u16;
-    let mut hits = 0u16;
-    let Some(hitboxes) = tables
-        .weapon_hitboxes
-        .get(first..first.saturating_add(count as usize))
-    else {
-        return (0, 0);
-    };
-    for hitbox in hitboxes {
-        if frame < hitbox.active_start_frame || frame > hitbox.active_end_frame {
-            continue;
-        }
-        active = active.saturating_add(1);
-        for entity in tables.entities {
-            if entity.room != current_room {
-                continue;
-            }
-            if weapon_hit_shape_hits_point(hitbox.shape, origin, rotation, entity.x, entity.z) {
-                hits = hits.saturating_add(1);
-            }
-        }
-    }
-    (active, hits)
-}
-
-fn weapon_hit_shape_hits_point(
-    shape: WeaponHitShapeRecord,
-    origin: WorldVertex,
-    rotation: Mat3I16,
-    px: i32,
-    pz: i32,
-) -> bool {
-    match shape {
-        WeaponHitShapeRecord::Box {
-            center,
-            half_extents,
-        } => {
-            let c = transform_local_point(origin, rotation, center);
-            let radius = half_extents[0].max(half_extents[2]) as i32;
-            distance_xz_sq(RoomPoint::new(px, 0, pz), RoomPoint::new(c.x, 0, c.z))
-                <= square_i32_saturating(radius)
-        }
-        WeaponHitShapeRecord::Capsule { start, end, radius } => {
-            let a = transform_local_point(origin, rotation, start);
-            let b = transform_local_point(origin, rotation, end);
-            point_segment_xz_distance_sq(px, pz, a.x, a.z, b.x, b.z)
-                <= square_i32_saturating(radius as i32)
-        }
-    }
-}
-
-fn transform_local_point(origin: WorldVertex, rotation: Mat3I16, point: [i32; 3]) -> WorldVertex {
-    let offset = rotate_offset_q12(&rotation, point);
-    WorldVertex::new(
-        origin.x.saturating_add(offset[0]),
-        origin.y.saturating_add(offset[1]),
-        origin.z.saturating_add(offset[2]),
-    )
-}
-
 fn scaled_offset(scale: LocalToWorldScale, offset: [i32; 3]) -> [i32; 3] {
     [
         scale.apply(offset[0]),
@@ -341,23 +260,4 @@ fn euler_q12_rotation_inverse(rotation_q12: [i16; 3]) -> Mat3I16 {
     let ry = Mat3I16::rotate_y(Angle::from_q12(inv_y).rotate_y_arg());
     let rz = Mat3I16::rotate_z(Angle::from_q12(inv_z).rotate_y_arg());
     rx.mul(&ry).mul(&rz)
-}
-
-fn point_segment_xz_distance_sq(px: i32, pz: i32, ax: i32, az: i32, bx: i32, bz: i32) -> i32 {
-    let abx = bx.saturating_sub(ax);
-    let abz = bz.saturating_sub(az);
-    let apx = px.saturating_sub(ax);
-    let apz = pz.saturating_sub(az);
-    let denom = square_i32_saturating(abx).saturating_add(square_i32_saturating(abz));
-    if denom <= 0 {
-        return square_i32_saturating(apx).saturating_add(square_i32_saturating(apz));
-    }
-    let dot = apx
-        .saturating_mul(abx)
-        .saturating_add(apz.saturating_mul(abz));
-    let t_q8 = ratio_q8_i32(dot.clamp(0, denom), denom);
-    let cx = ax.saturating_add((abx.saturating_mul(t_q8)) >> 8);
-    let cz = az.saturating_add((abz.saturating_mul(t_q8)) >> 8);
-    square_i32_saturating(px.saturating_sub(cx))
-        .saturating_add(square_i32_saturating(pz.saturating_sub(cz)))
 }
