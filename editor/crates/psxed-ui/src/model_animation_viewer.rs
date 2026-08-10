@@ -96,6 +96,7 @@ pub(crate) struct ModelAnimationViewerState {
     preview_quality: AnimationPreviewQuality,
     cached_model: Option<CachedModelContext>,
     cached_weapon_model: Option<CachedModelContext>,
+    cached_material: Option<CachedMaterialLayer>,
     cached_clip: Option<CachedClipContext>,
     last_time_seconds: f64,
 }
@@ -132,6 +133,7 @@ impl Default for ModelAnimationViewerState {
             preview_quality: AnimationPreviewQuality::Authoring,
             cached_model: None,
             cached_weapon_model: None,
+            cached_material: None,
             cached_clip: None,
             last_time_seconds: 0.0,
         }
@@ -263,6 +265,7 @@ impl ModelAnimationViewerState {
     fn invalidate_model_cache(&mut self) {
         self.cached_model = None;
         self.cached_weapon_model = None;
+        self.cached_material = None;
     }
 
     fn invalidate_clip_cache(&mut self) {
@@ -522,6 +525,13 @@ pub(crate) fn draw_model_animation_viewer(
         load_clip_context_cached(project, project_root, state, clip, model_context.as_deref())
     });
 
+    let material_layer = preview_material_layer_cached(project, project_root, state);
+    let character_material = material_layer.as_ref().map(|(atlas, motion)| {
+        model_import_preview::PreviewMaterialLayer {
+            atlas,
+            motion: *motion,
+        }
+    });
     let character_id = state.selected_character.filter(|id| {
         project
             .resource(*id)
@@ -712,6 +722,7 @@ pub(crate) fn draw_model_animation_viewer(
                                 &preview_capsules,
                                 &preview_sockets,
                                 equipped_weapon.as_ref(),
+                                character_material.as_ref(),
                                 selected_joint,
                                 joint_picking,
                             );
@@ -775,6 +786,7 @@ pub(crate) fn draw_model_animation_viewer(
                     &[],
                     &[],
                     None,
+                    character_material.as_ref(),
                     None,
                     false,
                 );
@@ -2979,6 +2991,7 @@ fn draw_preview(
     combat_capsules: &[model_import_preview::PreviewCombatCapsule],
     sockets: &[model_import_preview::PreviewSocket],
     equipped_weapon: Option<&model_import_preview::PreviewEquippedWeapon<'_>>,
+    character_material: Option<&model_import_preview::PreviewMaterialLayer<'_>>,
     selected_joint: Option<u16>,
     joint_picking: bool,
 ) -> PreviewInteraction {
@@ -3142,6 +3155,7 @@ fn draw_preview(
         combat_capsules,
         sockets,
         equipped_weapon,
+        character_material,
         selected_joint,
     );
 
@@ -3511,6 +3525,17 @@ fn role_loops_by_default(role: AnimationRole) -> bool {
     )
 }
 
+/// Cached resolved character material: atlas image plus UV motion,
+/// invalidated by the resolver's cache key (which embeds generated
+/// settings, so Material Lab edits refresh the preview immediately).
+#[derive(Debug, Clone)]
+struct CachedMaterialLayer {
+    material: ResourceId,
+    key: String,
+    atlas: Arc<ColorImage>,
+    motion: psx_level::LevelMaterialUvMotion,
+}
+
 #[derive(Debug, Clone)]
 struct LoadedModelContext {
     model_bytes: Vec<u8>,
@@ -3531,6 +3556,92 @@ fn load_model_context_cached(
     id: ResourceId,
 ) -> Option<Arc<LoadedModelContext>> {
     load_model_context_into(project, project_root, &mut state.cached_model, id)
+}
+
+/// The material the previewed character renders with in Play: the
+/// selected Character's override first, else the material on a scene
+/// ModelRenderer showing the selected model (same fallback the
+/// orientation probe uses). None means the model's own atlas.
+fn preview_material_id(
+    project: &ProjectDocument,
+    state: &ModelAnimationViewerState,
+) -> Option<ResourceId> {
+    if let Some(character_id) = state.selected_character {
+        if let Some(resource) = project.resource(character_id) {
+            if let ResourceData::Character(character) = &resource.data {
+                if let Some(material) = character.material {
+                    return Some(material);
+                }
+            }
+        }
+    }
+    let model_id = state.selected_model?;
+    let scene = project.active_scene();
+    for node in scene.nodes() {
+        if let NodeKind::ModelRenderer {
+            model: Some(model),
+            material: Some(material),
+            ..
+        } = &node.kind
+        {
+            if *model == model_id {
+                return Some(*material);
+            }
+        }
+    }
+    None
+}
+
+fn material_uv_motion(
+    project: &ProjectDocument,
+    material_id: ResourceId,
+) -> psx_level::LevelMaterialUvMotion {
+    let fallback = psx_level::LevelMaterialUvMotion::default();
+    let Some(resource) = project.resource(material_id) else {
+        return fallback;
+    };
+    let ResourceData::Material(material) = &resource.data else {
+        return fallback;
+    };
+    if material.animation.mode != psxed_project::MaterialAnimationMode::UvScroll {
+        return fallback;
+    }
+    let scroll = material.animation.uv_scroll;
+    psx_level::LevelMaterialUvMotion {
+        enabled: scroll.enabled,
+        speed_u_q8: scroll.speed_u_q8,
+        speed_v_q8: scroll.speed_v_q8,
+        phase_u: scroll.phase_u,
+        phase_v: scroll.phase_v,
+    }
+}
+
+/// Resolve and cache the preview material layer (any texture mode,
+/// including Generated, via the cook's own resolver).
+fn preview_material_layer_cached(
+    project: &ProjectDocument,
+    project_root: &Path,
+    state: &mut ModelAnimationViewerState,
+) -> Option<(Arc<ColorImage>, psx_level::LevelMaterialUvMotion)> {
+    let material_id = preview_material_id(project, state)?;
+    let (key, bytes) =
+        psxed_project::resolve_material_texture_psxt(project, material_id, project_root)
+            .ok()
+            .flatten()?;
+    if let Some(cached) = &state.cached_material {
+        if cached.material == material_id && cached.key == key {
+            return Some((Arc::clone(&cached.atlas), cached.motion));
+        }
+    }
+    let atlas = Arc::new(decode_psxt_image(&bytes)?);
+    let motion = material_uv_motion(project, material_id);
+    state.cached_material = Some(CachedMaterialLayer {
+        material: material_id,
+        key,
+        atlas: Arc::clone(&atlas),
+        motion,
+    });
+    Some((atlas, motion))
 }
 
 /// The weapon-preview overlay keeps its own cache slot so switching
