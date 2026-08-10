@@ -41,7 +41,8 @@ mod instances;
 
 pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
-    draw_collision_cylinder_debug, draw_model_instance_shadows, draw_model_instances,
+    draw_collision_cylinder_debug, draw_model_instance_from_pose, draw_model_instance_shadows,
+    draw_model_instances, resolve_instance_actor_pose, InstanceActorPoseSnapshot,
     ModelInstanceDepthPass, ModelInstanceDrawStats, ModelInstancePoseOverride,
 };
 
@@ -1277,6 +1278,71 @@ pub fn draw_instance_equipment<
     )
 }
 
+/// Draw non-player equipment from one instance pose already resolved by the
+/// gameplay tick.
+///
+/// This snapshot-driven counterpart to [`draw_instance_equipment`] performs no
+/// instance animation or override lookup. Feed it the same
+/// [`InstanceActorPoseSnapshot`] used by [`draw_model_instance_from_pose`] and
+/// pass `instance_pose.pose()` to
+/// [`crate::combat::transform_actor_combat_capsule`] for one body/socket/combat
+/// authority.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn draw_instance_equipment_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    current_room: RoomIndex,
+    instance_pose: InstanceActorPoseSnapshot,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    equipment::draw_instance_equipment_from_pose::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        PROFILE,
+    >(
+        tables,
+        knobs,
+        scratch,
+        current_room,
+        instance_pose,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
+        triangles,
+        world,
+    )
+}
+
 /// Draw the player's attached equipment (weapon models). Gameplay hit
 /// resolution lives in the sim, not here: the melee arc and rig
 /// combat capsules (see `crate::combat`).
@@ -1649,6 +1715,11 @@ pub fn player_joint_world_transform(
 /// Sample one live model-instance joint through the same transform used by
 /// [`draw_model_instances`]. The caller supplies the entity's live transform,
 /// clip, and phase so authored hurtboxes stay attached to the rendered rig.
+///
+/// This compatibility facade delegates to the instance snapshot's shared
+/// presentation-transform constructor. Tick-owned gameplay should instead
+/// call [`resolve_instance_actor_pose`] once and sample
+/// `instance_pose.pose()` for every authored hurtbox.
 pub fn model_instance_joint_world_transform(
     tables: ModelTables,
     runtime_model: RuntimeModelAsset,
@@ -1662,35 +1733,18 @@ pub fn model_instance_joint_world_transform(
     yaw: i16,
     joint: u8,
 ) -> Option<JointWorldTransform> {
-    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
-    let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
-    let pose_translation =
-        model_pose_anchor_translation(animation, phase_q12, clip_anchor, reference_anchor, None);
-    let combined_yaw = Angle::from_q12(yaw as u16).add_signed_q12(instance.visual_yaw);
-    let model_rotation = if instance.pitch == 0 && instance.roll == 0 {
-        yaw_rotation_matrix(combined_yaw)
-    } else {
-        euler_q12_rotation([instance.pitch, combined_yaw.as_q12() as i16, instance.roll])
-    };
-    let origin = visual_model_origin(
+    instances::instance_actor_pose_from_components(
+        tables,
+        SimTick::ZERO,
+        runtime_model,
+        instance,
+        animation,
+        phase_q12,
+        clip_local,
         x,
         y,
         z,
-        runtime_model.world_height,
-        instance.visual_offset,
-        instance.visual_scale_q8,
-        &model_rotation,
-    );
-    let local_to_world = visual_model_local_to_world(runtime_model, instance.visual_scale_q8);
-    ActorPoseSnapshot::new(
-        SimTick::ZERO,
-        animation,
-        phase_q12,
-        None,
-        origin,
-        model_rotation,
-        local_to_world,
-        pose_translation,
+        yaw,
     )
     .joint_world_transform(u16::from(joint))
 }
