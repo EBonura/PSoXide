@@ -819,6 +819,7 @@ pub(crate) fn draw_model_resource_editor(
                 ui,
                 &mut model.attachments,
                 model_stats.as_ref().map(|stats| stats.joint_count),
+                None,
             );
         });
 

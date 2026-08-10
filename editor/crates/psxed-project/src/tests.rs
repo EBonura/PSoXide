@@ -2546,6 +2546,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             parents: vec![None, Some(0)],
             signature: "psx-parent-v1:2:root,0".to_string(),
             note: "test skeleton".to_string(),
+            joint_names: Vec::new(),
         }),
     );
     let idle_animation = project.add_resource(
@@ -2619,6 +2620,7 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
             parents: vec![None],
             signature: "psx-parent-v1:1:root".to_string(),
             note: String::new(),
+            joint_names: Vec::new(),
         }),
     );
     let make_model = |path: &str| ModelResource {
