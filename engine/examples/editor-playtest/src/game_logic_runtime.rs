@@ -2,12 +2,12 @@
 //! example-side movement backend and effect dispatch the runtime
 //! crate's `GameEntities`/`LogicRuntime` leave to the owning game.
 //!
-//! - [`SceneEntityMover`] backs entity Patrol/Aggro steps with the
-//!   engine motor's `commit_body_step` over the entity room's ACTIVE
-//!   collision (grid floors + step rules, closed box props, other
-//!   bodies), so enemies move under exactly the player's rules. A
-//!   room whose collision is not resident refuses movement (the
-//!   entity keeps thinking; it walks again when the room streams in).
+//! - [`SceneEntityMover`] backs entity Patrol/Aggro steps with the active
+//!   world's movement solver. Grid projects retain `commit_body_step`; BSP
+//!   projects use the same caller-owned static-world + transformed-mover +
+//!   dynamic-cylinder trace stack as the player. A grid room whose collision
+//!   is not resident refuses movement (the entity keeps thinking; it walks
+//!   again when the room streams in).
 //! - Effect dispatch drains `LogicRuntime::take_fired` marks into the
 //!   example's presentation: DOOR records toggle their linked box
 //!   prop (draw + collision), MESSAGE records open the interactable
@@ -39,10 +39,12 @@ impl ActivePlayerCapsule {
     };
 }
 
-/// Movement backend for game entities: the entity room's grid
-/// collision from the active window, closed box props, the other
-/// entities' bodies (pre-tick snapshot), and the player's body.
+/// Movement backend for game entities. Both world backends compose other
+/// entities' pre-tick bodies and the player; grid projects additionally use
+/// active-room and prop collision, while BSP projects use resident hulls and
+/// transformed brush movers.
 pub(super) struct SceneEntityMover<'a> {
+    pub(super) bsp: Option<&'a mut BspRuntime>,
     pub(super) window: &'a RuntimeRoomWindow,
     pub(super) box_props: &'a RuntimeBoxProps,
     pub(super) models: &'a [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -80,20 +82,6 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         radius: i32,
         height: i32,
     ) -> [i32; 3] {
-        // Entity coordinates are their OWN room's local space, so the
-        // collision room enters with zero offsets (the offsets on the
-        // window slots translate rooms into the CURRENT room's space
-        // for the player; entities never leave their room this
-        // slice).
-        let Some(active) = self.active_room(room) else {
-            return position;
-        };
-        let collision_rooms = [CharacterCollisionRoom::from_collision(
-            active.collision_room,
-            0,
-            0,
-        )];
-
         // Body blockers: other entities' cooked instances at their
         // LIVE positions (self excluded), plus the player's capsule.
         let own_instance = GAME_ENTITIES
@@ -146,6 +134,25 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
                 &mut cylinders[cylinder_count..],
             );
 
+        let start = RoomPoint::new(position[0], position[1], position[2]);
+        if let Some(bsp) = self.bsp.as_deref_mut() {
+            let step = bsp
+                .commit_body_step(start, dx, dz, radius, height, &cylinders[..cylinder_count])
+                .expect("PXBSP entity trace failed");
+            return [step.position.x, step.position.y, step.position.z];
+        }
+
+        // Entity coordinates are their OWN room's local space, so the grid
+        // collision room enters with zero offsets (window offsets translate
+        // rooms into the CURRENT room's space for the player).
+        let Some(active) = self.active_room(room) else {
+            return position;
+        };
+        let collision_rooms = [CharacterCollisionRoom::from_collision(
+            active.collision_room,
+            0,
+            0,
+        )];
         let mut aabbs = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
         let mut aabb_count = self
             .box_props
@@ -162,14 +169,8 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
             &cylinders[..cylinder_count],
             &aabbs[..aabb_count],
         );
-        let step = psx_engine::character_motor::commit_body_step(
-            collision,
-            RoomPoint::new(position[0], position[1], position[2]),
-            dx,
-            dz,
-            radius,
-            height,
-        );
+        let step =
+            psx_engine::character_motor::commit_body_step(collision, start, dx, dz, radius, height);
         [step.position.x, step.position.y, step.position.z]
     }
 }

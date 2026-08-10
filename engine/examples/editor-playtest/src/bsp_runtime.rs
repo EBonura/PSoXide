@@ -15,9 +15,10 @@ use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, SliceReader, Vec3I32};
 use psx_engine::{
-    CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
-    CollisionQueryError, CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint,
-    ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
+    commit_body_step_with_trace_provider, BodyStep, CharacterBlockerTraceProvider,
+    CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
+    CharacterMotorState, CollisionQueryError, CollisionTraceShape, OtFrame, PrimitivePacketArena,
+    RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_level::{find_asset_of_kind, AssetId, AssetKind};
@@ -275,6 +276,7 @@ impl BspRuntime {
         input: CharacterMotorInput,
         config: CharacterMotorConfig,
         delta_vblanks: u16,
+        blockers: &[CharacterCollisionCylinder],
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
@@ -290,7 +292,36 @@ impl BspRuntime {
             &mut self.trace_scratch,
         )
         .expect("validated PXBSP player collision provider");
+        let mut provider = CharacterBlockerTraceProvider::new(&mut provider, blockers);
         motor.update_vblanks_with_trace_provider(&mut provider, input, config, delta_vblanks)
+    }
+
+    /// Move one gameplay entity through the same static-world, transformed-
+    /// mover, and dynamic-cylinder trace stack used by the player motor.
+    pub(super) fn commit_body_step(
+        &mut self,
+        start: RoomPoint,
+        dx: i32,
+        dz: i32,
+        radius: i32,
+        height: i32,
+        blockers: &[CharacterCollisionCylinder],
+    ) -> Result<BodyStep, CollisionQueryError> {
+        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
+        let count = self.collision_models(&mut models);
+        let radius = radius.max(0);
+        let height = height.max(1);
+        let shape = CollisionTraceShape::Body { radius, height };
+        let mut provider = PxbspCollisionProvider::new(
+            &self.map,
+            BSP_PLAYER_HULL_INDEX,
+            &models[..count],
+            shape,
+            &mut self.trace_scratch,
+        )
+        .expect("validated PXBSP entity collision provider");
+        let mut provider = CharacterBlockerTraceProvider::new(&mut provider, blockers);
+        commit_body_step_with_trace_provider(&mut provider, start, dx, dz, radius, height)
     }
 
     pub(super) fn update_camera(
