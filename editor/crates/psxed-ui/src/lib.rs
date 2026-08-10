@@ -538,6 +538,9 @@ pub struct EditorWorkspace {
     /// In-flight brush face-extrude drag (Brush tool primary held on a
     /// brush face).
     brush_extrude: Option<BrushExtrude>,
+    /// First ground point of a pending two-point brush clip
+    /// (Brush tool, modifier-click).
+    brush_clip_start: Option<[i32; 3]>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -2622,6 +2625,7 @@ impl EditorWorkspace {
             selected_brush: None,
             brush_drag: None,
             brush_extrude: None,
+            brush_clip_start: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
