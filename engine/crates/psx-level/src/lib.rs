@@ -3000,8 +3000,17 @@ pub struct EquipmentRecord {
     pub character_socket: &'static str,
     /// Weapon grip/pivot to align.
     pub weapon_grip: &'static str,
+    /// Host entity's `MODEL_INSTANCES` index, or
+    /// [`EquipmentRecord::NO_INSTANCE`] when the host is the player
+    /// (whose live pose comes from the player context instead).
+    pub model_instance: u16,
     /// Reserved.
     pub flags: u16,
+}
+
+impl EquipmentRecord {
+    /// `model_instance` sentinel: no bound model instance.
+    pub const NO_INSTANCE: u16 = u16::MAX;
 }
 
 /// One placed point light. Coordinates are room-local engine

@@ -1719,7 +1719,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for equipment in &package.equipment {
         let _ = writeln!(
             out,
-            "    EquipmentRecord {{ room: RoomIndex({}), weapon: WeaponIndex({}), x: {}, y: {}, z: {}, yaw: {}, character_socket: {:?}, weapon_grip: {:?}, flags: {} }},",
+            "    EquipmentRecord {{ room: RoomIndex({}), weapon: WeaponIndex({}), x: {}, y: {}, z: {}, yaw: {}, character_socket: {:?}, weapon_grip: {:?}, model_instance: {}, flags: {} }},",
             equipment.room,
             equipment.weapon,
             equipment.x,
@@ -1728,6 +1728,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             equipment.yaw,
             equipment.character_socket,
             equipment.weapon_grip,
+            equipment.model_instance,
             equipment.flags,
         );
     }

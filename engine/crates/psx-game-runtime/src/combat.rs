@@ -567,6 +567,7 @@ mod tests {
             yaw: 0,
             character_socket: "right_hand_grip",
             weapon_grip: "grip",
+            model_instance: EquipmentRecord::NO_INSTANCE,
             flags: 0,
         },
         EquipmentRecord {
@@ -578,6 +579,7 @@ mod tests {
             yaw: 0,
             character_socket: "right_hand_grip",
             weapon_grip: "grip",
+            model_instance: EquipmentRecord::NO_INSTANCE,
             flags: equipment_flags::PLAYER,
         },
     ];
