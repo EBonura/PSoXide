@@ -593,6 +593,43 @@ impl TriTexturedGouraud {
         }
     }
 
+    /// Build a self-contained texture-window packet whose tag temporarily
+    /// carries `ot_slot` for a later tagged-stream OT linking pass.
+    ///
+    /// This is the windowed counterpart to
+    /// [`ClassicTriTexturedGouraud::with_staged_slot_prepacked_unchecked`].
+    /// It is intended for classic affine renderers whose tiled materials can
+    /// interleave in the ordering table, so every polygon restores its own
+    /// GP0(E2) state instead of relying on a global draw-mode side effect.
+    ///
+    /// # Safety
+    /// Every color must have its high byte clear. `clut_high_word` and
+    /// `tpage_high_word` must contain only their intended high halfwords, and
+    /// `texture_window_word` must be a valid GP0(E2) command.
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [u32; 3],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        texture_window_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self {
+            tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
+            tex_window: texture_window_word,
+            color0_cmd: 0x3400_0000 | colors[0],
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: uv_words[0] as u32 | clut_high_word,
+            color1: colors[1],
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: uv_words[1] as u32 | tpage_high_word,
+            color2: colors[2],
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+        }
+    }
+
     /// Zeroed packet for static prebuilt-pool initialisation. Real
     /// content is written before the packet is ever linked into an
     /// ordering table.
@@ -950,6 +987,40 @@ impl QuadTexturedGouraud {
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: uv_words[2] as u32,
             color3: pack_color(r3, g3, b3),
+            v3: pack_vertex(verts[3].0, verts[3].1),
+            uv3: uv_words[3] as u32,
+        }
+    }
+
+    /// Build a self-contained texture-window packet whose tag temporarily
+    /// carries `ot_slot` for a later tagged-stream OT linking pass.
+    ///
+    /// # Safety
+    /// Every color must have its high byte clear. `clut_high_word` and
+    /// `tpage_high_word` must contain only their intended high halfwords, and
+    /// `texture_window_word` must be a valid GP0(E2) command.
+    pub const unsafe fn with_staged_slot_prepacked_unchecked(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [u32; 4],
+        clut_high_word: u32,
+        tpage_high_word: u32,
+        texture_window_word: u32,
+        ot_slot: u16,
+    ) -> Self {
+        Self {
+            tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
+            tex_window: texture_window_word,
+            color0_cmd: 0x3c00_0000 | colors[0],
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: uv_words[0] as u32 | clut_high_word,
+            color1: colors[1],
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: uv_words[1] as u32 | tpage_high_word,
+            color2: colors[2],
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+            color3: colors[3],
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
