@@ -63,6 +63,8 @@ use crate::{
 };
 
 mod assets;
+mod budget;
+pub use budget::*;
 mod cook_ui;
 mod manifest;
 mod performance;
@@ -947,7 +949,7 @@ pub fn build_package(
             project,
             crate::brush_world::BrushWorldCookOptions {
                 project_root,
-                mode: crate::brush_world::BrushWorldCookMode::Draft,
+                mode: project.bsp_cook_mode,
                 ambient: [32; 3],
                 texture_asset_base,
             },
@@ -2297,6 +2299,7 @@ pub fn build_package(
 
     (
         Some(PlaytestPackage {
+            bsp_cook_mode: project.bsp_cook_mode,
             world_geometry,
             // Same map the cook uses to dedupe texture references, so the
             // reachable set cannot drift from what was actually cooked.
