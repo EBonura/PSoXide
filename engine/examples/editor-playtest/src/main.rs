@@ -345,6 +345,10 @@ struct Playtest {
     /// `GAME_ENTITIES` records (phase 3; empty for record-free
     /// projects and then inert).
     game_entities: RuntimeGameEntities,
+    /// Exact attack clip/phase tokens emitted by the latest NPC tick. The
+    /// post-update pose pass consumes these before player melee, keeping enemy
+    /// body, equipment, and contact on one retained sample.
+    deferred_enemy_attacks: RuntimeDeferredEnemyAttacks,
     /// Logic-entity runtime (delay queue, master gating, fan-out)
     /// over the cooked `LOGIC` records (phase 3).
     logic: RuntimeLogic,
