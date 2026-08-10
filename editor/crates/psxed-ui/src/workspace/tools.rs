@@ -283,8 +283,25 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact else {
             return;
         };
-        // Pressing on a brush face starts a face extrude on that brush;
-        // pressing empty ground starts a create drag.
+        // Shift-press on a brush starts a whole-brush move; a plain press
+        // on a brush face starts a face extrude; pressing empty ground
+        // starts a create drag.
+        if frame.modifiers.shift {
+            if let Some((index, _)) = ws.pick_brush_face(frame.rect, pointer) {
+                let base = ws.project.active_scene().brushes[index].clone();
+                let press_ground = ws
+                    .brush_ground_point_raw(frame.rect, pointer)
+                    .unwrap_or([0.0; 3]);
+                ws.selected_brush = Some(index);
+                ws.brush_move = Some(BrushMove {
+                    index,
+                    base,
+                    press_ground,
+                    applied: [0, 0],
+                });
+            }
+            return;
+        }
         if let Some((index, face)) = ws.pick_brush_face(frame.rect, pointer) {
             let base = ws.project.active_scene().brushes[index].clone();
             let Some(plane) =
@@ -326,6 +343,26 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
+        if let Some(mv) = ws.brush_move.clone() {
+            let Some(ground) = ws.brush_ground_point_raw(frame.rect, pointer) else {
+                return;
+            };
+            let step = (ws.snap_units.max(1)) as f32;
+            let snap = |v: f32| ((v / step).round() * step) as i32;
+            let applied = [
+                snap(ground[0] - mv.press_ground[0]),
+                snap(ground[2] - mv.press_ground[2]),
+            ];
+            if applied != mv.applied {
+                let mut preview = mv.base.clone();
+                preview.translate([applied[0], 0, applied[1]]);
+                ws.project.active_scene_mut().brushes[mv.index] = preview;
+                if let Some(state) = ws.brush_move.as_mut() {
+                    state.applied = applied;
+                }
+            }
+            return;
+        }
         if let Some(extrude) = ws.brush_extrude.clone() {
             let step = (ws.snap_units.max(1)) as f32;
             let raw_units = if extrude.axis == 1 {
@@ -371,6 +408,15 @@ impl ViewportTool3d for BrushTool {
     }
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
+        if let Some(mv) = ws.brush_move.take() {
+            let live = ws.project.active_scene().brushes[mv.index].clone();
+            ws.project.active_scene_mut().brushes[mv.index] = mv.base;
+            if mv.applied != [0, 0] {
+                ws.push_undo();
+                ws.project.active_scene_mut().brushes[mv.index] = live;
+            }
+            return;
+        }
         if let Some(extrude) = ws.brush_extrude.take() {
             // Restore the base, then record one undo step and re-apply
             // the final shape so a full drag is a single undo entry.
@@ -414,11 +460,23 @@ impl ViewportTool3d for BrushTool {
                     let up = [start[0], BRUSH_CREATE_HEIGHT, start[2]];
                     let clipped = ws.project.active_scene().brushes[selected]
                         .clip([start, point, up]);
-                    if let (Some(back), Some(front)) = (clipped.back, clipped.front) {
-                        ws.push_undo();
-                        let scene = ws.project.active_scene_mut();
-                        scene.brushes[selected] = back;
-                        scene.brushes.push(front);
+                    match (ws.brush_clip_keep, clipped.back, clipped.front) {
+                        (BrushClipKeep::Both, Some(back), Some(front)) => {
+                            ws.push_undo();
+                            let scene = ws.project.active_scene_mut();
+                            scene.brushes[selected] = back;
+                            scene.brushes.push(front);
+                        }
+                        (BrushClipKeep::Back, Some(back), Some(_)) => {
+                            ws.push_undo();
+                            ws.project.active_scene_mut().brushes[selected] = back;
+                        }
+                        (BrushClipKeep::Front, Some(_), Some(front)) => {
+                            ws.push_undo();
+                            ws.project.active_scene_mut().brushes[selected] = front;
+                        }
+                        // Plane missed the brush: nothing to keep or drop.
+                        _ => {}
                     }
                 }
             }

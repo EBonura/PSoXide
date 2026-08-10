@@ -393,8 +393,25 @@ impl EditorWorkspace {
         );
         match self.active_tool {
             ViewTool::Brush => {
+                ui.separator();
+                if ui
+                    .button(format!("Clip keeps: {}", self.brush_clip_keep.label()))
+                    .on_hover_text("Which side(s) a two-point clip keeps")
+                    .clicked()
+                {
+                    self.brush_clip_keep = self.brush_clip_keep.next();
+                }
                 if let Some(index) = self.selected_brush {
-                    ui.separator();
+                    if ui.button(icons::label(icons::PLUS, "Duplicate")).clicked() {
+                        self.push_undo();
+                        let step = (self.snap_units.max(1)) as i32;
+                        let mut copy = self.project.active_scene().brushes[index].clone();
+                        copy.translate([step, 0, step]);
+                        let scene = self.project.active_scene_mut();
+                        scene.brushes.push(copy);
+                        let new_index = scene.brushes.len() - 1;
+                        self.selected_brush = Some(new_index);
+                    }
                     if ui
                         .button(icons::label(icons::TRASH, "Delete brush"))
                         .clicked()

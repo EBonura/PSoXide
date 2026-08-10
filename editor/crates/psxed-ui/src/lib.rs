@@ -541,6 +541,10 @@ pub struct EditorWorkspace {
     /// First ground point of a pending two-point brush clip
     /// (Brush tool, modifier-click).
     brush_clip_start: Option<[i32; 3]>,
+    /// Which side(s) the next brush clip keeps.
+    brush_clip_keep: BrushClipKeep,
+    /// In-flight whole-brush move drag (Brush tool, shift-press).
+    brush_move: Option<BrushMove>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -2064,6 +2068,42 @@ pub(crate) struct BrushDrag {
     pub(crate) current: [i32; 3],
 }
 
+/// Which side(s) a two-point brush clip keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrushClipKeep {
+    Both,
+    Back,
+    Front,
+}
+
+impl BrushClipKeep {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Back => "back",
+            Self::Front => "front",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Both => Self::Back,
+            Self::Back => Self::Front,
+            Self::Front => Self::Both,
+        }
+    }
+}
+
+/// In-flight whole-brush move drag (shift held on press): the brush
+/// follows the ground-plane pointer on X/Z, snapped.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushMove {
+    pub(crate) index: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    pub(crate) press_ground: [f32; 3],
+    pub(crate) applied: [i32; 2],
+}
+
 /// In-flight brush face-extrude drag: the pressed face slides along its
 /// dominant normal axis; the scene brush previews live and the base is
 /// restored before the single undo-recorded commit on release.
@@ -2626,6 +2666,8 @@ impl EditorWorkspace {
             brush_drag: None,
             brush_extrude: None,
             brush_clip_start: None,
+            brush_clip_keep: BrushClipKeep::Both,
+            brush_move: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
