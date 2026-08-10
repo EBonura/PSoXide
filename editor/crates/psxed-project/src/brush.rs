@@ -164,6 +164,114 @@ impl Brush {
     }
 }
 
+/// Result of splitting a brush by a plane: the kept halves, already
+/// pruned of dead faces. A side is `None` when the plane misses the brush
+/// on that side.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClippedBrush {
+    /// Half on the inside of the clip plane (behind its outward normal),
+    /// capped with the clip face as given.
+    pub back: Option<Brush>,
+    /// Half on the outside, capped with the clip face reversed.
+    pub front: Option<Brush>,
+}
+
+impl Brush {
+    /// Translate the whole brush by an integer delta.
+    pub fn translate(&mut self, delta: [i32; 3]) {
+        for face in &mut self.faces {
+            for point in &mut face.points {
+                for axis in 0..3 {
+                    point[axis] += delta[axis];
+                }
+            }
+        }
+    }
+
+    /// Translate one face's plane by an integer delta (the extrude/resize
+    /// core: the tool constrains `delta` to the face normal's direction;
+    /// the kernel only moves the plane and lets `solve` reshape the brush).
+    pub fn translate_face(&mut self, face: usize, delta: [i32; 3]) {
+        if let Some(face) = self.faces.get_mut(face) {
+            for point in &mut face.points {
+                for axis in 0..3 {
+                    point[axis] += delta[axis];
+                }
+            }
+        }
+    }
+
+    /// Drop faces that no longer bound the solid (their solved polygon is
+    /// gone). Used after clips so brushes don't accumulate dead planes.
+    pub fn pruned(&self) -> Brush {
+        let solved = self.solve();
+        Brush {
+            faces: self
+                .faces
+                .iter()
+                .zip(&solved.polygons)
+                .filter_map(|(face, polygon)| polygon.is_some().then_some(*face))
+                .collect(),
+        }
+    }
+
+    /// Split by the plane of `points` (wound as usual: outward normal).
+    /// The clip-tool core: keep back, front, or both.
+    pub fn clip(&self, points: [[i32; 3]; 3]) -> ClippedBrush {
+        let make = |cap: BrushFace| {
+            let mut half = self.clone();
+            half.faces.push(cap);
+            let half = half.pruned();
+            // A side survives when it still encloses volume. A redundant
+            // cap (plane misses the brush) prunes away and leaves the
+            // whole brush on that side; an all-consuming cap leaves
+            // nothing valid and the side is dropped.
+            half.solve().is_valid().then_some(half)
+        };
+        let back = make(BrushFace { points });
+        let front = make(BrushFace {
+            points: [points[0], points[2], points[1]],
+        });
+        ClippedBrush { back, front }
+    }
+
+    /// Nearest ray hit against the convex solid: `Some((t, face_index))`
+    /// with `t` in units of `dir` length. The picking core for brush
+    /// selection; slab test over the face planes.
+    pub fn raycast(&self, origin: [f64; 3], dir: [f64; 3]) -> Option<(f64, usize)> {
+        let mut t_enter = f64::NEG_INFINITY;
+        let mut t_exit = f64::INFINITY;
+        let mut enter_face = None;
+        for (index, face) in self.faces.iter().enumerate() {
+            let plane = Plane::from_points(face.points)?;
+            let (n, d) = plane.normalized();
+            let denom = dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2];
+            let start = origin[0] * n[0] + origin[1] * n[1] + origin[2] * n[2] - d;
+            if denom.abs() < f64::EPSILON {
+                if start > 0.0 {
+                    return None; // parallel and fully outside this plane
+                }
+                continue;
+            }
+            let t = -start / denom;
+            if denom < 0.0 {
+                // Entering through this face.
+                if t > t_enter {
+                    t_enter = t;
+                    enter_face = Some(index);
+                }
+            } else if t < t_exit {
+                t_exit = t;
+            }
+            if t_enter > t_exit {
+                return None;
+            }
+        }
+        let face = enter_face?;
+        (t_enter >= 0.0).then_some((t_enter, face))
+    }
+}
+
 /// Large quad on `plane` around `anchor`, wound to face the same way.
 fn base_winding(plane: &Plane, anchor: [i32; 3]) -> Vec<[f64; 3]> {
     let (n, _) = plane.normalized();
@@ -350,6 +458,66 @@ mod tests {
         };
         let solved = brush.solve();
         assert!(solved.polygons[0].is_none());
+    }
+
+    #[test]
+    fn translate_moves_bounds() {
+        let mut brush = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        brush.translate([128, -32, 256]);
+        let solved = brush.solve();
+        assert_eq!(solved.min, [128.0, -32.0, 256.0]);
+        assert_eq!(solved.max, [192.0, 32.0, 320.0]);
+    }
+
+    #[test]
+    fn face_translate_extrudes() {
+        let mut brush = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        // Push +X (face index 3) out by 64: the box widens.
+        brush.translate_face(3, [64, 0, 0]);
+        let solved = brush.solve();
+        assert!(solved.is_valid());
+        assert_eq!(solved.max, [128.0, 64.0, 64.0]);
+        // Pull it past -X: the brush inverts and stops enclosing volume.
+        brush.translate_face(3, [-256, 0, 0]);
+        assert!(!brush.solve().is_valid());
+    }
+
+    #[test]
+    fn clip_splits_into_two_halves() {
+        let brush = Brush::cuboid([0, 0, 0], [128, 64, 64]);
+        // Vertical clip plane at x=32, wound for a +X outward normal.
+        let clipped = brush.clip([[32, 0, 0], [32, 64, 0], [32, 0, 64]]);
+        let back = clipped.back.expect("back half");
+        let front = clipped.front.expect("front half");
+        assert_eq!(back.solve().max, [32.0, 64.0, 64.0]);
+        assert_eq!(front.solve().min, [32.0, 0.0, 0.0]);
+        assert_eq!(back.faces.len(), 6);
+        assert_eq!(front.faces.len(), 6);
+    }
+
+    #[test]
+    fn clip_missing_the_brush_keeps_one_side() {
+        let brush = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        let clipped = brush.clip([[200, 0, 0], [200, 64, 0], [200, 0, 64]]);
+        assert!(clipped.front.is_none(), "nothing outside x=200");
+        let back = clipped.back.expect("whole brush behind the plane");
+        assert_eq!(back.faces.len(), 6, "redundant cap pruned");
+    }
+
+    #[test]
+    fn raycast_hits_entry_face() {
+        let brush = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        // From -X toward the box: hits the -X face (index 2) at t=36/72=0.5.
+        let hit = brush.raycast([-36.0, 32.0, 32.0], [72.0, 0.0, 0.0]);
+        let (t, face) = hit.expect("ray hits the box");
+        assert!((t - 0.5).abs() < 1e-9);
+        assert_eq!(face, 2);
+        // Pointing away misses.
+        assert!(brush.raycast([-36.0, 32.0, 32.0], [-72.0, 0.0, 0.0]).is_none());
+        // Parallel ray outside a slab misses.
+        assert!(brush.raycast([-36.0, 200.0, 32.0], [72.0, 0.0, 0.0]).is_none());
+        // Origin inside: entry is behind the origin -> no hit (t >= 0 rule).
+        assert!(brush.raycast([32.0, 32.0, 32.0], [72.0, 0.0, 0.0]).is_none());
     }
 
     #[test]
