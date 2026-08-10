@@ -82,7 +82,8 @@ pub mod world_render;
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
-    commit_body_step, BodyStep, CharacterCollision, CharacterCollisionAabb,
+    commit_body_step, commit_body_step_with_trace_provider, BodyStep,
+    CharacterBlockerTraceProvider, CharacterCollision, CharacterCollisionAabb,
     CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAction, CharacterMotorAnim,
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
 };
