@@ -444,6 +444,8 @@ fn trigger_relay_door_chain_cooks_with_resolved_box_link() {
         LogicNodeKind::Door {
             box_prop: "Gate Box".to_string(),
             start_open: false,
+            open_offset: crate::default_brush_door_open_offset(),
+            travel_ticks: crate::default_brush_door_travel_ticks(),
         },
         "",
         0,
@@ -487,6 +489,8 @@ fn door_box_links_fail_loudly_when_missing_or_ambiguous() {
         LogicNodeKind::Door {
             box_prop: "No Such Box".to_string(),
             start_open: false,
+            open_offset: crate::default_brush_door_open_offset(),
+            travel_ticks: crate::default_brush_door_travel_ticks(),
         },
         "",
         0,
@@ -513,6 +517,8 @@ fn door_box_links_fail_loudly_when_missing_or_ambiguous() {
         LogicNodeKind::Door {
             box_prop: "Twin Box".to_string(),
             start_open: false,
+            open_offset: crate::default_brush_door_open_offset(),
+            travel_ticks: crate::default_brush_door_travel_ticks(),
         },
         "",
         0,
@@ -537,6 +543,8 @@ fn door_box_links_fail_loudly_when_missing_or_ambiguous() {
         LogicNodeKind::Door {
             box_prop: String::new(),
             start_open: false,
+            open_offset: crate::default_brush_door_open_offset(),
+            travel_ticks: crate::default_brush_door_travel_ticks(),
         },
         "",
         0,
