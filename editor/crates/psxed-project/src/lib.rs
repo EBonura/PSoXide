@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 mod animation_pose_correction;
 pub mod brush;
 pub mod brush_compile;
+pub mod brush_pack;
 pub mod brush_portal;
 pub mod floor_view;
 pub use animation_pose_correction::*;
