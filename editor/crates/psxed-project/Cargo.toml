@@ -12,6 +12,7 @@ psxed-audio  = { path = "../psxed-audio" }
 psxed-gltf   = { path = "../psxed-gltf" }
 psxed-tex    = { path = "../psxed-tex" }
 psx-asset    = { path = "../../../sdk/crates/psx-asset" }
+psx-bsp      = { path = "../../../engine/crates/psx-bsp" }
 psx-engine   = { path = "../../../engine/crates/psx-engine" }
 psx-iso      = { path = "../../../crates/psx-iso" }
 psx-level    = { path = "../../../engine/crates/psx-level" }
@@ -38,6 +39,10 @@ path = "src/bin/gen_prefab_kit.rs"
 [[bin]]
 name = "gen-stress-map"
 path = "src/bin/gen_stress_map.rs"
+
+[[bin]]
+name = "gen-brush-first-playable"
+path = "src/bin/gen_brush_first_playable.rs"
 
 [[bin]]
 name = "miniaturise-project"

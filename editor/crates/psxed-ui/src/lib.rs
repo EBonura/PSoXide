@@ -531,6 +531,24 @@ pub struct EditorWorkspace {
     /// click samples its logical material into the shared brush/resource
     /// selection, then automatically returns to painting.
     material_paint_sampling: bool,
+    /// Index into the active scene's brushes, when one is selected.
+    selected_brush: Option<usize>,
+    /// Selected face index within the selected brush.
+    selected_brush_face: Option<usize>,
+    /// In-flight brush-create drag (Brush tool primary held).
+    brush_drag: Option<BrushDrag>,
+    /// In-flight brush face-extrude drag (Brush tool primary held on a
+    /// brush face).
+    brush_extrude: Option<BrushExtrude>,
+    /// First ground point of a pending two-point brush clip
+    /// (Brush tool, modifier-click).
+    brush_clip_start: Option<[i32; 3]>,
+    /// Which side(s) the next brush clip keeps.
+    brush_clip_keep: BrushClipKeep,
+    /// Keep face textures anchored to the brush when it moves.
+    brush_texture_lock: bool,
+    /// In-flight whole-brush move drag (Brush tool, shift-press).
+    brush_move: Option<BrushMove>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -1972,6 +1990,29 @@ impl ViewportCameraState {
         }
     }
 
+    /// Inverse of [`Self::ray_for_normalized_panel_point`]: project a
+    /// world position to normalized panel coordinates (`[-1, 1]`, centre
+    /// origin). `None` when at or behind the camera plane.
+    pub fn normalized_panel_point_for_world(self, world: [f32; 3]) -> Option<(f32, f32)> {
+        let basis = self.basis();
+        let v = [
+            world[0] - basis.position[0],
+            world[1] - basis.position[1],
+            world[2] - basis.position[2],
+        ];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let depth = dot(v, basis.forward);
+        if depth <= 1.0 {
+            return None;
+        }
+        let half_fov_x: f32 = 0.5;
+        let half_fov_y: f32 = 0.5 * 240.0 / 320.0;
+        Some((
+            dot(v, basis.right) / depth / half_fov_x,
+            -dot(v, basis.up) / depth / half_fov_y,
+        ))
+    }
+
     /// Build a world-space ray from normalized panel coordinates.
     ///
     /// `nx` and `ny` are in `[-1, 1]`, where `0, 0` is the panel
@@ -2018,6 +2059,72 @@ enum ViewTool {
     /// Drop a child entity node into the sector under the cursor.
     /// The kind of node placed is controlled by `place_kind`.
     Place,
+    /// Drag a world-space convex brush footprint on the ground plane;
+    /// click selects the nearest brush under the cursor.
+    Brush,
+}
+
+/// In-flight brush-create drag: press anchor and current corner on the
+/// ground plane, snapped world units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrushDrag {
+    pub(crate) anchor: [i32; 3],
+    pub(crate) current: [i32; 3],
+}
+
+/// Which side(s) a two-point brush clip keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrushClipKeep {
+    Both,
+    Back,
+    Front,
+}
+
+impl BrushClipKeep {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Back => "back",
+            Self::Front => "front",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Both => Self::Back,
+            Self::Back => Self::Front,
+            Self::Front => Self::Both,
+        }
+    }
+}
+
+/// In-flight whole-brush move drag (shift held on press): the brush
+/// follows the ground-plane pointer on X/Z, snapped.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushMove {
+    pub(crate) index: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    pub(crate) press_ground: [f32; 3],
+    pub(crate) applied: [i32; 2],
+}
+
+/// In-flight brush face-extrude drag: the pressed face slides along its
+/// dominant normal axis; the scene brush previews live and the base is
+/// restored before the single undo-recorded commit on release.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushExtrude {
+    pub(crate) index: usize,
+    pub(crate) face: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    /// Dominant axis of the face normal (0/1/2) and its sign.
+    pub(crate) axis: usize,
+    pub(crate) dir: i32,
+    /// Pointer y at press (vertical faces drag by pixels).
+    pub(crate) press_y: f32,
+    /// Unsnapped ground point at press (horizontal drags measure here).
+    pub(crate) press_ground: [f32; 3],
+    /// Last applied delta along the axis, world units.
+    pub(crate) applied: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2152,6 +2259,7 @@ impl ViewTool {
             Self::Water => "Water",
             Self::Erase => "Erase",
             Self::Place => "Place",
+            Self::Brush => "Brush",
         }
     }
 
@@ -2165,6 +2273,7 @@ impl ViewTool {
             Self::Water => icons::BLEND,
             Self::Erase => icons::TRASH,
             Self::Place => icons::PLUS,
+            Self::Brush => icons::BOX,
         }
     }
 
@@ -2557,6 +2666,14 @@ impl EditorWorkspace {
             brush_material: None,
             material_paint_blend: false,
             material_paint_sampling: false,
+            selected_brush: None,
+            selected_brush_face: None,
+            brush_drag: None,
+            brush_extrude: None,
+            brush_clip_start: None,
+            brush_clip_keep: BrushClipKeep::Both,
+            brush_texture_lock: true,
+            brush_move: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
@@ -3313,6 +3430,22 @@ impl EditorWorkspace {
         let mut project = self.project.clone();
         project.normalize_loaded();
         self.clear_validation_issues();
+        if !project.active_scene().brushes.is_empty() {
+            let compiled = psxed_project::brush_playtest::cook_brush_playtest_to_dir(
+                &project,
+                &self.project_dir,
+                &dir,
+            )
+            .map_err(|error| error.to_string())?;
+            return Ok(format!(
+                "Cooked brush Play world ({} KiB, {} texture{}, {} mover{}) - run `make build-editor-playtest`",
+                compiled.pxbsp.bytes.len() / 1024,
+                compiled.textures.len(),
+                if compiled.textures.len() == 1 { "" } else { "s" },
+                compiled.movers.len(),
+                if compiled.movers.len() == 1 { "" } else { "s" },
+            ));
+        }
         // Build once: Cortex-sized projects have enough materials, animation,
         // world geometry, and portal topology that doing this again merely for
         // the status summary makes every Play launch needlessly expensive.

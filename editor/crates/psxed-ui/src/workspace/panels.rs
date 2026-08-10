@@ -1693,13 +1693,18 @@ impl EditorWorkspace {
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     constrain_resizable_dock_content(ui, content_width);
-                                    // Selection priority: primitive (Select tool's
+                                    // Selection priority: brush (while the Brush
+                                    // tool is active) → primitive (Select tool's
                                     // product -- face, edge, or vertex) → resource
                                     // (clicked in the bottom panel) → node (scene
-                                    // tree row). The primitive branch wins because
-                                    // it's the active edit target during paint and
-                                    // height-edit workflows.
-                                    if let Some(selection) = self.selection.selected_primitive {
+                                    // tree row). The active tool's edit target wins.
+                                    if self.active_tool == ViewTool::Brush
+                                        && self.selected_brush.is_some()
+                                    {
+                                        self.draw_brush_inspector(ui);
+                                    } else if let Some(selection) =
+                                        self.selection.selected_primitive
+                                    {
                                         match selection {
                                             Selection::Face(face) => {
                                                 self.draw_face_inspector(ui, face)
