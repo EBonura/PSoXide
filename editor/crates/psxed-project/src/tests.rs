@@ -2476,6 +2476,27 @@ fn editor_workspace_roundtrips_through_ron_string() {
 }
 
 #[test]
+fn editor_viewport_roundtrips_and_defaults_for_legacy_projects() {
+    let mut project = ProjectDocument::new("viewport");
+    project.editor_viewport = EditorViewportState {
+        view_2d: true,
+        orthographic_view: EditorOrthographicView::Front,
+        orthographic_focus: [128.0, 256.0, -64.0],
+        viewport_zoom: 48.0,
+        snap_units: 32,
+    };
+    let ron = project.to_ron_string().unwrap();
+    assert!(ron.contains("editor_viewport"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+
+    // A project saved before the field existed loads with defaults: the
+    // struct fills every field from serde defaults (empty record), and
+    // the ProjectDocument field itself is #[serde(default)].
+    let legacy: EditorViewportState = ron::from_str("()").unwrap();
+    assert_eq!(legacy, EditorViewportState::default());
+}
+
+#[test]
 fn material_lab_recipe_roundtrips_through_ron_string() {
     let mut project = ProjectDocument::new("material-lab");
     let mut material = MaterialResource::translucent(None, PsxBlendMode::Average);
