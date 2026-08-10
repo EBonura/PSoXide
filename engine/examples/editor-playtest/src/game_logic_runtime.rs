@@ -186,6 +186,103 @@ pub(super) fn game_entity_for_instance(instance: u16) -> Option<usize> {
 }
 
 impl Playtest {
+    /// Resolve enemy attack contact after this tick's player and instance pose
+    /// snapshots have been frozen. Authored HITBOX/HURTBOX geometry is
+    /// authoritative whenever both sides provide it. The legacy entity arc is
+    /// used only when either side has no authored role at all; inactive
+    /// authored frames, invalid authored joints, and authored geometric misses
+    /// stay misses.
+    pub(super) fn resolve_enemy_melee(&mut self) {
+        if self.deferred_enemy_attacks.is_empty() {
+            return;
+        }
+        let player = self.motor.position();
+        let player_position = [player.x, player.y, player.z];
+        // The same body-radius source the entity tick input uses, so the
+        // legacy fallback arc keeps its Character-derived reach.
+        let player_radius = match self.character {
+            Some(character) => character.radius,
+            None if self.bsp.is_some() => BSP_PLAYER_RADIUS,
+            None => 0,
+        };
+        let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
+        let player_capsules = self
+            .character
+            .and_then(|character| {
+                let first = character.combat_capsule_first.to_usize();
+                let end = first.saturating_add(usize::from(character.combat_capsule_count));
+                COMBAT_CAPSULES.get(first..end)
+            })
+            .unwrap_or(&[]);
+        let player_pose = self.player_actor_pose.map(|snapshot| snapshot.pose());
+        let mut hits = 0u16;
+        let mut damage_total = 0u16;
+        let mut attack_index = 0usize;
+        while attack_index < self.deferred_enemy_attacks.len() {
+            let Some(attack) = self.deferred_enemy_attacks.get(attack_index) else {
+                break;
+            };
+            attack_index += 1;
+            if player_invulnerable
+                || attack.room() != self.room_index
+                || !self.game_entities.deferred_attack_can_connect(attack)
+            {
+                continue;
+            }
+            let Some(entity) = GAME_ENTITIES.get(attack.entity()) else {
+                continue;
+            };
+            let first = entity.combat_capsule_first.to_usize();
+            let end = first.saturating_add(usize::from(entity.combat_capsule_count));
+            let attacker_capsules = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
+            let attacker_pose = self
+                .instance_actor_poses
+                .get(entity.model_instance as usize)
+                .copied()
+                .flatten()
+                .map(|snapshot| snapshot.pose());
+            let contact = combat::resolve_authored_actor_contact(
+                attacker_capsules,
+                CharacterAnimationAction::LightAttack,
+                attacker_pose,
+                player_capsules,
+                player_pose,
+            );
+            let damage = match contact {
+                combat::AuthoredActorContact::Hit {
+                    damage,
+                    poise_damage: _,
+                } => Some(damage),
+                combat::AuthoredActorContact::Miss => None,
+                combat::AuthoredActorContact::FallbackRequired => self
+                    .game_entities
+                    .deferred_attack_legacy_arc_hits(
+                        GAME_ENTITIES,
+                        attack,
+                        player_position,
+                        self.room_index,
+                        player_radius,
+                    )
+                    .then_some(entity.touch_damage),
+            };
+            let Some(damage) = damage else {
+                continue;
+            };
+            if self.game_entities.connect_deferred_attack(attack) {
+                hits = hits.saturating_add(1);
+                damage_total = damage_total.saturating_add(damage);
+            }
+        }
+        if damage_total > 0 {
+            // Player health floors at zero; death/respawn remains the next
+            // gameplay phase exactly as it was for legacy entity contact.
+            self.player_health = self.player_health.saturating_sub(damage_total);
+        }
+        if hits > 0 {
+            telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(hits));
+        }
+    }
+
     /// Player melee resolution for the combat slice: while an attack
     /// action is locked and the current attack-clip frame is inside
     /// the weapon's active window, sweep the melee arc over the live
@@ -426,7 +523,18 @@ impl Playtest {
                 continue;
             }
             let position = self.game_entities.position(index);
-            let clip = self.game_entities.clip_for_state(GAME_ENTITIES, index);
+            // A final Attack tick may have transitioned the state to Recover
+            // before presentation freezes. The deferred token retains the
+            // exact attack clip/phase that contact evaluates, so body and
+            // equipment visibly sample that same pose this tick.
+            let clip = self
+                .deferred_enemy_attacks
+                .as_slice()
+                .iter()
+                .copied()
+                .find(|attack| attack.entity() == index)
+                .map(|attack| attack.clip())
+                .unwrap_or_else(|| self.game_entities.clip_for_state(GAME_ENTITIES, index));
             out[count] = ModelInstancePoseOverride {
                 instance: record.model_instance,
                 x: position[0],

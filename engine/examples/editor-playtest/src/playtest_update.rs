@@ -11,6 +11,10 @@ impl Playtest {
     /// a two-load check, preserving the bit-identical gates and the
     /// budget's <1k idle rule.
     pub(super) fn tick_gameplay_layer(&mut self, ctx: &Ctx) {
+        // Deferred tokens are one-simulation-tick capabilities. Clear even on
+        // zero-record and 30 Hz off-ticks so an i-frame whiff can never be
+        // replayed later against a different retained pose.
+        self.deferred_enemy_attacks.clear();
         if GAME_ENTITIES.is_empty() && LOGIC.is_empty() {
             return;
         }
@@ -57,9 +61,10 @@ impl Playtest {
                 entity_dead[index] = self.game_entities.state(index)
                     == psx_game_runtime::entities::GameEntityState::Dead;
             }
-            // Souls i-frames: query before this tick's player motor update so
-            // attack contact matches the frames the motor reports. Resolve it
-            // before lending the BSP scratch to the entity mover.
+            // Souls i-frames: the deferred tick never resolves contact, so
+            // this pre-motor value only feeds the shared tick-input contract.
+            // `resolve_enemy_melee` re-queries invulnerability after the motor
+            // update, pairing it with the same retained pose contact uses.
             let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
             let mut mover = SceneEntityMover {
                 bsp: self.bsp.as_mut(),
@@ -73,7 +78,7 @@ impl Playtest {
                 player_radius,
                 player_height,
             };
-            self.game_entities.tick_delta(
+            self.game_entities.tick_delta_deferred(
                 GAME_ENTITIES,
                 psx_game_runtime::entities::GameEntityTickInput {
                     player: player_pos,
@@ -84,17 +89,11 @@ impl Playtest {
                 },
                 &mut mover,
                 npc_delta_ticks,
+                &mut self.deferred_enemy_attacks,
             )
         } else {
             psx_game_runtime::entities::GameEntityTickStats::default()
         };
-        // Entity attack connections damage the player (floors at 0;
-        // death/respawn handling is phase 4).
-        if entity_stats.player_damage > 0 {
-            self.player_health = self
-                .player_health
-                .saturating_sub(entity_stats.player_damage);
-        }
         self.logic.tick(
             LOGIC,
             psx_game_runtime::logic::LogicTickInput {
@@ -131,12 +130,6 @@ impl Playtest {
             telemetry::counter(
                 telemetry::counter::GAME_ENTITY_ATTACK_ENTERS,
                 u32::from(entity_stats.attack_enters),
-            );
-        }
-        if entity_stats.player_hits > 0 {
-            telemetry::counter(
-                telemetry::counter::PLAYER_HITS_TAKEN,
-                u32::from(entity_stats.player_hits),
             );
         }
         let fired_total = self.logic.stats().fired;
@@ -213,6 +206,7 @@ impl Playtest {
         // initial door states onto their box props (START_ON doors
         // begin open without a fire event).
         self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.deferred_enemy_attacks.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_health = PLAYER_MAX_HEALTH;
