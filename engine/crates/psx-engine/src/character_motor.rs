@@ -9,8 +9,8 @@
 use crate::floor_sample::{height_at_local, triangle_heights_to_quad};
 use crate::{
     collision_query::{
-        trace_collision, CollisionQueryError, CollisionTraceProvider, CollisionTraceQuery,
-        CollisionTraceShape, COLLISION_FRACTION_ONE_Q12,
+        trace_collision, CollisionQueryError, CollisionTrace, CollisionTraceProvider,
+        CollisionTraceQuery, CollisionTraceShape, COLLISION_FRACTION_ONE_Q12,
     },
     fixed::div_q12_i32,
     Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12,
@@ -105,6 +105,49 @@ impl CharacterCollisionAabb {
     /// Build a blocking AABB from room-local corners.
     pub const fn new(min: RoomPoint, max: RoomPoint) -> Self {
         Self { min, max }
+    }
+}
+
+/// Deterministic actor-cylinder layer over one world trace provider.
+///
+/// The wrapped provider remains authoritative for static world geometry and
+/// transformed brush models. Dynamic blockers are evaluated afterward in
+/// slice order, and only a strictly earlier actor contact replaces the world
+/// result. Exact ties therefore remain stable: world before actors, then the
+/// first actor in the caller-owned slice. The adapter owns no heap or scratch;
+/// a wrapped-provider failure leaves the caller's output untouched.
+pub struct CharacterBlockerTraceProvider<'provider, 'blockers, P: ?Sized> {
+    provider: &'provider mut P,
+    blockers: &'blockers [CharacterCollisionCylinder],
+}
+
+impl<'provider, 'blockers, P: CollisionTraceProvider + ?Sized>
+    CharacterBlockerTraceProvider<'provider, 'blockers, P>
+{
+    /// Compose dynamic actor cylinders over `provider` without allocation.
+    pub const fn new(
+        provider: &'provider mut P,
+        blockers: &'blockers [CharacterCollisionCylinder],
+    ) -> Self {
+        Self { provider, blockers }
+    }
+}
+
+impl<P: CollisionTraceProvider + ?Sized> CollisionTraceProvider
+    for CharacterBlockerTraceProvider<'_, '_, P>
+{
+    fn trace_into(&mut self, query: CollisionTraceQuery, output: &mut CollisionTrace) -> bool {
+        let mut best = CollisionTrace::unobstructed(query.end);
+        if !self.provider.trace_into(query, &mut best) {
+            return false;
+        }
+        for &blocker in self.blockers {
+            if let Some(candidate) = trace_character_blocker(query, blocker) {
+                merge_collision_trace(&mut best, candidate);
+            }
+        }
+        *output = best;
+        true
     }
 }
 
@@ -1582,6 +1625,85 @@ pub fn commit_body_step(
     }
 }
 
+/// Collision-check one non-player body step through a trace provider.
+///
+/// This is the BSP/provider counterpart of [`commit_body_step`]. It keeps the
+/// same deterministic full-step, X-only, then Z-only cascade while sharing the
+/// exact body/floor trace rules used by [`CharacterMotorState`]. A provider
+/// failure is explicit and never commits a partial step.
+pub fn commit_body_step_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    start: RoomPoint,
+    dx: i32,
+    dz: i32,
+    radius: i32,
+    height: i32,
+) -> Result<BodyStep, CollisionQueryError> {
+    let target = RoomPoint::new(
+        start.x.saturating_add(dx),
+        start.y,
+        start.z.saturating_add(dz),
+    );
+    if target.x == start.x && target.z == start.z {
+        return Ok(BodyStep {
+            position: start,
+            moved: false,
+            blocked: false,
+        });
+    }
+    let shape = CollisionTraceShape::Body {
+        radius: radius.max(0),
+        height: height.max(1),
+    };
+    if let Some(position) = trace_body_grounded_stand_position(provider, start, target, shape)? {
+        return Ok(BodyStep {
+            position,
+            moved: true,
+            blocked: false,
+        });
+    }
+
+    let x_only = RoomPoint::new(target.x, start.y, start.z);
+    if let Some(position) = trace_body_grounded_stand_position(provider, start, x_only, shape)? {
+        return Ok(BodyStep {
+            position,
+            moved: position.x != start.x || position.z != start.z,
+            blocked: true,
+        });
+    }
+    let z_only = RoomPoint::new(start.x, start.y, target.z);
+    if let Some(position) = trace_body_grounded_stand_position(provider, start, z_only, shape)? {
+        return Ok(BodyStep {
+            position,
+            moved: position.x != start.x || position.z != start.z,
+            blocked: true,
+        });
+    }
+    Ok(BodyStep {
+        position: start,
+        moved: false,
+        blocked: true,
+    })
+}
+
+fn trace_body_grounded_stand_position<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    start: RoomPoint,
+    target: RoomPoint,
+    shape: CollisionTraceShape,
+) -> Result<Option<RoomPoint>, CollisionQueryError> {
+    let Some(position) = trace_stand_position(provider, start, target, shape)? else {
+        return Ok(None);
+    };
+    let Some(floor) = trace_supporting_floor(provider, position, shape)? else {
+        return Ok(None);
+    };
+    if position.y.saturating_sub(floor) > STEP_DOWN_HEIGHT {
+        return Ok(None);
+    }
+    Ok(Some(position.with_y(floor)))
+}
+
 /// [`body_stand_position`] plus the AI grounding rule: the committed
 /// spot must have supporting floor within [`STEP_DOWN_HEIGHT`] of the
 /// feet (`body_stand_position` holds the feet height over deeper
@@ -2101,6 +2223,182 @@ fn body_hits_aabb_blocker(
     false
 }
 
+fn merge_collision_trace(best: &mut CollisionTrace, candidate: CollisionTrace) {
+    let start_solid = best.start_solid || candidate.start_solid;
+    let all_solid = best.all_solid || candidate.all_solid;
+    if candidate.fraction_q12 < best.fraction_q12 {
+        *best = candidate;
+    }
+    best.start_solid = start_solid;
+    best.all_solid = all_solid;
+}
+
+/// Trace one upright moving body against one upright actor cylinder.
+///
+/// Actor blockers intentionally participate only in horizontal body sweeps
+/// (and zero-length recovery probes). Downward support traces must continue to
+/// resolve the BSP floor rather than treating another actor's head as terrain.
+/// The closest-point interval is monotonic, so a 12-step Q0.12 binary search
+/// finds the first deterministic contact without floating point or allocation.
+fn trace_character_blocker(
+    query: CollisionTraceQuery,
+    blocker: CharacterCollisionCylinder,
+) -> Option<CollisionTrace> {
+    let CollisionTraceShape::Body { radius, height } = query.shape else {
+        return None;
+    };
+    if radius <= 0
+        || height <= 0
+        || blocker.radius <= 0
+        || blocker.height <= 0
+        || query.start.y != query.end.y
+    {
+        return None;
+    }
+    let body_top = query.start.y.saturating_add(height);
+    // The generic trace motor probes a raised path after any direct hit to
+    // step over low WORLD risers. Actor bodies are never steppable in the grid
+    // contract, so keep them blocking across that one bounded lift.
+    let blocker_top = blocker
+        .position
+        .y
+        .saturating_add(blocker.height)
+        .saturating_add(STEP_UP_HEIGHT);
+    if body_top <= blocker.position.y || blocker_top <= query.start.y {
+        return None;
+    }
+    let combined_radius = radius.saturating_add(blocker.radius);
+    if combined_radius <= 0 {
+        return None;
+    }
+    let radius_sq = square_i32_saturating(combined_radius);
+    let start_dx = query.start.x.saturating_sub(blocker.position.x);
+    let start_dz = query.start.z.saturating_sub(blocker.position.z);
+    let start_sq = square_i32_saturating(start_dx).saturating_add(square_i32_saturating(start_dz));
+    let move_x = query.end.x.saturating_sub(query.start.x);
+    let move_z = query.end.z.saturating_sub(query.start.z);
+    if start_sq < radius_sq {
+        let all_solid = blocker_overlap_at_fraction(query, blocker, combined_radius, Q12::SCALE);
+        return Some(CollisionTrace {
+            all_solid,
+            start_solid: true,
+            fraction_q12: 0,
+            end: query.start,
+            normal_q12: blocker_contact_normal(start_dx, start_dz, move_x, move_z),
+            plane_distance: 0,
+        });
+    }
+    if start_sq == radius_sq {
+        let outward_dot = start_dx
+            .saturating_mul(move_x)
+            .saturating_add(start_dz.saturating_mul(move_z));
+        if outward_dot >= 0 {
+            return None;
+        }
+        return Some(CollisionTrace {
+            all_solid: false,
+            start_solid: false,
+            fraction_q12: 0,
+            end: query.start,
+            normal_q12: blocker_contact_normal(start_dx, start_dz, move_x, move_z),
+            plane_distance: 0,
+        });
+    }
+    let length_sq = square_i32_saturating(move_x).saturating_add(square_i32_saturating(move_z));
+    if length_sq <= 0 {
+        return None;
+    }
+
+    // Project the blocker centre onto the swept centre segment. If the body
+    // does not overlap at that closest Q0.12 point, the segment is clear.
+    let to_center_x = blocker.position.x.saturating_sub(query.start.x);
+    let to_center_z = blocker.position.z.saturating_sub(query.start.z);
+    let projection = to_center_x
+        .saturating_mul(move_x)
+        .saturating_add(to_center_z.saturating_mul(move_z));
+    let closest_q12 = div_q12_i32(projection, length_sq).clamp(0, Q12::SCALE);
+    if closest_q12 <= 0
+        || !blocker_overlap_at_fraction(query, blocker, combined_radius, closest_q12)
+    {
+        return None;
+    }
+
+    let mut clear_q12: i32 = 0;
+    let mut contact_q12 = closest_q12;
+    while clear_q12.saturating_add(1) < contact_q12 {
+        let middle = clear_q12.saturating_add(contact_q12) / 2;
+        if blocker_overlap_at_fraction(query, blocker, combined_radius, middle) {
+            contact_q12 = middle;
+        } else {
+            clear_q12 = middle;
+        }
+    }
+    // A contact exactly at the requested endpoint must still reject the
+    // occupancy test; reserve 4096 for a genuinely unobstructed trace.
+    let fraction_q12 = contact_q12.min(COLLISION_FRACTION_ONE_Q12 - 1);
+    let end = trace_lerp_point(query.start, query.end, fraction_q12);
+    let contact_dx = end.x.saturating_sub(blocker.position.x);
+    let contact_dz = end.z.saturating_sub(blocker.position.z);
+    Some(CollisionTrace {
+        all_solid: false,
+        start_solid: false,
+        fraction_q12,
+        end,
+        normal_q12: blocker_contact_normal(contact_dx, contact_dz, move_x, move_z),
+        plane_distance: 0,
+    })
+}
+
+fn blocker_overlap_at_fraction(
+    query: CollisionTraceQuery,
+    blocker: CharacterCollisionCylinder,
+    radius: i32,
+    fraction_q12: i32,
+) -> bool {
+    let point = trace_lerp_point(query.start, query.end, fraction_q12);
+    let dx = point.x.saturating_sub(blocker.position.x);
+    let dz = point.z.saturating_sub(blocker.position.z);
+    square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
+        <= square_i32_saturating(radius)
+}
+
+fn trace_lerp_point(start: RoomPoint, end: RoomPoint, fraction_q12: i32) -> RoomPoint {
+    let fraction = Q12::from_raw(fraction_q12.clamp(0, Q12::SCALE));
+    RoomPoint::new(
+        start
+            .x
+            .saturating_add(fraction.mul_i32(end.x.saturating_sub(start.x))),
+        start
+            .y
+            .saturating_add(fraction.mul_i32(end.y.saturating_sub(start.y))),
+        start
+            .z
+            .saturating_add(fraction.mul_i32(end.z.saturating_sub(start.z))),
+    )
+}
+
+fn blocker_contact_normal(dx: i32, dz: i32, move_x: i32, move_z: i32) -> [i16; 3] {
+    let length = isqrt_i32(square_i32_saturating(dx).saturating_add(square_i32_saturating(dz)));
+    if length > 0 {
+        let nx = dx
+            .saturating_mul(Q12::SCALE)
+            .checked_div(length)
+            .unwrap_or(0)
+            .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        let nz = dz
+            .saturating_mul(Q12::SCALE)
+            .checked_div(length)
+            .unwrap_or(0)
+            .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        return [nx, 0, nz];
+    }
+    if move_x.saturating_abs() >= move_z.saturating_abs() {
+        [if move_x >= 0 { -4096 } else { 4096 }, 0, 0]
+    } else {
+        [0, 0, if move_z >= 0 { -4096 } else { 4096 }]
+    }
+}
+
 fn cylinder_overlaps(
     position: RoomPoint,
     radius: i32,
@@ -2238,6 +2536,148 @@ mod tests {
         );
         assert_eq!(result, Err(CollisionQueryError));
         assert_eq!(motor, before);
+    }
+
+    struct FixedTraceProvider {
+        trace: CollisionTrace,
+        fail_once: bool,
+    }
+
+    impl CollisionTraceProvider for FixedTraceProvider {
+        fn trace_into(&mut self, _query: CollisionTraceQuery, output: &mut CollisionTrace) -> bool {
+            if self.fail_once {
+                self.fail_once = false;
+                return false;
+            }
+            *output = self.trace;
+            true
+        }
+    }
+
+    #[test]
+    fn blocker_trace_hits_swept_actor_before_endpoint() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
+        let blockers = [CharacterCollisionCylinder::new(
+            RoomPoint::new(10, 0, 0),
+            2,
+            8,
+        )];
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace::unobstructed(query.end),
+            fail_once: false,
+        };
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        let trace = trace_collision(&mut provider, query).expect("compound trace");
+        assert!(trace.hit());
+        assert!(!trace.start_solid);
+        assert!(trace.end.x >= 5 && trace.end.x <= 6, "{trace:?}");
+        assert_eq!(trace.normal_q12[1], 0);
+        assert!(trace.normal_q12[0] < 0);
+    }
+
+    #[test]
+    fn blocker_trace_allows_motion_away_from_exact_tangent() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(6, 0, 0), RoomPoint::new(-8, 0, 0), 2, 8);
+        let blockers = [CharacterCollisionCylinder::new(
+            RoomPoint::new(10, 0, 0),
+            2,
+            8,
+        )];
+        let clear = CollisionTrace::unobstructed(query.end);
+        let mut world = FixedTraceProvider {
+            trace: clear,
+            fail_once: false,
+        };
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        assert_eq!(trace_collision(&mut provider, query), Ok(clear));
+    }
+
+    #[test]
+    fn world_hit_wins_exact_fraction_tie_with_dynamic_blocker() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
+        let blocker = CharacterCollisionCylinder::new(RoomPoint::new(10, 0, 0), 2, 8);
+        let dynamic = trace_character_blocker(query, blocker).expect("dynamic candidate");
+        let world_normal = [0, 0, -4096];
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace {
+                normal_q12: world_normal,
+                ..dynamic
+            },
+            fail_once: false,
+        };
+        let blockers = [blocker];
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        let trace = trace_collision(&mut provider, query).expect("compound trace");
+        assert_eq!(trace.fraction_q12, dynamic.fraction_q12);
+        assert_eq!(trace.normal_q12, world_normal);
+    }
+
+    #[test]
+    fn blocker_layer_preserves_failed_output_and_reuses_immediately() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
+        let blockers = [CharacterCollisionCylinder::new(
+            RoomPoint::new(10, 0, 0),
+            2,
+            8,
+        )];
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace::unobstructed(query.end),
+            fail_once: true,
+        };
+        let sentinel = CollisionTrace {
+            all_solid: true,
+            start_solid: true,
+            fraction_q12: 17,
+            end: RoomPoint::new(1, 2, 3),
+            normal_q12: [4, 5, 6],
+            plane_distance: 7,
+        };
+        let mut output = sentinel;
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        assert!(!provider.trace_into(query, &mut output));
+        assert_eq!(output, sentinel);
+        assert!(provider.trace_into(query, &mut output));
+        assert!(output.hit());
+        assert_ne!(output, sentinel);
+    }
+
+    #[test]
+    fn downward_floor_probe_ignores_actor_heads() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 20, 0), RoomPoint::new(0, -20, 0), 2, 8);
+        let blockers = [CharacterCollisionCylinder::new(
+            RoomPoint::new(0, 0, 0),
+            4,
+            10,
+        )];
+        let clear = CollisionTrace::unobstructed(query.end);
+        let mut world = FixedTraceProvider {
+            trace: clear,
+            fail_once: false,
+        };
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        assert_eq!(trace_collision(&mut provider, query), Ok(clear));
+    }
+
+    #[test]
+    fn trace_body_step_uses_full_then_x_then_z_blocker_order() {
+        let blockers = [CharacterCollisionCylinder::new(
+            RoomPoint::new(10, 0, 10),
+            2,
+            8,
+        )];
+        let mut world = FlatTraceProvider::new(None);
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        let step =
+            commit_body_step_with_trace_provider(&mut provider, RoomPoint::ZERO, 20, 20, 2, 8)
+                .expect("trace body step");
+        assert_eq!(step.position, RoomPoint::new(20, 0, 0));
+        assert!(step.moved);
+        assert!(step.blocked);
     }
 
     #[test]
