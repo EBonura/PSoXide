@@ -527,7 +527,8 @@ pub enum LogicNodeKind {
         required: u16,
     },
     /// Toggles the named Box Prop between closed (drawn + solid) and
-    /// open (hidden + passable) when used.
+    /// open (hidden + passable) in frozen grid projects. A brush-bound
+    /// door instead translates its compiled submodel to `open_offset`.
     Door {
         /// Name of the Box Prop node this door drives. Must resolve
         /// to exactly one placed Box Prop at cook time.
@@ -536,6 +537,12 @@ pub enum LogicNodeKind {
         /// Whether the door starts open.
         #[serde(default)]
         start_open: bool,
+        /// World-space translation from closed to open, in engine units.
+        #[serde(default = "default_brush_door_open_offset")]
+        open_offset: [i16; 3],
+        /// Fixed 60 Hz simulation ticks between endpoints.
+        #[serde(default = "default_brush_door_travel_ticks")]
+        travel_ticks: u16,
     },
 }
 
@@ -553,6 +560,14 @@ pub(crate) const fn default_logic_trigger_size() -> [u16; 3] {
 
 pub(crate) const fn default_logic_multisource_required() -> u16 {
     1
+}
+
+pub const fn default_brush_door_open_offset() -> [i16; 3] {
+    [0, 128, 0]
+}
+
+pub const fn default_brush_door_travel_ticks() -> u16 {
+    60
 }
 
 /// Authored collision shape for component-node entities.

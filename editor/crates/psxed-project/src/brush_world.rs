@@ -583,6 +583,8 @@ mod tests {
             kind: LogicNodeKind::Door {
                 box_prop: String::new(),
                 start_open: false,
+                open_offset: crate::default_brush_door_open_offset(),
+                travel_ticks: crate::default_brush_door_travel_ticks(),
             },
             target: String::new(),
             killtarget: String::new(),
