@@ -12,7 +12,7 @@ use core::{mem::size_of, ptr};
 
 use psx_gpu::prim::{ClassicQuadTexturedGouraud, ClassicTriTextured, ClassicTriTexturedGouraud};
 use psx_gte::{
-    math::Vec3I16,
+    math::{Mat3I16, Vec3I16, Vec3I32},
     scene::{self, Projected},
 };
 
@@ -153,6 +153,67 @@ pub struct ClassicAliasProjectedVertex {
     /// Cached unsigned GTE depth. The aligned record retains an eight-byte
     /// stride, with two trailing padding bytes left unused.
     pub depth: u16,
+}
+
+/// Compose the exact retained-alias model-to-view transform while keeping
+/// repeated matrix work on one loaded GTE schedule.
+///
+/// `model_offset` and `world_origin` are integer world/model units, matching
+/// the classic renderer's matrix translation lanes. `scale` is a per-axis Q12
+/// value. The result is bit-identical to rotating the offset, scaling the
+/// model matrix, and then composing it with the view matrix as separate SDK
+/// operations, but avoids reloading the same model rotation between steps.
+pub fn compose_classic_alias_transform(
+    view_rotation: Mat3I16,
+    view_translation: Vec3I32,
+    model_rotation: Mat3I16,
+    model_offset: Vec3I16,
+    world_origin: Vec3I32,
+    scale: Vec3I16,
+) -> (Mat3I16, Vec3I32) {
+    scene::load_rotation(&model_rotation);
+    scene::load_translation(Vec3I32::ZERO);
+    let rotated_offset = scene::transform_vertex_scheduled(model_offset);
+    let scaled = transform_matrix_columns([
+        Vec3I16::new(scale.x, 0, 0),
+        Vec3I16::new(0, scale.y, 0),
+        Vec3I16::new(0, 0, scale.z),
+    ]);
+
+    scene::load_rotation(&view_rotation);
+    scene::load_translation(Vec3I32::ZERO);
+    let composed = transform_matrix_columns([
+        Vec3I16::new(scaled.m[0][0], scaled.m[1][0], scaled.m[2][0]),
+        Vec3I16::new(scaled.m[0][1], scaled.m[1][1], scaled.m[2][1]),
+        Vec3I16::new(scaled.m[0][2], scaled.m[1][2], scaled.m[2][2]),
+    ]);
+    let model_translation = Vec3I16::new(
+        rotated_offset.x.wrapping_add(world_origin.x) as i16,
+        rotated_offset.y.wrapping_add(world_origin.y) as i16,
+        rotated_offset.z.wrapping_add(world_origin.z) as i16,
+    );
+    let rotated_translation = scene::transform_vertex_scheduled(model_translation);
+    let translation = Vec3I32::new(
+        rotated_translation.x.wrapping_add(view_translation.x),
+        rotated_translation.y.wrapping_add(view_translation.y),
+        rotated_translation.z.wrapping_add(view_translation.z),
+    );
+    (composed, translation)
+}
+
+#[inline(always)]
+fn transform_matrix_columns(columns: [Vec3I16; 3]) -> Mat3I16 {
+    let c0 = scene::transform_vertex_scheduled(columns[0]);
+    let c1 = scene::transform_vertex_scheduled(columns[1]);
+    let c2 = scene::transform_vertex_scheduled(columns[2]);
+    let clamp = |value: i32| value.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    Mat3I16 {
+        m: [
+            [clamp(c0.x), clamp(c1.x), clamp(c2.x)],
+            [clamp(c0.y), clamp(c1.y), clamp(c2.y)],
+            [clamp(c0.z), clamp(c1.z), clamp(c2.z)],
+        ],
+    }
 }
 
 /// Project selected deduplicated positions through the currently loaded GTE
@@ -1403,6 +1464,49 @@ mod tests {
         assert_eq!(
             unsafe { alias_vec3(compact.as_ptr(), 1) },
             Vec3I16::new(4, 5, 6)
+        );
+    }
+
+    #[test]
+    fn fused_alias_transform_matches_separate_sdk_operations() {
+        let view_rotation = Mat3I16::rotate_xyz(19, 37, 5);
+        let view_translation = Vec3I32::new(120, -48, 320);
+        let model_rotation = Mat3I16::rotate_z(71).mul(&Mat3I16::rotate_y(43));
+        let model_offset = Vec3I16::new(-7, 13, 4);
+        let world_origin = Vec3I32::new(96, -112, 28);
+        let scale = Vec3I16::new(3072, 4096, 5120);
+
+        scene::load_rotation(&model_rotation);
+        scene::load_translation(Vec3I32::ZERO);
+        let rotated_offset = scene::transform_vertex_scheduled(model_offset);
+        let diagonal = Mat3I16 {
+            m: [[scale.x, 0, 0], [0, scale.y, 0], [0, 0, scale.z]],
+        };
+        let scaled = scene::compose_rotation_scheduled(&model_rotation, &diagonal);
+        let rotation = scene::compose_rotation_scheduled(&view_rotation, &scaled);
+        scene::load_rotation(&view_rotation);
+        scene::load_translation(Vec3I32::ZERO);
+        let rotated_translation = scene::transform_vertex_scheduled(Vec3I16::new(
+            rotated_offset.x.wrapping_add(world_origin.x) as i16,
+            rotated_offset.y.wrapping_add(world_origin.y) as i16,
+            rotated_offset.z.wrapping_add(world_origin.z) as i16,
+        ));
+        let translation = Vec3I32::new(
+            rotated_translation.x.wrapping_add(view_translation.x),
+            rotated_translation.y.wrapping_add(view_translation.y),
+            rotated_translation.z.wrapping_add(view_translation.z),
+        );
+
+        assert_eq!(
+            compose_classic_alias_transform(
+                view_rotation,
+                view_translation,
+                model_rotation,
+                model_offset,
+                world_origin,
+                scale,
+            ),
+            (rotation, translation)
         );
     }
 
