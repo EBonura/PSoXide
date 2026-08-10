@@ -533,6 +533,10 @@ pub struct EditorWorkspace {
     material_paint_sampling: bool,
     /// Index into the active scene's brushes, when one is selected.
     selected_brush: Option<usize>,
+    /// Multi-brush selection (shift-click). Always contains
+    /// `selected_brush` when it is non-empty; empty means "just the
+    /// primary" so single-selection flows stay untouched.
+    selected_brushes: Vec<usize>,
     /// Selected face index within the selected brush.
     selected_brush_face: Option<usize>,
     /// In-flight brush-create drag (Brush tool primary held).
@@ -2115,10 +2119,14 @@ impl BrushClipKeep {
 
 /// In-flight whole-brush move drag (shift held on press). The same 3-axis
 /// delta storage serves 3D ground moves and Top/Front/Side plane moves.
+/// When the pressed brush belongs to a multi-selection, `others` carries
+/// the rest of the selection's (index, base) pairs so the whole group
+/// moves and commits as one gesture.
 #[derive(Debug, Clone)]
 pub(crate) struct BrushMove {
     pub(crate) index: usize,
     pub(crate) base: psxed_project::brush::Brush,
+    pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
     pub(crate) press_ground: [f32; 3],
     pub(crate) applied: [i32; 3],
 }
@@ -2698,6 +2706,7 @@ impl EditorWorkspace {
             material_paint_blend: false,
             material_paint_sampling: false,
             selected_brush: None,
+            selected_brushes: Vec::new(),
             selected_brush_face: None,
             brush_drag: None,
             brush_extrude: None,
