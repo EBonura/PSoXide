@@ -364,6 +364,14 @@ pub(crate) use draw_project_cached_room;
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
+    let _ = writeln!(
+        out,
+        "pub const BSP_COOK_IS_RELEASE: bool = {};\n",
+        matches!(
+            package.bsp_cook_mode,
+            crate::brush_world::BrushWorldCookMode::Release
+        )
+    );
     let has_room_fog = package
         .rooms
         .iter()
