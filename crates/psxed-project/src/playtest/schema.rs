@@ -1385,6 +1385,9 @@ pub struct PlaytestEquipment {
     pub yaw: i16,
     /// Character socket to follow.
     pub character_socket: String,
+    /// Host entity's model-instance index, or `u16::MAX` for the
+    /// player (no bound instance).
+    pub model_instance: u16,
     /// Weapon grip/pivot to align.
     pub weapon_grip: String,
     /// Runtime flags. Bit 0 = follows the live player controller.
