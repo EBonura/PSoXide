@@ -351,6 +351,19 @@ impl EditorWorkspace {
             solved.max[1] - solved.min[1],
             solved.max[2] - solved.min[2],
         ));
+        // Numeric placement fallback: exact (unsnapped) min-corner entry.
+        if let Some(origin) = self.selected_brush_origin() {
+            let mut edited = origin;
+            ui.horizontal(|ui| {
+                ui.label("Origin");
+                ui.add(egui::DragValue::new(&mut edited[0]).speed(1).prefix("X "));
+                ui.add(egui::DragValue::new(&mut edited[1]).speed(1).prefix("Y "));
+                ui.add(egui::DragValue::new(&mut edited[2]).speed(1).prefix("Z "));
+            });
+            if edited != origin {
+                self.set_selected_brush_origin(edited);
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             if ui.button("Duplicate").clicked() {
                 self.duplicate_selected_brush();
@@ -453,6 +466,18 @@ impl EditorWorkspace {
             egui::RichText::new(format!("Face {face} of {}", brush.faces.len())).strong(),
         );
         ui.label(plane_label);
+        // Numeric face fallback: slide the plane along its dominant axis.
+        if let Some((axis, position)) = self.selected_brush_face_axis() {
+            let mut edited = position;
+            ui.horizontal(|ui| {
+                ui.label(format!("Plane {} at", ["X", "Y", "Z"][axis]));
+                ui.add(egui::DragValue::new(&mut edited).speed(1));
+            });
+            if edited != position && !self.set_selected_brush_face_axis_position(edited) {
+                self.status =
+                    "Face edit rejected: brush would stop enclosing volume".to_string();
+            }
+        }
         let material_name = face_data.material.and_then(|id| {
             self.project
                 .material_options()
@@ -537,10 +562,9 @@ impl EditorWorkspace {
     }
 
     /// Numeric UV controls for the selected brush face: offset, rotation,
-    /// per-axis scale, reset.
-    // ponytail: one undo per widget change; a slider drag records several
-    // steps. Coalesce with the inspector-transaction wrapper when brush
-    // UVs move into a proper inspector panel.
+    /// per-axis scale, reset. Runs inside the Inspector, so history is
+    /// owned by the inspector transaction wrapper: a slider drag or a
+    /// focused text edit coalesces into one undo step.
     pub(crate) fn draw_brush_face_uv_controls(&mut self, ui: &mut egui::Ui) {
         let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
             return;
@@ -597,10 +621,102 @@ impl EditorWorkspace {
             }
         });
         if edited != current {
-            self.push_undo();
             self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
             self.mark_dirty();
         }
+    }
+
+    /// Solved axis-aligned min corner of the selected brush, rounded to
+    /// integers: the numeric inspector's "Origin".
+    pub(crate) fn selected_brush_origin(&self) -> Option<[i32; 3]> {
+        let index = self.selected_brush?;
+        let brush = self.project.active_scene().brushes.get(index)?;
+        let solved = brush.solve();
+        solved
+            .is_valid()
+            .then(|| solved.min.map(|value| value.round() as i32))
+    }
+
+    /// Numeric fallback for whole-brush placement: translate the selected
+    /// brush so its solved min corner lands exactly on `origin`. No grid
+    /// snapping: typing exact off-grid coordinates is the point of the
+    /// fallback. Inspector-owned mutation: history is recorded by the
+    /// inspector transaction wrapper, not here.
+    pub(crate) fn set_selected_brush_origin(&mut self, origin: [i32; 3]) -> bool {
+        let Some(current) = self.selected_brush_origin() else {
+            return false;
+        };
+        let Some(index) = self.selected_brush else {
+            return false;
+        };
+        let delta = [
+            origin[0] - current[0],
+            origin[1] - current[1],
+            origin[2] - current[2],
+        ];
+        if delta == [0; 3] {
+            return true;
+        }
+        let texture_lock = self.brush_texture_lock;
+        let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) else {
+            return false;
+        };
+        if texture_lock {
+            brush.translate_with_uv_lock(delta, psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL);
+        } else {
+            brush.translate(delta);
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// Dominant-axis descriptor of the selected face's plane: the axis
+    /// index and the authored reference coordinate (`points[0]` on that
+    /// axis). Exact position for axis-aligned faces; a reference point
+    /// for slopes.
+    pub(crate) fn selected_brush_face_axis(&self) -> Option<(usize, i32)> {
+        let (index, face) = (self.selected_brush?, self.selected_brush_face?);
+        let face = self
+            .project
+            .active_scene()
+            .brushes
+            .get(index)?
+            .faces
+            .get(face)?;
+        let plane = psxed_project::brush::Plane::from_points(face.points)?;
+        Some((
+            dominant_axis(plane.normal),
+            face.points[0][dominant_axis(plane.normal)],
+        ))
+    }
+
+    /// Numeric fallback for face manipulation: slide the selected face's
+    /// plane so its reference point sits at `value` on its dominant axis.
+    /// Returns `false` (leaving the brush untouched) when the edit would
+    /// stop the brush enclosing volume. Inspector-owned mutation: no
+    /// history record here (see `set_selected_brush_origin`).
+    pub(crate) fn set_selected_brush_face_axis_position(&mut self, value: i32) -> bool {
+        let Some((axis, current)) = self.selected_brush_face_axis() else {
+            return false;
+        };
+        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
+            return false;
+        };
+        if value == current {
+            return true;
+        }
+        let mut delta = [0i32; 3];
+        delta[axis] = value - current;
+        let Some(mut edited) = self.project.active_scene().brushes.get(index).cloned() else {
+            return false;
+        };
+        edited.translate_face(face, delta);
+        if !edited.solve().is_valid() {
+            return false;
+        }
+        self.project.active_scene_mut().brushes[index] = edited;
+        self.mark_dirty();
+        true
     }
 
     /// Apply the paint material to the selected brush face, as one undo
