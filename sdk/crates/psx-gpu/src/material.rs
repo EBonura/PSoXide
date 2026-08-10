@@ -61,9 +61,9 @@ impl TextureWindow {
 
     /// Build a window for a power-of-two tile.
     ///
-    /// `origin_*` and `size_*` are in texels. The origin and size must
-    /// be 8-texel aligned because GP0(E2) stores mask/offset in 8-texel
-    /// units.
+    /// `origin_*` and `size_*` are in texels. Each origin must align to its
+    /// tile size because GP0(E2) replaces the coordinate bits selected by the
+    /// mask. The complete tile must fit in the active 256x256 texture page.
     pub const fn power_of_two_tile(origin_x: u8, origin_y: u8, size_x: u8, size_y: u8) -> Self {
         assert!(
             size_x >= 8 && size_x.is_power_of_two(),
@@ -74,15 +74,23 @@ impl TextureWindow {
             "texture-window height must be a power of two >= 8"
         );
         assert!(
-            origin_x.is_multiple_of(8),
-            "texture-window origin_x must align to 8 texels"
+            origin_x.is_multiple_of(size_x),
+            "texture-window origin_x must align to its width"
         );
         assert!(
-            origin_y.is_multiple_of(8),
-            "texture-window origin_y must align to 8 texels"
+            origin_y.is_multiple_of(size_y),
+            "texture-window origin_y must align to its height"
         );
         assert!(size_x <= 128, "texture-window width must fit GP0(E2)");
         assert!(size_y <= 128, "texture-window height must fit GP0(E2)");
+        assert!(
+            origin_x as u16 + size_x as u16 <= 256,
+            "texture window must fit the texture-page width"
+        );
+        assert!(
+            origin_y as u16 + size_y as u16 <= 256,
+            "texture window must fit the texture-page height"
+        );
         let mask_x = ((!((size_x as u16) - 1)) & 0x00FF) as u8;
         let mask_y = ((!((size_y as u16) - 1)) & 0x00FF) as u8;
         Self::new(mask_x / 8, mask_y / 8, origin_x / 8, origin_y / 8)
@@ -410,7 +418,7 @@ impl TextureMaterial {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlendMode, TextureMaterial};
+    use super::{BlendMode, TextureMaterial, TextureWindow};
 
     #[test]
     fn blend_mode_decodes_tpage_bits() {
@@ -419,6 +427,12 @@ mod tests {
         assert_eq!(BlendMode::from_tpage_bits(2), BlendMode::Subtract);
         assert_eq!(BlendMode::from_tpage_bits(3), BlendMode::AddQuarter);
         assert_eq!(BlendMode::from_tpage_bits(4), BlendMode::Average);
+    }
+
+    #[test]
+    #[should_panic(expected = "texture-window origin_x must align to its width")]
+    fn power_of_two_window_rejects_an_origin_only_aligned_to_eight_texels() {
+        let _ = TextureWindow::power_of_two_tile(8, 0, 32, 32);
     }
 
     #[test]
