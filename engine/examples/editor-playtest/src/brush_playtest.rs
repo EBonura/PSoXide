@@ -19,7 +19,7 @@ use psx_math::{cos_q12, sin_q12};
 use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
 use psxed_format::texture::Depth;
 
-use crate::generated_brush::{BRUSH_TEXTURES, BRUSH_TEXTURE_ASSET_IDS, BRUSH_WORLD_PXBSP};
+use crate::generated::{ASSETS, PXBSP_WORLD};
 use crate::{OT, PRIMITIVE_PACKETS};
 
 const MAX_DOORS: usize = 16;
@@ -47,7 +47,7 @@ pub struct BrushPlaytest {
 impl BrushPlaytest {
     pub fn new() -> Self {
         Self {
-            map: PxbspResidentMap::with_capacity(BRUSH_WORLD_PXBSP.len()),
+            map: PxbspResidentMap::with_capacity(PXBSP_WORLD.len()),
             renderer: Renderer::new(),
             doors: BrushDoorSet::EMPTY,
             materials: Vec::new(),
@@ -58,7 +58,7 @@ impl BrushPlaytest {
     }
 
     fn load_map(&mut self) {
-        let mut reader = SliceReader::new(BRUSH_WORLD_PXBSP);
+        let mut reader = SliceReader::new(PXBSP_WORLD);
         self.map.load(0, &mut reader).expect("cooked brush PXBSP");
         self.doors
             .init_from_map(&self.map)
@@ -342,22 +342,23 @@ impl Scene for BrushPlaytest {
 }
 
 fn upload_material_textures(map: &PxbspResidentMap) -> Vec<Option<PxbspTextureBinding>> {
-    assert_eq!(
-        BRUSH_TEXTURE_ASSET_IDS.len(),
-        BRUSH_TEXTURES.len(),
-        "brush texture manifest arrays differ"
-    );
     // ponytail: the resident checkpoint packs its complete texture set into a
     // fixed VRAM region. Replace this with shared asset residency when brush
     // worlds join the gameplay runtime.
     let mut bindings = vec![None; map.materials().len()];
+    let mut texture_asset_ids = Vec::new();
+    for material in map.materials().iter() {
+        if !texture_asset_ids.contains(&material.texture_asset) {
+            texture_asset_ids.push(material.texture_asset);
+        }
+    }
     let mut page_x = FIRST_TEXTURE_X;
     let mut page_y = 0;
-    for (texture_index, (&asset_id, &bytes)) in BRUSH_TEXTURE_ASSET_IDS
-        .iter()
-        .zip(BRUSH_TEXTURES.iter())
-        .enumerate()
-    {
+    for (texture_index, &asset_id) in texture_asset_ids.iter().enumerate() {
+        let bytes = ASSETS
+            .get(asset_id as usize)
+            .expect("PXBSP texture asset is present in the master table")
+            .bytes;
         let texture = Texture::from_bytes(bytes).expect("cooked brush texture");
         let depth = match texture.depth() {
             Depth::Bit4 => TexDepth::Bit4,

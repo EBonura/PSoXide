@@ -53,7 +53,7 @@ use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    clamp_ui_font_scale, default_ui_font_scale, default_ui_letter_spacing, spatial, AnimationRole,
+    clamp_ui_font_scale, default_ui_font_scale, default_ui_letter_spacing, AnimationRole,
     CharacterAnimationAction, CharacterControllerSettings, NodeId, NodeKind, OptionId, OptionKind,
     ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode, ResourceData,
     ResourceId, SceneNode, UiAction, UiAnchor, UiGradient, UiImageEffect, UiNodeId, UiNodeKind,
@@ -90,7 +90,6 @@ pub use manifest::{
 pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
 
-#[cfg(test)]
 const DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
 const ATMOSPHERE_DENSITY_MAX: i32 = 96;
 const ATMOSPHERE_FALL_SPEED_MAX_Q4: i32 = 64;
@@ -209,10 +208,16 @@ pub fn build_package(
         .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
         .collect();
     room_nodes.sort_by_key(|node| node.id.raw());
+    let uses_pxbsp = !scene.brushes.is_empty();
 
-    if room_nodes.is_empty() {
+    if room_nodes.is_empty() && !uses_pxbsp {
         report.error("playtest needs at least one Room node - none found");
         return (None, report);
+    }
+    if uses_pxbsp {
+        // The PXBSP payload is authoritative when brushes are present. Ignore
+        // transitional Section nodes instead of cooking two world providers.
+        room_nodes.clear();
     }
 
     // Pass 2: cook each Room. We need the `CookedWorldGrid` for
@@ -256,6 +261,7 @@ pub fn build_package(
     let mut room_portals: Vec<PlaytestRoomPortal> = Vec::new();
     let mut pending_floor_links: Vec<PendingRoomFloorLink> = Vec::new();
     let room_near_rooms: Vec<u16> = Vec::new();
+    let mut world_geometry = PlaytestWorldGeometry::Grid;
 
     for room_node in &room_nodes {
         let NodeKind::Section { grid: base_grid } = &room_node.kind else {
@@ -720,6 +726,220 @@ pub fn build_package(
             }
         }
     }
+    if uses_pxbsp {
+        // Brush worlds still enter the normal package/gameplay pipeline. One
+        // synthetic region preserves the existing room-indexed actor tables
+        // until real PXBSP leaf/PVS residency replaces them; its tiny PSXW is
+        // metadata only and is never the selected world renderer/collider.
+        let synthetic_sector_size = scene
+            .world_sector_size_for_node(scene.root)
+            .unwrap_or(1024)
+            .max(1);
+        let synthetic_grid = WorldGrid::empty(1, 1, synthetic_sector_size);
+        let cooked = match cook_world_grid(project, &synthetic_grid) {
+            Ok(cooked) => cooked,
+            Err(error) => {
+                report.error(format!("PXBSP synthetic region failed cook: {error}"));
+                return (None, report);
+            }
+        };
+        let world_asset_index = assets.len();
+        assets.push(PlaytestAsset {
+            kind: PlaytestAssetKind::RoomWorld,
+            bytes: Vec::new(),
+            filename: "room_000.psxw".to_string(),
+            source_label: "PXBSP world region".to_string(),
+            streamed_class: StreamedClass::None,
+        });
+        room_chunks_by_node.insert(
+            scene.root,
+            vec![AuthoredRoomChunk {
+                room_index: 0,
+                authored_room: scene.root.raw() as u32,
+                chunk_index: 0,
+                array_origin: [0, 0],
+                world_origin: [0, 0],
+                size: [1, 1],
+                cells: vec![[0, 0]],
+                neighbours: [None; 4],
+                triangles: 0,
+                psxw_bytes: 0,
+                static_lit_bytes: 0,
+                populated_cells: 1,
+                floor_idx: 0,
+            }],
+        );
+        append_room_visibility(
+            0,
+            &cooked,
+            DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS,
+            &mut room_visibility,
+            &mut visibility_cells,
+            &mut visibility_pvs,
+            &mut visibility_pvs_bits,
+        );
+        let resolved_camera = scene
+            .world_camera_for_node(scene.root)
+            .unwrap_or_default()
+            .normalized();
+        let resolved_culling = scene
+            .world_culling_for_node(scene.root)
+            .unwrap_or_default()
+            .normalized();
+        let streaming = scene
+            .world_streaming_for_node(scene.root)
+            .unwrap_or_default()
+            .normalized();
+        let resolved_physics = scene
+            .world_physics_for_node(scene.root)
+            .unwrap_or_default()
+            .normalized();
+        let resolved_sky = scene
+            .world_sky_for_node(scene.root)
+            .unwrap_or_default()
+            .resolved_for_room(false, [0; 3]);
+        let resolved_far_vista = scene
+            .world_far_vista_for_node(scene.root)
+            .unwrap_or_default()
+            .resolved_for_room(false, [0; 3]);
+        rooms.push(PlaytestRoom {
+            name: "PXBSP World".to_string(),
+            world_asset_index,
+            reflection_probe_asset_index: None,
+            origin_x: 0,
+            origin_z: 0,
+            origin_y: 0,
+            sector_size: synthetic_sector_size,
+            draw_distance: resolved_culling.draw_distance,
+            chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
+            visibility_radius: resolved_culling.visibility_radius,
+            resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
+            visible_chunk_limit: streaming.visible_chunk_limit,
+            gravity_per_tick: resolved_physics.gravity_per_tick,
+            material_first: 0,
+            material_count: 0,
+            portal_first: 0,
+            portal_count: 0,
+            near_room_first: 0,
+            near_room_count: 0,
+            overlapped_room_first: 0,
+            overlapped_room_count: 0,
+            fog_rgb: [0; 3],
+            fog_near: 0,
+            fog_far: resolved_culling.draw_distance,
+            atmosphere_rgb: [0; 3],
+            atmosphere_density: 0,
+            atmosphere_fall_speed_q4: 0,
+            atmosphere_wind_speed_q4: 0,
+            sky: PlaytestSky {
+                top_rgb: resolved_sky.top_color,
+                horizon_rgb: resolved_sky.horizon_color,
+                bottom_rgb: resolved_sky.lower_color,
+                horizon_percent: resolved_sky.horizon_percent,
+                horizon_thickness_percent: resolved_sky.horizon_thickness_percent,
+                skybox_columns: resolved_sky.skybox_columns,
+                skybox_rows: resolved_sky.skybox_rows,
+                flags: if resolved_sky.enabled {
+                    sky_flags::ENABLED
+                } else {
+                    0
+                },
+                cyclorama_quads: Vec::new(),
+                cloud_layer: PlaytestCloudLayer {
+                    texture_asset_index: None,
+                    color_rgb: resolved_sky.cloud_layer.color,
+                    density: resolved_sky.cloud_layer.density,
+                    altitude: resolved_sky.cloud_layer.altitude,
+                    extent: resolved_sky.cloud_layer.extent,
+                    tile_count: resolved_sky.cloud_layer.tile_count,
+                    scroll_speed: resolved_sky.cloud_layer.scroll_speed,
+                    noise_seed: resolved_sky.cloud_layer.noise_seed,
+                    flags: 0,
+                },
+            },
+            far_vista: PlaytestFarVista {
+                texture_asset_indices: Vec::new(),
+                radius: resolved_far_vista.radius,
+                height: resolved_far_vista.height,
+                vertical_offset: resolved_far_vista.vertical_offset,
+                segments: resolved_far_vista.segments,
+                rotation_degrees: resolved_far_vista.rotation_degrees,
+                tint_rgb: resolved_far_vista.tint,
+                flags: 0,
+            },
+            camera: PlaytestCamera {
+                distance: resolved_camera.distance,
+                height: resolved_camera.height,
+                target_height: resolved_camera.target_height,
+                lock_rise_percent: resolved_camera.lock_rise_percent,
+                min_floor_clearance: resolved_camera.min_floor_clearance,
+                orbit_speed_level: resolved_camera.orbit_speed_level,
+                position_lag_shift: resolved_camera.position_lag_shift,
+                focus_lag_shift: resolved_camera.focus_lag_shift,
+                distance_lag_shift: resolved_camera.distance_lag_shift,
+            },
+            flags: 0,
+        });
+        room_bake_inputs.push(CookedRoomBakeInput {
+            room_index: 0,
+            world_asset_index,
+            world_origin: [0, 0],
+            origin_y: 0,
+            cooked,
+        });
+
+        let texture_asset_base = match u16::try_from(assets.len()) {
+            Ok(base) => base,
+            Err(_) => {
+                report.error("PXBSP texture asset base exceeds u16");
+                return (None, report);
+            }
+        };
+        let compiled = match crate::brush_world::compile_brush_world(
+            project,
+            crate::brush_world::BrushWorldCookOptions {
+                project_root,
+                mode: crate::brush_world::BrushWorldCookMode::Draft,
+                ambient: [32; 3],
+                texture_asset_base,
+            },
+        ) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                report.error(format!("brush world compile failed: {error:?}"));
+                return (None, report);
+            }
+        };
+        for texture in &compiled.textures {
+            let expected = assets.len();
+            if usize::from(texture.asset_id) != expected {
+                report.error(format!(
+                    "PXBSP texture asset {} does not match master asset slot {expected}",
+                    texture.asset_id
+                ));
+                return (None, report);
+            }
+            texture_asset_for_path.insert(texture.key.clone(), expected);
+            assets.push(PlaytestAsset {
+                kind: PlaytestAssetKind::Texture,
+                bytes: texture.bytes.clone(),
+                filename: format!("texture_{:03}.psxt", texture.asset_id),
+                source_label: texture.key.clone(),
+                streamed_class: StreamedClass::None,
+            });
+        }
+        world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
+            bytes: compiled.pxbsp.bytes,
+            movers: compiled
+                .movers
+                .iter()
+                .map(|mover| PlaytestPxbspMover {
+                    node: mover.node.raw() as u32,
+                    model_index: mover.model_index,
+                })
+                .collect(),
+        });
+    }
 
     if rooms.is_empty() {
         report.error("every Room is empty - cook needs at least one populated room");
@@ -907,42 +1127,59 @@ pub fn build_package(
         if node.kind.is_component() {
             continue;
         }
-        let Some(room_node) = enclosing_room(scene, node) else {
-            if !matches!(
-                node.kind,
-                NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
-            ) {
-                report.warn(format!(
-                    "{} '{}' has no enclosing Room - dropped",
-                    node.kind.label(),
-                    node.name
-                ));
-            }
-            continue;
+        let (room_index, raw_pos, floor_pos, placement_sector_size) = if uses_pxbsp {
+            // Brush scenes author transforms directly in engine/world units.
+            // Region zero is the temporary residency envelope; positions stay
+            // world-space so the BSP renderer, tracer, actors, and sockets all
+            // consume the same coordinates.
+            let pos = node.transform.translation.map(|value| value.round() as i32);
+            (
+                0,
+                pos,
+                pos,
+                rooms.first().map(|room| room.sector_size).unwrap_or(1024),
+            )
+        } else {
+            let Some(room_node) = enclosing_room(scene, node) else {
+                if !matches!(
+                    node.kind,
+                    NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
+                ) {
+                    report.warn(format!(
+                        "{} '{}' has no enclosing Room - dropped",
+                        node.kind.label(),
+                        node.name
+                    ));
+                }
+                continue;
+            };
+            let NodeKind::Section { grid } = &room_node.kind else {
+                continue;
+            };
+            let Some(chunk) = room_chunks_by_node
+                .get(&room_node.id)
+                .and_then(|chunks| chunk_for_node(node, grid, chunks))
+            else {
+                if !matches!(
+                    node.kind,
+                    NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
+                ) {
+                    report.warn(format!(
+                        "{} '{}' is outside cooked Room '{}' chunks - dropped",
+                        node.kind.label(),
+                        node.name,
+                        room_node.name
+                    ));
+                }
+                continue;
+            };
+            (
+                chunk.room_index,
+                node_chunk_local_position(node, grid, chunk),
+                floor_anchored_node_chunk_local_position(node, grid, chunk),
+                grid.sector_size,
+            )
         };
-        let NodeKind::Section { grid } = &room_node.kind else {
-            continue;
-        };
-        let Some(chunk) = room_chunks_by_node
-            .get(&room_node.id)
-            .and_then(|chunks| chunk_for_node(node, grid, chunks))
-        else {
-            if !matches!(
-                node.kind,
-                NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
-            ) {
-                report.warn(format!(
-                    "{} '{}' is outside cooked Room '{}' chunks - dropped",
-                    node.kind.label(),
-                    node.name,
-                    room_node.name
-                ));
-            }
-            continue;
-        };
-        let room_index = chunk.room_index;
-        let raw_pos = node_chunk_local_position(node, grid, chunk);
-        let floor_pos = floor_anchored_node_chunk_local_position(node, grid, chunk);
         let pitch = angle_from_degrees(node.transform.rotation_degrees[0]);
         let yaw = yaw_from_degrees(node.transform.rotation_degrees[1]);
         let roll = angle_from_degrees(node.transform.rotation_degrees[2]);
@@ -1356,7 +1593,7 @@ pub fn build_package(
             } => {
                 if !push_point_light(
                     node.name.as_str(),
-                    grid,
+                    placement_sector_size,
                     room_index,
                     raw_pos,
                     *color,
@@ -1493,7 +1730,7 @@ pub fn build_package(
                     pitch,
                     yaw,
                     roll,
-                    grid.sector_size,
+                    placement_sector_size,
                     materials,
                     uvs,
                     *geometry,
@@ -1517,6 +1754,14 @@ pub fn build_package(
                 wait_ticks,
                 enabled,
             } => {
+                let bsp_door_link = match &world_geometry {
+                    PlaytestWorldGeometry::Pxbsp(world) => world
+                        .movers
+                        .iter()
+                        .position(|mover| mover.node == node.id.raw() as u32)
+                        .and_then(|index| u16::try_from(index).ok()),
+                    PlaytestWorldGeometry::Grid => None,
+                };
                 if !push_logic_node(
                     node.name.as_str(),
                     room_index,
@@ -1528,6 +1773,7 @@ pub fn build_package(
                     *delay_ticks,
                     *wait_ticks,
                     *enabled,
+                    bsp_door_link,
                     &mut names,
                     &mut logic,
                     &mut pending_door_links,
@@ -1726,10 +1972,17 @@ pub fn build_package(
                         None
                     }
                     Err(crate::resolve::SpawnCharacterResolutionError::NoCharacters) => {
-                        report.error(format!(
-                            "Player source '{}' has no Character assigned and no Character resources exist",
-                            spawn_node.name
-                        ));
+                        if uses_pxbsp {
+                            report.warn(format!(
+                                "Player source '{}' has no Character; using the BSP debug controller",
+                                spawn_node.name
+                            ));
+                        } else {
+                            report.error(format!(
+                                "Player source '{}' has no Character assigned and no Character resources exist",
+                                spawn_node.name
+                            ));
+                        }
                         None
                     }
                     Err(crate::resolve::SpawnCharacterResolutionError::AmbiguousCharacters {
@@ -1743,73 +1996,77 @@ pub fn build_package(
                     }
                 }
             };
-            let profile_material = resolved.and_then(|character_id| {
-                project.resource(character_id).and_then(|resource| {
-                    if let ResourceData::Character(character) = &resource.data {
-                        character.material
-                    } else {
-                        None
-                    }
-                })
-            });
-            let renderer_material_override = candidate
-                .renderer
-                .and_then(|renderer| renderer.material)
-                .or(profile_material)
-                .and_then(|material_id| {
-                    resolve_model_material_override(
-                        project,
-                        project_root,
-                        &format!("Model Renderer '{}'", spawn_node.name),
-                        material_id,
-                        &mut texture_asset_for_path,
-                        &mut assets,
-                        &mut report,
-                    )
+            if uses_pxbsp && resolved.is_none() && renderer_model.is_none() {
+                None
+            } else {
+                let profile_material = resolved.and_then(|character_id| {
+                    project.resource(character_id).and_then(|resource| {
+                        if let ResourceData::Character(character) = &resource.data {
+                            character.material
+                        } else {
+                            None
+                        }
+                    })
                 });
-            cook_player_character(
-                project,
-                project_root,
-                spawn_node,
-                resolved,
-                renderer_model,
-                renderer_material_override,
-                candidate
+                let renderer_material_override = candidate
                     .renderer
-                    .map(|renderer| renderer.visual_offset)
-                    .unwrap_or([0; 3]),
-                candidate
-                    .renderer
-                    .map(|renderer| renderer.visual_yaw)
-                    .unwrap_or(0),
-                candidate
-                    .renderer
-                    .map(|renderer| renderer.visual_scale_q8)
-                    .unwrap_or(crate::MODEL_SCALE_ONE_Q8),
-                candidate
-                    .animator
-                    .map(|animator| animator.action_clips)
-                    .unwrap_or(&[]),
-                candidate.controller_settings,
-                candidate.camera,
-                candidate.weight_q8,
-                &mut assets,
-                &mut models,
-                &mut model_clips,
-                &mut model_clip_bounds,
-                &mut model_frame_bounds,
-                &mut model_sockets,
-                &mut model_for_resource,
-                &runtime_model_clips,
-                &mut model_clip_remaps,
-                &mut combat_capsules,
-                &mut characters,
-                &mut report,
-            )
-            .map(|character_index| PlaytestPlayerController {
-                spawn: spawn_record,
-                character: character_index,
-            })
+                    .and_then(|renderer| renderer.material)
+                    .or(profile_material)
+                    .and_then(|material_id| {
+                        resolve_model_material_override(
+                            project,
+                            project_root,
+                            &format!("Model Renderer '{}'", spawn_node.name),
+                            material_id,
+                            &mut texture_asset_for_path,
+                            &mut assets,
+                            &mut report,
+                        )
+                    });
+                cook_player_character(
+                    project,
+                    project_root,
+                    spawn_node,
+                    resolved,
+                    renderer_model,
+                    renderer_material_override,
+                    candidate
+                        .renderer
+                        .map(|renderer| renderer.visual_offset)
+                        .unwrap_or([0; 3]),
+                    candidate
+                        .renderer
+                        .map(|renderer| renderer.visual_yaw)
+                        .unwrap_or(0),
+                    candidate
+                        .renderer
+                        .map(|renderer| renderer.visual_scale_q8)
+                        .unwrap_or(crate::MODEL_SCALE_ONE_Q8),
+                    candidate
+                        .animator
+                        .map(|animator| animator.action_clips)
+                        .unwrap_or(&[]),
+                    candidate.controller_settings,
+                    candidate.camera,
+                    candidate.weight_q8,
+                    &mut assets,
+                    &mut models,
+                    &mut model_clips,
+                    &mut model_clip_bounds,
+                    &mut model_frame_bounds,
+                    &mut model_sockets,
+                    &mut model_for_resource,
+                    &runtime_model_clips,
+                    &mut model_clip_remaps,
+                    &mut combat_capsules,
+                    &mut characters,
+                    &mut report,
+                )
+                .map(|character_index| PlaytestPlayerController {
+                    spawn: spawn_record,
+                    character: character_index,
+                })
+            }
         }
         _ => None,
     };
@@ -1982,6 +2239,7 @@ pub fn build_package(
 
     (
         Some(PlaytestPackage {
+            world_geometry,
             // Same map the cook uses to dedupe texture references, so the
             // reachable set cannot drift from what was actually cooked.
             used_texture_paths: {
