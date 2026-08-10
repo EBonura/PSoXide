@@ -533,6 +533,10 @@ pub struct EditorWorkspace {
     material_paint_sampling: bool,
     /// Index into the active scene's brushes, when one is selected.
     selected_brush: Option<usize>,
+    /// Multi-brush selection (shift-click). Always contains
+    /// `selected_brush` when it is non-empty; empty means "just the
+    /// primary" so single-selection flows stay untouched.
+    selected_brushes: Vec<usize>,
     /// Selected face index within the selected brush.
     selected_brush_face: Option<usize>,
     /// In-flight brush-create drag (Brush tool primary held).
@@ -549,6 +553,9 @@ pub struct EditorWorkspace {
     brush_texture_lock: bool,
     /// In-flight whole-brush move drag (Brush tool, shift-press).
     brush_move: Option<BrushMove>,
+    /// In-flight vertex/edge drag (Brush tool with Vertex or Edge
+    /// selection mode in an orthographic view).
+    brush_vertex_drag: Option<BrushVertexDrag>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -2112,10 +2119,14 @@ impl BrushClipKeep {
 
 /// In-flight whole-brush move drag (shift held on press). The same 3-axis
 /// delta storage serves 3D ground moves and Top/Front/Side plane moves.
+/// When the pressed brush belongs to a multi-selection, `others` carries
+/// the rest of the selection's (index, base) pairs so the whole group
+/// moves and commits as one gesture.
 #[derive(Debug, Clone)]
 pub(crate) struct BrushMove {
     pub(crate) index: usize,
     pub(crate) base: psxed_project::brush::Brush,
+    pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
     pub(crate) press_ground: [f32; 3],
     pub(crate) applied: [i32; 3],
 }
@@ -2137,6 +2148,22 @@ pub(crate) struct BrushExtrude {
     pub(crate) press_ground: [f32; 3],
     /// Last applied delta along the axis, world units.
     pub(crate) applied: i32,
+}
+
+/// In-flight brush vertex/edge drag: the grabbed solved vertices (a
+/// projected corner's whole depth column, or an edge's two columns) move
+/// together in the active orthographic plane. The scene brush previews
+/// live from `base`; one undo records on commit.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushVertexDrag {
+    pub(crate) index: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    /// Solved base-brush vertices being dragged, world f64.
+    pub(crate) targets: Vec<[f64; 3]>,
+    /// Unsnapped plane point at press.
+    pub(crate) press_ground: [f32; 3],
+    /// Last applied snapped delta, world units.
+    pub(crate) applied: [i32; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2574,6 +2601,7 @@ impl EditorWorkspace {
         }
         workspace.apply_project_editor_camera();
         workspace.apply_project_editor_visibility();
+        workspace.apply_project_editor_viewport();
         Ok(workspace)
     }
 
@@ -2679,6 +2707,7 @@ impl EditorWorkspace {
             material_paint_blend: false,
             material_paint_sampling: false,
             selected_brush: None,
+            selected_brushes: Vec::new(),
             selected_brush_face: None,
             brush_drag: None,
             brush_extrude: None,
@@ -2686,6 +2715,7 @@ impl EditorWorkspace {
             brush_clip_keep: BrushClipKeep::Both,
             brush_texture_lock: true,
             brush_move: None,
+            brush_vertex_drag: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
@@ -2846,6 +2876,49 @@ impl EditorWorkspace {
         }
     }
 
+    fn current_editor_viewport_state(&self) -> psxed_project::EditorViewportState {
+        psxed_project::EditorViewportState {
+            view_2d: self.view_2d,
+            orthographic_view: match self.orthographic_view {
+                OrthographicView::Top => psxed_project::EditorOrthographicView::Top,
+                OrthographicView::Front => psxed_project::EditorOrthographicView::Front,
+                OrthographicView::Side => psxed_project::EditorOrthographicView::Side,
+            },
+            orthographic_focus: self.orthographic_focus,
+            viewport_zoom: self.viewport_zoom,
+            snap_units: self.snap_units,
+        }
+    }
+
+    fn persist_editor_viewport_state(&mut self) {
+        let editor_viewport = self.current_editor_viewport_state();
+        if self.project.editor_viewport != editor_viewport {
+            self.project.editor_viewport = editor_viewport;
+            self.dirty = true;
+        }
+    }
+
+    fn apply_project_editor_viewport(&mut self) {
+        let editor_viewport = self.project.editor_viewport;
+        self.view_2d = editor_viewport.view_2d;
+        self.orthographic_view = match editor_viewport.orthographic_view {
+            psxed_project::EditorOrthographicView::Top => OrthographicView::Top,
+            psxed_project::EditorOrthographicView::Front => OrthographicView::Front,
+            psxed_project::EditorOrthographicView::Side => OrthographicView::Side,
+        };
+        self.orthographic_focus = editor_viewport
+            .orthographic_focus
+            .map(|value| if value.is_finite() { value } else { 0.0 });
+        self.viewport_zoom = if editor_viewport.viewport_zoom.is_finite() {
+            editor_viewport
+                .viewport_zoom
+                .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM)
+        } else {
+            DEFAULT_VIEWPORT_ZOOM
+        };
+        self.snap_units = editor_viewport.snap_units.max(1);
+    }
+
     fn persist_editor_workspace_state(&mut self) {
         let editor_workspace = self.current_editor_workspace_state();
         if self.project.editor_workspace != editor_workspace {
@@ -2902,6 +2975,7 @@ impl EditorWorkspace {
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
         self.persist_editor_workspace_state();
+        self.persist_editor_viewport_state();
         if self.floating_geometry.is_some() {
             return Err("Place or cancel the duplicate preview before saving".to_string());
         }
@@ -2955,6 +3029,7 @@ impl EditorWorkspace {
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
         self.persist_editor_workspace_state();
+        self.persist_editor_viewport_state();
         if !self.dirty {
             return Ok(false);
         }
@@ -2998,6 +3073,7 @@ impl EditorWorkspace {
                 self.apply_project_editor_camera();
                 self.apply_project_editor_visibility();
                 self.apply_project_editor_workspace();
+                self.apply_project_editor_viewport();
             }
             Err(error) => {
                 self.status = format!("Reload failed: {error}");

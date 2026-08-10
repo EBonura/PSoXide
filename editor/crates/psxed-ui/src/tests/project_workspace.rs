@@ -247,6 +247,37 @@ fn editor_workspace_saves_with_project_and_restores_on_open() {
 }
 
 #[test]
+fn editor_viewport_saves_with_project_and_restores_on_open() {
+    let project_dir = test_temp_dir("editor-viewport");
+    let mut workspace =
+        EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("viewport"));
+    workspace.view_2d = true;
+    workspace.set_orthographic_view(OrthographicView::Side);
+    workspace.orthographic_focus = [64.0, 128.0, 256.0];
+    workspace.viewport_zoom = 48.0;
+    workspace.snap_units = 32;
+
+    workspace.save().unwrap();
+
+    let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+    assert!(reopened.view_2d, "2D mode restored");
+    assert_eq!(reopened.orthographic_view, OrthographicView::Side);
+    assert_eq!(reopened.orthographic_focus, [64.0, 128.0, 256.0]);
+    assert_eq!(reopened.viewport_zoom, 48.0);
+    assert_eq!(reopened.snap_units, 32);
+
+    // Out-of-range persisted zoom clamps into the interactive range.
+    let mut wild = EditorWorkspace::open_directory(&project_dir).unwrap();
+    wild.project.editor_viewport.viewport_zoom = 100_000.0;
+    wild.project.editor_viewport.snap_units = 0;
+    wild.apply_project_editor_viewport();
+    assert_eq!(wild.viewport_zoom, MAX_VIEWPORT_ZOOM);
+    assert_eq!(wild.snap_units, 1);
+
+    let _ = std::fs::remove_dir_all(project_dir);
+}
+
+#[test]
 fn typed_brush_cook_issue_selects_and_frames_the_authored_brush() {
     let mut project = ProjectDocument::new("brush diagnostic");
     project

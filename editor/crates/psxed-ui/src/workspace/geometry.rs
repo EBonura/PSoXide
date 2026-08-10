@@ -140,6 +140,12 @@ impl EditorWorkspace {
                 if modifiers.command {
                     let point = self.brush_snap_2d(world);
                     self.brush_clip_click(point);
+                } else if modifiers.shift {
+                    // Shift-click toggles multi-selection membership;
+                    // missing everything leaves the selection alone.
+                    if let Some((index, _)) = self.pick_brush_face_at_2d(world) {
+                        self.toggle_brush_selection(index);
+                    }
                 } else {
                     self.select_brush_at_2d(world);
                 }
@@ -279,6 +285,10 @@ impl EditorWorkspace {
     pub(crate) fn duplicate_current_selection(&mut self) {
         if self.floating_geometry.is_some() {
             self.status = "Place or cancel the duplicate preview first".to_string();
+            return;
+        }
+        if self.active_tool == ViewTool::Brush && self.selected_brush.is_some() {
+            self.duplicate_selected_brushes();
             return;
         }
         if self.has_geometry_selection() {

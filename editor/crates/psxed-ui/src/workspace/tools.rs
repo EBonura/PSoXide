@@ -223,6 +223,88 @@ impl EditorWorkspace {
         })
     }
 
+    /// All selected brush indices: the multi-selection when one exists,
+    /// else the primary alone. Sorted, deduplicated, stale-free.
+    pub(crate) fn selected_brush_set(&self) -> Vec<usize> {
+        let mut set: Vec<usize> = if self.selected_brushes.is_empty() {
+            self.selected_brush.into_iter().collect()
+        } else {
+            self.selected_brushes.clone()
+        };
+        set.sort_unstable();
+        set.dedup();
+        let count = self.project.active_scene().brushes.len();
+        set.retain(|index| *index < count);
+        set
+    }
+
+    /// Whether `index` is the primary selection or a multi-selection
+    /// member (drives the highlight in every view).
+    pub(crate) fn brush_is_selected(&self, index: usize) -> bool {
+        self.selected_brush == Some(index) || self.selected_brushes.contains(&index)
+    }
+
+    /// Plain-click selection: exactly one brush (and optional face),
+    /// dropping any multi-selection.
+    pub(crate) fn replace_brush_selection(&mut self, index: usize, face: Option<usize>) {
+        self.selected_brush = Some(index);
+        self.selected_brushes = vec![index];
+        self.selected_brush_face = face;
+    }
+
+    pub(crate) fn clear_brush_selection(&mut self) {
+        self.selected_brush = None;
+        self.selected_brushes.clear();
+        self.selected_brush_face = None;
+    }
+
+    /// Shift-click selection: toggle membership. The primary follows the
+    /// toggled brush, or the last remaining member after a removal.
+    pub(crate) fn toggle_brush_selection(&mut self, index: usize) {
+        if self.selected_brushes.is_empty() {
+            if let Some(primary) = self.selected_brush {
+                self.selected_brushes.push(primary);
+            }
+        }
+        if let Some(position) = self.selected_brushes.iter().position(|i| *i == index) {
+            self.selected_brushes.remove(position);
+            if self.selected_brush == Some(index) {
+                self.selected_brush = self.selected_brushes.last().copied();
+                self.selected_brush_face = None;
+            }
+        } else {
+            self.selected_brushes.push(index);
+            self.selected_brush = Some(index);
+            self.selected_brush_face = None;
+        }
+    }
+
+    /// Drop selection entries that no longer resolve to a brush (after
+    /// undo/redo or an external document change) and clamp the face.
+    pub(crate) fn reconcile_brush_selection(&mut self) {
+        let count = self.project.active_scene().brushes.len();
+        self.selected_brushes.retain(|index| *index < count);
+        if self.selected_brush.is_some_and(|index| index >= count) {
+            self.selected_brush = self.selected_brushes.first().copied();
+            self.selected_brush_face = None;
+        }
+        if let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) {
+            let faces = self
+                .project
+                .active_scene()
+                .brushes
+                .get(index)
+                .map_or(0, |brush| brush.faces.len());
+            if face >= faces {
+                self.selected_brush_face = None;
+            }
+        }
+        if self.selected_brush.is_none() {
+            self.selected_brushes.clear();
+            self.selected_brush_face = None;
+        }
+    }
+
     /// Replace the selected brush with six hollow wall slabs (one undo
     /// step); the first slab stays selected. No-op when not hollowable.
     pub(crate) fn hollow_selected_brush(&mut self, thickness: i32) {
@@ -244,6 +326,7 @@ impl EditorWorkspace {
         scene.brushes[index] = slabs.next().expect("hollow returns six slabs");
         scene.brushes.extend(slabs);
         self.selected_brush_face = None;
+        self.mark_dirty();
     }
 
     /// Snap every point of the selected brush to the editor grid step,
@@ -263,10 +346,12 @@ impl EditorWorkspace {
         }
         self.push_undo();
         self.project.active_scene_mut().brushes[index] = snapped;
+        self.mark_dirty();
     }
 
     /// Cancel every in-flight brush gesture: the create drag, a pending
-    /// clip point, and live extrude/move previews (restoring their base).
+    /// clip point, and live extrude/move/vertex previews (restoring
+    /// their base).
     pub(crate) fn cancel_brush_gestures(&mut self) {
         self.brush_drag = None;
         self.brush_clip_start = None;
@@ -284,19 +369,31 @@ impl EditorWorkspace {
             if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(mv.index) {
                 *slot = mv.base;
             }
+            for (index, base) in mv.others {
+                if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(index) {
+                    *slot = base;
+                }
+            }
+        }
+        if let Some(drag) = self.brush_vertex_drag.take() {
+            if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(drag.index) {
+                *slot = drag.base;
+            }
         }
     }
 
-    /// Delete the selected brush as one undo step.
-    pub(crate) fn delete_selected_brush(&mut self) {
-        let Some(index) = self.selected_brush.take() else {
+    /// Delete every selected brush as one undo step.
+    pub(crate) fn delete_selected_brushes(&mut self) {
+        let targets = self.selected_brush_set();
+        self.clear_brush_selection();
+        if targets.is_empty() {
             return;
-        };
-        self.selected_brush_face = None;
-        if self.project.active_scene().brushes.get(index).is_some() {
-            self.push_undo();
-            self.project.active_scene_mut().brushes.remove(index);
         }
+        self.push_undo();
+        for index in targets.iter().rev() {
+            self.project.active_scene_mut().brushes.remove(*index);
+        }
+        self.mark_dirty();
     }
 
     /// Keyboard for the Brush tool: Escape cancels the in-flight gesture,
@@ -320,7 +417,7 @@ impl EditorWorkspace {
             self.cancel_brush_gestures();
         }
         if delete {
-            self.delete_selected_brush();
+            self.delete_selected_brushes();
         }
     }
 
@@ -348,9 +445,22 @@ impl EditorWorkspace {
             solved.max[1] - solved.min[1],
             solved.max[2] - solved.min[2],
         ));
+        // Numeric placement fallback: exact (unsnapped) min-corner entry.
+        if let Some(origin) = self.selected_brush_origin() {
+            let mut edited = origin;
+            ui.horizontal(|ui| {
+                ui.label("Origin");
+                ui.add(egui::DragValue::new(&mut edited[0]).speed(1).prefix("X "));
+                ui.add(egui::DragValue::new(&mut edited[1]).speed(1).prefix("Y "));
+                ui.add(egui::DragValue::new(&mut edited[2]).speed(1).prefix("Z "));
+            });
+            if edited != origin {
+                self.set_selected_brush_origin(edited);
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             if ui.button("Duplicate").clicked() {
-                self.duplicate_selected_brush();
+                self.duplicate_selected_brushes();
             }
             if ui.button("Hollow").clicked() {
                 let thickness = (self.snap_units.max(1)) as i32;
@@ -360,7 +470,7 @@ impl EditorWorkspace {
                 self.snap_selected_brush();
             }
             if ui.button("Delete").clicked() {
-                self.delete_selected_brush();
+                self.delete_selected_brushes();
             }
         });
 
@@ -450,6 +560,18 @@ impl EditorWorkspace {
             egui::RichText::new(format!("Face {face} of {}", brush.faces.len())).strong(),
         );
         ui.label(plane_label);
+        // Numeric face fallback: slide the plane along its dominant axis.
+        if let Some((axis, position)) = self.selected_brush_face_axis() {
+            let mut edited = position;
+            ui.horizontal(|ui| {
+                ui.label(format!("Plane {} at", ["X", "Y", "Z"][axis]));
+                ui.add(egui::DragValue::new(&mut edited).speed(1));
+            });
+            if edited != position && !self.set_selected_brush_face_axis_position(edited) {
+                self.status =
+                    "Face edit rejected: brush would stop enclosing volume".to_string();
+            }
+        }
         let material_name = face_data.material.and_then(|id| {
             self.project
                 .material_options()
@@ -503,39 +625,51 @@ impl EditorWorkspace {
         if let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) {
             brush.mover = mover;
         }
+        self.mark_dirty();
     }
 
-    /// Duplicate the selected brush (offset by one grid step, honouring
-    /// texture lock) and select the copy. One undo step.
-    pub(crate) fn duplicate_selected_brush(&mut self) {
-        let Some(index) = self.selected_brush else {
+    /// Duplicate every selected brush (offset by one grid step, honouring
+    /// texture lock) and select the copies. One undo step; the primary
+    /// selection follows its own copy.
+    pub(crate) fn duplicate_selected_brushes(&mut self) {
+        let targets = self.selected_brush_set();
+        if targets.is_empty() {
             return;
-        };
-        let Some(mut copy) = self.project.active_scene().brushes.get(index).cloned() else {
-            return;
-        };
+        }
+        let primary = self.selected_brush;
         self.push_undo();
         let step = (self.snap_units.max(1)) as i32;
-        if self.brush_texture_lock {
-            copy.translate_with_uv_lock(
-                [step, 0, step],
-                psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
-            );
-        } else {
-            copy.translate([step, 0, step]);
+        let texture_lock = self.brush_texture_lock;
+        let mut new_primary = None;
+        let mut new_selection = Vec::new();
+        for &index in &targets {
+            let mut copy = self.project.active_scene().brushes[index].clone();
+            if texture_lock {
+                copy.translate_with_uv_lock(
+                    [step, 0, step],
+                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                );
+            } else {
+                copy.translate([step, 0, step]);
+            }
+            let scene = self.project.active_scene_mut();
+            scene.brushes.push(copy);
+            let new_index = scene.brushes.len() - 1;
+            new_selection.push(new_index);
+            if primary == Some(index) {
+                new_primary = Some(new_index);
+            }
         }
-        let scene = self.project.active_scene_mut();
-        scene.brushes.push(copy);
-        let new_index = scene.brushes.len() - 1;
-        self.selected_brush = Some(new_index);
+        self.selected_brush = new_primary.or_else(|| new_selection.last().copied());
+        self.selected_brushes = new_selection;
         self.selected_brush_face = None;
+        self.mark_dirty();
     }
 
     /// Numeric UV controls for the selected brush face: offset, rotation,
-    /// per-axis scale, reset.
-    // ponytail: one undo per widget change; a slider drag records several
-    // steps. Coalesce with the inspector-transaction wrapper when brush
-    // UVs move into a proper inspector panel.
+    /// per-axis scale, reset. Runs inside the Inspector, so history is
+    /// owned by the inspector transaction wrapper: a slider drag or a
+    /// focused text edit coalesces into one undo step.
     pub(crate) fn draw_brush_face_uv_controls(&mut self, ui: &mut egui::Ui) {
         let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
             return;
@@ -592,9 +726,102 @@ impl EditorWorkspace {
             }
         });
         if edited != current {
-            self.push_undo();
             self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
+            self.mark_dirty();
         }
+    }
+
+    /// Solved axis-aligned min corner of the selected brush, rounded to
+    /// integers: the numeric inspector's "Origin".
+    pub(crate) fn selected_brush_origin(&self) -> Option<[i32; 3]> {
+        let index = self.selected_brush?;
+        let brush = self.project.active_scene().brushes.get(index)?;
+        let solved = brush.solve();
+        solved
+            .is_valid()
+            .then(|| solved.min.map(|value| value.round() as i32))
+    }
+
+    /// Numeric fallback for whole-brush placement: translate the selected
+    /// brush so its solved min corner lands exactly on `origin`. No grid
+    /// snapping: typing exact off-grid coordinates is the point of the
+    /// fallback. Inspector-owned mutation: history is recorded by the
+    /// inspector transaction wrapper, not here.
+    pub(crate) fn set_selected_brush_origin(&mut self, origin: [i32; 3]) -> bool {
+        let Some(current) = self.selected_brush_origin() else {
+            return false;
+        };
+        let Some(index) = self.selected_brush else {
+            return false;
+        };
+        let delta = [
+            origin[0] - current[0],
+            origin[1] - current[1],
+            origin[2] - current[2],
+        ];
+        if delta == [0; 3] {
+            return true;
+        }
+        let texture_lock = self.brush_texture_lock;
+        let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) else {
+            return false;
+        };
+        if texture_lock {
+            brush.translate_with_uv_lock(delta, psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL);
+        } else {
+            brush.translate(delta);
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// Dominant-axis descriptor of the selected face's plane: the axis
+    /// index and the authored reference coordinate (`points[0]` on that
+    /// axis). Exact position for axis-aligned faces; a reference point
+    /// for slopes.
+    pub(crate) fn selected_brush_face_axis(&self) -> Option<(usize, i32)> {
+        let (index, face) = (self.selected_brush?, self.selected_brush_face?);
+        let face = self
+            .project
+            .active_scene()
+            .brushes
+            .get(index)?
+            .faces
+            .get(face)?;
+        let plane = psxed_project::brush::Plane::from_points(face.points)?;
+        Some((
+            dominant_axis(plane.normal),
+            face.points[0][dominant_axis(plane.normal)],
+        ))
+    }
+
+    /// Numeric fallback for face manipulation: slide the selected face's
+    /// plane so its reference point sits at `value` on its dominant axis.
+    /// Returns `false` (leaving the brush untouched) when the edit would
+    /// stop the brush enclosing volume. Inspector-owned mutation: no
+    /// history record here (see `set_selected_brush_origin`).
+    pub(crate) fn set_selected_brush_face_axis_position(&mut self, value: i32) -> bool {
+        let Some((axis, current)) = self.selected_brush_face_axis() else {
+            return false;
+        };
+        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
+            return false;
+        };
+        if value == current {
+            return true;
+        }
+        let mut delta = [0i32; 3];
+        delta[axis] = value - current;
+        let Some(mut edited) = self.project.active_scene().brushes.get(index).cloned() else {
+            return false;
+        };
+        edited.translate_face(face, delta);
+        if !edited.solve().is_valid() {
+            return false;
+        }
+        self.project.active_scene_mut().brushes[index] = edited;
+        self.mark_dirty();
+        true
     }
 
     /// Apply the paint material to the selected brush face, as one undo
@@ -618,6 +845,7 @@ impl EditorWorkspace {
         }
         self.push_undo();
         self.project.active_scene_mut().brushes[index].faces[face].material = Some(material);
+        self.mark_dirty();
     }
 
     /// The cuboid a brush drag would commit, if it has area.
@@ -670,8 +898,9 @@ impl EditorWorkspace {
         self.push_undo();
         let scene = self.project.active_scene_mut();
         scene.brushes.push(brush);
-        self.selected_brush = Some(self.project.active_scene().brushes.len() - 1);
-        self.selected_brush_face = None;
+        let created = self.project.active_scene().brushes.len() - 1;
+        self.replace_brush_selection(created, None);
+        self.mark_dirty();
     }
 
     /// One clip click at a snapped ground point: the first click stores
@@ -693,22 +922,29 @@ impl EditorWorkspace {
                 let mut up = start;
                 let depth_axis = view.depth_axis();
                 up[depth_axis] = up[depth_axis].saturating_add(BRUSH_CREATE_HEIGHT);
-                let clipped =
-                    self.project.active_scene().brushes[selected].clip([start, point, up]);
+                // `.get` rather than indexing: the selection can go stale
+                // across undo/redo before the second clip click lands.
+                let Some(brush) = self.project.active_scene().brushes.get(selected) else {
+                    return;
+                };
+                let clipped = brush.clip([start, point, up]);
                 match (self.brush_clip_keep, clipped.back, clipped.front) {
                     (BrushClipKeep::Both, Some(back), Some(front)) => {
                         self.push_undo();
                         let scene = self.project.active_scene_mut();
                         scene.brushes[selected] = back;
                         scene.brushes.push(front);
+                        self.mark_dirty();
                     }
                     (BrushClipKeep::Back, Some(back), Some(_)) => {
                         self.push_undo();
                         self.project.active_scene_mut().brushes[selected] = back;
+                        self.mark_dirty();
                     }
                     (BrushClipKeep::Front, Some(_), Some(front)) => {
                         self.push_undo();
                         self.project.active_scene_mut().brushes[selected] = front;
+                        self.mark_dirty();
                     }
                     // Plane missed the brush: nothing to keep or drop.
                     _ => {}
@@ -723,13 +959,11 @@ impl EditorWorkspace {
     pub(crate) fn select_brush_at_2d(&mut self, world: [f32; 2]) -> bool {
         match self.pick_brush_face_at_2d(world) {
             Some((index, face)) => {
-                self.selected_brush = Some(index);
-                self.selected_brush_face = Some(face);
+                self.replace_brush_selection(index, Some(face));
                 true
             }
             None => {
-                self.selected_brush = None;
-                self.selected_brush_face = None;
+                self.clear_brush_selection();
                 false
             }
         }
@@ -798,17 +1032,38 @@ impl EditorWorkspace {
         best.map(|(_, _, index, face)| (index, face))
     }
 
-    /// Shift-drag entry for an in-plane whole-brush move.
+    /// Other members of the multi-selection that should ride along with
+    /// a whole-brush move grabbed on `index`.
+    fn brush_move_others(&self, index: usize) -> Vec<(usize, psxed_project::brush::Brush)> {
+        if !self.brush_is_selected(index) {
+            return Vec::new();
+        }
+        self.selected_brush_set()
+            .into_iter()
+            .filter(|other| *other != index)
+            .map(|other| (other, self.project.active_scene().brushes[other].clone()))
+            .collect()
+    }
+
+    /// Shift-drag entry for an in-plane whole-brush move. Grabbing a
+    /// brush inside the multi-selection moves the whole selection;
+    /// grabbing an unselected brush selects and moves it alone.
     pub(crate) fn begin_brush_move_2d(&mut self, world: [f32; 2]) -> bool {
         let Some((index, face)) = self.pick_brush_face_at_2d(world) else {
             return false;
         };
+        let others = self.brush_move_others(index);
         let base = self.project.active_scene().brushes[index].clone();
-        self.selected_brush = Some(index);
-        self.selected_brush_face = Some(face);
+        if others.is_empty() {
+            self.replace_brush_selection(index, Some(face));
+        } else {
+            self.selected_brush = Some(index);
+            self.selected_brush_face = Some(face);
+        }
         self.brush_move = Some(BrushMove {
             index,
             base,
+            others,
             press_ground: self
                 .orthographic_view
                 .unproject(world, self.orthographic_focus),
@@ -833,9 +1088,19 @@ impl EditorWorkspace {
         if applied == mv.applied {
             return;
         }
+        self.apply_brush_move_preview(&mv, applied);
+    }
+
+    /// Write the move preview for the grabbed brush and every rider.
+    fn apply_brush_move_preview(&mut self, mv: &BrushMove, applied: [i32; 3]) {
         let mut preview = mv.base.clone();
         preview.translate(applied);
         self.project.active_scene_mut().brushes[mv.index] = preview;
+        for (index, base) in &mv.others {
+            let mut preview = base.clone();
+            preview.translate(applied);
+            self.project.active_scene_mut().brushes[*index] = preview;
+        }
         if let Some(state) = self.brush_move.as_mut() {
             state.applied = applied;
         }
@@ -894,8 +1159,7 @@ impl EditorWorkspace {
             return false;
         };
         let base = self.project.active_scene().brushes[index].clone();
-        self.selected_brush = Some(index);
-        self.selected_brush_face = Some(face);
+        self.replace_brush_selection(index, Some(face));
         self.brush_extrude = Some(BrushExtrude {
             index,
             face,
@@ -934,23 +1198,193 @@ impl EditorWorkspace {
         }
     }
 
+    /// Unique solved vertices of the selected brush, world f64 (welded
+    /// within half a unit; authored geometry is integer).
+    fn selected_brush_solved_verts(&self) -> Option<(usize, Vec<[f64; 3]>)> {
+        let index = self.selected_brush?;
+        let brush = self.project.active_scene().brushes.get(index)?;
+        let solved = brush.solve();
+        if !solved.is_valid() {
+            return None;
+        }
+        let mut verts: Vec<[f64; 3]> = Vec::new();
+        for vert in solved.polygons.iter().flatten().flat_map(|p| p.verts.iter()) {
+            if !verts
+                .iter()
+                .any(|seen| (0..3).all(|axis| (seen[axis] - vert[axis]).abs() <= 0.5))
+            {
+                verts.push(*vert);
+            }
+        }
+        Some((index, verts))
+    }
+
+    /// Every solved vertex whose projection sits on `projected` (the
+    /// whole depth column behind one on-screen corner).
+    fn brush_vertex_column(
+        view: OrthographicView,
+        verts: &[[f64; 3]],
+        projected: [f64; 2],
+    ) -> Vec<[f64; 3]> {
+        verts
+            .iter()
+            .copied()
+            .filter(|vert| {
+                let p = view.project_f64(*vert);
+                (p[0] - projected[0]).abs() <= 0.5 && (p[1] - projected[1]).abs() <= 0.5
+            })
+            .collect()
+    }
+
+    /// Vertex mode entry: grab the selected brush's projected corner
+    /// nearest `world` (within `tolerance` world units) and start
+    /// dragging its depth column. `false` when nothing is close enough.
+    pub(crate) fn begin_brush_vertex_drag_2d(&mut self, world: [f32; 2], tolerance: f32) -> bool {
+        let Some((index, verts)) = self.selected_brush_solved_verts() else {
+            return false;
+        };
+        let view = self.orthographic_view;
+        let point = world.map(f64::from);
+        let tolerance2 = f64::from(tolerance.max(0.0)).powi(2);
+        let mut best: Option<(f64, [f64; 2])> = None;
+        for vert in &verts {
+            let projected = view.project_f64(*vert);
+            let d2 = (projected[0] - point[0]).powi(2) + (projected[1] - point[1]).powi(2);
+            if d2 <= tolerance2 && best.is_none_or(|(best_d2, _)| d2 < best_d2) {
+                best = Some((d2, projected));
+            }
+        }
+        let Some((_, projected)) = best else {
+            return false;
+        };
+        let targets = Self::brush_vertex_column(view, &verts, projected);
+        self.start_brush_vertex_drag(index, targets, world);
+        true
+    }
+
+    /// Edge mode entry: grab the selected brush's projected edge nearest
+    /// `world` and drag both endpoint columns together.
+    pub(crate) fn begin_brush_edge_drag_2d(&mut self, world: [f32; 2], tolerance: f32) -> bool {
+        let Some((index, verts)) = self.selected_brush_solved_verts() else {
+            return false;
+        };
+        let view = self.orthographic_view;
+        let point = world.map(f64::from);
+        let tolerance2 = f64::from(tolerance.max(0.0)).powi(2);
+        let solved = self.project.active_scene().brushes[index].solve();
+        let mut best: Option<(f64, [f64; 2], [f64; 2])> = None;
+        for polygon in solved.polygons.iter().flatten() {
+            let count = polygon.verts.len();
+            for i in 0..count {
+                let a = view.project_f64(polygon.verts[i]);
+                let b = view.project_f64(polygon.verts[(i + 1) % count]);
+                let d2 = point_segment_distance2(point, a, b);
+                if d2 <= tolerance2 && best.is_none_or(|(best_d2, _, _)| d2 < best_d2) {
+                    best = Some((d2, a, b));
+                }
+            }
+        }
+        let Some((_, a, b)) = best else {
+            return false;
+        };
+        let mut targets = Self::brush_vertex_column(view, &verts, a);
+        for vert in Self::brush_vertex_column(view, &verts, b) {
+            if !targets
+                .iter()
+                .any(|seen| (0..3).all(|axis| (seen[axis] - vert[axis]).abs() <= 0.5))
+            {
+                targets.push(vert);
+            }
+        }
+        self.start_brush_vertex_drag(index, targets, world);
+        true
+    }
+
+    fn start_brush_vertex_drag(&mut self, index: usize, targets: Vec<[f64; 3]>, world: [f32; 2]) {
+        let base = self.project.active_scene().brushes[index].clone();
+        self.selected_brush = Some(index);
+        self.brush_vertex_drag = Some(BrushVertexDrag {
+            index,
+            base,
+            targets,
+            press_ground: self
+                .orthographic_view
+                .unproject(world, self.orthographic_focus),
+            applied: [0; 3],
+        });
+    }
+
+    /// Advance the vertex/edge drag: snapped in-plane delta applied to
+    /// every grabbed vertex's authored points. Previews that stop the
+    /// brush enclosing volume are refused (the last valid preview holds).
+    pub(crate) fn update_brush_vertex_drag_2d(&mut self, world: [f32; 2]) {
+        let Some(drag) = self.brush_vertex_drag.clone() else {
+            return;
+        };
+        let current = self
+            .orthographic_view
+            .unproject(world, self.orthographic_focus);
+        let step = self.snap_units.max(1) as f32;
+        let snap = |value: f32| ((value / step).round() * step) as i32;
+        let mut applied = [0; 3];
+        for axis in self.orthographic_view.plane_axes() {
+            applied[axis] = snap(current[axis] - drag.press_ground[axis]);
+        }
+        if applied == drag.applied {
+            return;
+        }
+        let mut preview = drag.base.clone();
+        let moved = preview.translate_points_near(&drag.targets, applied, 0.5);
+        if moved > 0 && preview.solve().is_valid() {
+            self.project.active_scene_mut().brushes[drag.index] = preview;
+            if let Some(state) = self.brush_vertex_drag.as_mut() {
+                state.applied = applied;
+            }
+        }
+    }
+
+    fn commit_brush_vertex_drag_preview(&mut self) -> bool {
+        let Some(drag) = self.brush_vertex_drag.take() else {
+            return false;
+        };
+        let live = self.project.active_scene().brushes[drag.index].clone();
+        self.project.active_scene_mut().brushes[drag.index] = drag.base;
+        if drag.applied != [0; 3] {
+            self.push_undo();
+            self.project.active_scene_mut().brushes[drag.index] = live;
+            self.mark_dirty();
+        }
+        true
+    }
+
     fn commit_brush_move_preview(&mut self) -> bool {
         let Some(mv) = self.brush_move.take() else {
             return false;
         };
         self.project.active_scene_mut().brushes[mv.index] = mv.base.clone();
+        for (index, base) in &mv.others {
+            self.project.active_scene_mut().brushes[*index] = base.clone();
+        }
         if mv.applied != [0; 3] {
             self.push_undo();
-            let mut moved = mv.base;
-            if self.brush_texture_lock {
-                moved.translate_with_uv_lock(
-                    mv.applied,
-                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
-                );
-            } else {
-                moved.translate(mv.applied);
+            let texture_lock = self.brush_texture_lock;
+            let mut commit_one = |ws: &mut Self, index: usize, base: psxed_project::brush::Brush| {
+                let mut moved = base;
+                if texture_lock {
+                    moved.translate_with_uv_lock(
+                        mv.applied,
+                        psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                    );
+                } else {
+                    moved.translate(mv.applied);
+                }
+                ws.project.active_scene_mut().brushes[index] = moved;
+            };
+            commit_one(self, mv.index, mv.base.clone());
+            for (index, base) in &mv.others {
+                commit_one(self, *index, base.clone());
             }
-            self.project.active_scene_mut().brushes[mv.index] = moved;
+            self.mark_dirty();
         }
         true
     }
@@ -964,12 +1398,16 @@ impl EditorWorkspace {
         if extrude.applied != 0 {
             self.push_undo();
             self.project.active_scene_mut().brushes[extrude.index] = live;
+            self.mark_dirty();
         }
         true
     }
 
     pub(crate) fn commit_brush_gesture_2d(&mut self) {
-        if self.commit_brush_move_preview() || self.commit_brush_extrude_preview() {
+        if self.commit_brush_move_preview()
+            || self.commit_brush_vertex_drag_preview()
+            || self.commit_brush_extrude_preview()
+        {
             return;
         }
         self.commit_brush_drag();
@@ -1030,15 +1468,18 @@ impl EditorWorkspace {
             }
         };
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            let selected = self.selected_brush == Some(index);
+            let selected = self.brush_is_selected(index);
             let stroke = if selected {
                 egui::Stroke::new(2.0, STUDIO_ACCENT)
             } else {
                 egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
             };
+            // The face highlight follows only the primary selection.
             draw(
                 brush,
-                selected.then_some(self.selected_brush_face).flatten(),
+                (self.selected_brush == Some(index))
+                    .then_some(self.selected_brush_face)
+                    .flatten(),
                 stroke,
             );
         }
@@ -1049,6 +1490,33 @@ impl EditorWorkspace {
             let projected = view.project_f32(start.map(|value| value as f32));
             let center = transform.world_to_screen(projected);
             painter.circle_stroke(center, 4.0, egui::Stroke::new(1.5, STUDIO_ACCENT));
+        }
+        // Vertex/Edge mode: square handles on the selected brush's
+        // projected corners show what a drag will grab.
+        if matches!(
+            self.selection_mode,
+            SelectionMode::Vertex | SelectionMode::Edge
+        ) {
+            if let Some((_, verts)) = self.selected_brush_solved_verts() {
+                let mut seen: Vec<[f64; 2]> = Vec::new();
+                for vert in verts {
+                    let projected = view.project_f64(vert);
+                    if seen.iter().any(|s| {
+                        (s[0] - projected[0]).abs() <= 0.5 && (s[1] - projected[1]).abs() <= 0.5
+                    }) {
+                        continue;
+                    }
+                    seen.push(projected);
+                    let center =
+                        transform.world_to_screen([projected[0] as f32, projected[1] as f32]);
+                    painter.rect_stroke(
+                        egui::Rect::from_center_size(center, egui::Vec2::splat(6.0)),
+                        0.0,
+                        egui::Stroke::new(1.5, STUDIO_ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
         }
     }
 
@@ -1081,15 +1549,15 @@ impl EditorWorkspace {
             }
         };
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            let selected = self.selected_brush == Some(index);
+            let selected = self.brush_is_selected(index);
             let stroke = if selected {
                 egui::Stroke::new(2.0, STUDIO_ACCENT)
             } else {
                 egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
             };
             draw(brush, stroke);
-            // Emphasize the selected face's polygon on the selected brush.
-            if selected {
+            // Emphasize the selected face's polygon on the primary brush.
+            if self.selected_brush == Some(index) {
                 if let Some(face) = self.selected_brush_face {
                     if let Some(Some(polygon)) = brush.solve().polygons.get(face) {
                         let count = polygon.verts.len();
@@ -1199,14 +1667,20 @@ impl ViewportTool3d for BrushTool {
         // starts a create drag.
         if frame.modifiers.shift {
             if let Some((index, _)) = ws.pick_brush_face(frame.rect, pointer) {
+                let others = ws.brush_move_others(index);
                 let base = ws.project.active_scene().brushes[index].clone();
                 let press_ground = ws
                     .brush_ground_point_raw(frame.rect, pointer)
                     .unwrap_or([0.0; 3]);
-                ws.selected_brush = Some(index);
+                if others.is_empty() {
+                    ws.replace_brush_selection(index, ws.selected_brush_face);
+                } else {
+                    ws.selected_brush = Some(index);
+                }
                 ws.brush_move = Some(BrushMove {
                     index,
                     base,
+                    others,
                     press_ground,
                     applied: [0; 3],
                 });
@@ -1231,8 +1705,7 @@ impl ViewportTool3d for BrushTool {
             let press_ground = ws
                 .brush_ground_point_raw(frame.rect, pointer)
                 .unwrap_or([0.0; 3]);
-            ws.selected_brush = Some(index);
-            ws.selected_brush_face = Some(face);
+            ws.replace_brush_selection(index, Some(face));
             ws.brush_extrude = Some(BrushExtrude {
                 index,
                 face,
@@ -1268,12 +1741,7 @@ impl ViewportTool3d for BrushTool {
                 snap(ground[2] - mv.press_ground[2]),
             ];
             if applied != mv.applied {
-                let mut preview = mv.base.clone();
-                preview.translate(applied);
-                ws.project.active_scene_mut().brushes[mv.index] = preview;
-                if let Some(state) = ws.brush_move.as_mut() {
-                    state.applied = applied;
-                }
+                ws.apply_brush_move_preview(&mv, applied);
             }
             return;
         }
@@ -1346,13 +1814,14 @@ impl ViewportTool3d for BrushTool {
         ws.brush_clip_start = None;
         match ws.pick_brush_face(frame.rect, pointer) {
             Some((index, face)) => {
-                ws.selected_brush = Some(index);
-                ws.selected_brush_face = Some(face);
+                if frame.modifiers.shift {
+                    ws.toggle_brush_selection(index);
+                } else {
+                    ws.replace_brush_selection(index, Some(face));
+                }
             }
-            None => {
-                ws.selected_brush = None;
-                ws.selected_brush_face = None;
-            }
+            None if frame.modifiers.shift => {}
+            None => ws.clear_brush_selection(),
         }
     }
 }
