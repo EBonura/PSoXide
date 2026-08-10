@@ -70,6 +70,8 @@ name = "psx-bsp"
 version = "0.1.0"
 dependencies = [
  "psx-engine",
+ "psx-gpu",
+ "psx-gte",
  "psx-math",
  "psx-pack",
 ]
