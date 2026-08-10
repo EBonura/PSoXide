@@ -112,7 +112,8 @@ pub use movement::{
 };
 pub use render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, OtSubmitInFlight,
-    PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, RoomSurfaceSink,
+    PrimitiveArena, PrimitivePacketArena, PrimitivePacketScratch, PrimitivePacketStream,
+    PrimitivePacketWordReservation, PrimitiveSink, RoomSurfaceSink,
 };
 pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_basis,
