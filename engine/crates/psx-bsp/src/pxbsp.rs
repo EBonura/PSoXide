@@ -236,6 +236,8 @@ pub mod material_animation {
 pub mod entity_class {
     /// A translated brush submodel driven between closed and open endpoints.
     pub const BRUSH_DOOR: u16 = 1;
+    /// Authored world-space entry point for the player character.
+    pub const PLAYER_SPAWN: u16 = 2;
 }
 
 /// Common flags stored in [`PxbspEntity::flags`].
