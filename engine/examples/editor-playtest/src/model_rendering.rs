@@ -9,8 +9,9 @@ use psx_game_runtime::model_rendering as mr;
 
 pub(super) use psx_game_runtime::model_rendering::{
     accumulate_model_instance_draw_stats, distance_xz_sq, draw_collision_cylinder_debug,
-    emit_model_counters, EquipmentDrawStats, ModelInstanceDepthPass, ModelInstanceDrawStats,
-    ModelInstancePoseOverride, PlayerModelDrawStats, RuntimeModelAsset,
+    emit_model_counters, EquipmentDrawStats, InstanceActorPoseSnapshot, ModelInstanceDepthPass,
+    ModelInstanceDrawStats, ModelInstancePoseOverride, PlayerActorPoseSnapshot,
+    PlayerModelDrawStats, RuntimeModelAsset,
 };
 
 /// The cooked model-family tables bundled for the crate render policy.
@@ -144,23 +145,78 @@ fn room_reflection_probe_slot(room: RoomIndex) -> Option<VramSlot> {
     find_room_texture_vram_slot(asset)
 }
 
+impl Playtest {
+    /// Freeze actor presentation after the simulation tick. Rendering,
+    /// equipment sockets, and combat consume these values until the next tick.
+    pub(super) fn refresh_actor_pose_snapshots(&mut self, ctx: &Ctx) {
+        let player = self.motor.position();
+        self.player_actor_pose = self.character.and_then(|character| {
+            mr::resolve_player_actor_pose(
+                model_tables(),
+                character,
+                &self.models,
+                &self.clips,
+                player.x,
+                player.y,
+                player.z,
+                self.motor.yaw(),
+                self.anim_state.action(),
+                character.clip_for(self.anim_state),
+                self.anim_start_tick,
+                self.player_anim_blend(ctx.sim_tick),
+                ctx.sim_tick,
+                ctx.video_hz,
+            )
+        });
+
+        for pose in self.instance_actor_poses.iter_mut() {
+            *pose = None;
+        }
+        let mut overrides = [ModelInstancePoseOverride {
+            instance: u16::MAX,
+            x: 0,
+            y: 0,
+            z: 0,
+            yaw: 0,
+            clip: psx_level::OptionalModelClipIndex::NONE,
+            phase_ticks: 0,
+            one_shot: false,
+        }; MAX_GAME_ENTITIES];
+        let override_count = self.game_entity_pose_overrides(&mut overrides);
+        let overrides = &overrides[..override_count];
+        let elapsed_tick = self.gameplay_tick(ctx.sim_tick);
+        let count = MODEL_INSTANCES.len().min(self.instance_actor_poses.len());
+        let mut index = 0usize;
+        while index < count {
+            self.instance_actor_poses[index] = mr::resolve_instance_actor_pose(
+                model_tables(),
+                &self.models,
+                &self.clips,
+                overrides,
+                index,
+                elapsed_tick,
+                ctx.video_hz,
+            );
+            index += 1;
+        }
+    }
+
+    pub(super) fn clear_actor_pose_snapshots(&mut self) {
+        self.player_actor_pose = None;
+        for pose in self.instance_actor_poses.iter_mut() {
+            *pose = None;
+        }
+    }
+}
+
 /// Draw the player's animated model through the crate policy.
 pub(super) fn draw_player(
     current_room: RoomIndex,
     character: RuntimeCharacter,
-    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    player_pose: PlayerActorPoseSnapshot,
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
-    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    x: i32,
-    y: i32,
-    z: i32,
-    yaw: Angle,
-    anim_action: CharacterAnimationAction,
-    clip_local: ModelClipIndex,
-    anim_start_tick: SimTick,
-    blend: Option<PlayerAnimBlend>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -169,9 +225,7 @@ pub(super) fn draw_player(
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
-    mr::draw_player::<
-        MAX_RUNTIME_MODELS,
-        MAX_RUNTIME_MODEL_CLIPS,
+    mr::draw_player_from_pose::<
         MODEL_VERTEX_CAP,
         JOINT_CAP,
         OT_DEPTH,
@@ -182,19 +236,10 @@ pub(super) fn draw_player(
         MODEL_DRAW_KNOBS,
         model_scratch_arena(),
         character,
-        models,
+        player_pose,
         model_faces,
         model_parts,
         model_vertices,
-        clips,
-        x,
-        y,
-        z,
-        yaw,
-        anim_action,
-        clip_local,
-        anim_start_tick,
-        blend,
         elapsed_tick,
         video_hz,
         camera,
@@ -212,6 +257,8 @@ pub(super) fn draw_player(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_instance_equipment(
     current_room: RoomIndex,
+    instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
+    max_draws: usize,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -222,54 +269,60 @@ pub(super) fn draw_instance_equipment(
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    pose_overrides: &[ModelInstancePoseOverride],
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
-    mr::draw_instance_equipment::<
-        MAX_RUNTIME_MODELS,
-        MAX_RUNTIME_MODEL_CLIPS,
-        MODEL_VERTEX_CAP,
-        JOINT_CAP,
-        OT_DEPTH,
-        MODEL_PROFILE_ENABLED,
-    >(
-        model_tables(),
-        MODEL_DRAW_KNOBS,
-        model_scratch_arena(),
-        current_room,
-        elapsed_tick,
-        video_hz,
-        camera,
-        options,
-        lighting,
-        models,
-        model_faces,
-        model_parts,
-        model_vertices,
-        clips,
-        pose_overrides,
-        triangles,
-        world,
-    )
+    let mut out = EquipmentDrawStats::default();
+    let mut remaining = max_draws.min(MODEL_DRAW_KNOBS.max_equipment_draws);
+    for pose in instance_poses.iter().copied().flatten() {
+        if remaining == 0 {
+            break;
+        }
+        let mut knobs = MODEL_DRAW_KNOBS;
+        knobs.max_equipment_draws = remaining;
+        let stats = mr::draw_instance_equipment_from_pose::<
+            MAX_RUNTIME_MODELS,
+            MAX_RUNTIME_MODEL_CLIPS,
+            MODEL_VERTEX_CAP,
+            JOINT_CAP,
+            OT_DEPTH,
+            MODEL_PROFILE_ENABLED,
+        >(
+            model_tables(),
+            knobs,
+            model_scratch_arena(),
+            current_room,
+            pose,
+            elapsed_tick,
+            video_hz,
+            camera,
+            options,
+            lighting,
+            models,
+            model_faces,
+            model_parts,
+            model_vertices,
+            clips,
+            triangles,
+            world,
+        );
+        mr::accumulate_equipment_draw_stats(&mut out, stats);
+        remaining = remaining.saturating_sub(stats.draws as usize);
+        if stats.stats.primitive_overflow || stats.stats.command_overflow {
+            break;
+        }
+    }
+    out
 }
 
 /// Draw the player's attached equipment through the crate policy.
 pub(super) fn draw_player_equipment(
-    character: RuntimeCharacter,
+    player_pose: PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    x: i32,
-    y: i32,
-    z: i32,
-    yaw: Angle,
-    anim_action: CharacterAnimationAction,
-    clip_local: ModelClipIndex,
-    anim_start_tick: SimTick,
-    blend: Option<PlayerAnimBlend>,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
@@ -278,7 +331,7 @@ pub(super) fn draw_player_equipment(
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
-    mr::draw_player_equipment::<
+    mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,
         MODEL_VERTEX_CAP,
@@ -289,20 +342,12 @@ pub(super) fn draw_player_equipment(
         model_tables(),
         MODEL_DRAW_KNOBS,
         model_scratch_arena(),
-        character,
+        player_pose,
         models,
         model_faces,
         model_parts,
         model_vertices,
         clips,
-        x,
-        y,
-        z,
-        yaw,
-        anim_action,
-        clip_local,
-        anim_start_tick,
-        blend,
         elapsed_tick,
         video_hz,
         camera,
@@ -317,51 +362,58 @@ pub(super) fn draw_player_equipment(
 /// the crate policy.
 pub(super) fn draw_model_instances(
     current_room: RoomIndex,
+    instance_poses: &[Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     elapsed_tick: SimTick,
     video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
-    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    pose_overrides: &[ModelInstancePoseOverride],
     depth_pass: ModelInstanceDepthPass,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
-    mr::draw_model_instances::<
-        MAX_RUNTIME_MODELS,
-        MAX_RUNTIME_MODEL_CLIPS,
-        MODEL_VERTEX_CAP,
-        JOINT_CAP,
-        OT_DEPTH,
-        MODEL_BOUNDS_CULLING_ENABLED,
-        MODEL_PROFILE_ENABLED,
-    >(
-        model_tables(),
-        MODEL_DRAW_KNOBS,
-        model_scratch_arena(),
-        current_room,
-        elapsed_tick,
-        video_hz,
-        camera,
-        options,
-        lighting,
-        room_reflection_probe_slot(current_room),
-        models,
-        model_faces,
-        model_parts,
-        model_vertices,
-        clips,
-        pose_overrides,
-        depth_pass,
-        &mut model_texture_slot,
-        triangles,
-        world,
-    )
+    let mut out = ModelInstanceDrawStats::default();
+    for pose in instance_poses
+        .iter()
+        .take(MODEL_DRAW_KNOBS.max_model_instances)
+        .copied()
+        .flatten()
+    {
+        let stats = mr::draw_model_instance_from_pose::<
+            MODEL_VERTEX_CAP,
+            JOINT_CAP,
+            OT_DEPTH,
+            MODEL_BOUNDS_CULLING_ENABLED,
+            MODEL_PROFILE_ENABLED,
+        >(
+            model_tables(),
+            MODEL_DRAW_KNOBS,
+            model_scratch_arena(),
+            current_room,
+            pose,
+            elapsed_tick,
+            video_hz,
+            camera,
+            options,
+            lighting,
+            room_reflection_probe_slot(current_room),
+            model_faces,
+            model_parts,
+            model_vertices,
+            depth_pass,
+            &mut model_texture_slot,
+            triangles,
+            world,
+        );
+        accumulate_model_instance_draw_stats(&mut out, stats);
+        if stats.stats.primitive_overflow || stats.stats.command_overflow {
+            break;
+        }
+    }
+    out
 }
 
 /// Draw the floor shadow decal under every placed model instance.

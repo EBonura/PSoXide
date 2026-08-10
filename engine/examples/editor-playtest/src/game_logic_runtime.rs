@@ -23,7 +23,6 @@
 use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
 use psx_game_runtime::entities::MeleeArcStats;
-use psx_game_runtime::model_rendering as mr;
 
 #[derive(Clone, Copy)]
 struct ActivePlayerCapsule {
@@ -200,6 +199,9 @@ impl Playtest {
         let Some(character) = self.character else {
             return;
         };
+        let Some(player_pose) = self.player_actor_pose else {
+            return;
+        };
         let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
         // ComboAttack is the heaviest swing the player has, so it takes the
         // heavy scaling too; a distinct multiplier would be a tuning change,
@@ -212,32 +214,12 @@ impl Playtest {
         } else {
             spec
         };
-        // Current attack-clip animation frame, through the same phase
-        // math the render path uses -- the cooked hitbox window is
-        // authored against the frames the player SEES.
+        // The active frame comes from the exact snapshot the visible body and
+        // equipped weapon consume; combat never reconstructs animation phase.
         let action = self.anim_state.action();
-        let clip = character.clip_for(self.anim_state);
-        let Some(model) = self
-            .models
-            .get(character.model.to_usize())
-            .copied()
-            .flatten()
-        else {
-            return;
-        };
-        let Some(animation) = model.clip(&self.clips, clip) else {
-            return;
-        };
-        let phase = mr::animation_phase_at_tick_q12(
-            animation,
-            now.saturating_sub(self.anim_start_tick),
-            ctx.video_hz,
-            character.action_loops(action),
-            character.action_speed(action),
-            character.action_frame_range(action),
-        );
-        if let Some(stats) = self
-            .resolve_player_combat_capsules(ctx, character, model, animation, phase, action, clip)
+        let phase = player_pose.pose().phase_q12();
+        if let Some(stats) =
+            self.resolve_player_combat_capsules(character, player_pose, phase, action)
         {
             self.report_player_melee_stats(stats);
             return;
@@ -269,13 +251,10 @@ impl Playtest {
     /// window is authoritative, including frames with no active capsule.
     fn resolve_player_combat_capsules(
         &mut self,
-        ctx: &Ctx,
         character: RuntimeCharacter,
-        model: RuntimeModelAsset,
-        animation: Animation<'static>,
+        player_pose: PlayerActorPoseSnapshot,
         phase: u32,
         action: CharacterAnimationAction,
-        clip: ModelClipIndex,
     ) -> Option<MeleeArcStats> {
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
@@ -285,8 +264,6 @@ impl Playtest {
         let mut active = [ActivePlayerCapsule::EMPTY; psx_level::MAX_CHARACTER_COMBAT_CAPSULES];
         let mut active_count = 0usize;
         let mut authored_action = false;
-        let player = self.motor.position();
-        let tables = model_rendering::model_tables();
         for record in records {
             if record.flags & psx_level::combat_capsule_flags::HITBOX == 0
                 || record.action != action_index
@@ -300,24 +277,12 @@ impl Playtest {
             {
                 continue;
             }
-            let Some(joint) = mr::player_joint_world_transform(
-                tables,
-                model,
-                character,
-                animation,
-                phase,
-                player.x,
-                player.y,
-                player.z,
-                self.motor.yaw(),
-                action,
-                clip,
-                record.joint,
-            ) else {
+            let Some(capsule) = combat::transform_actor_combat_capsule(record, player_pose.pose())
+            else {
                 continue;
             };
             active[active_count] = ActivePlayerCapsule {
-                capsule: combat::transform_combat_capsule(record, joint),
+                capsule,
                 damage: record.damage,
                 poise_damage: record.poise_damage,
             };
@@ -363,14 +328,8 @@ impl Playtest {
                 continue;
             }
 
-            let hit = self.authored_capsule_hit_entity(
-                ctx,
-                entity,
-                entity_record,
-                &active[..active_count],
-                body,
-                tables,
-            );
+            let hit =
+                self.authored_capsule_hit_entity(entity_record, &active[..active_count], body);
             if let Some(hit) = hit {
                 self.swing_hit_mask |= mask;
                 let outcome = self.game_entities.apply_hit(
@@ -390,12 +349,9 @@ impl Playtest {
 
     fn authored_capsule_hit_entity(
         &self,
-        ctx: &Ctx,
-        entity: usize,
         entity_record: &LevelGameEntityRecord,
         active: &[ActivePlayerCapsule],
         body_fallback: WorldCombatCapsule,
-        tables: mr::ModelTables,
     ) -> Option<ActivePlayerCapsule> {
         let first = entity_record.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(entity_record.combat_capsule_count));
@@ -410,45 +366,20 @@ impl Playtest {
                 .find(|hit| combat::combat_capsules_overlap(&hit.capsule, &body_fallback));
         }
 
-        let instance = MODEL_INSTANCES.get(entity_record.model_instance as usize)?;
-        let model = self
-            .models
-            .get(instance.model.to_usize())
+        let instance_pose = self
+            .instance_actor_poses
+            .get(entity_record.model_instance as usize)
             .copied()
             .flatten()?;
-        let state_clip = self.game_entities.clip_for_state(GAME_ENTITIES, entity);
-        let clip = ModelClipIndex(state_clip.clip);
-        let animation = model.clip(&self.clips, clip)?;
-        let phase = mr::animation_phase_at_tick_q12(
-            animation,
-            u32::from(state_clip.phase_ticks),
-            ctx.video_hz,
-            !state_clip.one_shot,
-            psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
-            psx_level::CharacterActionFrameRange::FULL,
-        );
-        let position = self.game_entities.position(entity);
-        let yaw = self.game_entities.yaw(entity);
         for hurtbox in hurtboxes {
             if hurtbox.flags & psx_level::combat_capsule_flags::HURTBOX == 0 {
                 continue;
             }
-            let Some(joint) = mr::model_instance_joint_world_transform(
-                tables,
-                model,
-                instance,
-                animation,
-                phase,
-                clip,
-                position[0],
-                position[1],
-                position[2],
-                yaw,
-                hurtbox.joint,
-            ) else {
+            let Some(hurtbox) =
+                combat::transform_actor_combat_capsule(hurtbox, instance_pose.pose())
+            else {
                 continue;
             };
-            let hurtbox = combat::transform_combat_capsule(hurtbox, joint);
             if let Some(hit) = active
                 .iter()
                 .copied()
