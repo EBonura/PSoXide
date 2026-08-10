@@ -49,7 +49,12 @@ const BLOCK_BYTES: u32 = 16;
 /// bytes of zero nibbles. LOOP-START is the bit that matters: the hardware
 /// latches the repeat address off this block while decoding it, which does not
 /// depend on anything written before key-on.
-const SAMPLE_TAIL: [u8; BLOCK_BYTES as usize] =
+/// Self-looping silent ADPCM block appended after each packed one-shot.
+///
+/// Cookers that build a bank for later bulk upload should append this after
+/// every sample. This gives silicon the same loop-start marker as [`Bank`]
+/// without duplicating the hardware-specific byte sequence outside the SDK.
+pub const PARKING_TAIL: [u8; BLOCK_BYTES as usize] =
     [0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// Ticks of margin added past a sample's own length before its voice is
@@ -175,7 +180,7 @@ impl Bank {
         // block carries END, REPEAT and LOOP-START, so the hardware latches the
         // repeat address to the block itself as it decodes it, rather than
         // relying on a value written before key-on.
-        psx_spu::upload_adpcm(self.next, &SAMPLE_TAIL);
+        psx_spu::upload_adpcm(self.next, &PARKING_TAIL);
         self.next = SpuAddr::new(self.next.byte_offset() + BLOCK_BYTES);
         sample
     }
@@ -395,12 +400,12 @@ mod tests {
         // despite the repeat register naming it. The hardware latches the
         // repeat address off a block carrying 0x04 as it decodes it, which
         // owes nothing to a register written before key-on.
-        assert_eq!(SAMPLE_TAIL[1] & 0x01, 0x01, "END");
-        assert_eq!(SAMPLE_TAIL[1] & 0x02, 0x02, "REPEAT");
-        assert_eq!(SAMPLE_TAIL[1] & 0x04, 0x04, "LOOP-START");
-        assert_eq!(SAMPLE_TAIL[0], 0x00, "shift and filter zero");
+        assert_eq!(PARKING_TAIL[1] & 0x01, 0x01, "END");
+        assert_eq!(PARKING_TAIL[1] & 0x02, 0x02, "REPEAT");
+        assert_eq!(PARKING_TAIL[1] & 0x04, 0x04, "LOOP-START");
+        assert_eq!(PARKING_TAIL[0], 0x00, "shift and filter zero");
         assert!(
-            SAMPLE_TAIL[2..].iter().all(|&b| b == 0),
+            PARKING_TAIL[2..].iter().all(|&b| b == 0),
             "decodes to silence"
         );
     }
