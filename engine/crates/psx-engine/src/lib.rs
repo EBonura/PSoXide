@@ -86,14 +86,16 @@ pub use character_motor::{
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
 };
 pub use classic_affine::{
-    compose_classic_alias_transform, project_classic_affine_indexed_vertices,
-    submit_classic_affine_batch, submit_classic_affine_fan, submit_classic_affine_packed_fan,
+    compose_classic_alias_transform, materialize_classic_affine_word_vertices,
+    project_classic_affine_indexed_vertices, submit_classic_affine_batch,
+    submit_classic_affine_fan, submit_classic_affine_packed_fan,
     submit_classic_affine_projected_fan, submit_classic_affine_windowed_batch,
     submit_classic_affine_windowed_fan, submit_classic_alias_model,
     submit_classic_alias_view_model, ClassicAffineBatchSurface, ClassicAffinePosition,
     ClassicAffineProfile, ClassicAffineProjectedVertex, ClassicAffineSourceVertex,
-    ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWindowedBatchSurface, ClassicAliasFace,
-    ClassicAliasProjectedVertex, ClassicAliasVertex,
+    ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWindowedBatchSurface,
+    ClassicAffineWordSourceVertex, ClassicAliasFace, ClassicAliasProjectedVertex,
+    ClassicAliasVertex,
 };
 pub use fixed::{div_q12_i32, Q12, Q8};
 pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};

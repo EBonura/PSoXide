@@ -49,6 +49,23 @@ pub struct ClassicAffineSourceVertex {
     pub light: [u8; 2],
 }
 
+/// Word-strided retained-world vertex with either two light contributions or
+/// a baked RGB word in its final field.
+///
+/// This layout lets validated asset loaders retain compact twelve-byte source
+/// records while the renderer expands only the visible fans into projection
+/// scratch.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassicAffineWordSourceVertex {
+    /// Model- or world-space position.
+    pub position: [i16; 3],
+    /// Material-relative or already baked atlas UV.
+    pub uv: [u8; 2],
+    /// Two light contributions in the low bytes or baked RGB in the low 24 bits.
+    pub light: u32,
+}
+
 /// Compact projected vertex used by the packed world-fan path.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -63,6 +80,56 @@ pub struct ClassicAffineProjectedVertex {
     pub screen: [i16; 2],
     /// Cached GTE depth.
     pub depth: i32,
+}
+
+/// Expand word-strided retained-world vertices into classic-affine scratch.
+///
+/// The first three words of each destination are materialized directly. The
+/// projection fields are intentionally left unchanged because every classic
+/// affine submit path overwrites them before reading them.
+///
+/// # Safety
+/// `source` must contain `vertex_count` aligned source records, `destination`
+/// must contain the same number of aligned writable records, and the ranges
+/// must not overlap.
+pub unsafe fn materialize_classic_affine_word_vertices(
+    source: *const ClassicAffineWordSourceVertex,
+    vertex_count: usize,
+    destination: *mut ClassicAffineVertex,
+    uv_offset: [u8; 2],
+    light_weights: [u16; 2],
+    baked_uv: bool,
+    baked_light: bool,
+) {
+    let mut index = 0usize;
+    while index < vertex_count {
+        let source_words = unsafe { source.add(index).cast::<u32>() };
+        let destination_words = unsafe { destination.add(index).cast::<u32>() };
+        let position_xy = unsafe { ptr::read(source_words) };
+        let mut position_z_uv = unsafe { ptr::read(source_words.add(1)) };
+        let source_light = unsafe { ptr::read(source_words.add(2)) };
+
+        if !baked_uv {
+            let u = ((position_z_uv >> 16) as u8).wrapping_add(uv_offset[0]);
+            let v = ((position_z_uv >> 24) as u8).wrapping_add(uv_offset[1]);
+            position_z_uv = (position_z_uv & 0x0000_ffff) | ((u as u32) << 16) | ((v as u32) << 24);
+        }
+        let color = if baked_light {
+            source_light
+        } else {
+            light_color(
+                [source_light as u8, (source_light >> 8) as u8],
+                light_weights,
+            )
+        };
+
+        unsafe {
+            ptr::write(destination_words, position_xy);
+            ptr::write(destination_words.add(1), position_z_uv);
+            ptr::write(destination_words.add(2), color);
+        }
+        index += 1;
+    }
 }
 
 /// Deduplicated signed-integer position consumed by the retained indexed
@@ -1702,6 +1769,8 @@ mod tests {
         assert_eq!(core::mem::align_of::<ClassicAffineVertex>(), 4);
         assert_eq!(size_of::<ClassicAffineSourceVertex>(), 10);
         assert_eq!(core::mem::align_of::<ClassicAffineSourceVertex>(), 1);
+        assert_eq!(size_of::<ClassicAffineWordSourceVertex>(), 12);
+        assert_eq!(core::mem::align_of::<ClassicAffineWordSourceVertex>(), 4);
         assert_eq!(size_of::<ClassicAffineProjectedVertex>(), 16);
         assert_eq!(core::mem::align_of::<ClassicAffineProjectedVertex>(), 4);
         assert_eq!(size_of::<ClassicAffinePosition>(), 6);
@@ -1719,6 +1788,55 @@ mod tests {
         assert_eq!(core::mem::align_of::<ClassicAliasVertex>(), 1);
         assert_eq!(size_of::<ClassicAliasProjectedVertex>(), 8);
         assert_eq!(core::mem::align_of::<ClassicAliasProjectedVertex>(), 4);
+    }
+
+    #[test]
+    fn word_source_materialization_preserves_baked_and_dynamic_attributes() {
+        let source = [
+            ClassicAffineWordSourceVertex {
+                position: [-7, 11, 23],
+                uv: [250, 4],
+                light: 0x0000_2010,
+            },
+            ClassicAffineWordSourceVertex {
+                position: [31, -19, 5],
+                uv: [9, 17],
+                light: 0x00ab_cdef,
+            },
+        ];
+        let mut output = [ClassicAffineVertex {
+            screen: [123, -456],
+            depth: 789,
+            ..ClassicAffineVertex::default()
+        }; 2];
+        unsafe {
+            materialize_classic_affine_word_vertices(
+                source.as_ptr(),
+                1,
+                output.as_mut_ptr(),
+                [10, 252],
+                [256, 128],
+                false,
+                false,
+            );
+            materialize_classic_affine_word_vertices(
+                source.as_ptr().add(1),
+                1,
+                output.as_mut_ptr().add(1),
+                [99, 99],
+                [0, 0],
+                true,
+                true,
+            );
+        }
+        assert_eq!(output[0].position, [-7, 11, 23]);
+        assert_eq!(output[0].uv, [4, 0]);
+        assert_eq!(output[0].color, 0x0020_2020);
+        assert_eq!(output[0].screen, [123, -456]);
+        assert_eq!(output[0].depth, 789);
+        assert_eq!(output[1].position, [31, -19, 5]);
+        assert_eq!(output[1].uv, [9, 17]);
+        assert_eq!(output[1].color, 0x00ab_cdef);
     }
 
     #[test]
