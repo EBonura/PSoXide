@@ -6,6 +6,7 @@
 
 use crate::{ClipNode, Plane, RecordSlice, Vec3I16, Vec3I32};
 use psx_engine::div_q12_i32;
+use psx_gte::math::Mat3I16;
 use psx_math::int32::mul_q12_i32;
 
 pub const CONTENTS_EMPTY: i16 = -1;
@@ -13,6 +14,40 @@ pub const CONTENTS_SOLID: i16 = -2;
 pub const CONTENTS_WATER: i16 = -3;
 pub const Q12_ONE: i32 = 4096;
 const DIST_EPSILON: i32 = 128;
+
+/// Rigid local-to-world transform shared by brush rendering and collision.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BrushTransform {
+    /// Q20.12 world position of model-local zero.
+    pub origin: Vec3I32,
+    /// Q3.12 model-local to world rotation.
+    pub rotation: Mat3I16,
+}
+
+impl BrushTransform {
+    pub const IDENTITY: Self = Self {
+        origin: Vec3I32 { x: 0, y: 0, z: 0 },
+        rotation: Mat3I16::IDENTITY,
+    };
+
+    pub const fn translated(origin: Vec3I32) -> Self {
+        Self {
+            origin,
+            rotation: Mat3I16::IDENTITY,
+        }
+    }
+
+    fn point_to_local(self, point: Vec3I32) -> Vec3I32 {
+        inverse_rotate_q12(
+            self.rotation,
+            Vec3I32 {
+                x: point.x.saturating_sub(self.origin.x),
+                y: point.y.saturating_sub(self.origin.y),
+                z: point.z.saturating_sub(self.origin.z),
+            },
+        )
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Trace {
@@ -69,6 +104,14 @@ impl<'a> CollisionHull<'a> {
         let mut trace = Trace::unobstructed(end);
         self.recursive_check(self.head_node, 0, Q12_ONE, start, end, &mut trace)?;
         Some(trace)
+    }
+
+    /// Apply one mover transform while retaining this model-local hull.
+    pub const fn transformed(self, transform: BrushTransform) -> TransformedCollisionHull<'a> {
+        TransformedCollisionHull {
+            local: self,
+            transform,
+        }
     }
 
     fn point_contents_from(self, mut node_index: i16, point: Vec3I32) -> Option<i16> {
@@ -171,6 +214,33 @@ impl<'a> CollisionHull<'a> {
     }
 }
 
+/// World-space query facade over one model-local clipnode hull.
+#[derive(Copy, Clone)]
+pub struct TransformedCollisionHull<'a> {
+    local: CollisionHull<'a>,
+    transform: BrushTransform,
+}
+
+impl TransformedCollisionHull<'_> {
+    pub fn point_contents(self, point: Vec3I32) -> Option<i16> {
+        self.local
+            .point_contents(self.transform.point_to_local(point))
+    }
+
+    pub fn trace(self, start: Vec3I32, end: Vec3I32) -> Option<Trace> {
+        let mut trace = self.local.trace(
+            self.transform.point_to_local(start),
+            self.transform.point_to_local(end),
+        )?;
+        trace.end = interpolate(start, end, trace.fraction);
+        trace.normal = rotate_normal(self.transform.rotation, trace.normal);
+        trace.plane_distance = trace
+            .plane_distance
+            .saturating_add(normal_dot_point(trace.normal, self.transform.origin));
+        Some(trace)
+    }
+}
+
 fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
     let dot = match plane.kind {
         0 => point.x,
@@ -195,6 +265,49 @@ fn interpolate(start: Vec3I32, end: Vec3I32, fraction: i32) -> Vec3I32 {
             .z
             .saturating_add(mul_q12_i32(end.z.saturating_sub(start.z), fraction)),
     }
+}
+
+fn inverse_rotate_q12(rotation: Mat3I16, vector: Vec3I32) -> Vec3I32 {
+    Vec3I32 {
+        x: q12_dot(
+            [rotation.m[0][0], rotation.m[1][0], rotation.m[2][0]],
+            vector,
+        ),
+        y: q12_dot(
+            [rotation.m[0][1], rotation.m[1][1], rotation.m[2][1]],
+            vector,
+        ),
+        z: q12_dot(
+            [rotation.m[0][2], rotation.m[1][2], rotation.m[2][2]],
+            vector,
+        ),
+    }
+}
+
+fn rotate_normal(rotation: Mat3I16, normal: Vec3I16) -> Vec3I16 {
+    let normal = Vec3I32 {
+        x: normal.x as i32,
+        y: normal.y as i32,
+        z: normal.z as i32,
+    };
+    let clamp = |value: i32| value.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    Vec3I16 {
+        x: clamp(q12_dot(rotation.m[0], normal)),
+        y: clamp(q12_dot(rotation.m[1], normal)),
+        z: clamp(q12_dot(rotation.m[2], normal)),
+    }
+}
+
+fn q12_dot(row: [i16; 3], vector: Vec3I32) -> i32 {
+    mul_q12_i32(vector.x, row[0] as i32)
+        .saturating_add(mul_q12_i32(vector.y, row[1] as i32))
+        .saturating_add(mul_q12_i32(vector.z, row[2] as i32))
+}
+
+fn normal_dot_point(normal: Vec3I16, point: Vec3I32) -> i32 {
+    mul_q12_i32(point.x, normal.x as i32)
+        .saturating_add(mul_q12_i32(point.y, normal.y as i32))
+        .saturating_add(mul_q12_i32(point.z, normal.z as i32))
 }
 
 #[cfg(test)]
@@ -270,5 +383,61 @@ mod tests {
         assert_eq!(trace.fraction, 1984);
         assert_eq!(trace.end.x, 128);
         assert_eq!(trace.normal.x, 4096);
+    }
+
+    #[test]
+    fn transformed_hull_rotates_and_translates_world_queries() {
+        let planes = axial_x_plane();
+        let nodes = one_node();
+        let transform = BrushTransform {
+            origin: Vec3I32 {
+                x: 10 * Q12_ONE,
+                y: 20 * Q12_ONE,
+                z: 30 * Q12_ONE,
+            },
+            rotation: Mat3I16::rotate_z(64),
+        };
+        let hull = hull(&planes, &nodes).transformed(transform);
+        assert_eq!(
+            hull.point_contents(Vec3I32 {
+                x: 10 * Q12_ONE,
+                y: 21 * Q12_ONE,
+                z: 30 * Q12_ONE,
+            }),
+            Some(CONTENTS_EMPTY)
+        );
+        assert_eq!(
+            hull.point_contents(Vec3I32 {
+                x: 10 * Q12_ONE,
+                y: 19 * Q12_ONE,
+                z: 30 * Q12_ONE,
+            }),
+            Some(CONTENTS_SOLID)
+        );
+
+        let trace = hull
+            .trace(
+                Vec3I32 {
+                    x: 10 * Q12_ONE,
+                    y: 21 * Q12_ONE,
+                    z: 30 * Q12_ONE,
+                },
+                Vec3I32 {
+                    x: 10 * Q12_ONE,
+                    y: 19 * Q12_ONE,
+                    z: 30 * Q12_ONE,
+                },
+            )
+            .expect("transformed trace");
+        assert_eq!(
+            trace.normal,
+            Vec3I16 {
+                x: 0,
+                y: 4096,
+                z: 0
+            }
+        );
+        assert_eq!(trace.plane_distance, 20 * Q12_ONE);
+        assert!((20 * Q12_ONE..=20 * Q12_ONE + DIST_EPSILON).contains(&trace.end.y));
     }
 }
