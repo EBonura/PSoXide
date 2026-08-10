@@ -151,16 +151,103 @@ fn brush_tool_modifier_clicks_clip_selected_brush() {
     let a = scene.brushes[0].solve();
     let b = scene.brushes[1].solve();
     assert!(a.is_valid() && b.is_valid());
-    // The halves partition the original bounds.
-    let span = |s: &SolvedBrush, axis: usize| s.max[axis] - s.min[axis];
-    assert!(span(&a, 0) < span(&whole, 0) + 1e-6);
-    assert!(span(&b, 0) < span(&whole, 0) + 1e-6);
+    // The halves partition the original footprint.
+    let area = |s: &SolvedBrush| (s.max[0] - s.min[0]) * (s.max[2] - s.min[2]);
+    assert!(area(&a) < area(&whole) - 1.0);
+    assert!(area(&b) < area(&whole) - 1.0);
+    // AABBs of the halves cover the whole footprint (they may overlap
+    // when the clip plane is not axis-aligned, so >= rather than ==).
+    assert!(area(&a) + area(&b) >= area(&whole) - 1.0);
     assert_eq!(a.min[1], 0.0);
     assert_eq!(b.min[1], 0.0);
 
     // One undo restores the unsplit brush.
     harness.workspace.do_undo();
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
+}
+
+#[test]
+fn brush_tool_clip_keep_back_replaces_in_place() {
+    let mut harness = ViewportHarness::floored_room("brush_tool_clip_back", 4);
+    harness.frame(harness.room_center(), 3000.0);
+    harness.workspace.active_tool = ViewTool::Brush;
+    let tool = tool_impl_3d(ViewTool::Brush);
+
+    let press = brush_frame(&harness, Pos2::new(280.0, 300.0));
+    let commit = brush_frame(&harness, Pos2::new(520.0, 400.0));
+    tool.primary_pressed(&mut harness.workspace, &press);
+    tool.primary_dragged(&mut harness.workspace, &commit);
+    tool.primary_released(&mut harness.workspace, &commit);
+    let whole = harness.workspace.project.active_scene().brushes[0].solve();
+
+    harness.workspace.brush_clip_keep = BrushClipKeep::Back;
+    let mut clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
+    let mut clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
+    clip_a.modifiers.command = true;
+    clip_b.modifiers.command = true;
+    tool.primary_clicked(&mut harness.workspace, &clip_a);
+    tool.primary_clicked(&mut harness.workspace, &clip_b);
+
+    let scene = harness.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 1, "keep-back discards the front half");
+    let kept = scene.brushes[0].solve();
+    assert!(kept.is_valid());
+    let area = |s: &SolvedBrush| (s.max[0] - s.min[0]) * (s.max[2] - s.min[2]);
+    assert!(
+        area(&kept) < area(&whole) - 1.0,
+        "kept half covers less footprint than the whole"
+    );
+}
+
+#[test]
+fn brush_tool_shift_drag_moves_whole_brush() {
+    let mut harness = ViewportHarness::floored_room("brush_tool_move", 4);
+    harness.frame(harness.room_center(), 3000.0);
+    harness.workspace.active_tool = ViewTool::Brush;
+    let tool = tool_impl_3d(ViewTool::Brush);
+
+    let press = brush_frame(&harness, Pos2::new(300.0, 300.0));
+    let commit = brush_frame(&harness, Pos2::new(500.0, 400.0));
+    tool.primary_pressed(&mut harness.workspace, &press);
+    tool.primary_dragged(&mut harness.workspace, &commit);
+    tool.primary_released(&mut harness.workspace, &commit);
+    let before = harness.workspace.project.active_scene().brushes[0].solve();
+
+    // Shift-press over the projected top-face centre, then drag right.
+    let camera = harness.workspace.viewport_3d_camera();
+    let (nx, ny) = camera
+        .normalized_panel_point_for_world([
+            ((before.min[0] + before.max[0]) * 0.5) as f32,
+            before.max[1] as f32,
+            ((before.min[2] + before.max[2]) * 0.5) as f32,
+        ])
+        .expect("brush projects");
+    let rect = harness.viewport;
+    let over = Pos2::new(
+        rect.center().x + nx * rect.width() * 0.5,
+        rect.center().y + ny * rect.height() * 0.5,
+    );
+    let mut grab = brush_frame(&harness, over);
+    grab.modifiers.shift = true;
+    let mut dragged = brush_frame(&harness, Pos2::new(over.x + 80.0, over.y));
+    dragged.modifiers.shift = true;
+    tool.primary_pressed(&mut harness.workspace, &grab);
+    assert!(harness.workspace.brush_move.is_some(), "shift-press grabs");
+    tool.primary_dragged(&mut harness.workspace, &dragged);
+    tool.primary_released(&mut harness.workspace, &dragged);
+
+    let after = harness.workspace.project.active_scene().brushes[0].solve();
+    let size_before = before.max[0] - before.min[0];
+    let size_after = after.max[0] - after.min[0];
+    assert_eq!(size_before, size_after, "move preserves shape");
+    assert!(
+        after.min[0] != before.min[0] || after.min[2] != before.min[2],
+        "brush moved"
+    );
+
+    harness.workspace.do_undo();
+    let restored = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(restored.min, before.min);
 }
 
 #[test]
