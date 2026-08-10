@@ -7,6 +7,7 @@ mod tests {
     use std::path::Path;
 
     use crate::brush_world::{compile_brush_world, BrushWorldCookMode, BrushWorldCookOptions};
+    use crate::playtest::PlaytestWorldGeometry;
     use crate::ProjectDocument;
     use psx_bsp::collision::{Trace, TraceScratch, Q12_ONE};
     use psx_bsp::mover::BrushDoorSet;
@@ -54,6 +55,43 @@ mod tests {
         .expect("normal editor-playtest runtime source");
         assert!(runtime_main.contains("mod bsp_runtime;"));
         assert!(!runtime_main.contains("brush_playtest::run()"));
+    }
+
+    #[test]
+    fn project_cook_choice_reaches_the_normal_package_and_compiler() {
+        let mut project = ProjectDocument::from_ron_str(include_str!(
+            "../../../projects/brush-first-playable/project.ron"
+        ))
+        .expect("brush first-playable fixture");
+        let fixture_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+
+        assert_eq!(project.bsp_cook_mode, BrushWorldCookMode::Draft);
+        let draft = crate::playtest::build_package(&project, &fixture_dir)
+            .0
+            .expect("Draft package");
+        project.bsp_cook_mode = BrushWorldCookMode::Release;
+        let release = crate::playtest::build_package(&project, &fixture_dir)
+            .0
+            .expect("Release package");
+
+        assert_eq!(draft.bsp_cook_mode, BrushWorldCookMode::Draft);
+        assert_eq!(release.bsp_cook_mode, BrushWorldCookMode::Release);
+        let PlaytestWorldGeometry::Pxbsp(draft_world) = &draft.world_geometry else {
+            panic!("Draft package is not PXBSP");
+        };
+        let PlaytestWorldGeometry::Pxbsp(release_world) = &release.world_geometry else {
+            panic!("Release package is not PXBSP");
+        };
+        assert_ne!(draft_world.bytes, release_world.bytes);
+        assert!(crate::playtest::render_manifest_source(&draft)
+            .contains("pub const BSP_COOK_IS_RELEASE: bool = false;"));
+        assert!(crate::playtest::render_manifest_source(&release)
+            .contains("pub const BSP_COOK_IS_RELEASE: bool = true;"));
+
+        let restored = ProjectDocument::from_ron_str(&project.to_ron_string().expect("serialize"))
+            .expect("reload");
+        assert_eq!(restored.bsp_cook_mode, BrushWorldCookMode::Release);
     }
 
     #[test]
