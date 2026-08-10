@@ -341,6 +341,56 @@ fn snap_selected_brush_rounds_points() {
 }
 
 #[test]
+fn texture_lock_compensates_face_uv_on_move() {
+    let mut harness = ViewportHarness::floored_room("brush_uv_lock", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    assert!(harness.workspace.brush_texture_lock, "lock defaults on");
+    // Near the room centre so the framed camera can grab it.
+    harness.workspace.begin_brush_drag_2d([1792.0, 1792.0]);
+    harness.workspace.update_brush_drag_2d([2304.0, 2304.0]);
+    harness.workspace.commit_brush_drag();
+    let before = harness.workspace.project.active_scene().brushes[0].solve();
+
+    // Shift-drag move through the tool; the top face UV offset must
+    // compensate for the world shift (identity UV would stay [0, 0]
+    // only if the brush did not move).
+    let tool = tool_impl_3d(ViewTool::Brush);
+    harness.frame(harness.room_center(), 3000.0);
+    let camera = harness.workspace.viewport_3d_camera();
+    let (nx, ny) = camera
+        .normalized_panel_point_for_world([
+            ((before.min[0] + before.max[0]) * 0.5) as f32,
+            before.max[1] as f32,
+            ((before.min[2] + before.max[2]) * 0.5) as f32,
+        ])
+        .expect("brush projects");
+    let rect = harness.viewport;
+    let over = Pos2::new(
+        rect.center().x + nx * rect.width() * 0.5,
+        rect.center().y + ny * rect.height() * 0.5,
+    );
+    let mut grab = brush_frame(&harness, over);
+    grab.modifiers.shift = true;
+    let mut dragged = brush_frame(&harness, Pos2::new(over.x + 90.0, over.y));
+    dragged.modifiers.shift = true;
+    tool.primary_pressed(&mut harness.workspace, &grab);
+    tool.primary_dragged(&mut harness.workspace, &dragged);
+    tool.primary_released(&mut harness.workspace, &dragged);
+
+    let scene = harness.workspace.project.active_scene();
+    let after = scene.brushes[0].solve();
+    assert!(
+        after.min != before.min,
+        "brush moved (precondition for the lock check)"
+    );
+    let locked_any = scene.brushes[0]
+        .faces
+        .iter()
+        .any(|face| face.uv.offset_texels != [0, 0]);
+    assert!(locked_any, "texture lock compensated at least one face UV");
+}
+
+#[test]
 fn brush_tool_zero_area_drag_commits_nothing() {
     let mut harness = ViewportHarness::floored_room("brush_tool_zero", 4);
     harness.frame(harness.room_center(), 3000.0);
