@@ -80,17 +80,22 @@ impl EditorWorkspace {
                         let (rect, response) =
                             ui.allocate_exact_size(size, Sense::click_and_drag());
                         self.last_viewport_size = rect.size();
+                        let orthographic_view = self.orthographic_view;
+                        let top_view = orthographic_view == OrthographicView::Top;
                         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
                         let resource_drop_hovered =
-                            response.dnd_hover_payload::<ResourceId>().is_some();
+                            top_view && response.dnd_hover_payload::<ResourceId>().is_some();
                         let prefab_drop_hovered =
-                            response.dnd_hover_payload::<PrefabDragPayload>().is_some();
+                            top_view && response.dnd_hover_payload::<PrefabDragPayload>().is_some();
 
                         if !dnd_active
                             && (response.dragged_by(egui::PointerButton::Middle)
                                 || response.dragged_by(egui::PointerButton::Secondary))
                         {
-                            self.viewport_pan += ui.input(|input| input.pointer.delta());
+                            let delta = ui.input(|input| input.pointer.delta());
+                            let [horizontal, vertical] = orthographic_view.plane_axes();
+                            self.orthographic_focus[horizontal] -= delta.x / self.viewport_zoom;
+                            self.orthographic_focus[vertical] += delta.y / self.viewport_zoom;
                         }
 
                         if !dnd_active && response.hovered() {
@@ -99,28 +104,39 @@ impl EditorWorkspace {
                                 let pointer = ui
                                     .input(|input| input.pointer.hover_pos())
                                     .unwrap_or_else(|| rect.center());
-                                let before = ViewportTransform::new(
+                                let before = ViewportTransform::from_focus(
                                     rect,
-                                    self.viewport_pan,
+                                    orthographic_view.project_f32(self.orthographic_focus),
                                     self.viewport_zoom,
                                 )
                                 .screen_to_world(pointer);
                                 let zoom_factor = (1.0 + scroll * 0.0015).clamp(0.75, 1.25);
                                 self.viewport_zoom = (self.viewport_zoom * zoom_factor)
                                     .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
-                                let after = ViewportTransform::new(
+                                let after = ViewportTransform::from_focus(
                                     rect,
-                                    self.viewport_pan,
+                                    orthographic_view.project_f32(self.orthographic_focus),
                                     self.viewport_zoom,
                                 )
-                                .world_to_screen(before);
-                                self.viewport_pan += pointer - after;
+                                .screen_to_world(pointer);
+                                let projected_focus =
+                                    orthographic_view.project_f32(self.orthographic_focus);
+                                self.orthographic_focus = orthographic_view.with_projected_focus(
+                                    self.orthographic_focus,
+                                    [
+                                        projected_focus[0] + before[0] - after[0],
+                                        projected_focus[1] + before[1] - after[1],
+                                    ],
+                                );
                             }
                         }
 
-                        let transform =
-                            ViewportTransform::new(rect, self.viewport_pan, self.viewport_zoom);
-                        if self.floating_geometry.is_none() {
+                        let transform = ViewportTransform::from_focus(
+                            rect,
+                            orthographic_view.project_f32(self.orthographic_focus),
+                            self.viewport_zoom,
+                        );
+                        if top_view && self.floating_geometry.is_none() {
                             let dropped_resource = resource_drop_hovered
                                 .then(|| response.dnd_release_payload::<ResourceId>())
                                 .flatten()
@@ -146,35 +162,45 @@ impl EditorWorkspace {
                             draw_world_grid(&painter, transform);
                         }
 
-                        let hits = draw_scene_viewport(
-                            &painter,
-                            transform,
-                            &self.project,
-                            SceneViewportContext {
-                                hidden_scene_nodes: &self.hidden_scene_nodes,
-                                selected: self.selection.selected_node,
-                                selected_nodes: &self.selection.selected_nodes,
-                                selected_sectors: &self.selection.selected_sectors,
-                                validation_issue_primitives: &self.validation_issue_primitives,
-                                validation_issue_rooms: &self.validation_issue_rooms,
-                                show_portals: self.show_portals,
-                                show_lights: self.show_lights,
-                            },
-                        );
+                        let hits = if top_view {
+                            draw_scene_viewport(
+                                &painter,
+                                transform,
+                                &self.project,
+                                SceneViewportContext {
+                                    hidden_scene_nodes: &self.hidden_scene_nodes,
+                                    selected: self.selection.selected_node,
+                                    selected_nodes: &self.selection.selected_nodes,
+                                    selected_sectors: &self.selection.selected_sectors,
+                                    validation_issue_primitives: &self.validation_issue_primitives,
+                                    validation_issue_rooms: &self.validation_issue_rooms,
+                                    show_portals: self.show_portals,
+                                    show_lights: self.show_lights,
+                                },
+                            )
+                        } else {
+                            Vec::new()
+                        };
 
                         let pointer_world = response
                             .hover_pos()
                             .or_else(|| response.interact_pointer_pos())
                             .map(|pos| transform.screen_to_world(pos));
-                        if let Some(world) = pointer_world {
-                            self.draw_portal_place_preview_2d(&painter, transform, world);
+                        if top_view {
+                            if let Some(world) = pointer_world {
+                                self.draw_portal_place_preview_2d(&painter, transform, world);
+                            }
                         }
-                        if let (Some(room), Some(world)) = (
-                            self.floating_geometry.as_ref().map(|preview| preview.room),
-                            pointer_world,
-                        ) {
-                            if let Some(origin) = self.floating_origin_from_2d_world(room, world) {
-                                self.track_floating_geometry_pointer_origin(origin);
+                        if top_view {
+                            if let (Some(room), Some(world)) = (
+                                self.floating_geometry.as_ref().map(|preview| preview.room),
+                                pointer_world,
+                            ) {
+                                if let Some(origin) =
+                                    self.floating_origin_from_2d_world(room, world)
+                                {
+                                    self.track_floating_geometry_pointer_origin(origin);
+                                }
                             }
                         }
                         let top_hit = pointer_world
@@ -188,7 +214,7 @@ impl EditorWorkspace {
                         if !primary_down {
                             self.interaction.take_box_select_2d();
                         }
-                        if !dnd_active && self.floating_geometry.is_some() {
+                        if !dnd_active && top_view && self.floating_geometry.is_some() {
                             if response.clicked_by(egui::PointerButton::Primary) {
                                 self.commit_floating_geometry();
                             }
@@ -201,8 +227,9 @@ impl EditorWorkspace {
                                 &self.project,
                                 self.viewport_zoom,
                                 self.snap_units,
+                                orthographic_view,
                             );
-                            draw_axes_gizmo(&painter, rect);
+                            draw_axes_gizmo(&painter, rect, orthographic_view);
                             return;
                         }
                         if !dnd_active && matches!(self.active_tool, ViewTool::Brush) {
@@ -211,21 +238,38 @@ impl EditorWorkspace {
                             }
                             if response.drag_started_by(egui::PointerButton::Primary) {
                                 if let Some(pos) = response.interact_pointer_pos() {
-                                    self.begin_brush_drag_2d(transform.screen_to_world(pos));
+                                    let world = transform.screen_to_world(pos);
+                                    let modifiers = ui.input(|input| input.modifiers);
+                                    if modifiers.shift {
+                                        self.begin_brush_move_2d(world);
+                                    } else if !self
+                                        .begin_brush_resize_2d(world, 8.0 / self.viewport_zoom)
+                                        && self.pick_brush_face_at_2d(world).is_none()
+                                    {
+                                        self.begin_brush_drag_2d(world);
+                                    }
                                 }
                             }
                             if response.dragged_by(egui::PointerButton::Primary) {
                                 if let Some(pos) =
                                     response.interact_pointer_pos().or(response.hover_pos())
                                 {
-                                    self.update_brush_drag_2d(transform.screen_to_world(pos));
+                                    let world = transform.screen_to_world(pos);
+                                    if self.brush_move.is_some() {
+                                        self.update_brush_move_2d(world);
+                                    } else if self.brush_extrude.is_some() {
+                                        self.update_brush_resize_2d(world);
+                                    } else {
+                                        self.update_brush_drag_2d(world);
+                                    }
                                 }
                             }
                             if response.drag_stopped_by(egui::PointerButton::Primary) {
-                                self.commit_brush_drag();
+                                self.commit_brush_gesture_2d();
                             }
                         }
-                        if !dnd_active
+                        if top_view
+                            && !dnd_active
                             && matches!(self.active_tool, ViewTool::Select)
                             && response.drag_started_by(egui::PointerButton::Primary)
                         {
@@ -241,7 +285,8 @@ impl EditorWorkspace {
                                 }
                             }
                         }
-                        if !dnd_active
+                        if top_view
+                            && !dnd_active
                             && matches!(self.active_tool, ViewTool::Select)
                             && response.dragged_by(egui::PointerButton::Primary)
                         {
@@ -251,7 +296,8 @@ impl EditorWorkspace {
                                 self.update_viewport_box_select(current, transform);
                             }
                         }
-                        if !dnd_active
+                        if top_view
+                            && !dnd_active
                             && self.interaction.box_select_2d().is_none()
                             && response.dragged_by(egui::PointerButton::Primary)
                         {
@@ -272,10 +318,14 @@ impl EditorWorkspace {
                             &self.project,
                             self.viewport_zoom,
                             self.snap_units,
+                            orthographic_view,
                         );
-                        draw_viewport_box_select_marquee(&painter, self.viewport_box_select_rect());
+                        draw_viewport_box_select_marquee(
+                            &painter,
+                            top_view.then(|| self.viewport_box_select_rect()).flatten(),
+                        );
                         self.draw_brush_footprints_2d(&painter, transform);
-                        draw_axes_gizmo(&painter, rect);
+                        draw_axes_gizmo(&painter, rect, orthographic_view);
                         if resource_drop_hovered || prefab_drop_hovered {
                             painter.rect_stroke(
                                 rect.shrink(2.0),
@@ -1169,12 +1219,16 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_view_dimension_group_menu(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(120.0);
-        if toolbar_menu_choice(ui, icons::label(icons::SQUARE, "2D"), self.view_2d) && !self.view_2d
-        {
-            self.view_2d = true;
-            self.status = "Viewport: 2D".to_string();
-            self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+        ui.set_min_width(140.0);
+        for view in OrthographicView::ALL {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(icons::SQUARE, view.label()),
+                self.view_2d && self.orthographic_view == view,
+            ) && (!self.view_2d || self.orthographic_view != view)
+            {
+                self.set_orthographic_view(view);
+            }
         }
         if toolbar_menu_choice(ui, icons::label(icons::BOX, "3D"), !self.view_2d) && self.view_2d {
             self.view_2d = false;
@@ -1228,7 +1282,7 @@ impl EditorWorkspace {
 
     pub(crate) fn view_dimension_group_label(&self) -> &'static str {
         if self.view_2d {
-            "2D"
+            self.orthographic_view.label()
         } else {
             "3D"
         }

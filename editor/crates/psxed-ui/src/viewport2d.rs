@@ -6,6 +6,7 @@ pub(crate) fn draw_viewport_overlay(
     project: &ProjectDocument,
     zoom: f32,
     snap_units: u16,
+    view: OrthographicView,
 ) {
     let overlay = Rect::from_min_size(
         rect.left_top() + Vec2::new(12.0, 12.0),
@@ -23,7 +24,7 @@ pub(crate) fn draw_viewport_overlay(
         StrokeKind::Inside,
     );
     let lines = [
-        "Top Orthographic".to_string(),
+        format!("{} Orthographic", view.label()),
         format!("Grid: {snap_units} units"),
         format!("{} nodes", project.active_scene().nodes().len()),
         format!("{} resources", project.resources.len()),
@@ -57,12 +58,15 @@ pub(crate) fn draw_viewport_box_select_marquee(painter: &egui::Painter, rect: Op
     );
 }
 
-pub(crate) fn draw_axes_gizmo(painter: &egui::Painter, rect: Rect) {
+pub(crate) fn draw_axes_gizmo(painter: &egui::Painter, rect: Rect, view: OrthographicView) {
     let origin = Pos2::new(rect.left() + 34.0, rect.bottom() - 38.0);
     let x_end = origin + Vec2::new(42.0, 0.0);
     let y_end = origin + Vec2::new(0.0, -42.0);
-    let x_stroke = Stroke::new(2.0, Color32::from_rgb(220, 52, 46));
-    let y_stroke = Stroke::new(2.0, Color32::from_rgb(108, 220, 92));
+    let [horizontal_axis, vertical_axis] = view.plane_axes();
+    let horizontal_color = axis_color(horizontal_axis);
+    let vertical_color = axis_color(vertical_axis);
+    let x_stroke = Stroke::new(2.0, horizontal_color);
+    let y_stroke = Stroke::new(2.0, vertical_color);
 
     painter.circle_filled(origin, 3.0, STUDIO_ACCENT);
     painter.line_segment([origin, x_end], x_stroke);
@@ -74,17 +78,103 @@ pub(crate) fn draw_axes_gizmo(painter: &egui::Painter, rect: Rect) {
     painter.text(
         x_end + Vec2::new(8.0, 0.0),
         Align2::LEFT_CENTER,
-        "X",
+        axis_label(horizontal_axis),
         FontId::monospace(12.0),
-        Color32::from_rgb(255, 95, 88),
+        horizontal_color,
     );
     painter.text(
         y_end + Vec2::new(0.0, -8.0),
         Align2::CENTER_BOTTOM,
-        "Y",
+        axis_label(vertical_axis),
         FontId::monospace(12.0),
-        Color32::from_rgb(140, 255, 128),
+        vertical_color,
     );
+}
+
+fn axis_label(axis: usize) -> &'static str {
+    match axis {
+        0 => "X",
+        1 => "Y",
+        2 => "Z",
+        _ => unreachable!("world axis is always X, Y, or Z"),
+    }
+}
+
+fn axis_color(axis: usize) -> Color32 {
+    match axis {
+        0 => Color32::from_rgb(255, 95, 88),
+        1 => Color32::from_rgb(140, 255, 128),
+        2 => Color32::from_rgb(96, 150, 255),
+        _ => unreachable!("world axis is always X, Y, or Z"),
+    }
+}
+
+/// One of the three axis-aligned 2D authoring planes. All views use the
+/// same world-space focus, zoom, grid settings, and editor selection; only
+/// the pair of world axes projected into the panel changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrthographicView {
+    /// Look down from +Y: horizontal X, vertical Z.
+    Top,
+    /// Look back from +Z: horizontal X, vertical Y.
+    Front,
+    /// Look left from +X: horizontal Z, vertical Y.
+    Side,
+}
+
+impl OrthographicView {
+    pub(crate) const ALL: [Self; 3] = [Self::Top, Self::Front, Self::Side];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Top => "Top",
+            Self::Front => "Front",
+            Self::Side => "Side",
+        }
+    }
+
+    /// `[horizontal, vertical]` world-axis indices.
+    pub(crate) const fn plane_axes(self) -> [usize; 2] {
+        match self {
+            Self::Top => [0, 2],
+            Self::Front => [0, 1],
+            Self::Side => [2, 1],
+        }
+    }
+
+    /// World axis perpendicular to this view. The virtual camera sits on
+    /// the positive side of this axis.
+    pub(crate) const fn depth_axis(self) -> usize {
+        match self {
+            Self::Top => 1,
+            Self::Front => 2,
+            Self::Side => 0,
+        }
+    }
+
+    pub(crate) fn project_f32(self, world: [f32; 3]) -> [f32; 2] {
+        let [horizontal, vertical] = self.plane_axes();
+        [world[horizontal], world[vertical]]
+    }
+
+    pub(crate) fn project_f64(self, world: [f64; 3]) -> [f64; 2] {
+        let [horizontal, vertical] = self.plane_axes();
+        [world[horizontal], world[vertical]]
+    }
+
+    /// Lift a panel-space world point into 3D while preserving the current
+    /// focus coordinate along the hidden/depth axis.
+    pub(crate) fn unproject(self, plane: [f32; 2], focus: [f32; 3]) -> [f32; 3] {
+        let [horizontal, vertical] = self.plane_axes();
+        let mut world = focus;
+        world[horizontal] = plane[0];
+        world[vertical] = plane[1];
+        world
+    }
+
+    pub(crate) fn with_projected_focus(self, focus: [f32; 3], plane: [f32; 2]) -> [f32; 3] {
+        self.unproject(plane, focus)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +187,10 @@ pub(crate) struct ViewportTransform {
 impl ViewportTransform {
     pub(crate) fn new(rect: Rect, pan: Vec2, zoom: f32) -> Self {
         Self { rect, pan, zoom }
+    }
+
+    pub(crate) fn from_focus(rect: Rect, focus: [f32; 2], zoom: f32) -> Self {
+        Self::new(rect, Vec2::new(-focus[0] * zoom, focus[1] * zoom), zoom)
     }
 
     pub(crate) fn world_to_screen(self, world: [f32; 2]) -> Pos2 {
