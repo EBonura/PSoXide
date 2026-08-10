@@ -346,7 +346,7 @@ fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
 mod tests {
     use super::*;
     use crate::brush::BrushFace;
-    use psx_bsp::collision::{CollisionHull, Q12_ONE};
+    use psx_bsp::collision::{CollisionHull, Trace, TraceScratch, Q12_ONE};
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
 
     fn hull(compiled: &CompiledCollisionHulls, hull: usize) -> CollisionHull<'_> {
@@ -365,6 +365,17 @@ mod tests {
         }
     }
 
+    fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
+        let mut output = Trace::default();
+        assert!(hull.trace_into(
+            &start,
+            &end,
+            &mut TraceScratch::new(),
+            &mut output,
+        ));
+        output
+    }
+
     const PLAYER: CollisionHullBounds = CollisionHullBounds {
         mins: [-16, 0, -16],
         maxs: [16, 56, 16],
@@ -375,12 +386,16 @@ mod tests {
         let wall = Brush::cuboid([128, 0, 0], [192, 256, 256]);
         let compiled =
             compile_collision_hulls(&[wall], &[CollisionHullBounds::POINT, PLAYER]).expect("cook");
-        let point = hull(&compiled, 0)
-            .trace(at(0, 64, 64), at(200, 64, 64))
-            .expect("point trace");
-        let player = hull(&compiled, 1)
-            .trace(at(0, 64, 64), at(200, 64, 64))
-            .expect("player trace");
+        let point = trace(
+            &hull(&compiled, 0),
+            at(0, 64, 64),
+            at(200, 64, 64),
+        );
+        let player = trace(
+            &hull(&compiled, 1),
+            at(0, 64, 64),
+            at(200, 64, 64),
+        );
         let point_x = point.end.x as f64 / Q12_ONE as f64;
         let player_x = player.end.x as f64 / Q12_ONE as f64;
         assert!((127.0..128.1).contains(&point_x));
@@ -395,12 +410,8 @@ mod tests {
         ];
         let compiled = compile_collision_hulls(&brushes, &[PLAYER]).expect("cook");
         let hull = hull(&compiled, 0);
-        let floor = hull
-            .trace(at(256, 160, 256), at(256, -32, 256))
-            .expect("floor trace");
-        let ceiling = hull
-            .trace(at(256, 80, 256), at(256, 300, 256))
-            .expect("ceiling trace");
+        let floor = trace(&hull, at(256, 160, 256), at(256, -32, 256));
+        let ceiling = trace(&hull, at(256, 80, 256), at(256, 300, 256));
         let floor_y = floor.end.y as f64 / Q12_ONE as f64;
         let ceiling_y = ceiling.end.y as f64 / Q12_ONE as f64;
         assert!((63.0..64.1).contains(&floor_y));
