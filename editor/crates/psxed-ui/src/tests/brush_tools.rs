@@ -304,6 +304,43 @@ fn brush_2d_clip_clicks_split_selected() {
 }
 
 #[test]
+fn hollow_selected_brush_makes_room_walls() {
+    let mut harness = ViewportHarness::floored_room("brush_hollow", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.begin_brush_drag_2d([0.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([512.0, 512.0]);
+    harness.workspace.commit_brush_drag();
+    assert_eq!(harness.workspace.selected_brush, Some(0));
+
+    harness.workspace.hollow_selected_brush(16);
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes.len(),
+        6,
+        "hollow replaces one brush with six slabs"
+    );
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
+}
+
+#[test]
+fn snap_selected_brush_rounds_points() {
+    let mut harness = ViewportHarness::floored_room("brush_snap_sel", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    // Author an off-grid brush directly.
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([1, 0, -1], [65, 63, 62]));
+    harness.workspace.selected_brush = Some(0);
+    harness.workspace.snap_selected_brush();
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.min, [0.0, 0.0, 0.0]);
+    assert_eq!(solved.max, [64.0, 64.0, 64.0]);
+}
+
+#[test]
 fn brush_tool_zero_area_drag_commits_nothing() {
     let mut harness = ViewportHarness::floored_room("brush_tool_zero", 4);
     harness.frame(harness.room_center(), 3000.0);

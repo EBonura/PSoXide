@@ -429,6 +429,23 @@ impl EditorWorkspace {
                         self.apply_material_to_selected_brush_face();
                     }
                 }
+                if self.selected_brush.is_some() {
+                    if ui
+                        .button("Hollow")
+                        .on_hover_text("Replace with six wall slabs (grid-step thickness)")
+                        .clicked()
+                    {
+                        let thickness = (self.snap_units.max(1)) as i32;
+                        self.hollow_selected_brush(thickness);
+                    }
+                    if ui
+                        .button("Snap to grid")
+                        .on_hover_text("Snap every brush point to the grid step")
+                        .clicked()
+                    {
+                        self.snap_selected_brush();
+                    }
+                }
                 if let Some(index) = self.selected_brush {
                     if ui.button(icons::label(icons::PLUS, "Duplicate")).clicked() {
                         self.push_undo();
