@@ -237,126 +237,33 @@ impl EditorWorkspace {
                 self.selection.hovered_entity_node = None;
             }
 
-            // Select-tool drag-translate. Two distinct drag flows:
-            //   1. Entity bound under cursor → start `node_drag`,
-            //      move the node on its X/Z plane.
-            //   2. Otherwise (face / edge / vertex hit, or empty)
-            //      move primitive geometry on the X/Z grid. Alt
-            //      keeps the existing primitive vertical drag.
-            // Pure clicks (press without movement) just promote
-            // the hovered target to the selection -- no undo
-            // entry, no mutation. The first drag frame that
-            // crosses a threshold lazy-pushes undo so a
-            // press-and-release doesn't leave a stale snapshot.
-            if select_tool {
-                if response.drag_started_by(egui::PointerButton::Primary) {
-                    if let Some(pointer) = response.interact_pointer_pos() {
-                        match pointer_target {
-                            Some(Viewport3dPointerTarget::PrimitiveGizmo(axis)) => {
-                                self.begin_primitive_gizmo_drag(axis, rect, pointer);
-                            }
-                            Some(Viewport3dPointerTarget::NodeGizmo(handle)) => {
-                                self.begin_node_gizmo_handle_drag(handle, rect, pointer);
-                            }
-                            Some(Viewport3dPointerTarget::Entity(hit))
-                                if self.transform_gizmo_mode == TransformGizmoMode::Move =>
-                            {
-                                self.begin_node_drag(hit, rect);
-                            }
-                            Some(Viewport3dPointerTarget::Entity(_)) => {}
-                            Some(Viewport3dPointerTarget::Surface { .. }) => {
-                                let modifiers = ui.input(|input| input.modifiers);
-                                self.begin_primitive_pointer_drag(rect, pointer, modifiers);
-                            }
-                            None => {
-                                let modifiers = ui.input(|input| input.modifiers);
-                                self.begin_viewport_3d_box_select(pointer, hover_room, modifiers);
-                            }
-                        }
-                    }
-                }
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    match self.interaction {
-                        Interaction::PrimitiveGizmo(_) => {
-                            if let Some(p) = response.interact_pointer_pos() {
-                                self.update_primitive_gizmo_drag(p);
-                            }
-                        }
-                        Interaction::NodeGizmo(_) => {
-                            if let Some(p) = response.interact_pointer_pos() {
-                                self.update_node_gizmo_drag(rect, p);
-                            }
-                        }
-                        Interaction::Node(_) => {
-                            if let Some(p) = response.interact_pointer_pos() {
-                                self.update_node_drag(rect, p);
-                            }
-                        }
-                        Interaction::PrimitiveGrid(_) => {
-                            if let Some(p) = response.interact_pointer_pos() {
-                                self.update_primitive_grid_drag(rect, p);
-                            }
-                        }
-                        Interaction::BoxSelect3d(_) => {
-                            if let Some(p) =
-                                response.interact_pointer_pos().or(response.hover_pos())
-                            {
-                                self.update_viewport_3d_box_select(p, rect);
-                            }
-                        }
-                        _ => self.update_primitive_drag(response.drag_delta().y),
-                    }
-                }
-                if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    match self.interaction {
-                        Interaction::PrimitiveGizmo(_) => self.end_primitive_gizmo_drag(),
-                        Interaction::NodeGizmo(_) => self.end_node_gizmo_drag(),
-                        Interaction::Node(_) => self.end_node_drag(),
-                        Interaction::PrimitiveGrid(_) => self.end_primitive_grid_drag(),
-                        Interaction::BoxSelect3d(_) => self.end_viewport_3d_box_select(),
-                        _ => self.end_primitive_drag(),
-                    }
-                }
-                if response.clicked_by(egui::PointerButton::Primary) {
-                    // Click selection consumes the same topmost
-                    // target as hover and drag start. Gizmo clicks
-                    // are therefore handled by the gizmo path above
-                    // and never fall through to a face behind them.
-                    let modifiers = ui.input(|input| input.modifiers);
-                    match pointer_target {
-                        Some(Viewport3dPointerTarget::Entity(hit)) => {
-                            let visible_order = self.scene_node_order();
-                            self.apply_node_selection_modifiers(
-                                hit.node,
-                                modifiers,
-                                &visible_order,
-                            );
-                        }
-                        Some(Viewport3dPointerTarget::Surface { .. }) | None => {
-                            self.commit_face_selection(modifiers);
-                        }
-                        Some(
-                            Viewport3dPointerTarget::PrimitiveGizmo(_)
-                            | Viewport3dPointerTarget::NodeGizmo(_),
-                        ) => {}
-                    }
-                }
-            } else {
-                // The eyedropper is deliberately click-only. Keeping it armed
-                // throughout a drag prevents a sample gesture from falling
-                // through into Paint after the one-shot state clears.
-                let primary_active = response.clicked_by(egui::PointerButton::Primary)
-                    || (!self.material_paint_sampling
-                        && response.dragged_by(egui::PointerButton::Primary));
-                if primary_active {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        let face_hit = self.pick_face_with_hit(rect, pos);
-                        let fallback = self
-                            .active_room_id()
-                            .and_then(|room| self.pick_3d_paint_world(rect, pos, room));
-                        self.dispatch_paint_3d(face_hit, fallback);
-                    }
-                }
+            // Tool dispatch: translate this frame's primary-button state
+            // into `ToolFrame3d` events for the active tool object
+            // (workspace/tools.rs). Select keeps its drag flows and
+            // lazy-undo semantics; paint tools keep click-or-drag
+            // painting; brush tools plug in as new arms of
+            // `tools::tool_impl_3d` without growing this function.
+            let frame = tools::ToolFrame3d {
+                rect,
+                pointer_interact: response.interact_pointer_pos(),
+                pointer_hover: response.hover_pos(),
+                modifiers: ui.input(|input| input.modifiers),
+                pointer_target,
+                hover_room,
+                drag_delta_y: response.drag_delta().y,
+            };
+            let tool = tools::tool_impl_3d(self.active_tool);
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                tool.primary_pressed(self, &frame);
+            }
+            if response.dragged_by(egui::PointerButton::Primary) {
+                tool.primary_dragged(self, &frame);
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                tool.primary_released(self, &frame);
+            }
+            if response.clicked_by(egui::PointerButton::Primary) {
+                tool.primary_clicked(self, &frame);
             }
         } else {
             self.selection.hovered_entity_node = None;
