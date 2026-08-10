@@ -622,17 +622,20 @@ impl EditorWorkspace {
 
     /// The cuboid a brush drag would commit, if it has area.
     fn brush_drag_cuboid(drag: BrushDrag) -> Option<psxed_project::brush::Brush> {
-        psxed_project::brush::Brush::cuboid_from_corners(
-            [drag.anchor[0], 0, drag.anchor[2]],
-            [drag.current[0], BRUSH_CREATE_HEIGHT, drag.current[2]],
-        )
+        let mut opposite = drag.current;
+        let depth_axis = drag.view.depth_axis();
+        opposite[depth_axis] = drag.anchor[depth_axis].saturating_add(BRUSH_CREATE_HEIGHT);
+        psxed_project::brush::Brush::cuboid_from_corners(drag.anchor, opposite)
     }
 
-    /// Snap a 2D top-view world point (XZ) to the brush grid at y = 0.
+    /// Snap a point from the active orthographic plane to the brush grid.
+    /// Its hidden-axis coordinate comes from the world-space shared focus.
     pub(crate) fn brush_snap_2d(&self, world: [f32; 2]) -> [i32; 3] {
         let step = (self.snap_units.max(1)) as f32;
         let snap = |v: f32| ((v / step).round() * step) as i32;
-        [snap(world[0]), 0, snap(world[1])]
+        self.orthographic_view
+            .unproject(world, self.orthographic_focus)
+            .map(snap)
     }
 
     /// Start a brush-create drag at a snapped point (2D view entry).
@@ -641,6 +644,7 @@ impl EditorWorkspace {
         self.brush_drag = Some(BrushDrag {
             anchor: point,
             current: point,
+            view: self.orthographic_view,
         });
     }
 
@@ -675,6 +679,10 @@ impl EditorWorkspace {
     /// plane through both, honouring `brush_clip_keep`. Shared by the 3D
     /// tool and the 2D view.
     pub(crate) fn brush_clip_click(&mut self, point: [i32; 3]) {
+        self.brush_clip_click_in_view(point, self.orthographic_view);
+    }
+
+    fn brush_clip_click_in_view(&mut self, point: [i32; 3], view: OrthographicView) {
         let Some(selected) = self.selected_brush else {
             return;
         };
@@ -682,10 +690,11 @@ impl EditorWorkspace {
             None => self.brush_clip_start = Some(point),
             Some(start) if start == point => {}
             Some(start) => {
-                let up = [start[0], BRUSH_CREATE_HEIGHT, start[2]];
-                let clipped = self.project.active_scene().brushes[selected].clip([
-                    start, point, up,
-                ]);
+                let mut up = start;
+                let depth_axis = view.depth_axis();
+                up[depth_axis] = up[depth_axis].saturating_add(BRUSH_CREATE_HEIGHT);
+                let clipped =
+                    self.project.active_scene().brushes[selected].clip([start, point, up]);
                 match (self.brush_clip_keep, clipped.back, clipped.front) {
                     (BrushClipKeep::Both, Some(back), Some(front)) => {
                         self.push_undo();
@@ -708,28 +717,14 @@ impl EditorWorkspace {
         }
     }
 
-    /// Select the brush whose footprint contains the 2D world point,
-    /// preferring the smallest footprint (topmost in intent). Returns
-    /// whether a brush was hit.
+    /// Select the visible brush face under the active orthographic point.
+    /// Smaller projected brushes retain the old Top-view priority; exact
+    /// overlaps then prefer the face nearest the positive-axis viewer.
     pub(crate) fn select_brush_at_2d(&mut self, world: [f32; 2]) -> bool {
-        let mut best: Option<(f64, usize)> = None;
-        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            let solved = brush.solve();
-            let inside = f64::from(world[0]) >= solved.min[0]
-                && f64::from(world[0]) <= solved.max[0]
-                && f64::from(world[1]) >= solved.min[2]
-                && f64::from(world[1]) <= solved.max[2];
-            if inside {
-                let area = (solved.max[0] - solved.min[0]) * (solved.max[2] - solved.min[2]);
-                if best.is_none_or(|(best_area, _)| area < best_area) {
-                    best = Some((area, index));
-                }
-            }
-        }
-        match best {
-            Some((_, index)) => {
+        match self.pick_brush_face_at_2d(world) {
+            Some((index, face)) => {
                 self.selected_brush = Some(index);
-                self.selected_brush_face = None;
+                self.selected_brush_face = Some(face);
                 true
             }
             None => {
@@ -740,44 +735,319 @@ impl EditorWorkspace {
         }
     }
 
-    /// Brush footprints in the 2D top view: bounds rectangles, the
-    /// in-flight create preview, and the pending clip point.
+    pub(crate) fn pick_brush_face_at_2d(&self, world: [f32; 2]) -> Option<(usize, usize)> {
+        let view = self.orthographic_view;
+        let [horizontal, vertical] = view.plane_axes();
+        let depth_axis = view.depth_axis();
+        let point = world.map(f64::from);
+        let mut best: Option<(f64, f64, usize, usize)> = None;
+
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            let solved = brush.solve();
+            if !solved.is_valid() {
+                continue;
+            }
+            let min = view.project_f64(solved.min);
+            let max = view.project_f64(solved.max);
+            if point[0] < min[0] || point[0] > max[0] || point[1] < min[1] || point[1] > max[1] {
+                continue;
+            }
+            let area = (max[0] - min[0]) * (max[1] - min[1]);
+            let mut nearest_face: Option<(f64, usize)> = None;
+            for (face, polygon) in solved.polygons.iter().enumerate() {
+                let Some(polygon) = polygon else { continue };
+                let projected = polygon
+                    .verts
+                    .iter()
+                    .copied()
+                    .map(|vertex| view.project_f64(vertex))
+                    .collect::<Vec<_>>();
+                if !point_in_convex_polygon_2d(point, &projected) {
+                    continue;
+                }
+                let Some(plane) =
+                    psxed_project::brush::Plane::from_points(brush.faces[face].points)
+                else {
+                    continue;
+                };
+                let denominator = plane.normal[depth_axis] as f64;
+                if denominator.abs() < f64::EPSILON {
+                    continue;
+                }
+                let depth = (plane.dist as f64
+                    - plane.normal[horizontal] as f64 * point[0]
+                    - plane.normal[vertical] as f64 * point[1])
+                    / denominator;
+                if nearest_face.is_none_or(|(best_depth, best_face)| {
+                    depth > best_depth || (depth == best_depth && face < best_face)
+                }) {
+                    nearest_face = Some((depth, face));
+                }
+            }
+            let Some((depth, face)) = nearest_face else {
+                continue;
+            };
+            if best.is_none_or(|(best_area, best_depth, best_index, _)| {
+                area < best_area
+                    || (area == best_area
+                        && (depth > best_depth || (depth == best_depth && index < best_index)))
+            }) {
+                best = Some((area, depth, index, face));
+            }
+        }
+        best.map(|(_, _, index, face)| (index, face))
+    }
+
+    /// Shift-drag entry for an in-plane whole-brush move.
+    pub(crate) fn begin_brush_move_2d(&mut self, world: [f32; 2]) -> bool {
+        let Some((index, face)) = self.pick_brush_face_at_2d(world) else {
+            return false;
+        };
+        let base = self.project.active_scene().brushes[index].clone();
+        self.selected_brush = Some(index);
+        self.selected_brush_face = Some(face);
+        self.brush_move = Some(BrushMove {
+            index,
+            base,
+            press_ground: self
+                .orthographic_view
+                .unproject(world, self.orthographic_focus),
+            applied: [0; 3],
+        });
+        true
+    }
+
+    pub(crate) fn update_brush_move_2d(&mut self, world: [f32; 2]) {
+        let Some(mv) = self.brush_move.clone() else {
+            return;
+        };
+        let current = self
+            .orthographic_view
+            .unproject(world, self.orthographic_focus);
+        let step = self.snap_units.max(1) as f32;
+        let snap = |value: f32| ((value / step).round() * step) as i32;
+        let mut applied = [0; 3];
+        for axis in self.orthographic_view.plane_axes() {
+            applied[axis] = snap(current[axis] - mv.press_ground[axis]);
+        }
+        if applied == mv.applied {
+            return;
+        }
+        let mut preview = mv.base.clone();
+        preview.translate(applied);
+        self.project.active_scene_mut().brushes[mv.index] = preview;
+        if let Some(state) = self.brush_move.as_mut() {
+            state.applied = applied;
+        }
+    }
+
+    /// Start resizing the axis-facing brush face nearest a projected edge.
+    /// Faces perpendicular to the current view are deliberately excluded:
+    /// their depth motion is ambiguous in a 2D panel.
+    pub(crate) fn begin_brush_resize_2d(&mut self, world: [f32; 2], tolerance: f32) -> bool {
+        let view = self.orthographic_view;
+        let point = world.map(f64::from);
+        let tolerance2 = f64::from(tolerance.max(0.0)).powi(2);
+        let mut best: Option<(f64, bool, usize, usize, usize, i32)> = None;
+
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            let solved = brush.solve();
+            for (face, polygon) in solved.polygons.iter().enumerate() {
+                let Some(polygon) = polygon else { continue };
+                let Some(plane) =
+                    psxed_project::brush::Plane::from_points(brush.faces[face].points)
+                else {
+                    continue;
+                };
+                let axis = dominant_axis(plane.normal);
+                if axis == view.depth_axis() {
+                    continue;
+                }
+                let projected = polygon
+                    .verts
+                    .iter()
+                    .copied()
+                    .map(|vertex| view.project_f64(vertex))
+                    .collect::<Vec<_>>();
+                let distance2 = polygon_edge_distance2(point, &projected);
+                if distance2 > tolerance2 {
+                    continue;
+                }
+                let selected = self.selected_brush == Some(index);
+                let dir = if plane.normal[axis] >= 0 { 1 } else { -1 };
+                if best.is_none_or(
+                    |(best_distance, best_selected, best_index, best_face, _, _)| {
+                        distance2 < best_distance
+                            || (distance2 == best_distance
+                                && (selected && !best_selected
+                                    || (selected == best_selected
+                                        && (index < best_index
+                                            || (index == best_index && face < best_face)))))
+                    },
+                ) {
+                    best = Some((distance2, selected, index, face, axis, dir));
+                }
+            }
+        }
+
+        let Some((_, _, index, face, axis, dir)) = best else {
+            return false;
+        };
+        let base = self.project.active_scene().brushes[index].clone();
+        self.selected_brush = Some(index);
+        self.selected_brush_face = Some(face);
+        self.brush_extrude = Some(BrushExtrude {
+            index,
+            face,
+            base,
+            axis,
+            dir,
+            press_y: 0.0,
+            press_ground: view.unproject(world, self.orthographic_focus),
+            applied: 0,
+        });
+        true
+    }
+
+    pub(crate) fn update_brush_resize_2d(&mut self, world: [f32; 2]) {
+        let Some(extrude) = self.brush_extrude.clone() else {
+            return;
+        };
+        let current = self
+            .orthographic_view
+            .unproject(world, self.orthographic_focus);
+        let step = self.snap_units.max(1) as f32;
+        let raw = current[extrude.axis] - extrude.press_ground[extrude.axis];
+        let snapped = ((raw / step).round() * step) as i32;
+        if snapped == extrude.applied {
+            return;
+        }
+        let mut delta = [0; 3];
+        delta[extrude.axis] = snapped;
+        let mut preview = extrude.base.clone();
+        preview.translate_face(extrude.face, delta);
+        if preview.solve().is_valid() {
+            self.project.active_scene_mut().brushes[extrude.index] = preview;
+            if let Some(state) = self.brush_extrude.as_mut() {
+                state.applied = snapped;
+            }
+        }
+    }
+
+    fn commit_brush_move_preview(&mut self) -> bool {
+        let Some(mv) = self.brush_move.take() else {
+            return false;
+        };
+        self.project.active_scene_mut().brushes[mv.index] = mv.base.clone();
+        if mv.applied != [0; 3] {
+            self.push_undo();
+            let mut moved = mv.base;
+            if self.brush_texture_lock {
+                moved.translate_with_uv_lock(
+                    mv.applied,
+                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                );
+            } else {
+                moved.translate(mv.applied);
+            }
+            self.project.active_scene_mut().brushes[mv.index] = moved;
+        }
+        true
+    }
+
+    fn commit_brush_extrude_preview(&mut self) -> bool {
+        let Some(extrude) = self.brush_extrude.take() else {
+            return false;
+        };
+        let live = self.project.active_scene().brushes[extrude.index].clone();
+        self.project.active_scene_mut().brushes[extrude.index] = extrude.base;
+        if extrude.applied != 0 {
+            self.push_undo();
+            self.project.active_scene_mut().brushes[extrude.index] = live;
+        }
+        true
+    }
+
+    pub(crate) fn commit_brush_gesture_2d(&mut self) {
+        if self.commit_brush_move_preview() || self.commit_brush_extrude_preview() {
+            return;
+        }
+        self.commit_brush_drag();
+    }
+
+    /// Project exact solved brush polygons into the active orthographic
+    /// plane, including the selected face and transient create/clip state.
     pub(crate) fn draw_brush_footprints_2d(
         &self,
         painter: &egui::Painter,
         transform: crate::viewport2d::ViewportTransform,
     ) {
-        let rect_for = |min: [f64; 3], max: [f64; 3]| {
-            let a = transform.world_to_screen([min[0] as f32, min[2] as f32]);
-            let b = transform.world_to_screen([max[0] as f32, max[2] as f32]);
-            egui::Rect::from_two_pos(a, b)
+        let view = self.orthographic_view;
+        let draw = |brush: &psxed_project::brush::Brush,
+                    selected_face: Option<usize>,
+                    stroke: egui::Stroke| {
+            let solved = brush.solve();
+            if !solved.is_valid() {
+                return;
+            }
+            for (face, polygon) in solved.polygons.iter().enumerate() {
+                let Some(polygon) = polygon else { continue };
+                let points = polygon
+                    .verts
+                    .iter()
+                    .copied()
+                    .map(|world| {
+                        let projected = view.project_f64(world);
+                        transform.world_to_screen([projected[0] as f32, projected[1] as f32])
+                    })
+                    .collect::<Vec<_>>();
+                if points.len() < 2 {
+                    continue;
+                }
+                if selected_face == Some(face) && projected_polygon_area(&points).abs() > 0.5 {
+                    painter.add(egui::Shape::convex_polygon(
+                        points.clone(),
+                        Color32::from_rgba_unmultiplied(
+                            STUDIO_ACCENT.r(),
+                            STUDIO_ACCENT.g(),
+                            STUDIO_ACCENT.b(),
+                            28,
+                        ),
+                        egui::Stroke::NONE,
+                    ));
+                }
+                let face_stroke = if selected_face == Some(face) {
+                    egui::Stroke::new(3.0, STUDIO_ACCENT)
+                } else {
+                    stroke
+                };
+                for edge in 0..points.len() {
+                    painter.line_segment(
+                        [points[edge], points[(edge + 1) % points.len()]],
+                        face_stroke,
+                    );
+                }
+            }
         };
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            let solved = brush.solve();
             let selected = self.selected_brush == Some(index);
             let stroke = if selected {
                 egui::Stroke::new(2.0, STUDIO_ACCENT)
             } else {
                 egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
             };
-            painter.rect_stroke(
-                rect_for(solved.min, solved.max),
-                0.0,
+            draw(
+                brush,
+                selected.then_some(self.selected_brush_face).flatten(),
                 stroke,
-                egui::StrokeKind::Middle,
             );
         }
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
-            let solved = preview.solve();
-            painter.rect_stroke(
-                rect_for(solved.min, solved.max),
-                0.0,
-                egui::Stroke::new(1.5, STUDIO_ACCENT),
-                egui::StrokeKind::Middle,
-            );
+            draw(&preview, None, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
         if let Some(start) = self.brush_clip_start {
-            let center = transform.world_to_screen([start[0] as f32, start[2] as f32]);
+            let projected = view.project_f32(start.map(|value| value as f32));
+            let center = transform.world_to_screen(projected);
             painter.circle_stroke(center, 4.0, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
     }
@@ -847,6 +1117,78 @@ impl EditorWorkspace {
 /// primitive height-drag feel: 8 px per 64-unit quantum).
 const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
 
+fn dominant_axis(normal: [i64; 3]) -> usize {
+    let mut axis = 0;
+    for candidate in 1..3 {
+        if normal[candidate].abs() > normal[axis].abs() {
+            axis = candidate;
+        }
+    }
+    axis
+}
+
+fn point_in_convex_polygon_2d(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    let mut winding_sign = 0i8;
+    let mut has_area = false;
+    for index in 0..polygon.len() {
+        let a = polygon[index];
+        let b = polygon[(index + 1) % polygon.len()];
+        let cross = (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0]);
+        if cross.abs() <= 1.0e-7 {
+            continue;
+        }
+        has_area = true;
+        let sign = if cross > 0.0 { 1 } else { -1 };
+        if winding_sign != 0 && winding_sign != sign {
+            return false;
+        }
+        winding_sign = sign;
+    }
+    has_area
+}
+
+fn polygon_edge_distance2(point: [f64; 2], polygon: &[[f64; 2]]) -> f64 {
+    if polygon.len() < 2 {
+        return f64::INFINITY;
+    }
+    (0..polygon.len())
+        .map(|index| {
+            point_segment_distance2(point, polygon[index], polygon[(index + 1) % polygon.len()])
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+fn point_segment_distance2(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let ap = [point[0] - a[0], point[1] - a[1]];
+    let length2 = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if length2 <= f64::EPSILON {
+        0.0
+    } else {
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / length2).clamp(0.0, 1.0)
+    };
+    let closest = [a[0] + ab[0] * t, a[1] + ab[1] * t];
+    let delta = [point[0] - closest[0], point[1] - closest[1]];
+    delta[0] * delta[0] + delta[1] * delta[1]
+}
+
+fn projected_polygon_area(points: &[egui::Pos2]) -> f32 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+    let twice_area = (0..points.len())
+        .map(|index| {
+            let a = points[index];
+            let b = points[(index + 1) % points.len()];
+            a.x * b.y - b.x * a.y
+        })
+        .sum::<f32>();
+    twice_area * 0.5
+}
+
 impl ViewportTool3d for BrushTool {
     fn primary_pressed(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
         let Some(pointer) = frame.pointer_interact else {
@@ -866,7 +1208,7 @@ impl ViewportTool3d for BrushTool {
                     index,
                     base,
                     press_ground,
-                    applied: [0, 0],
+                    applied: [0; 3],
                 });
             }
             return;
@@ -905,6 +1247,7 @@ impl ViewportTool3d for BrushTool {
             ws.brush_drag = Some(BrushDrag {
                 anchor: point,
                 current: point,
+                view: OrthographicView::Top,
             });
         }
     }
@@ -921,11 +1264,12 @@ impl ViewportTool3d for BrushTool {
             let snap = |v: f32| ((v / step).round() * step) as i32;
             let applied = [
                 snap(ground[0] - mv.press_ground[0]),
+                0,
                 snap(ground[2] - mv.press_ground[2]),
             ];
             if applied != mv.applied {
                 let mut preview = mv.base.clone();
-                preview.translate([applied[0], 0, applied[1]]);
+                preview.translate(applied);
                 ws.project.active_scene_mut().brushes[mv.index] = preview;
                 if let Some(state) = ws.brush_move.as_mut() {
                     state.applied = applied;
@@ -978,35 +1322,10 @@ impl ViewportTool3d for BrushTool {
     }
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
-        if let Some(mv) = ws.brush_move.take() {
-            // Restore the base, then rebuild the final position through
-            // the lock-aware translate so the undo step captures it.
-            ws.project.active_scene_mut().brushes[mv.index] = mv.base.clone();
-            if mv.applied != [0, 0] {
-                ws.push_undo();
-                let mut moved = mv.base;
-                let delta = [mv.applied[0], 0, mv.applied[1]];
-                if ws.brush_texture_lock {
-                    moved.translate_with_uv_lock(
-                        delta,
-                        psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
-                    );
-                } else {
-                    moved.translate(delta);
-                }
-                ws.project.active_scene_mut().brushes[mv.index] = moved;
-            }
+        if ws.commit_brush_move_preview() {
             return;
         }
-        if let Some(extrude) = ws.brush_extrude.take() {
-            // Restore the base, then record one undo step and re-apply
-            // the final shape so a full drag is a single undo entry.
-            let live = ws.project.active_scene().brushes[extrude.index].clone();
-            ws.project.active_scene_mut().brushes[extrude.index] = extrude.base;
-            if extrude.applied != 0 {
-                ws.push_undo();
-                ws.project.active_scene_mut().brushes[extrude.index] = live;
-            }
+        if ws.commit_brush_extrude_preview() {
             return;
         }
         ws.commit_brush_drag();
@@ -1020,7 +1339,7 @@ impl ViewportTool3d for BrushTool {
         // vertical clip plane that splits the selected brush in two.
         if frame.modifiers.command {
             if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
-                ws.brush_clip_click(point);
+                ws.brush_clip_click_in_view(point, OrthographicView::Top);
             }
             return;
         }

@@ -4,6 +4,14 @@ use super::*;
 /// coordinates, or the reason no single target could be resolved.
 type GeometryCellTargets = Result<(NodeId, Vec<(u16, u16)>), &'static str>;
 
+fn project_center_half_2d(
+    view: OrthographicView,
+    center: [f32; 3],
+    half: [f32; 3],
+) -> ([f32; 2], [f32; 2]) {
+    (view.project_f32(center), view.project_f32(half))
+}
+
 impl EditorWorkspace {
     /// Stop a transient character action/movement preview when its Animator is
     /// edited. The transient preview carries its own clip override, so leaving
@@ -120,6 +128,13 @@ impl EditorWorkspace {
         hits: &[ViewportHit],
         modifiers: egui::Modifiers,
     ) {
+        if self.orthographic_view != OrthographicView::Top && self.active_tool != ViewTool::Brush {
+            self.status = format!(
+                "{} is a BSP brush view; use Top for room-grid and node tools",
+                self.orthographic_view.label()
+            );
+            return;
+        }
         match self.active_tool {
             ViewTool::Brush => {
                 if modifiers.command {
@@ -2501,7 +2516,7 @@ impl EditorWorkspace {
         }
 
         let Some((center, half)) = self.current_frame_bounds_2d() else {
-            self.viewport_pan = Vec2::ZERO;
+            self.orthographic_focus = [0.0; 3];
             self.viewport_zoom = DEFAULT_VIEWPORT_ZOOM;
             self.status = "Reset viewport frame".to_string();
             return;
@@ -2516,10 +2531,9 @@ impl EditorWorkspace {
         self.viewport_zoom = zoom_x
             .min(zoom_y)
             .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
-        self.viewport_pan = Vec2::new(
-            -center[0] * self.viewport_zoom,
-            center[1] * self.viewport_zoom,
-        );
+        self.orthographic_focus = self
+            .orthographic_view
+            .with_projected_focus(self.orthographic_focus, center);
         self.status = "Framed selection".to_string();
     }
 
@@ -2649,8 +2663,35 @@ impl EditorWorkspace {
     pub(crate) fn current_frame_bounds_2d(&self) -> Option<([f32; 2], [f32; 2])> {
         if self.active_tool == ViewTool::Brush {
             if let Some((center, half)) = self.selected_brush_frame_bounds_3d() {
-                return Some(([center[0], center[2]], [half[0], half[2]]));
+                return Some(project_center_half_2d(self.orthographic_view, center, half));
             }
+        }
+
+        // Legacy room-grid/node authoring remains a Top-view workflow. In
+        // Front and Side, frame all BSP brushes when no brush is selected so
+        // the alternate views never reinterpret grid XZ coordinates as XY.
+        if self.orthographic_view != OrthographicView::Top {
+            let mut bounds = None;
+            for brush in &self.project.active_scene().brushes {
+                let solved = brush.solve();
+                if !solved.is_valid() {
+                    continue;
+                }
+                let min = self.orthographic_view.project_f64(solved.min);
+                let max = self.orthographic_view.project_f64(solved.max);
+                merge_bounds(
+                    &mut bounds,
+                    [
+                        ((min[0] + max[0]) * 0.5) as f32,
+                        ((min[1] + max[1]) * 0.5) as f32,
+                    ],
+                    [
+                        ((max[0] - min[0]) * 0.5) as f32,
+                        ((max[1] - min[1]) * 0.5) as f32,
+                    ],
+                );
+            }
+            return bounds.map(bounds_to_center_half);
         }
 
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
