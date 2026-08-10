@@ -50,6 +50,7 @@
 //! ```
 
 #![no_std]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
@@ -85,15 +86,15 @@ pub use character_motor::{
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
 };
 pub use classic_affine::{
-    project_classic_affine_indexed_vertices, submit_classic_affine_batch,
-    submit_classic_affine_fan, submit_classic_affine_packed_fan,
+    compose_classic_alias_transform, project_classic_affine_indexed_vertices,
+    submit_classic_affine_batch, submit_classic_affine_fan, submit_classic_affine_packed_fan,
     submit_classic_affine_projected_fan, submit_classic_alias_model,
     submit_classic_alias_view_model, ClassicAffineBatchSurface, ClassicAffinePosition,
     ClassicAffineProfile, ClassicAffineProjectedVertex, ClassicAffineSourceVertex,
     ClassicAffineSubmit, ClassicAffineVertex, ClassicAliasFace, ClassicAliasProjectedVertex,
     ClassicAliasVertex,
 };
-pub use fixed::{Q12, Q8};
+pub use fixed::{div_q12_i32, Q12, Q8};
 pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};
 pub use game_app::{FlowCursor, GameApp, GAMEPLAY_ONLY};
 pub use lighting::{
