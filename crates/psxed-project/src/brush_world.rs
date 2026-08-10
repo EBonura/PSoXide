@@ -94,6 +94,8 @@ pub enum BrushWorldCookError {
     UnsupportedMoverTransform(NodeId),
     MoverOriginOutOfRange(NodeId),
     MoverOriginInSolid(NodeId),
+    InvalidPlayerSpawnTransform(NodeId),
+    PlayerSpawnInSolid(NodeId),
     InvalidDoorMotion {
         node: NodeId,
         error: PxbspBrushDoorError,
@@ -294,6 +296,37 @@ pub fn compile_brush_world(
         });
     }
 
+    for node in scene.nodes() {
+        if !matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }) {
+            continue;
+        }
+        let origin = point_entity_origin(node.id, node.transform.translation)?;
+        let leaf = packed_point_leaf(&world_geometry, origin)?;
+        if leaf == 0 {
+            return Err(BrushWorldCookError::PlayerSpawnInSolid(node.id));
+        }
+        let angles = node
+            .transform
+            .rotation_degrees
+            .map(|degrees| crate::spatial::euler_degrees_to_q12(degrees) as i16);
+        entities.push(PxbspEntityInput {
+            entity: PxbspEntity {
+                class_id: entity_class::PLAYER_SPAWN,
+                flags: entity_flags::ENABLED,
+                model: u16::MAX,
+                leaf,
+                origin,
+                angles: psx_bsp::Vec3I16 {
+                    x: angles[0],
+                    y: angles[1],
+                    z: angles[2],
+                },
+                ..PxbspEntity::default()
+            },
+            payload: Vec::new(),
+        });
+    }
+
     let slots = pxbsp_material_slots(&world_geometry, &submodels);
     let (materials, textures) = resolve_materials(project, &slots, &options)?;
     let pxbsp = build_pxbsp_with_submodels(
@@ -379,6 +412,28 @@ fn mover_origin(node: NodeId, translation: [f32; 3]) -> Result<[i32; 3], BrushWo
     } else {
         Err(BrushWorldCookError::MoverOriginOutOfRange(node))
     }
+}
+
+fn point_entity_origin(
+    node: NodeId,
+    translation: [f32; 3],
+) -> Result<Vec3I32, BrushWorldCookError> {
+    if !translation.into_iter().all(f32::is_finite) {
+        return Err(BrushWorldCookError::InvalidPlayerSpawnTransform(node));
+    }
+    let mut origin = [0; 3];
+    for (output, value) in origin.iter_mut().zip(translation) {
+        let scaled = f64::from(value) * 4096.0;
+        if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+            return Err(BrushWorldCookError::InvalidPlayerSpawnTransform(node));
+        }
+        *output = scaled.round() as i32;
+    }
+    Ok(Vec3I32 {
+        x: origin[0],
+        y: origin[1],
+        z: origin[2],
+    })
 }
 
 fn model_center_world_q12(origin: [i32; 3], mins: [i16; 3], maxs: [i16; 3]) -> Vec3I32 {
@@ -747,6 +802,19 @@ mod tests {
                 radius: 1.0,
             },
         );
+        let spawn = scene.add_node(
+            NodeId::ROOT,
+            "Player Spawn",
+            NodeKind::SpawnPoint {
+                player: true,
+                character: None,
+            },
+        );
+        scene.node_mut(spawn).expect("spawn").transform = Transform3 {
+            translation: [128.5, 128.0, 128.0],
+            rotation_degrees: [0.0, 90.0, 0.0],
+            ..Transform3::default()
+        };
 
         project
     }
@@ -793,7 +861,7 @@ mod tests {
         assert_eq!(map.materials().get(0).expect("material").texture_asset, 40);
 
         let entities = map.entities();
-        assert_eq!(entities.len(), 1);
+        assert_eq!(entities.len(), 2);
         let entity = entities.get(0).expect("door entity");
         assert_eq!(entity.class_id, entity_class::BRUSH_DOOR);
         assert_eq!(entity.flags, entity_flags::ENABLED);
@@ -819,6 +887,22 @@ mod tests {
             }
         );
         assert_eq!(payload.travel_ticks, 60);
+
+        let spawn = entities.get(1).expect("player spawn");
+        assert_eq!(spawn.class_id, entity_class::PLAYER_SPAWN);
+        assert_eq!(spawn.flags, entity_flags::ENABLED);
+        assert_eq!(spawn.model, u16::MAX);
+        assert_ne!(spawn.leaf, 0);
+        assert_eq!(
+            spawn.origin,
+            Vec3I32 {
+                x: 128 * 4096 + 2048,
+                y: 128 * 4096,
+                z: 128 * 4096,
+            }
+        );
+        assert_eq!(spawn.angles.y, 1024);
+        assert_eq!(entities.payload(1), Some(&[][..]));
 
         let mut doors = BrushDoorSet::<4>::default();
         doors.init_from_map(&map).expect("runtime doors");
