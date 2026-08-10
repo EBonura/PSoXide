@@ -254,6 +254,160 @@ impl EditorWorkspace {
         )
     }
 
+    /// Snap a 2D top-view world point (XZ) to the brush grid at y = 0.
+    pub(crate) fn brush_snap_2d(&self, world: [f32; 2]) -> [i32; 3] {
+        let step = (self.snap_units.max(1)) as f32;
+        let snap = |v: f32| ((v / step).round() * step) as i32;
+        [snap(world[0]), 0, snap(world[1])]
+    }
+
+    /// Start a brush-create drag at a snapped point (2D view entry).
+    pub(crate) fn begin_brush_drag_2d(&mut self, world: [f32; 2]) {
+        let point = self.brush_snap_2d(world);
+        self.brush_drag = Some(BrushDrag {
+            anchor: point,
+            current: point,
+        });
+    }
+
+    /// Update the in-flight brush-create drag (2D view entry).
+    pub(crate) fn update_brush_drag_2d(&mut self, world: [f32; 2]) {
+        if let Some(drag) = self.brush_drag {
+            self.brush_drag = Some(BrushDrag {
+                current: self.brush_snap_2d(world),
+                ..drag
+            });
+        }
+    }
+
+    /// Commit the in-flight create drag as a brush, one undo step.
+    /// Shared by the 3D tool release and the 2D view release.
+    pub(crate) fn commit_brush_drag(&mut self) {
+        let Some(drag) = self.brush_drag.take() else {
+            return;
+        };
+        let Some(brush) = Self::brush_drag_cuboid(drag) else {
+            return; // zero-area drag: nothing to commit
+        };
+        self.push_undo();
+        let scene = self.project.active_scene_mut();
+        scene.brushes.push(brush);
+        self.selected_brush = Some(self.project.active_scene().brushes.len() - 1);
+        self.selected_brush_face = None;
+    }
+
+    /// One clip click at a snapped ground point: the first click stores
+    /// the point, the second splits the selected brush by the vertical
+    /// plane through both, honouring `brush_clip_keep`. Shared by the 3D
+    /// tool and the 2D view.
+    pub(crate) fn brush_clip_click(&mut self, point: [i32; 3]) {
+        let Some(selected) = self.selected_brush else {
+            return;
+        };
+        match self.brush_clip_start.take() {
+            None => self.brush_clip_start = Some(point),
+            Some(start) if start == point => {}
+            Some(start) => {
+                let up = [start[0], BRUSH_CREATE_HEIGHT, start[2]];
+                let clipped = self.project.active_scene().brushes[selected].clip([
+                    start, point, up,
+                ]);
+                match (self.brush_clip_keep, clipped.back, clipped.front) {
+                    (BrushClipKeep::Both, Some(back), Some(front)) => {
+                        self.push_undo();
+                        let scene = self.project.active_scene_mut();
+                        scene.brushes[selected] = back;
+                        scene.brushes.push(front);
+                    }
+                    (BrushClipKeep::Back, Some(back), Some(_)) => {
+                        self.push_undo();
+                        self.project.active_scene_mut().brushes[selected] = back;
+                    }
+                    (BrushClipKeep::Front, Some(_), Some(front)) => {
+                        self.push_undo();
+                        self.project.active_scene_mut().brushes[selected] = front;
+                    }
+                    // Plane missed the brush: nothing to keep or drop.
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Select the brush whose footprint contains the 2D world point,
+    /// preferring the smallest footprint (topmost in intent). Returns
+    /// whether a brush was hit.
+    pub(crate) fn select_brush_at_2d(&mut self, world: [f32; 2]) -> bool {
+        let mut best: Option<(f64, usize)> = None;
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            let solved = brush.solve();
+            let inside = f64::from(world[0]) >= solved.min[0]
+                && f64::from(world[0]) <= solved.max[0]
+                && f64::from(world[1]) >= solved.min[2]
+                && f64::from(world[1]) <= solved.max[2];
+            if inside {
+                let area = (solved.max[0] - solved.min[0]) * (solved.max[2] - solved.min[2]);
+                if best.is_none_or(|(best_area, _)| area < best_area) {
+                    best = Some((area, index));
+                }
+            }
+        }
+        match best {
+            Some((_, index)) => {
+                self.selected_brush = Some(index);
+                self.selected_brush_face = None;
+                true
+            }
+            None => {
+                self.selected_brush = None;
+                self.selected_brush_face = None;
+                false
+            }
+        }
+    }
+
+    /// Brush footprints in the 2D top view: bounds rectangles, the
+    /// in-flight create preview, and the pending clip point.
+    pub(crate) fn draw_brush_footprints_2d(
+        &self,
+        painter: &egui::Painter,
+        transform: crate::viewport2d::ViewportTransform,
+    ) {
+        let rect_for = |min: [f64; 3], max: [f64; 3]| {
+            let a = transform.world_to_screen([min[0] as f32, min[2] as f32]);
+            let b = transform.world_to_screen([max[0] as f32, max[2] as f32]);
+            egui::Rect::from_two_pos(a, b)
+        };
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            let solved = brush.solve();
+            let selected = self.selected_brush == Some(index);
+            let stroke = if selected {
+                egui::Stroke::new(2.0, STUDIO_ACCENT)
+            } else {
+                egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
+            };
+            painter.rect_stroke(
+                rect_for(solved.min, solved.max),
+                0.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
+            let solved = preview.solve();
+            painter.rect_stroke(
+                rect_for(solved.min, solved.max),
+                0.0,
+                egui::Stroke::new(1.5, STUDIO_ACCENT),
+                egui::StrokeKind::Middle,
+            );
+        }
+        if let Some(start) = self.brush_clip_start {
+            let center = transform.world_to_screen([start[0] as f32, start[2] as f32]);
+            painter.circle_stroke(center, 4.0, egui::Stroke::new(1.5, STUDIO_ACCENT));
+        }
+    }
+
     /// Wireframe overlay for scene brushes plus the in-flight create
     /// preview, drawn with the editor camera's forward projection.
     // ponytail: re-solves every brush each frame; cache solved polygons
@@ -470,16 +624,7 @@ impl ViewportTool3d for BrushTool {
             }
             return;
         }
-        let Some(drag) = ws.brush_drag.take() else {
-            return;
-        };
-        let Some(brush) = EditorWorkspace::brush_drag_cuboid(drag) else {
-            return; // zero-area drag: nothing to commit
-        };
-        ws.push_undo();
-        let scene = ws.project.active_scene_mut();
-        scene.brushes.push(brush);
-        ws.selected_brush = Some(ws.project.active_scene().brushes.len() - 1);
+        ws.commit_brush_drag();
     }
 
     fn primary_clicked(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
@@ -489,38 +634,8 @@ impl ViewportTool3d for BrushTool {
         // Modifier-click places clip points: two ground points define a
         // vertical clip plane that splits the selected brush in two.
         if frame.modifiers.command {
-            let Some(selected) = ws.selected_brush else {
-                return;
-            };
-            let Some(point) = ws.brush_ground_point(frame.rect, pointer) else {
-                return;
-            };
-            match ws.brush_clip_start.take() {
-                None => ws.brush_clip_start = Some(point),
-                Some(start) if start == point => {}
-                Some(start) => {
-                    let up = [start[0], BRUSH_CREATE_HEIGHT, start[2]];
-                    let clipped = ws.project.active_scene().brushes[selected]
-                        .clip([start, point, up]);
-                    match (ws.brush_clip_keep, clipped.back, clipped.front) {
-                        (BrushClipKeep::Both, Some(back), Some(front)) => {
-                            ws.push_undo();
-                            let scene = ws.project.active_scene_mut();
-                            scene.brushes[selected] = back;
-                            scene.brushes.push(front);
-                        }
-                        (BrushClipKeep::Back, Some(back), Some(_)) => {
-                            ws.push_undo();
-                            ws.project.active_scene_mut().brushes[selected] = back;
-                        }
-                        (BrushClipKeep::Front, Some(_), Some(front)) => {
-                            ws.push_undo();
-                            ws.project.active_scene_mut().brushes[selected] = front;
-                        }
-                        // Plane missed the brush: nothing to keep or drop.
-                        _ => {}
-                    }
-                }
+            if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
+                ws.brush_clip_click(point);
             }
             return;
         }

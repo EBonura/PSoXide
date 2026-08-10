@@ -121,6 +121,14 @@ impl EditorWorkspace {
         modifiers: egui::Modifiers,
     ) {
         match self.active_tool {
+            ViewTool::Brush => {
+                if modifiers.command {
+                    let point = self.brush_snap_2d(world);
+                    self.brush_clip_click(point);
+                } else {
+                    self.select_brush_at_2d(world);
+                }
+            }
             ViewTool::Select => {
                 if let Some(hit) = hits.iter().rev().find(|hit| hit.contains(world)) {
                     if let Some(sector) = self

@@ -254,6 +254,56 @@ fn brush_tool_shift_drag_moves_whole_brush() {
 }
 
 #[test]
+fn brush_2d_drag_creates_and_click_selects() {
+    let mut harness = ViewportHarness::floored_room("brush_2d_create", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+
+    // Drag a footprint in 2D world coordinates (XZ plane).
+    harness.workspace.begin_brush_drag_2d([100.0, 200.0]);
+    harness.workspace.update_brush_drag_2d([612.0, 456.0]);
+    harness.workspace.commit_brush_drag();
+
+    let scene = harness.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 1);
+    let solved = scene.brushes[0].solve();
+    // Corners snapped to the 16-unit grid.
+    assert_eq!(solved.min[0], 96.0);
+    assert_eq!(solved.min[2], 208.0); // 200/16 = 12.5 rounds to 13 -> 208
+    assert_eq!(solved.max[1], BRUSH_CREATE_HEIGHT as f64);
+
+    // 2D click inside the footprint selects; outside clears.
+    harness.workspace.selected_brush = None;
+    assert!(harness.workspace.select_brush_at_2d([300.0, 300.0]));
+    assert_eq!(harness.workspace.selected_brush, Some(0));
+    assert!(!harness.workspace.select_brush_at_2d([-500.0, -500.0]));
+    assert_eq!(harness.workspace.selected_brush, None);
+}
+
+#[test]
+fn brush_2d_clip_clicks_split_selected() {
+    let mut harness = ViewportHarness::floored_room("brush_2d_clip", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.begin_brush_drag_2d([0.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([256.0, 128.0]);
+    harness.workspace.commit_brush_drag();
+    assert!(harness.workspace.select_brush_at_2d([128.0, 64.0]));
+
+    // Two clip clicks along a vertical world line at x=128.
+    harness.workspace.brush_clip_click([128, 0, -64]);
+    assert!(harness.workspace.brush_clip_start.is_some());
+    harness.workspace.brush_clip_click([128, 0, 192]);
+
+    let scene = harness.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 2, "axis clip splits in two");
+    let a = scene.brushes[0].solve();
+    let b = scene.brushes[1].solve();
+    // Exact partition at x=128 for the axis-aligned clip plane.
+    assert_eq!(a.max[0].max(b.max[0]), 256.0);
+    assert_eq!(a.min[0].min(b.min[0]), 0.0);
+    assert!((a.max[0] - 128.0).abs() < 1e-6 || (b.max[0] - 128.0).abs() < 1e-6);
+}
+
+#[test]
 fn brush_tool_zero_area_drag_commits_nothing() {
     let mut harness = ViewportHarness::floored_room("brush_tool_zero", 4);
     harness.frame(harness.room_center(), 3000.0);
