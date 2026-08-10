@@ -264,6 +264,21 @@ impl Scene for Playtest {
             telemetry::stage_end(telemetry::stage::SKY);
         }
 
+        // The cooked BSP replaces only static grid surfaces. It writes its
+        // tagged packets into the same arena/OT used below, after which the
+        // ordinary actor, equipment, effect, and overlay passes continue.
+        let bsp_material_tick = self.gameplay_tick(ctx.sim_tick).as_u32();
+        if let Some(bsp) = self.bsp.as_mut() {
+            telemetry::stage_begin(telemetry::stage::ROOM);
+            bsp.draw(
+                camera,
+                bsp_material_tick,
+                &mut primitive_packets,
+                &mut ot,
+            );
+            telemetry::stage_end(telemetry::stage::ROOM);
+        }
+
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
         if let Some(room_record) = room_record {
@@ -278,7 +293,7 @@ impl Scene for Playtest {
             telemetry::stage_end(telemetry::stage::FAR_VISTA);
         }
 
-        if self.current_collision_room.is_some() {
+        if self.current_collision_room.is_some() || self.bsp.is_some() {
             let mut total_instance_stats = ModelInstanceDrawStats::default();
             let mut room_active_chunks = 0u32;
             let mut room_cached_draws = 0u32;
@@ -298,6 +313,8 @@ impl Scene for Playtest {
             )))]
             let room_visibility_fallback_draws = 0u32;
             let mut room_active_chunk_mask = RuntimeDebugMask::EMPTY;
+            // This mask describes streamed grid chunks, not the resident BSP.
+            // BSP draw proof remains the shared primitive/GPU command counters.
             let mut room_drawn_chunk_mask = RuntimeDebugMask::EMPTY;
             #[cfg(feature = "world-grid-visible")]
             let mut room_visible_cells = 0u32;
@@ -393,6 +410,7 @@ impl Scene for Playtest {
                 #[cfg(feature = "room-surface-profile")]
                 let room_command_start = world.command_len();
                 telemetry::stage_begin(telemetry::stage::ROOM);
+                if self.bsp.is_none() {
                 #[cfg(feature = "world-grid-visible")]
                 {
                     #[cfg(feature = "vis-full-active-chunks")]
@@ -751,6 +769,7 @@ impl Scene for Playtest {
                             &mut world,
                         );
                     }
+                }
                 }
                 telemetry::stage_end(telemetry::stage::ROOM);
                 #[cfg(feature = "room-surface-profile")]
