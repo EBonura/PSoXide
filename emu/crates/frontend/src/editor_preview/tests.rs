@@ -279,6 +279,85 @@ fn sample_project_preview_frame_contains_draw_commands() {
 }
 
 #[test]
+fn brush_preview_emits_solid_faces() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let project_root = repo_root.join("editor/samples/cortex_v1");
+    let mut project =
+        ProjectDocument::load_from_path(project_root.join("project.ron")).expect("project loads");
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+    textures.refresh_models(&project, &project_root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &project_root);
+
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 320,
+        pitch_q12: 300,
+        radius: 8192,
+        target: [2048, 512, 2048],
+        position: [0, 0, 0],
+    };
+    let empty_hidden = std::collections::HashSet::new();
+    let build = |project: &ProjectDocument,
+                 textures: &crate::editor_textures::EditorTextures,
+                 assets: &crate::editor_assets::EditorAssets| {
+        super::build_phase1_frame(
+            project,
+            camera,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            &empty_hidden,
+            None,
+            0,
+            NodeId::ROOT,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            textures,
+            assets,
+        )
+    };
+    let draw_count = |frame: &super::EditorPreviewFrame| {
+        frame
+            .cmd_log
+            .iter()
+            .filter(|entry| matches!(entry.opcode, 0x20..=0x7F))
+            .count()
+    };
+
+    let baseline = draw_count(&build(&project, &textures, &assets));
+
+    // A brush square in front of the camera target must add solid faces.
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [1536, 0, 1536],
+            [2560, 384, 2560],
+        ));
+    let with_brush = draw_count(&build(&project, &textures, &assets));
+    assert!(
+        with_brush > baseline,
+        "brush must add draw commands: baseline={baseline} with_brush={with_brush}"
+    );
+}
+
+#[test]
 fn eroded_box_prop_preview_uses_generated_surface_mesh() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
