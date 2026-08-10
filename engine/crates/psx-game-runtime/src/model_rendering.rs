@@ -10,12 +10,11 @@
 
 use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
-    apply_model_pose_translation, compute_joint_world_transform, telemetry, Angle, CullMode,
-    DepthPolicy, JointViewTransform, JointWorldTransform, LocalToWorldScale, Mat3I16,
-    ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PrimitiveSink, ProjectedVertex, RoomPoint,
-    SimTick, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
-    TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
-    WorldVertex,
+    telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, JointWorldTransform,
+    LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PrimitiveSink,
+    ProjectedVertex, RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer,
+    TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass,
+    WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
@@ -31,6 +30,7 @@ use psx_level::{
 };
 use psx_math::int32::{clamp_i16, square_i32_saturating};
 
+use crate::actor_pose::ActorPoseSnapshot;
 use crate::character::{PlayerAnim, PlayerAnimBlend, RuntimeCharacter};
 use crate::room_cache::ActiveRuntimeRoom;
 use crate::room_lighting::RuntimeRoomLighting;
@@ -147,6 +147,34 @@ pub struct RuntimeModelAsset {
     pub world_height: u16,
     pub collision_radius: u16,
     pub local_to_world: LocalToWorldScale,
+}
+
+/// Resolved player model plus its render-independent pose authority.
+///
+/// This is the handoff object a gameplay loop can build once per simulation
+/// tick and share between body, equipment, and combat consumers.
+#[derive(Copy, Clone)]
+pub struct PlayerActorPoseSnapshot {
+    model: RuntimeModelAsset,
+    clip_local: ModelClipIndex,
+    pose: ActorPoseSnapshot,
+}
+
+impl PlayerActorPoseSnapshot {
+    /// Runtime model whose skeleton the pose samples.
+    pub const fn model(self) -> RuntimeModelAsset {
+        self.model
+    }
+
+    /// Model-local clip index active for this snapshot.
+    pub const fn clip_local(self) -> ModelClipIndex {
+        self.clip_local
+    }
+
+    /// Shared actor pose consumed by rendering, sockets, and hit volumes.
+    pub const fn pose(self) -> ActorPoseSnapshot {
+        self.pose
+    }
 }
 
 impl RuntimeModelAsset {
@@ -786,6 +814,81 @@ pub(crate) fn player_pose_blend<const MAX_RUNTIME_MODEL_CLIPS: usize>(
         })
 }
 
+/// Resolve the player's model and freeze its complete presentation pose for
+/// one simulation tick.
+///
+/// Callers that own the gameplay tick should retain this value and feed its
+/// [`ActorPoseSnapshot`] to body, equipment, and combat consumers. The legacy
+/// draw entry points also use this resolver, so their geometry already shares
+/// the same authoritative sampling rules while their caller is migrated.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_player_actor_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+>(
+    tables: ModelTables,
+    character: RuntimeCharacter,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    x: i32,
+    y: i32,
+    z: i32,
+    yaw: Angle,
+    anim_action: CharacterAnimationAction,
+    clip_local: ModelClipIndex,
+    anim_start_tick: SimTick,
+    blend: Option<PlayerAnimBlend>,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+) -> Option<PlayerActorPoseSnapshot> {
+    let model = models.get(character.model.to_usize()).copied().flatten()?;
+    let animation = model.clip(clips, clip_local)?;
+    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
+    let phase_q12 = animation_phase_at_tick_q12(
+        animation,
+        local_tick,
+        video_hz,
+        character.action_loops(anim_action),
+        character.action_speed(anim_action),
+        character.action_frame_range(anim_action),
+    );
+    let blend_from = player_pose_blend(character, model, clips, blend, video_hz);
+    let clip_anchor = model_clip_anchor(tables, model, clip_local);
+    let reference_anchor = model_clip_anchor(tables, model, character.clip_for(PlayerAnim::Idle));
+    let pose_translation = model_pose_anchor_translation(
+        animation,
+        phase_q12,
+        clip_anchor,
+        reference_anchor,
+        character.action_in_place_override(anim_action),
+    );
+    let rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
+    let origin = visual_model_origin(
+        x,
+        y,
+        z,
+        model.world_height,
+        character.visual_offset,
+        character.visual_scale_q8,
+        &rotation,
+    );
+    let local_to_world = visual_model_local_to_world(model, character.visual_scale_q8);
+    Some(PlayerActorPoseSnapshot {
+        model,
+        clip_local,
+        pose: ActorPoseSnapshot::new(
+            elapsed_tick,
+            animation,
+            phase_q12,
+            blend_from,
+            origin,
+            rotation,
+            local_to_world,
+            pose_translation,
+        ),
+    })
+}
+
 /// Draw the player model: pose the skeleton, skin the mesh, and submit
 /// the resulting faces into the ordering table.
 pub fn draw_player<
@@ -824,48 +927,85 @@ pub fn draw_player<
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
-    let Some(runtime_model) = models.get(character.model.to_usize()).copied().flatten() else {
-        return PlayerModelDrawStats::default();
-    };
-
-    let Some(anim) = runtime_model.clip(clips, clip_local) else {
-        return PlayerModelDrawStats::default();
-    };
-    // Phase the animation relative to the clip-start tick so
-    // state changes don't pop into the middle of a new clip.
-    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
-    let phase = animation_phase_at_tick_q12(
-        anim,
-        local_tick,
-        video_hz,
-        character.action_loops(anim_action),
-        character.action_speed(anim_action),
-        character.action_frame_range(anim_action),
-    );
-    let blend_from = player_pose_blend(character, runtime_model, clips, blend, video_hz);
-    let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
-    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
-    let reference_anchor =
-        model_clip_anchor(tables, runtime_model, character.clip_for(PlayerAnim::Idle));
-    let pose_translation = model_pose_anchor_translation(
-        anim,
-        phase,
-        clip_anchor,
-        reference_anchor,
-        character.action_in_place_override(anim_action),
-    );
-
-    let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
-    let origin = visual_model_origin(
+    let Some(player_pose) = resolve_player_actor_pose(
+        tables,
+        character,
+        models,
+        clips,
         x,
         y,
         z,
-        runtime_model.world_height,
-        character.visual_offset,
-        character.visual_scale_q8,
-        &model_rotation,
-    );
-    let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
+        yaw,
+        anim_action,
+        clip_local,
+        anim_start_tick,
+        blend,
+        elapsed_tick,
+        video_hz,
+    ) else {
+        return PlayerModelDrawStats::default();
+    };
+    draw_player_from_pose::<MODEL_VERTEX_CAP, JOINT_CAP, OT_DEPTH, BOUNDS_CULL, PROFILE>(
+        tables,
+        knobs,
+        scratch,
+        character,
+        player_pose,
+        model_faces,
+        model_parts,
+        model_vertices,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        room_reflection_probe,
+        resolve_override_texture,
+        triangles,
+        world,
+    )
+}
+
+/// Draw the player body from a pose already resolved by the gameplay tick.
+///
+/// Pair this with [`draw_player_equipment_from_pose`] so body, weapon sockets,
+/// and combat all consume one [`PlayerActorPoseSnapshot`].
+#[allow(clippy::too_many_arguments)]
+pub fn draw_player_from_pose<
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const BOUNDS_CULL: bool,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    character: RuntimeCharacter,
+    player_pose: PlayerActorPoseSnapshot,
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    room_reflection_probe: Option<VramSlot>,
+    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> PlayerModelDrawStats {
+    let runtime_model = player_pose.model();
+    let actor_pose = player_pose.pose();
+    let anim = actor_pose.animation();
+    let phase = actor_pose.phase_q12();
+    let blend_from = actor_pose.blend_from();
+    let bounds = model_frame_bounds(tables, runtime_model, player_pose.clip_local(), phase);
+    let pose_translation = actor_pose.pose_translation();
+    let model_rotation = actor_pose.rotation();
+    let origin = actor_pose.origin();
+    let local_to_world = actor_pose.local_to_world();
     let bounds_origin =
         model_pose_translated_origin(origin, model_rotation, local_to_world, pose_translation);
     telemetry::stage_begin(telemetry::stage::PLAYER_BOUNDS);
@@ -1209,6 +1349,66 @@ pub fn draw_player_equipment<
     )
 }
 
+/// Draw player equipment from a pose already resolved by the gameplay tick.
+///
+/// This is the snapshot-driven counterpart to [`draw_player_equipment`]. Use
+/// the same [`PlayerActorPoseSnapshot`] with [`draw_player_from_pose`] and
+/// [`crate::combat::transform_actor_combat_capsule`] to keep every consumer on
+/// one animation sample and presentation transform.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn draw_player_equipment_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    player_pose: PlayerActorPoseSnapshot,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    equipment::draw_player_equipment_from_pose::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        PROFILE,
+    >(
+        tables,
+        knobs,
+        scratch,
+        player_pose,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        triangles,
+        world,
+    )
+}
+
 fn rotate_offset_q12(rotation: &Mat3I16, offset: [i32; 3]) -> [i32; 3] {
     let row = |r: [i16; 3]| -> i32 {
         let x = (r[0] as i32).saturating_mul(offset[0]);
@@ -1433,16 +1633,17 @@ pub fn player_joint_world_transform(
         &model_rotation,
     );
     let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
-    let pose = apply_model_pose_translation(
-        animation.pose_looped_q12(phase_q12, u16::from(joint))?,
-        pose_translation,
-    );
-    Some(compute_joint_world_transform(
-        pose,
+    ActorPoseSnapshot::new(
+        SimTick::ZERO,
+        animation,
+        phase_q12,
+        None,
+        origin,
         model_rotation,
         local_to_world,
-        origin,
-    ))
+        pose_translation,
+    )
+    .joint_world_transform(u16::from(joint))
 }
 
 /// Sample one live model-instance joint through the same transform used by
@@ -1481,16 +1682,17 @@ pub fn model_instance_joint_world_transform(
         &model_rotation,
     );
     let local_to_world = visual_model_local_to_world(runtime_model, instance.visual_scale_q8);
-    let pose = apply_model_pose_translation(
-        animation.pose_looped_q12(phase_q12, u16::from(joint))?,
-        pose_translation,
-    );
-    Some(compute_joint_world_transform(
-        pose,
+    ActorPoseSnapshot::new(
+        SimTick::ZERO,
+        animation,
+        phase_q12,
+        None,
+        origin,
         model_rotation,
         local_to_world,
-        origin,
-    ))
+        pose_translation,
+    )
+    .joint_world_transform(u16::from(joint))
 }
 
 fn model_pose_anchor_translation(
