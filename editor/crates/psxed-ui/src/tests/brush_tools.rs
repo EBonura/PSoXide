@@ -1,5 +1,6 @@
 use super::*;
 use crate::workspace::tools::{tool_impl_3d, ToolFrame3d, BRUSH_CREATE_HEIGHT};
+use psxed_project::brush::SolvedBrush;
 
 fn brush_frame(harness: &ViewportHarness, pointer: Pos2) -> ToolFrame3d {
     ToolFrame3d {
@@ -117,6 +118,49 @@ fn brush_tool_face_drag_extrudes_top_face() {
     harness.workspace.do_undo();
     let restored = harness.workspace.project.active_scene().brushes[0].solve();
     assert_eq!(restored.max[1], solved.max[1]);
+}
+
+#[test]
+fn brush_tool_modifier_clicks_clip_selected_brush() {
+    let mut harness = ViewportHarness::floored_room("brush_tool_clip", 4);
+    harness.frame(harness.room_center(), 3000.0);
+    harness.workspace.active_tool = ViewTool::Brush;
+    let tool = tool_impl_3d(ViewTool::Brush);
+
+    // Create and keep selected.
+    let press = brush_frame(&harness, Pos2::new(280.0, 300.0));
+    let commit = brush_frame(&harness, Pos2::new(520.0, 400.0));
+    tool.primary_pressed(&mut harness.workspace, &press);
+    tool.primary_dragged(&mut harness.workspace, &commit);
+    tool.primary_released(&mut harness.workspace, &commit);
+    assert_eq!(harness.workspace.selected_brush, Some(0));
+    let whole = harness.workspace.project.active_scene().brushes[0].solve();
+
+    // Two cmd-clicks across the middle: one above, one below the
+    // footprint on screen, defining a vertical plane through it.
+    let mut clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
+    let mut clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
+    clip_a.modifiers.command = true;
+    clip_b.modifiers.command = true;
+    tool.primary_clicked(&mut harness.workspace, &clip_a);
+    assert!(harness.workspace.brush_clip_start.is_some());
+    tool.primary_clicked(&mut harness.workspace, &clip_b);
+
+    let scene = harness.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 2, "clip split the brush in two");
+    let a = scene.brushes[0].solve();
+    let b = scene.brushes[1].solve();
+    assert!(a.is_valid() && b.is_valid());
+    // The halves partition the original bounds.
+    let span = |s: &SolvedBrush, axis: usize| s.max[axis] - s.min[axis];
+    assert!(span(&a, 0) < span(&whole, 0) + 1e-6);
+    assert!(span(&b, 0) < span(&whole, 0) + 1e-6);
+    assert_eq!(a.min[1], 0.0);
+    assert_eq!(b.min[1], 0.0);
+
+    // One undo restores the unsplit brush.
+    harness.workspace.do_undo();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
 }
 
 #[test]
