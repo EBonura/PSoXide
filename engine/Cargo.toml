@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/psx-bsp",
     "crates/psx-engine",
     "crates/psx-game-runtime",
     "crates/psx-level",
