@@ -97,9 +97,7 @@ fn inspect_pack(path: &str, bytes: &[u8]) -> Result<usize, String> {
                     maps += 1;
                     println!(
                         "{path} chunk {} ({} -> {} bytes):",
-                        entry.chunk_id,
-                        entry.byte_size,
-                        decoded
+                        entry.chunk_id, entry.byte_size, decoded
                     );
                     print!("{summary}");
                 }
