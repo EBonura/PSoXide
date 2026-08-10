@@ -14,8 +14,28 @@ use crate::{NodeKind, ProjectDocument, ResourceData};
 
 /// Fixed renderer visibility scratch. One decompressed PVS row must fit.
 pub const PLAYTEST_PVS_ROW_LIMIT_BYTES: usize = 1024;
-/// Primitive packet arena instantiated by the normal editor-playtest runtime.
+/// Baseline primitive packet arena of the normal editor-playtest runtime.
+/// The cooked manifest derives the actual per-project capacity from the
+/// conservative packet envelope, between this floor and
+/// [`PLAYTEST_PACKET_CAPACITY_CEILING`].
 pub const PLAYTEST_PACKET_LIMIT: usize = 1536;
+/// Largest packet arena the runtime may be asked to instantiate. Content
+/// whose envelope exceeds this must be restructured, not silently degraded.
+pub const PLAYTEST_PACKET_CAPACITY_CEILING: usize = 4096;
+
+/// Per-project primitive arena capacity for a cooked packet envelope:
+/// the envelope rounded up to a 64-packet step, floored at the baseline
+/// arena and capped at the runtime ceiling.
+pub const fn derived_packet_capacity(envelope_packets: usize) -> usize {
+    let rounded = envelope_packets.div_ceil(64) * 64;
+    if rounded < PLAYTEST_PACKET_LIMIT {
+        PLAYTEST_PACKET_LIMIT
+    } else if rounded > PLAYTEST_PACKET_CAPACITY_CEILING {
+        PLAYTEST_PACKET_CAPACITY_CEILING
+    } else {
+        rounded
+    }
+}
 /// Residency table capacities instantiated by the normal editor-playtest runtime.
 pub const PLAYTEST_RAM_ASSET_SLOT_LIMIT: usize = 128;
 pub const PLAYTEST_VRAM_ASSET_SLOT_LIMIT: usize = 64;
@@ -97,6 +117,9 @@ pub struct PlaytestBudgetReport {
     pub vram_bytes: usize,
     pub vram_asset_slots: usize,
     pub packet_count: usize,
+    /// Packet limit this report was judged against: the derivation ceiling
+    /// for authored estimates, the exact derived arena capacity after a cook.
+    pub packet_limit: usize,
     pub issues: Vec<PlaytestBudgetIssue>,
 }
 
@@ -122,7 +145,7 @@ impl PlaytestBudgetReport {
             PLAYTEST_VRAM_PHYSICAL_BYTES,
             self.vram_asset_slots,
             self.packet_count,
-            PLAYTEST_PACKET_LIMIT,
+            self.packet_limit,
         )
     }
 }
@@ -205,6 +228,9 @@ pub fn estimate_playtest_budgets(
         vram_bytes: texture_bytes,
         vram_asset_slots,
         packet_count,
+        // Before a cook the arena can still grow to the ceiling, so only
+        // content the derivation cannot cover is an authoring problem.
+        packet_limit: PLAYTEST_PACKET_CAPACITY_CEILING,
         issues: Vec::new(),
     };
     attach_budget_issues(project, &mut report);
@@ -285,14 +311,7 @@ pub fn cooked_playtest_budgets(
         .count()
         .saturating_add(usize::from(bsp_bytes != 0));
     let vram_asset_slots = texture_assets.len();
-    let envelope = playtest_performance_envelope(package).unwrap_or_default();
-    let packet_count = if bsp_packets == 0 {
-        envelope
-            .tr_packets_before_hw_split
-            .saturating_add(envelope.prop_surfaces)
-    } else {
-        bsp_packets.saturating_add(envelope.prop_surfaces)
-    };
+    let packet_count = cooked_packet_count(package, bsp_packets);
     let mut report = PlaytestBudgetReport {
         stage: PlaytestBudgetStage::Cooked,
         mode: package.bsp_cook_mode,
@@ -306,10 +325,49 @@ pub fn cooked_playtest_budgets(
         vram_bytes,
         vram_asset_slots,
         packet_count,
+        packet_limit: derived_packet_capacity(packet_count),
         issues: Vec::new(),
     };
     attach_budget_issues(project, &mut report);
     report
+}
+
+/// Emitted-face PXBSP packet count, or zero when the package is not PXBSP or
+/// the world bytes fail to parse.
+fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
+    let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
+        return 0;
+    };
+    let Ok(index) = PxbspIndex::read(&mut SliceReader::new(&world.bytes)) else {
+        return 0;
+    };
+    let faces = index.lump(PxbspLumpKind::Faces);
+    let face_start = faces.offset as usize;
+    let face_end = faces.end() as usize;
+    let Some(face_bytes) = world.bytes.get(face_start..face_end) else {
+        return 0;
+    };
+    face_bytes
+        .chunks_exact(14)
+        .map(|face| usize::from(u16::from_le_bytes([face[8], face[9]])).saturating_sub(2))
+        .sum()
+}
+
+fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
+    let envelope = playtest_performance_envelope(package).unwrap_or_default();
+    if bsp_packets == 0 {
+        envelope
+            .tr_packets_before_hw_split
+            .saturating_add(envelope.prop_surfaces)
+    } else {
+        bsp_packets.saturating_add(envelope.prop_surfaces)
+    }
+}
+
+/// Per-project primitive arena capacity the generated manifest publishes for
+/// this cooked package.
+pub fn cooked_manifest_packet_capacity(package: &PlaytestPackage) -> usize {
+    derived_packet_capacity(cooked_packet_count(package, cooked_bsp_packets(package)))
 }
 
 fn authored_texture_paths(project: &ProjectDocument) -> BTreeSet<String> {
@@ -426,11 +484,11 @@ fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetRe
             action: "reduce texture depth/size or atlas the focused material's texture",
         });
     }
-    if report.packet_count > PLAYTEST_PACKET_LIMIT {
+    if report.packet_count > report.packet_limit {
         report.issues.push(PlaytestBudgetIssue {
             kind: PlaytestBudgetKind::Packets,
             used: report.packet_count,
-            limit: PLAYTEST_PACKET_LIMIT,
+            limit: report.packet_limit,
             unit: " packets",
             target: geometry_target,
             action: "split visibility or simplify the focused brush/room",
@@ -446,13 +504,16 @@ mod tests {
     #[test]
     fn estimated_packet_overflow_points_at_largest_brush() {
         let mut project = ProjectDocument::new("budget focus");
-        for index in 0..300 {
+        // Enough cuboids to overflow even the derivation ceiling: only
+        // content the runtime arena cannot grow to cover is an issue.
+        for index in 0..400 {
             project
                 .active_scene_mut()
                 .brushes
                 .push(Brush::cuboid([index * 4, 0, 0], [index * 4 + 2, 2, 2]));
         }
         let report = estimate_playtest_budgets(&project, Path::new("."));
+        assert_eq!(report.packet_limit, PLAYTEST_PACKET_CAPACITY_CEILING);
         let issue = report
             .issues
             .iter()
@@ -461,10 +522,22 @@ mod tests {
         assert_eq!(
             issue.target,
             Some(PlaytestValidationTarget::Brush {
-                brush: 299,
+                brush: 399,
                 face: None,
             })
         );
         assert!(issue.message().contains("simplify the focused brush/room"));
+    }
+
+    #[test]
+    fn derived_packet_capacity_clamps_and_rounds() {
+        assert_eq!(derived_packet_capacity(0), PLAYTEST_PACKET_LIMIT);
+        assert_eq!(derived_packet_capacity(1536), PLAYTEST_PACKET_LIMIT);
+        assert_eq!(derived_packet_capacity(1537), 1600);
+        assert_eq!(derived_packet_capacity(2015), 2048);
+        assert_eq!(
+            derived_packet_capacity(9999),
+            PLAYTEST_PACKET_CAPACITY_CEILING
+        );
     }
 }

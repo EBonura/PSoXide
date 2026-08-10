@@ -225,7 +225,8 @@ fn main() -> ExitCode {
                 }
                 match playtest_performance_envelope(&package) {
                     Ok(envelope) => {
-                        const PACKET_CAPACITY: usize = 1536;
+                        let packet_capacity =
+                            psxed_project::playtest::cooked_manifest_packet_capacity(&package);
                         let pre_hw_packets = envelope
                             .tr_packets_before_hw_split
                             .saturating_add(envelope.prop_surfaces);
@@ -239,12 +240,12 @@ fn main() -> ExitCode {
                             envelope.resident_room_limit,
                             envelope.resident_payload_bytes,
                             envelope.resident_stream_bytes,
-                            PACKET_CAPACITY,
+                            packet_capacity,
                         );
-                        if pre_hw_packets > PACKET_CAPACITY {
+                        if pre_hw_packets > packet_capacity {
                             eprintln!(
-                                "[cook-playtest] warning: conservative TR+prop packet envelope {} exceeds runtime capacity {}; recorded-view validation is required",
-                                pre_hw_packets, PACKET_CAPACITY,
+                                "[cook-playtest] warning: conservative TR+prop packet envelope {} exceeds even the derived runtime capacity {}; recorded-view validation is required",
+                                pre_hw_packets, packet_capacity,
                             );
                         }
                     }
