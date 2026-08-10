@@ -2975,8 +2975,10 @@ impl EditorWorkspace {
         }
     }
 
-    /// Create `editor/projects/<derived-name>/` by recursive-copy of
-    /// the default project, then switch this workspace to it.
+    /// Create `editor/projects/<derived-name>/` by recursive-copy of the
+    /// buildable BSP-first template, then switch this workspace to it. The
+    /// legacy default project remains a compatibility sample, not the source
+    /// for newly authored levels.
     ///
     /// Validates `name`: non-empty and target directory must not
     /// already exist. On success the workspace points at the new project; on
@@ -2990,12 +2992,17 @@ impl EditorWorkspace {
         if target.exists() {
             return Err(format!("{} already exists", short_path(&target)));
         }
-        copy_dir_recursive(&psxed_project::default_project_dir(), &target)
-            .map_err(|error| format!("copy default project: {error}"))?;
+        copy_dir_recursive(&psxed_project::new_project_template_dir(), &target)
+            .map_err(|error| format!("copy BSP starter project: {error}"))?;
         let mut opened = Self::open_directory(&target)?;
         opened.project.name = trimmed.to_string();
         opened.mark_dirty();
         opened.save()?;
+        // New BSP maps open where blockout work begins: the top orthographic
+        // viewport with the brush tool active. Existing projects retain their
+        // saved workspace/camera state when opened normally.
+        opened.view_2d = true;
+        opened.active_tool = ViewTool::Brush;
         opened.retire_egui_textures(self.drain_live_egui_textures());
         *self = opened;
         self.status = format!("Created {}", short_path(&self.project_dir));

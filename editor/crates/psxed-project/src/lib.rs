@@ -229,6 +229,28 @@ mod projects_dir_tests {
         }
     }
 
+    #[test]
+    fn new_project_template_is_a_buildable_pxbsp_level() {
+        let root = new_project_template_dir();
+        let project = ProjectDocument::load_from_path(root.join("project.ron"))
+            .expect("load BSP-first project template");
+        assert!(!project.active_scene().brushes.is_empty());
+        assert!(
+            project
+                .active_scene()
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.kind, NodeKind::Section { .. }))
+        );
+
+        let (package, report) = playtest::build_package(&project, &root);
+        assert!(report.is_ok(), "BSP starter cook: {:?}", report.errors);
+        assert!(matches!(
+            package.expect("BSP starter package").world_geometry,
+            playtest::PlaytestWorldGeometry::Pxbsp(_)
+        ));
+    }
+
     /// Seeding must respect a deletion. Re-creating the sample every launch
     /// because the directory is empty would be infuriating, so absence of the
     /// directory itself is the trigger.
@@ -283,11 +305,21 @@ pub fn project_file_stem(name: &str) -> String {
     }
 }
 
-/// Default project directory (`editor/projects/default/`). Always
-/// present in the source tree; user "New Project" copies its
-/// contents into a sibling directory.
+/// Legacy grid sample directory (`editor/projects/default/`). Always present
+/// in the source tree and retained as the compatibility/fallback project while
+/// existing grid content remains supported.
 pub fn default_project_dir() -> PathBuf {
     projects_dir().join("default")
+}
+
+/// BSP-first template copied by the editor's New Project flow.
+///
+/// The template is intentionally the same tracked brush-first playable used by
+/// cook, collision, mover, and replay regressions. A newly created project
+/// therefore starts from a level that is already buildable and testable through
+/// the normal PXBSP path instead of inheriting the legacy sector grid.
+pub fn new_project_template_dir() -> PathBuf {
+    projects_dir().join("brush-first-playable")
 }
 
 /// Enumerate every directory under [`projects_dir`] that contains a

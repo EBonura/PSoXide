@@ -1078,6 +1078,20 @@ fn create_and_open_project_sets_document_name_and_derived_directory() {
     assert_eq!(ws.project().name, name);
     assert_eq!(ws.project_root(), target);
     assert!(!ws.is_dirty());
+    assert!(ws.view_2d);
+    assert_eq!(ws.active_tool, ViewTool::Brush);
+    assert!(
+        !ws.project().active_scene().brushes.is_empty(),
+        "new projects use the BSP-first brush template"
+    );
+    assert!(
+        ws.project()
+            .active_scene()
+            .nodes()
+            .iter()
+            .all(|node| !matches!(node.kind, NodeKind::Section { .. })),
+        "new projects do not inherit legacy grid sections"
+    );
     assert!(ws
         .project()
         .resources
