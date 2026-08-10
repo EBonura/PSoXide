@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod collision;
+pub mod collision_provider;
 pub mod mover;
 pub mod pxbsp;
 pub mod pxbsp_resident;
