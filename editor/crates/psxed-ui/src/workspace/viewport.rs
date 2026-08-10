@@ -289,6 +289,7 @@ impl EditorWorkspace {
         self.draw_primitive_gizmo(&painter, rect, hovered_primitive_axis);
         self.draw_node_gizmo(&painter, rect, hovered_node_handle);
         draw_viewport_box_select_marquee(&painter, self.viewport_3d_box_select_rect());
+        self.draw_brush_overlay(&painter, rect);
         if resource_drop_hovered || prefab_drop_hovered {
             painter.rect_stroke(
                 rect.shrink(2.0),

@@ -47,9 +47,14 @@ pub(crate) trait ViewportTool3d {
 pub(crate) fn tool_impl_3d(tool: ViewTool) -> &'static dyn ViewportTool3d {
     match tool {
         ViewTool::Select => &SelectTool,
+        ViewTool::Brush => &BrushTool,
         _ => &PaintDispatchTool,
     }
 }
+
+/// Height of a freshly dragged-out brush, world units. Face drags resize
+/// it afterwards.
+pub(crate) const BRUSH_CREATE_HEIGHT: i32 = 256;
 
 /// Selection, gizmo and drag-translate flows (previously the `select_tool`
 /// branch of `draw_viewport_3d_body`).
@@ -157,6 +162,141 @@ impl PaintDispatchTool {
             .active_room_id()
             .and_then(|room| ws.pick_3d_paint_world(frame.rect, pos, room));
         ws.dispatch_paint_3d(face_hit, fallback);
+    }
+}
+
+/// Brush tool: drag a footprint on the ground plane to create a cuboid
+/// brush; click to select the nearest brush under the pointer.
+pub(crate) struct BrushTool;
+
+impl EditorWorkspace {
+    /// Camera ray intersected with the world ground plane (y = 0),
+    /// snapped to the editor grid step.
+    fn brush_ground_point(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<[i32; 3]> {
+        let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
+        if dir[1].abs() < 1e-6 {
+            return None;
+        }
+        let t = -origin[1] / dir[1];
+        if t <= 0.0 {
+            return None;
+        }
+        let step = (self.snap_units.max(1)) as f32;
+        let snap = |v: f32| ((v / step).round() * step) as i32;
+        Some([snap(origin[0] + dir[0] * t), 0, snap(origin[2] + dir[2] * t)])
+    }
+
+    /// Nearest brush under the pointer, via the kernel's convex raycast.
+    fn pick_brush(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
+        let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
+        let origin = origin.map(f64::from);
+        let dir = dir.map(f64::from);
+        let mut best: Option<(f64, usize)> = None;
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            if let Some((t, _)) = brush.raycast(origin, dir) {
+                if best.is_none_or(|(best_t, _)| t < best_t) {
+                    best = Some((t, index));
+                }
+            }
+        }
+        best.map(|(_, index)| index)
+    }
+
+    /// The cuboid a brush drag would commit, if it has area.
+    fn brush_drag_cuboid(drag: BrushDrag) -> Option<psxed_project::brush::Brush> {
+        psxed_project::brush::Brush::cuboid_from_corners(
+            [drag.anchor[0], 0, drag.anchor[2]],
+            [drag.current[0], BRUSH_CREATE_HEIGHT, drag.current[2]],
+        )
+    }
+
+    /// Wireframe overlay for scene brushes plus the in-flight create
+    /// preview, drawn with the editor camera's forward projection.
+    // ponytail: re-solves every brush each frame; cache solved polygons
+    // on the scene when brush counts grow.
+    pub(crate) fn draw_brush_overlay(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let camera = self.viewport_3d_camera();
+        let project = |w: [f64; 3]| {
+            camera
+                .normalized_panel_point_for_world([w[0] as f32, w[1] as f32, w[2] as f32])
+                .map(|(nx, ny)| {
+                    egui::Pos2::new(
+                        rect.center().x + nx * rect.width() * 0.5,
+                        rect.center().y + ny * rect.height() * 0.5,
+                    )
+                })
+        };
+        let mut draw = |brush: &psxed_project::brush::Brush, stroke: egui::Stroke| {
+            for polygon in brush.solve().polygons.iter().flatten() {
+                let count = polygon.verts.len();
+                for i in 0..count {
+                    let a = project(polygon.verts[i]);
+                    let b = project(polygon.verts[(i + 1) % count]);
+                    if let (Some(a), Some(b)) = (a, b) {
+                        painter.line_segment([a, b], stroke);
+                    }
+                }
+            }
+        };
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            let selected = self.selected_brush == Some(index);
+            let stroke = if selected {
+                egui::Stroke::new(2.0, STUDIO_ACCENT)
+            } else {
+                egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
+            };
+            draw(brush, stroke);
+        }
+        if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
+            draw(&preview, egui::Stroke::new(1.5, STUDIO_ACCENT));
+        }
+    }
+}
+
+impl ViewportTool3d for BrushTool {
+    fn primary_pressed(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
+        let Some(pointer) = frame.pointer_interact else {
+            return;
+        };
+        if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
+            ws.brush_drag = Some(BrushDrag {
+                anchor: point,
+                current: point,
+            });
+        }
+    }
+
+    fn primary_dragged(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
+        let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
+            return;
+        };
+        if let (Some(drag), Some(point)) = (ws.brush_drag, ws.brush_ground_point(frame.rect, pointer))
+        {
+            ws.brush_drag = Some(BrushDrag {
+                current: point,
+                ..drag
+            });
+        }
+    }
+
+    fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
+        let Some(drag) = ws.brush_drag.take() else {
+            return;
+        };
+        let Some(brush) = EditorWorkspace::brush_drag_cuboid(drag) else {
+            return; // zero-area drag: nothing to commit
+        };
+        ws.push_undo();
+        let scene = ws.project.active_scene_mut();
+        scene.brushes.push(brush);
+        ws.selected_brush = Some(ws.project.active_scene().brushes.len() - 1);
+    }
+
+    fn primary_clicked(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
+        let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
+            return;
+        };
+        ws.selected_brush = ws.pick_brush(frame.rect, pointer);
     }
 }
 
