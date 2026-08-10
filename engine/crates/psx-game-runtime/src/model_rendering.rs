@@ -1219,6 +1219,12 @@ pub struct EquipmentDrawStats {
     pub stats: TexturedModelRenderStats,
 }
 
+/// Sum equipment draw stats across retained actor snapshots and room passes.
+pub fn accumulate_equipment_draw_stats(total: &mut EquipmentDrawStats, next: EquipmentDrawStats) {
+    total.draws = total.draws.saturating_add(next.draws);
+    accumulate_model_stats(&mut total.stats, next.stats);
+}
+
 /// Draw weapons riding non-player equipment records on their bound
 /// model instances' live poses. Room-gated; call inside the per-room
 /// instance draw. See `equipment::draw_instance_equipment`.
