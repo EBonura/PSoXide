@@ -1,11 +1,11 @@
 //! PS1 record packing for compiled brush BSP geometry.
 
-use crate::ResourceId;
-use crate::brush::{BRUSH_UV_UNITS_PER_TEXEL, paraxial_uv};
+use crate::brush::{paraxial_uv, BRUSH_UV_UNITS_PER_TEXEL};
 use crate::brush_compile::{
-    BspChild, BspLeafContents, CompiledSurface, CompiledSurfaceBsp, pack_plane,
+    pack_plane, BspChild, BspLeafContents, CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_portal::CompiledPortal;
+use crate::ResourceId;
 
 use psx_bsp::{FACE_BACKSIDE, FACE_BAKED_LIGHT};
 
@@ -122,8 +122,8 @@ pub fn pack_bsp_geometry(
     }
 
     let (leaf_mapping, visible_leaves) = runtime_leaf_mapping(bsp)?;
-    let visibility_row = draft_visibility_row(visible_leaves);
-    let visibility = compress_visibility(&visibility_row);
+    let (visibility, visibility_offsets) =
+        portal_component_visibility(bsp, portals, &leaf_mapping, visible_leaves);
     let leaf_bounds = leaf_bounds(bsp, portals);
     let mut mark_surfaces = Vec::new();
     let mut leaves = Vec::new();
@@ -139,7 +139,7 @@ pub fn pack_bsp_geometry(
         pack_leaf_record(
             &mut leaves,
             CONTENTS_EMPTY,
-            0,
+            visibility_offsets[host_leaf],
             leaf_bounds[host_leaf],
             first_mark as u16,
             leaf.mark_surfaces.len() as u16,
@@ -378,12 +378,72 @@ fn pack_child(child: BspChild, leaf_mapping: &[i16]) -> Result<i16, BrushPackErr
     }
 }
 
-fn draft_visibility_row(visible_leaves: usize) -> Vec<u8> {
-    let mut row = vec![0; visible_leaves.div_ceil(8)];
-    for leaf in 0..visible_leaves {
-        row[leaf >> 3] |= 1 << (leaf & 7);
+/// Build a conservative first-stage PVS from the exact empty-leaf portal
+/// graph. Every empty leaf in the same portal-connected component remains
+/// visible; sealed components are omitted. This deliberately stops short of
+/// portal-frustum flow, but unlike the former all-visible draft row it gives
+/// sealed rooms and disconnected world volumes independent visibility sets
+/// without risking through-an-open-portal false negatives.
+fn portal_component_visibility(
+    bsp: &CompiledSurfaceBsp,
+    portals: &[CompiledPortal],
+    leaf_mapping: &[i16],
+    visible_leaves: usize,
+) -> (Vec<u8>, Vec<i32>) {
+    let mut adjacency = vec![Vec::new(); bsp.leaves.len()];
+    for portal in portals {
+        if bsp.leaves[portal.front_leaf].contents != BspLeafContents::Empty
+            || bsp.leaves[portal.back_leaf].contents != BspLeafContents::Empty
+        {
+            continue;
+        }
+        adjacency[portal.front_leaf].push(portal.back_leaf);
+        adjacency[portal.back_leaf].push(portal.front_leaf);
     }
-    row
+
+    let row_bytes = visible_leaves.div_ceil(8);
+    let mut visibility = Vec::new();
+    let mut offsets = vec![-1; bsp.leaves.len()];
+    let mut component = Vec::new();
+    let mut pending = Vec::new();
+
+    for root in 0..bsp.leaves.len() {
+        if bsp.leaves[root].contents != BspLeafContents::Empty || offsets[root] >= 0 {
+            continue;
+        }
+
+        component.clear();
+        pending.clear();
+        pending.push(root);
+        // Mark membership while discovering so cycles and duplicate portals
+        // cannot enqueue the same leaf repeatedly. `i32::MAX` is only a host
+        // scratch sentinel and never reaches the cooked output.
+        offsets[root] = i32::MAX;
+        while let Some(leaf) = pending.pop() {
+            component.push(leaf);
+            for &adjacent in &adjacency[leaf] {
+                if offsets[adjacent] < 0 {
+                    offsets[adjacent] = i32::MAX;
+                    pending.push(adjacent);
+                }
+            }
+        }
+
+        let mut row = vec![0; row_bytes];
+        for &host_leaf in &component {
+            let runtime_leaf = leaf_mapping[host_leaf];
+            debug_assert!(runtime_leaf > 0);
+            let visible_index = runtime_leaf as usize - 1;
+            row[visible_index >> 3] |= 1 << (visible_index & 7);
+        }
+        let offset = visibility.len() as i32;
+        visibility.extend_from_slice(&compress_visibility(&row));
+        for &host_leaf in &component {
+            offsets[host_leaf] = offset;
+        }
+    }
+
+    (visibility, offsets)
 }
 
 fn compress_visibility(row: &[u8]) -> Vec<u8> {
@@ -591,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn draft_pvs_marks_every_empty_leaf_visible() {
+    fn portal_component_pvs_marks_every_leaf_in_one_open_component() {
         let (_, packed) = packed(&[Brush::cuboid([0, 0, 0], [128, 64, 256])]);
         let row_bytes = (packed.visible_leaves as usize).div_ceil(8);
         assert_eq!(packed.visibility.len(), row_bytes);
@@ -599,12 +659,64 @@ mod tests {
             assert_ne!(packed.visibility[leaf >> 3] & (1 << (leaf & 7)), 0);
         }
         let leaves = RecordSlice::<Leaf>::new(&packed.leaves).expect("leaves");
-        assert!(
-            leaves
-                .iter()
-                .skip(1)
-                .all(|leaf| leaf.visibility_offset == 0)
+        assert!(leaves
+            .iter()
+            .skip(1)
+            .all(|leaf| leaf.visibility_offset == 0));
+    }
+
+    #[test]
+    fn portal_component_pvs_separates_sealed_room_interiors() {
+        let mut brushes = Brush::cuboid([0, 0, 0], [256, 256, 256])
+            .hollow(32)
+            .expect("first room");
+        brushes.extend(
+            Brush::cuboid([512, 0, 0], [768, 256, 256])
+                .hollow(32)
+                .expect("second room"),
         );
+        let surfaces = compile_csg_surfaces(&brushes);
+        let mut bsp = build_surface_bsp(&surfaces);
+        let portals = portalize_surface_bsp(&bsp);
+        classify_bsp_leaves(&mut bsp, &portals, &brushes);
+        let (mapping, visible_leaves) = runtime_leaf_mapping(&bsp).expect("leaf mapping");
+        let (visibility, offsets) =
+            portal_component_visibility(&bsp, &portals, &mapping, visible_leaves);
+
+        let first_host = point_leaf_index(&bsp, [128.0, 128.0, 128.0]);
+        let second_host = point_leaf_index(&bsp, [640.0, 128.0, 128.0]);
+        assert_eq!(bsp.leaves[first_host].contents, BspLeafContents::Empty);
+        assert_eq!(bsp.leaves[second_host].contents, BspLeafContents::Empty);
+        assert_ne!(offsets[first_host], offsets[second_host]);
+
+        let row_bytes = visible_leaves.div_ceil(8);
+        let first_row = decompress_visibility_row(&visibility, offsets[first_host], row_bytes);
+        let second_row = decompress_visibility_row(&visibility, offsets[second_host], row_bytes);
+        let first_bit = mapping[first_host] as usize - 1;
+        let second_bit = mapping[second_host] as usize - 1;
+        assert_ne!(first_row[first_bit >> 3] & (1 << (first_bit & 7)), 0);
+        assert_eq!(first_row[second_bit >> 3] & (1 << (second_bit & 7)), 0);
+        assert_ne!(second_row[second_bit >> 3] & (1 << (second_bit & 7)), 0);
+        assert_eq!(second_row[first_bit >> 3] & (1 << (first_bit & 7)), 0);
+    }
+
+    fn decompress_visibility_row(input: &[u8], offset: i32, row_bytes: usize) -> Vec<u8> {
+        let mut output = vec![0; row_bytes];
+        let mut source = offset as usize;
+        let mut destination = 0usize;
+        while destination < row_bytes {
+            let byte = input[source];
+            source += 1;
+            if byte != 0 {
+                output[destination] = byte;
+                destination += 1;
+            } else {
+                let run = input[source] as usize;
+                source += 1;
+                destination += run;
+            }
+        }
+        output
     }
 
     #[test]
