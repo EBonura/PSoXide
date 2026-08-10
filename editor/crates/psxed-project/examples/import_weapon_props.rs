@@ -2,7 +2,7 @@
 //! cook each GLB as a static 1-joint model, register the generated
 //! bind-pose clip (the cook demands >=1 clip per model and the
 //! equipment draw skips clipless weapons), create Weapon resources,
-//! give every character's model a provisional `right_hand_grip`
+//! give every named humanoid hand a `right_hand_grip`
 //! socket, and hang Equipment components on the scene's character
 //! entities so the swords render in Play.
 //!
@@ -27,9 +27,25 @@ use psxed_project::{
 // world_height 1024, so 1 source unit = 545.3 engine units. Sword
 // world heights come from their measured GLB Y spans (1.037 / 1.408).
 const SWORDS: [(&str, &str, u16); 2] = [
-    ("Sword1_Light.glb", "Sword1 Light", 566),
-    ("Sword1_Heavyglb.glb", "Sword1 Heavy", 768),
+    ("sword1_light.glb", "Sword1 Light", 566),
+    ("sword1_heavy.glb", "Sword1 Heavy", 768),
 ];
+
+fn right_hand_joint(project: &ProjectDocument, model_id: ResourceId) -> Option<u16> {
+    let model = sword_model(project, model_id);
+    let skeleton = model.skeleton.and_then(|id| project.resource(id))?;
+    let ResourceData::Skeleton(skeleton) = &skeleton.data else {
+        return None;
+    };
+    skeleton
+        .joint_names
+        .iter()
+        .position(|name| {
+            let leaf = name.rsplit([':', '|', '/']).next().unwrap_or(name);
+            leaf.eq_ignore_ascii_case("RightHand") || leaf.eq_ignore_ascii_case("Right_Hand")
+        })
+        .and_then(|joint| u16::try_from(joint).ok())
+}
 
 fn sword_model<'a>(
     project: &'a ProjectDocument,
@@ -73,7 +89,7 @@ fn main() {
     let mut model_ids: Vec<ResourceId> = Vec::new();
     let mut clip_bytes: Vec<Vec<u8>> = Vec::new();
     for (file, name, world_height) in SWORDS {
-        let dst = src_dir.join(file.to_ascii_lowercase().replace("heavyglb", "heavy"));
+        let dst = src_dir.join(file);
         std::fs::copy(props_dir.join(file), &dst)
             .unwrap_or_else(|e| panic!("copy {} into project: {e}", file));
 
@@ -216,10 +232,9 @@ fn main() {
         println!("Sword1 Heavy shares Sword1 Light's atlas ({target})");
     }
 
-    // Provisional hand socket on every character-referenced model. Bone
-    // names do not survive the cook yet, so on the shared 22-bone rig we
-    // guess the arm-chain tip (joint 9); the P2 socket editor exists to
-    // place this properly.
+    // Socket only a named right hand. Guessing from joint count attached the
+    // first campaign pass to a left-hand chain tip on the shared Mantis rig;
+    // missing names are now a hard authoring seam, never runtime truth.
     let wielder_models: Vec<ResourceId> = project
         .resources
         .iter()
@@ -229,18 +244,13 @@ fn main() {
         })
         .collect();
     for id in wielder_models {
-        let joint_count = {
-            let model = sword_model(&project, id);
-            model
-                .skeleton
-                .and_then(|sk| project.resource(sk))
-                .and_then(|r| match &r.data {
-                    ResourceData::Skeleton(s) => Some(s.joint_count),
-                    _ => None,
-                })
-                .unwrap_or(1)
+        let Some(joint) = right_hand_joint(&project, id) else {
+            println!(
+                "{}: no named RightHand joint; socket intentionally not guessed",
+                project.resource(id).map(|r| r.name.as_str()).unwrap_or("model")
+            );
+            continue;
         };
-        let joint = if joint_count == 22 { 9 } else { 0 };
         let Some(resource) = project.resource_mut(id) else {
             continue;
         };
@@ -255,7 +265,7 @@ fn main() {
             joint,
             ..AttachmentSocket::right_hand_grip()
         });
-        println!("{name}: added right_hand_grip socket on provisional joint {joint}");
+        println!("{name}: added right_hand_grip socket on named joint {joint}");
     }
 
     let mut weapon_ids: Vec<ResourceId> = Vec::new();
