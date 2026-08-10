@@ -34,7 +34,9 @@ mod tests {
         assert_eq!(package.rooms.len(), 1);
         assert_eq!(package.assets.len(), 2);
         assert_eq!(package.texture_asset_count(), 1);
+        assert_eq!(world.texture_asset_indices, [1]);
         assert_eq!(package.spawn.expect("player spawn").room, 0);
+        assert_eq!(package.spawn.expect("player spawn").yaw, 3072);
         assert_eq!(package.logic.len(), 1);
         assert_eq!(package.logic[0].link, 0, "door links BSP mover ordinal");
 
@@ -42,7 +44,16 @@ mod tests {
         assert!(source.contains("pub const PLAYTEST_USES_PXBSP: bool = true;"));
         assert!(source.contains("pub static PXBSP_WORLD: &[u8]"));
         assert!(source.contains("PXBSP_MOVER_NODE_IDS: &[u32] = &[2]"));
+        assert!(source.contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(1)]"));
         assert!(!source.contains("BRUSH_TEXTURES"));
+
+        let runtime_main = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../engine/examples/editor-playtest/src/main.rs"),
+        )
+        .expect("normal editor-playtest runtime source");
+        assert!(runtime_main.contains("mod bsp_runtime;"));
+        assert!(!runtime_main.contains("brush_playtest::run()"));
     }
 
     #[test]
@@ -80,6 +91,24 @@ mod tests {
             ..spawn.origin
         };
         let mut scratch = TraceScratch::new();
+        let mut camera_trace = Trace::default();
+        let camera_destination = Vec3I32 {
+            x: 2_909 * 4096,
+            ..spawn.origin
+        };
+        assert!(map
+            .model_collision_hull(0, 0)
+            .expect("world point hull")
+            .trace_into(
+                &spawn.origin,
+                &camera_destination,
+                &mut scratch,
+                &mut camera_trace,
+            ));
+        assert!(
+            camera_trace.fraction < Q12_ONE,
+            "third-person camera cannot leave the brush world"
+        );
         let mut world_trace = Trace::default();
         assert!(map
             .model_collision_hull(0, 1)
