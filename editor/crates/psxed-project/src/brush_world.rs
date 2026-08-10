@@ -14,14 +14,18 @@ use crate::brush_pack::{pack_bsp_geometry, BrushPackError, BspLighting, PackedBs
 use crate::brush_portal::{classify_bsp_leaves, portalize_surface_bsp};
 use crate::brush_pxbsp::{
     build_pxbsp_with_submodels, pxbsp_material_slots, CompiledPxbsp, PxbspBuildError,
-    PxbspMapPayloads, PxbspSubmodel,
+    PxbspEntityInput, PxbspMapPayloads, PxbspSubmodel,
 };
 use crate::{
     resolve_material_texture_psxt, LogicNodeKind, MaterialAnimationMode, MaterialFaceSidedness,
     NodeId, NodeKind, ProjectDocument, PsxBlendMode, ResourceData, ResourceId, Scene,
 };
 
-use psx_bsp::pxbsp::{material_animation, material_blend, material_flags, PxbspMaterial};
+use psx_bsp::pxbsp::{
+    entity_class, entity_flags, material_animation, material_blend, material_flags, PxbspBrushDoor,
+    PxbspBrushDoorError, PxbspEntity, PxbspMaterial,
+};
+use psx_bsp::{Node, Plane, RecordSlice, Vec3I32};
 use psxed_format::texture::Depth;
 
 const PLAYER_HULL: CollisionHullBounds = CollisionHullBounds {
@@ -63,7 +67,10 @@ pub struct CompiledBrushMover {
     /// Model 0 is the static world; mover models begin at 1.
     pub model_index: u16,
     pub origin: [i32; 3],
+    pub open_offset: [i32; 3],
+    pub travel_ticks: u16,
     pub start_open: bool,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +93,12 @@ pub enum BrushWorldCookError {
     },
     UnsupportedMoverTransform(NodeId),
     MoverOriginOutOfRange(NodeId),
+    MoverOriginInSolid(NodeId),
+    InvalidDoorMotion {
+        node: NodeId,
+        error: PxbspBrushDoorError,
+    },
+    InvalidWorldTree,
     MissingMaterial(ResourceId),
     ResourceIsNotMaterial(ResourceId),
     MaterialTexture {
@@ -178,9 +191,17 @@ pub fn compile_brush_world(
 
     let mut submodels = Vec::new();
     let mut movers = Vec::new();
+    let mut entities = Vec::new();
     for node in scene.nodes() {
         let NodeKind::Logic {
-            kind: LogicNodeKind::Door { start_open, .. },
+            kind:
+                LogicNodeKind::Door {
+                    start_open,
+                    open_offset,
+                    travel_ticks,
+                    ..
+                },
+            enabled,
             ..
         } = &node.kind
         else {
@@ -214,6 +235,49 @@ pub fn compile_brush_world(
         )?;
         let model_index = u16::try_from(submodels.len() + 1)
             .map_err(|_| BrushWorldCookError::ModelIndexOverflow)?;
+        let leaf_probe = model_center_world_q12(origin, geometry.mins, geometry.maxs);
+        // ponytail: PXBSP v1 links one representative leaf. Replace this
+        // with a touched-leaf span before full entity PVS activation ships.
+        let leaf = packed_point_leaf(&world_geometry, leaf_probe)?;
+        if leaf == 0 {
+            return Err(BrushWorldCookError::MoverOriginInSolid(node.id));
+        }
+        let motion = PxbspBrushDoor::new(
+            Vec3I32 {
+                x: i32::from(open_offset[0]) * 4096,
+                y: i32::from(open_offset[1]) * 4096,
+                z: i32::from(open_offset[2]) * 4096,
+            },
+            *travel_ticks,
+        );
+        motion
+            .validate()
+            .map_err(|error| BrushWorldCookError::InvalidDoorMotion {
+                node: node.id,
+                error,
+            })?;
+        let mut flags = 0;
+        if *enabled {
+            flags |= entity_flags::ENABLED;
+        }
+        if *start_open {
+            flags |= entity_flags::START_OPEN;
+        }
+        entities.push(PxbspEntityInput {
+            entity: PxbspEntity {
+                class_id: entity_class::BRUSH_DOOR,
+                flags,
+                model: model_index,
+                leaf,
+                origin: Vec3I32 {
+                    x: origin[0] * 4096,
+                    y: origin[1] * 4096,
+                    z: origin[2] * 4096,
+                },
+                ..PxbspEntity::default()
+            },
+            payload: motion.to_le_bytes().to_vec(),
+        });
         submodels.push(PxbspSubmodel {
             geometry,
             collision,
@@ -223,7 +287,10 @@ pub fn compile_brush_world(
             node: node.id,
             model_index,
             origin,
+            open_offset: open_offset.map(i32::from),
+            travel_ticks: *travel_ticks,
             start_open: *start_open,
+            enabled: *enabled,
         });
     }
 
@@ -235,7 +302,7 @@ pub fn compile_brush_world(
         submodels,
         PxbspMapPayloads {
             materials: &materials,
-            entities: &[],
+            entities: &entities,
             texture_data: &[],
             sound_data: &[],
             model_data: &[],
@@ -312,6 +379,54 @@ fn mover_origin(node: NodeId, translation: [f32; 3]) -> Result<[i32; 3], BrushWo
     } else {
         Err(BrushWorldCookError::MoverOriginOutOfRange(node))
     }
+}
+
+fn model_center_world_q12(origin: [i32; 3], mins: [i16; 3], maxs: [i16; 3]) -> Vec3I32 {
+    let axis = |index: usize| {
+        origin[index] * 4096 + (i32::from(mins[index]) + i32::from(maxs[index])) * 2048
+    };
+    Vec3I32 {
+        x: axis(0),
+        y: axis(1),
+        z: axis(2),
+    }
+}
+
+fn packed_point_leaf(
+    geometry: &PackedBspGeometry,
+    point: Vec3I32,
+) -> Result<u16, BrushWorldCookError> {
+    let nodes =
+        RecordSlice::<Node>::new(&geometry.nodes).ok_or(BrushWorldCookError::InvalidWorldTree)?;
+    let planes =
+        RecordSlice::<Plane>::new(&geometry.planes).ok_or(BrushWorldCookError::InvalidWorldTree)?;
+    let mut node_index = geometry.root_node;
+    loop {
+        if node_index < 0 {
+            let leaf = -1i32 - i32::from(node_index);
+            return u16::try_from(leaf).map_err(|_| BrushWorldCookError::InvalidWorldTree);
+        }
+        let node = nodes
+            .get(node_index as usize)
+            .ok_or(BrushWorldCookError::InvalidWorldTree)?;
+        let plane = planes
+            .get(node.plane as usize)
+            .ok_or(BrushWorldCookError::InvalidWorldTree)?;
+        let dot = match plane.kind {
+            0 => point.x,
+            1 => point.y,
+            2 => point.z,
+            _ => packed_mul_q12(point.x, i32::from(plane.normal.x))
+                .saturating_add(packed_mul_q12(point.y, i32::from(plane.normal.y)))
+                .saturating_add(packed_mul_q12(point.z, i32::from(plane.normal.z))),
+        };
+        node_index = node.children[usize::from(dot.saturating_sub(plane.distance) <= 0)];
+    }
+}
+
+fn packed_mul_q12(value: i32, q12: i32) -> i32 {
+    let product = (i64::from(value) * i64::from(q12)) >> 12;
+    product.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 fn translate_brushes(brushes: &[Brush], origin: [i32; 3]) -> Vec<Brush> {
@@ -574,7 +689,8 @@ fn flat_white_psxt() -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::{MaterialResource, Transform3};
-    use psx_bsp::collision::BrushTransform;
+    use psx_bsp::mover::BrushDoor;
+    use psx_bsp::pxbsp::{entity_class, entity_flags, PxbspBrushDoor};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
     use psx_bsp::SliceReader;
 
@@ -595,7 +711,7 @@ mod tests {
         }
     }
 
-    fn authored_world(mode: BrushWorldCookMode) -> CompiledBrushWorld {
+    fn authored_project() -> ProjectDocument {
         let mut project = ProjectDocument::new("brush world");
         let material = project.add_resource(
             "Stone",
@@ -632,6 +748,11 @@ mod tests {
             },
         );
 
+        project
+    }
+
+    fn authored_world(mode: BrushWorldCookMode) -> CompiledBrushWorld {
+        let project = authored_project();
         compile_brush_world(
             &project,
             BrushWorldCookOptions {
@@ -652,31 +773,81 @@ mod tests {
         assert_eq!(compiled.movers.len(), 1);
         assert_eq!(compiled.movers[0].model_index, 1);
         assert_eq!(compiled.movers[0].origin, [512, 64, 512]);
+        assert_eq!(compiled.movers[0].open_offset, [0, 128, 0]);
+        assert_eq!(compiled.movers[0].travel_ticks, 60);
+        assert!(compiled.movers[0].enabled);
 
         let mut map = PxbspResidentMap::with_capacity(compiled.pxbsp.bytes.len());
         map.load(9, &mut SliceReader::new(&compiled.pxbsp.bytes))
             .expect("resident PXBSP");
         assert_eq!(map.brush_models().len(), 2);
-        let door = map.brush_models().get(1).expect("door model");
-        assert_eq!([door.mins.x, door.mins.y, door.mins.z], [-32, 0, -8]);
-        assert_eq!([door.maxs.x, door.maxs.y, door.maxs.z], [32, 96, 8]);
+        let door_model = map.brush_models().get(1).expect("door model");
+        assert_eq!(
+            [door_model.mins.x, door_model.mins.y, door_model.mins.z],
+            [-32, 0, -8]
+        );
+        assert_eq!(
+            [door_model.maxs.x, door_model.maxs.y, door_model.maxs.z],
+            [32, 96, 8]
+        );
         assert_eq!(map.materials().get(0).expect("material").texture_asset, 40);
 
+        let entities = map.entities();
+        assert_eq!(entities.len(), 1);
+        let entity = entities.get(0).expect("door entity");
+        assert_eq!(entity.class_id, entity_class::BRUSH_DOOR);
+        assert_eq!(entity.flags, entity_flags::ENABLED);
+        assert_eq!(entity.model, 1);
+        assert_ne!(entity.leaf, 0);
+        assert_eq!(
+            entity.origin,
+            Vec3I32 {
+                x: 512 * 4096,
+                y: 64 * 4096,
+                z: 512 * 4096
+            }
+        );
+        let payload = entities
+            .payload_record::<PxbspBrushDoor>(0)
+            .expect("door payload");
+        assert_eq!(
+            payload.open_offset,
+            Vec3I32 {
+                x: 0,
+                y: 128 * 4096,
+                z: 0
+            }
+        );
+        assert_eq!(payload.travel_ticks, 60);
+
+        let mut door = BrushDoor::from_entity(entity, payload).expect("runtime door");
         let hull = map
             .model_collision_hull(1, 0)
             .expect("door point hull")
-            .transformed(BrushTransform::translated(psx_bsp::Vec3I32 {
-                x: 512 * 4096,
-                y: 64 * 4096,
-                z: 512 * 4096,
-            }));
+            .transformed(door.transform());
         assert_eq!(
-            hull.point_contents(psx_bsp::Vec3I32 {
+            hull.point_contents(Vec3I32 {
                 x: 512 * 4096,
                 y: 96 * 4096,
                 z: 512 * 4096,
             }),
             Some(psx_bsp::collision::CONTENTS_SOLID)
+        );
+        door.set_open(true);
+        for _ in 0..60 {
+            assert!(door.tick());
+        }
+        let open_hull = map
+            .model_collision_hull(1, 0)
+            .expect("door point hull")
+            .transformed(door.transform());
+        assert_eq!(
+            open_hull.point_contents(Vec3I32 {
+                x: 512 * 4096,
+                y: 96 * 4096,
+                z: 512 * 4096,
+            }),
+            Some(psx_bsp::collision::CONTENTS_EMPTY)
         );
     }
 
@@ -712,6 +883,55 @@ mod tests {
             BrushWorldCookError::MissingMover {
                 brush: 1,
                 node: NodeId(999),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_door_motion_fails_loudly() {
+        let mut project = authored_project();
+        let door = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.kind,
+                    NodeKind::Logic {
+                        kind: LogicNodeKind::Door { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("door")
+            .id;
+        let NodeKind::Logic {
+            kind: LogicNodeKind::Door { open_offset, .. },
+            ..
+        } = &mut project
+            .active_scene_mut()
+            .node_mut(door)
+            .expect("door")
+            .kind
+        else {
+            panic!("door kind");
+        };
+        *open_offset = [0; 3];
+        let error = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: Path::new("."),
+                mode: BrushWorldCookMode::Draft,
+                ambient: [24; 3],
+                texture_asset_base: 40,
+            },
+        )
+        .expect_err("motionless door");
+        assert_eq!(
+            error,
+            BrushWorldCookError::InvalidDoorMotion {
+                node: door,
+                error: PxbspBrushDoorError::ZeroOpenOffset,
             }
         );
     }
