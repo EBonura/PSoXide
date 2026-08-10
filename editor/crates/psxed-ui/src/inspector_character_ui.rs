@@ -2415,10 +2415,25 @@ pub(crate) fn model_scale_axis_editor(ui: &mut egui::Ui, label: &str, value: &mu
     changed
 }
 
+/// "13 · RightHand" when names are known for the joint, else
+/// "Joint 13". Rig namespace prefixes (`mixamorig:RightHand`) are
+/// stripped for display only.
+pub(crate) fn joint_label(joint: u16, joint_names: Option<&[String]>) -> String {
+    match joint_names
+        .and_then(|names| names.get(joint as usize))
+        .map(|name| name.rsplit(':').next().unwrap_or(name).trim())
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => format!("{joint} · {name}"),
+        None => format!("Joint {joint}"),
+    }
+}
+
 pub(crate) fn attachment_socket_list_editor(
     ui: &mut egui::Ui,
     sockets: &mut Vec<psxed_project::AttachmentSocket>,
     joint_count: Option<u16>,
+    joint_names: Option<&[String]>,
 ) -> bool {
     let mut changed = false;
     let mut remove: Option<usize> = None;
@@ -2456,6 +2471,12 @@ pub(crate) fn attachment_socket_list_editor(
                 .map(|count| count.saturating_sub(1))
                 .unwrap_or(u16::MAX);
             changed |= drag_u16(ui, "Joint", &mut socket.joint, 0, max_joint);
+            if let Some(name) = joint_names
+                .and_then(|names| names.get(socket.joint as usize))
+                .filter(|name| !name.trim().is_empty())
+            {
+                ui.label(RichText::new(name.as_str()).small().color(STUDIO_TEXT_WEAK));
+            }
             if let Some(count) = joint_count {
                 if socket.joint >= count {
                     ui.colored_label(

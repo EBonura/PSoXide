@@ -76,6 +76,12 @@ pub struct SkeletonResource {
     /// Human-readable note/source hint.
     #[serde(default)]
     pub note: String,
+    /// Source bone names in cooked-joint order, captured at import
+    /// (the cooked model itself stores only indices). Empty for
+    /// skeletons imported before names existed; joint pickers fall
+    /// back to bare indices. Not part of the compatibility signature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joint_names: Vec<String>,
 }
 
 impl SkeletonResource {
@@ -91,7 +97,17 @@ impl SkeletonResource {
             parents,
             signature,
             note: String::new(),
+            joint_names: Vec::new(),
         }
+    }
+
+    /// The display name for one joint, or `None` when this skeleton
+    /// has no captured names (or the name is empty).
+    pub fn joint_name(&self, joint: u16) -> Option<&str> {
+        self.joint_names
+            .get(joint as usize)
+            .map(String::as_str)
+            .filter(|name| !name.trim().is_empty())
     }
 
     /// True when an animation with `joint_count` can at least be
