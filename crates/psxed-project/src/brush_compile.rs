@@ -1,6 +1,6 @@
-//! Draft brush collision compiler (docs/bsp-engine-overhaul.md, the
-//! first-playable slice): brushes become packed XBSP plane and clipnode
-//! records that `psx_bsp::collision::CollisionHull` traces directly.
+//! Brush-world compiler cores (docs/bsp-engine-overhaul.md, the
+//! first-playable slice): exterior CSG surfaces plus packed XBSP planes
+//! and clipnodes consumed directly by `psx_bsp`.
 //!
 //! Construction is the union test over convex solids written as a BSP:
 //! each brush contributes a chain of its face planes; a point inside
@@ -11,7 +11,8 @@
 // qbsp-style balanced build with outer sealing replaces this when the
 // full compiler lands.
 
-use crate::brush::{Brush, Plane};
+use crate::brush::{Brush, FaceUv, Plane};
+use crate::ResourceId;
 
 /// Fixed-point scale shared with the runtime: positions and plane
 /// distances are Q20.12, normals Q3.12.
@@ -30,6 +31,213 @@ pub struct CompiledCollision {
 
 const CONTENTS_EMPTY: i16 = -1;
 const CONTENTS_SOLID: i16 = -2;
+const CSG_EPSILON: f64 = 1.0 / 65_536.0;
+
+/// One exterior polygon after union CSG has removed brush interiors.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompiledSurface {
+    /// Exact authored face plane, wound outward from the solid union.
+    pub plane: Plane,
+    /// Convex exterior polygon in world coordinates.
+    pub vertices: Vec<[f64; 3]>,
+    /// Material inherited from the authored face.
+    pub material: Option<ResourceId>,
+    /// Texture transform inherited from the authored face.
+    pub uv: FaceUv,
+    /// Source brush index for diagnostics and deterministic coplanar ties.
+    pub source_brush: usize,
+    /// Source face index within `source_brush`.
+    pub source_face: usize,
+}
+
+/// Compile the exterior boundary of the union of every valid brush.
+///
+/// Each solved face polygon is subtracted by every other convex brush.
+/// Shared faces disappear, intersections split into convex fragments and
+/// same-facing coplanar overlaps are owned by the lower brush index.
+pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
+    let solved: Vec<_> = brushes.iter().map(Brush::solve).collect();
+    let planes: Vec<Vec<Option<Plane>>> = brushes
+        .iter()
+        .map(|brush| {
+            brush
+                .faces
+                .iter()
+                .map(|face| Plane::from_points(face.points))
+                .collect()
+        })
+        .collect();
+    let volume_planes: Vec<Vec<Plane>> = planes
+        .iter()
+        .map(|brush| brush.iter().copied().flatten().collect())
+        .collect();
+    let valid: Vec<bool> = solved.iter().map(|brush| brush.is_valid()).collect();
+    let mut output = Vec::new();
+
+    for (brush_index, brush) in brushes.iter().enumerate() {
+        if !valid[brush_index] {
+            continue;
+        }
+        for (face_index, face) in brush.faces.iter().enumerate() {
+            let Some(face_plane) = planes[brush_index][face_index] else {
+                continue;
+            };
+            let Some(polygon) = solved[brush_index].polygons[face_index].as_ref() else {
+                continue;
+            };
+            let mut fragments = vec![polygon.verts.clone()];
+            for other_index in 0..brushes.len() {
+                if other_index == brush_index || !valid[other_index] {
+                    continue;
+                }
+                let other_planes = &volume_planes[other_index];
+                let keep_coplanar_inside = brush_index < other_index
+                    && other_planes
+                        .iter()
+                        .any(|other| same_facing_plane(face_plane, *other));
+                if keep_coplanar_inside {
+                    continue;
+                }
+                fragments = fragments
+                    .into_iter()
+                    .flat_map(|fragment| subtract_convex_brush(&fragment, other_planes))
+                    .collect();
+                if fragments.is_empty() {
+                    break;
+                }
+            }
+            output.extend(fragments.into_iter().map(|vertices| CompiledSurface {
+                plane: face_plane,
+                vertices,
+                material: face.material,
+                uv: face.uv,
+                source_brush: brush_index,
+                source_face: face_index,
+            }));
+        }
+    }
+    output
+}
+
+fn subtract_convex_brush(polygon: &[[f64; 3]], planes: &[Plane]) -> Vec<Vec<[f64; 3]>> {
+    let mut inside = polygon.to_vec();
+    let mut outside = Vec::new();
+    for plane in planes {
+        match split_polygon(&inside, *plane) {
+            PolygonSplit::Front(front) => {
+                outside.push(front);
+                return outside;
+            }
+            PolygonSplit::Back(back) => inside = back,
+            PolygonSplit::Coplanar => {}
+            PolygonSplit::Split { front, back } => {
+                outside.push(front);
+                inside = back;
+            }
+        }
+    }
+    outside
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PolygonSplit {
+    Front(Vec<[f64; 3]>),
+    Back(Vec<[f64; 3]>),
+    Coplanar,
+    Split {
+        front: Vec<[f64; 3]>,
+        back: Vec<[f64; 3]>,
+    },
+}
+
+fn split_polygon(vertices: &[[f64; 3]], plane: Plane) -> PolygonSplit {
+    let (normal, distance) = normalized_plane(plane);
+    let distances: Vec<f64> = vertices
+        .iter()
+        .map(|vertex| dot(normal, *vertex) - distance)
+        .collect();
+    let has_front = distances.iter().any(|distance| *distance > CSG_EPSILON);
+    let has_back = distances.iter().any(|distance| *distance < -CSG_EPSILON);
+    match (has_front, has_back) {
+        (false, false) => return PolygonSplit::Coplanar,
+        (true, false) => return PolygonSplit::Front(vertices.to_vec()),
+        (false, true) => return PolygonSplit::Back(vertices.to_vec()),
+        (true, true) => {}
+    }
+
+    let mut front = Vec::new();
+    let mut back = Vec::new();
+    for index in 0..vertices.len() {
+        let next = (index + 1) % vertices.len();
+        let current_vertex = vertices[index];
+        let next_vertex = vertices[next];
+        let current_distance = distances[index];
+        let next_distance = distances[next];
+        if current_distance >= -CSG_EPSILON {
+            push_welded(&mut front, current_vertex);
+        }
+        if current_distance <= CSG_EPSILON {
+            push_welded(&mut back, current_vertex);
+        }
+        if (current_distance > CSG_EPSILON && next_distance < -CSG_EPSILON)
+            || (current_distance < -CSG_EPSILON && next_distance > CSG_EPSILON)
+        {
+            let amount = current_distance / (current_distance - next_distance);
+            let intersection = [
+                current_vertex[0] + (next_vertex[0] - current_vertex[0]) * amount,
+                current_vertex[1] + (next_vertex[1] - current_vertex[1]) * amount,
+                current_vertex[2] + (next_vertex[2] - current_vertex[2]) * amount,
+            ];
+            push_welded(&mut front, intersection);
+            push_welded(&mut back, intersection);
+        }
+    }
+    close_welded(&mut front);
+    close_welded(&mut back);
+    PolygonSplit::Split { front, back }
+}
+
+fn same_facing_plane(left: Plane, right: Plane) -> bool {
+    let (left_normal, left_distance) = normalized_plane(left);
+    let (right_normal, right_distance) = normalized_plane(right);
+    dot(left_normal, right_normal) > 1.0 - CSG_EPSILON
+        && (left_distance - right_distance).abs() <= CSG_EPSILON
+}
+
+fn normalized_plane(plane: Plane) -> ([f64; 3], f64) {
+    let normal = plane.normal.map(|component| component as f64);
+    let length = dot(normal, normal).sqrt();
+    (
+        [normal[0] / length, normal[1] / length, normal[2] / length],
+        plane.dist as f64 / length,
+    )
+}
+
+fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn push_welded(vertices: &mut Vec<[f64; 3]>, vertex: [f64; 3]) {
+    let distinct = vertices
+        .last()
+        .is_none_or(|last| squared_distance(*last, vertex) > CSG_EPSILON * CSG_EPSILON);
+    if distinct {
+        vertices.push(vertex);
+    }
+}
+
+fn close_welded(vertices: &mut Vec<[f64; 3]>) {
+    if vertices.len() > 1
+        && squared_distance(vertices[0], *vertices.last().unwrap()) <= CSG_EPSILON * CSG_EPSILON
+    {
+        vertices.pop();
+    }
+}
+
+fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
+    let delta = [left[0] - right[0], left[1] - right[1], left[2] - right[2]];
+    dot(delta, delta)
+}
 
 /// Compile every valid brush into one point-hull collision BSP.
 pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
@@ -164,6 +372,67 @@ mod tests {
             y: q12(y),
             z: q12(z),
         }
+    }
+
+    fn surface_axis_coordinate(surface: &CompiledSurface, axis: usize) -> Option<f64> {
+        let (normal, distance) = normalized_plane(surface.plane);
+        (normal[axis].abs() > 1.0 - CSG_EPSILON
+            && (0..3).all(|other| other == axis || normal[other].abs() <= CSG_EPSILON))
+        .then(|| distance / normal[axis])
+    }
+
+    #[test]
+    fn csg_single_cuboid_emits_six_exterior_quads() {
+        let surfaces = compile_csg_surfaces(&[Brush::cuboid([0, 0, 0], [128, 64, 256])]);
+        assert_eq!(surfaces.len(), 6);
+        assert!(surfaces.iter().all(|surface| surface.vertices.len() == 4));
+    }
+
+    #[test]
+    fn csg_adjacent_cuboids_remove_both_shared_faces() {
+        let surfaces = compile_csg_surfaces(&[
+            Brush::cuboid([0, 0, 0], [128, 128, 128]),
+            Brush::cuboid([128, 0, 0], [256, 128, 128]),
+        ]);
+        assert_eq!(surfaces.len(), 10);
+        assert!(!surfaces.iter().any(|surface| {
+            surface_axis_coordinate(surface, 0).is_some_and(|x| (x - 128.0).abs() < CSG_EPSILON)
+        }));
+    }
+
+    #[test]
+    fn csg_overlapping_cuboids_clip_away_buried_face_regions() {
+        let surfaces = compile_csg_surfaces(&[
+            Brush::cuboid([0, 0, 0], [128, 128, 128]),
+            Brush::cuboid([64, 0, 0], [192, 128, 128]),
+        ]);
+        assert_eq!(surfaces.len(), 10);
+        assert!(!surfaces.iter().any(|surface| {
+            surface_axis_coordinate(surface, 0)
+                .is_some_and(|x| (x - 64.0).abs() < CSG_EPSILON || (x - 128.0).abs() < CSG_EPSILON)
+        }));
+    }
+
+    #[test]
+    fn csg_duplicate_brushes_keep_one_deterministic_owner() {
+        let brush = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        let surfaces = compile_csg_surfaces(&[brush.clone(), brush]);
+        assert_eq!(surfaces.len(), 6);
+        assert!(surfaces.iter().all(|surface| surface.source_brush == 0));
+    }
+
+    #[test]
+    fn csg_preserves_authored_face_uvs() {
+        let mut brush = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        brush.faces[2].uv.offset_texels = [17, -9];
+        brush.faces[2].uv.rotation_deg = 45;
+        let surfaces = compile_csg_surfaces(&[brush]);
+        let face = surfaces
+            .iter()
+            .find(|surface| surface.source_face == 2)
+            .expect("source face survives");
+        assert_eq!(face.uv.offset_texels, [17, -9]);
+        assert_eq!(face.uv.rotation_deg, 45);
     }
 
     #[test]
