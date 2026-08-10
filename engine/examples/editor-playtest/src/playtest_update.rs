@@ -92,10 +92,6 @@ impl Playtest {
                 .player_health
                 .saturating_sub(entity_stats.player_damage);
         }
-        // Player melee resolution: while an attack action is locked
-        // and its active window is live, sweep the weapon arc over
-        // the entities. Costs nothing outside attacks.
-        self.resolve_player_melee(ctx);
         self.logic.tick(
             LOGIC,
             psx_game_runtime::logic::LogicTickInput {
@@ -220,6 +216,7 @@ impl Playtest {
         self.player_health_max = PLAYER_MAX_HEALTH;
         self.water_death_ticks_remaining = 0;
         self.swing_hit_mask = 0;
+        self.clear_actor_pose_snapshots();
         self.sync_door_box_props();
         // Start the camera behind the AUTHORED spawn facing so the
         // SpawnPoint's editor rotation is honoured in Play (movement is

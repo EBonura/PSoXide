@@ -86,6 +86,7 @@ impl Scene for Playtest {
             // Re-anchor the animation epoch on the next gameplay entry
             // (see `gameplay_epoch` in main.rs).
             self.gameplay_epoch_set = false;
+            self.clear_actor_pose_snapshots();
         }
         #[cfg(feature = "cd-stream-bench")]
         if state.has_gameplay() {
@@ -205,6 +206,11 @@ impl Scene for Playtest {
 
     fn update(&mut self, ctx: &mut Ctx) {
         self.update_gameplay(ctx);
+        // This tail runs after every intentional input-mode early return in
+        // `update_gameplay`: freeze final actor state once, then run combat
+        // from the same snapshots the next body/equipment render consumes.
+        self.refresh_actor_pose_snapshots(ctx);
+        self.resolve_player_melee(ctx);
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -903,17 +909,15 @@ impl Scene for Playtest {
                 }
                 let instance_stats = draw_model_instances(
                     active.index,
+                    &self.instance_actor_poses,
                     self.gameplay_tick(ctx.sim_tick),
                     ctx.video_hz,
                     &room_camera,
                     actor_options,
                     &lighting,
-                    &self.models,
                     &self.model_faces[..self.model_face_count],
                     &self.model_parts[..self.model_part_count],
                     &self.model_vertices[..self.model_vertex_count],
-                    &self.clips,
-                    entity_poses,
                     instance_depth_pass,
                     &mut primitive_packets,
                     &mut world,
@@ -924,7 +928,7 @@ impl Scene for Playtest {
 
             // Player draws through the same compact model path as
             // placed model instances.
-            if let Some(character) = self.character {
+            if let (Some(character), Some(player_pose)) = (self.character, self.player_actor_pose) {
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
                 let actor_options = current_actor_surface_options(self.room_index);
@@ -949,19 +953,10 @@ impl Scene for Playtest {
                         draw_player(
                             self.room_index,
                             character,
-                            &self.models,
+                            player_pose,
                             &self.model_faces[..self.model_face_count],
                             &self.model_parts[..self.model_part_count],
                             &self.model_vertices[..self.model_vertex_count],
-                            &self.clips,
-                            player.x,
-                            player.y,
-                            player.z,
-                            self.motor.yaw(),
-                            self.anim_state.action(),
-                            character.clip_for(self.anim_state),
-                            self.anim_start_tick,
-                            self.player_anim_blend(ctx.sim_tick),
                             ctx.sim_tick,
                             ctx.video_hz,
                             &camera,
@@ -993,20 +988,12 @@ impl Scene for Playtest {
                 } else {
                     player_lighting.map_or(EquipmentDrawStats::default(), |lighting| {
                         draw_player_equipment(
-                            character,
+                            player_pose,
                             &self.models,
                             &self.model_faces[..self.model_face_count],
                             &self.model_parts[..self.model_part_count],
                             &self.model_vertices[..self.model_vertex_count],
                             &self.clips,
-                            player.x,
-                            player.y,
-                            player.z,
-                            self.motor.yaw(),
-                            self.anim_state.action(),
-                            character.clip_for(self.anim_state),
-                            self.anim_start_tick,
-                            self.player_anim_blend(ctx.sim_tick),
                             ctx.sim_tick,
                             ctx.video_hz,
                             &camera,
@@ -1033,6 +1020,7 @@ impl Scene for Playtest {
 
             if self.character.is_some() {
                 let player = self.motor.position();
+                let mut instance_equipment_remaining = MAX_EQUIPMENT_DRAWS;
                 for &active_slot in &active_draw_order {
                     if active_slot == INVALID_ACTIVE_ROOM_SLOT {
                         continue;
@@ -1070,17 +1058,15 @@ impl Scene for Playtest {
                     telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                     let instance_stats = draw_model_instances(
                         active.index,
+                        &self.instance_actor_poses,
                         self.gameplay_tick(ctx.sim_tick),
                         ctx.video_hz,
                         &room_camera,
                         actor_options,
                         &lighting,
-                        &self.models,
                         &self.model_faces[..self.model_face_count],
                         &self.model_parts[..self.model_part_count],
                         &self.model_vertices[..self.model_vertex_count],
-                        &self.clips,
-                        entity_poses,
                         ModelInstanceDepthPass::InFrontOfPlayer(player_depth),
                         &mut primitive_packets,
                         &mut world,
@@ -1092,8 +1078,10 @@ impl Scene for Playtest {
                     // passes (the OT depth-sorts the weapon with its
                     // body).
                     telemetry::stage_begin(telemetry::stage::EQUIPMENT);
-                    let _ = draw_instance_equipment(
+                    let equipment_stats = draw_instance_equipment(
                         active.index,
+                        &self.instance_actor_poses,
+                        instance_equipment_remaining,
                         self.gameplay_tick(ctx.sim_tick),
                         ctx.video_hz,
                         &room_camera,
@@ -1104,10 +1092,11 @@ impl Scene for Playtest {
                         &self.model_parts[..self.model_part_count],
                         &self.model_vertices[..self.model_vertex_count],
                         &self.clips,
-                        entity_poses,
                         &mut primitive_packets,
                         &mut world,
                     );
+                    instance_equipment_remaining =
+                        instance_equipment_remaining.saturating_sub(equipment_stats.draws as usize);
                     telemetry::stage_end(telemetry::stage::EQUIPMENT);
                 }
             }

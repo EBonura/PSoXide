@@ -366,6 +366,14 @@ struct Playtest {
     /// when an attack action starts.
     // psx-numeric-allow-next-line: one-hit-per-swing bitmask over 64 entity records; bit ops only, two-word on R3000
     swing_hit_mask: u64,
+    /// Player skeleton/presentation state frozen after the latest fixed update.
+    /// Body rendering, equipment sockets, and authored combat capsules all
+    /// consume this same snapshot until the next simulation tick.
+    player_actor_pose: Option<PlayerActorPoseSnapshot>,
+    /// Per-cooked-instance pose authority for the latest fixed update. The
+    /// table index is the `MODEL_INSTANCES` index, covering both live game
+    /// entities and static placed actors without render-time resampling.
+    instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -531,6 +539,7 @@ impl Playtest {
         addr_of_mut!((*scene).bsp).write(None);
         addr_of_mut!((*scene).current_collision_room).write(None);
         addr_of_mut!((*scene).character).write(None);
+        addr_of_mut!((*scene).player_actor_pose).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
         addr_of_mut!((*scene).soft_lock_target).write(None);
         addr_of_mut!((*scene).active_interactable).write(None);
@@ -546,6 +555,9 @@ impl Playtest {
         }
         for slot in 0..MAX_RUNTIME_MODEL_CLIPS {
             addr_of_mut!((*scene).clips[slot]).write(None);
+        }
+        for slot in 0..MAX_MODEL_INSTANCES {
+            addr_of_mut!((*scene).instance_actor_poses[slot]).write(None);
         }
         for slot in 0..MAX_ACTIVE_ROOMS {
             addr_of_mut!((*scene).window.rooms[slot]).write(None);
