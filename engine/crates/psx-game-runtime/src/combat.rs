@@ -23,8 +23,9 @@
 
 use psx_engine::{JointWorldTransform, WorldVertex};
 use psx_level::{
-    equipment_flags, CombatCapsuleRecord, EquipmentRecord, LevelWeaponRecord, RoomIndex,
-    WeaponHitboxRecord,
+    combat_capsule_flags, equipment_flags, CharacterAnimationAction, CombatCapsuleRecord,
+    EquipmentRecord, LevelWeaponRecord, RoomIndex, WeaponHitboxRecord,
+    MAX_CHARACTER_COMBAT_CAPSULES,
 };
 use psx_math::atan2_q12;
 
@@ -77,6 +78,100 @@ pub fn transform_actor_combat_capsule(
         record,
         pose.joint_world_transform(u16::from(record.joint))?,
     ))
+}
+
+/// Result of resolving one retained-pose actor attack against another.
+///
+/// `FallbackRequired` has deliberately narrow semantics: it means either the
+/// attacking action has no authored HITBOX at all or the defender has no
+/// authored HURTBOX at all. Once both sides are authored, inactive frames,
+/// invalid joints, missing snapshots, and geometric separation are
+/// authoritative misses and must never invoke a legacy radius/arc test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthoredActorContact {
+    /// One side of the authored contract is absent; caller may use its
+    /// explicitly documented legacy fallback.
+    FallbackRequired,
+    /// Both sides are authored but do not connect on this exact pose/frame.
+    Miss,
+    /// First deterministic authored HITBOX/HURTBOX overlap.
+    Hit {
+        /// Health damage from the attacking HITBOX.
+        damage: u16,
+        /// Poise damage from the attacking HITBOX.
+        poise_damage: u16,
+    },
+}
+
+/// Resolve one authored attack using only two already-retained actor poses.
+///
+/// This performs no animation phase reconstruction and allocates nothing. The
+/// attack frame comes from `attacker_pose.phase_q12()`, exactly matching body
+/// and equipment consumers of that snapshot. Cooked slices are capped at the
+/// per-character contract even if malformed caller data is longer.
+pub fn resolve_authored_actor_contact(
+    attacker_capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    attacker_pose: Option<ActorPoseSnapshot>,
+    defender_capsules: &[CombatCapsuleRecord],
+    defender_pose: Option<ActorPoseSnapshot>,
+) -> AuthoredActorContact {
+    let action = action.to_index() as u8;
+    let has_attack_hitbox = attacker_capsules
+        .iter()
+        .any(|record| record.flags & combat_capsule_flags::HITBOX != 0 && record.action == action);
+    let has_defender_hurtbox = defender_capsules
+        .iter()
+        .any(|record| record.flags & combat_capsule_flags::HURTBOX != 0);
+    if !has_attack_hitbox || !has_defender_hurtbox {
+        return AuthoredActorContact::FallbackRequired;
+    }
+    let (Some(attacker_pose), Some(defender_pose)) = (attacker_pose, defender_pose) else {
+        return AuthoredActorContact::Miss;
+    };
+    let frame = (attacker_pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+    let mut active = [WorldCombatCapsule::EMPTY; MAX_CHARACTER_COMBAT_CAPSULES];
+    let mut damage = [0u16; MAX_CHARACTER_COMBAT_CAPSULES];
+    let mut poise_damage = [0u16; MAX_CHARACTER_COMBAT_CAPSULES];
+    let mut active_count = 0usize;
+    for record in attacker_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
+        if record.flags & combat_capsule_flags::HITBOX == 0
+            || record.action != action
+            || frame < record.active_start_frame
+            || frame > record.active_end_frame
+        {
+            continue;
+        }
+        let Some(capsule) = transform_actor_combat_capsule(record, attacker_pose) else {
+            continue;
+        };
+        active[active_count] = capsule;
+        damage[active_count] = record.damage;
+        poise_damage[active_count] = record.poise_damage;
+        active_count += 1;
+    }
+    if active_count == 0 {
+        return AuthoredActorContact::Miss;
+    }
+    for hurtbox in defender_capsules.iter().take(MAX_CHARACTER_COMBAT_CAPSULES) {
+        if hurtbox.flags & combat_capsule_flags::HURTBOX == 0 {
+            continue;
+        }
+        let Some(hurtbox) = transform_actor_combat_capsule(hurtbox, defender_pose) else {
+            continue;
+        };
+        let mut hit = 0usize;
+        while hit < active_count {
+            if combat_capsules_overlap(&active[hit], &hurtbox) {
+                return AuthoredActorContact::Hit {
+                    damage: damage[hit],
+                    poise_damage: poise_damage[hit],
+                };
+            }
+            hit += 1;
+        }
+    }
+    AuthoredActorContact::Miss
 }
 
 fn transform_joint_local_point(joint: JointWorldTransform, local: [i16; 3]) -> [i32; 3] {
@@ -623,5 +718,167 @@ mod tests {
             player_melee_spec(&PLAYER_EQUIPMENT, &ZERO_REACH_WEAPONS, &HITBOXES),
             UNARMED
         );
+    }
+
+    mod authored_contact {
+        extern crate std;
+
+        use super::super::*;
+        use psx_asset::Animation;
+        use psx_engine::{LocalToWorldScale, Mat3I16, ModelPoseTranslation, SimTick};
+        use std::{boxed::Box, vec::Vec};
+
+        /// One-joint identity-rotation animation whose every frame holds the
+        /// same translation, so a snapshot's world pose is phase-independent
+        /// while its raw phase still drives the active-frame windows.
+        fn static_one_joint_animation() -> Animation<'static> {
+            const ANIMATION_HEADER_SIZE: usize = 8;
+            const POSE_RECORD_SIZE: usize = 24;
+            const FRAMES: usize = 2;
+            let payload_len = ANIMATION_HEADER_SIZE + FRAMES * POSE_RECORD_SIZE;
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"PSXA");
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&(payload_len as u32).to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&(FRAMES as u16).to_le_bytes());
+            bytes.extend_from_slice(&30u16.to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            for _ in 0..FRAMES {
+                for value in [4096i16, 0, 0, 0, 4096, 0, 0, 0, 4096] {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in [0i16, 0, 0] {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Animation::from_bytes(Box::leak(bytes.into_boxed_slice())).expect("test animation")
+        }
+
+        /// Snapshot at `origin` with the given raw Q12 phase (frame = phase
+        /// >> 12), matching the retained poses the runtime finalizes against.
+        fn pose_at(origin: [i32; 3], phase_q12: u32) -> ActorPoseSnapshot {
+            ActorPoseSnapshot::new(
+                SimTick::from_u32(1),
+                static_one_joint_animation(),
+                phase_q12,
+                None,
+                WorldVertex::new(origin[0], origin[1], origin[2]),
+                Mat3I16::IDENTITY,
+                LocalToWorldScale::IDENTITY,
+                ModelPoseTranslation { x: 0, y: 0, z: 0 },
+            )
+        }
+
+        const fn capsule_record(
+            joint: u8,
+            flags: u8,
+            action: CharacterAnimationAction,
+        ) -> CombatCapsuleRecord {
+            CombatCapsuleRecord {
+                joint,
+                flags,
+                action: action.to_index() as u8,
+                reserved: 0,
+                start: [0, 0, 0],
+                end: [0, 100, 0],
+                radius: 48,
+                active_start_frame: 2,
+                active_end_frame: 4,
+                damage: 25,
+                poise_damage: 35,
+            }
+        }
+
+        const ATTACK: CharacterAnimationAction = CharacterAnimationAction::LightAttack;
+        const HITBOXES: [CombatCapsuleRecord; 1] =
+            [capsule_record(0, combat_capsule_flags::HITBOX, ATTACK)];
+        const HURTBOXES: [CombatCapsuleRecord; 1] = [capsule_record(
+            0,
+            combat_capsule_flags::HURTBOX,
+            CharacterAnimationAction::Idle,
+        )];
+        /// Inside the 2..=4 active window.
+        const ACTIVE_PHASE: u32 = 3 << 12;
+        /// Before the window opens.
+        const INACTIVE_PHASE: u32 = 1 << 12;
+
+        #[test]
+        fn fallback_is_offered_only_while_a_side_is_unauthored() {
+            let near = [1000, 2000, 3000];
+            let attacker = Some(pose_at(near, ACTIVE_PHASE));
+            let defender = Some(pose_at(near, 0));
+
+            // Attacker with no HITBOX at all.
+            assert_eq!(
+                resolve_authored_actor_contact(&HURTBOXES, ATTACK, attacker, &HURTBOXES, defender),
+                AuthoredActorContact::FallbackRequired
+            );
+            // Attacker authored only for a DIFFERENT action slot.
+            const HEAVY_ONLY: [CombatCapsuleRecord; 1] = [capsule_record(
+                0,
+                combat_capsule_flags::HITBOX,
+                CharacterAnimationAction::HeavyAttack,
+            )];
+            assert_eq!(
+                resolve_authored_actor_contact(&HEAVY_ONLY, ATTACK, attacker, &HURTBOXES, defender),
+                AuthoredActorContact::FallbackRequired
+            );
+            // Defender with no HURTBOX at all.
+            assert_eq!(
+                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &[], defender),
+                AuthoredActorContact::FallbackRequired
+            );
+            assert_eq!(
+                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HITBOXES, defender),
+                AuthoredActorContact::FallbackRequired
+            );
+
+            // Both sides authored and connecting: the authored numbers land.
+            assert_eq!(
+                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HURTBOXES, defender),
+                AuthoredActorContact::Hit {
+                    damage: 25,
+                    poise_damage: 35,
+                }
+            );
+        }
+
+        #[test]
+        fn authored_misses_are_authoritative_and_never_fall_back() {
+            let near = [1000, 2000, 3000];
+            let attacker = Some(pose_at(near, ACTIVE_PHASE));
+            let defender = Some(pose_at(near, 0));
+
+            // A missing retained snapshot on either side is a miss.
+            assert_eq!(
+                resolve_authored_actor_contact(&HITBOXES, ATTACK, None, &HURTBOXES, defender),
+                AuthoredActorContact::Miss
+            );
+            assert_eq!(
+                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HURTBOXES, None),
+                AuthoredActorContact::Miss
+            );
+            // A frame outside the authored active window is a miss.
+            let early = Some(pose_at(near, INACTIVE_PHASE));
+            assert_eq!(
+                resolve_authored_actor_contact(&HITBOXES, ATTACK, early, &HURTBOXES, defender),
+                AuthoredActorContact::Miss
+            );
+            // A hitbox naming a joint the rig does not have is a miss.
+            const BAD_JOINT: [CombatCapsuleRecord; 1] =
+                [capsule_record(9, combat_capsule_flags::HITBOX, ATTACK)];
+            assert_eq!(
+                resolve_authored_actor_contact(&BAD_JOINT, ATTACK, attacker, &HURTBOXES, defender),
+                AuthoredActorContact::Miss
+            );
+            // Geometric separation is a miss.
+            let far = Some(pose_at([1000, 2000, 30_000], 0));
+            assert_eq!(
+                resolve_authored_actor_contact(&HITBOXES, ATTACK, attacker, &HURTBOXES, far),
+                AuthoredActorContact::Miss
+            );
+        }
     }
 }
