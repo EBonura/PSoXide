@@ -1,5 +1,6 @@
 //! Project-level brush world compilation into one complete PXBSP artifact.
 
+use std::fmt;
 use std::path::Path;
 
 use crate::brush::{Brush, BRUSH_UV_UNITS_PER_TEXEL};
@@ -83,6 +84,10 @@ pub struct CompiledBrushWorld {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrushWorldCookError {
     EmptyStaticWorld,
+    InvalidBrush {
+        brush: usize,
+        face: Option<usize>,
+    },
     MissingMover {
         brush: usize,
         node: NodeId,
@@ -119,6 +124,82 @@ pub enum BrushWorldCookError {
     Pxbsp(PxbspBuildError),
 }
 
+impl fmt::Display for BrushWorldCookError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyStaticWorld => formatter.write_str("scene has no static world brushes"),
+            Self::InvalidBrush { brush, face } => match face {
+                Some(face) => write!(formatter, "brush {brush} has invalid face {face}"),
+                None => write!(formatter, "brush {brush} does not enclose a valid solid"),
+            },
+            Self::MissingMover { brush, node } => {
+                write!(
+                    formatter,
+                    "brush {brush} references missing mover node {node:?}"
+                )
+            }
+            Self::BrushOwnerIsNotDoor { brush, node } => write!(
+                formatter,
+                "brush {brush} is bound to node {node:?}, which is not a Door"
+            ),
+            Self::UnsupportedMoverTransform(node) => write!(
+                formatter,
+                "Door node {node:?} uses rotation or scale unsupported by brush movers"
+            ),
+            Self::MoverOriginOutOfRange(node) => {
+                write!(
+                    formatter,
+                    "Door node {node:?} origin is outside the PXBSP range"
+                )
+            }
+            Self::MoverOriginInSolid(node) => {
+                write!(
+                    formatter,
+                    "Door node {node:?} origin is inside solid world geometry"
+                )
+            }
+            Self::InvalidPlayerSpawnTransform(node) => write!(
+                formatter,
+                "Player Spawn node {node:?} has a non-finite or out-of-range transform"
+            ),
+            Self::PlayerSpawnInSolid(node) => {
+                write!(
+                    formatter,
+                    "Player Spawn node {node:?} is inside solid geometry"
+                )
+            }
+            Self::InvalidDoorMotion { node, error } => {
+                write!(
+                    formatter,
+                    "Door node {node:?} has invalid motion: {error:?}"
+                )
+            }
+            Self::InvalidWorldTree => formatter.write_str("compiled BSP world tree is invalid"),
+            Self::MissingMaterial(material) => {
+                write!(formatter, "brush references missing material {material:?}")
+            }
+            Self::ResourceIsNotMaterial(resource) => {
+                write!(formatter, "brush resource {resource:?} is not a Material")
+            }
+            Self::MaterialTexture { material, error } => {
+                write!(formatter, "material {material:?} texture failed: {error}")
+            }
+            Self::InvalidTexture { material, error } => match material {
+                Some(material) => write!(formatter, "material {material:?} is invalid: {error}"),
+                None => write!(formatter, "default brush texture is invalid: {error}"),
+            },
+            Self::ModelIndexOverflow => formatter.write_str("PXBSP model index exceeds u16"),
+            Self::TextureAssetOverflow => {
+                formatter.write_str("PXBSP texture asset index exceeds u16")
+            }
+            Self::Pack(error) => write!(formatter, "BSP geometry packing failed: {error:?}"),
+            Self::Collision(error) => write!(formatter, "BSP collision compile failed: {error:?}"),
+            Self::Light(error) => write!(formatter, "BSP lighting failed: {error:?}"),
+            Self::Pxbsp(error) => write!(formatter, "PXBSP assembly failed: {error:?}"),
+        }
+    }
+}
+
 impl From<BrushPackError> for BrushWorldCookError {
     fn from(value: BrushPackError) -> Self {
         Self::Pack(value)
@@ -151,6 +232,18 @@ pub fn compile_brush_world(
     let scene = project.active_scene();
     let mut static_brushes = Vec::new();
     for (brush_index, brush) in scene.brushes.iter().enumerate() {
+        let solved = brush.solve();
+        if !solved.is_valid() {
+            let face = brush.faces.iter().enumerate().find_map(|(face, authored)| {
+                (crate::brush::Plane::from_points(authored.points).is_none()
+                    || solved.polygons.get(face).is_none_or(Option::is_none))
+                .then_some(face)
+            });
+            return Err(BrushWorldCookError::InvalidBrush {
+                brush: brush_index,
+                face,
+            });
+        }
         match brush.mover {
             None => static_brushes.push(brush.clone()),
             Some(node) => {
@@ -971,6 +1064,36 @@ mod tests {
                 node: NodeId(999),
             }
         );
+    }
+
+    #[test]
+    fn invalid_brush_reports_authored_index_and_face() {
+        let mut project = ProjectDocument::new("invalid brush");
+        let world = Brush::cuboid([0, 0, 0], [256, 256, 256]);
+        let mut invalid = Brush::cuboid([512, 0, 0], [768, 256, 256]);
+        invalid.faces.truncate(3);
+        invalid.faces[0].points = [[512, 0, 0]; 3];
+        project.active_scene_mut().brushes = vec![world, invalid];
+
+        let error = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: Path::new("."),
+                mode: BrushWorldCookMode::Draft,
+                ambient: [32; 3],
+                texture_asset_base: 0,
+            },
+        )
+        .expect_err("invalid brush");
+
+        assert_eq!(
+            error,
+            BrushWorldCookError::InvalidBrush {
+                brush: 1,
+                face: Some(0),
+            }
+        );
+        assert_eq!(error.to_string(), "brush 1 has invalid face 0");
     }
 
     #[test]
