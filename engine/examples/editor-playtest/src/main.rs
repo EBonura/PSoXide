@@ -162,11 +162,6 @@ mod generated {
     include!(env!("PSXED_PLAYTEST_MANIFEST"));
 }
 
-#[allow(dead_code)]
-mod generated_brush {
-    include!(env!("PSXED_BRUSH_PLAYTEST_MANIFEST"));
-}
-
 use generated::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOX_PROPS, BOX_PROP_STATE_COUNT,
     BOX_PROP_SURFACES,
@@ -988,7 +983,7 @@ static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zer
 
 #[no_mangle]
 fn main() -> ! {
-    if !generated_brush::BRUSH_WORLD_PXBSP.is_empty() {
+    if generated::PLAYTEST_USES_PXBSP {
         brush_playtest::run();
     }
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
