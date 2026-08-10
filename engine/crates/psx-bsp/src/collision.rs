@@ -37,7 +37,8 @@ impl BrushTransform {
         }
     }
 
-    fn point_to_local(self, point: Vec3I32) -> Vec3I32 {
+    /// Transform one Q20.12 world point into model-local coordinates.
+    pub fn point_to_local(self, point: Vec3I32) -> Vec3I32 {
         inverse_rotate_q12(
             self.rotation,
             Vec3I32 {
