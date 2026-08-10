@@ -128,6 +128,10 @@ pub enum PlaytestWorldGeometry {
 pub struct PlaytestPxbspWorld {
     /// Complete PXBSP file emitted by the brush compiler.
     pub bytes: Vec<u8>,
+    /// Texture assets referenced by the resident world's material table.
+    /// These stay in the ordinary room-residency contract so the shared VRAM
+    /// owner cannot evict them while the BSP world is active.
+    pub texture_asset_indices: Vec<usize>,
     /// Brush submodels in authored-node order.
     pub movers: Vec<PlaytestPxbspMover>,
 }
