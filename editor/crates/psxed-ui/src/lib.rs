@@ -3430,6 +3430,22 @@ impl EditorWorkspace {
         let mut project = self.project.clone();
         project.normalize_loaded();
         self.clear_validation_issues();
+        if !project.active_scene().brushes.is_empty() {
+            let compiled = psxed_project::brush_playtest::cook_brush_playtest_to_dir(
+                &project,
+                &self.project_dir,
+                &dir,
+            )
+            .map_err(|error| error.to_string())?;
+            return Ok(format!(
+                "Cooked brush Play world ({} KiB, {} texture{}, {} mover{}) - run `make build-editor-playtest`",
+                compiled.pxbsp.bytes.len() / 1024,
+                compiled.textures.len(),
+                if compiled.textures.len() == 1 { "" } else { "s" },
+                compiled.movers.len(),
+                if compiled.movers.len() == 1 { "" } else { "s" },
+            ));
+        }
         // Build once: Cortex-sized projects have enough materials, animation,
         // world geometry, and portal topology that doing this again merely for
         // the status summary makes every Play launch needlessly expensive.

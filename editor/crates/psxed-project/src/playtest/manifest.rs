@@ -3606,6 +3606,10 @@ pub fn write_cook_result(
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
+    let brush_manifest = generated_dir.join(crate::brush_playtest::BRUSH_MANIFEST_FILENAME);
+    if brush_manifest.exists() {
+        std::fs::remove_file(&brush_manifest)?;
+    }
     if let Some(package) = package {
         write_package(package, generated_dir)?;
     }
