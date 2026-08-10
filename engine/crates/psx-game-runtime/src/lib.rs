@@ -13,6 +13,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod actor_pose;
 pub mod arch_props;
 #[cfg(feature = "cd-stream-bench")]
 pub mod asset_streaming;
