@@ -429,6 +429,82 @@ fn brush_tool_zero_area_drag_commits_nothing() {
 }
 
 #[test]
+fn brush_numeric_origin_and_face_plane_edits() {
+    let mut harness = ViewportHarness::floored_room("brush_numeric", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    harness.workspace.selected_brush = Some(0);
+    harness.workspace.selected_brush_face = Some(3); // +X face
+
+    // Whole-brush origin entry translates without changing size.
+    assert_eq!(harness.workspace.selected_brush_origin(), Some([0, 0, 0]));
+    assert!(harness.workspace.set_selected_brush_origin([32, 16, -64]));
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.min, [32.0, 16.0, -64.0]);
+    assert_eq!(solved.max, [160.0, 144.0, 64.0]);
+
+    // The +X face reports its dominant axis and exact plane position.
+    assert_eq!(harness.workspace.selected_brush_face_axis(), Some((0, 160)));
+    assert!(harness.workspace.set_selected_brush_face_axis_position(200));
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.max[0], 200.0);
+
+    // The numeric fallback is exact: off-grid values are not snapped.
+    assert!(harness.workspace.set_selected_brush_face_axis_position(203));
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.max[0], 203.0);
+
+    // Sliding the face past the opposite side would stop the brush
+    // enclosing volume: rejected, brush untouched.
+    assert!(!harness.workspace.set_selected_brush_face_axis_position(-500));
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.max[0], 203.0);
+    assert!(harness.workspace.is_dirty());
+}
+
+#[test]
+fn brush_numeric_drag_coalesces_to_one_undo_step() {
+    let mut harness = ViewportHarness::floored_room("brush_numeric_undo", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
+    harness.workspace.selected_brush = Some(0);
+
+    // Three frames of a held DragValue drag, exactly as the inspector
+    // wrapper sees them: one coalesced undo step at the end.
+    let drag = InspectorUndoInput {
+        pointer_down: true,
+        ..InspectorUndoInput::default()
+    };
+    for x in [16, 32, 48] {
+        let before = harness.workspace.project.clone();
+        let epoch = harness.workspace.history.epoch();
+        assert!(harness.workspace.set_selected_brush_origin([x, 0, 0]));
+        harness.workspace.finish_inspector_undo(before, epoch, drag);
+    }
+    harness.workspace.prepare_inspector_undo(InspectorUndoInput::default());
+
+    harness.workspace.do_undo();
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.min[0], 0.0, "one undo unwinds the whole drag");
+    harness.workspace.do_redo();
+    let solved = harness.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.min[0], 48.0, "redo restores the final drag state");
+}
+
+#[test]
 fn brush_edits_mark_the_project_dirty_for_save_and_cook() {
     let mut harness = ViewportHarness::floored_room("brush_dirty", 4);
     harness.workspace.active_tool = ViewTool::Brush;
