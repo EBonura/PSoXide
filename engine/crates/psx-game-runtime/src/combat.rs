@@ -4,9 +4,12 @@
 //! per-axis early-outs, one exact squared compare, and one octant
 //! `atan2` on the survivors -- so a whiffed swing costs a handful of
 //! loads and a connected one stays deep inside the budget's 10k-cycle
-//! combat line. Deliberately NOT per-bone hitboxes: capsule/point vs
-//! arc is the phase-3 shape (the cooked grip-local
-//! [`WeaponHitShapeRecord`]s stay a render/debug aid).
+//! combat line. Deliberately NOT weapon-shape hitboxes: capsule/point
+//! vs arc is the phase-3 shape, and rig-attached
+//! [`CombatCapsuleRecord`]s are the authored upgrade path. The cooked
+//! grip-local `WeaponHitShapeRecord` geometry is authoring-only data
+//! today: nothing at runtime reads the shapes (only the hitbox
+//! records' active frame windows, below).
 //!
 //! The player's arc parameters and ACTIVE window come from the cooked
 //! contract: the first PLAYER-flagged [`EquipmentRecord`] resolves a
@@ -290,10 +293,10 @@ fn scale_u16(value: u16, num: u32, den: u32) -> u16 {
 /// one right-hand arm), its arc fields size the swing, and its hitbox
 /// frame windows union into the active window. Room-agnostic on
 /// purpose -- the weapon follows the player across rooms even though
-/// the equipment RECORD is pinned to the spawn room (the render
-/// path's per-room filter is a separate, pre-existing visual quirk).
-/// No player equipment (or an all-zero weapon from a hand-rolled
-/// manifest) falls back to [`UNARMED`].
+/// the equipment RECORD is pinned to the spawn room (the render path
+/// matches: player equipment draws without a room filter). No player
+/// equipment (or an all-zero weapon from a hand-rolled manifest)
+/// falls back to [`UNARMED`].
 pub fn player_melee_spec(
     equipment: &'static [EquipmentRecord],
     weapons: &'static [LevelWeaponRecord],

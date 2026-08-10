@@ -209,7 +209,6 @@ pub(super) fn draw_player(
 
 /// Draw the player's attached equipment through the crate policy.
 pub(super) fn draw_player_equipment(
-    current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -243,7 +242,6 @@ pub(super) fn draw_player_equipment(
         model_tables(),
         MODEL_DRAW_KNOBS,
         model_scratch_arena(),
-        current_room,
         character,
         models,
         model_faces,
