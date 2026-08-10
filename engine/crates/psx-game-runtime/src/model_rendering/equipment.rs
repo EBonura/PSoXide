@@ -3,9 +3,9 @@ use psx_engine::JointWorldTransform;
 use psx_level::equipment_flags;
 
 #[derive(Copy, Clone)]
-struct AttachmentPose {
-    origin: WorldVertex,
-    rotation: Mat3I16,
+pub(super) struct AttachmentPose {
+    pub(super) origin: WorldVertex,
+    pub(super) rotation: Mat3I16,
 }
 
 pub(super) fn draw_player_equipment<
@@ -253,10 +253,93 @@ fn submit_equipped_weapon<
 /// Draw weapons riding NON-player equipment records: each record bound
 /// to a model instance composes its socket from the instance's LIVE
 /// pose (position, yaw, state clip, phase, via
-/// [`super::instances::instance_pose_context`]), so a wandering
+/// [`super::instances::resolve_instance_actor_pose`]), so a wandering
 /// enemy's sword follows its hand. Instances are room-resident, so
 /// unlike the player pass this one is room-gated and runs inside the
 /// per-room draw.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_instance_equipment_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    current_room: RoomIndex,
+    instance_pose: super::instances::InstanceActorPoseSnapshot,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    let mut out = EquipmentDrawStats::default();
+    let Some(inst) = tables.model_instances.get(instance_pose.instance_index()) else {
+        return out;
+    };
+    if inst.room != current_room {
+        return out;
+    }
+    let mut drawn = 0usize;
+    for equipment in tables.equipment {
+        if equipment.flags & equipment_flags::PLAYER != 0
+            || equipment.model_instance == psx_level::EquipmentRecord::NO_INSTANCE
+            || equipment.model_instance as usize != instance_pose.instance_index()
+            || equipment.room != current_room
+            || drawn >= knobs.max_equipment_draws
+        {
+            continue;
+        }
+        let Some(stats) = submit_instance_equipment_record_from_pose::<
+            MAX_RUNTIME_MODELS,
+            MAX_RUNTIME_MODEL_CLIPS,
+            MODEL_VERTEX_CAP,
+            JOINT_CAP,
+            OT_DEPTH,
+            PROFILE,
+        >(
+            tables,
+            equipment,
+            instance_pose,
+            knobs,
+            scratch,
+            models,
+            model_faces,
+            model_parts,
+            model_vertices,
+            clips,
+            elapsed_tick,
+            video_hz,
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
+        ) else {
+            continue;
+        };
+        accumulate_model_stats(&mut out.stats, stats);
+        if stats.primitive_overflow || stats.command_overflow {
+            out.draws = drawn as u16;
+            return out;
+        }
+        drawn += 1;
+        out.draws = drawn as u16;
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_instance_equipment<
     const MAX_RUNTIME_MODELS: usize,
@@ -295,35 +378,18 @@ pub(super) fn draw_instance_equipment<
             continue;
         }
         let instance_index = equipment.model_instance as usize;
-        let Some(inst) = tables.model_instances.get(instance_index) else {
-            continue;
-        };
-        let Some(context) = super::instances::instance_pose_context(
+        let Some(context) = super::instances::resolve_instance_actor_pose(
             tables,
             models,
             clips,
             pose_overrides,
             instance_index,
-            inst,
             elapsed_tick,
             video_hz,
         ) else {
             continue;
         };
-        let Some(weapon) = tables.weapons.get(equipment.weapon.to_usize()) else {
-            continue;
-        };
-        let Some(socket) = find_model_socket(tables, context.model, equipment.character_socket)
-            .or_else(|| find_model_socket(tables, context.model, weapon.default_character_socket))
-        else {
-            continue;
-        };
-        // Instances render without crossfades, so the socket samples
-        // the same single clip the body draws with.
-        let Some(socket_pose) = attachment_socket_pose(context.pose, socket) else {
-            continue;
-        };
-        let Some(stats) = submit_equipped_weapon::<
+        let Some(stats) = submit_instance_equipment_record_from_pose::<
             MAX_RUNTIME_MODELS,
             MAX_RUNTIME_MODEL_CLIPS,
             MODEL_VERTEX_CAP,
@@ -331,8 +397,9 @@ pub(super) fn draw_instance_equipment<
             OT_DEPTH,
             PROFILE,
         >(
-            weapon,
-            socket_pose,
+            tables,
+            equipment,
+            context,
             knobs,
             scratch,
             models,
@@ -361,6 +428,70 @@ pub(super) fn draw_instance_equipment<
     out
 }
 
+#[allow(clippy::too_many_arguments)]
+fn submit_instance_equipment_record_from_pose<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    equipment: &psx_level::EquipmentRecord,
+    instance_pose: super::instances::InstanceActorPoseSnapshot,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> Option<TexturedModelRenderStats> {
+    let weapon = tables.weapons.get(equipment.weapon.to_usize())?;
+    let socket = find_model_socket(tables, instance_pose.model(), equipment.character_socket)
+        .or_else(|| {
+            find_model_socket(
+                tables,
+                instance_pose.model(),
+                weapon.default_character_socket,
+            )
+        })?;
+    let socket_pose = attachment_socket_pose(instance_pose.pose(), socket)?;
+    submit_equipped_weapon::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        PROFILE,
+    >(
+        weapon,
+        socket_pose,
+        knobs,
+        scratch,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        triangles,
+        world,
+    )
+}
+
 fn find_model_socket(
     tables: ModelTables,
     model: RuntimeModelAsset,
@@ -374,7 +505,7 @@ fn find_model_socket(
     sockets.iter().find(|socket| socket.name == name)
 }
 
-fn attachment_socket_pose(
+pub(super) fn attachment_socket_pose(
     pose: ActorPoseSnapshot,
     socket: &LevelModelSocketRecord,
 ) -> Option<AttachmentPose> {
