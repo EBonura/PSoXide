@@ -15,6 +15,7 @@ mod animation_pose_correction;
 pub mod brush;
 pub mod brush_collision_hulls;
 pub mod brush_compile;
+pub mod brush_light;
 pub mod brush_pack;
 pub mod brush_portal;
 pub mod floor_view;
