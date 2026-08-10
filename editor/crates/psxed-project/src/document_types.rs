@@ -332,6 +332,10 @@ pub struct ProjectDocument {
     /// Editor-only workspace preferences.
     #[serde(default)]
     pub editor_workspace: EditorWorkspaceState,
+    /// BSP compiler quality used by Build, Play, and Rebuild. Persisting this
+    /// in the project keeps GUI and CLI cooks on one deterministic policy.
+    #[serde(default)]
+    pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
     /// Cooked playtest cached-room depth sorting mode.
     #[serde(default)]
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
@@ -390,6 +394,7 @@ impl ProjectDocument {
             editor_camera: EditorCameraState::default(),
             editor_visibility: EditorVisibilityState::default(),
             editor_workspace: EditorWorkspaceState::default(),
+            bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
             runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
             runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),

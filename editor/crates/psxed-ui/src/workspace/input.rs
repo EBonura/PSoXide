@@ -1841,18 +1841,25 @@ impl EditorWorkspace {
             "Play"
         };
         // Play is a split button: the main face runs the project; the attached
-        // chevron opens a "boot at" picker that only *changes the setting*
-        // (where Play will boot from), without starting the game. Zero item
-        // spacing inside this group makes the two faces read as one control.
+        // chevron opens persistent boot/cook settings plus the latest host-side
+        // PSX envelope, without starting the game. Zero item spacing inside
+        // this group makes the two faces read as one control.
         let mut set_boot: Option<BootTarget> = None;
+        let mut set_cook_mode = None;
+        let mut focus_budget_target = None;
         let current_boot = self.project.boot;
+        let current_cook_mode = self.project.bsp_cook_mode;
         let boot_label = self.boot_target_label();
+        let budget = self.last_playtest_budget.clone().unwrap_or_else(|| {
+            psxed_project::playtest::estimate_playtest_budgets(&self.project, &self.project_dir)
+        });
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             if ui
                 .button(icons::label(icons::PLAY, play_label))
                 .on_hover_text(format!(
-                    "Cook, build, and run inside the 3D viewport. Boots at: {}. Shortcut: {}.",
+                    "{} BSP cook, build, and run inside the 3D viewport. Boots at: {}. Shortcut: {}.",
+                    current_cook_mode.label(),
                     boot_label,
                     command_shortcut_text("Enter")
                 ))
@@ -1893,12 +1900,94 @@ impl EditorWorkspace {
                         ui.close_menu();
                     }
                 }
+                ui.separator();
+                ui.label(RichText::new("BSP cook").color(STUDIO_TEXT_WEAK).small());
+                for mode in psxed_project::brush_world::BrushWorldCookMode::ALL {
+                    if ui
+                        .selectable_label(current_cook_mode == mode, mode.label())
+                        .on_hover_text(mode.description())
+                        .clicked()
+                    {
+                        set_cook_mode = Some(mode);
+                    }
+                }
+                ui.label(
+                    RichText::new(current_cook_mode.description())
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
+                ui.separator();
+                let stage = match budget.stage {
+                    psxed_project::playtest::PlaytestBudgetStage::AuthoredEstimate => {
+                        "PSX budget estimate (before cook)"
+                    }
+                    psxed_project::playtest::PlaytestBudgetStage::Cooked => {
+                        "PSX budget (last cook)"
+                    }
+                };
+                ui.label(RichText::new(stage).color(STUDIO_TEXT_WEAK).small());
+                ui.monospace(format!("BSP       {}", human_bytes_u64(budget.bsp_bytes as u64)));
+                ui.monospace(format!(
+                    "PVS       {} · row {}/{} B",
+                    human_bytes_u64(budget.pvs_bytes as u64),
+                    budget.pvs_row_bytes,
+                    psxed_project::playtest::PLAYTEST_PVS_ROW_LIMIT_BYTES,
+                ));
+                ui.monospace(format!(
+                    "Lighting  {}",
+                    human_bytes_u64(budget.light_bytes as u64)
+                ));
+                ui.monospace(format!(
+                    "Textures  {}",
+                    human_bytes_u64(budget.texture_bytes as u64)
+                ));
+                ui.monospace(format!(
+                    "RAM       {}/{} · {}/{} slots",
+                    human_bytes_u64(budget.ram_bytes as u64),
+                    human_bytes_u64(
+                        psxed_project::playtest::PLAYTEST_RAM_PHYSICAL_BYTES as u64
+                    ),
+                    budget.ram_asset_slots,
+                    psxed_project::playtest::PLAYTEST_RAM_ASSET_SLOT_LIMIT,
+                ));
+                ui.monospace(format!(
+                    "VRAM      {}/{} · {}/{} slots",
+                    human_bytes_u64(budget.vram_bytes as u64),
+                    human_bytes_u64(
+                        psxed_project::playtest::PLAYTEST_VRAM_PHYSICAL_BYTES as u64
+                    ),
+                    budget.vram_asset_slots,
+                    psxed_project::playtest::PLAYTEST_VRAM_ASSET_SLOT_LIMIT,
+                ));
+                ui.monospace(format!(
+                    "Packets   {}/{}",
+                    budget.packet_count,
+                    psxed_project::playtest::PLAYTEST_PACKET_LIMIT,
+                ));
+                if let Some(issue) = budget.first_actionable_issue() {
+                    ui.separator();
+                    ui.label(RichText::new(issue.message()).color(STUDIO_ERROR));
+                    if let Some(target) = issue.target {
+                        if ui.button("Focus budget offender").clicked() {
+                            focus_budget_target = Some(target);
+                            ui.close_menu();
+                        }
+                    }
+                } else {
+                    ui.weak("No host envelope exceeded; MIPS link/replay remain final gates.");
+                }
             })
             .response
-            .on_hover_text("Choose where Play boots: gameplay, or a UI scene (menu/title). Sets the boot point; does not start the game.");
+            .on_hover_text("Choose boot target and persistent BSP cook quality; inspect pre/post-cook PSX envelopes without starting Play.");
         });
         if let Some(target) = set_boot {
             self.set_boot_target(target);
+        }
+        if let Some(mode) = set_cook_mode {
+            self.set_bsp_cook_mode(mode);
+        }
+        if let Some(target) = focus_budget_target {
+            let _ = self.focus_playtest_validation_target(target);
         }
 
         if playtest_active
