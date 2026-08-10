@@ -525,8 +525,12 @@ impl Playtest {
             match record.kind {
                 psx_level::logic_kind::DOOR => {
                     if record.link != psx_level::LOGIC_LINK_NONE {
-                        self.box_props
-                            .set_door_open(usize::from(record.link), self.logic.door_open(index));
+                        let open = self.logic.door_open(index);
+                        if let Some(bsp) = self.bsp.as_mut() {
+                            bsp.set_door_open(usize::from(record.link), open);
+                        } else {
+                            self.box_props.set_door_open(usize::from(record.link), open);
+                        }
                     }
                 }
                 psx_level::logic_kind::MESSAGE => {
@@ -572,10 +576,39 @@ impl Playtest {
             if record.kind == psx_level::logic_kind::DOOR
                 && record.link != psx_level::LOGIC_LINK_NONE
             {
-                self.box_props
-                    .set_door_open(usize::from(record.link), self.logic.door_open(index));
+                let open = self.logic.door_open(index);
+                if let Some(bsp) = self.bsp.as_mut() {
+                    bsp.set_door_open(usize::from(record.link), open);
+                } else {
+                    self.box_props.set_door_open(usize::from(record.link), open);
+                }
             }
         }
+    }
+
+    /// First-playable proximity use routed through the normal logic runtime.
+    /// The brush cook stores each door's mover ordinal in `LevelLogicRecord::link`;
+    /// firing the record keeps relays/masters/state semantics authoritative.
+    pub(super) fn activate_nearest_bsp_door(&mut self, now: u32) -> bool {
+        let Some(mover) = self
+            .bsp
+            .as_ref()
+            .and_then(|bsp| bsp.nearest_door(self.motor.position(), BSP_USE_DISTANCE))
+        else {
+            return false;
+        };
+        let Some(index) = LOGIC.iter().position(|record| {
+            record.kind == psx_level::logic_kind::DOOR && usize::from(record.link) == mover
+        }) else {
+            panic!("PXBSP mover {mover} has no cooked Door logic record");
+        };
+        let fired =
+            self.logic
+                .fire_index(LOGIC, index, psx_game_runtime::logic::use_type::TOGGLE, now);
+        if fired {
+            self.dispatch_logic_effects();
+        }
+        fired
     }
 }
 

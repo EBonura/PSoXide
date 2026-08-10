@@ -155,6 +155,14 @@ impl Playtest {
     pub(super) fn init_gameplay(&mut self) {
         self.shadow_material = upload_shadow_texture();
         self.particle_material = upload_particle_texture();
+        self.bsp = if generated::PLAYTEST_USES_PXBSP {
+            let mut bsp = BspRuntime::load_manifest()
+                .unwrap_or_else(|error| panic!("cooked PXBSP initialization failed: {error}"));
+            let _ = bsp.refresh_materials();
+            Some(bsp)
+        } else {
+            None
+        };
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
@@ -262,6 +270,9 @@ impl Playtest {
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
         self.tick_gameplay_layer(ctx);
+        if let Some(bsp) = self.bsp.as_mut() {
+            bsp.tick_doors();
+        }
 
         if ctx.just_pressed(button::R3) {
             self.lock_target = match self.lock_target {
@@ -368,6 +379,14 @@ impl Playtest {
                     telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
                     return;
                 }
+            } else if ctx.just_pressed(INTERACT_BUTTON)
+                && self.activate_nearest_bsp_door(now.as_u32())
+            {
+                self.evade_run_hold_ticks = 0;
+                self.evade_run_hold_consumed = false;
+                self.camera_turning_last_tick = false;
+                telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
+                return;
             }
         }
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
@@ -434,51 +453,65 @@ impl Playtest {
         }
         telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
         telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
-        let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
-        let collision_room_count = if self.chunked_level() {
-            let catchup = delta_vblanks.min(4) as i32;
-            let margin = config
-                .radius
-                .saturating_add(config.run_speed.saturating_mul(catchup));
-            self.collect_collision_rooms(self.motor.position(), margin, &mut collision_rooms)
+        let motor_frame = if self.bsp.is_some() {
+            // The resident provider owns its bounded hull scratch and mover
+            // transforms, so BSP frames do not build the legacy grid-room
+            // collision set. Dynamic blocker composition remains a later,
+            // explicit provider layer rather than a hidden grid fallback.
+            telemetry::stage_end(telemetry::stage::SIM_COLLISION);
+            telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
+            self.bsp
+                .as_mut()
+                .expect("checked resident BSP backend")
+                .update_motor(&mut self.motor, input, config, delta_vblanks)
+                .expect("PXBSP player trace failed")
         } else {
-            0
-        };
-        let single_collision_room = if collision_room_count == 1 {
-            collision_rooms[0].room
-        } else {
-            None
-        };
-        let room_collision = match collision_room_count {
-            0 => self
-                .current_collision_room
-                .as_ref()
-                .map(|room| room.collision()),
-            1 => single_collision_room.as_ref().map(|room| room.collision()),
-            _ => None,
-        };
-        let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
-        let blocker_count = self.collect_collision_blockers(&mut blockers);
-        let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
-        let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
-        let collision = if collision_room_count <= 1 {
-            CharacterCollision::new_with_aabbs(
-                room_collision,
-                &blockers[..blocker_count],
-                &aabb_blockers[..aabb_blocker_count],
-            )
-        } else {
-            CharacterCollision::rooms_with_aabbs(
-                &collision_rooms[..collision_room_count],
-                &blockers[..blocker_count],
-                &aabb_blockers[..aabb_blocker_count],
-            )
-        };
-        telemetry::stage_end(telemetry::stage::SIM_COLLISION);
-        telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
-        let motor_frame =
+            let mut collision_rooms =
+                [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
+            let collision_room_count = if self.chunked_level() {
+                let catchup = delta_vblanks.min(4) as i32;
+                let margin = config
+                    .radius
+                    .saturating_add(config.run_speed.saturating_mul(catchup));
+                self.collect_collision_rooms(self.motor.position(), margin, &mut collision_rooms)
+            } else {
+                0
+            };
+            let single_collision_room = if collision_room_count == 1 {
+                collision_rooms[0].room
+            } else {
+                None
+            };
+            let room_collision = match collision_room_count {
+                0 => self
+                    .current_collision_room
+                    .as_ref()
+                    .map(|room| room.collision()),
+                1 => single_collision_room.as_ref().map(|room| room.collision()),
+                _ => None,
+            };
+            let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
+            let blocker_count = self.collect_collision_blockers(&mut blockers);
+            let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+            let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
+            let collision = if collision_room_count <= 1 {
+                CharacterCollision::new_with_aabbs(
+                    room_collision,
+                    &blockers[..blocker_count],
+                    &aabb_blockers[..aabb_blocker_count],
+                )
+            } else {
+                CharacterCollision::rooms_with_aabbs(
+                    &collision_rooms[..collision_room_count],
+                    &blockers[..blocker_count],
+                    &aabb_blockers[..aabb_blocker_count],
+                )
+            };
+            telemetry::stage_end(telemetry::stage::SIM_COLLISION);
+            telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
             self.motor
-                .update_vblanks_with_collision(collision, input, config, delta_vblanks);
+                .update_vblanks_with_collision(collision, input, config, delta_vblanks)
+        };
         telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;
         telemetry::stage_begin(telemetry::stage::SIM_ROOM_TRACK);
