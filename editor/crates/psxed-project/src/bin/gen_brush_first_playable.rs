@@ -81,6 +81,10 @@ fn main() {
     );
     scene.node_mut(spawn).expect("spawn node").transform = Transform3 {
         translation: [256.0, 65.0, 384.0],
+        // The normal playtest maps forward input through its camera yaw. Use
+        // the quarter-turn that makes the canonical UP route advance toward
+        // +X, without a BSP-only input convention.
+        rotation_degrees: [0.0, 270.0, 0.0],
         ..Transform3::default()
     };
 
@@ -103,9 +107,14 @@ fn main() {
         };
     }
 
+    let project_path = output_dir.join("project.ron");
     project
-        .save_to_path(output_dir.join("project.ron"))
+        .save_to_path(&project_path)
         .expect("save brush first playable");
+    let mut project_source =
+        std::fs::read_to_string(&project_path).expect("read generated brush first playable");
+    project_source.push('\n');
+    std::fs::write(&project_path, project_source).expect("finish brush first playable");
     write_walkthrough_tape(&output_dir);
 }
 
@@ -118,14 +127,17 @@ fn paint(brush: &mut Brush, material: psxed_project::ResourceId) {
 fn write_walkthrough_tape(output_dir: &Path) {
     const UP: u16 = 1 << 4;
     const CROSS: u16 = 1 << 14;
-    const FRAME_COUNT: usize = 180;
+    const FRAME_COUNT: usize = 220;
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
     writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
     writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
     for frame in 0..FRAME_COUNT {
-        let mut buttons = if frame < 150 { UP } else { 0 };
-        if (24..28).contains(&frame) {
+        // Normal Play has a short cold-load phase before gameplay owns input.
+        // Keep that pre-roll explicit, then reproduce the original 150-tick
+        // walk and fire use after 24 gameplay-relative movement samples.
+        let mut buttons = if (30..180).contains(&frame) { UP } else { 0 };
+        if (54..58).contains(&frame) {
             buttons |= CROSS;
         }
         writeln!(tape, "{frame},{buttons},128,128,128,128").unwrap();

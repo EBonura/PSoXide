@@ -99,6 +99,15 @@ fn main() -> ExitCode {
                             vram_seen.push(m.texture_asset_index);
                         }
                     }
+                    if i == 0 {
+                        if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
+                            for &texture in &world.texture_asset_indices {
+                                if !vram_seen.contains(&texture) {
+                                    vram_seen.push(texture);
+                                }
+                            }
+                        }
+                    }
                     if let Some(sky_texture) = r.sky.cloud_layer.texture_asset_index {
                         if !vram_seen.contains(&sky_texture) {
                             vram_seen.push(sky_texture);

@@ -983,6 +983,11 @@ pub fn build_package(
         }
         world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
             bytes: compiled.pxbsp.bytes,
+            texture_asset_indices: compiled
+                .textures
+                .iter()
+                .map(|texture| usize::from(texture.asset_id))
+                .collect(),
             movers: compiled
                 .movers
                 .iter()
