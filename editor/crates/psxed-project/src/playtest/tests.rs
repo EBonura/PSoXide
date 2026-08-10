@@ -33,6 +33,54 @@ fn test_wav_mono_44k() -> Vec<u8> {
 }
 
 #[test]
+fn brush_cook_diagnostics_keep_a_typed_editor_focus_target() {
+    let target =
+        brush_world_validation_target(&crate::brush_world::BrushWorldCookError::InvalidBrush {
+            brush: 7,
+            face: Some(2),
+        });
+    assert_eq!(
+        target,
+        Some(PlaytestValidationTarget::Brush {
+            brush: 7,
+            face: Some(2),
+        })
+    );
+
+    let node = NodeId(91);
+    assert_eq!(
+        brush_world_validation_target(
+            &crate::brush_world::BrushWorldCookError::PlayerSpawnInSolid(node)
+        ),
+        Some(PlaytestValidationTarget::Node(node))
+    );
+
+    let resource = ResourceId(41);
+    assert_eq!(
+        brush_world_validation_target(&crate::brush_world::BrushWorldCookError::MissingMaterial(
+            resource
+        )),
+        Some(PlaytestValidationTarget::Resource(resource))
+    );
+
+    let mut project = ProjectDocument::new("invalid brush package");
+    let mut invalid = crate::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    invalid.faces.truncate(3);
+    invalid.faces[0].points = [[0; 3]; 3];
+    project.active_scene_mut().brushes.push(invalid);
+    let (package, report) = build_package(&project, Path::new("."));
+    assert!(package.is_none());
+    assert_eq!(
+        report.focus_target,
+        Some(PlaytestValidationTarget::Brush {
+            brush: 0,
+            face: Some(0),
+        })
+    );
+    assert!(report.errors[0].contains("brush 0 has invalid face 0"));
+}
+
+#[test]
 fn tile_arch_cooks_surfaces_materials_and_segmented_collision() {
     let mut project = ProjectDocument::starter();
     let room_id = project

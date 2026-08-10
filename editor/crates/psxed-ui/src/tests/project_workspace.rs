@@ -247,6 +247,49 @@ fn editor_workspace_saves_with_project_and_restores_on_open() {
 }
 
 #[test]
+fn typed_brush_cook_issue_selects_and_frames_the_authored_brush() {
+    let mut project = ProjectDocument::new("brush diagnostic");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 64, 192],
+        ));
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.view_2d = false;
+    workspace.active_tool = ViewTool::Select;
+
+    assert!(workspace.focus_playtest_validation_target(
+        psxed_project::playtest::PlaytestValidationTarget::Brush {
+            brush: 0,
+            face: Some(3),
+        }
+    ));
+
+    assert_eq!(workspace.active_tool, ViewTool::Brush);
+    assert_eq!(workspace.selected_brush, Some(0));
+    assert_eq!(workspace.selected_brush_face, Some(3));
+    assert_eq!(workspace.camera_rig.target, [64, 32, 96]);
+    assert_eq!(workspace.status, "Framed selection");
+}
+
+#[test]
+fn stale_typed_cook_issue_target_falls_back_cleanly() {
+    let mut workspace = EditorWorkspace::with_project(
+        std::env::temp_dir(),
+        ProjectDocument::new("stale diagnostic"),
+    );
+    assert!(!workspace.focus_playtest_validation_target(
+        psxed_project::playtest::PlaytestValidationTarget::Brush {
+            brush: 99,
+            face: None,
+        }
+    ));
+    assert_eq!(workspace.selected_brush, None);
+}
+
+#[test]
 fn texture_import_resolution_label_marks_presets_and_custom_sizes() {
     assert_eq!(texture_import_resolution_label(32, 32), "32 x 32");
     assert_eq!(texture_import_resolution_label(40, 24), "Custom 40 x 24");

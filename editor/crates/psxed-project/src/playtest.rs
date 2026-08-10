@@ -98,6 +98,54 @@ const ATMOSPHERE_WIND_SPEED_MAX_Q4: i32 = 64;
 const UI_LARGE_IMAGE_STRIP_WIDTH: u16 = 160;
 const UI_LARGE_IMAGE_MAX_DIMENSION: u16 = 256;
 
+fn brush_world_validation_target(
+    error: &crate::brush_world::BrushWorldCookError,
+) -> Option<PlaytestValidationTarget> {
+    use crate::brush_world::BrushWorldCookError;
+
+    match error {
+        BrushWorldCookError::InvalidBrush { brush, face } => {
+            Some(PlaytestValidationTarget::Brush {
+                brush: *brush,
+                face: *face,
+            })
+        }
+        BrushWorldCookError::MissingMover { brush, .. }
+        | BrushWorldCookError::BrushOwnerIsNotDoor { brush, .. } => {
+            Some(PlaytestValidationTarget::Brush {
+                brush: *brush,
+                face: None,
+            })
+        }
+        BrushWorldCookError::UnsupportedMoverTransform(node)
+        | BrushWorldCookError::MoverOriginOutOfRange(node)
+        | BrushWorldCookError::MoverOriginInSolid(node)
+        | BrushWorldCookError::InvalidPlayerSpawnTransform(node)
+        | BrushWorldCookError::PlayerSpawnInSolid(node)
+        | BrushWorldCookError::InvalidDoorMotion { node, .. } => {
+            Some(PlaytestValidationTarget::Node(*node))
+        }
+        BrushWorldCookError::MissingMaterial(resource)
+        | BrushWorldCookError::ResourceIsNotMaterial(resource)
+        | BrushWorldCookError::MaterialTexture {
+            material: resource, ..
+        }
+        | BrushWorldCookError::InvalidTexture {
+            material: Some(resource),
+            ..
+        } => Some(PlaytestValidationTarget::Resource(*resource)),
+        BrushWorldCookError::EmptyStaticWorld
+        | BrushWorldCookError::InvalidWorldTree
+        | BrushWorldCookError::InvalidTexture { material: None, .. }
+        | BrushWorldCookError::ModelIndexOverflow
+        | BrushWorldCookError::TextureAssetOverflow
+        | BrushWorldCookError::Pack(_)
+        | BrushWorldCookError::Collision(_)
+        | BrushWorldCookError::Light(_)
+        | BrushWorldCookError::Pxbsp(_) => None,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CookedUiImageTexture {
     width: u16,
@@ -906,7 +954,12 @@ pub fn build_package(
         ) {
             Ok(compiled) => compiled,
             Err(error) => {
-                report.error(format!("brush world compile failed: {error:?}"));
+                let message = format!("brush world compile failed: {error}");
+                if let Some(target) = brush_world_validation_target(&error) {
+                    report.error_at(target, message);
+                } else {
+                    report.error(message);
+                }
                 return (None, report);
             }
         };
