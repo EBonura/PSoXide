@@ -1068,6 +1068,28 @@ impl Scene for Playtest {
                     );
                     telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
                     accumulate_model_instance_draw_stats(&mut total_instance_stats, instance_stats);
+                    // Enemy weapons ride their instances' live poses;
+                    // one pass per room after both instance depth
+                    // passes (the OT depth-sorts the weapon with its
+                    // body).
+                    telemetry::stage_begin(telemetry::stage::EQUIPMENT);
+                    let _ = draw_instance_equipment(
+                        active.index,
+                        self.gameplay_tick(ctx.sim_tick),
+                        ctx.video_hz,
+                        &room_camera,
+                        actor_options,
+                        &lighting,
+                        &self.models,
+                        &self.model_faces[..self.model_face_count],
+                        &self.model_parts[..self.model_part_count],
+                        &self.model_vertices[..self.model_vertex_count],
+                        &self.clips,
+                        entity_poses,
+                        &mut primitive_packets,
+                        &mut world,
+                    );
+                    telemetry::stage_end(telemetry::stage::EQUIPMENT);
                 }
             }
 

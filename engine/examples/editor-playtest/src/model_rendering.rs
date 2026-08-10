@@ -207,6 +207,53 @@ pub(super) fn draw_player(
     )
 }
 
+/// Draw non-player equipment riding its bound model instances (the
+/// per-room enemy weapon pass) through the crate policy.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_instance_equipment(
+    current_room: RoomIndex,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
+    clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    pose_overrides: &[ModelInstancePoseOverride],
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) -> EquipmentDrawStats {
+    mr::draw_instance_equipment::<
+        MAX_RUNTIME_MODELS,
+        MAX_RUNTIME_MODEL_CLIPS,
+        MODEL_VERTEX_CAP,
+        JOINT_CAP,
+        OT_DEPTH,
+        MODEL_PROFILE_ENABLED,
+    >(
+        model_tables(),
+        MODEL_DRAW_KNOBS,
+        model_scratch_arena(),
+        current_room,
+        elapsed_tick,
+        video_hz,
+        camera,
+        options,
+        lighting,
+        models,
+        model_faces,
+        model_parts,
+        model_vertices,
+        clips,
+        pose_overrides,
+        triangles,
+        world,
+    )
+}
+
 /// Draw the player's attached equipment through the crate policy.
 pub(super) fn draw_player_equipment(
     character: RuntimeCharacter,
