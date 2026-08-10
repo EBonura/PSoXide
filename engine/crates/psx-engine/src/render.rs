@@ -692,6 +692,17 @@ impl<const SLOTS: usize> PrimitivePacketScratch<SLOTS> {
     pub const ZERO: Self = Self {
         slots: [PrimitivePacketSlot::ZERO; SLOTS],
     };
+
+    /// Borrow the entire slot allocation as contiguous packet words.
+    ///
+    /// Retained renderers use this view when they materialize variable-width
+    /// packet streams directly. The typed arena and raw-word view are mutually
+    /// exclusive borrows, so a frame cannot accidentally use both layouts at
+    /// once.
+    pub fn words_mut(&mut self) -> &mut [u32] {
+        let words = SLOTS.saturating_mul(PRIMITIVE_PACKET_SLOT_WORDS);
+        unsafe { core::slice::from_raw_parts_mut(self.slots.as_mut_ptr().cast::<u32>(), words) }
+    }
 }
 
 /// Type-erased packet arena over [`PrimitivePacketScratch`].
@@ -932,5 +943,14 @@ mod tests {
         assert_eq!(*replayed, expected);
         assert_eq!(arena.len(), 1);
         assert_eq!(arena.remaining(), 0);
+    }
+
+    #[test]
+    fn packet_scratch_exposes_every_slot_as_contiguous_words() {
+        let mut scratch = PrimitivePacketScratch::<2>::ZERO;
+        let words = scratch.words_mut();
+        assert_eq!(words.len(), 2 * PRIMITIVE_PACKET_SLOT_WORDS);
+        words[PRIMITIVE_PACKET_SLOT_WORDS] = 0x1234_5678;
+        assert_eq!(scratch.slots[1].words[0], 0x1234_5678);
     }
 }
