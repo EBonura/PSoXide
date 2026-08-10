@@ -517,7 +517,9 @@ pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use psx_bsp::collision::{CONTENTS_EMPTY, CONTENTS_SOLID, CollisionHull};
+    use psx_bsp::collision::{
+        CollisionHull, Trace, TraceScratch, CONTENTS_EMPTY, CONTENTS_SOLID,
+    };
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
 
     fn hull(compiled: &CompiledCollision) -> CollisionHull<'_> {
@@ -538,6 +540,17 @@ mod tests {
             y: q12(y),
             z: q12(z),
         }
+    }
+
+    fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
+        let mut output = Trace::default();
+        assert!(hull.trace_into(
+            &start,
+            &end,
+            &mut TraceScratch::new(),
+            &mut output,
+        ));
+        output
     }
 
     fn surface_axis_coordinate(surface: &CompiledSurface, axis: usize) -> Option<f64> {
@@ -752,9 +765,7 @@ mod tests {
             .expect("hollowable");
         let compiled = compile_collision(&slabs);
         let hull = hull(&compiled);
-        let trace = hull
-            .trace(at(512, 400, 512), at(512, -400, 512))
-            .expect("trace");
+        let trace = trace(&hull, at(512, 400, 512), at(512, -400, 512));
         assert!(!trace.start_solid);
         assert!(trace.in_open);
         assert!(trace.fraction < Q12_ONE, "floor must obstruct");
@@ -775,7 +786,7 @@ mod tests {
         ]);
         let hull = hull(&compiled);
         assert_eq!(hull.point_contents(at(300, 64, 64)), Some(CONTENTS_EMPTY));
-        let trace = hull.trace(at(300, 64, 64), at(700, 64, 64)).expect("trace");
+        let trace = trace(&hull, at(300, 64, 64), at(700, 64, 64));
         assert!(trace.fraction < Q12_ONE);
         let end_world = trace.end.x as f64 / Q12_ONE as f64;
         assert!(

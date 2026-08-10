@@ -152,7 +152,7 @@ fn render_brush_manifest_source(textures: &[CompiledBrushTexture]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use psx_bsp::collision::Q12_ONE;
+    use psx_bsp::collision::{Trace, TraceScratch, Q12_ONE};
     use psx_bsp::mover::BrushDoorSet;
     use psx_bsp::pxbsp::{entity_class, entity_flags};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
@@ -214,22 +214,33 @@ mod tests {
             x: 768 * 4096,
             ..spawn.origin
         };
-        let world_trace = map
+        let mut scratch = TraceScratch::new();
+        let mut world_trace = Trace::default();
+        assert!(map
             .model_collision_hull(0, 1)
             .expect("world player hull")
-            .trace(spawn.origin, destination)
-            .expect("world trace");
+            .trace_into(
+                &spawn.origin,
+                &destination,
+                &mut scratch,
+                &mut world_trace,
+            ));
         assert_eq!(world_trace.fraction, Q12_ONE, "static doorway is clear");
 
         let mut doors = BrushDoorSet::<1>::default();
         doors.init_from_map(&map).expect("one runtime door");
         assert_eq!(doors.len(), 1);
-        let closed_trace = map
+        let mut closed_trace = Trace::default();
+        assert!(map
             .model_collision_hull(1, 1)
             .expect("door player hull")
             .transformed(doors.get(0).expect("door").transform())
-            .trace(spawn.origin, destination)
-            .expect("closed door trace");
+            .trace_into(
+                &spawn.origin,
+                &destination,
+                &mut scratch,
+                &mut closed_trace,
+            ));
         assert!(
             closed_trace.fraction < Q12_ONE,
             "closed door blocks the route"
@@ -239,12 +250,17 @@ mod tests {
         for _ in 0..60 {
             doors.tick();
         }
-        let open_trace = map
+        let mut open_trace = Trace::default();
+        assert!(map
             .model_collision_hull(1, 1)
             .expect("door player hull")
             .transformed(doors.get(0).expect("door").transform())
-            .trace(spawn.origin, destination)
-            .expect("open door trace");
+            .trace_into(
+                &spawn.origin,
+                &destination,
+                &mut scratch,
+                &mut open_trace,
+            ));
         assert_eq!(open_trace.fraction, Q12_ONE, "open door clears the route");
 
         let mut tape_doors = BrushDoorSet::<1>::default();
@@ -259,17 +275,22 @@ mod tests {
                 x: tape_origin.x + 4 * 4096,
                 ..tape_origin
             };
-            let mut trace = map
+            let mut trace = Trace::default();
+            assert!(map
                 .model_collision_hull(0, 1)
                 .expect("world player hull")
-                .trace(tape_origin, candidate)
-                .expect("tape world trace");
-            let door_trace = map
+                .trace_into(&tape_origin, &candidate, &mut scratch, &mut trace));
+            let mut door_trace = Trace::default();
+            assert!(map
                 .model_collision_hull(1, 1)
                 .expect("door player hull")
                 .transformed(tape_doors.get(0).expect("tape door").transform())
-                .trace(tape_origin, candidate)
-                .expect("tape door trace");
+                .trace_into(
+                    &tape_origin,
+                    &candidate,
+                    &mut scratch,
+                    &mut door_trace,
+                ));
             if door_trace.fraction < trace.fraction {
                 trace = door_trace;
             }
