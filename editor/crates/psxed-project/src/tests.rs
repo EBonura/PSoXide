@@ -1916,6 +1916,21 @@ fn project_missing_point_light_color_and_room_ambient_uses_defaults() {
 }
 
 #[test]
+fn legacy_door_motion_uses_brush_defaults() {
+    let door: LogicNodeKind = ron::from_str("Door(box_prop: \"Legacy Box\", start_open: true)")
+        .expect("legacy door parses");
+    assert_eq!(
+        door,
+        LogicNodeKind::Door {
+            box_prop: "Legacy Box".to_string(),
+            start_open: true,
+            open_offset: default_brush_door_open_offset(),
+            travel_ticks: default_brush_door_travel_ticks(),
+        }
+    );
+}
+
+#[test]
 fn adding_node_preserves_parent_child_relationship() {
     let mut scene = Scene::new("Test");
 

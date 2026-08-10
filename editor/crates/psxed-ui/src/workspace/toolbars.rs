@@ -205,6 +205,26 @@ impl EditorWorkspace {
                             draw_axes_gizmo(&painter, rect);
                             return;
                         }
+                        if !dnd_active && matches!(self.active_tool, ViewTool::Brush) {
+                            if response.hovered() {
+                                self.brush_tool_keyboard(ui);
+                            }
+                            if response.drag_started_by(egui::PointerButton::Primary) {
+                                if let Some(pos) = response.interact_pointer_pos() {
+                                    self.begin_brush_drag_2d(transform.screen_to_world(pos));
+                                }
+                            }
+                            if response.dragged_by(egui::PointerButton::Primary) {
+                                if let Some(pos) =
+                                    response.interact_pointer_pos().or(response.hover_pos())
+                                {
+                                    self.update_brush_drag_2d(transform.screen_to_world(pos));
+                                }
+                            }
+                            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                                self.commit_brush_drag();
+                            }
+                        }
                         if !dnd_active
                             && matches!(self.active_tool, ViewTool::Select)
                             && response.drag_started_by(egui::PointerButton::Primary)
@@ -254,6 +274,7 @@ impl EditorWorkspace {
                             self.snap_units,
                         );
                         draw_viewport_box_select_marquee(&painter, self.viewport_box_select_rect());
+                        self.draw_brush_footprints_2d(&painter, transform);
                         draw_axes_gizmo(&painter, rect);
                         if resource_drop_hovered || prefab_drop_hovered {
                             painter.rect_stroke(
@@ -392,6 +413,20 @@ impl EditorWorkspace {
             |ui| self.draw_tool_group_menu(ui),
         );
         match self.active_tool {
+            ViewTool::Brush => {
+                ui.separator();
+                if ui
+                    .button(format!("Clip keeps: {}", self.brush_clip_keep.label()))
+                    .on_hover_text("Which side(s) a two-point clip keeps")
+                    .clicked()
+                {
+                    self.brush_clip_keep = self.brush_clip_keep.next();
+                }
+                // Gesture-mode state only; per-brush and per-face editing
+                // lives in the inspector (draw_brush_inspector).
+                ui.checkbox(&mut self.brush_texture_lock, "Tex lock")
+                    .on_hover_text("Keep face textures anchored to the brush when it moves");
+            }
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
             ViewTool::Water => self.draw_water_toolbar_controls(ui),
@@ -977,6 +1012,17 @@ impl EditorWorkspace {
                     self.set_active_tool_cycle_value((tool, None));
                 }
             });
+        }
+
+        {
+            let selected = self.active_tool_cycle_value() == (ViewTool::Brush, None);
+            if toolbar_menu_choice(
+                ui,
+                icons::label(ViewTool::Brush.icon(), "Brush"),
+                selected,
+            ) {
+                self.set_active_tool_cycle_value((ViewTool::Brush, None));
+            }
         }
 
         ui.separator();

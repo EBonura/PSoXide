@@ -32,6 +32,7 @@
 #![allow(static_mut_refs)]
 
 extern crate psx_rt;
+extern crate alloc;
 
 #[cfg(all(target_arch = "mips", feature = "boot-trace"))]
 fn game_trace(message: &str) {
@@ -109,6 +110,7 @@ mod active_rooms;
 mod box_props;
 #[cfg(feature = "cd-stream-benchmark")]
 use psx_game_runtime::cd_stream;
+mod brush_playtest;
 mod character_runtime;
 mod debug_runtime;
 mod game_logic_runtime;
@@ -158,6 +160,11 @@ use water_runtime::*;
 #[allow(dead_code, unused_imports)]
 mod generated {
     include!(env!("PSXED_PLAYTEST_MANIFEST"));
+}
+
+#[allow(dead_code)]
+mod generated_brush {
+    include!(env!("PSXED_BRUSH_PLAYTEST_MANIFEST"));
 }
 
 use generated::{
@@ -981,6 +988,9 @@ static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zer
 
 #[no_mangle]
 fn main() -> ! {
+    if !generated_brush::BRUSH_WORLD_PXBSP.is_empty() {
+        brush_playtest::run();
+    }
     // Stamp the scene's boot state onto its link-time-zero storage BEFORE
     // any other use (see `SCENE` and `Playtest::init_zeroed`).
     // SAFETY: single-threaded boot path; the raw stamping happens before
