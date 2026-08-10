@@ -82,7 +82,9 @@ pub(crate) struct ModelAnimationViewerState {
     show_bones: bool,
     show_combat_capsules: bool,
     show_pose_corrections: bool,
+    show_attachment_sockets: bool,
     selected_combat_capsule: usize,
+    selected_attachment_socket: usize,
     selected_pose_joint: u16,
     selected_action: CharacterAnimationAction,
     capsule_edit_tool: CapsuleEditTool,
@@ -114,7 +116,9 @@ impl Default for ModelAnimationViewerState {
             show_bones: false,
             show_combat_capsules: false,
             show_pose_corrections: false,
+            show_attachment_sockets: false,
             selected_combat_capsule: 0,
+            selected_attachment_socket: 0,
             selected_pose_joint: 0,
             selected_action: CharacterAnimationAction::Idle,
             capsule_edit_tool: CapsuleEditTool::Move,
@@ -160,6 +164,7 @@ impl ModelAnimationViewerState {
                 self.selected_character = Some(id);
                 self.show_combat_capsules = true;
                 self.show_pose_corrections = false;
+                self.show_attachment_sockets = false;
                 self.selected_model = character.model;
                 self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
@@ -456,6 +461,7 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
             .on_hover_text("Visually attach hitboxes and hurtboxes to the selected Character rig");
         if clicked && state.show_combat_capsules {
             state.show_pose_corrections = false;
+            state.show_attachment_sockets = false;
         }
     });
     ui.add_enabled_ui(pose_available, |ui| {
@@ -467,6 +473,21 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
         response.on_hover_text("Author sparse joint corrections on the selected cooked clip");
         if clicked && state.show_pose_corrections {
             state.show_combat_capsules = false;
+            state.show_attachment_sockets = false;
+        }
+    });
+    ui.add_enabled_ui(state.selected_model.is_some(), |ui| {
+        let response = ui.toggle_value(
+            &mut state.show_attachment_sockets,
+            icons::label(icons::MAP_PIN, "Sockets"),
+        );
+        let clicked = response.clicked();
+        response.on_hover_text(
+            "Visually place weapon/attachment sockets on the selected model's rig",
+        );
+        if clicked && state.show_attachment_sockets {
+            state.show_combat_capsules = false;
+            state.show_pose_corrections = false;
         }
     });
     action
@@ -548,8 +569,45 @@ pub(crate) fn draw_model_animation_viewer(
             })
         })
         .flatten();
+    let socket_model_id = state
+        .show_attachment_sockets
+        .then_some(state.selected_model)
+        .flatten()
+        .filter(|id| {
+            project
+                .resource(*id)
+                .is_some_and(|resource| matches!(resource.data, ResourceData::Model(_)))
+        });
+    let sockets = socket_model_id
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(model) => Some(model.attachments.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if state.selected_attachment_socket >= sockets.len() {
+        state.selected_attachment_socket = sockets.len().saturating_sub(1);
+    }
+    let preview_sockets = if socket_model_id.is_some() {
+        sockets
+            .iter()
+            .enumerate()
+            .map(|(index, socket)| model_import_preview::PreviewSocket {
+                joint: socket.joint,
+                translation: socket.translation,
+                rotation_q12: socket.rotation_q12,
+                selected: index == state.selected_attachment_socket,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let selected_joint = if state.show_pose_corrections {
         Some(state.selected_pose_joint)
+    } else if socket_model_id.is_some() {
+        sockets
+            .get(state.selected_attachment_socket)
+            .map(|socket| socket.joint)
     } else {
         state
             .show_combat_capsules
@@ -560,8 +618,9 @@ pub(crate) fn draw_model_animation_viewer(
             })
             .flatten()
     };
-    let joint_picking =
-        (state.show_combat_capsules && character_id.is_some()) || pose_clip_id.is_some();
+    let joint_picking = (state.show_combat_capsules && character_id.is_some())
+        || pose_clip_id.is_some()
+        || socket_model_id.is_some();
     let authoring_panel_open = joint_picking;
     let assigned_action_clip = character_id.and_then(|character_id| {
         capsules
@@ -610,6 +669,7 @@ pub(crate) fn draw_model_animation_viewer(
                                 clip_context.as_deref(),
                                 preview_texture,
                                 &preview_capsules,
+                                &preview_sockets,
                                 selected_joint,
                                 joint_picking,
                             );
@@ -641,6 +701,14 @@ pub(crate) fn draw_model_animation_viewer(
                                     joint_count,
                                     max_frame,
                                 );
+                            } else if let Some(model_id) = socket_model_id {
+                                editor_changed |= draw_attachment_socket_editor(
+                                    ui,
+                                    project,
+                                    model_id,
+                                    state,
+                                    model_context.as_deref(),
+                                );
                             } else if let Some(character_id) = character_id {
                                 editor_changed |= draw_combat_capsule_editor(
                                     ui,
@@ -662,6 +730,7 @@ pub(crate) fn draw_model_animation_viewer(
                     selected_clip.as_ref(),
                     clip_context.as_deref(),
                     preview_texture,
+                    &[],
                     &[],
                     None,
                     false,
@@ -692,6 +761,14 @@ pub(crate) fn draw_model_animation_viewer(
     if let Some(joint) = preview_interaction.clicked_joint {
         if state.show_pose_corrections {
             state.selected_pose_joint = joint;
+        } else if let Some(model_id) = socket_model_id {
+            changed |= attach_selected_socket_to_joint(
+                project,
+                model_id,
+                state.selected_attachment_socket,
+                joint,
+            );
+            preview_texture.take();
         } else if let Some(character_id) = character_id {
             changed |= attach_selected_capsule_to_joint(
                 project,
@@ -703,16 +780,28 @@ pub(crate) fn draw_model_animation_viewer(
             preview_texture.take();
         }
     }
-    if let (Some(character_id), Some(delta)) = (character_id, preview_interaction.edit_delta) {
-        changed |= manipulate_selected_capsule(
-            project,
-            character_id,
-            state.selected_combat_capsule,
-            state.capsule_edit_tool,
-            state.capsule_edit_axis,
-            delta,
-        );
-        preview_texture.take();
+    if let Some(delta) = preview_interaction.edit_delta {
+        if let Some(model_id) = socket_model_id {
+            changed |= manipulate_selected_socket(
+                project,
+                model_id,
+                state.selected_attachment_socket,
+                state.capsule_edit_tool,
+                state.capsule_edit_axis,
+                delta,
+            );
+            preview_texture.take();
+        } else if let Some(character_id) = character_id {
+            changed |= manipulate_selected_capsule(
+                project,
+                character_id,
+                state.selected_combat_capsule,
+                state.capsule_edit_tool,
+                state.capsule_edit_axis,
+                delta,
+            );
+            preview_texture.take();
+        }
     }
     // The editor mutates the project in place and reports whether persistence
     // state must be updated by the workspace.
@@ -2184,6 +2273,173 @@ fn combat_u16_editor(ui: &mut egui::Ui, label: &str, value: &mut u16, min: u16, 
     .inner
 }
 
+fn draw_attachment_socket_editor(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    model_id: ResourceId,
+    state: &mut ModelAnimationViewerState,
+    model: Option<&LoadedModelContext>,
+) -> bool {
+    let mut changed = false;
+    // Sockets have no Resize concept; fall back before the tool row
+    // renders so the UI never shows a dead selection.
+    if state.capsule_edit_tool == CapsuleEditTool::Resize {
+        state.capsule_edit_tool = CapsuleEditTool::Move;
+    }
+    ui.heading("Attachment Sockets");
+    ui.label(
+        RichText::new(
+            "Select a socket, then click a highlighted body joint to attach it. \
+             Drag in the viewport to place; the triad shows the frame a weapon inherits.",
+        )
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+    ui.add_space(6.0);
+
+    let joint_count = model
+        .and_then(|model| psx_asset::Model::from_bytes(&model.model_bytes).ok())
+        .map(|model| model.joint_count());
+
+    let Some(resource) = project.resource_mut(model_id) else {
+        ui.colored_label(Color32::from_rgb(220, 120, 100), "Model is missing");
+        return false;
+    };
+    let ResourceData::Model(model_resource) = &mut resource.data else {
+        return false;
+    };
+    let sockets = &mut model_resource.attachments;
+
+    let socket_options = sockets
+        .iter()
+        .enumerate()
+        .map(|(index, socket)| (index, format!("{} · joint {}", socket.name, socket.joint)))
+        .collect::<Vec<_>>();
+    ui.horizontal(|ui| {
+        let selected_label = sockets
+            .get(state.selected_attachment_socket)
+            .map(|socket| socket.name.as_str())
+            .unwrap_or("No socket");
+        let mut selected = sockets
+            .get(state.selected_attachment_socket)
+            .map(|_| state.selected_attachment_socket);
+        if searchable_picker(
+            ui,
+            "animation-attachment-socket",
+            &mut selected,
+            selected_label,
+            &socket_options,
+            SearchablePickerConfig::required()
+                .with_width(176.0)
+                .with_search_hint("Search sockets…"),
+        ) {
+            state.selected_attachment_socket =
+                selected.unwrap_or(state.selected_attachment_socket);
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Viewport");
+        ui.selectable_value(&mut state.capsule_edit_tool, CapsuleEditTool::Move, "Move");
+        ui.selectable_value(
+            &mut state.capsule_edit_tool,
+            CapsuleEditTool::Rotate,
+            "Rotate",
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Local axis");
+        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::X, "X");
+        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::Y, "Y");
+        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::Z, "Z");
+    });
+    ui.label(
+        RichText::new(match state.capsule_edit_tool {
+            CapsuleEditTool::Rotate => {
+                "Left-drag rotates the socket around the selected local axis."
+            }
+            _ => "Left-drag moves the socket along the selected bone-local axis.",
+        })
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+    ui.separator();
+
+    changed |=
+        crate::inspector_character_ui::attachment_socket_list_editor(ui, sockets, joint_count);
+    if state.selected_attachment_socket >= sockets.len() {
+        state.selected_attachment_socket = sockets.len().saturating_sub(1);
+    }
+    changed
+}
+
+fn attach_selected_socket_to_joint(
+    project: &mut ProjectDocument,
+    model_id: ResourceId,
+    socket_index: usize,
+    joint: u16,
+) -> bool {
+    let Some(resource) = project.resource_mut(model_id) else {
+        return false;
+    };
+    let ResourceData::Model(model) = &mut resource.data else {
+        return false;
+    };
+    let Some(socket) = model.attachments.get_mut(socket_index) else {
+        return false;
+    };
+    socket.joint = joint;
+    // A click on a new joint means "re-anchor here": the old bone's
+    // offset is meaningless on the new bone, so drop it and let the
+    // drag tools re-author it. The rotation survives because grip
+    // orientation is usually rig-wide, not per-bone.
+    socket.translation = [0, 0, 0];
+    true
+}
+
+fn manipulate_selected_socket(
+    project: &mut ProjectDocument,
+    model_id: ResourceId,
+    socket_index: usize,
+    tool: CapsuleEditTool,
+    axis: CapsuleEditAxis,
+    delta: Vec2,
+) -> bool {
+    let Some(resource) = project.resource_mut(model_id) else {
+        return false;
+    };
+    let ResourceData::Model(model) = &mut resource.data else {
+        return false;
+    };
+    let Some(socket) = model.attachments.get_mut(socket_index) else {
+        return false;
+    };
+    match tool {
+        CapsuleEditTool::Rotate => {
+            // 12 q12 turn-units per pixel is the capsule editor's 0.018
+            // radians per pixel expressed in turns.
+            let amount = (delta.x * 12.0).round() as i32;
+            if amount == 0 {
+                return false;
+            }
+            let index = axis.index();
+            let turned = (i32::from(socket.rotation_q12[index]) + amount).rem_euclid(4096);
+            socket.rotation_q12[index] = turned as i16;
+        }
+        _ => {
+            let amount = ((delta.x - delta.y) * 2.0).round() as i32;
+            if amount == 0 {
+                return false;
+            }
+            let index = axis.index();
+            socket.translation[index] = socket.translation[index]
+                .saturating_add(amount)
+                .clamp(i16::MIN as i32, i16::MAX as i32);
+        }
+    }
+    true
+}
+
 fn attach_selected_capsule_to_joint(
     project: &mut ProjectDocument,
     character_id: ResourceId,
@@ -2651,6 +2907,7 @@ fn draw_preview(
     clip: Option<&LoadedClipContext>,
     preview_texture: &mut Option<egui::TextureHandle>,
     combat_capsules: &[model_import_preview::PreviewCombatCapsule],
+    sockets: &[model_import_preview::PreviewSocket],
     selected_joint: Option<u16>,
     joint_picking: bool,
 ) -> PreviewInteraction {
@@ -2666,7 +2923,7 @@ fn draw_preview(
         state.yaw_q12 = (state.yaw_q12 - (delta.x * 6.0) as i32).rem_euclid(4096);
         state.pitch_q12 = (state.pitch_q12 - (delta.y * 4.0) as i32).clamp(64, 960);
     }
-    let edit_delta = (!combat_capsules.is_empty()
+    let edit_delta = ((!combat_capsules.is_empty() || !sockets.is_empty())
         && response.dragged_by(egui::PointerButton::Primary)
         && pointer_delta != Vec2::ZERO)
         .then_some(pointer_delta);
@@ -2812,6 +3069,7 @@ fn draw_preview(
         model_import_preview::euler_rotation_q12(model.authored_rotation_q12),
         render_size,
         combat_capsules,
+        sockets,
         selected_joint,
     );
 
@@ -4039,5 +4297,99 @@ mod focus_tests {
 
         assert_ne!(base.bytes, corrected.bytes);
         assert_eq!(base.animation_stats, corrected.animation_stats);
+    }
+
+    fn project_with_socket_model() -> (ProjectDocument, ResourceId) {
+        let mut project = ProjectDocument::new("socket-editor");
+        let id = project.add_resource(
+            "Socket Test Model",
+            ResourceData::Model(psxed_project::ModelResource {
+                model_path: "assets/models/test/test.psxmdl".to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: None,
+                world_height: 1024,
+                collision_radius: 192,
+                scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                default_visual_yaw_q12: 0,
+                attachments: vec![psxed_project::AttachmentSocket {
+                    name: "right_hand_grip".to_string(),
+                    joint: 3,
+                    translation: [10, 20, 30],
+                    rotation_q12: [0, 1024, 0],
+                }],
+            }),
+        );
+        (project, id)
+    }
+
+    fn first_socket(project: &ProjectDocument, id: ResourceId) -> psxed_project::AttachmentSocket {
+        match &project.resource(id).expect("model resource").data {
+            ResourceData::Model(model) => model.attachments[0].clone(),
+            other => panic!("expected Model, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_socket_reanchors_on_the_new_joint() {
+        let (mut project, id) = project_with_socket_model();
+        assert!(attach_selected_socket_to_joint(&mut project, id, 0, 9));
+        let socket = first_socket(&project, id);
+        assert_eq!(socket.joint, 9);
+        assert_eq!(
+            socket.translation,
+            [0, 0, 0],
+            "attaching re-anchors the offset at the new bone"
+        );
+        assert_eq!(
+            socket.rotation_q12,
+            [0, 1024, 0],
+            "grip orientation survives re-attachment"
+        );
+        assert!(
+            !attach_selected_socket_to_joint(&mut project, id, 5, 9),
+            "an out-of-range socket index is a no-op"
+        );
+    }
+
+    #[test]
+    fn manipulate_socket_moves_along_the_selected_axis() {
+        let (mut project, id) = project_with_socket_model();
+        assert!(manipulate_selected_socket(
+            &mut project,
+            id,
+            0,
+            CapsuleEditTool::Move,
+            CapsuleEditAxis::Y,
+            Vec2::new(6.0, -4.0),
+        ));
+        // (6 - -4) * 2 = 20 units along Y.
+        assert_eq!(first_socket(&project, id).translation, [10, 40, 30]);
+        assert!(
+            !manipulate_selected_socket(
+                &mut project,
+                id,
+                0,
+                CapsuleEditTool::Move,
+                CapsuleEditAxis::Y,
+                Vec2::ZERO,
+            ),
+            "a zero drag is a no-op"
+        );
+    }
+
+    #[test]
+    fn manipulate_socket_rotates_in_q12_turns_and_wraps() {
+        let (mut project, id) = project_with_socket_model();
+        assert!(manipulate_selected_socket(
+            &mut project,
+            id,
+            0,
+            CapsuleEditTool::Rotate,
+            CapsuleEditAxis::Y,
+            Vec2::new(300.0, 0.0),
+        ));
+        // 1024 + 300 * 12 = 4624, wrapping one full turn to 528.
+        assert_eq!(first_socket(&project, id).rotation_q12, [0, 528, 0]);
     }
 }
