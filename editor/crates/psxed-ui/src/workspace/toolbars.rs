@@ -401,6 +401,16 @@ impl EditorWorkspace {
                 {
                     self.brush_clip_keep = self.brush_clip_keep.next();
                 }
+                if self.selected_brush.is_some() && self.selected_brush_face.is_some() {
+                    ui.separator();
+                    self.draw_brush_material_picker(ui);
+                    if ui
+                        .button(icons::label(icons::PALETTE, "Apply to face"))
+                        .clicked()
+                    {
+                        self.apply_material_to_selected_brush_face();
+                    }
+                }
                 if let Some(index) = self.selected_brush {
                     if ui.button(icons::label(icons::PLUS, "Duplicate")).clicked() {
                         self.push_undo();
@@ -419,6 +429,7 @@ impl EditorWorkspace {
                         self.push_undo();
                         self.project.active_scene_mut().brushes.remove(index);
                         self.selected_brush = None;
+                        self.selected_brush_face = None;
                     }
                 }
             }

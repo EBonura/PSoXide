@@ -10,12 +10,25 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One brush face: three integer points defining the plane. Material and
-/// UV state attach at scene integration, not here.
+/// One brush face: three integer points defining the plane, plus the
+/// face's material (None = untextured default).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrushFace {
     /// Plane points, counter-clockwise viewed from outside the brush.
     pub points: [[i32; 3]; 3],
+    /// Material applied to this face.
+    #[serde(default)]
+    pub material: Option<crate::ResourceId>,
+}
+
+impl BrushFace {
+    /// Face from plane points with no material.
+    pub const fn from_points(points: [[i32; 3]; 3]) -> Self {
+        Self {
+            points,
+            material: None,
+        }
+    }
 }
 
 /// A convex brush as an unordered set of faces.
@@ -113,7 +126,7 @@ impl Brush {
             [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], // +Y
         ];
         Self {
-            faces: faces.map(|points| BrushFace { points }).into(),
+            faces: faces.map(BrushFace::from_points).into(),
         }
     }
 
@@ -230,10 +243,8 @@ impl Brush {
             // nothing valid and the side is dropped.
             half.solve().is_valid().then_some(half)
         };
-        let back = make(BrushFace { points });
-        let front = make(BrushFace {
-            points: [points[0], points[2], points[1]],
-        });
+        let back = make(BrushFace::from_points(points));
+        let front = make(BrushFace::from_points([points[0], points[2], points[1]]));
         ClippedBrush { back, front }
     }
 
@@ -457,9 +468,7 @@ mod tests {
         let mut brush = Brush::cuboid([0, 0, 0], [128, 128, 128]);
         // Replace +Y with a slope through (0,128,*) and (128,0,*): CCW from
         // outside (above), normal (1,1,0)-ish.
-        brush.faces[5] = BrushFace {
-            points: [[0, 128, 0], [0, 128, 128], [128, 0, 128]],
-        };
+        brush.faces[5] = BrushFace::from_points([[0, 128, 0], [0, 128, 128], [128, 0, 128]]);
         let solved = brush.solve();
         assert!(solved.is_valid());
         let counts: Vec<usize> = solved
@@ -483,9 +492,7 @@ mod tests {
     fn redundant_face_is_dropped_not_fatal() {
         let mut brush = Brush::cuboid([0, 0, 0], [64, 64, 64]);
         // A plane far outside the cube contributes no polygon.
-        brush.faces.push(BrushFace {
-            points: [[0, 200, 0], [0, 200, 64], [64, 200, 64]],
-        });
+        brush.faces.push(BrushFace::from_points([[0, 200, 0], [0, 200, 64], [64, 200, 64]]));
         let solved = brush.solve();
         assert!(solved.is_valid());
         assert!(solved.polygons[6].is_none());
@@ -496,9 +503,7 @@ mod tests {
     fn collinear_points_are_degenerate() {
         assert!(Plane::from_points([[0, 0, 0], [1, 1, 1], [2, 2, 2]]).is_none());
         let mut brush = Brush::cuboid([0, 0, 0], [64, 64, 64]);
-        brush.faces[0] = BrushFace {
-            points: [[0, 0, 0], [1, 1, 1], [2, 2, 2]],
-        };
+        brush.faces[0] = BrushFace::from_points([[0, 0, 0], [1, 1, 1], [2, 2, 2]]);
         let solved = brush.solve();
         assert!(solved.polygons[0].is_none());
     }
@@ -589,6 +594,28 @@ mod tests {
         assert_eq!(paraxial_uv(&wall_x, [0.0, 10.0, 20.0]), [20.0, -10.0]);
         let wall_z = Plane::from_points([[0, 0, 0], [0, 64, 0], [64, 0, 0]]).unwrap();
         assert_eq!(paraxial_uv(&wall_z, [10.0, 20.0, 0.0]), [10.0, -20.0]);
+    }
+
+    #[test]
+    fn face_materials_survive_clip_and_extrude() {
+        let mut brush = Brush::cuboid([0, 0, 0], [128, 64, 64]);
+        brush.faces[3].material = Some(crate::ResourceId(7)); // +X face
+        let clipped = brush.clip([[64, 0, 0], [64, 64, 0], [64, 0, 64]]);
+        let front = clipped.front.expect("front half");
+        assert!(
+            front
+                .faces
+                .iter()
+                .any(|f| f.material == Some(crate::ResourceId(7))),
+            "+X face keeps its material in the front half"
+        );
+        let back = clipped.back.expect("back half");
+        assert!(back.faces.iter().all(|f| f.material.is_none()));
+
+        let mut extruded = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        extruded.faces[0].material = Some(crate::ResourceId(9));
+        extruded.translate_face(0, [0, 0, -32]);
+        assert_eq!(extruded.faces[0].material, Some(crate::ResourceId(9)));
     }
 
     #[test]
