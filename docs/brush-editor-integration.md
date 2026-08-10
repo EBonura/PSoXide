@@ -77,12 +77,10 @@ tools work.
 4. Create tool + extrude. At this point simple rooms can be boxed out
    end to end.
 5. Clip tool; UV axes + texture lock; vertex tools last.
-6. Play stopgap before the P5 compiler exists: cook brushes to the
-   existing free-surface record path (the `PlaytestBoxPropSurface`
-   pattern) with per-brush AABB collision, so brush maps render and are
-   roughly walkable in embedded Play. The real BSP/vis/light compile and
-   clipnode collision replace this at P5, with collision arriving via the
-   quake-core crate from the quake-psx all-Rust port.
+6. SUPERSEDED (owner decision 2026-08-10): no Play stopgap. Embedded
+   Play waits for the real brush compiler and BSP runtime; see
+   docs/bsp-engine-overhaul.md for the first-playable slice (which
+   includes movers and release-cook light baking).
 
 ## Open items
 
