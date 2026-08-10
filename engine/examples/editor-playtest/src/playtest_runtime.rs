@@ -214,6 +214,17 @@ impl Playtest {
         if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
             config.gravity_per_tick = room.gravity_per_tick;
         }
+        if self.bsp.is_some() {
+            // Hull one is currently the explicit brush-cook player contract.
+            // This assignment is the seam where Draft/Release cooks can select
+            // an authored body hull once the dimensions enter the manifest.
+            config.radius = BSP_PLAYER_RADIUS;
+            config.height = BSP_PLAYER_HEIGHT;
+            if self.character.is_none() {
+                config.walk_speed = BSP_FALLBACK_PLAYER_SPEED;
+                config.run_speed = BSP_FALLBACK_PLAYER_SPEED;
+            }
+        }
         config
     }
 
@@ -557,6 +568,17 @@ impl Playtest {
     }
 
     pub(super) fn camera_config(&self) -> ThirdPersonCameraConfig {
+        if self.bsp.is_some() && self.character.is_none() {
+            let mut config = ThirdPersonCameraConfig::character(
+                BSP_FALLBACK_CAMERA_DISTANCE,
+                BSP_FALLBACK_CAMERA_HEIGHT,
+                BSP_FALLBACK_CAMERA_TARGET_HEIGHT,
+            );
+            config.min_floor_clearance = BSP_FALLBACK_CAMERA_CLEARANCE;
+            config.collision_margin = BSP_FALLBACK_CAMERA_MARGIN;
+            config.collision_solve_interval = CAMERA_COLLISION_SOLVE_INTERVAL;
+            return config;
+        }
         let camera = ROOMS
             .get(self.room_index.to_usize())
             .map(|room| room.camera)
@@ -655,6 +677,12 @@ impl Playtest {
             .or_else(|| self.soft_lock_target_position());
         let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
         let config = self.camera_config();
+        if let Some(bsp) = self.bsp.as_mut() {
+            return bsp
+                .update_camera(&mut self.camera, target, input, config, 1)
+                .expect("PXBSP camera trace failed")
+                .camera;
+        }
         if CAMERA_COLLISION_ENABLED && self.chunked_level() {
             // The camera's blocking-room set changes only when the player
             // crosses a coarse cell or the active window changes, so the
