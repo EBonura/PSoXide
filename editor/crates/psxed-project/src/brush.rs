@@ -272,6 +272,47 @@ impl Brush {
     }
 }
 
+impl Brush {
+    /// Cuboid between two arbitrary opposite corners (create-tool core:
+    /// drag order does not matter). `None` when any axis is flat.
+    pub fn cuboid_from_corners(a: [i32; 3], b: [i32; 3]) -> Option<Self> {
+        let min = [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])];
+        let max = [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])];
+        (0..3).all(|axis| min[axis] < max[axis]).then(|| Self::cuboid(min, max))
+    }
+
+    /// Snap every authored point to a grid step (kept positive; the
+    /// resulting faces may degenerate, which `solve` reports per face).
+    pub fn snap_to_grid(&mut self, step: i32) {
+        let step = step.max(1);
+        // Round to nearest: div_euclid floors, so one +half shift is
+        // correct for negatives too (-1 -> 0, -17 -> -32 at step 32).
+        let snap = |v: i32| (v + step / 2).div_euclid(step) * step;
+        for face in &mut self.faces {
+            for point in &mut face.points {
+                for axis in 0..3 {
+                    point[axis] = snap(point[axis]);
+                }
+            }
+        }
+    }
+}
+
+/// Paraxial (dominant-axis) texture projection of a world position for a
+/// face with the given plane: the Quake-style default mapping. Returns
+/// texel-space (u, v) before per-face offset/rotation/scale.
+pub fn paraxial_uv(plane: &Plane, world: [f64; 3]) -> [f64; 2] {
+    let n = plane.normal.map(|v| v as f64);
+    let abs = n.map(f64::abs);
+    if abs[1] >= abs[0] && abs[1] >= abs[2] {
+        [world[0], world[2]] // floor/ceiling: XZ
+    } else if abs[0] >= abs[2] {
+        [world[2], -world[1]] // X-facing wall: ZY
+    } else {
+        [world[0], -world[1]] // Z-facing wall: XY
+    }
+}
+
 /// Large quad on `plane` around `anchor`, wound to face the same way.
 fn base_winding(plane: &Plane, anchor: [i32; 3]) -> Vec<[f64; 3]> {
     let (n, _) = plane.normalized();
@@ -518,6 +559,34 @@ mod tests {
         assert!(brush.raycast([-36.0, 200.0, 32.0], [72.0, 0.0, 0.0]).is_none());
         // Origin inside: entry is behind the origin -> no hit (t >= 0 rule).
         assert!(brush.raycast([32.0, 32.0, 32.0], [72.0, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn cuboid_from_corners_normalizes_and_rejects_flat() {
+        let brush = Brush::cuboid_from_corners([64, 0, 128], [0, 32, 0]).unwrap();
+        let solved = brush.solve();
+        assert_eq!(solved.min, [0.0, 0.0, 0.0]);
+        assert_eq!(solved.max, [64.0, 32.0, 128.0]);
+        assert!(Brush::cuboid_from_corners([0, 0, 0], [64, 0, 64]).is_none());
+    }
+
+    #[test]
+    fn snap_to_grid_rounds_points() {
+        let mut brush = Brush::cuboid([1, 30, -1], [65, 63, 62]);
+        brush.snap_to_grid(32);
+        let solved = brush.solve();
+        assert_eq!(solved.min, [0.0, 32.0, 0.0]);
+        assert_eq!(solved.max, [64.0, 64.0, 64.0]);
+    }
+
+    #[test]
+    fn paraxial_uv_picks_dominant_axis() {
+        let floor = Plane::from_points([[0, 0, 0], [0, 0, 64], [64, 0, 64]]).unwrap();
+        assert_eq!(paraxial_uv(&floor, [10.0, 0.0, 20.0]), [10.0, 20.0]);
+        let wall_x = Plane::from_points([[0, 0, 0], [0, 64, 0], [0, 0, 64]]).unwrap();
+        assert_eq!(paraxial_uv(&wall_x, [0.0, 10.0, 20.0]), [20.0, -10.0]);
+        let wall_z = Plane::from_points([[0, 0, 0], [0, 64, 0], [64, 0, 0]]).unwrap();
+        assert_eq!(paraxial_uv(&wall_z, [10.0, 20.0, 0.0]), [10.0, -20.0]);
     }
 
     #[test]
