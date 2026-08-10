@@ -1,9 +1,9 @@
 //! Host-side package schema for embedded editor play mode.
 
 use crate::{
-    MaterialAnimation, MaterialFaceSidedness, PsxBlendMode, ResourceId, RuntimeDepthSortMode,
-    RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, SkyCycloramaQuad, UiGradientDirection,
-    UiNodeKind, UiValueBinding,
+    MaterialAnimation, MaterialFaceSidedness, NodeId, PsxBlendMode, ResourceId,
+    RuntimeDepthSortMode, RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, SkyCycloramaQuad,
+    UiGradientDirection, UiNodeKind, UiValueBinding,
 };
 
 /// Number of cooked character animation action slots.
@@ -2069,6 +2069,16 @@ pub struct PlaytestStreamMemoryReport {
 
 /// Outcome of validating a project for playtest. Errors block
 /// cooking; warnings are surfaced but not fatal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestValidationTarget {
+    /// Brush and optional authored face index in the active scene.
+    Brush { brush: usize, face: Option<usize> },
+    /// Scene-tree node responsible for the failure.
+    Node(NodeId),
+    /// Project resource responsible for the failure.
+    Resource(ResourceId),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestValidationReport {
     /// Hard errors. Embedded Play must refuse to launch when this
@@ -2077,6 +2087,10 @@ pub struct PlaytestValidationReport {
     /// Soft warnings. Surface in the editor status line but
     /// don't block cooking.
     pub warnings: Vec<String>,
+    /// First authoring object the editor can select and frame for a hard
+    /// error. Kept separate from the display strings so callers never have
+    /// to scrape ids or brush indices from diagnostics.
+    pub focus_target: Option<PlaytestValidationTarget>,
 }
 
 impl PlaytestValidationReport {
@@ -2087,6 +2101,13 @@ impl PlaytestValidationReport {
 
     pub(super) fn error(&mut self, msg: impl Into<String>) {
         self.errors.push(msg.into());
+    }
+
+    pub(super) fn error_at(&mut self, target: PlaytestValidationTarget, msg: impl Into<String>) {
+        if self.focus_target.is_none() {
+            self.focus_target = Some(target);
+        }
+        self.error(msg);
     }
 
     pub(super) fn warn(&mut self, msg: impl Into<String>) {
