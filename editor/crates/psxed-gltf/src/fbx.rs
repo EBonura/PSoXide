@@ -268,6 +268,7 @@ pub(crate) fn finish_static_fbx_rigid_model_scene(
         model,
         clips,
         texture,
+        joint_names: vec!["root".to_string()],
         report,
     })
 }
@@ -341,10 +342,21 @@ pub(crate) fn finish_fbx_rigid_model_scene(
         texture_bytes: texture.as_ref().map_or(0, Vec::len),
     };
 
+    let joint_names = joints
+        .iter()
+        .map(|&node| {
+            scene
+                .nodes
+                .get(node)
+                .map(|node| node.element.name.to_string())
+                .unwrap_or_default()
+        })
+        .collect();
     Ok(RigidModelPackage {
         model,
         clips,
         texture,
+        joint_names,
         report,
     })
 }
