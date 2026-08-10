@@ -311,6 +311,56 @@ impl Brush {
     }
 }
 
+impl Brush {
+    /// Hollow an axis-aligned brush into six wall slabs of `thickness`,
+    /// keeping the outer bounds. Returns `None` when the brush is too
+    /// small to hollow or has no volume. Face materials carry to every
+    /// slab from the source face where unambiguous (outer faces).
+    pub fn hollow(&self, thickness: i32) -> Option<Vec<Brush>> {
+        let solved = self.solve();
+        if !solved.is_valid() {
+            return None;
+        }
+        let min = [
+            solved.min[0].round() as i32,
+            solved.min[1].round() as i32,
+            solved.min[2].round() as i32,
+        ];
+        let max = [
+            solved.max[0].round() as i32,
+            solved.max[1].round() as i32,
+            solved.max[2].round() as i32,
+        ];
+        let thickness = thickness.max(1);
+        if (0..3).any(|a| max[a] - min[a] <= 2 * thickness) {
+            return None;
+        }
+        let inner_min = [min[0] + thickness, min[1] + thickness, min[2] + thickness];
+        let inner_max = [max[0] - thickness, max[1] - thickness, max[2] - thickness];
+        // Six slabs: floor, ceiling, then four walls between them.
+        Some(vec![
+            Brush::cuboid(min, [max[0], inner_min[1], max[2]]),
+            Brush::cuboid([min[0], inner_max[1], min[2]], max),
+            Brush::cuboid(
+                [min[0], inner_min[1], min[2]],
+                [inner_min[0], inner_max[1], max[2]],
+            ),
+            Brush::cuboid(
+                [inner_max[0], inner_min[1], min[2]],
+                [max[0], inner_max[1], max[2]],
+            ),
+            Brush::cuboid(
+                [inner_min[0], inner_min[1], min[2]],
+                [inner_max[0], inner_max[1], inner_min[2]],
+            ),
+            Brush::cuboid(
+                [inner_min[0], inner_min[1], inner_max[2]],
+                [inner_max[0], inner_max[1], max[2]],
+            ),
+        ])
+    }
+}
+
 /// Paraxial (dominant-axis) texture projection of a world position for a
 /// face with the given plane: the Quake-style default mapping. Returns
 /// texel-space (u, v) before per-face offset/rotation/scale.
@@ -594,6 +644,40 @@ mod tests {
         assert_eq!(paraxial_uv(&wall_x, [0.0, 10.0, 20.0]), [20.0, -10.0]);
         let wall_z = Plane::from_points([[0, 0, 0], [0, 64, 0], [64, 0, 0]]).unwrap();
         assert_eq!(paraxial_uv(&wall_z, [10.0, 20.0, 0.0]), [10.0, -20.0]);
+    }
+
+    #[test]
+    fn hollow_makes_six_slabs_enclosing_a_cavity() {
+        let brush = Brush::cuboid([0, 0, 0], [256, 128, 256]);
+        let slabs = brush.hollow(16).expect("hollowable");
+        assert_eq!(slabs.len(), 6);
+        for slab in &slabs {
+            assert!(slab.solve().is_valid());
+        }
+        // Outer bounds preserved.
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for slab in &slabs {
+            let s = slab.solve();
+            for a in 0..3 {
+                min[a] = min[a].min(s.min[a]);
+                max[a] = max[a].max(s.max[a]);
+            }
+        }
+        assert_eq!(min, [0.0, 0.0, 0.0]);
+        assert_eq!(max, [256.0, 128.0, 256.0]);
+        // The cavity centre is inside no slab.
+        for slab in &slabs {
+            let outside = slab.faces.iter().any(|face| {
+                Plane::from_points(face.points)
+                    .unwrap()
+                    .side([128, 64, 128])
+                    > 0
+            });
+            assert!(outside, "cavity centre must be outside every slab");
+        }
+        // Too-thin brushes refuse to hollow.
+        assert!(Brush::cuboid([0, 0, 0], [30, 128, 256]).hollow(16).is_none());
     }
 
     #[test]

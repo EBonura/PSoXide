@@ -223,6 +223,48 @@ impl EditorWorkspace {
         })
     }
 
+    /// Replace the selected brush with six hollow wall slabs (one undo
+    /// step); the first slab stays selected. No-op when not hollowable.
+    pub(crate) fn hollow_selected_brush(&mut self, thickness: i32) {
+        let Some(index) = self.selected_brush else {
+            return;
+        };
+        let Some(slabs) = self
+            .project
+            .active_scene()
+            .brushes
+            .get(index)
+            .and_then(|brush| brush.hollow(thickness))
+        else {
+            return;
+        };
+        self.push_undo();
+        let scene = self.project.active_scene_mut();
+        let mut slabs = slabs.into_iter();
+        scene.brushes[index] = slabs.next().expect("hollow returns six slabs");
+        scene.brushes.extend(slabs);
+        self.selected_brush_face = None;
+    }
+
+    /// Snap every point of the selected brush to the editor grid step,
+    /// as one undo step.
+    pub(crate) fn snap_selected_brush(&mut self) {
+        let Some(index) = self.selected_brush else {
+            return;
+        };
+        let step = (self.snap_units.max(1)) as i32;
+        let Some(current) = self.project.active_scene().brushes.get(index).cloned() else {
+            return;
+        };
+        let mut snapped = current.clone();
+        snapped.snap_to_grid(step);
+        if snapped == current || !snapped.solve().is_valid() {
+            return;
+        }
+        self.push_undo();
+        self.project.active_scene_mut().brushes[index] = snapped;
+    }
+
     /// Apply the paint material to the selected brush face, as one undo
     /// step. No-op when no brush face is selected or no material chosen.
     pub(crate) fn apply_material_to_selected_brush_face(&mut self) {
