@@ -109,6 +109,38 @@ pub enum PlaytestAssetKind {
     ModelAnimation,
 }
 
+/// Geometry provider selected for the normal embedded-Play lifecycle.
+///
+/// Gameplay tables remain common to both variants. The distinction only
+/// chooses how the static world, visibility, and collision are supplied.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PlaytestWorldGeometry {
+    /// Legacy sector-grid rooms backed by cooked `.psxw` assets.
+    #[default]
+    Grid,
+    /// One resident PXBSP world plus its authored brush-mover links.
+    Pxbsp(PlaytestPxbspWorld),
+}
+
+/// Resident PXBSP payload and the deterministic authored mover mapping needed
+/// by normal gameplay logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestPxbspWorld {
+    /// Complete PXBSP file emitted by the brush compiler.
+    pub bytes: Vec<u8>,
+    /// Brush submodels in authored-node order.
+    pub movers: Vec<PlaytestPxbspMover>,
+}
+
+/// Link from an authored Door logic node to its PXBSP brush submodel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestPxbspMover {
+    /// Stable authored [`crate::NodeId`] value.
+    pub node: u32,
+    /// Model zero is the static world; mover models start at one.
+    pub model_index: u16,
+}
+
 /// Streaming class of a [`PlaytestAsset`]. A streamed asset's baked
 /// manifest static is empty bytes (under `cd-stream-bench`) and its
 /// payload is packed into the parallel UI.PAK that the runtime loads
@@ -1792,6 +1824,8 @@ pub struct PlaytestEntity {
 /// instances, and residency.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestPackage {
+    /// Static-world provider used by the normal Play lifecycle.
+    pub world_geometry: PlaytestWorldGeometry,
     /// Project-relative paths of every source texture the cook actually
     /// reached, deduplicated.
     ///
