@@ -531,14 +531,43 @@ pub fn import_model_with_animation_sources(
 
     let model_id =
         register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))?;
+    let mut skeleton_id = None;
     if let Some(resource) = project.resource_mut(model_id) {
         if let ResourceData::Model(model) = &mut resource.data {
             model.source_path = Some(relativise(source_path, Some(project_root)));
             model.world_height = config.world_height;
             model.collision_radius = default_model_collision_radius_for_height(config.world_height);
+            skeleton_id = model.skeleton;
         }
     }
+    apply_skeleton_joint_names(project, skeleton_id, &package.joint_names);
     Ok(model_id)
+}
+
+/// Backfill source bone names onto a skeleton that has none yet. The
+/// cooked model stores only indices, so names exist only at import
+/// time; a signature-deduped skeleton shared by several models gets
+/// its names from whichever import lands first.
+fn apply_skeleton_joint_names(
+    project: &mut ProjectDocument,
+    skeleton_id: Option<ResourceId>,
+    joint_names: &[String],
+) {
+    let Some(skeleton_id) = skeleton_id else {
+        return;
+    };
+    if joint_names.iter().all(|name| name.trim().is_empty()) {
+        return;
+    }
+    let Some(resource) = project.resource_mut(skeleton_id) else {
+        return;
+    };
+    let ResourceData::Skeleton(skeleton) = &mut resource.data else {
+        return;
+    };
+    if skeleton.joint_names.is_empty() && skeleton.joint_count as usize == joint_names.len() {
+        skeleton.joint_names = joint_names.to_vec();
+    }
 }
 
 fn unique_clip_stem(used: &mut BTreeSet<String>, base: &str) -> String {
@@ -688,6 +717,7 @@ pub fn import_animation_library(
         clip_ids.push(id);
     }
 
+    apply_skeleton_joint_names(project, Some(skeleton_id), &package.joint_names);
     let set_id = register_animation_set_resource(project, library_name, skeleton_id, &clip_ids);
     Ok(AnimationLibraryImport {
         skeleton_id,

@@ -449,6 +449,7 @@ fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
             parents: vec![None],
             signature: "equip-test".to_string(),
             note: String::new(),
+            joint_names: Vec::new(),
         }),
     );
     starter_model.skeleton = Some(skeleton);
