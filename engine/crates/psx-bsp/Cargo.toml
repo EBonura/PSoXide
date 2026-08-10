@@ -10,6 +10,11 @@ description = "Checked, allocation-free XBSP/PXBSP map readers. Shared by the gu
 workspace = true
 
 [dependencies]
+# Explicit paths (not `workspace = true`): psx-bsp is consumed from the
+# editor and quake-psx too, and workspace inheritance only resolves
+# against the engine workspace root.
+psx-engine = { path = "../psx-engine" }
+psx-math = { path = "../../../sdk/crates/psx-math" }
 
 [dev-dependencies]
 # Examples only: the lib stays dependency-free. Explicit path (not

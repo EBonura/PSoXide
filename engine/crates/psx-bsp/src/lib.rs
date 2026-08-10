@@ -11,6 +11,8 @@
 // then this allow goes away.
 #![allow(missing_docs)]
 
+pub mod collision;
+
 use core::fmt;
 use core::marker::PhantomData;
 
