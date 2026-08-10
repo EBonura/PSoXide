@@ -422,64 +422,10 @@ impl EditorWorkspace {
                 {
                     self.brush_clip_keep = self.brush_clip_keep.next();
                 }
-                if self.selected_brush.is_some() && self.selected_brush_face.is_some() {
-                    ui.separator();
-                    self.draw_brush_material_picker(ui);
-                    if ui
-                        .button(icons::label(icons::PALETTE, "Apply to face"))
-                        .clicked()
-                    {
-                        self.apply_material_to_selected_brush_face();
-                    }
-                    self.draw_brush_face_uv_controls(ui);
-                }
-                if self.selected_brush.is_some() {
-                    if ui
-                        .button("Hollow")
-                        .on_hover_text("Replace with six wall slabs (grid-step thickness)")
-                        .clicked()
-                    {
-                        let thickness = (self.snap_units.max(1)) as i32;
-                        self.hollow_selected_brush(thickness);
-                    }
-                    if ui
-                        .button("Snap to grid")
-                        .on_hover_text("Snap every brush point to the grid step")
-                        .clicked()
-                    {
-                        self.snap_selected_brush();
-                    }
-                }
+                // Gesture-mode state only; per-brush and per-face editing
+                // lives in the inspector (draw_brush_inspector).
                 ui.checkbox(&mut self.brush_texture_lock, "Tex lock")
                     .on_hover_text("Keep face textures anchored to the brush when it moves");
-                if let Some(index) = self.selected_brush {
-                    if ui.button(icons::label(icons::PLUS, "Duplicate")).clicked() {
-                        self.push_undo();
-                        let step = (self.snap_units.max(1)) as i32;
-                        let mut copy = self.project.active_scene().brushes[index].clone();
-                        if self.brush_texture_lock {
-                            copy.translate_with_uv_lock(
-                                [step, 0, step],
-                                psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
-                            );
-                        } else {
-                            copy.translate([step, 0, step]);
-                        }
-                        let scene = self.project.active_scene_mut();
-                        scene.brushes.push(copy);
-                        let new_index = scene.brushes.len() - 1;
-                        self.selected_brush = Some(new_index);
-                    }
-                    if ui
-                        .button(icons::label(icons::TRASH, "Delete brush"))
-                        .clicked()
-                    {
-                        self.push_undo();
-                        self.project.active_scene_mut().brushes.remove(index);
-                        self.selected_brush = None;
-                        self.selected_brush_face = None;
-                    }
-                }
             }
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
