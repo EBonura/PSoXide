@@ -210,7 +210,7 @@ impl Scene for Playtest {
         // `update_gameplay`: freeze final actor state once, then run combat
         // from the same snapshots the next body/equipment render consumes.
         self.refresh_actor_pose_snapshots(ctx);
-        self.resolve_enemy_melee();
+        self.resolve_enemy_melee(ctx);
         self.resolve_player_melee(ctx);
     }
 

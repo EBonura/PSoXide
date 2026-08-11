@@ -361,9 +361,13 @@ struct Playtest {
     player_health: u16,
     /// See [`Self::player_health`].
     player_health_max: u16,
-    /// Remaining environmental-hazard death sequence ticks. Non-zero locks
+    /// Remaining death-sequence ticks, shared by every death cause
+    /// (combat damage, BSP liquid hazards, lethal water). Non-zero locks
     /// player input until the shared checkpoint/spawn respawn completes.
     hazard_death_ticks_remaining: u8,
+    /// Whether the running death sequence was armed by combat damage
+    /// rather than an environmental hazard (respawn logging only).
+    death_by_combat: bool,
     /// Entities already hit by the CURRENT player swing (bit i =
     /// entity i): one swing connects at most once per enemy. Cleared
     /// when an attack action starts.
