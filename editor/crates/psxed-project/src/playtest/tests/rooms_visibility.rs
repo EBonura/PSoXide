@@ -11,7 +11,9 @@ fn generated_room_cache_counts_match_runtime_builder() {
     assert!(cache.cell_vertex_count > 0);
     assert!(!package.room_cache_cell_vertices.is_empty());
     let room_record = &package.rooms[cache.room as usize];
-    let room_asset = &package.assets[room_record.world_asset_index];
+    let room_asset = &package.assets[room_record
+        .world_asset_index
+        .expect("grid room world asset")];
     let room = RuntimeRoom::from_bytes(&room_asset.bytes).expect("room parses");
     let materials =
         cache_materials_for_room(cache.room, &package.materials, &package.assets).unwrap();

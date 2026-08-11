@@ -451,6 +451,11 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     /// Wrapping identity of the latest tick/tick-delta call. Deferred contact
     /// tokens are deliberately one-call capabilities.
     attack_tick_generation: u16,
+    /// Optional owner-supplied per-record activation (for BSP PVS/area
+    /// residency). When disabled, the legacy active-room gate remains exact.
+    spatial_activation_enabled: bool,
+    // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
+    spatial_active_mask: u64,
 }
 
 impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
@@ -477,6 +482,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         attack_owner_plus_one: 0,
         director_delay_ticks: 0,
         attack_tick_generation: 0,
+        spatial_activation_enabled: false,
+        spatial_active_mask: 0,
     };
 
     /// Reset and spawn entity state 1:1 from the cooked records
@@ -519,6 +526,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// Cooked records that did not fit `MAX_ENTITIES` at spawn.
     pub fn overflow_count(&self) -> u16 {
         self.overflow
+    }
+
+    /// Select an owner-defined per-record activation mask, or restore the
+    /// legacy room-window gate with `None`.
+    pub fn set_spatial_active_mask(&mut self, mask: Option<u64>) {
+        self.spatial_activation_enabled = mask.is_some();
+        self.spatial_active_mask = mask.unwrap_or(0);
     }
 
     /// Behavior state of entity `index`.
@@ -837,7 +851,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 continue;
             }
             let behavior_awake = !matches!(state, GameEntityState::Idle | GameEntityState::Patrol);
-            if !behavior_awake && !room_is_active(record.room, input.active_rooms) {
+            let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
+            let activation_allows = if self.spatial_activation_enabled {
+                spatially_active
+            } else {
+                room_is_active(record.room, input.active_rooms)
+            };
+            if !behavior_awake && !activation_allows {
                 stats.gated += 1;
                 index += 1;
                 continue;
@@ -1980,6 +2000,32 @@ mod tests {
         // (hl-psx: combat continues outside the PVS).
         let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&ACTIVE), &mut NoClipMover);
         assert_eq!(stats.thought, 1);
+    }
+
+    #[test]
+    fn owner_spatial_mask_replaces_room_gating_without_sleeping_combat() {
+        static ROOM_7: [RoomIndex; 1] = [RoomIndex(7)];
+        let input = GameEntityTickInput {
+            player: [1200, 0, 1000],
+            player_room: RoomIndex(7),
+            player_radius: 192,
+            player_invulnerable: false,
+            active_rooms: &ROOM_7,
+        };
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&FAR_ROOM_ENEMY);
+        entities.set_spatial_active_mask(Some(0));
+        let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
+        assert_eq!((stats.thought, stats.gated), (0, 1));
+
+        entities.set_spatial_active_mask(Some(1));
+        let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
+        assert_eq!(stats.thought, 1);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+
+        entities.set_spatial_active_mask(Some(0));
+        let stats = entities.tick(&FAR_ROOM_ENEMY, input, &mut NoClipMover);
+        assert_eq!(stats.thought, 1, "engaged behavior remains awake");
     }
 
     #[test]

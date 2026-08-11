@@ -26,8 +26,10 @@ EXPECT_STAGGERS=1
 EXPECT_DEATHS=1
 EXPECT_HITS_TAKEN=3
 EXPECT_PLAYER_X_BIASED=1003625
-EXPECT_VRAM_HASH=0x2fd148c1585cfcff
-EXPECT_DISPLAY_HASH=0xbe036d63a1eb1abd
+# PXBSP-native world-content pass: static brush geometry, the live enemy,
+# both weapons, and the HUD are present without a synthetic PSXW room.
+EXPECT_VRAM_HASH=0x007fb6683f98d82b
+EXPECT_DISPLAY_HASH=0x0739fbd9575fdbb8
 
 fail() {
     echo "combat-checkpoint: FAIL: $1" >&2

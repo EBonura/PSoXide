@@ -277,12 +277,7 @@ impl Scene for Playtest {
         let bsp_material_tick = self.gameplay_tick(ctx.sim_tick).as_u32();
         if let Some(bsp) = self.bsp.as_mut() {
             telemetry::stage_begin(telemetry::stage::ROOM);
-            bsp.draw(
-                camera,
-                bsp_material_tick,
-                &mut primitive_packets,
-                &mut ot,
-            );
+            bsp.draw(camera, bsp_material_tick, &mut primitive_packets, &mut ot);
             telemetry::stage_end(telemetry::stage::ROOM);
         }
 
@@ -354,6 +349,39 @@ impl Scene for Playtest {
             let entity_pose_count = self.game_entity_pose_overrides(&mut entity_poses);
             let entity_poses = &entity_poses[..entity_pose_count];
 
+            // PXBSP has no ActiveRuntimeRoom: that type owns parsed PSXW
+            // render/collision payloads. Draw the singleton metadata room's
+            // ordinary gameplay content directly in world space while the BSP
+            // renderer above owns only static brush surfaces.
+            if self.bsp.is_some() {
+                if let (Some(room_record), Some(lighting)) =
+                    (room_record, self.current_room_lighting(camera))
+                {
+                    let room_options = room_surface_options(room_record).with_material_animation(
+                        self.gameplay_tick(ctx.sim_tick).as_u32(),
+                        ctx.video_hz.as_u16(),
+                    );
+                    let actor_options = actor_surface_options(room_record).with_material_animation(
+                        self.gameplay_tick(ctx.sim_tick).as_u32(),
+                        ctx.video_hz.as_u16(),
+                    );
+                    let instance_stats = self.draw_room_world_content(
+                        self.room_index,
+                        &camera,
+                        &self.materials[..self.material_count],
+                        room_options,
+                        actor_options,
+                        &lighting,
+                        ModelInstanceDepthPass::All,
+                        entity_poses,
+                        ctx,
+                        &mut primitive_packets,
+                        &mut world,
+                    );
+                    accumulate_model_instance_draw_stats(&mut total_instance_stats, instance_stats);
+                }
+            }
+
             let active_draw_order = active_room_draw_order(
                 &self.window.rooms,
                 camera,
@@ -396,11 +424,10 @@ impl Scene for Playtest {
                     ctx.video_hz.as_u16(),
                 );
                 // Actors clear the surface they stand on; see actor_surface_options.
-                let actor_options = actor_surface_options(room_record)
-                    .with_material_animation(
-                        self.gameplay_tick(ctx.sim_tick).as_u32(),
-                        ctx.video_hz.as_u16(),
-                    );
+                let actor_options = actor_surface_options(room_record).with_material_animation(
+                    self.gameplay_tick(ctx.sim_tick).as_u32(),
+                    ctx.video_hz.as_u16(),
+                );
                 let room_camera = camera_for_room(camera, active);
                 let lighting = RuntimeRoomLighting {
                     room_index: active.index,
@@ -418,151 +445,11 @@ impl Scene for Playtest {
                 let room_command_start = world.command_len();
                 telemetry::stage_begin(telemetry::stage::ROOM);
                 if self.bsp.is_none() {
-                #[cfg(feature = "world-grid-visible")]
-                {
-                    #[cfg(feature = "vis-full-active-chunks")]
+                    #[cfg(feature = "world-grid-visible")]
                     {
-                        let stats = if active.surface_cache.ready {
-                            room_cached_draws = room_cached_draws.saturating_add(1);
-                            if let Some((
-                                cached_cells,
-                                cached_cell_vertices,
-                                cached_vertices,
-                                cached_surfaces,
-                            )) = room_surface_cache_slices(active.index, active.surface_cache)
-                            {
-                                let vertex_count = cached_vertices.len();
-                                let room_projection = room_projection_arena();
-                                let projected_indices =
-                                    &mut room_projection.indices[..vertex_count];
-                                let projected_vertices =
-                                    &mut room_projection.vertices[..vertex_count];
-                                let projected_depths = &mut room_projection.depths[..vertex_count];
-                                let cell_scratch = cell_scratch_arena();
-                                let accepted_cell_indices = &mut cell_scratch.indices[..];
-                                let accepted_cell_depths = &mut cell_scratch.depths[..];
-                                generated::draw_project_cached_room!(
-                                    &lighting,
-                                    draw_indexed_cached_room_vertex_lit_all_cells,
-                                    [
-                                        cached_cells,
-                                        cached_cell_vertices,
-                                        cached_vertices,
-                                        cached_surfaces,
-                                        projected_indices,
-                                        projected_vertices,
-                                        projected_depths,
-                                        accepted_cell_indices,
-                                        accepted_cell_depths,
-                                        materials,
-                                    ],
-                                    [
-                                        &room_camera,
-                                        room_options,
-                                        cached_room_depth_mode(),
-                                        cached_room_subdivision_mode(),
-                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                        active.sector_size,
-                                        active.index == self.visibility.root,
-                                        Some(prebuilt_room_quads_for(active.index)),
-                                        &mut primitive_packets,
-                                        &mut world,
-                                    ]
-                                )
-                            } else {
-                                room_uncached_draws = room_uncached_draws.saturating_add(1);
-                                room_cache_fallback_draws =
-                                    room_cache_fallback_draws.saturating_add(1);
-                                if let Some(render_room) = active.render() {
-                                    room_drawn_chunk_mask |= chunk_mask;
-                                    draw_room_vertex_lit(
-                                        render_room,
-                                        materials,
-                                        &lighting,
-                                        &room_camera,
-                                        room_options,
-                                        &mut primitive_packets,
-                                        &mut world,
-                                    );
-                                }
-                                GridVisibilityStats::default()
-                            }
-                        } else {
-                            room_uncached_draws = room_uncached_draws.saturating_add(1);
-                            if active_surface_cache_failed(active.surface_cache) {
-                                room_cache_fallback_draws =
-                                    room_cache_fallback_draws.saturating_add(1);
-                            }
-                            if let Some(render_room) = active.render() {
-                                room_drawn_chunk_mask |= chunk_mask;
-                                draw_room_vertex_lit(
-                                    render_room,
-                                    materials,
-                                    &lighting,
-                                    &room_camera,
-                                    room_options,
-                                    &mut primitive_packets,
-                                    &mut world,
-                                );
-                            }
-                            GridVisibilityStats::default()
-                        };
-                        room_visible_cells =
-                            room_visible_cells.saturating_add(stats.cells_drawn as u32);
-                        if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
-                            room_drawn_chunk_mask |= chunk_mask;
-                        }
-                        accumulate_grid_visibility_stats(&mut room_stats_total, stats);
-                    }
-                    #[cfg(not(feature = "vis-full-active-chunks"))]
-                    {
-                        let player = self.motor.position();
-                        let portal_cell_window = self.portal_cell_window(active.index);
-                        // The player's own room anchors its per-cell PVS at
-                        // the player; a far room admitted by the portal walk
-                        // anchors at the portal that admitted it (the
-                        // doorway-eye view). Rooms with no usable anchor
-                        // draw every cell through the cached path below --
-                        // NEVER a silent skip (the arch-door regression).
-                        let window_visibility_anchor = if active.index == self.room_index {
-                            Some(player)
-                        } else {
-                            self.portal_entry_anchor(active.index, active.sector_size)
-                        };
-                        telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
-                        let visible_cells_result = match window_visibility_anchor {
-                            Some(window_anchor) => {
-                                let visibility_anchor = RoomPoint::new(
-                                    window_anchor.x.saturating_sub(active.offset_x),
-                                    window_anchor.y,
-                                    window_anchor.z.saturating_sub(active.offset_z),
-                                );
-                                self.cached_precomputed_visible_cells(
-                                    active_slot,
-                                    active.index,
-                                    active.width,
-                                    active.depth,
-                                    active.sector_size,
-                                    visibility_anchor,
-                                    active.offset_x,
-                                    active.offset_z,
-                                    window_anchor,
-                                    room_camera,
-                                    ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES
-                                        && !self.player_moved_last_tick
-                                        && self.camera_turning_last_tick
-                                        && active.surface_cache.ready,
-                                )
-                            }
-                            None => None,
-                        };
-                        telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
-                        let stats = if let Some((cells, range_culled)) = visible_cells_result {
-                            room_range_culled_cells =
-                                room_range_culled_cells.saturating_add(range_culled as u32);
-                            room_visible_cells =
-                                room_visible_cells.saturating_add(cells.len() as u32);
-                            if active.surface_cache.ready {
+                        #[cfg(feature = "vis-full-active-chunks")]
+                        {
+                            let stats = if active.surface_cache.ready {
                                 room_cached_draws = room_cached_draws.saturating_add(1);
                                 if let Some((
                                     cached_cells,
@@ -572,106 +459,6 @@ impl Scene for Playtest {
                                 )) =
                                     room_surface_cache_slices(active.index, active.surface_cache)
                                 {
-                                    let vertex_count = cached_vertices.len();
-                                    let room_projection = room_projection_arena();
-                                    let projected_indices =
-                                        &mut room_projection.indices[..vertex_count];
-                                    let projected_vertices =
-                                        &mut room_projection.vertices[..vertex_count];
-                                    let projected_depths =
-                                        &mut room_projection.depths[..vertex_count];
-                                    let cell_scratch = cell_scratch_arena();
-                                    let accepted_cell_indices = &mut cell_scratch.indices[..];
-                                    let accepted_cell_depths = &mut cell_scratch.depths[..];
-                                    generated::draw_project_cached_room!(
-                                        &lighting,
-                                        draw_indexed_cached_room_vertex_lit_visible_cells,
-                                        [
-                                            cached_cells,
-                                            cached_cell_vertices,
-                                            cached_vertices,
-                                            cached_surfaces,
-                                            projected_indices,
-                                            projected_vertices,
-                                            projected_depths,
-                                            accepted_cell_indices,
-                                            accepted_cell_depths,
-                                            active.depth,
-                                            active.sector_size,
-                                            materials,
-                                        ],
-                                        [
-                                            &room_camera,
-                                            room_options,
-                                            cached_room_depth_mode(),
-                                            cached_room_subdivision_mode(),
-                                            cells,
-                                            ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                            portal_cell_window,
-                                            Some(prebuilt_room_quads_for(active.index)),
-                                            &mut primitive_packets,
-                                            &mut world,
-                                        ]
-                                    )
-                                } else {
-                                    room_uncached_draws = room_uncached_draws.saturating_add(1);
-                                    if let Some(render_room) = active.render() {
-                                        draw_room_vertex_lit_visible_cells(
-                                            render_room,
-                                            materials,
-                                            &lighting,
-                                            &room_camera,
-                                            room_options,
-                                            cells,
-                                            ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                            &mut primitive_packets,
-                                            &mut world,
-                                        )
-                                    } else {
-                                        GridVisibilityStats::default()
-                                    }
-                                }
-                            } else {
-                                room_uncached_draws = room_uncached_draws.saturating_add(1);
-                                if active_surface_cache_failed(active.surface_cache) {
-                                    room_cache_fallback_draws =
-                                        room_cache_fallback_draws.saturating_add(1);
-                                }
-                                if let Some(render_room) = active.render() {
-                                    draw_room_vertex_lit_visible_cells(
-                                        render_room,
-                                        materials,
-                                        &lighting,
-                                        &room_camera,
-                                        room_options,
-                                        cells,
-                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                        &mut primitive_packets,
-                                        &mut world,
-                                    )
-                                } else {
-                                    GridVisibilityStats::default()
-                                }
-                            }
-                        } else {
-                            // No usable anchor or no PVS data for this room.
-                            // Draw EVERY cell through the cached path -- it
-                            // works for streamed rooms whose full render data
-                            // is not resident (active.render() == None), which
-                            // the old uncached-only fallback silently skipped
-                            // (the arch-door black-room regression).
-                            room_visibility_fallback_draws =
-                                room_visibility_fallback_draws.saturating_add(1);
-                            if active.surface_cache.ready {
-                                if let Some((
-                                    cached_cells,
-                                    cached_cell_vertices,
-                                    cached_vertices,
-                                    cached_surfaces,
-                                )) =
-                                    room_surface_cache_slices(active.index, active.surface_cache)
-                                {
-                                    room_cached_draws = room_cached_draws.saturating_add(1);
                                     let vertex_count = cached_vertices.len();
                                     let room_projection = room_projection_arena();
                                     let projected_indices =
@@ -705,22 +492,281 @@ impl Scene for Playtest {
                                             cached_room_subdivision_mode(),
                                             ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                             active.sector_size,
-                                            // Lateral-cull cells in EVERY no-anchor
-                                            // fallback room, not just the root: the
-                                            // AABB test is the same conservative
-                                            // margin bound the root room already
-                                            // trusts, and 3-4 of ~5 drawn
-                                            // rooms take this path per frame. Cells
-                                            // it rejects are off-screen, so output
-                                            // pixels are unchanged; only the
-                                            // projection + surface walk for them is
-                                            // skipped.
-                                            true,
+                                            active.index == self.visibility.root,
                                             Some(prebuilt_room_quads_for(active.index)),
                                             &mut primitive_packets,
                                             &mut world,
                                         ]
                                     )
+                                } else {
+                                    room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                    room_cache_fallback_draws =
+                                        room_cache_fallback_draws.saturating_add(1);
+                                    if let Some(render_room) = active.render() {
+                                        room_drawn_chunk_mask |= chunk_mask;
+                                        draw_room_vertex_lit(
+                                            render_room,
+                                            materials,
+                                            &lighting,
+                                            &room_camera,
+                                            room_options,
+                                            &mut primitive_packets,
+                                            &mut world,
+                                        );
+                                    }
+                                    GridVisibilityStats::default()
+                                }
+                            } else {
+                                room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                if active_surface_cache_failed(active.surface_cache) {
+                                    room_cache_fallback_draws =
+                                        room_cache_fallback_draws.saturating_add(1);
+                                }
+                                if let Some(render_room) = active.render() {
+                                    room_drawn_chunk_mask |= chunk_mask;
+                                    draw_room_vertex_lit(
+                                        render_room,
+                                        materials,
+                                        &lighting,
+                                        &room_camera,
+                                        room_options,
+                                        &mut primitive_packets,
+                                        &mut world,
+                                    );
+                                }
+                                GridVisibilityStats::default()
+                            };
+                            room_visible_cells =
+                                room_visible_cells.saturating_add(stats.cells_drawn as u32);
+                            if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
+                                room_drawn_chunk_mask |= chunk_mask;
+                            }
+                            accumulate_grid_visibility_stats(&mut room_stats_total, stats);
+                        }
+                        #[cfg(not(feature = "vis-full-active-chunks"))]
+                        {
+                            let player = self.motor.position();
+                            let portal_cell_window = self.portal_cell_window(active.index);
+                            // The player's own room anchors its per-cell PVS at
+                            // the player; a far room admitted by the portal walk
+                            // anchors at the portal that admitted it (the
+                            // doorway-eye view). Rooms with no usable anchor
+                            // draw every cell through the cached path below --
+                            // NEVER a silent skip (the arch-door regression).
+                            let window_visibility_anchor = if active.index == self.room_index {
+                                Some(player)
+                            } else {
+                                self.portal_entry_anchor(active.index, active.sector_size)
+                            };
+                            telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
+                            let visible_cells_result = match window_visibility_anchor {
+                                Some(window_anchor) => {
+                                    let visibility_anchor = RoomPoint::new(
+                                        window_anchor.x.saturating_sub(active.offset_x),
+                                        window_anchor.y,
+                                        window_anchor.z.saturating_sub(active.offset_z),
+                                    );
+                                    self.cached_precomputed_visible_cells(
+                                        active_slot,
+                                        active.index,
+                                        active.width,
+                                        active.depth,
+                                        active.sector_size,
+                                        visibility_anchor,
+                                        active.offset_x,
+                                        active.offset_z,
+                                        window_anchor,
+                                        room_camera,
+                                        ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES
+                                            && !self.player_moved_last_tick
+                                            && self.camera_turning_last_tick
+                                            && active.surface_cache.ready,
+                                    )
+                                }
+                                None => None,
+                            };
+                            telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
+                            let stats = if let Some((cells, range_culled)) = visible_cells_result {
+                                room_range_culled_cells =
+                                    room_range_culled_cells.saturating_add(range_culled as u32);
+                                room_visible_cells =
+                                    room_visible_cells.saturating_add(cells.len() as u32);
+                                if active.surface_cache.ready {
+                                    room_cached_draws = room_cached_draws.saturating_add(1);
+                                    if let Some((
+                                        cached_cells,
+                                        cached_cell_vertices,
+                                        cached_vertices,
+                                        cached_surfaces,
+                                    )) = room_surface_cache_slices(
+                                        active.index,
+                                        active.surface_cache,
+                                    ) {
+                                        let vertex_count = cached_vertices.len();
+                                        let room_projection = room_projection_arena();
+                                        let projected_indices =
+                                            &mut room_projection.indices[..vertex_count];
+                                        let projected_vertices =
+                                            &mut room_projection.vertices[..vertex_count];
+                                        let projected_depths =
+                                            &mut room_projection.depths[..vertex_count];
+                                        let cell_scratch = cell_scratch_arena();
+                                        let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                        let accepted_cell_depths = &mut cell_scratch.depths[..];
+                                        generated::draw_project_cached_room!(
+                                            &lighting,
+                                            draw_indexed_cached_room_vertex_lit_visible_cells,
+                                            [
+                                                cached_cells,
+                                                cached_cell_vertices,
+                                                cached_vertices,
+                                                cached_surfaces,
+                                                projected_indices,
+                                                projected_vertices,
+                                                projected_depths,
+                                                accepted_cell_indices,
+                                                accepted_cell_depths,
+                                                active.depth,
+                                                active.sector_size,
+                                                materials,
+                                            ],
+                                            [
+                                                &room_camera,
+                                                room_options,
+                                                cached_room_depth_mode(),
+                                                cached_room_subdivision_mode(),
+                                                cells,
+                                                ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                                portal_cell_window,
+                                                Some(prebuilt_room_quads_for(active.index)),
+                                                &mut primitive_packets,
+                                                &mut world,
+                                            ]
+                                        )
+                                    } else {
+                                        room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                        if let Some(render_room) = active.render() {
+                                            draw_room_vertex_lit_visible_cells(
+                                                render_room,
+                                                materials,
+                                                &lighting,
+                                                &room_camera,
+                                                room_options,
+                                                cells,
+                                                ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                                &mut primitive_packets,
+                                                &mut world,
+                                            )
+                                        } else {
+                                            GridVisibilityStats::default()
+                                        }
+                                    }
+                                } else {
+                                    room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                    if active_surface_cache_failed(active.surface_cache) {
+                                        room_cache_fallback_draws =
+                                            room_cache_fallback_draws.saturating_add(1);
+                                    }
+                                    if let Some(render_room) = active.render() {
+                                        draw_room_vertex_lit_visible_cells(
+                                            render_room,
+                                            materials,
+                                            &lighting,
+                                            &room_camera,
+                                            room_options,
+                                            cells,
+                                            ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                            &mut primitive_packets,
+                                            &mut world,
+                                        )
+                                    } else {
+                                        GridVisibilityStats::default()
+                                    }
+                                }
+                            } else {
+                                // No usable anchor or no PVS data for this room.
+                                // Draw EVERY cell through the cached path -- it
+                                // works for streamed rooms whose full render data
+                                // is not resident (active.render() == None), which
+                                // the old uncached-only fallback silently skipped
+                                // (the arch-door black-room regression).
+                                room_visibility_fallback_draws =
+                                    room_visibility_fallback_draws.saturating_add(1);
+                                if active.surface_cache.ready {
+                                    if let Some((
+                                        cached_cells,
+                                        cached_cell_vertices,
+                                        cached_vertices,
+                                        cached_surfaces,
+                                    )) = room_surface_cache_slices(
+                                        active.index,
+                                        active.surface_cache,
+                                    ) {
+                                        room_cached_draws = room_cached_draws.saturating_add(1);
+                                        let vertex_count = cached_vertices.len();
+                                        let room_projection = room_projection_arena();
+                                        let projected_indices =
+                                            &mut room_projection.indices[..vertex_count];
+                                        let projected_vertices =
+                                            &mut room_projection.vertices[..vertex_count];
+                                        let projected_depths =
+                                            &mut room_projection.depths[..vertex_count];
+                                        let cell_scratch = cell_scratch_arena();
+                                        let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                        let accepted_cell_depths = &mut cell_scratch.depths[..];
+                                        generated::draw_project_cached_room!(
+                                            &lighting,
+                                            draw_indexed_cached_room_vertex_lit_all_cells,
+                                            [
+                                                cached_cells,
+                                                cached_cell_vertices,
+                                                cached_vertices,
+                                                cached_surfaces,
+                                                projected_indices,
+                                                projected_vertices,
+                                                projected_depths,
+                                                accepted_cell_indices,
+                                                accepted_cell_depths,
+                                                materials,
+                                            ],
+                                            [
+                                                &room_camera,
+                                                room_options,
+                                                cached_room_depth_mode(),
+                                                cached_room_subdivision_mode(),
+                                                ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                                active.sector_size,
+                                                // Lateral-cull cells in EVERY no-anchor
+                                                // fallback room, not just the root: the
+                                                // AABB test is the same conservative
+                                                // margin bound the root room already
+                                                // trusts, and 3-4 of ~5 drawn
+                                                // rooms take this path per frame. Cells
+                                                // it rejects are off-screen, so output
+                                                // pixels are unchanged; only the
+                                                // projection + surface walk for them is
+                                                // skipped.
+                                                true,
+                                                Some(prebuilt_room_quads_for(active.index)),
+                                                &mut primitive_packets,
+                                                &mut world,
+                                            ]
+                                        )
+                                    } else {
+                                        room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                        if let Some(render_room) = active.render() {
+                                            draw_room_vertex_lit(
+                                                render_room,
+                                                materials,
+                                                &lighting,
+                                                &room_camera,
+                                                room_options,
+                                                &mut primitive_packets,
+                                                &mut world,
+                                            );
+                                        }
+                                        GridVisibilityStats::default()
+                                    }
                                 } else {
                                     room_uncached_draws = room_uncached_draws.saturating_add(1);
                                     if let Some(render_room) = active.render() {
@@ -736,47 +782,32 @@ impl Scene for Playtest {
                                     }
                                     GridVisibilityStats::default()
                                 }
-                            } else {
-                                room_uncached_draws = room_uncached_draws.saturating_add(1);
-                                if let Some(render_room) = active.render() {
-                                    draw_room_vertex_lit(
-                                        render_room,
-                                        materials,
-                                        &lighting,
-                                        &room_camera,
-                                        room_options,
-                                        &mut primitive_packets,
-                                        &mut world,
-                                    );
-                                }
-                                GridVisibilityStats::default()
+                            };
+                            if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
+                                room_drawn_chunk_mask |= chunk_mask;
                             }
-                        };
-                        if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
-                            room_drawn_chunk_mask |= chunk_mask;
+                            accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                         }
-                        accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                     }
-                }
-                #[cfg(not(feature = "world-grid-visible"))]
-                {
-                    room_uncached_draws = room_uncached_draws.saturating_add(1);
-                    if active_surface_cache_failed(active.surface_cache) {
-                        room_cache_fallback_draws = room_cache_fallback_draws.saturating_add(1);
+                    #[cfg(not(feature = "world-grid-visible"))]
+                    {
+                        room_uncached_draws = room_uncached_draws.saturating_add(1);
+                        if active_surface_cache_failed(active.surface_cache) {
+                            room_cache_fallback_draws = room_cache_fallback_draws.saturating_add(1);
+                        }
+                        if let Some(render_room) = active.render() {
+                            room_drawn_chunk_mask |= chunk_mask;
+                            draw_room_vertex_lit(
+                                render_room,
+                                materials,
+                                &lighting,
+                                &room_camera,
+                                room_options,
+                                &mut primitive_packets,
+                                &mut world,
+                            );
+                        }
                     }
-                    if let Some(render_room) = active.render() {
-                        room_drawn_chunk_mask |= chunk_mask;
-                        draw_room_vertex_lit(
-                            render_room,
-                            materials,
-                            &lighting,
-                            &room_camera,
-                            room_options,
-                            &mut primitive_packets,
-                            &mut world,
-                        );
-                    }
-                }
                 }
                 telemetry::stage_end(telemetry::stage::ROOM);
                 #[cfg(feature = "room-surface-profile")]
@@ -788,102 +819,6 @@ impl Scene for Playtest {
                         world.command_len().saturating_sub(room_command_start) as u32,
                     );
                 }
-                draw_water(
-                    active.index,
-                    &room_camera,
-                    actor_options,
-                    &lighting,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                telemetry::stage_begin(telemetry::stage::ENTITY_MARKERS);
-                draw_entity_markers(
-                    ENTITIES,
-                    active.index,
-                    materials,
-                    &room_camera,
-                    room_options,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
-                telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
-                box_prop_profile_begin(telemetry::stage::BOX_PROPS);
-                draw_box_props(
-                    BOX_PROPS,
-                    BOX_PROP_SURFACES,
-                    &self.box_props,
-                    active.index,
-                    &room_camera,
-                    actor_options,
-                    &lighting,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                box_prop_profile_end(telemetry::stage::BOX_PROPS);
-                psx_game_runtime::cylinder_props::draw_cylinder_props::<
-                    _,
-                    OT_DEPTH,
-                    { !CYLINDER_PROPS.is_empty() },
-                >(
-                    CYLINDER_PROPS,
-                    CYLINDER_PROP_SURFACES,
-                    active.index,
-                    &room_camera,
-                    actor_options,
-                    &lighting,
-                    prop_texture_slot,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                psx_game_runtime::arch_props::draw_arch_props(
-                    ARCH_PROPS,
-                    ARCH_PROP_SURFACES,
-                    active.index,
-                    &room_camera,
-                    actor_options,
-                    &lighting,
-                    prop_texture_slot,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
-                draw_box_prop_floor_debris(
-                    BOX_PROPS,
-                    &self.box_props,
-                    active.index,
-                    &room_camera,
-                    actor_options,
-                    &lighting,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                box_prop_profile_end(telemetry::stage::BOX_PROP_DEBRIS);
-                box_prop_profile_begin(telemetry::stage::BOX_PROP_SHARDS);
-                draw_box_prop_break_events(
-                    BOX_PROPS,
-                    &self.box_props,
-                    active.index,
-                    &room_camera,
-                    actor_options,
-                    &lighting,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                box_prop_profile_end(telemetry::stage::BOX_PROP_SHARDS);
-                box_prop_profile_begin(telemetry::stage::IMAGE_CARDS);
-                draw_image_props(
-                    IMAGE_PROPS,
-                    active.index,
-                    &room_camera,
-                    actor_options,
-                    &lighting,
-                    &mut primitive_packets,
-                    &mut world,
-                );
-                box_prop_profile_end(telemetry::stage::IMAGE_CARDS);
-                telemetry::stage_end(telemetry::stage::IMAGE_PROPS);
-                telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                 let player = self.motor.position();
                 let instance_depth_pass = player_actor_depth_for_room(
                     active,
@@ -894,36 +829,19 @@ impl Scene for Playtest {
                 )
                 .map(ModelInstanceDepthPass::BehindPlayer)
                 .unwrap_or(ModelInstanceDepthPass::All);
-                if !cfg!(feature = "actor-shadows-off") {
-                    if let Some(shadow_material) = self.shadow_material {
-                    draw_model_instance_shadows(
-                        active.index,
-                        &room_camera,
-                        actor_options,
-                        shadow_material,
-                        &self.models,
-                        entity_poses,
-                        &mut primitive_packets,
-                        &mut world,
-                    );
-                    }
-                }
-                let instance_stats = draw_model_instances(
+                let instance_stats = self.draw_room_world_content(
                     active.index,
-                    &self.instance_actor_poses,
-                    self.gameplay_tick(ctx.sim_tick),
-                    ctx.video_hz,
                     &room_camera,
+                    materials,
+                    room_options,
                     actor_options,
                     &lighting,
-                    &self.model_faces[..self.model_face_count],
-                    &self.model_parts[..self.model_part_count],
-                    &self.model_vertices[..self.model_vertex_count],
                     instance_depth_pass,
+                    entity_poses,
+                    ctx,
                     &mut primitive_packets,
                     &mut world,
                 );
-                telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
                 accumulate_model_instance_draw_stats(&mut total_instance_stats, instance_stats);
             }
 
@@ -1022,6 +940,38 @@ impl Scene for Playtest {
             if self.character.is_some() {
                 let player = self.motor.position();
                 let mut instance_equipment_remaining = MAX_EQUIPMENT_DRAWS;
+                if self.bsp.is_some() {
+                    if let (Some(room_record), Some(lighting)) =
+                        (room_record, self.current_room_lighting(camera))
+                    {
+                        let actor_options = actor_surface_options(room_record)
+                            .with_material_animation(
+                                self.gameplay_tick(ctx.sim_tick).as_u32(),
+                                ctx.video_hz.as_u16(),
+                            );
+                        telemetry::stage_begin(telemetry::stage::EQUIPMENT);
+                        let equipment_stats = draw_instance_equipment(
+                            self.room_index,
+                            &self.instance_actor_poses,
+                            instance_equipment_remaining,
+                            self.gameplay_tick(ctx.sim_tick),
+                            ctx.video_hz,
+                            &camera,
+                            actor_options,
+                            &lighting,
+                            &self.models,
+                            &self.model_faces[..self.model_face_count],
+                            &self.model_parts[..self.model_part_count],
+                            &self.model_vertices[..self.model_vertex_count],
+                            &self.clips,
+                            &mut primitive_packets,
+                            &mut world,
+                        );
+                        instance_equipment_remaining = instance_equipment_remaining
+                            .saturating_sub(equipment_stats.draws as usize);
+                        telemetry::stage_end(telemetry::stage::EQUIPMENT);
+                    }
+                }
                 for &active_slot in &active_draw_order {
                     if active_slot == INVALID_ACTIVE_ROOM_SLOT {
                         continue;
@@ -1357,5 +1307,156 @@ impl Scene for Playtest {
                 }
             }
         }
+    }
+}
+
+impl Playtest {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_room_world_content(
+        &self,
+        room: RoomIndex,
+        camera: &WorldCamera,
+        materials: &[WorldRenderMaterial],
+        room_options: WorldSurfaceOptions,
+        actor_options: WorldSurfaceOptions,
+        lighting: &RuntimeRoomLighting,
+        instance_depth_pass: ModelInstanceDepthPass,
+        entity_poses: &[ModelInstancePoseOverride],
+        ctx: &Ctx,
+        primitive_packets: &mut PrimitivePacketArena<'_>,
+        world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    ) -> ModelInstanceDrawStats {
+        draw_water(
+            room,
+            camera,
+            actor_options,
+            lighting,
+            primitive_packets,
+            world,
+        );
+        telemetry::stage_begin(telemetry::stage::ENTITY_MARKERS);
+        draw_entity_markers(
+            ENTITIES,
+            room,
+            materials,
+            camera,
+            room_options,
+            primitive_packets,
+            world,
+        );
+        telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
+        telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
+        box_prop_profile_begin(telemetry::stage::BOX_PROPS);
+        draw_box_props(
+            BOX_PROPS,
+            BOX_PROP_SURFACES,
+            &self.box_props,
+            room,
+            camera,
+            actor_options,
+            lighting,
+            primitive_packets,
+            world,
+        );
+        box_prop_profile_end(telemetry::stage::BOX_PROPS);
+        psx_game_runtime::cylinder_props::draw_cylinder_props::<
+            _,
+            OT_DEPTH,
+            { !CYLINDER_PROPS.is_empty() },
+        >(
+            CYLINDER_PROPS,
+            CYLINDER_PROP_SURFACES,
+            room,
+            camera,
+            actor_options,
+            lighting,
+            prop_texture_slot,
+            primitive_packets,
+            world,
+        );
+        psx_game_runtime::arch_props::draw_arch_props(
+            ARCH_PROPS,
+            ARCH_PROP_SURFACES,
+            room,
+            camera,
+            actor_options,
+            lighting,
+            prop_texture_slot,
+            primitive_packets,
+            world,
+        );
+        box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
+        draw_box_prop_floor_debris(
+            BOX_PROPS,
+            &self.box_props,
+            room,
+            camera,
+            actor_options,
+            lighting,
+            primitive_packets,
+            world,
+        );
+        box_prop_profile_end(telemetry::stage::BOX_PROP_DEBRIS);
+        box_prop_profile_begin(telemetry::stage::BOX_PROP_SHARDS);
+        draw_box_prop_break_events(
+            BOX_PROPS,
+            &self.box_props,
+            room,
+            camera,
+            actor_options,
+            lighting,
+            primitive_packets,
+            world,
+        );
+        box_prop_profile_end(telemetry::stage::BOX_PROP_SHARDS);
+        box_prop_profile_begin(telemetry::stage::IMAGE_CARDS);
+        draw_image_props(
+            IMAGE_PROPS,
+            room,
+            camera,
+            actor_options,
+            lighting,
+            primitive_packets,
+            world,
+        );
+        box_prop_profile_end(telemetry::stage::IMAGE_CARDS);
+        telemetry::stage_end(telemetry::stage::IMAGE_PROPS);
+        telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
+        if !cfg!(feature = "actor-shadows-off") {
+            if let Some(shadow_material) = self.shadow_material {
+                draw_model_instance_shadows(
+                    room,
+                    camera,
+                    actor_options,
+                    shadow_material,
+                    &self.models,
+                    entity_poses,
+                    if self.bsp.is_some() {
+                        u64::from(self.bsp_instance_visible_mask)
+                    } else {
+                        u64::MAX
+                    },
+                    primitive_packets,
+                    world,
+                );
+            }
+        }
+        let stats = draw_model_instances(
+            room,
+            &self.instance_actor_poses,
+            self.gameplay_tick(ctx.sim_tick),
+            ctx.video_hz,
+            camera,
+            actor_options,
+            lighting,
+            &self.model_faces[..self.model_face_count],
+            &self.model_parts[..self.model_part_count],
+            &self.model_vertices[..self.model_vertex_count],
+            instance_depth_pass,
+            primitive_packets,
+            world,
+        );
+        telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
+        stats
     }
 }

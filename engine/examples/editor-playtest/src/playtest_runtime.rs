@@ -90,7 +90,9 @@ impl Playtest {
             self.camera.focus(),
         );
         #[cfg(not(feature = "cd-stream-bench"))]
-        self.load_active_room_window();
+        if self.bsp.is_none() {
+            self.load_active_room_window();
+        }
         telemetry::debug_log("player water:respawn");
     }
 
@@ -450,6 +452,23 @@ impl Playtest {
             );
         }
 
+        if self.bsp.is_some() {
+            for inst in MODEL_INSTANCES {
+                if inst.room != self.room_index {
+                    continue;
+                }
+                let Some(model) = self.models.get(inst.model.to_usize()).copied().flatten() else {
+                    continue;
+                };
+                draw_collision_cylinder_debug(
+                    RoomPoint::new(inst.x, inst.y, inst.z),
+                    i32::from(model.collision_radius),
+                    i32::from(model.world_height),
+                    camera,
+                    (0xff, 0xd0, 0x40),
+                );
+            }
+        }
         for active in self.window.rooms.iter().flatten().copied() {
             let room_camera = camera_for_room(camera, active);
             for inst in MODEL_INSTANCES {
@@ -481,6 +500,41 @@ impl Playtest {
             return 0;
         };
         let mut submitted = 0usize;
+        if self.bsp.is_some() {
+            let depth_range = ROOMS
+                .get(self.room_index.to_usize())
+                .map(room_depth_range)
+                .unwrap_or(WORLD_DEPTH_RANGE);
+            let mut projector = None;
+            for emitter in PARTICLE_EMITTERS {
+                if emitter.room != self.room_index {
+                    continue;
+                }
+                let loaded_projector = match projector {
+                    Some(projector) => Some(projector),
+                    None => {
+                        if !PROP_PARTICLE_GTE_PROJECT_ENABLED {
+                            None
+                        } else {
+                            let loaded = LoadedWorldCameraGte::load(camera);
+                            projector = Some(loaded);
+                            Some(loaded)
+                        }
+                    }
+                };
+                submitted += draw_particle_emitter(
+                    *emitter,
+                    camera,
+                    loaded_projector,
+                    depth_range,
+                    particle_material,
+                    elapsed_tick,
+                    ot,
+                    primitive_packets,
+                );
+            }
+            return submitted;
+        }
         for active in self.window.rooms.iter().flatten().copied() {
             if !self.portal_visibility_draws_room(active.index) {
                 continue;
@@ -622,7 +676,9 @@ impl Playtest {
     }
 
     pub(super) fn current_room_lighting(&self, camera: WorldCamera) -> Option<RuntimeRoomLighting> {
-        self.current_collision_room?;
+        if self.bsp.is_none() {
+            self.current_collision_room?;
+        }
         let room_record = ROOMS.get(self.room_index.to_usize())?;
         Some(RuntimeRoomLighting {
             room_index: self.room_index,

@@ -521,12 +521,15 @@ fn build_world_pack_from_inputs(
     }
     chunks.sort_by_key(|(chunk_id, _)| *chunk_id);
     reject_duplicate_chunk_ids(&chunks)?;
-    if chunks.is_empty() {
-        return Err("no WORLD.PAK chunks found".to_string());
-    }
     if let Some(order_file) = order_file {
         let order = read_world_pack_order_file(order_file)?;
+        if chunks.is_empty() && order.is_empty() {
+            return Ok(build_world_pack(&[]));
+        }
         apply_world_pack_order(&mut chunks, &order, order_file)?;
+    }
+    if chunks.is_empty() {
+        return Err("no WORLD.PAK chunks found".to_string());
     }
     let refs: Vec<(u32, &[u8])> = chunks
         .iter()
@@ -785,6 +788,25 @@ mod tests {
         assert_eq!(&pack[..8], b"PSOXWPAK");
         assert_eq!(u32::from_le_bytes(pack[12..16].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(pack[28..32].try_into().unwrap()), 1000);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_empty_order_builds_a_header_only_world_pack() {
+        let dir = std::env::temp_dir().join(format!(
+            "mkisopsx-test-{}-{}",
+            std::process::id(),
+            "empty-world-pack"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let order = dir.join("world_pack_order.txt");
+        std::fs::write(&order, "# resident PXBSP has no PSXW chunks\n").unwrap();
+
+        let pack = build_world_pack_from_inputs(Some(&dir), &[], Some(&order), false).unwrap();
+        assert_eq!(&pack[..8], b"PSOXWPAK");
+        assert_eq!(u32::from_le_bytes(pack[12..16].try_into().unwrap()), 0);
 
         std::fs::remove_dir_all(dir).unwrap();
     }

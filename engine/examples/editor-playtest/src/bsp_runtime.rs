@@ -11,6 +11,7 @@ use core::fmt;
 use psx_bsp::collision::{BrushTransform, TraceScratch};
 use psx_bsp::collision_provider::{select_body_hull, PxbspCollisionModel, PxbspCollisionProvider};
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
+use psx_bsp::pxbsp::PXBSP_MAX_VISIBILITY_BYTES;
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, SliceReader, Vec3I32};
@@ -124,6 +125,9 @@ pub(super) struct BspRuntime {
     doors: BrushDoorSet<MAX_BSP_DOORS>,
     materials: Vec<Option<PxbspTextureBinding>>,
     trace_scratch: TraceScratch,
+    activation_visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
+    activation_leaf: Option<usize>,
+    activation_visible_leaves: usize,
 }
 
 impl BspRuntime {
@@ -210,7 +214,58 @@ impl BspRuntime {
             doors,
             materials: vec![None; material_count],
             trace_scratch: TraceScratch::new(),
+            activation_visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
+            activation_leaf: None,
+            activation_visible_leaves: 0,
         })
+    }
+
+    /// Return one bit per world-space point visible from `observer` through
+    /// the cooked PXBSP PVS. Invalid/solid points and malformed visibility
+    /// fail closed. Positions are engine units; the map lookup consumes Q20.12.
+    pub(super) fn visible_points_mask(&mut self, observer: RoomPoint, points: &[[i32; 3]]) -> u64 {
+        let q12 = |value: i32| value.saturating_mul(4096);
+        let observer = Vec3I32 {
+            x: q12(observer.x),
+            y: q12(observer.y),
+            z: q12(observer.z),
+        };
+        let Some(observer_leaf) = self.map.point_leaf_index(observer) else {
+            self.activation_leaf = None;
+            self.activation_visible_leaves = 0;
+            return 0;
+        };
+        if self.activation_leaf != Some(observer_leaf) {
+            let Some(visible_leaves) = self
+                .map
+                .leaf_visibility_into(observer_leaf, &mut self.activation_visibility)
+            else {
+                self.activation_leaf = None;
+                self.activation_visible_leaves = 0;
+                return 0;
+            };
+            self.activation_leaf = Some(observer_leaf);
+            self.activation_visible_leaves = visible_leaves;
+        }
+        let visible_leaves = self.activation_visible_leaves;
+        let mut mask = 0u64;
+        for (index, point) in points.iter().enumerate().take(64) {
+            let Some(leaf) = self.map.point_leaf_index(Vec3I32 {
+                x: q12(point[0]),
+                y: q12(point[1]),
+                z: q12(point[2]),
+            }) else {
+                continue;
+            };
+            if leaf == 0 || leaf > visible_leaves {
+                continue;
+            }
+            let visible_index = leaf - 1;
+            if self.activation_visibility[visible_index >> 3] & (1 << (visible_index & 7)) != 0 {
+                mask |= 1u64 << index;
+            }
+        }
+        mask
     }
 
     /// Resolve every PXBSP material through the normal playtest VRAM owner.

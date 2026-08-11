@@ -93,6 +93,7 @@ pub use manifest::{
 pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
 
+#[cfg(test)]
 const DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
 const ATMOSPHERE_DENSITY_MAX: i32 = 96;
 const ATMOSPHERE_FALL_SPEED_MAX_Q4: i32 = 64;
@@ -707,7 +708,7 @@ pub fn build_package(
 
                 rooms.push(PlaytestRoom {
                     name: runtime_room_name(&room_node.name, portal_room_count, portal_room.index),
-                    world_asset_index,
+                    world_asset_index: Some(world_asset_index),
                     reflection_probe_asset_index,
                     origin_x: chunk_grid.origin[0],
                     origin_z: chunk_grid.origin[1],
@@ -821,57 +822,15 @@ pub fn build_package(
         }
     }
     if uses_pxbsp {
-        // Brush worlds still enter the normal package/gameplay pipeline. One
-        // synthetic region preserves the existing room-indexed actor tables
-        // until real PXBSP leaf/PVS residency replaces them; its tiny PSXW is
-        // metadata only and is never the selected world renderer/collider.
-        let synthetic_sector_size = scene
+        // The singleton record retains shared world/camera/sky settings for
+        // the ordinary gameplay pipeline. Geometry, collision, visibility,
+        // and spatial activation come exclusively from resident PXBSP; there
+        // is deliberately no synthetic WorldGrid, PSXW asset, room chunk, or
+        // grid-PVS bake hiding behind this metadata anchor.
+        let world_sector_size = scene
             .world_sector_size_for_node(scene.root)
             .unwrap_or(1024)
             .max(1);
-        let synthetic_grid = WorldGrid::empty(1, 1, synthetic_sector_size);
-        let cooked = match cook_world_grid(project, &synthetic_grid) {
-            Ok(cooked) => cooked,
-            Err(error) => {
-                report.error(format!("PXBSP synthetic region failed cook: {error}"));
-                return (None, report);
-            }
-        };
-        let world_asset_index = assets.len();
-        assets.push(PlaytestAsset {
-            kind: PlaytestAssetKind::RoomWorld,
-            bytes: Vec::new(),
-            filename: "room_000.psxw".to_string(),
-            source_label: "PXBSP world region".to_string(),
-            streamed_class: StreamedClass::None,
-        });
-        room_chunks_by_node.insert(
-            scene.root,
-            vec![AuthoredRoomChunk {
-                room_index: 0,
-                authored_room: scene.root.raw() as u32,
-                chunk_index: 0,
-                array_origin: [0, 0],
-                world_origin: [0, 0],
-                size: [1, 1],
-                cells: vec![[0, 0]],
-                neighbours: [None; 4],
-                triangles: 0,
-                psxw_bytes: 0,
-                static_lit_bytes: 0,
-                populated_cells: 1,
-                floor_idx: 0,
-            }],
-        );
-        append_room_visibility(
-            0,
-            &cooked,
-            DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS,
-            &mut room_visibility,
-            &mut visibility_cells,
-            &mut visibility_pvs,
-            &mut visibility_pvs_bits,
-        );
         let resolved_camera = scene
             .world_camera_for_node(scene.root)
             .unwrap_or_default()
@@ -898,12 +857,12 @@ pub fn build_package(
             .resolved_for_room(false, [0; 3]);
         rooms.push(PlaytestRoom {
             name: "PXBSP World".to_string(),
-            world_asset_index,
+            world_asset_index: None,
             reflection_probe_asset_index: None,
             origin_x: 0,
             origin_z: 0,
             origin_y: 0,
-            sector_size: synthetic_sector_size,
+            sector_size: world_sector_size,
             draw_distance: resolved_culling.draw_distance,
             chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
             visibility_radius: resolved_culling.visibility_radius,
@@ -974,13 +933,6 @@ pub fn build_package(
             },
             flags: 0,
         });
-        room_bake_inputs.push(CookedRoomBakeInput {
-            room_index: 0,
-            world_asset_index,
-            world_origin: [0, 0],
-            origin_y: 0,
-            cooked,
-        });
 
         let texture_asset_base = match u16::try_from(assets.len()) {
             Ok(base) => base,
@@ -1050,7 +1002,11 @@ pub fn build_package(
         report.error("every Room is empty - cook needs at least one populated room");
         return (None, report);
     }
-    let mut chunks = build_playtest_chunks(&room_chunks_by_node, rooms.len());
+    let mut chunks = if uses_pxbsp {
+        Vec::new()
+    } else {
+        build_playtest_chunks(&room_chunks_by_node, rooms.len())
+    };
 
     // Pass 3: spawn + entities + model instances + lights.
     let mut player_spawns: Vec<PlayerSpawnCandidate<'_>> = Vec::new();

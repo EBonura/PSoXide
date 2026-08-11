@@ -7,8 +7,8 @@ use psx_math::int32::mul_q12_i32;
 
 use crate::collision::CollisionHull;
 use crate::pxbsp::{
-    PxbspEntityTable, PxbspEntityTableError, PxbspError, PxbspIndex, PxbspLumpKind, PxbspMaterial,
-    PxbspMaterialError, PXBSP_LUMP_COUNT,
+    decompress_visibility, PxbspEntityTable, PxbspEntityTableError, PxbspError, PxbspIndex,
+    PxbspLumpKind, PxbspMaterial, PxbspMaterialError, PXBSP_LUMP_COUNT,
 };
 use crate::{
     BrushModel, ClipNode, CookedRecord, Face, Leaf, LumpRange, Node, Plane, ReadAt, RecordSlice,
@@ -248,6 +248,32 @@ impl PxbspResidentMap {
 
     pub fn visibility(&self) -> &[u8] {
         self.lump_bytes(PxbspLumpKind::Visibility)
+    }
+
+    /// Decompress the PVS row for one validated non-solid runtime leaf.
+    ///
+    /// Returns the number of addressable empty leaves. Bit `n` in the
+    /// caller-owned output corresponds to runtime leaf `n + 1`. Invalid,
+    /// solid, unbounded, or malformed rows return `None` without allocating.
+    pub fn leaf_visibility_into(&self, leaf_index: usize, output: &mut [u8]) -> Option<usize> {
+        if leaf_index == 0 {
+            return None;
+        }
+        let leaf = self.leaves().get(leaf_index)?;
+        let offset = usize::try_from(leaf.visibility_offset).ok()?;
+        let visible_leaves = usize::try_from(self.brush_models().get(0)?.visible_leaves).ok()?;
+        let row_bytes = visible_leaves.div_ceil(8);
+        if row_bytes > output.len() {
+            return None;
+        }
+        output[..row_bytes].fill(0);
+        decompress_visibility(self.visibility(), offset, &mut output[..row_bytes])
+            .then_some(visible_leaves)
+    }
+
+    /// Locate a Q20.12 point and decompress its PVS into caller-owned bytes.
+    pub fn point_visibility_into(&self, point: Vec3I32, output: &mut [u8]) -> Option<usize> {
+        self.leaf_visibility_into(self.point_leaf_index(point)?, output)
     }
 
     pub fn model_data(&self) -> &[u8] {
@@ -612,6 +638,36 @@ pub(crate) mod tests {
             }),
             Some(0)
         );
+    }
+
+    #[test]
+    fn decompresses_point_pvs_into_caller_owned_bytes() {
+        let map = load(&write_file(&valid_lumps())).expect("resident map");
+        let mut visibility = [0xa5; 1];
+        assert_eq!(
+            map.point_visibility_into(
+                Vec3I32 {
+                    x: 4096,
+                    y: 0,
+                    z: 0,
+                },
+                &mut visibility,
+            ),
+            Some(1)
+        );
+        assert_eq!(visibility, [1]);
+        assert_eq!(
+            map.point_visibility_into(
+                Vec3I32 {
+                    x: -4096,
+                    y: 0,
+                    z: 0,
+                },
+                &mut visibility,
+            ),
+            None
+        );
+        assert_eq!(map.leaf_visibility_into(1, &mut []), None);
     }
 
     #[test]

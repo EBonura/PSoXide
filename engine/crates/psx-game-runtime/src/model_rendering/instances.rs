@@ -115,12 +115,17 @@ pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEP
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     pose_overrides: &[ModelInstancePoseOverride],
+    visible_instance_mask: u64,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     let mut drawn = 0usize;
     for (index, inst) in tables.model_instances.iter().enumerate() {
-        if inst.room != current_room || drawn >= knobs.max_model_instances {
+        if index >= 64
+            || visible_instance_mask & (1u64 << index) == 0
+            || inst.room != current_room
+            || drawn >= knobs.max_model_instances
+        {
             continue;
         }
         let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
