@@ -2601,3 +2601,192 @@ fn real_egui_brush_inspector_exposes_and_changes_bsp_contents() {
         BrushContents::Solid
     );
 }
+
+/// Same slope plane as `arbitrary_plane_face_handle_drags_along_its_normal_and_undoes_once`,
+/// but authored from points that all sit OFF the solved polygon: the face
+/// handle must key off the solved polygon centre plus the authored plane,
+/// never off the raw authored points.
+#[test]
+fn off_corner_authored_plane_face_handle_drags_along_its_normal_and_undoes_once() {
+    let mut wedge = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    // Plane x + y = 128 (outward normal (1,1,0)), authored from three points
+    // far outside the brush bounds.
+    wedge.faces[5] = psxed_project::brush::BrushFace::from_points([
+        [-64, 192, 0],
+        [-64, 192, 128],
+        [192, -64, 128],
+    ]);
+    assert!(wedge.solve().is_valid());
+    // Fixture precondition: no authored plane point coincides with a solved
+    // polygon corner.
+    let corners = solved_unique_verts(&wedge);
+    for point in wedge.faces[5].points {
+        assert!(
+            !corners.contains(&point.map(i64::from)),
+            "authored point {point:?} must sit off the solved polygon"
+        );
+    }
+    let base = wedge.clone();
+    let (mut workspace, rect) = handle_test_workspace(wedge);
+    workspace.brush_edit_mode = BrushEditMode::Face;
+    workspace.selection_mode = SelectionMode::Face;
+    let (center, _) = EditorWorkspace::face_center_and_normal(&base, 5).unwrap();
+    let pointer = workspace.project_brush_point_3d(rect, center).unwrap();
+    assert!(matches!(
+        workspace.pick_brush_handle_3d(rect, pointer),
+        Some((0, BrushHandle3d::Face { face: 5, .. }))
+    ));
+
+    let mut frame = ToolFrame3d {
+        rect,
+        pointer_interact: Some(pointer),
+        pointer_hover: Some(pointer),
+        modifiers: egui::Modifiers::NONE,
+        pointer_target: None,
+        hover_room: None,
+        drag_delta_y: 0.0,
+    };
+    tool_impl_3d(ViewTool::Brush).primary_pressed(&mut workspace, &frame);
+    let drag = workspace.brush_extrude.clone().expect("face handle drag");
+    assert!(drag.normal_3d.is_some());
+    let end = pointer + drag.screen_direction * 24.0;
+    frame.pointer_interact = Some(end);
+    frame.pointer_hover = Some(end);
+    tool_impl_3d(ViewTool::Brush).primary_dragged(&mut workspace, &frame);
+    let applied = workspace.brush_extrude.as_ref().unwrap().applied;
+    assert_ne!(applied, [0; 3]);
+    assert_ne!(applied[0], 0, "slope movement must include X");
+    assert_ne!(applied[1], 0, "slope movement must include Y");
+    let moved = workspace.project.active_scene().brushes[0].clone();
+    assert!(moved.solve().is_valid());
+    assert_eq!(
+        psxed_project::brush::Plane::from_points(moved.faces[5].points)
+            .unwrap()
+            .normal,
+        psxed_project::brush::Plane::from_points(base.faces[5].points)
+            .unwrap()
+            .normal,
+        "drag along the normal must preserve the authored plane orientation"
+    );
+    tool_impl_3d(ViewTool::Brush).primary_released(&mut workspace, &frame);
+    assert!(workspace.is_dirty());
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes[0], base);
+}
+
+/// Plane numeric fallback on a non-axis-aligned face: sliding along the
+/// dominant axis translates the whole authored plane, preserving its
+/// orientation, and rejects an edit that would stop enclosing volume.
+#[test]
+fn face_plane_numeric_edit_slides_a_non_axis_aligned_face() {
+    let mut harness = ViewportHarness::floored_room("brush_numeric_slope", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    let mut wedge = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    wedge.faces[5] =
+        psxed_project::brush::BrushFace::from_points([[0, 128, 0], [0, 128, 128], [128, 0, 128]]);
+    assert!(wedge.solve().is_valid());
+    let normal_before = psxed_project::brush::Plane::from_points(wedge.faces[5].points)
+        .unwrap()
+        .normal;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(wedge);
+    harness.workspace.selected_brush = Some(0);
+    harness.workspace.selected_brush_face = Some(5);
+
+    // The slope's dominant axis resolves to X with the authored reference
+    // point at x = 0.
+    assert_eq!(harness.workspace.selected_brush_face_axis(), Some((0, 0)));
+    assert!(harness.workspace.set_selected_brush_face_axis_position(32));
+    assert_eq!(harness.workspace.selected_brush_face_axis(), Some((0, 32)));
+    let moved = harness.workspace.project.active_scene().brushes[0].clone();
+    assert!(moved.solve().is_valid());
+    let plane = psxed_project::brush::Plane::from_points(moved.faces[5].points).unwrap();
+    assert_eq!(plane.normal, normal_before, "slide keeps the slope");
+    // x + y = 160 after the +32 slide (normal components are 128 * 128).
+    assert_eq!(plane.dist, 160 * plane.normal[0]);
+    assert!(harness.workspace.is_dirty());
+
+    // Sliding past the far side would invert the wedge: rejected, untouched.
+    assert!(!harness
+        .workspace
+        .set_selected_brush_face_axis_position(-1000));
+    assert_eq!(harness.workspace.project.active_scene().brushes[0], moved);
+}
+
+/// A 3D marquee sweeping two separated brushes selects both, through real
+/// egui pointer dispatch.
+#[test]
+fn marquee_3d_selects_multiple_brushes_via_real_egui() {
+    let mut project = ProjectDocument::new("3d multi-brush marquee");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [-192, 0, -32],
+            [-64, 64, 32],
+        ));
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [64, 0, -32],
+            [192, 64, 32],
+        ));
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("marquee-3d-multi"), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [0, 600, -1400];
+    let (yaw, pitch) = camera_angles_to_look_at([0, 600, -1400], [0, 32, 0]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    let rect = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+    let left = workspace
+        .project_brush_point_3d(rect, [-128.0, 32.0, 0.0])
+        .unwrap();
+    let right = workspace
+        .project_brush_point_3d(rect, [128.0, 32.0, 0.0])
+        .unwrap();
+
+    // Start well outside both brushes' pick tolerance so Select begins a
+    // marquee, then sweep a rect that covers both projected boxes (the
+    // camera looks along +Z, so world +X projects left of centre).
+    let min_x = left.x.min(right.x);
+    let max_x = left.x.max(right.x);
+    run_real_egui_viewport_plain_drag(
+        &mut workspace,
+        Pos2::new(min_x - 40.0, left.y - 60.0),
+        Pos2::new(max_x + 40.0, right.y + 60.0),
+    );
+
+    assert_eq!(workspace.selected_brush_set(), vec![0, 1]);
+    assert_eq!(workspace.status_text(), "Selected 2 brushes");
+}
+
+/// The Move/Resize/Edge/Vertex mode buttons stay visible and clickable
+/// while the 3D viewport (not an orthographic view) is active.
+#[test]
+fn brush_mode_buttons_visible_and_clickable_with_3d_viewport_active() {
+    let mut project = ProjectDocument::new("3d visible brush modes");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("mode-buttons-3d"), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Brush;
+    workspace.view_2d = false;
+    workspace.replace_brush_selection(0, None);
+
+    // The helper asserts every mode button is present in the drawn frame
+    // before clicking, so this proves visibility with the 3D viewport up.
+    click_visible_brush_mode(&mut workspace, BrushEditMode::Vertex);
+    assert_eq!(workspace.brush_edit_mode, BrushEditMode::Vertex);
+}
