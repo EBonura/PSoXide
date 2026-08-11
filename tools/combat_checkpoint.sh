@@ -58,6 +58,15 @@ assert_eq() {
     [ "$2" = "$3" ] || fail "$1: got '$2', expected '$3'"
 }
 
+# See write_combat_tape: a video-frame tape drifts against the guest's pad-poll
+# clock by an amount that depends on guest code layout. The editor records on
+# the video-frame clock, so a re-recorded tape would put this gate back on it.
+assert_poll_clock() {
+    head -1 "$1" | grep -q 'clock=pad_poll' || fail \
+        "$1 is not a pad_poll tape. Replay gates need the guest's own input clock;
+  convert an editor recording with 'frontend launch --input-tape <in> --input-tape-transcribe <out>'."
+}
+
 cd "$ROOT"
 mkdir -p "$OUT"
 
@@ -94,6 +103,9 @@ echo "combat-checkpoint: disc"
 # counter assertions. Incremental cargo makes this free when up to date.
 echo "combat-checkpoint: building frontend"
 (cd emu && cargo build -p frontend --release --quiet)
+
+assert_poll_clock "$FIXTURE/combat-checkpoint.pxitape.csv"
+assert_poll_clock "$FIXTURE/door-blocks-damage.pxitape.csv"
 
 for RUN in 1 2; do
     echo "combat-checkpoint: canonical replay $RUN/2"
