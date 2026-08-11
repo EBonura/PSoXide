@@ -2659,3 +2659,263 @@ fn inspector_respects_explicit_history_and_deliberate_clears() {
     workspace.do_undo();
     assert_eq!(workspace.status, "Nothing to undo");
 }
+
+/// The verified combat loadout must survive the production "Starter
+/// Characters" sync into a genuinely fresh New Project: sword weapon
+/// resources and their assets arrive byte-for-byte, the Aletha and Rust
+/// Mantis profiles carry the measured combat capsules, and every synced
+/// reference resolves inside the target project (a profile whose model or
+/// animation set points at a resource id the sync never copied is exactly
+/// the dangling-reference failure this test exists to catch).
+#[test]
+fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
+    let mut workspace =
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let name = format!(
+        "Starter Combat Sync {} {}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    let _ = std::fs::remove_dir_all(&project_dir);
+
+    workspace.create_and_open_project(&name).unwrap();
+    assert!(
+        !workspace
+            .project()
+            .resources
+            .iter()
+            .any(|resource| matches!(resource.data, ResourceData::Character(_))),
+        "the BSP starter template must arrive character-free"
+    );
+
+    // The exact body of the resources-panel "Starter Characters" action.
+    workspace.push_undo();
+    let target_dir = workspace.project_dir.clone();
+    let report = sync_starter_character_catalogue(&mut workspace.project, &target_dir)
+        .expect("starter character sync");
+    assert!(report.changed());
+    workspace.mark_dirty();
+    workspace.save().expect("save synced project");
+
+    // Weapon + character assets land as byte-copies of the tracked default
+    // project files (themselves byte-copies of the verified cortex_v1 sample).
+    let default_root = psxed_project::default_project_dir();
+    for relative in [
+        "assets/models/sword1_light/sword1_light.psxmdl",
+        "assets/models/sword1_light/sword1_light.psxt",
+        "assets/models/sword1_light/prop_bind_pose.psxanim",
+        "assets/models/sword1_heavy/sword1_heavy.psxmdl",
+        "assets/models/ci_player/ci_player.psxmdl",
+        "assets/models/rust_mantis/rust_mantis.psxmdl",
+        "assets/animations/ci_player_complete/light_attack.psxanim",
+        "assets/animations/rust_mantis_starter/idle.psxanim",
+    ] {
+        assert_eq!(
+            std::fs::read(project_dir.join(relative)).unwrap(),
+            std::fs::read(default_root.join(relative)).unwrap(),
+            "sync did not copy {relative} byte-for-byte"
+        );
+    }
+
+    let project = workspace.project();
+    let resource_by_name = |name: &str, wants: fn(&ResourceData) -> bool| {
+        project
+            .resources
+            .iter()
+            .find(|resource| resource.name == name && wants(&resource.data))
+            .unwrap_or_else(|| panic!("synced project is missing '{name}'"))
+    };
+
+    // Full referential integrity: after syncing into a genuinely fresh
+    // project every cook-relevant resource reference must resolve. Only
+    // `AnimationClip::source` / `AnimationSource` provenance is exempt: the
+    // catalogue deliberately does not carry authoring sources, and the cook
+    // never reads them.
+    for resource in &project.resources {
+        let mut check = |label: &str, reference: Option<psxed_project::ResourceId>| {
+            if let Some(id) = reference {
+                assert!(
+                    project.resource(id).is_some(),
+                    "synced '{}' has a dangling {label} reference #{}",
+                    resource.name,
+                    id.raw()
+                );
+            }
+        };
+        match &resource.data {
+            ResourceData::Character(character) => {
+                check("model", character.model);
+                check("material", character.material);
+                check("animation set", character.animation_set);
+            }
+            ResourceData::Model(model) => check("skeleton", model.skeleton),
+            ResourceData::Weapon(weapon) => check("weapon model", weapon.model),
+            ResourceData::AnimationClip(clip) => {
+                check("skeleton", clip.skeleton);
+                check("target model", clip.target_model);
+            }
+            ResourceData::AnimationSet(set) => {
+                check("skeleton", set.skeleton);
+                for binding in &set.action_clips {
+                    check("action clip", Some(binding.clip));
+                }
+                for clip in &set.clips {
+                    check("library clip", Some(*clip));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // The verified Aletha loadout: measured capsules, ci_player model with
+    // the joint-13 grip socket, the complete action set, and the crystal
+    // covering material.
+    let aletha = resource_by_name("Aletha", |data| matches!(data, ResourceData::Character(_)));
+    let ResourceData::Character(aletha) = &aletha.data else {
+        unreachable!();
+    };
+    assert_eq!(aletha.combat_capsules.len(), 4);
+    let capsule = |index: usize| &aletha.combat_capsules[index];
+    assert_eq!(capsule(0).name, "Torso Hurtbox");
+    assert_eq!(capsule(0).joint, 3);
+    assert_eq!(capsule(0).capsule.radius, 180);
+    assert_eq!(capsule(0).role, psxed_project::CombatCapsuleRole::Hurtbox);
+    for (index, action, window, damage, poise) in [
+        (
+            1,
+            psxed_project::CharacterAnimationAction::LightAttack,
+            (12, 15),
+            25,
+            25,
+        ),
+        (
+            2,
+            psxed_project::CharacterAnimationAction::HeavyAttack,
+            (11, 14),
+            38,
+            50,
+        ),
+        (
+            3,
+            psxed_project::CharacterAnimationAction::ComboAttack,
+            (12, 25),
+            30,
+            30,
+        ),
+    ] {
+        assert_eq!(capsule(index).joint, 13);
+        assert_eq!(capsule(index).capsule.radius, 72);
+        assert_eq!(
+            capsule(index).role,
+            psxed_project::CombatCapsuleRole::Hitbox {
+                action,
+                active_start_frame: window.0,
+                active_end_frame: window.1,
+                damage,
+                poise_damage: poise,
+            }
+        );
+    }
+    let aletha_model = project.resource(aletha.model.unwrap()).unwrap();
+    let ResourceData::Model(aletha_model_data) = &aletha_model.data else {
+        panic!("Aletha model reference is not a Model");
+    };
+    assert_eq!(
+        aletha_model_data.model_path,
+        "assets/models/ci_player/ci_player.psxmdl"
+    );
+    let socket = aletha_model_data
+        .attachments
+        .iter()
+        .find(|socket| socket.name == "right_hand_grip")
+        .expect("Aletha model carries the right_hand_grip socket");
+    assert_eq!(socket.joint, 13);
+    let aletha_set = project.resource(aletha.animation_set.unwrap()).unwrap();
+    assert_eq!(aletha_set.name, "Aletha Complete Animation Set");
+    let aletha_material = project.resource(aletha.material.unwrap()).unwrap();
+    assert_eq!(aletha_material.name, "Aletha Crystal");
+
+    // The verified Mantis enemy: torso hurtbox only (reciprocal damage is the
+    // documented legacy-arc fallback), armed model socket for equipment.
+    let mantis = resource_by_name("Rust Mantis Enemy", |data| {
+        matches!(data, ResourceData::Character(_))
+    });
+    let ResourceData::Character(mantis) = &mantis.data else {
+        unreachable!();
+    };
+    assert_eq!(mantis.combat_capsules.len(), 1);
+    assert_eq!(mantis.combat_capsules[0].name, "Torso Hurtbox");
+    assert_eq!(mantis.combat_capsules[0].joint, 3);
+    assert_eq!(mantis.combat_capsules[0].capsule.radius, 184);
+    assert_eq!(
+        mantis.combat_capsules[0].role,
+        psxed_project::CombatCapsuleRole::Hurtbox
+    );
+    assert_eq!(mantis.spawn_role, psxed_project::CharacterSpawnRole::Enemy);
+    let behavior = mantis.enemy_behavior.expect("mantis enemy behavior");
+    assert_eq!(behavior.poise, 100);
+    assert_eq!(behavior.max_health, 100);
+    assert_eq!(behavior.touch_damage, 10);
+    let mantis_model = project.resource(mantis.model.unwrap()).unwrap();
+    let ResourceData::Model(mantis_model_data) = &mantis_model.data else {
+        panic!("Mantis model reference is not a Model");
+    };
+    assert!(mantis_model_data
+        .attachments
+        .iter()
+        .any(|socket| socket.name == "right_hand_grip" && socket.joint == 13));
+
+    // The verified sword weapons, grips exact (scale-specific measured
+    // translations), each resolving to a synced Model resource.
+    for (name, grip_translation, hitboxes) in
+        [("Sword1 Light", [0, 15077, 0], 1), ("Sword1 Heavy", [0, 18462, 0], 0)]
+    {
+        assert!(STARTER_WEAPON_NAMES.contains(&name));
+        let weapon = resource_by_name(name, |data| matches!(data, ResourceData::Weapon(_)));
+        let ResourceData::Weapon(weapon) = &weapon.data else {
+            unreachable!();
+        };
+        assert_eq!(weapon.default_character_socket, "right_hand_grip");
+        assert_eq!(weapon.grip.name, "grip");
+        assert_eq!(weapon.grip.translation, grip_translation);
+        assert_eq!(weapon.grip.rotation_q12, [0, -1024, 0]);
+        assert_eq!(weapon.hitboxes.len(), hitboxes);
+        assert_eq!(weapon.arc_reach, 640);
+        assert_eq!(weapon.damage, 25);
+        let model = project
+            .resource(weapon.model.expect("starter weapon has a model"))
+            .unwrap_or_else(|| panic!("weapon '{name}' has a dangling model reference"));
+        assert!(matches!(model.data, ResourceData::Model(_)));
+        assert_eq!(model.name, name);
+    }
+    let light_weapon = resource_by_name("Sword1 Light", |data| {
+        matches!(data, ResourceData::Weapon(_))
+    });
+    let ResourceData::Weapon(light_weapon) = &light_weapon.data else {
+        unreachable!();
+    };
+    assert_eq!(light_weapon.hitboxes[0].active_start_frame, 12);
+    assert_eq!(light_weapon.hitboxes[0].active_end_frame, 15);
+
+    // A second sync of an already-armed project is a no-op: the catalogue
+    // converged instead of duplicating resources or rewriting files.
+    let resources_before = workspace.project().resources.len();
+    let repeat = sync_starter_character_catalogue(&mut workspace.project, &target_dir)
+        .expect("repeat starter character sync");
+    assert!(
+        !repeat.changed(),
+        "repeat sync must be a no-op (added {}, updated {}, removed {}, copied {}, deleted {})",
+        repeat.resources_added,
+        repeat.resources_updated,
+        repeat.resources_removed,
+        repeat.files_copied,
+        repeat.files_removed
+    );
+    assert_eq!(workspace.project().resources.len(), resources_before);
+
+    let _ = std::fs::remove_dir_all(project_dir);
+}
