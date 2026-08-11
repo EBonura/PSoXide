@@ -755,12 +755,18 @@ id_table! {
     /// surface body no counter reaches; `stage - cell_setup - call` is the
     /// loop's own overhead. Together these close the attribution.
     pub const ROOM_SURF_CALL_CYCLES: u16 = 252;
+
+    /// Player attack actions that actually started (an accepted light,
+    /// heavy, or combo press; presses swallowed by locks or hit-stun do
+    /// not count). Lets headless combat gates assert attempt counts
+    /// independently of whether the swings later connect.
+    pub const PLAYER_ATTACK_STARTS: u16 = 253;
     }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 253;
+pub const COUNTER_COUNT: usize = 254;
 
-const _: () = assert!(counter::ROOM_SURF_CALL_CYCLES as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PLAYER_ATTACK_STARTS as usize == COUNTER_COUNT - 1);

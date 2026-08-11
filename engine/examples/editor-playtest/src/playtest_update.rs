@@ -409,6 +409,7 @@ impl Playtest {
                 false
             };
             if started {
+                telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
                 input = CharacterMotorInput::default();
             }
         }
