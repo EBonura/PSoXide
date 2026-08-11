@@ -2623,6 +2623,12 @@ impl AppState {
         Ok(())
     }
 
+    /// Select the BSP Room workspace's orthographic viewport for the native
+    /// `--editor-view top` startup route.
+    pub fn show_editor_room_orthographic(&mut self) {
+        self.editor.show_room_orthographic();
+    }
+
     /// Enter the embedded editor workspace.
     pub fn open_editor_workspace(&mut self) {
         self.running = false;

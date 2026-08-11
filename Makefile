@@ -36,7 +36,7 @@
 	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio hwtest-audio-chain \
 	hwtest-sb4-capture hwtest-sb4 hwtest-sb4-baseline \
 	hello-engine hello-engine-disc run-hello-engine \
-	cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
+	cook-playtest build-editor-playtest editor-blank-playtest-check profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
 	profile-demo3-disc-stream-forward profile-demo7-camera-sweep
 
@@ -67,6 +67,8 @@ help:
 	@echo "                      - update exact-hash validation baselines"
 	@echo "    make test-sdk     - build every SDK example + run Milestone-C regression suite"
 	@echo "    make profile-demo3 - cook/build demo3 BIN and dump streamed screenshot/profile"
+	@echo "    make editor-blank-playtest-check"
+	@echo "                      - author a blank BSP level through editor commands, build MIPS, and boot headlessly"
 	@echo "    make profile-demo3-forward - streamed demo3 profile while holding forward"
 	@echo "    make profile-demo3-paced20 - alias for streamed 20Hz visual cadence telemetry"
 	@echo "    make profile-demo3-paced20-forward - streamed paced20 profile while holding forward"
@@ -718,6 +720,55 @@ EDITOR_PLAYTEST_HARDWARE_FEATURES ?= cd-stream-bench world-order-bucketed world-
 
 build-editor-playtest:
 	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
+
+# End-to-end acceptance for the shortest BSP editor loop. The unit regression
+# exports the exact persisted project it authored through EditorWorkspace
+# commands; the remaining stages deliberately use the same build-project-disc
+# path as the editor's Play action. No GUI, BIOS, or original hardware is used.
+editor-blank-playtest-check:
+	@set -eu; \
+	check_tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/psoxide-editor-blank-check.XXXXXX"); \
+	trap 'rm -rf "$$check_tmp"' EXIT HUP INT TERM; \
+	project_dir="$$check_tmp/project"; \
+	project_file="$$project_dir/project.ron"; \
+	generated_fixture="$$check_tmp/generated-fixture"; \
+	tracked_fixture="editor/projects/brush-first-playable"; \
+	cue="$$project_dir/baked/editor_blank_playtest_acceptance.cue"; \
+	disc="$$project_dir/baked/editor_blank_playtest_acceptance.bin"; \
+	frame="$$check_tmp/frame.ppm"; \
+	log="$$check_tmp/headless.log"; \
+	cargo run -p psxed-project --bin gen-brush-first-playable -- "$$generated_fixture"; \
+	cmp "$$generated_fixture/project.ron" "$$tracked_fixture/project.ron"; \
+	cmp "$$generated_fixture/walk-through-door.pxitape.csv" "$$tracked_fixture/walk-through-door.pxitape.csv"; \
+	cmp "$$generated_fixture/assets/textures/starter_stone_brick.psxt" "$$tracked_fixture/assets/textures/starter_stone_brick.psxt"; \
+	cd editor; \
+	PSOXIDE_EDITOR_BLANK_PROJECT_OUT="$$project_dir" cargo test -p psxed-ui tests::project_workspace::bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract -- --exact --nocapture; \
+	cd ..; \
+	cd emu; \
+	EDITOR_PLAYTEST_FEATURES='cd-stream-bench emulator-telemetry' cargo run -p frontend --release -- build-project-disc --project "$$project_file"; \
+	if ! cargo run -p frontend --release -- launch \
+		--path "$$cue" \
+		--embedded-playtest \
+		--hold-forward \
+		--guest-frames 180 \
+		--guest-visual-frames 60 \
+		--steps 1000000000 \
+		--dump-hw "$$frame" \
+		--dump-hash \
+		--dump-guest-profile > "$$log" 2>&1; then \
+		cat "$$log"; \
+		exit 1; \
+	fi; \
+	cat "$$log"; \
+	cd ..; \
+	python3 tools/check-editor-blank-playtest.py \
+		--project "$$project_file" \
+		--manifest engine/examples/editor-playtest/generated/level_manifest.cooked.rs \
+		--pxbsp engine/examples/editor-playtest/generated/brush_world.pxbsp \
+		--exe build/examples/mipsel-sony-psx/release/editor-playtest.exe \
+		--disc "$$disc" \
+		--frame "$$frame" \
+		--log "$$log"
 
 profile-demo3:
 	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_HW)

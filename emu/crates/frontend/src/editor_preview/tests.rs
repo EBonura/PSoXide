@@ -358,6 +358,207 @@ fn brush_preview_emits_solid_faces() {
 }
 
 #[test]
+fn solved_brush_front_sidedness_culls_a_camera_inside_the_solid() {
+    let mut project = ProjectDocument::new("brush winding cull");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [512, 512, 512],
+        ));
+    let empty = ProjectDocument::new("brush winding cull");
+    let textures = crate::editor_textures::EditorTextures::new();
+    let assets = crate::editor_assets::EditorAssets::new();
+    let hidden = std::collections::HashSet::new();
+    let build = |project: &ProjectDocument, position| {
+        super::build_phase1_frame(
+            project,
+            ViewportCameraState {
+                mode: ViewportCameraMode::Free,
+                yaw_q12: 3072,
+                pitch_q12: 0,
+                radius: 512,
+                target: [0; 3],
+                position,
+            },
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &hidden,
+            None,
+            0,
+            NodeId::ROOT,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &textures,
+            &assets,
+        )
+    };
+    let draws = |frame: &super::EditorPreviewFrame| {
+        frame
+            .cmd_log
+            .iter()
+            .filter(|entry| matches!(entry.opcode, 0x20..=0x7f))
+            .count()
+    };
+
+    let empty_draws = draws(&build(&empty, [256, 256, 256]));
+    assert_eq!(
+        draws(&build(&project, [256, 256, 256])),
+        empty_draws,
+        "an interior camera must see only back faces of a closed solid"
+    );
+    assert!(
+        draws(&build(&project, [-512, 256, 256])) > empty_draws,
+        "an exterior camera looking toward the solid must see front faces"
+    );
+}
+
+#[test]
+fn legacy_textured_scene_is_fully_replaced_by_bsp_only_and_empty_scenes() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let legacy_root = repo_root.join("editor/samples/cortex_v1");
+    let legacy_project = ProjectDocument::load_from_path(legacy_root.join("project.ron"))
+        .expect("load tracked legacy textured scene");
+    let mut bsp_project = ProjectDocument::new("bsp-only-preview");
+    bsp_project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [-512, 0, -512],
+            [512, 512, 512],
+        ));
+    let empty_project = ProjectDocument::new("empty-preview");
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&legacy_project, &legacy_root);
+    textures.refresh_models(&legacy_project, &legacy_root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&legacy_project, &legacy_root);
+    let hidden = std::collections::HashSet::new();
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 512,
+        pitch_q12: 320,
+        radius: 2048,
+        target: [0, 256, 0],
+        position: [0; 3],
+    };
+    let build = |project: &ProjectDocument, camera| {
+        super::build_phase1_frame(
+            project,
+            camera,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &hidden,
+            None,
+            0,
+            NodeId::ROOT,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &textures,
+            &assets,
+        )
+    };
+    let legacy_camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 320,
+        pitch_q12: 300,
+        radius: 8192,
+        target: [2048, 512, 2048],
+        position: [0; 3],
+    };
+    let legacy_frame = build(&legacy_project, legacy_camera);
+    let bsp_frame = build(&bsp_project, camera);
+    let empty_frame = build(&empty_project, camera);
+
+    assert!(
+        bsp_frame
+            .cmd_log
+            .iter()
+            .any(|entry| matches!(entry.opcode, 0x20..=0x7f)),
+        "a BSP-only project must submit brush draw commands"
+    );
+    assert!(
+        empty_frame.cmd_log.iter().any(|entry| entry.opcode == 0x02),
+        "an empty project must still clear the persistent preview target"
+    );
+
+    let Some(mut fresh_renderer) = headless_preview_renderer() else {
+        panic!("no headless adapter");
+    };
+    let vram = textures.vram_words();
+    fresh_renderer.render_frame(&emulator_core::Gpu::new(), &bsp_frame.cmd_log, vram);
+    let scale = fresh_renderer.internal_scale();
+    let (_, _, expected_bsp) = fresh_renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+    fresh_renderer.render_frame(&emulator_core::Gpu::new(), &empty_frame.cmd_log, vram);
+    let (_, _, expected_empty) = fresh_renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+
+    let Some(mut reused_renderer) = headless_preview_renderer() else {
+        panic!("no second headless adapter");
+    };
+    reused_renderer.render_frame(&emulator_core::Gpu::new(), &legacy_frame.cmd_log, vram);
+    let (_, _, rendered_legacy) =
+        reused_renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+    let legacy_pixels = rendered_legacy
+        .chunks_exact(4)
+        .zip(expected_empty.chunks_exact(4))
+        .filter(|(legacy, empty)| legacy != empty)
+        .count();
+    assert!(
+        legacy_pixels > 100,
+        "legacy priming frame must visibly dirty the target, changed={legacy_pixels}"
+    );
+    reused_renderer.render_frame(&emulator_core::Gpu::new(), &bsp_frame.cmd_log, vram);
+    let (_, _, bsp_after_legacy) =
+        reused_renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+    assert_eq!(
+        bsp_after_legacy, expected_bsp,
+        "a BSP-only scene must replace every pixel of the prior legacy textured scene"
+    );
+    let changed_from_background = expected_bsp
+        .chunks_exact(4)
+        .zip(expected_empty.chunks_exact(4))
+        .filter(|(bsp, empty)| bsp != empty)
+        .count();
+    assert!(
+        changed_from_background > 100,
+        "BSP frame must contain visible solid-face pixels, changed={changed_from_background}"
+    );
+
+    reused_renderer.render_frame(&emulator_core::Gpu::new(), &empty_frame.cmd_log, vram);
+    let (_, _, empty_after_bsp) =
+        reused_renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+    assert_eq!(
+        empty_after_bsp, expected_empty,
+        "opening an empty/BSP-less scene must not retain the old scene's pixels"
+    );
+}
+
+#[test]
 fn eroded_box_prop_preview_uses_generated_surface_mesh() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")

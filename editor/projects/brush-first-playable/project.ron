@@ -2,13 +2,13 @@
     name: "Brush First Playable",
     editor_camera: (
         mode: Orbit,
-        orbit_yaw_q12: 256,
-        orbit_pitch_q12: 256,
-        orbit_radius: 6144,
+        orbit_yaw_q12: 3072,
+        orbit_pitch_q12: 3665,
+        orbit_radius: 550,
         orbit_target: (
-            0,
             512,
-            0,
+            64,
+            384,
         ),
         free_yaw_q12: 256,
         free_pitch_q12: 256,
@@ -33,6 +33,18 @@
     editor_workspace: (
         active: Room,
     ),
+    editor_viewport: (
+        view_2d: false,
+        orthographic_view: Top,
+        orthographic_focus: (
+            0.0,
+            0.0,
+            0.0,
+        ),
+        viewport_zoom: 96.0,
+        snap_units: 16,
+    ),
+    bsp_cook_mode: Draft,
     runtime_depth_sort_mode: HybridWalls,
     runtime_texture_split_mode: All,
     runtime_room_draw_order_mode: Distance,
@@ -108,9 +120,10 @@
     resources: [
         /*[0]*/ (
             id: (1),
-            name: "Warm Stone",
+            name: "Starter Stone Brick",
             data: Material((
-                texture_mode: Generated,
+                texture_mode: SimpleImage,
+                psxt_path: Some("assets/textures/starter_stone_brick.psxt"),
                 blend_mode: Opaque,
                 tint: (128, 128, 128),
                 generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
