@@ -1,5 +1,14 @@
 # PSoXide, Quake-PSX, and demo-disc finish-line plan
 
+> SUPERSEDED IN PART (2026-08-11): read
+> `docs/finish-line-scope-correction-2026-08-11.md` first. The owner made
+> Quake shareware a DEFAULT demo-disc program rather than an opt-in,
+> deferred several items out of the finish line (Quake saves, grid-project
+> migration, advanced TrenchBroom features, a dedicated soundtrack, release
+> administration), fixed the editor's required workflow, and made one
+> composed BSP tech demonstration a finish-line gate. Where that document
+> and this one disagree, that one wins.
+
 Date: 2026-08-11
 
 Status: final. Authoritative execution plan after the architecture correction
