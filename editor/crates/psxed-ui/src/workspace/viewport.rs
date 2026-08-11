@@ -244,6 +244,7 @@ impl EditorWorkspace {
                 || response.clicked_by(egui::PointerButton::Primary)
             {
                 self.last_paint_stamp = None;
+                self.brush_face_paint_stroke = false;
             }
 
             // Hover-track entity bounds in Select mode so the

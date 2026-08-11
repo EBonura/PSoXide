@@ -2097,18 +2097,40 @@ pub enum PlaytestValidationTarget {
     Resource(ResourceId),
 }
 
+/// One hard error, with the authoring object responsible when the cook can
+/// derive one. Per-error rather than per-report: the diagnostics panel lists
+/// every failure, and an author who reads row four wants to jump to row four's
+/// brush, not to whatever row one happened to blame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestValidationError {
+    pub message: String,
+    /// Authoring object the editor can select and frame. `None` when the
+    /// failure is a whole-map limit with no single offender.
+    pub target: Option<PlaytestValidationTarget>,
+}
+
+impl PlaytestValidationError {
+    /// `true` when the message contains `needle`. Diagnostics assertions ask
+    /// this constantly, and spelling it out keeps them reading as prose.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.message.contains(needle)
+    }
+}
+
+impl std::fmt::Display for PlaytestValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestValidationReport {
     /// Hard errors. Embedded Play must refuse to launch when this
     /// list is non-empty.
-    pub errors: Vec<String>,
+    pub errors: Vec<PlaytestValidationError>,
     /// Soft warnings. Surface in the editor status line but
     /// don't block cooking.
     pub warnings: Vec<String>,
-    /// First authoring object the editor can select and frame for a hard
-    /// error. Kept separate from the display strings so callers never have
-    /// to scrape ids or brush indices from diagnostics.
-    pub focus_target: Option<PlaytestValidationTarget>,
 }
 
 impl PlaytestValidationReport {
@@ -2117,15 +2139,67 @@ impl PlaytestValidationReport {
         self.errors.is_empty()
     }
 
+    /// First authoring object any hard error can blame. The single-target
+    /// convenience the auto-focus-after-a-failing-cook flow has always used.
+    pub fn focus_target(&self) -> Option<PlaytestValidationTarget> {
+        self.errors.iter().find_map(|error| error.target)
+    }
+
+    /// Just the messages, for joins, logs and `contains` assertions.
+    pub fn error_messages(&self) -> Vec<&str> {
+        self.errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect()
+    }
+
     pub(super) fn error(&mut self, msg: impl Into<String>) {
-        self.errors.push(msg.into());
+        self.errors.push(PlaytestValidationError {
+            message: msg.into(),
+            target: None,
+        });
     }
 
     pub(super) fn error_at(&mut self, target: PlaytestValidationTarget, msg: impl Into<String>) {
-        if self.focus_target.is_none() {
-            self.focus_target = Some(target);
+        self.errors.push(PlaytestValidationError {
+            message: msg.into(),
+            target: Some(target),
+        });
+    }
+
+    /// Push an error whose target may or may not be derivable, without
+    /// forcing every call site to branch.
+    pub(super) fn error_maybe_at(
+        &mut self,
+        target: Option<PlaytestValidationTarget>,
+        msg: impl Into<String>,
+    ) {
+        self.errors.push(PlaytestValidationError {
+            message: msg.into(),
+            target,
+        });
+    }
+
+    /// Run `body`, then stamp `target` onto every error it pushed that does
+    /// not already name one.
+    ///
+    /// The per-kind cook helpers only receive a node NAME, so they cannot
+    /// build a `Node` target themselves, and threading a `NodeId` through
+    /// every helper signature would touch far more code than it is worth.
+    /// The caller loop already holds the node, so it blames it here. A helper
+    /// that DID derive a more precise target (a specific resource, say) keeps
+    /// it: only `None` targets are filled in.
+    pub(super) fn blaming<R>(
+        &mut self,
+        target: PlaytestValidationTarget,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let before = self.errors.len();
+        let result = body(self);
+        for error in &mut self.errors[before..] {
+            error.target.get_or_insert(target);
         }
-        self.error(msg);
+        result
     }
 
     pub(super) fn warn(&mut self, msg: impl Into<String>) {
