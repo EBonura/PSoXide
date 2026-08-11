@@ -249,10 +249,10 @@ fn draw_save_states_button(ui: &mut egui::Ui, state: &mut AppState) {
 /// mid-game (running or paused) is the point of the panel, so it must
 /// not require opening the full Menu overlay first.
 fn draw_controls_button(ui: &mut egui::Ui, state: &mut AppState) {
-    let btn = Button::new(RichText::new("KB").strong().size(11.0)).min_size(BUTTON_SIZE);
+    let btn = icon_button(icons::KEYBOARD);
     if ui
         .add(btn)
-        .on_hover_text("Controls (rebind keyboard keys)")
+        .on_hover_text("Keyboard controls (rebind keys)")
         .clicked()
     {
         state.menu.open_controls();
@@ -265,7 +265,7 @@ fn draw_controller_button(ui: &mut egui::Ui) {
     let btn = icon_button(icons::GAMEPAD_2);
     if ui
         .add(btn)
-        .on_hover_text("Controllers (assign ports and Digital/Analog mode)")
+        .on_hover_text("Input devices (assign ports and Digital/Analog mode)")
         .clicked()
     {
         let id = egui::Id::new(CONTROLLER_PANEL_ID);
