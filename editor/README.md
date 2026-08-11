@@ -40,6 +40,10 @@ cargo run -p frontend -- --editor --windowed
    available for additive selection and marquee gestures in Select. The
    Inspector also provides exact Origin, axis-aligned Size, and face-plane
    values, plus Duplicate, Snap, and Delete.
+   To cut a brush, select it and Cmd/Ctrl-click twice with the Brush tool:
+   the two points define a vertical plane through the brush. **Clip keeps**
+   in the toolbar chooses whether the cut leaves both halves, only the near
+   one, or only the far one. Each cut is one undo step.
 4. To change a surface, click the brush face, choose a Material in the
    Inspector, then press **Apply to face**. Imported textures appear as
    Materials in the Resources panel. **Face UV** offset, rotation, and per-axis
