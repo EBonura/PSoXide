@@ -8,12 +8,20 @@ mod tests {
 
     use crate::brush_world::{compile_brush_world, BrushWorldCookMode, BrushWorldCookOptions};
     use crate::playtest::PlaytestWorldGeometry;
-    use crate::ProjectDocument;
+    use crate::{
+        ArchPropGeometry, BoxPropErosion, GridUvTransform, NodeKind, ProjectDocument,
+        ARCH_PROP_MATERIAL_COUNT, BOX_PROP_FACE_COUNT,
+    };
     use psx_bsp::collision::{Trace, TraceScratch, Q12_ONE};
+    use psx_bsp::collision_provider::{select_body_hull, CookedBodyHull, PxbspCollisionProvider};
     use psx_bsp::mover::BrushDoorSet;
     use psx_bsp::pxbsp::{entity_class, entity_flags};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
     use psx_bsp::{SliceReader, Vec3I32};
+    use psx_engine::{
+        commit_body_step_with_trace_provider, CharacterBlockerTraceProvider,
+        CharacterCollisionAabb, CollisionTraceShape, RoomPoint,
+    };
 
     #[test]
     fn first_playable_brush_world_uses_the_normal_gameplay_package() {
@@ -282,5 +290,248 @@ mod tests {
             "walkthrough tape reaches the second room: x={}",
             tape_origin.x >> 12
         );
+    }
+
+    fn pxbsp_body_step(
+        map: &PxbspResidentMap,
+        hulls: &[CookedBodyHull],
+        blockers: &[CharacterCollisionAabb],
+        start: RoomPoint,
+        end: RoomPoint,
+        radius: i32,
+        height: i32,
+    ) -> psx_engine::BodyStep {
+        let shape = CollisionTraceShape::Body { radius, height };
+        let hull_index = select_body_hull(hulls, radius, height).expect("authored body hull");
+        let mut scratch = TraceScratch::new();
+        let mut world = PxbspCollisionProvider::new(map, hull_index, &[], shape, &mut scratch)
+            .expect("resident PXBSP body provider");
+        let mut composed = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], blockers);
+        commit_body_step_with_trace_provider(
+            &mut composed,
+            start,
+            end.x.saturating_sub(start.x),
+            end.z.saturating_sub(start.z),
+            radius,
+            height,
+        )
+        .expect("bounded trace succeeds")
+    }
+
+    #[test]
+    fn real_pxbsp_player_and_npc_steps_obey_cooked_box_and_arch_props() {
+        let mut project = ProjectDocument::from_ron_str(include_str!(
+            "../../../projects/brush-first-playable/project.ron"
+        ))
+        .expect("brush first-playable fixture");
+        let material = project.resources[0].id;
+        let world_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::World { .. }))
+            .map(|node| node.id)
+            .expect("brush world node");
+        if let NodeKind::World { sector_size, .. } = &mut project
+            .active_scene_mut()
+            .node_mut(world_id)
+            .expect("brush world node")
+            .kind
+        {
+            *sector_size = 128;
+        }
+
+        let box_vertices = [
+            [-32, 0, -32],
+            [32, 0, -32],
+            [32, 64, -32],
+            [-32, 64, -32],
+            [-32, 0, 32],
+            [32, 0, 32],
+            [32, 64, 32],
+            [-32, 64, 32],
+        ];
+        let collidable_box = project.active_scene_mut().add_node(
+            world_id,
+            "PXBSP blocking box",
+            NodeKind::BoxProp {
+                materials: [Some(material); BOX_PROP_FACE_COUNT],
+                uvs: [GridUvTransform::IDENTITY; BOX_PROP_FACE_COUNT],
+                vertices: box_vertices,
+                collision_enabled: true,
+                break_flags: 0,
+                erosion: BoxPropErosion::default(),
+            },
+        );
+        project
+            .active_scene_mut()
+            .node_mut(collidable_box)
+            .expect("blocking box")
+            .transform
+            .translation = [352.0, 65.0, 192.0];
+        let decorative_box = project.active_scene_mut().add_node(
+            world_id,
+            "PXBSP decorative box",
+            NodeKind::BoxProp {
+                materials: [Some(material); BOX_PROP_FACE_COUNT],
+                uvs: [GridUvTransform::IDENTITY; BOX_PROP_FACE_COUNT],
+                vertices: box_vertices,
+                collision_enabled: false,
+                break_flags: 0,
+                erosion: BoxPropErosion::default(),
+            },
+        );
+        project
+            .active_scene_mut()
+            .node_mut(decorative_box)
+            .expect("decorative box")
+            .transform
+            .translation = [352.0, 65.0, 576.0];
+        let arch = project.active_scene_mut().add_node(
+            world_id,
+            "PXBSP blocking arch",
+            NodeKind::ArchProp {
+                materials: [Some(material); ARCH_PROP_MATERIAL_COUNT],
+                uvs: [GridUvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT],
+                geometry: ArchPropGeometry {
+                    span_tiles: 2,
+                    depth_tiles: 1,
+                    rise_quanta: 2,
+                    leg_height_quanta: 2,
+                    band_thickness_quanta: 1,
+                    ..ArchPropGeometry::default()
+                },
+                collision_enabled: true,
+            },
+        );
+        project
+            .active_scene_mut()
+            .node_mut(arch)
+            .expect("blocking arch")
+            .transform
+            .translation = [736.0, 65.0, 384.0];
+
+        let fixture_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+        let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
+        assert!(report.is_ok(), "PXBSP prop package: {:?}", report.errors);
+        let package = package.expect("PXBSP prop package");
+        let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
+            panic!("brush project selected the grid provider");
+        };
+        let mut map = PxbspResidentMap::with_capacity(world.bytes.len());
+        map.load(0, &mut SliceReader::new(&world.bytes))
+            .expect("resident prop PXBSP");
+
+        assert_eq!(package.box_props.len(), 2);
+        let blocking = package
+            .box_props
+            .iter()
+            .find(|prop| prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED != 0)
+            .expect("collidable box");
+        let decorative = package
+            .box_props
+            .iter()
+            .find(|prop| prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED == 0)
+            .expect("non-collidable box");
+        let box_blocker = CharacterCollisionAabb::new(
+            RoomPoint::new(
+                blocking.collision_min[0],
+                blocking.collision_min[1],
+                blocking.collision_min[2],
+            ),
+            RoomPoint::new(
+                blocking.collision_max[0],
+                blocking.collision_max[1],
+                blocking.collision_max[2],
+            ),
+        );
+        assert!(box_blocker.is_strictly_valid());
+        assert_eq!(decorative.collision_min, [320, 65, 544]);
+        assert_eq!(decorative.collision_max, [384, 129, 608]);
+
+        for (radius, height) in [(16, 56), (8, 32)] {
+            let start = RoomPoint::new(256, 65, 192);
+            let end = RoomPoint::new(440, 65, 192);
+            let open = pxbsp_body_step(&map, &world.body_hulls, &[], start, end, radius, height);
+            assert_eq!(
+                open.position,
+                RoomPoint::new(end.x, 64, end.z),
+                "world-only path is clear"
+            );
+            let blocked = pxbsp_body_step(
+                &map,
+                &world.body_hulls,
+                &[box_blocker],
+                start,
+                end,
+                radius,
+                height,
+            );
+            assert!(blocked.blocked, "player/NPC body is blocked by cooked box");
+            assert_ne!(blocked.position, end);
+
+            let decorative_start = RoomPoint::new(256, 65, 576);
+            let decorative_end = RoomPoint::new(440, 65, 576);
+            let decorative_step = pxbsp_body_step(
+                &map,
+                &world.body_hulls,
+                &[],
+                decorative_start,
+                decorative_end,
+                radius,
+                height,
+            );
+            assert_eq!(
+                decorative_step.position,
+                RoomPoint::new(decorative_end.x, 64, decorative_end.z),
+                "non-collidable box stays decorative"
+            );
+        }
+
+        let arch_record = package.arch_props.first().expect("collidable arch");
+        let arch_collisions = &package.arch_prop_collisions[usize::from(arch_record.collision_first)
+            ..usize::from(arch_record.collision_first) + usize::from(arch_record.collision_count)];
+        let arch_collision = arch_collisions
+            .iter()
+            .find(|collision| {
+                collision.min[0] > 128
+                    && collision.max[0] < 896
+                    && collision.min[1] <= 65
+                    && collision.max[1] >= 97
+            })
+            .expect("low arch collision inside the room");
+        let arch_blocker = CharacterCollisionAabb::new(
+            RoomPoint::new(
+                arch_collision.min[0],
+                arch_collision.min[1],
+                arch_collision.min[2],
+            ),
+            RoomPoint::new(
+                arch_collision.max[0],
+                arch_collision.max[1],
+                arch_collision.max[2],
+            ),
+        );
+        let arch_z = (arch_collision.min[2] + arch_collision.max[2]) / 2;
+        let arch_start = RoomPoint::new(arch_collision.min[0] - 48, 65, arch_z);
+        let arch_end = RoomPoint::new(arch_collision.max[0] + 48, 65, arch_z);
+        let open = pxbsp_body_step(&map, &world.body_hulls, &[], arch_start, arch_end, 16, 56);
+        assert_eq!(
+            open.position,
+            RoomPoint::new(arch_end.x, 64, arch_end.z),
+            "world-only arch path is clear"
+        );
+        let blocked = pxbsp_body_step(
+            &map,
+            &world.body_hulls,
+            &[arch_blocker],
+            arch_start,
+            arch_end,
+            16,
+            56,
+        );
+        assert!(blocked.blocked, "cooked arch segment blocks BSP body");
+        assert_ne!(blocked.position, arch_end);
     }
 }
