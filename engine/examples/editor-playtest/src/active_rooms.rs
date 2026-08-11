@@ -56,6 +56,15 @@ impl Playtest {
     }
 
     pub(super) fn load_active_room_window(&mut self) {
+        // Fail closed: the grid room window is the entry point for every
+        // RuntimeRoom, RoomCollision and residency reference in the guest. A
+        // PXBSP build reaching it means the cook and the runtime disagree
+        // about who owns space, and the old behaviour was to build an empty
+        // window and carry on with an invisible, non-solid level.
+        assert!(
+            !USES_PXBSP,
+            "grid room window reached in a PXBSP build; psx-bsp owns space"
+        );
         self.active_window_dirty = true;
         self.window.job = ActiveRoomWindowJob::EMPTY;
         if !self.chunked_level() {
