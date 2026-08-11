@@ -273,6 +273,18 @@ impl Playtest {
             })
             .unwrap_or(&[]);
         let player_pose = self.player_actor_pose.map(|snapshot| snapshot.pose());
+        let mut prop_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+        let prop_blocker_count = if self.bsp.is_some() {
+            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut prop_blockers)
+            else {
+                // Malformed or overflowing authored collision cannot grant a
+                // combat connection. Deferred tokens stay available to retry.
+                return;
+            };
+            count
+        } else {
+            0
+        };
         let mut hits = 0u16;
         let mut damage_total = 0u16;
         let mut attack_index = 0usize;
@@ -335,6 +347,7 @@ impl Playtest {
                 if !bsp.melee_segment_clear(
                     melee_eye_point(attacker),
                     melee_eye_point(player_position),
+                    &prop_blockers[..prop_blocker_count],
                 ) {
                     continue;
                 }
@@ -371,6 +384,18 @@ impl Playtest {
         let Some(player_pose) = self.player_actor_pose else {
             return;
         };
+        let mut prop_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+        let prop_blocker_count = if self.bsp.is_some() {
+            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut prop_blockers)
+            else {
+                // Fail closed before either authored capsules or the legacy
+                // arc can latch a hit through invalid generated prop state.
+                return;
+            };
+            count
+        } else {
+            0
+        };
         let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
         // ComboAttack is the heaviest swing the player has, so it takes the
         // heavy scaling too; a distinct multiplier would be a tuning change,
@@ -387,9 +412,13 @@ impl Playtest {
         // equipped weapon consume; combat never reconstructs animation phase.
         let action = self.anim_state.action();
         let phase = player_pose.pose().phase_q12();
-        if let Some(stats) =
-            self.resolve_player_combat_capsules(character, player_pose, phase, action)
-        {
+        if let Some(stats) = self.resolve_player_combat_capsules(
+            character,
+            player_pose,
+            phase,
+            action,
+            &prop_blockers[..prop_blocker_count],
+        ) {
             self.report_player_melee_stats(stats);
             return;
         }
@@ -418,7 +447,11 @@ impl Playtest {
             spec.poise_damage,
             &mut self.swing_hit_mask,
             |_, target| match bsp.as_deref_mut() {
-                Some(bsp) => !bsp.melee_segment_clear(player_eye, melee_eye_point(target)),
+                Some(bsp) => !bsp.melee_segment_clear(
+                    player_eye,
+                    melee_eye_point(target),
+                    &prop_blockers[..prop_blocker_count],
+                ),
                 None => false,
             },
         );
@@ -434,6 +467,7 @@ impl Playtest {
         player_pose: PlayerActorPoseSnapshot,
         phase: u32,
         action: CharacterAnimationAction,
+        prop_blockers: &[CharacterCollisionAabb],
     ) -> Option<MeleeArcStats> {
         let first = character.combat_capsule_first.to_usize();
         let end = first.saturating_add(usize::from(character.combat_capsule_count));
@@ -519,6 +553,7 @@ impl Playtest {
                     if !bsp.melee_segment_clear(
                         melee_eye_point([player.x, player.y, player.z]),
                         melee_eye_point(position),
+                        prop_blockers,
                     ) {
                         entity += 1;
                         continue;
