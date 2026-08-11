@@ -27,6 +27,7 @@ pub const LAYERS: char = '\u{e466}'; // ph-stack
 pub const FILTER: char = '\u{e266}'; // ph-funnel
 pub const HARD_DRIVE: char = '\u{e29e}'; // ph-hard-drive
 pub const GAMEPAD_2: char = '\u{e26e}'; // ph-game-controller
+pub const KEYBOARD: char = '\u{e2d8}'; // ph-keyboard
 /// Wireframe toggle -- polygon outline.
 pub const GRID: char = '\u{e6d0}'; // ph-polygon
 pub const SAVE: char = '\u{e248}'; // ph-floppy-disk
