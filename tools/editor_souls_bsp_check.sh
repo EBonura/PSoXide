@@ -113,6 +113,16 @@ assert_eq() {
     [ "$2" = "$3" ] || fail "$1: got '$2', expected '$3'"
 }
 
+# A replay gate's tape must be indexed on the guest's own input clock. The
+# editor records live play on the video-frame clock, so a tape re-recorded
+# rather than re-authored would silently put this gate back on the drifting
+# clock described above; catch that here instead of three builds later.
+assert_poll_clock() {
+    head -1 "$1" | grep -q 'clock=pad_poll' || fail \
+        "$1 is not a pad_poll tape. Replay gates need the guest's own input clock;
+  convert an editor recording with 'frontend launch --input-tape <in> --input-tape-transcribe <out>'."
+}
+
 # Every counter/gauge whose value is a property of the SIMULATION, not of a
 # build's render cadence. The cross-layout stage compares this whole list
 # between two differently compiled guests.
@@ -186,6 +196,9 @@ echo "editor-souls-bsp-check: disc"
 # counter assertions. Incremental cargo makes this free when up to date.
 echo "editor-souls-bsp-check: building frontend"
 (cd emu && cargo build -p frontend --release --quiet)
+
+assert_poll_clock "$PROJECT/souls-canonical.pxitape.csv"
+assert_poll_clock "$PROJECT/souls-negative.pxitape.csv"
 
 for RUN in 1 2; do
     echo "editor-souls-bsp-check: canonical replay $RUN/2"
