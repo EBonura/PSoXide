@@ -1,7 +1,7 @@
 # Quake, PSoXide BSP, editor, and combat convergence handoff
 
-Last updated: 2026-08-11 (Level C.1 authoring, shared BSP liquids, and
-deterministic-build integration, section 0). The original
+Last updated: 2026-08-11 (Level C.1 authoring, shared BSP liquids, editor
+binary correction, and deterministic-build integration, section 0). The original
 2026-08-10 21:50 BST snapshot text is retained below it; where the two
 disagree, section 0 and `docs/convergence-discrepancy-report-2026-08-11.md`
 are current.
@@ -11,7 +11,7 @@ Live integration branch: `codex/quake-psoxide-convergence`
 Live integration worktree: `/Users/ebonura/Desktop/repos/PSoXide-convergence`
 
 Current PSoXide integration code HEAD before this documentation update:
-`f1e6ce42` (merge of shared BSP liquid commit `9532e39f`)
+`f78a879c` (image-free blank-slate playtest gate)
 
 ## 0. 2026-08-11 integration checkpoint (current state)
 
@@ -902,6 +902,56 @@ material, and an original-console run. Full Quake-style vertical swimming,
 air/breathing, screen tint, fog, sounds and liquid-entry effects remain open;
 do not broaden this baseline playtest behavior into a claim of full Quake
 liquid gameplay.
+
+### 0.18 Stale editor binary correction and image-free authoring gate (2026-08-11)
+
+The user's failed editor check was real, but it exercised an obsolete release
+binary built at 10:08 BST rather than the current convergence source. The old
+binary still clamped the orthographic view to 24 pixels per unit, returned
+early from the BSP-only preview path without replacing the previous 3D frame,
+and had no current 3D brush-picking dispatch. That exactly explains the empty
+2D view, retained previous 3D scene, visible wireframes, and failed selection.
+The bad handoff was ours: the user was given a path whose executable had not
+been rebuilt after the fixes.
+
+The current release binary was rebuilt at 16:20:56 BST:
+
+```text
+path:   /Users/ebonura/Desktop/repos/PSoXide-convergence/target/release/frontend
+bytes:  23,845,840
+sha256: 6885b91e63821e955325227fa9129dbaf7f294841d55c57d0a67dc8d7127742c
+```
+
+The exact user launch command is:
+
+```sh
+/Users/ebonura/Desktop/repos/PSoXide-convergence/target/release/frontend \
+  --windowed \
+  --editor \
+  --editor-project /Users/ebonura/Desktop/repos/PSoXide-convergence/editor/projects/brush-first-playable \
+  --editor-view 3d
+```
+
+Focused real-egui and renderer regressions prove current-source behavior for
+Top framing at 0.675 pixels per unit, coincident 3D brush click cycling, plain
+drag with both Brush and Select, and complete legacy-to-BSP-to-empty frame
+replacement. This remains programmatic evidence; do not claim the user's UI
+problem is closed until the user rechecks the rebuilt native executable.
+
+Commit `f78a879c` also removed the last framebuffer PPM from
+`make editor-blank-playtest-check`. The gate now regenerates and byte-checks
+the roofless `brush-open-courtyard` template, performs a blank-slate editor
+authoring session, saves and recooks it, builds the real MIPS guest and disc,
+and replays movement using telemetry and deterministic VRAM/display hashes
+without writing an image. Its final rerun passed with 121 guest frames, 60
+visual frames, no deadline misses, player movement from `(192, 192)` to
+`(192, 80)`, VRAM hash `0xdb1a46181b00783a`, and display hash
+`0xac182dca36383a5d`.
+
+The only tracked dirt in the integration worktree remains the user's saved
+camera change in `editor/projects/brush-first-playable/project.ron`. Preserve
+it. The camera-preservation regression now compares the loaded authored value
+instead of hard-coding an old fixture camera.
 
 ## 1. Owner objective
 
