@@ -31,8 +31,8 @@
 #![no_main]
 #![allow(static_mut_refs)]
 
-extern crate psx_rt;
 extern crate alloc;
+extern crate psx_rt;
 
 #[cfg(all(target_arch = "mips", feature = "boot-trace"))]
 fn game_trace(message: &str) {
@@ -61,17 +61,17 @@ use psx_engine::GridVisibilityStats;
 ))]
 use psx_engine::GridVisibleCell;
 use psx_engine::{
-    button, horizontal_view_coordinates, prewarm_indexed_cached_room_quads, telemetry, Angle, App,
-    CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
-    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
-    CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
-    Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame, PrimitivePacketArena,
-    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, RenderSubmission, Rgb8, RoomPoint,
-    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
-    TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, AdaptiveSubdivisionKindMask, VideoHz,
-    VisualPacing, WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass,
-    WorldSurfaceOptions, WorldTriCommand, WorldVertex, Q12,
+    button, horizontal_view_coordinates, prewarm_indexed_cached_room_quads, telemetry,
+    AdaptiveSubdivisionKindMask, Angle, App, CachedRoomCell, CachedRoomDepthMode,
+    CachedRoomSubdivisionMode, CachedRoomSurface, CharacterCollision, CharacterCollisionAabb,
+    CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig,
+    CharacterMotorInput, CharacterMotorState, Config, Ctx, DepthBand, DepthRange,
+    LoadedWorldCameraGte, OtFrame, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink,
+    ProjectedVertex, RenderSubmission, Rgb8, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Scene,
+    SceneStateRef, SchedulerConfig, SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing,
+    WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions,
+    WorldTriCommand, WorldVertex, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -98,8 +98,8 @@ use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
     InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
-    LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ParticleEmitterRecord,
-    LevelWaterCellRecord, RoomIndex, RuntimeDebugMask,
+    LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord, LevelWaterCellRecord, ModelClipIndex,
+    ParticleEmitterRecord, RoomIndex, RuntimeDebugMask,
 };
 use psx_vram::{TexDepth, Tpage};
 
@@ -165,18 +165,16 @@ mod generated {
 
 use generated::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOX_PROPS, BOX_PROP_STATE_COUNT,
-    BOX_PROP_SURFACES,
-    CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE, CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE,
-    CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, COMBAT_CAPSULES, CYLINDER_PROPS,
-    CYLINDER_PROP_SURFACES, ENTITIES, EQUIPMENT, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES,
-    INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
-    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
-    PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES,
-    ROOM_CACHE_SURFACES,
-    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS,
-    ROOM_REFLECTION_PROBES, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS,
-    UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS,
-    WEAPON_HITBOXES,
+    BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
+    CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
+    COMBAT_CAPSULES, CYLINDER_PROPS, CYLINDER_PROP_SURFACES, ENTITIES, EQUIPMENT, GAME_ENTITIES,
+    IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MATERIALS, MODELS,
+    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
+    PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, PLAYTEST_PACKET_CAPACITY,
+    PXBSP_AMBIENT_RGB, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
+    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES,
+    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
+    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -379,6 +377,9 @@ struct Playtest {
     /// table index is the `MODEL_INSTANCES` index, covering both live game
     /// entities and static placed actors without render-time resampling.
     instance_actor_poses: [Option<InstanceActorPoseSnapshot>; MAX_MODEL_INSTANCES],
+    /// PXBSP PVS result for cooked model instances. Grid worlds leave this at
+    /// all-visible and continue using their room window.
+    bsp_instance_visible_mask: u16,
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -631,6 +632,7 @@ impl Playtest {
         }
         self.streaming_jobs = RuntimeStreamingJobs::new();
         self.room_materials_unresolved = true;
+        self.bsp_instance_visible_mask = u16::MAX;
     }
 
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
@@ -642,6 +644,18 @@ impl Playtest {
         if !self.step_persistent_model_assets() {
             // The model pack and WORLD.PAK share one physical CD controller.
             // Finish the session-lifetime read before room residency can seek.
+            return;
+        }
+        // Resident PXBSP owns world geometry, PVS, and collision. It has no
+        // synthetic PSXW room stream/window; only shared VRAM uploads and BSP
+        // material resolution remain after persistent models are ready.
+        if self.bsp.is_some() {
+            if background_tick {
+                let _ = self.streaming_jobs.step_vram_uploads();
+                if let Some(bsp) = self.bsp.as_mut() {
+                    let _ = bsp.refresh_materials();
+                }
+            }
             return;
         }
         #[cfg(feature = "cd-stream-bench")]
@@ -678,9 +692,6 @@ impl Playtest {
             let upload_completed = self.streaming_jobs.step_vram_uploads();
             if upload_completed || self.room_materials_unresolved {
                 self.room_materials_unresolved = self.refresh_active_room_materials();
-            }
-            if let Some(bsp) = self.bsp.as_mut() {
-                let _ = bsp.refresh_materials();
             }
             self.reconcile_active_room_window();
         }
@@ -742,7 +753,10 @@ impl Playtest {
             let conditions = [
                 ("collision_room", self.current_collision_room.is_some()),
                 ("window_job_idle", !self.window.job.active),
-                ("portal_rooms_active", self.portal_visible_rooms_are_active(record)),
+                (
+                    "portal_rooms_active",
+                    self.portal_visible_rooms_are_active(record),
+                ),
                 ("ring_resident", self.initial_stream_ring_resident()),
                 ("ring_textures", textures_ready),
                 ("bsp_textures", bsp_ready),

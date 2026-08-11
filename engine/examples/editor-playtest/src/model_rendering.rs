@@ -62,7 +62,9 @@ impl Playtest {
             // Model parsing owns the CD first. Only now seed portal visibility
             // and the incremental room-window job; the same tick can reconcile
             // and pump WORLD.PAK without two readers sharing the controller.
-            self.load_active_room_window();
+            if self.bsp.is_none() {
+                self.load_active_room_window();
+            }
         }
         self.runtime_models_loaded
     }
@@ -197,6 +199,9 @@ impl Playtest {
                 elapsed_tick,
                 ctx.video_hz,
             );
+            if self.bsp.is_some() && self.bsp_instance_visible_mask & (1u16 << index) == 0 {
+                self.instance_actor_poses[index] = None;
+            }
             index += 1;
         }
     }
@@ -424,6 +429,7 @@ pub(super) fn draw_model_instance_shadows(
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     pose_overrides: &[ModelInstancePoseOverride],
+    visible_instance_mask: u64,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
@@ -437,6 +443,7 @@ pub(super) fn draw_model_instance_shadows(
         material,
         models,
         pose_overrides,
+        visible_instance_mask,
         triangles,
         world,
     );

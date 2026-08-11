@@ -37,6 +37,7 @@ pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;
 pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;
 pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 pub const PLAYTEST_USES_PXBSP: bool = false;
+pub const PXBSP_AMBIENT_RGB: [u8; 3] = [0; 3];
 pub const PLAYTEST_PACKET_CAPACITY: usize = 1536;
 pub static PXBSP_WORLD: &[u8] = &[];
 pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];
