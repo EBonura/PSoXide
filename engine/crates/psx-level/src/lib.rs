@@ -2102,6 +2102,12 @@ pub struct LevelBoxPropRecord {
     pub roll: i16,
     /// Editable local vertices, bottom ring then top ring.
     pub vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
+    /// Conservative room-local collision bounds after authored resize and
+    /// rotation. The bounds are retained even when collision is disabled
+    /// because break/fall support logic shares the same physical envelope.
+    pub collision_min: [i32; 3],
+    /// Upper conservative room-local collision bounds.
+    pub collision_max: [i32; 3],
     /// First generated surface in `BOX_PROP_SURFACES`. A zero count keeps the
     /// legacy six-face cage rendering path.
     pub surface_first: u16,

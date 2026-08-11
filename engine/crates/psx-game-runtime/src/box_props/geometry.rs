@@ -183,7 +183,16 @@ pub(super) fn build_box_prop_runtime(prop: &LevelBoxPropRecord) -> BoxPropRuntim
     }
     let (cull_center, cull_radius) = box_prop_cull_bounds(vertices);
     let break_shards = box_prop_break_shard_runtime(prop, raw_faces, cull_center);
-    let (aabb_min, aabb_max) = box_prop_aabb_from_vertices(vertices);
+    let aabb_min = RoomPoint::new(
+        prop.collision_min[0],
+        prop.collision_min[1],
+        prop.collision_min[2],
+    );
+    let aabb_max = RoomPoint::new(
+        prop.collision_max[0],
+        prop.collision_max[1],
+        prop.collision_max[2],
+    );
     let floor_y = box_prop_floor_y(vertices);
     BoxPropRuntime {
         faces,
@@ -295,29 +304,6 @@ fn box_prop_debris_bounds(
         span_x: max_x.saturating_sub(min_x).max(64),
         span_z: max_z.saturating_sub(min_z).max(64),
     }
-}
-
-fn box_prop_aabb_from_vertices(
-    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
-) -> (RoomPoint, RoomPoint) {
-    let mut min_x = vertices[0].x;
-    let mut max_x = vertices[0].x;
-    let mut min_y = vertices[0].y;
-    let mut max_y = vertices[0].y;
-    let mut min_z = vertices[0].z;
-    let mut max_z = vertices[0].z;
-    for vertex in vertices {
-        min_x = min_x.min(vertex.x);
-        max_x = max_x.max(vertex.x);
-        min_y = min_y.min(vertex.y);
-        max_y = max_y.max(vertex.y);
-        min_z = min_z.min(vertex.z);
-        max_z = max_z.max(vertex.z);
-    }
-    (
-        RoomPoint::new(min_x, min_y, min_z),
-        RoomPoint::new(max_x, max_y, max_z),
-    )
 }
 
 /// Whether two box AABBs overlap in the X/Z (floor) plane. Used to decide

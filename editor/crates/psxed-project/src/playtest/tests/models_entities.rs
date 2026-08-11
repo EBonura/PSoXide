@@ -520,6 +520,70 @@ fn box_prop_cooks_faces_vertices_and_collision() {
 }
 
 #[test]
+fn resized_box_prop_cooks_rotated_world_collision_bounds() {
+    let vertices = [
+        [-10, 0, -20],
+        [30, 0, -20],
+        [30, 40, -20],
+        [-10, 40, -20],
+        [-10, 0, 60],
+        [30, 0, 60],
+        [30, 40, 60],
+        [-10, 40, 60],
+    ];
+    let (min, max) = super::super::cook_props_lights::box_prop_collision_aabb(
+        [100, 5, 200],
+        0,
+        1024,
+        0,
+        vertices,
+    );
+    assert_eq!(min, [80, 5, 170]);
+    assert_eq!(max, [160, 45, 210]);
+}
+
+#[test]
+fn degenerate_collidable_box_prop_fails_the_cook() {
+    let mut project = ProjectDocument::starter();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .expect("starter has a material")
+        .id;
+    let room_id = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
+        .map(|node| node.id)
+        .expect("starter has a room");
+    project.active_scene_mut().add_node(
+        room_id,
+        "Degenerate Box",
+        NodeKind::BoxProp {
+            materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
+            uvs: [crate::GridUvTransform::IDENTITY; crate::BOX_PROP_FACE_COUNT],
+            vertices: [[0; 3]; crate::BOX_PROP_VERTEX_COUNT],
+            collision_enabled: true,
+            break_flags: 0,
+            erosion: crate::BoxPropErosion::default(),
+        },
+    );
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("Degenerate Box") && error.contains("collision bounds")),
+        "errors: {:?}",
+        report.errors
+    );
+}
+
+#[test]
 fn eroded_box_prop_cooks_shared_runtime_surfaces() {
     let mut project = ProjectDocument::starter();
     let material_id = project

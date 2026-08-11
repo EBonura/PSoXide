@@ -471,6 +471,16 @@ pub(crate) fn push_box_prop(
         flags |= box_prop_flags::COLLISION_ENABLED;
     }
 
+    let (collision_min, collision_max) = box_prop_collision_aabb(pos, pitch, yaw, roll, vertices);
+    if collision_enabled
+        && (0..3).any(|axis| collision_min[axis] >= collision_max[axis])
+    {
+        report.error(format!(
+            "Box Prop '{node_name}' has degenerate collision bounds"
+        ));
+        return false;
+    }
+
     let generated = crate::generate_box_prop_erosion_quads(vertices, erosion);
     let surface_first = box_prop_surfaces.len();
     if surface_first > u16::MAX as usize
@@ -529,6 +539,8 @@ pub(crate) fn push_box_prop(
         yaw,
         roll,
         vertices,
+        collision_min,
+        collision_max,
         surface_first: surface_first as u16,
         surface_count: (box_prop_surfaces.len() - surface_first) as u16,
         tint_rgb,
@@ -536,6 +548,42 @@ pub(crate) fn push_box_prop(
         flags,
     });
     true
+}
+
+/// Cook a resized and rotated BoxProp's exact conservative AABB once on the
+/// host. Runtime rendering still owns the oriented faces, but collision and
+/// support logic consume these integer bounds without rebuilding trigonometry.
+pub(crate) fn box_prop_collision_aabb(
+    origin: [i32; 3],
+    pitch: i16,
+    yaw: i16,
+    roll: i16,
+    vertices: [[i16; 3]; crate::BOX_PROP_VERTEX_COUNT],
+) -> ([i32; 3], [i32; 3]) {
+    let mut min = [i32::MAX; 3];
+    let mut max = [i32::MIN; 3];
+    for local in vertices {
+        let rotated = crate::spatial::rotate_euler_local_q12(
+            [
+                i32::from(local[0]),
+                i32::from(local[1]),
+                i32::from(local[2]),
+            ],
+            pitch as u16,
+            yaw as u16,
+            roll as u16,
+        );
+        let world = [
+            origin[0].saturating_add(rotated[0]),
+            origin[1].saturating_add(rotated[1]),
+            origin[2].saturating_add(rotated[2]),
+        ];
+        for axis in 0..3 {
+            min[axis] = min[axis].min(world[axis]);
+            max[axis] = max[axis].max(world[axis]);
+        }
+    }
+    (min, max)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -75,6 +75,30 @@ impl Playtest {
                 &mut out[count..],
             )
     }
+
+    /// Checked fixed-capacity collection for the resident BSP provider.
+    /// Invalid generated tables or more blockers than the explicit stack
+    /// budget return `None`; no partially filled slice is consumed.
+    pub(super) fn collect_static_prop_aabb_blockers_checked(
+        &self,
+        out: &mut [CharacterCollisionAabb],
+    ) -> Option<usize> {
+        let mut count =
+            self.box_props
+                .collect_collision_blockers_checked(BOX_PROPS, self.room_index, out)?;
+        count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked(
+            ARCH_PROPS,
+            ARCH_PROP_COLLISIONS,
+            self.room_index,
+            out.get_mut(count..)?,
+        )?;
+        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked(
+            IMAGE_PROPS,
+            self.room_index,
+            out.get_mut(count..)?,
+        )?;
+        Some(count)
+    }
 }
 
 #[inline(always)]

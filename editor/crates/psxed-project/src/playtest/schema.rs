@@ -926,6 +926,11 @@ pub struct PlaytestBoxProp {
     pub roll: i16,
     /// Editable local vertices, bottom ring then top ring.
     pub vertices: [[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT],
+    /// Conservative room-local collision AABB minimum after authored resize
+    /// and rotation. The guest consumes these cooked bounds directly.
+    pub collision_min: [i32; 3],
+    /// Conservative room-local collision AABB maximum.
+    pub collision_max: [i32; 3],
     /// First generated quad in [`PlaytestPackage::box_prop_surfaces`].
     pub surface_first: u16,
     /// Number of generated erosion quads. Zero selects legacy cage faces.

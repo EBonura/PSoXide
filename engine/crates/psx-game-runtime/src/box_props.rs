@@ -611,6 +611,51 @@ impl<
         }
         count
     }
+
+    /// Collect collision-enabled boxes without truncating or accepting a
+    /// malformed cooked/runtime record.
+    ///
+    /// `None` means the output capacity was exceeded, a live prop has no
+    /// matching runtime slot, or its cooked bounds are not canonical. This is
+    /// the fail-closed path used by resident BSP playtests; the legacy method
+    /// above retains the grid backend's historical filtering behavior.
+    pub fn collect_collision_blockers_checked(
+        &self,
+        props: &'static [LevelBoxPropRecord],
+        current_room: RoomIndex,
+        out: &mut [CharacterCollisionAabb],
+    ) -> Option<usize> {
+        let mut count = 0usize;
+        for (index, prop) in props.iter().enumerate() {
+            if prop.room != current_room
+                || prop.flags & box_prop_flags::COLLISION_ENABLED == 0
+                || self.is_box_prop_broken(index)
+                || self.is_door_open(index)
+            {
+                continue;
+            }
+            let box_runtime = self.runtime.get(index)?;
+            let fall_y = self.fall.get(index)?.fall_y;
+            let blocker = CharacterCollisionAabb::new(
+                RoomPoint::new(
+                    box_runtime.aabb_min.x,
+                    box_runtime.aabb_min.y.saturating_add(fall_y),
+                    box_runtime.aabb_min.z,
+                ),
+                RoomPoint::new(
+                    box_runtime.aabb_max.x,
+                    box_runtime.aabb_max.y.saturating_add(fall_y),
+                    box_runtime.aabb_max.z,
+                ),
+            );
+            if !blocker.is_strictly_valid() {
+                return None;
+            }
+            *out.get_mut(count)? = blocker;
+            count += 1;
+        }
+        Some(count)
+    }
 }
 
 const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT] = [
@@ -621,6 +666,113 @@ const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT]
     [7, 6, 5, 4],
     [0, 1, 2, 3],
 ];
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    const fn record(
+        room: u16,
+        collision_min: [i32; 3],
+        collision_max: [i32; 3],
+        enabled: bool,
+    ) -> LevelBoxPropRecord {
+        LevelBoxPropRecord {
+            room: RoomIndex(room),
+            texture_assets: [None; psx_level::BOX_PROP_FACE_COUNT],
+            blend_modes: [0; psx_level::BOX_PROP_FACE_COUNT],
+            uvs: [[(0, 0); 4]; psx_level::BOX_PROP_FACE_COUNT],
+            x: 0,
+            y: 0,
+            z: 0,
+            ground_y: 0,
+            pitch: 0,
+            yaw: 0,
+            roll: 0,
+            vertices: [[0; 3]; psx_level::BOX_PROP_VERTEX_COUNT],
+            collision_min,
+            collision_max,
+            surface_first: 0,
+            surface_count: 0,
+            tint_rgb: [[0x80; 3]; psx_level::BOX_PROP_FACE_COUNT],
+            baked_vertex_rgb: [[(0x80, 0x80, 0x80); 4]; psx_level::BOX_PROP_FACE_COUNT],
+            flags: if enabled {
+                box_prop_flags::COLLISION_ENABLED
+            } else {
+                0
+            },
+        }
+    }
+
+    #[test]
+    fn checked_box_collection_honours_room_and_collision_flag() {
+        static PROPS: [LevelBoxPropRecord; 3] = [
+            record(0, [10, 0, -4], [14, 8, 4], true),
+            record(0, [20, 0, -4], [24, 8, 4], false),
+            record(1, [30, 0, -4], [34, 8, 4], true),
+        ];
+        let mut state = BoxProps::<3, 1, 1>::EMPTY;
+        state.init();
+        state.rebuild(&PROPS);
+        let mut out = [CharacterCollisionAabb::EMPTY; 3];
+        assert_eq!(
+            state.collect_collision_blockers_checked(&PROPS, RoomIndex(0), &mut out),
+            Some(1)
+        );
+        assert_eq!(out[0].min, RoomPoint::new(10, 0, -4));
+        assert_eq!(out[0].max, RoomPoint::new(14, 8, 4));
+    }
+
+    #[test]
+    fn checked_box_collection_rejects_bad_bounds_capacity_and_runtime_overflow() {
+        static BAD: [LevelBoxPropRecord; 1] = [record(0, [10, 8, -4], [14, 0, 4], true)];
+        static TWO: [LevelBoxPropRecord; 2] = [
+            record(0, [10, 0, -4], [14, 8, 4], true),
+            record(0, [20, 0, -4], [24, 8, 4], true),
+        ];
+        let mut state = BoxProps::<2, 1, 1>::EMPTY;
+        state.init();
+        state.rebuild(&BAD);
+        let mut out = [CharacterCollisionAabb::EMPTY; 2];
+        assert_eq!(
+            state.collect_collision_blockers_checked(&BAD, RoomIndex(0), &mut out),
+            None
+        );
+
+        state.rebuild(&TWO);
+        assert_eq!(
+            state.collect_collision_blockers_checked(&TWO, RoomIndex(0), &mut out[..1]),
+            None
+        );
+        let mut undersized = BoxProps::<1, 1, 1>::EMPTY;
+        undersized.init();
+        undersized.rebuild(&TWO);
+        assert_eq!(
+            undersized.collect_collision_blockers_checked(&TWO, RoomIndex(0), &mut out),
+            None
+        );
+    }
+
+    #[test]
+    fn checked_box_collection_tracks_a_mid_fall_render_offset() {
+        static PROPS: [LevelBoxPropRecord; 1] = [record(0, [10, 100, -4], [14, 108, 4], true)];
+        let mut state = BoxProps::<1, 1, 1>::EMPTY;
+        state.init();
+        state.rebuild(&PROPS);
+        state.fall[0] = BoxPropFallState {
+            falling: true,
+            fall_y: -24,
+            vel: 8,
+        };
+        let mut out = [CharacterCollisionAabb::EMPTY; 1];
+        assert_eq!(
+            state.collect_collision_blockers_checked(&PROPS, RoomIndex(0), &mut out),
+            Some(1)
+        );
+        assert_eq!(out[0].min, RoomPoint::new(10, 76, -4));
+        assert_eq!(out[0].max, RoomPoint::new(14, 84, 4));
+    }
+}
 
 const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; BOX_PROP_BREAK_SHARD_COUNT] = [
     BoxPropBreakShard {
