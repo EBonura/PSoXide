@@ -125,6 +125,9 @@ impl Playtest {
         self.active_interactable = None;
         self.evade_run_hold_ticks = 0;
         self.evade_run_hold_consumed = false;
+        // New life: the next successful weapon socket resolution counts
+        // as this life's PLAYER_WEAPON_ATTACHMENTS event.
+        self.weapon_attach_reported = false;
         self.game_entities.spawn_from_records(GAME_ENTITIES);
         self.logic.init_from_records(LOGIC);
         // The logic runtime restarts its rolling fired total with the
@@ -976,7 +979,7 @@ impl Playtest {
                 true
             }
             InteractableKind::Checkpoint => {
-                self.checkpoint = Some(RuntimeCheckpoint {
+                self.set_checkpoint(RuntimeCheckpoint {
                     room: self.room_index,
                     position: self.motor.position(),
                     yaw: self.motor.yaw(),
@@ -986,6 +989,21 @@ impl Playtest {
                 true
             }
         }
+    }
+
+    /// The single checkpoint assignment point for BOTH activation paths
+    /// (the logic-graph CHECKPOINT dispatch and the legacy direct
+    /// interactable path are mutually exclusive per activation, so an
+    /// activation can never double-count). Only an assignment that
+    /// CHANGES the held value counts: re-activating the same checkpoint
+    /// from the same pose is a no-op for the counter, while the first
+    /// activation of a life (the checkpoint itself persists across
+    /// respawn) and any pose/record change count once.
+    pub(super) fn set_checkpoint(&mut self, checkpoint: RuntimeCheckpoint) {
+        if self.checkpoint != Some(checkpoint) {
+            telemetry::counter(telemetry::counter::PLAYER_CHECKPOINT_ACTIVATIONS, 1);
+        }
+        self.checkpoint = Some(checkpoint);
     }
 
     pub(super) fn open_interactable_message(&mut self, interactable: &InteractableRecord) {
