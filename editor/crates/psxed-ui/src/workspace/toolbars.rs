@@ -83,6 +83,12 @@ impl EditorWorkspace {
                         #[cfg(test)]
                         {
                             self.last_orthographic_viewport_rect = rect;
+                            self.last_orthographic_response = Some((
+                                response.id,
+                                response.hovered(),
+                                response.drag_started_by(egui::PointerButton::Primary),
+                                response.dragged_by(egui::PointerButton::Primary),
+                            ));
                         }
                         let orthographic_view = self.orthographic_view;
                         let top_view = orthographic_view == OrthographicView::Top;
@@ -295,12 +301,13 @@ impl EditorWorkspace {
                                 self.commit_brush_gesture_2d();
                             }
                         }
-                        if top_view
-                            && !dnd_active
+                        let bsp_brush_marquee = !self.project.active_scene().brushes.is_empty();
+                        if !dnd_active
                             && matches!(self.active_tool, ViewTool::Select)
                             && response.drag_started_by(egui::PointerButton::Primary)
                         {
-                            let can_box_select = top_hit.is_none() || top_hit_is_room;
+                            let can_box_select = bsp_brush_marquee
+                                || (top_view && (top_hit.is_none() || top_hit_is_room));
                             if can_box_select {
                                 if let Some(start) = response.interact_pointer_pos() {
                                     let modifiers = ui.input(|input| input.modifiers);
@@ -312,8 +319,7 @@ impl EditorWorkspace {
                                 }
                             }
                         }
-                        if top_view
-                            && !dnd_active
+                        if !dnd_active
                             && matches!(self.active_tool, ViewTool::Select)
                             && response.dragged_by(egui::PointerButton::Primary)
                         {
@@ -349,7 +355,9 @@ impl EditorWorkspace {
                         );
                         draw_viewport_box_select_marquee(
                             &painter,
-                            top_view.then(|| self.viewport_box_select_rect()).flatten(),
+                            (top_view || bsp_brush_marquee)
+                                .then(|| self.viewport_box_select_rect())
+                                .flatten(),
                         );
                         self.draw_brush_footprints_2d(&painter, transform);
                         draw_axes_gizmo(&painter, rect, orthographic_view);

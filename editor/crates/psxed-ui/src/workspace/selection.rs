@@ -907,24 +907,42 @@ impl EditorWorkspace {
         modifiers: egui::Modifiers,
     ) {
         let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
-        self.interaction = Interaction::BoxSelect2d(ViewportBoxSelect {
-            start,
-            current: start,
-            room,
-            additive,
-            base_sectors: if additive {
-                self.selection.selected_sectors.clone()
-            } else {
-                HashSet::new()
-            },
-        });
-        if !additive {
+        let brushes = !self.project.active_scene().brushes.is_empty();
+        let base_sectors = if additive {
+            self.selection.selected_sectors.clone()
+        } else {
+            HashSet::new()
+        };
+        let base_brushes = if brushes && additive {
+            self.selected_brush_set()
+        } else {
+            Vec::new()
+        };
+        let base_primary_brush = (brushes && additive)
+            .then_some(self.selected_brush)
+            .flatten();
+        if brushes {
+            if !additive {
+                self.clear_brush_selection();
+            }
+            self.clear_sector_selection();
+        } else if !additive {
             self.selection.selected_sectors.clear();
             self.selection.selected_sector = None;
             self.selection.sector_selection_anchor = None;
         }
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
+        self.interaction = Interaction::BoxSelect2d(ViewportBoxSelect {
+            start,
+            current: start,
+            room,
+            additive,
+            base_sectors,
+            brushes,
+            base_brushes,
+            base_primary_brush,
+        });
     }
 
     pub(crate) fn update_viewport_box_select(
@@ -940,8 +958,85 @@ impl EditorWorkspace {
         let room = drag.room;
         let additive = drag.additive;
         let base_sectors = drag.base_sectors.clone();
-        self.select_sectors_in_screen_rect(transform, rect, room, additive, &base_sectors);
+        let brushes = drag.brushes;
+        let base_brushes = drag.base_brushes.clone();
+        let base_primary_brush = drag.base_primary_brush;
+        if brushes {
+            self.select_brushes_in_screen_rect(
+                transform,
+                rect,
+                additive,
+                &base_brushes,
+                base_primary_brush,
+            );
+        } else {
+            self.select_sectors_in_screen_rect(transform, rect, room, additive, &base_sectors);
+        }
         true
+    }
+
+    fn select_brushes_in_screen_rect(
+        &mut self,
+        transform: ViewportTransform,
+        rect: Rect,
+        additive: bool,
+        base_brushes: &[usize],
+        base_primary_brush: Option<usize>,
+    ) {
+        let view = self.orthographic_view;
+        let mut selected = if additive {
+            base_brushes.to_vec()
+        } else {
+            Vec::new()
+        };
+        let mut hits = Vec::new();
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            let solved = brush.solve();
+            if !solved.is_valid() {
+                continue;
+            }
+            let mut bounds = Rect::NOTHING;
+            for vertex in solved
+                .polygons
+                .iter()
+                .flatten()
+                .flat_map(|polygon| polygon.verts.iter().copied())
+            {
+                let projected = view.project_f64(vertex);
+                bounds.extend_with(
+                    transform.world_to_screen([projected[0] as f32, projected[1] as f32]),
+                );
+            }
+            if bounds.is_positive() && rect.intersects(bounds) {
+                hits.push(index);
+                if !selected.contains(&index) {
+                    selected.push(index);
+                }
+            }
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        self.selected_brushes = selected;
+        self.selected_brush = if additive && base_primary_brush.is_some() {
+            base_primary_brush.filter(|index| self.selected_brushes.contains(index))
+        } else {
+            hits.first().copied()
+        }
+        .or_else(|| self.selected_brushes.first().copied());
+        self.selected_brush_face = None;
+        self.clear_node_selection_state();
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        // Preserve the active marquee interaction while clearing the legacy
+        // grid selection. clear_sector_selection() also ends BoxSelect2d.
+        self.selection.selected_sector = None;
+        self.selection.selected_sectors.clear();
+        self.selection.sector_selection_anchor = None;
+        self.status = match self.selected_brushes.len() {
+            0 => "No brushes in marquee".to_string(),
+            1 => "Selected 1 brush".to_string(),
+            count => format!("Selected {count} brushes"),
+        };
     }
 
     pub(crate) fn viewport_box_select_rect(&self) -> Option<Rect> {

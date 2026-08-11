@@ -165,9 +165,9 @@ this branch do not participate in the contract.
 - The grid cook dependency and hard-coded NPC hull were subsequently resolved
   in sections 0.9/0.10; authored ImageProp/BoxProp/ArchProp AABBs join the BSP
   trace in sections 0.11/0.12. BSP water contents/swimming remains open.
-- TrenchBroom workflow items remaining: arbitrary plane handles for
-  non-axis brushes, 2D marquee brush select, 3D-view vertex/edge handles,
-  file watching, and the from-scratch test by a non-implementer.
+- The Level C authoring-tool pass in section 0.14 closes arbitrary plane
+  handles, orthographic brush marquee selection, 3D vertex/edge handles and
+  safe file watching. A fresh from-scratch test by a non-implementer remains.
 - No original-hardware battery ran; all evidence is emulator evidence.
 - The `i32::MIN` weapon-origin spawn transient (7.1) was not re-tested.
 - `/tmp` evidence directories from section 21 were lost to a disk-full
@@ -595,6 +595,82 @@ as the Inspector, and the blank-slate artifact was host-cooked while the real
 MIPS build used the canonical fixture. Multi-storey Top-view surface choice,
 Hollow's signed-axis material policy on cavity faces, interactive GUI behavior
 and original hardware remain explicit adversarial checks rather than claims.
+
+### 0.14 Level C brush manipulation and safe file watching (2026-08-11)
+
+Commit `2bee2441` on `codex/editor-level-c-tools` closes the four practical
+editing gaps listed in section 0.5 without changing the BSP-first project,
+Draft/Release or Play contracts.
+
+- A real egui marquee selects multiple BSP brushes in Top, Front and Side.
+  Plain drags replace the brush selection and modified drags preserve the
+  stable base selection. Legacy grid-only scenes keep their existing sector
+  marquee behavior.
+- The Brush tool renders and picks perspective vertex and edge handles on the
+  selected brush. A drag uses a camera-facing world plane, snaps its three-axis
+  delta, rejects a non-convex preview and records one undo step on release.
+- Perspective face handles render at visible face centers with a short outward
+  normal. Axis-aligned faces retain their established drag grammar. A sloped
+  face moves along its exact floating-point unit normal, then applies one
+  integer translation to all three authored plane points, preserving the face
+  orientation and convexity.
+- The editor polls `project.ron` and only runtime-ready paths referenced by the
+  in-memory project. It never recursively scans the project tree. Runtime
+  resources use size and modification metadata only. `project.ron` is hashed
+  only after its metadata changes. Raw Model, Mesh and Animation Source files
+  are excluded because they are consumed by explicit import/bake actions and
+  may be very large.
+- A clean external `project.ron` change reloads automatically. If local edits
+  are dirty, the in-memory document is preserved, a conflict is latched and
+  Save refuses to overwrite the disk version. Explicit Reload accepts the disk
+  version and clears the latch. External runtime-resource changes invalidate
+  previews without changing project dirty state.
+
+The new UI evidence is headless only. Real `egui::RawInput` drives the marquee
+in all orthographic views and a perspective vertex-handle drag through the
+actual viewport responses. Geometry, selection, conflict, persistence and undo
+are asserted from program state. No native window, manual GUI action, image
+capture or original hardware is part of this evidence.
+
+Validation at `2bee2441`:
+
+- `cargo test -p psxed-ui --lib`: 365 passed, 1 diagnostic image test ignored.
+- `cargo test -p psxed-project --lib`: 475 passed, 1 diagnostic test ignored.
+- `cargo test -p frontend --bin frontend editor_preview::tests:: --
+  --nocapture`: 49 passed, 1 diagnostic test ignored. This includes the solid
+  BSP face regression and the stale-scene-to-BSP-to-empty replacement test.
+- `cargo check -p frontend`: passed. Existing unrelated warnings remain.
+- The real egui Top-view output test loads the tracked
+  `brush-first-playable` project and proves its solved brush edges emit clipped
+  outline shapes inside the orthographic viewport. It does not save an image.
+- Fresh generation of `brush-first-playable` compared byte-for-byte with all
+  three tracked fixture files.
+- The blank-slate command regression exported an exact new project, then the
+  release frontend cooked it to an 8,140-byte PXBSP, built a 972,800-byte real
+  MIPS executable and produced a 2,408,448-byte disc. A headless held-forward
+  launch completed 121 guest frames and 60 visual frames with
+  `visual_budget_status=pass`, `cadence_status=steady`, player XZ moving from
+  `(192, 192)` to `(192, 80)`, VRAM hash `0xd04bfc56063efac1` and display hash
+  `0xe012fdb4ce522bfb`.
+- Artifact SHA-256: PXBSP
+  `1d1d05e66c7d1752715918bee00daa59a37422370076ca6a5bf2bbd6ddae39cd`,
+  MIPS executable
+  `a082592a7cd86f87b9a53bb1f701265230c5b287302afb3860c8834c3dc010f2`,
+  disc BIN
+  `6a8a1ad1630eac80299ef7e657a24a2531df5da1b797a7623eb5dd912d6e7968`.
+
+The canonical `make editor-blank-playtest-check` wrapper was not invoked
+unchanged because it always writes a framebuffer PPM. Its authoring, cook,
+MIPS build, disc and headless launch stages ran with framebuffer dumping
+disabled, and every non-image assertion in its checker was repeated. This is
+not evidence for the wrapper's PPM assertion.
+
+Challenge this pass before declaring Level C complete. In particular, test
+dense overlapping brushes at distant zoom, imported arbitrary-plane brushes
+whose authored plane points do not coincide with every solved corner, resource
+replacement that preserves file length, external deletion and recreation of a
+runtime asset, repeated conflict/reload/save cycles and a clean from-scratch
+level authored by somebody who did not implement these tools.
 
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
