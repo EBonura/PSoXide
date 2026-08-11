@@ -787,7 +787,6 @@ impl AppState {
             .map_err(|e| format!("boot disc: {e:?}"))?;
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
@@ -2311,7 +2310,6 @@ impl AppState {
         );
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
         bus.attach_memcard_port1(Vec::new());
         self.swap_in_booted(bus, cpu);
         Ok(())
@@ -2331,7 +2329,6 @@ impl AppState {
         cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
         bus.enable_hle_bios();
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
         self.swap_in_booted(bus, cpu);
         Ok(())
     }
@@ -3172,7 +3169,6 @@ impl AppState {
         fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &disc_path);
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
 
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
@@ -3852,11 +3848,8 @@ fn integrate_freelook(fl: &mut emulator_core::FreelookState, input: &FreelookInp
 /// delta must still be projected so gameplay continues from the framing the
 /// user chose. Only an explicit reset removes that delta.
 fn freelook_for_projection(mut fl: emulator_core::FreelookState) -> emulator_core::FreelookState {
-    let has_camera_delta = fl.yaw != 0.0
-        || fl.pitch != 0.0
-        || fl.tx != 0.0
-        || fl.ty != 0.0
-        || fl.tz != 0.0;
+    let has_camera_delta =
+        fl.yaw != 0.0 || fl.pitch != 0.0 || fl.tx != 0.0 || fl.ty != 0.0 || fl.tz != 0.0;
     fl.enabled |= has_camera_delta;
     fl
 }
@@ -4279,6 +4272,7 @@ fn load_sidecar_disc_for_exe(exe_path: &Path) -> Result<Option<Disc>, String> {
 pub fn build_ui(
     ctx: &egui::Context,
     state: &mut AppState,
+    input_router: &mut crate::input::InputRouter,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
     #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
@@ -4288,6 +4282,7 @@ pub fn build_ui(
     ui::draw_layout(
         ctx,
         state,
+        input_router,
         vram_tex,
         display_tex,
         #[cfg(feature = "editor")]

@@ -219,6 +219,16 @@ impl PortDevice {
         self
     }
 
+    /// Remove the controller from this port while preserving any
+    /// attached memory card.
+    pub fn without_pad(mut self) -> Self {
+        self.pad = None;
+        if matches!(self.selected, Some(Selected::Pad)) {
+            self.selected = None;
+        }
+        self
+    }
+
     /// Clock one byte across the serial link. Returns the device's
     /// RX byte and whether the device is holding `/DSR` low (ACK)
     /// to request another byte.

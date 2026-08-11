@@ -56,9 +56,9 @@ pollster   = { workspace = true }
 # native, uses the browser performance clock on wasm where `std`'s clock panics.
 web-time   = "1.1"
 
-# `gilrs` (gamepads) and `rfd` (native file dialogs) have no wasm32 backend, so
-# the wasm frontend uses keyboard-only input and skips the file dialogs. `cpal`
-# builds on both: native host audio here, WebAudio backend in the wasm table.
+# `gilrs` (gamepads) and `rfd` (native file dialogs) have no wasm32 backend.
+# The browser frontend uses the Web Gamepad API and browser file inputs instead.
+# `cpal` builds on both: native host audio here, WebAudio backend in the wasm table.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal  = { workspace = true }
 gilrs = { workspace = true }
