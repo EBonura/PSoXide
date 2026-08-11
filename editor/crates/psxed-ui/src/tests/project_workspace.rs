@@ -38,6 +38,48 @@ fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
 }
 
 #[test]
+fn same_length_atomic_project_replace_is_detected_even_when_metadata_looks_unchanged() {
+    let dir = test_temp_dir("project-watch-atomic-same-length");
+    let path = dir.join("project.ron");
+    let project = ProjectDocument::new("baseline-name");
+    save_watch_project(&dir, &project);
+    let baseline_len = std::fs::metadata(&path).unwrap().len();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+
+    let mut external = project.clone();
+    external.name = "external-name".to_string();
+    let replacement = dir.join("project.ron.atomic-replacement");
+    external.save_to_path(&replacement).unwrap();
+    assert_eq!(std::fs::metadata(&replacement).unwrap().len(), baseline_len);
+    std::fs::rename(&replacement, &path).unwrap();
+    // Model the hardest coarse-filesystem case: the watcher sees metadata
+    // equal to its baseline. Only the always-bounded project hash can reveal
+    // that the atomic replacement contains different bytes.
+    workspace.project_watch.project.metadata = watched_file_metadata(&path);
+    workspace.poll_project_watch(true);
+    assert_eq!(workspace.project().name, external.name);
+    assert!(!workspace.has_external_project_conflict());
+
+    workspace.project.name = "local-dirty!".to_string();
+    workspace.mark_dirty();
+    let mut second_external = external.clone();
+    second_external.name = "disk-changed!".to_string();
+    second_external.save_to_path(&replacement).unwrap();
+    assert_eq!(std::fs::metadata(&replacement).unwrap().len(), baseline_len);
+    std::fs::rename(&replacement, &path).unwrap();
+    workspace.project_watch.project.metadata = watched_file_metadata(&path);
+    let error = workspace.save().unwrap_err();
+    assert!(error.contains("changed outside"), "{error}");
+    assert_eq!(workspace.project().name, "local-dirty!");
+    assert!(workspace.has_external_project_conflict());
+    assert_eq!(
+        ProjectDocument::load_from_path(&path).unwrap().name,
+        second_external.name
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn resource_watch_is_metadata_only_and_ignores_large_raw_source_resources() {
     let dir = test_temp_dir("resource-watch-scope");
     let runtime_path = dir.join("assets/sfx/hit.wav");
@@ -79,6 +121,61 @@ fn resource_watch_is_metadata_only_and_ignores_large_raw_source_resources() {
 
     std::fs::write(&runtime_path, b"runtime-audio-changed").unwrap();
     workspace.poll_project_watch(true);
+    assert_eq!(
+        workspace.status_text(),
+        "Reloaded externally changed project resources"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn referenced_runtime_resource_delete_recreate_and_atomic_replace_are_detected() {
+    let dir = test_temp_dir("resource-watch-delete-recreate");
+    let runtime_path = dir.join("assets/sfx/hit.wav");
+    std::fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+    std::fs::write(&runtime_path, b"runtime-audio-A").unwrap();
+    let mut project = ProjectDocument::new("resource lifecycle");
+    project.add_resource(
+        "Hit",
+        ResourceData::Audio {
+            source_path: "assets/sfx/hit.wav".to_string(),
+        },
+    );
+    save_watch_project(&dir, &project);
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    let original = watched_file_metadata(&runtime_path).unwrap();
+
+    std::fs::remove_file(&runtime_path).unwrap();
+    workspace.poll_project_watch(true);
+    assert_eq!(workspace.project_watch.resources[&runtime_path], None);
+    assert_eq!(
+        workspace.status_text(),
+        "Reloaded externally changed project resources"
+    );
+
+    std::fs::write(&runtime_path, b"runtime-audio-B").unwrap();
+    workspace.poll_project_watch(true);
+    let recreated = workspace.project_watch.resources[&runtime_path].unwrap();
+    assert_ne!(recreated, original, "recreated file identity must change");
+    assert_eq!(
+        workspace.status_text(),
+        "Reloaded externally changed project resources"
+    );
+
+    let replacement = runtime_path.with_extension("atomic");
+    std::fs::write(&replacement, b"runtime-audio-C").unwrap();
+    assert_eq!(
+        std::fs::metadata(&replacement).unwrap().len(),
+        std::fs::metadata(&runtime_path).unwrap().len()
+    );
+    std::fs::rename(&replacement, &runtime_path).unwrap();
+    let atomically_replaced = watched_file_metadata(&runtime_path).unwrap();
+    assert_ne!(atomically_replaced, recreated);
+    workspace.poll_project_watch(true);
+    assert_eq!(
+        workspace.project_watch.resources[&runtime_path],
+        Some(atomically_replaced)
+    );
     assert_eq!(
         workspace.status_text(),
         "Reloaded externally changed project resources"
@@ -1467,6 +1564,9 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
     let original_brushes = workspace.project().active_scene().brushes.len();
     let material = workspace.first_material().expect("template material");
     workspace.set_orthographic_view(OrthographicView::Top);
+    // Author the enclosed test room directly on the courtyard's 64-unit
+    // floor, then focus its new 80-unit interior floor for point placement.
+    workspace.orthographic_focus[1] = 64.0;
     workspace.begin_brush_drag_2d([2048.0, 0.0]);
     workspace.update_brush_drag_2d([2560.0, 512.0]);
     workspace.commit_brush_drag();
@@ -1484,9 +1584,10 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         .iter()
         .flat_map(|brush| &brush.faces)
         .all(|face| face.material == Some(material)));
+    workspace.orthographic_focus[1] = 80.0;
 
     // Real Place commands in a scene with no legacy Room/Section. The top
-    // view resolves the new room's upward floor at Y=16 and lifts the spawn
+    // view resolves the new room's upward floor at Y=80 and lifts the spawn
     // one unit out of the solid boundary.
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PlayerSpawn)));
     workspace.handle_viewport_click([2304.0, 256.0], &[], egui::Modifiers::default());
@@ -1498,7 +1599,7 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
         .expect("placed BSP player spawn");
     assert_eq!(spawn.parent, Some(workspace.project().active_scene().root));
-    assert_eq!(spawn.transform.translation, [2304.0, 17.0, 256.0]);
+    assert_eq!(spawn.transform.translation, [2304.0, 81.0, 256.0]);
 
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointLightMarker)));
     workspace.handle_viewport_click([2304.0, 384.0], &[], egui::Modifiers::default());
@@ -1508,7 +1609,7 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         .nodes()
         .iter()
         .any(|node| matches!(node.kind, NodeKind::PointLight { .. })
-            && node.transform.translation == [2304.0, 272.0, 384.0]));
+            && node.transform.translation == [2304.0, 336.0, 384.0]));
 
     workspace.save().expect("save authored BSP project");
     workspace.request_play_or_rebuild(EditorPlaytestStatus::Idle);
@@ -1633,6 +1734,9 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     assert!(workspace.place_bsp_from_top([512.0, 512.0]));
     let light = workspace.selected_node_id();
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::BoxProp)));
+    // The courtyard intentionally offers two materials, so Box Prop placement
+    // requires the same explicit material choice presented by the toolbar.
+    workspace.replace_resource_selection(material);
     assert!(workspace.place_bsp_from_top([1536.0, 1536.0]));
     let prop = workspace.selected_node_id();
     for id in [spawn, light, prop] {
@@ -1772,7 +1876,7 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
 }
 
 #[test]
-fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
+fn new_project_release_choice_copies_the_roofless_open_courtyard() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let name = format!(
@@ -1797,7 +1901,7 @@ fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
         workspace.project().bsp_cook_mode,
         psxed_project::brush_world::BrushWorldCookMode::Release
     );
-    assert!(!workspace.project().active_scene().brushes.is_empty());
+    assert_eq!(workspace.project().active_scene().brushes.len(), 5);
     assert!(
         !workspace.is_dirty(),
         "the framed new project is already saved"
@@ -1808,6 +1912,17 @@ fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
     assert!(
         workspace.viewport_zoom < DEFAULT_VIEWPORT_ZOOM,
         "the starter BSP must be framed instead of opening at 96 px/unit"
+    );
+    assert_eq!(workspace.orthographic_focus, [2112.0, 0.0, 2112.0]);
+    let framed_span = 4224.0 * workspace.viewport_zoom;
+    assert!(
+        framed_span <= workspace.last_viewport_size.x.max(320.0) * 0.72 + 0.01
+            && framed_span <= workspace.last_viewport_size.y.max(240.0) * 0.72 + 0.01,
+        "the entire courtyard must fit inside the initial Top frame"
+    );
+    assert!(
+        64.0 * workspace.viewport_zoom >= 2.0,
+        "the 64-unit perimeter must remain visibly thicker than two pixels"
     );
     let saved = ProjectDocument::load_from_path(target.join("project.ron")).unwrap();
     assert_eq!(
@@ -1820,10 +1935,37 @@ fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
         psxed_project::EditorOrthographicView::Top
     );
     assert_eq!(saved.editor_viewport.viewport_zoom, workspace.viewport_zoom);
-    assert_eq!(saved.editor_camera.orbit_target, [512, 64, 384]);
-    assert_eq!(saved.editor_camera.orbit_radius, 550);
-    assert_eq!(saved.editor_camera.orbit_yaw_q12, 3072);
-    assert_eq!(saved.editor_camera.orbit_pitch_q12, 3665);
+    assert_eq!(saved.active_scene().brushes.len(), 5);
+    assert_eq!(saved.editor_camera.orbit_target, [2112, 160, 2112]);
+    assert_eq!(saved.editor_camera.orbit_radius, 4800);
+    assert_eq!(saved.editor_camera.orbit_yaw_q12, 3584);
+    assert_eq!(saved.editor_camera.orbit_pitch_q12, 3712);
+    let material_paths = saved
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            psxed_project::ResourceData::Material(material) => material.psxt_path.as_deref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        material_paths,
+        [
+            "assets/textures/courtyard_cobbles.psxt",
+            "assets/textures/courtyard_brick.psxt"
+        ]
+    );
+    let template = psxed_project::new_project_template_dir();
+    for relative in [
+        "assets/textures/courtyard_cobbles.psxt",
+        "assets/textures/courtyard_brick.psxt",
+    ] {
+        assert_eq!(
+            std::fs::read(target.join(relative)).unwrap(),
+            std::fs::read(template.join(relative)).unwrap(),
+            "New Project did not copy {relative} byte-for-byte"
+        );
+    }
     let _ = std::fs::remove_dir_all(target);
 }
 
