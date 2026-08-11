@@ -928,6 +928,13 @@ impl Scene for Playtest {
                     telemetry::counter::EQUIPMENT_DRAWS,
                     equipment_stats.draws as u32,
                 );
+                if equipment_stats.draws > 0 && !self.weapon_attach_reported {
+                    // First frame of this life where the equipped weapon
+                    // resolved to its socket pose and submitted: one
+                    // PLAYER_WEAPON_ATTACHMENTS event per (re)spawn.
+                    self.weapon_attach_reported = true;
+                    telemetry::counter(telemetry::counter::PLAYER_WEAPON_ATTACHMENTS, 1);
+                }
                 emit_model_counters(
                     equipment_stats.stats,
                     telemetry::counter::EQUIPMENT_PROJECTED_VERTICES,
