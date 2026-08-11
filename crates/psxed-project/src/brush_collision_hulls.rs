@@ -32,7 +32,10 @@ pub struct CompiledCollisionHulls {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CollisionHullCompileError {
     InvalidBounds(usize),
-    InvalidPlane,
+    /// A brush face produced a degenerate plane. Carries the brush index when
+    /// the failure happened inside a per-brush hull expansion; `None` when it
+    /// came from a whole-tree pass with no single brush in scope.
+    InvalidPlane(Option<usize>),
     LimitExceeded {
         kind: &'static str,
         count: usize,
@@ -58,14 +61,22 @@ pub fn compile_collision_hulls(
             return Err(CollisionHullCompileError::InvalidBounds(hull_index));
         }
         let mut escape = CONTENTS_EMPTY;
-        for ((_, brush), solved) in ordered.iter().zip(&solved).rev() {
+        for ((brush_index, brush), solved) in ordered.iter().zip(&solved).rev() {
             if !solved.is_valid() {
                 continue;
             }
+            // Name the brush: the hull helpers only see one brush at a time
+            // and cannot know where it sits in the authored list.
+            let blame = |error| match error {
+                CollisionHullCompileError::InvalidPlane(_) => {
+                    CollisionHullCompileError::InvalidPlane(Some(*brush_index))
+                }
+                other => other,
+            };
             let planes = if hull == CollisionHullBounds::POINT {
-                point_hull_planes(brush)?
+                point_hull_planes(brush).map_err(blame)?
             } else {
-                expanded_hull_planes(brush, solved, hull)?
+                expanded_hull_planes(brush, solved, hull).map_err(blame)?
             };
             if planes.is_empty() {
                 continue;
@@ -110,7 +121,7 @@ fn point_hull_planes(brush: &Brush) -> Result<Vec<([u8; 14], bool)>, CollisionHu
         .faces
         .iter()
         .filter_map(|face| Plane::from_points(face.points))
-        .map(|plane| pack_plane(&plane).ok_or(CollisionHullCompileError::InvalidPlane))
+        .map(|plane| pack_plane(&plane).ok_or(CollisionHullCompileError::InvalidPlane(None)))
         .collect()
 }
 
@@ -128,7 +139,7 @@ fn expanded_hull_planes(
             continue;
         }
         let plane =
-            Plane::from_points(face.points).ok_or(CollisionHullCompileError::InvalidPlane)?;
+            Plane::from_points(face.points).ok_or(CollisionHullCompileError::InvalidPlane(None))?;
         add_support_plane(
             &mut planes,
             plane.normal.map(|value| value as f64),
@@ -156,7 +167,7 @@ fn expanded_hull_planes(
         .into_iter()
         .map(|plane| {
             pack_normalized_plane(plane.normal, plane.distance)
-                .ok_or(CollisionHullCompileError::InvalidPlane)
+                .ok_or(CollisionHullCompileError::InvalidPlane(None))
         })
         .collect()
 }
