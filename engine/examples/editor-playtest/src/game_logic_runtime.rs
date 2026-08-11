@@ -250,7 +250,7 @@ impl Playtest {
     /// used only when either side has no authored role at all; inactive
     /// authored frames, invalid authored joints, and authored geometric misses
     /// stay misses.
-    pub(super) fn resolve_enemy_melee(&mut self) {
+    pub(super) fn resolve_enemy_melee(&mut self, ctx: &Ctx) {
         if self.deferred_enemy_attacks.is_empty() {
             return;
         }
@@ -358,9 +358,19 @@ impl Playtest {
             }
         }
         if damage_total > 0 {
-            // Player health floors at zero; death/respawn remains the next
-            // gameplay phase exactly as it was for legacy entity contact.
-            self.player_health = self.player_health.saturating_sub(damage_total);
+            // Combat damage reaching zero arms the SAME delayed
+            // death/respawn sequence the environmental hazards use; a
+            // hit landing during the countdown keeps health floored
+            // without re-arming it.
+            let outcome = psx_game_runtime::character::apply_player_damage(
+                self.player_health,
+                self.hazard_death_ticks_remaining > 0,
+                damage_total,
+            );
+            self.player_health = outcome.health;
+            if outcome.died {
+                self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+            }
         }
         if hits > 0 {
             telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(hits));

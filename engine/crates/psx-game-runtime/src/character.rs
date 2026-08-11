@@ -468,3 +468,55 @@ pub fn scaled_player_speed(speed: i32, num: i32, den: i32) -> i32 {
         scaled
     }
 }
+
+/// Outcome of one player damage application (the souls death rule).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PlayerDamageOutcome {
+    /// Health after the subtraction (floors at zero).
+    pub health: u16,
+    /// The application killed: the owning game must arm exactly one
+    /// death sequence (death animation, input lock, delayed respawn).
+    pub died: bool,
+}
+
+/// Apply damage to the player: the shared kill decision for every
+/// damage source (enemy combat connections and environmental hazards).
+/// Health floors at zero; reaching zero kills UNLESS a death sequence
+/// is already running (`already_dying`), so overlapping hits during
+/// the death countdown can never arm a second respawn.
+pub fn apply_player_damage(health: u16, already_dying: bool, damage: u16) -> PlayerDamageOutcome {
+    let health = health.saturating_sub(damage);
+    PlayerDamageOutcome {
+        health,
+        died: !already_dying && damage > 0 && health == 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_damage_kills_exactly_at_zero() {
+        let survived = apply_player_damage(100, false, 99);
+        assert_eq!(survived, PlayerDamageOutcome { health: 1, died: false });
+        let killed = apply_player_damage(1, false, 1);
+        assert_eq!(killed, PlayerDamageOutcome { health: 0, died: true });
+        let overkill = apply_player_damage(10, false, u16::MAX);
+        assert_eq!(overkill, PlayerDamageOutcome { health: 0, died: true });
+    }
+
+    #[test]
+    fn player_damage_never_rearms_a_running_death() {
+        // A hit landing during the death countdown keeps health floored
+        // without starting a second death sequence.
+        let during_death = apply_player_damage(0, true, 25);
+        assert_eq!(during_death, PlayerDamageOutcome { health: 0, died: false });
+    }
+
+    #[test]
+    fn zero_damage_is_not_a_death_event() {
+        let nothing = apply_player_damage(0, false, 0);
+        assert_eq!(nothing, PlayerDamageOutcome { health: 0, died: false });
+    }
+}
