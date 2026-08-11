@@ -955,6 +955,65 @@ mod tests {
     }
 
     #[test]
+    fn trigger_touch_chains_to_a_checkpoint_record() {
+        // Souls slice: a TriggerVolume targeting a CHECKPOINT record by
+        // name must fire the checkpoint through the ordinary touch scan,
+        // producing the fired mark the owning game's effect dispatch
+        // drains (the same drain that assigns the in-memory checkpoint),
+        // exactly as an interact prompt would.
+        static TRIGGER_CHECKPOINT: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                targetname: 1,
+                target: 7,
+                min: [-100, -100, -100],
+                max: [100, 100, 100],
+                wait_ticks: -1,
+                ..blank(logic_kind::TRIGGER_VOLUME)
+            },
+            LevelLogicRecord {
+                targetname: 7,
+                ..blank(logic_kind::CHECKPOINT)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&TRIGGER_CHECKPOINT);
+        // Outside the volume: neither record fires.
+        logic.tick(&TRIGGER_CHECKPOINT, input_at([500, 0, 0]), 1);
+        assert!(!logic.any_fired());
+        // Touch: the trigger fires and fans out to the checkpoint in the
+        // same tick.
+        logic.tick(&TRIGGER_CHECKPOINT, input_at([0, 0, 0]), 2);
+        assert!(logic.take_fired(0), "trigger fired on touch");
+        assert!(logic.take_fired(1), "checkpoint record fired via target");
+        // The fire-once trigger retired; standing in it cannot re-fire
+        // the checkpoint.
+        logic.tick(&TRIGGER_CHECKPOINT, input_at([0, 0, 0]), 3);
+        assert!(!logic.take_fired(1));
+    }
+
+    #[test]
+    fn door_use_marks_fired_only_on_state_change() {
+        // Basis for the LOGIC_DOOR_ACTIVATIONS counter: the owning game
+        // counts drained DOOR fire marks, and a mark only exists when
+        // the use actually changed the door state (same-state ON/OFF
+        // uses return before marking).
+        static DOOR: [LevelLogicRecord; 1] = [LevelLogicRecord {
+            targetname: 3,
+            ..blank(logic_kind::DOOR)
+        }];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&DOOR);
+        logic.fire_by_name(&DOOR, 3, use_type::ON, 1);
+        assert!(logic.take_fired(0), "closed -> open is an activation");
+        logic.fire_by_name(&DOOR, 3, use_type::ON, 2);
+        assert!(!logic.take_fired(0), "already-open ON is not");
+        logic.fire_by_name(&DOOR, 3, use_type::OFF, 3);
+        assert!(logic.take_fired(0), "open -> closed is an activation");
+        logic.fire_by_name(&DOOR, 3, use_type::TOGGLE, 4);
+        assert!(logic.take_fired(0), "toggle always changes state");
+    }
+
+    #[test]
     fn disabled_records_init_removed_and_start_on_seeds_counters() {
         static FLAGGED: [LevelLogicRecord; 2] = [
             LevelLogicRecord {
