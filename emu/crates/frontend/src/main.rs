@@ -1303,7 +1303,7 @@ impl ApplicationHandler for Shell {
                         self.state.status_message_set(if self.state.freelook.enabled {
                             "Freecam ON - pad drives the camera, game input paused (hold L3+R3 to reset)"
                         } else {
-                            "Freecam off - pad returns to the game"
+                            "Freecam controls off - framing preserved; pad returns to the game"
                         });
                     }
                     Some(FreelookChordAction::Reset) => {
