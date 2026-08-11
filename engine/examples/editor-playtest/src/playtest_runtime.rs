@@ -759,9 +759,32 @@ impl Playtest {
             .or_else(|| self.soft_lock_target_position());
         let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
         let config = self.camera_config();
+        let mut prop_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+        let prop_blocker_count = if self.bsp.is_some() {
+            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut prop_blockers)
+            else {
+                // Invalid generated prop collision freezes the existing camera
+                // instead of treating the obstructed boom as clear.
+                return world_camera_from_position_focus(
+                    PROJECTION,
+                    self.camera.position(),
+                    self.camera.focus(),
+                );
+            };
+            count
+        } else {
+            0
+        };
         if let Some(bsp) = self.bsp.as_mut() {
             return bsp
-                .update_camera(&mut self.camera, target, input, config, 1)
+                .update_camera(
+                    &mut self.camera,
+                    target,
+                    input,
+                    config,
+                    1,
+                    &prop_blockers[..prop_blocker_count],
+                )
                 .expect("PXBSP camera trace failed")
                 .camera;
         }

@@ -1602,7 +1602,20 @@ fn lerp_vertex(from: RoomPoint, to: RoomPoint, num: i32, den: i32) -> RoomPoint 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RuntimeRoom;
+    use crate::{CharacterBlockerTraceProvider, CharacterCollisionAabb, RuntimeRoom};
+
+    struct ClearTraceProvider;
+
+    impl CollisionTraceProvider for ClearTraceProvider {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
+            *output = crate::CollisionTrace::unobstructed(query.end);
+            true
+        }
+    }
 
     struct HalfDistanceTraceProvider {
         fail: bool,
@@ -1660,6 +1673,136 @@ mod tests {
         assert!(frame.collision_pull_in);
         assert_eq!(frame.distance, 540);
         assert_eq!(provider.calls, 1);
+    }
+
+    #[test]
+    fn collidable_prop_aabb_shortens_camera_spring_arm() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let target = trace_target();
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        config.collision_margin = 0;
+
+        let mut clear_camera = ThirdPersonCameraState::new(Angle::HALF);
+        clear_camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+        let clear = clear_camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut ClearTraceProvider,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .expect("clear camera update");
+        assert!(!clear.collision_pull_in);
+
+        let blockers = [CharacterCollisionAabb::new(
+            RoomPoint::new(-64, 1, -800),
+            RoomPoint::new(64, 1_000, -600),
+        )];
+        let mut clear_world = ClearTraceProvider;
+        let mut props =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut clear_world, &[], &blockers);
+        let mut blocked_camera = ThirdPersonCameraState::new(Angle::HALF);
+        blocked_camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+        let blocked = blocked_camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .expect("prop-blocked camera update");
+        assert!(blocked.collision_pull_in);
+        assert!(blocked.distance < clear.distance);
+    }
+
+    #[test]
+    fn collidable_prop_floor_clamps_the_full_trace_camera_update() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let target = trace_target();
+        let mut config = ThirdPersonCameraConfig::character(384, 3, 3);
+        config.collision_margin = 0;
+        config.min_floor_clearance = 64;
+        config.pitch_min_q12 = 0;
+        config.pitch_max_q12 = 0;
+        let floor = [CharacterCollisionAabb::new(
+            RoomPoint::new(-1_024, -2, -1_024),
+            RoomPoint::new(1_024, 2, 1_024),
+        )];
+        let mut clear_world = ClearTraceProvider;
+        let mut props =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut clear_world, &[], &floor);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+
+        let frame = camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .expect("prop floor camera update");
+
+        assert!(!frame.collision_pull_in);
+        assert_eq!(frame.camera.position.y, 68);
+        assert!(
+            frame.camera.position.y >= floor[0].max.y + config.min_floor_clearance,
+            "conservative sub-sample contact must not leave the camera below clearance"
+        );
+    }
+
+    #[test]
+    fn malformed_and_overflow_prop_state_roll_back_the_full_camera_update() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let target = trace_target();
+        let config = ThirdPersonCameraConfig::character(1_400, 700, 0);
+        let malformed = [CharacterCollisionAabb::new(
+            RoomPoint::new(64, 8, 64),
+            RoomPoint::new(-64, 0, -64),
+        )];
+        let mut clear_world = ClearTraceProvider;
+        let mut props =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut clear_world, &[], &malformed);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let before = camera;
+        assert_eq!(
+            camera.update_vblanks_with_trace_provider(
+                projection,
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            ),
+            Err(CollisionQueryError)
+        );
+        assert_eq!(camera, before);
+
+        let valid = CharacterCollisionAabb::new(
+            RoomPoint::new(-64, 1, -800),
+            RoomPoint::new(64, 1_000, -600),
+        );
+        let overflow = [valid; psx_level::MAX_STATIC_PROP_AABB_BLOCKERS + 1];
+        let mut props =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut clear_world, &[], &overflow);
+        assert_eq!(
+            camera.update_vblanks_with_trace_provider(
+                projection,
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            ),
+            Err(CollisionQueryError)
+        );
+        assert_eq!(camera, before);
     }
 
     #[test]

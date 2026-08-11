@@ -532,10 +532,9 @@ impl<
             {
                 continue;
             }
-            let Some(box_runtime) = self.runtime.get(index) else {
+            let Some((min, max)) = self.live_collision_aabb(index) else {
                 continue;
             };
-            let (min, max) = (box_runtime.aabb_min, box_runtime.aabb_max);
             if character_body_overlaps_aabb(current, config.radius, config.height, min, max)
                 || character_body_overlaps_aabb(target, config.radius, config.height, min, max)
             {
@@ -565,10 +564,9 @@ impl<
             {
                 continue;
             }
-            let Some(box_runtime) = self.runtime.get(index) else {
+            let Some((min, max)) = self.live_collision_aabb(index) else {
                 continue;
             };
-            let (min, max) = (box_runtime.aabb_min, box_runtime.aabb_max);
             if box_prop_intersects_attack_volume(origin, yaw, config, min, max) {
                 let center_x = min.x.saturating_add(max.x) / 2;
                 let center_z = min.z.saturating_add(max.z) / 2;
@@ -634,20 +632,8 @@ impl<
             {
                 continue;
             }
-            let box_runtime = self.runtime.get(index)?;
-            let fall_y = self.fall.get(index)?.fall_y;
-            let blocker = CharacterCollisionAabb::new(
-                RoomPoint::new(
-                    box_runtime.aabb_min.x,
-                    box_runtime.aabb_min.y.saturating_add(fall_y),
-                    box_runtime.aabb_min.z,
-                ),
-                RoomPoint::new(
-                    box_runtime.aabb_max.x,
-                    box_runtime.aabb_max.y.saturating_add(fall_y),
-                    box_runtime.aabb_max.z,
-                ),
-            );
+            let (min, max) = self.live_collision_aabb(index)?;
+            let blocker = CharacterCollisionAabb::new(min, max);
             if !blocker.is_strictly_valid() {
                 return None;
             }
@@ -655,6 +641,26 @@ impl<
             count += 1;
         }
         Some(count)
+    }
+
+    /// Current world-space physical bounds for one box, including its
+    /// transient falling offset. Rendering, checked BSP collision, and break
+    /// probes all consume this single position authority.
+    fn live_collision_aabb(&self, index: usize) -> Option<(RoomPoint, RoomPoint)> {
+        let runtime = self.runtime.get(index)?;
+        let fall_y = self.fall.get(index)?.fall_y;
+        Some((
+            RoomPoint::new(
+                runtime.aabb_min.x,
+                runtime.aabb_min.y.saturating_add(fall_y),
+                runtime.aabb_min.z,
+            ),
+            RoomPoint::new(
+                runtime.aabb_max.x,
+                runtime.aabb_max.y.saturating_add(fall_y),
+                runtime.aabb_max.z,
+            ),
+        ))
     }
 }
 
@@ -677,6 +683,24 @@ mod collision_tests {
         collision_max: [i32; 3],
         enabled: bool,
     ) -> LevelBoxPropRecord {
+        record_with_flags(
+            room,
+            collision_min,
+            collision_max,
+            if enabled {
+                box_prop_flags::COLLISION_ENABLED
+            } else {
+                0
+            },
+        )
+    }
+
+    const fn record_with_flags(
+        room: u16,
+        collision_min: [i32; 3],
+        collision_max: [i32; 3],
+        flags: u16,
+    ) -> LevelBoxPropRecord {
         LevelBoxPropRecord {
             room: RoomIndex(room),
             texture_assets: [None; psx_level::BOX_PROP_FACE_COUNT],
@@ -696,11 +720,7 @@ mod collision_tests {
             surface_count: 0,
             tint_rgb: [[0x80; 3]; psx_level::BOX_PROP_FACE_COUNT],
             baked_vertex_rgb: [[(0x80, 0x80, 0x80); 4]; psx_level::BOX_PROP_FACE_COUNT],
-            flags: if enabled {
-                box_prop_flags::COLLISION_ENABLED
-            } else {
-                0
-            },
+            flags,
         }
     }
 
@@ -771,6 +791,95 @@ mod collision_tests {
         );
         assert_eq!(out[0].min, RoomPoint::new(10, 76, -4));
         assert_eq!(out[0].max, RoomPoint::new(14, 84, 4));
+    }
+
+    #[test]
+    fn mid_fall_movement_and_attack_break_probes_use_the_live_aabb() {
+        static PROPS: [LevelBoxPropRecord; 1] = [record_with_flags(
+            0,
+            [10, 1_000, -4],
+            [14, 1_008, 4],
+            box_prop_flags::COLLISION_ENABLED
+                | box_prop_flags::BREAK_ON_WALK
+                | box_prop_flags::BREAK_ON_ATTACK,
+        )];
+        let config = CharacterMotorConfig::character_with_body(2, 8, 12, 12, Angle::from_q12(1));
+        let input = CharacterMotorInput {
+            walk: 1,
+            ..CharacterMotorInput::default()
+        };
+
+        let mut authored = BoxProps::<1, 1, 1>::EMPTY;
+        authored.init();
+        authored.rebuild(&PROPS);
+        authored.break_for_movement(
+            &PROPS,
+            RoomIndex(0),
+            RoomPoint::ZERO,
+            Angle::QUARTER,
+            box_prop_flags::BREAK_ON_WALK,
+            input,
+            config,
+            1,
+        );
+        assert!(
+            !authored.is_box_prop_broken(0),
+            "the authored box is vertically out of reach"
+        );
+        authored.break_for_attack(
+            &PROPS,
+            RoomIndex(0),
+            RoomPoint::ZERO,
+            Angle::QUARTER,
+            config,
+        );
+        assert!(
+            !authored.is_box_prop_broken(0),
+            "the authored box is outside the attack height"
+        );
+
+        let mut movement = BoxProps::<1, 1, 1>::EMPTY;
+        movement.init();
+        movement.rebuild(&PROPS);
+        movement.fall[0] = BoxPropFallState {
+            falling: true,
+            fall_y: -1_000,
+            vel: 8,
+        };
+        movement.break_for_movement(
+            &PROPS,
+            RoomIndex(0),
+            RoomPoint::ZERO,
+            Angle::QUARTER,
+            box_prop_flags::BREAK_ON_WALK,
+            input,
+            config,
+            1,
+        );
+        assert!(
+            movement.is_box_prop_broken(0),
+            "movement breaks the box at its live falling location"
+        );
+
+        let mut attack = BoxProps::<1, 1, 1>::EMPTY;
+        attack.init();
+        attack.rebuild(&PROPS);
+        attack.fall[0] = BoxPropFallState {
+            falling: true,
+            fall_y: -1_000,
+            vel: 8,
+        };
+        attack.break_for_attack(
+            &PROPS,
+            RoomIndex(0),
+            RoomPoint::ZERO,
+            Angle::QUARTER,
+            config,
+        );
+        assert!(
+            attack.is_box_prop_broken(0),
+            "attack breaks the box at its live falling location"
+        );
     }
 }
 
