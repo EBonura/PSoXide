@@ -37,6 +37,114 @@ fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The conflict latch and the watch baseline have to survive being used over
+/// and over, not just once.
+///
+/// Each round: dirty a local edit, change project.ron externally, watch the
+/// Save get blocked, Reload to accept the disk version, edit again, and Save
+/// cleanly. That last Save only works if `reload` recaptured the watch
+/// baseline; if it did not, round two would latch on a phantom conflict and
+/// the project would become unsaveable. Three rounds, because a latch that
+/// only sticks on the second use would pass a single-cycle test.
+///
+/// The edits add brushes rather than renaming: a name change makes `save`
+/// rename the project DIRECTORY, which is a different flow entirely.
+#[test]
+fn repeated_conflict_reload_save_cycles_keep_the_latch_and_baseline_honest() {
+    let dir = test_temp_dir("project-watch-cycles");
+    let project = ProjectDocument::new("cycle baseline");
+    save_watch_project(&dir, &project);
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    let path = dir.join("project.ron");
+
+    let cuboid = |size: i32| psxed_project::brush::Brush::cuboid([0, 0, 0], [size, size, size]);
+    let brush_count = |document: &ProjectDocument| document.active_scene().brushes.len();
+
+    for round in 1..=3usize {
+        // A local edit the author has not saved yet.
+        let local_before = brush_count(workspace.project());
+        workspace
+            .project
+            .active_scene_mut()
+            .brushes
+            .push(cuboid(64 + round as i32));
+        workspace.mark_dirty();
+        assert!(
+            !workspace.has_external_project_conflict(),
+            "round {round} started latched"
+        );
+
+        // Something outside the editor rewrites project.ron. Each round writes
+        // a different number of brushes, so neither size nor hash can go stale.
+        let mut external = project.clone();
+        for extra in 0..round {
+            external
+                .active_scene_mut()
+                .brushes
+                .push(cuboid(512 + extra as i32));
+        }
+        external.save_to_path(&path).unwrap();
+
+        // Save must refuse and must not touch the local document.
+        let refusal = workspace.save().unwrap_err();
+        assert!(
+            refusal.contains("changed outside"),
+            "round {round} refusal: {refusal}"
+        );
+        assert_eq!(
+            brush_count(workspace.project()),
+            local_before + 1,
+            "round {round} lost the unsaved edit"
+        );
+        assert!(
+            workspace.has_external_project_conflict(),
+            "round {round} did not latch"
+        );
+        assert!(workspace.is_dirty());
+
+        // Reload accepts the disk version and clears the latch.
+        workspace.reload();
+        assert_eq!(
+            brush_count(workspace.project()),
+            round,
+            "round {round} did not adopt the external document"
+        );
+        assert!(
+            !workspace.has_external_project_conflict(),
+            "round {round} stayed latched after Reload"
+        );
+
+        // And the recaptured baseline lets the very next Save through.
+        workspace
+            .project
+            .active_scene_mut()
+            .brushes
+            .push(cuboid(1024));
+        workspace.mark_dirty();
+        workspace
+            .save()
+            .unwrap_or_else(|error| panic!("round {round} Save after Reload: {error}"));
+        assert!(!workspace.is_dirty());
+        assert!(!workspace.has_external_project_conflict());
+
+        // The saved bytes are on disk, and polling the freshly captured
+        // baseline sees no phantom change.
+        assert_eq!(
+            brush_count(&ProjectDocument::load_from_path(&path).unwrap()),
+            round + 1,
+            "round {round} did not reach disk"
+        );
+        workspace.poll_project_watch(true);
+        assert!(
+            !workspace.has_external_project_conflict(),
+            "round {round} polled a phantom conflict after Save"
+        );
+        assert_eq!(brush_count(workspace.project()), round + 1);
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn same_length_atomic_project_replace_is_detected_even_when_metadata_looks_unchanged() {
     let dir = test_temp_dir("project-watch-atomic-same-length");

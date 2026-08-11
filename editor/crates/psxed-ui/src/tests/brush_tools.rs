@@ -1776,6 +1776,101 @@ fn brush_2d_clip_clicks_split_selected() {
     assert!((a.max[0] - 128.0).abs() < 1e-6 || (b.max[0] - 128.0).abs() < 1e-6);
 }
 
+/// The third `Clip keeps` mode. Both and Back had coverage; Front did not,
+/// and it is the one that replaces the brush with the far half.
+#[test]
+fn brush_clip_keep_front_replaces_with_the_far_half() {
+    let mut harness = ViewportHarness::floored_room("brush_clip_front", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.begin_brush_drag_2d([0.0, 0.0]);
+    harness.workspace.update_brush_drag_2d([256.0, 128.0]);
+    harness.workspace.commit_brush_drag();
+    assert!(harness.workspace.select_brush_at_2d([128.0, 64.0]));
+
+    // Cycle the toolbar control off Both, through Back, onto Front.
+    assert_eq!(harness.workspace.brush_clip_keep, BrushClipKeep::Both);
+    harness.workspace.brush_clip_keep = harness.workspace.brush_clip_keep.next();
+    harness.workspace.brush_clip_keep = harness.workspace.brush_clip_keep.next();
+    assert_eq!(harness.workspace.brush_clip_keep, BrushClipKeep::Front);
+
+    harness.workspace.brush_clip_click([128, 0, -64]);
+    harness.workspace.brush_clip_click([128, 0, 192]);
+
+    let scene = harness.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 1, "keep Front replaces in place");
+    let solved = scene.brushes[0].solve();
+    assert!(solved.is_valid());
+    assert_eq!(solved.max[0] - solved.min[0], 128.0, "one half survived");
+    harness.workspace.do_undo();
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0]
+            .solve()
+            .max[0],
+        256.0,
+        "one undo restores the unclipped brush"
+    );
+}
+
+/// Clip is part of the required authoring loop, so a clipped brush has to
+/// survive the whole loop: split, save, reopen, cook. A clip that produced a
+/// degenerate or non-convex brush would only surface at cook time.
+#[test]
+fn clipped_brush_saves_reopens_and_still_cooks() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("clip-cook-loop");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_tool = ViewTool::Brush;
+
+    let before = workspace.project().active_scene().brushes.len();
+    // Clip the template's floor slab: pick the brush whose solved box is the
+    // widest, then cut it with a vertical plane through its centre.
+    let (index, solved) = workspace
+        .project()
+        .active_scene()
+        .brushes
+        .iter()
+        .enumerate()
+        .map(|(index, brush)| (index, brush.solve()))
+        .filter(|(_, solved)| solved.is_valid())
+        .max_by(|a, b| {
+            (a.1.max[0] - a.1.min[0])
+                .partial_cmp(&(b.1.max[0] - b.1.min[0]))
+                .unwrap()
+        })
+        .expect("template brush");
+    workspace.replace_brush_selection(index, None);
+    let mid_x = ((solved.min[0] + solved.max[0]) * 0.5).round() as i32;
+    let min_z = solved.min[2].round() as i32;
+    let max_z = solved.max[2].round() as i32;
+    workspace.brush_clip_click([mid_x, 0, min_z - 64]);
+    assert!(workspace.brush_clip_start.is_some(), "first click armed");
+    workspace.brush_clip_click([mid_x, 0, max_z + 64]);
+    assert_eq!(
+        workspace.project().active_scene().brushes.len(),
+        before + 1,
+        "clip split the brush in two"
+    );
+
+    workspace.save_if_dirty().expect("save the clipped project");
+    let reopened = EditorWorkspace::open_directory(&dir).expect("reopen");
+    assert_eq!(
+        reopened.project().active_scene().brushes.len(),
+        before + 1,
+        "the split survived save and reopen"
+    );
+    for brush in &reopened.project().active_scene().brushes {
+        assert!(brush.solve().is_valid(), "clip left a degenerate brush");
+    }
+
+    let project = reopened.project().clone();
+    let (package, report) = psxed_project::playtest::build_package(&project, &dir);
+    assert!(report.is_ok(), "clipped world must cook: {:?}", report.errors);
+    assert!(package.is_some());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn hollow_selected_brush_makes_room_walls() {
     let mut harness = ViewportHarness::floored_room("brush_hollow", 4);
