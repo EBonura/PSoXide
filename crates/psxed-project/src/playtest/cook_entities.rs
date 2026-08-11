@@ -1174,6 +1174,20 @@ pub(crate) fn register_model_for_instance(
             return None;
         }
         seen_sockets.push(socket.name.as_str());
+        // Compact joint-local envelope, same contract as combat capsules:
+        // the runtime attachment math is regression-tested exactly to this
+        // cooker-enforced range.
+        if socket
+            .translation
+            .iter()
+            .any(|&v| i16::try_from(v).is_err())
+        {
+            report.error(format!(
+                "Model '{}' socket '{}' translation is outside the compact joint-local range",
+                resource.name, socket.name
+            ));
+            return None;
+        }
         model_sockets.push(PlaytestModelSocket {
             model: model_index,
             name: socket.name.clone(),
@@ -2091,6 +2105,20 @@ pub(crate) fn register_weapon_for_equipment(
     let hitbox_count =
         u16::try_from(weapon_hitboxes.len() - hitbox_first as usize).unwrap_or(u16::MAX);
     let weapon_index = u16::try_from(weapons.len()).unwrap_or(u16::MAX);
+    // Same compact joint-local envelope as sockets and capsules; the
+    // equipped-weapon placement regression covers exactly this range.
+    if weapon
+        .grip
+        .translation
+        .iter()
+        .any(|&v| i16::try_from(v).is_err())
+    {
+        report.error(format!(
+            "Weapon '{}' grip translation is outside the compact joint-local range",
+            resource.name
+        ));
+        return None;
+    }
     weapons.push(PlaytestWeapon {
         name: resource.name.clone(),
         source_resource: weapon_resource_id,
