@@ -1,5 +1,10 @@
 # Floors in the editor: floor-awareness architecture
 
+> HISTORICAL (2026-08-11): this document describes the legacy grid world's
+> floor handling. BSP-first projects author vertical space directly as
+> brushes; grid floors remain compatibility-only per
+> `docs/legacy-grid-boundary.md`.
+
 Status: design proposal (no code yet). Written after a string of "the
 entity shows on the wrong floor / selection hits the floor below"
 regressions, each fixed by bolting a floor check onto one more code path.

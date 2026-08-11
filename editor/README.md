@@ -1,5 +1,9 @@
 # `editor/` (editor & content pipeline)
 
+> The PSoXide Editor authors the owner's souls-like game: PXBSP brush levels
+> plus PSoXide gameplay records. It is not a Quake editor; Quake-PSX has its
+> own separate content pipeline (`docs/finish-line-plan-2026-08-11.md`).
+
 The host-side authoring stack: the project model, the asset cookers that
 turn source content (OBJ/glTF meshes, PNG/JPG textures, WAV audio) into
 binary blobs the runtime consumes, and the reusable egui UI panels. The

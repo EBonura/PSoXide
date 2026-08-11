@@ -1,5 +1,11 @@
 # PSoXide Editor Architecture
 
+> The PSoXide Editor authors the owner's souls-like game: PXBSP brush worlds
+> plus PSoXide gameplay records (players, enemies, equipment, sockets,
+> hit/hurt volumes, movers, triggers, props, checkpoints). It is not a Quake
+> level editor and does not read or write Quake gameplay data
+> (`docs/finish-line-plan-2026-08-11.md` section 2).
+
 The editor should live inside the PSoXide desktop application, but as a
 separate host workspace from the emulator. The Menu remains the launcher shell:
 Games and Examples boot PS1 software, while Create opens the editor.
