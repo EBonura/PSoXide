@@ -26,7 +26,7 @@ EXPECT_STAGGERS=1
 EXPECT_DEATHS=1
 EXPECT_HITS_TAKEN=3
 EXPECT_PLAYER_X_BIASED=1000942
-EXPECT_VRAM_HASH=0x1ecddf8bf551aefc
+EXPECT_VRAM_HASH=0xd130035937890a00
 EXPECT_DISPLAY_HASH=0xcb43a5cdb7831862
 
 fail() {
@@ -119,12 +119,23 @@ assert_eq "run-to-run display determinism" "$DISPLAY_1" "$DISPLAY_2"
 assert_eq "pinned VRAM hash" "$VRAM_1" "$EXPECT_VRAM_HASH"
 assert_eq "pinned display hash" "$DISPLAY_1" "$EXPECT_DISPLAY_HASH"
 
+# Door tape contract: exactly the scripted player attempts happened, the
+# door's logic never fired (so it never opened), the enemy swung the pinned
+# number of times, and not one connection crossed the closed door in either
+# direction.
+EXPECT_DOOR_PLAYER_ATTEMPTS=3
+EXPECT_DOOR_ENEMY_SWINGS=8
 DOOR="$OUT/door.txt"
+assert_eq "door tape: player attack attempts" \
+    "$(counter_or_zero "$DOOR" "player attack starts")" "$EXPECT_DOOR_PLAYER_ATTEMPTS"
+assert_eq "door tape: door logic never fired" \
+    "$(counter_or_zero "$DOOR" "logic records fired")" "0"
+assert_eq "door tape: enemy attack attempts" \
+    "$(counter_or_zero "$DOOR" "game entity attack enters")" "$EXPECT_DOOR_ENEMY_SWINGS"
 assert_eq "door tape: player melee hits blocked" \
     "$(counter_or_zero "$DOOR" "player melee hits")" "0"
 assert_eq "door tape: player hits taken blocked" \
     "$(counter_or_zero "$DOOR" "player hits taken")" "0"
-DOOR_SWINGS="$(counter_or_zero "$DOOR" "game entity attack enters")"
-[ "$DOOR_SWINGS" -ge 1 ] || fail "door tape: enemy never swung (attack enters $DOOR_SWINGS)"
+DOOR_SWINGS="$EXPECT_DOOR_ENEMY_SWINGS"
 
 echo "combat-checkpoint: PASS (melee $EXPECT_MELEE_HITS, stagger $EXPECT_STAGGERS, death $EXPECT_DEATHS, taken $EXPECT_HITS_TAKEN, door swings $DOOR_SWINGS blocked, vram $VRAM_1)"

@@ -727,6 +727,7 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::GAME_ENTITY_DEATHS => "game entity deaths",
         counter::PLAYER_MELEE_HITS => "player melee hits",
         counter::PLAYER_HITS_TAKEN => "player hits taken",
+        counter::PLAYER_ATTACK_STARTS => "player attack starts",
         _ => "unknown",
     }
 }
