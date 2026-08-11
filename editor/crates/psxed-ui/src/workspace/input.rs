@@ -25,6 +25,14 @@ impl EditorWorkspace {
     pub(crate) fn clear_validation_issues(&mut self) {
         self.validation_issue_primitives.clear();
         self.validation_issue_rooms.clear();
+        self.last_cook_errors.clear();
+    }
+
+    /// Hard errors from the last failed cook, newest cook wins.
+    pub(crate) fn last_cook_errors(
+        &self,
+    ) -> &[psxed_project::playtest::PlaytestValidationError] {
+        &self.last_cook_errors
     }
 
     /// Select the concrete authoring object attached to a typed cook
@@ -1985,6 +1993,30 @@ impl EditorWorkspace {
                     "Packets   {}/{}",
                     budget.packet_count, budget.packet_limit,
                 ));
+                if !self.last_cook_errors.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!(
+                            "Last cook failed with {} error{}",
+                            self.last_cook_errors.len(),
+                            if self.last_cook_errors.len() == 1 { "" } else { "s" }
+                        ))
+                        .color(STUDIO_ERROR),
+                    );
+                    // Every row is focusable, not just the first: the author
+                    // reading error four wants error four's brush.
+                    for error in &self.last_cook_errors {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&error.message).color(STUDIO_ERROR).small());
+                        });
+                        if let Some(target) = error.target {
+                            if ui.small_button("Focus").clicked() {
+                                focus_budget_target = Some(target);
+                                ui.close_menu();
+                            }
+                        }
+                    }
+                }
                 if let Some(issue) = budget.first_actionable_issue() {
                     ui.separator();
                     ui.label(RichText::new(issue.message()).color(STUDIO_ERROR));

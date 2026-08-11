@@ -645,6 +645,84 @@ fn stale_typed_cook_issue_target_falls_back_cleanly() {
     assert_eq!(workspace.selected_brush, None);
 }
 
+/// A cook error raised by a per-kind cook helper (which only ever sees a node
+/// NAME) still blames the authoring node, via the caller-side blame scope.
+#[test]
+fn cook_errors_blame_the_authoring_node_that_raised_them() {
+    use psxed_project::playtest::PlaytestValidationTarget;
+
+    // A Trigger Volume with no target is dead content and fails the cook.
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("per-error-targets");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let offender = workspace.selected_node_id();
+
+    let project = workspace.project().clone();
+    let (package, report) = psxed_project::playtest::build_package(&project, &dir);
+    assert!(package.is_none(), "a targetless volume must fail the cook");
+    let blamed: Vec<_> = report
+        .errors
+        .iter()
+        .filter(|error| error.contains("has no target"))
+        .map(|error| error.target)
+        .collect();
+    assert_eq!(
+        blamed,
+        vec![Some(PlaytestValidationTarget::Node(offender))],
+        "the dead volume blames its own node"
+    );
+    assert_eq!(
+        report.focus_target(),
+        Some(PlaytestValidationTarget::Node(offender)),
+        "the convenience accessor still returns the first focusable error"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// End to end: a failing cook driven through the editor's own cook command
+/// auto-focuses the authored node responsible, and keeps every error's target
+/// available so the diagnostics list can focus any row.
+#[test]
+fn failing_cook_auto_focuses_the_offending_node_and_keeps_every_target() {
+    use psxed_project::playtest::PlaytestValidationTarget;
+
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("failing-cook-focus");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let offender = workspace.selected_node_id();
+    workspace.replace_node_selection(workspace.project().active_scene().root);
+
+    let cook = test_temp_dir("failing-cook-focus-out");
+    let error = workspace
+        .cook_playtest_to_dir(&cook)
+        .expect_err("a targetless Trigger Volume must fail validation");
+    assert!(error.contains("has no target"), "{error}");
+    assert_eq!(
+        workspace.selected_node_id(),
+        offender,
+        "the failing cook selected the node the author has to fix"
+    );
+    let targets: Vec<_> = workspace
+        .last_cook_errors()
+        .iter()
+        .map(|error| error.target)
+        .collect();
+    assert!(
+        targets.contains(&Some(PlaytestValidationTarget::Node(offender))),
+        "the retained diagnostics keep the offender focusable: {targets:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(cook);
+}
+
 #[test]
 fn texture_import_resolution_label_marks_presets_and_custom_sizes() {
     assert_eq!(texture_import_resolution_label(32, 32), "32 x 32");
@@ -1994,7 +2072,7 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
         .expect("cook rooted prop and door");
     let project = ProjectDocument::load_from_path(project_dir.join("project.ron")).unwrap();
     let (package, report) = psxed_project::playtest::build_package(&project, &project_dir);
-    assert!(report.is_ok(), "{}", report.errors.join("; "));
+    assert!(report.is_ok(), "{}", report.error_messages().join("; "));
     let package = package.expect("cooked package");
     assert_eq!(package.box_props.len(), 1);
     assert_ne!(
@@ -3604,7 +3682,7 @@ fn souls_slice_project_is_authored_through_production_commands() {
 
     let project = ProjectDocument::load_from_path(project_dir.join("project.ron")).unwrap();
     let (package, report) = psxed_project::playtest::build_package(&project, &project_dir);
-    assert!(report.is_ok(), "{}", report.errors.join("; "));
+    assert!(report.is_ok(), "{}", report.error_messages().join("; "));
     let package = package.expect("cooked package");
     let psxed_project::playtest::PlaytestWorldGeometry::Pxbsp(ref world) = package.world_geometry
     else {
