@@ -1,7 +1,7 @@
 # Quake, PSoXide BSP, editor, and combat convergence handoff
 
-Last updated: 2026-08-11 (Level C.1 and deterministic-build integration,
-section 0). The original
+Last updated: 2026-08-11 (Level C.1 authoring, shared BSP liquids, and
+deterministic-build integration, section 0). The original
 2026-08-10 21:50 BST snapshot text is retained below it; where the two
 disagree, section 0 and `docs/convergence-discrepancy-report-2026-08-11.md`
 are current.
@@ -11,7 +11,7 @@ Live integration branch: `codex/quake-psoxide-convergence`
 Live integration worktree: `/Users/ebonura/Desktop/repos/PSoXide-convergence`
 
 Current PSoXide integration code HEAD before this documentation update:
-`6d7b4a87779843c4797bcb6942bc4c83e85d7a8b`
+`f1e6ce42` (merge of shared BSP liquid commit `9532e39f`)
 
 ## 0. 2026-08-11 integration checkpoint (current state)
 
@@ -165,7 +165,9 @@ this branch do not participate in the contract.
   section 3 limitation applies only to revisions before `e57af183`.
 - The grid cook dependency and hard-coded NPC hull were subsequently resolved
   in sections 0.9/0.10; authored ImageProp/BoxProp/ArchProp AABBs join the BSP
-  trace in sections 0.11/0.12. BSP water contents/swimming remains open.
+  trace in sections 0.11/0.12. BSP Water/Slime/Lava authoring, packing and
+  baseline runtime behavior landed in section 0.17. Full vertical swimming,
+  breathing, tint and liquid audio remain later gameplay work.
 - The Level C authoring-tool pass in section 0.14 closes arbitrary plane
   handles, orthographic brush marquee selection, 3D vertex/edge handles and
   safe file watching. A fresh from-scratch test by a non-implementer remains.
@@ -817,6 +819,89 @@ worker. Read it in full before editing. It deliberately records unfinished
 work, uncertainty, dirty-worktree boundaries, validation evidence, and ways to
 falsify the current implementation. It is not a claim that the campaign is
 finished.
+
+### 0.17 Shared PXBSP liquid volumes (2026-08-11)
+
+Implementation commit `9532e39f63163bc239e12976a385ca37c8b485be`
+was merged into `codex/quake-psoxide-convergence` by `f1e6ce42`. This closes
+the BSP side of legacy-grid boundary rows A5 and C5 without routing the new
+authoring lane back through `WorldGrid`.
+
+The authored and cooked contract is:
+
+- every closed brush has `BrushContents`: Solid, Water, Slime or Lava. Solid
+  remains the serde default and is omitted from RON, preserving old project
+  files;
+- the Brush Inspector exposes `BSP contents` for single and multiple
+  selections. Mixed selections show `Mixed`, one option applies atomically,
+  one undo restores every prior value, and changing a Door brush to liquid
+  removes the unsupported mover binding;
+- Hollow, clip, extrusion, pruning and normal brush transforms preserve
+  contents. The cook rejects any liquid mover that evades the UI guard;
+- render BSP leaves and all three collision hulls use the exact shared Quake
+  terminal codes. Overlap precedence is Solid, Lava, Slime, Water, Empty and
+  is independent of authored brush order;
+- precedence-aware CSG removes weaker coplanar liquid faces under stronger
+  volumes while retaining real contents transitions. Nested, partial and
+  reversed-order pack tests inspect both leaf codes and surviving surface
+  ownership;
+- liquid leaves remain visible and portal-connected for PVS purposes. Only
+  structural Solid brushes occlude the Release light bake;
+- every liquid-owned PXBSP face carries the shared `FACE_TWO_SIDED` override,
+  so its boundary is visible from both outside and inside without changing the
+  sidedness of a material reused on Solid geometry;
+- `CollisionHull::sample_liquid_contents` performs an allocation-free,
+  feet-first contiguous point sample. Feet, torso and head establish Quake
+  water level while the strongest sampled hazard determines damage;
+- the general editor playtest retains 60 percent movement speed in any BSP
+  liquid. Water is harmless, Slime deals 4 health every 30 simulation ticks,
+  and Lava deals 10 every 15 ticks. Fatal BSP hazards use the existing
+  checkpoint/spawn reset after a full 30-tick death delay;
+- `make editor-bsp-liquid-check` generates a temporary Lava-brush project,
+  cooks a real PXBSP, builds the real `mipsel-sony-psx` guest and disc, and
+  boots the headless emulator with guest telemetry only. It deliberately
+  writes no screenshot or framebuffer dump.
+
+The first adversarial review rejected the initial implementation. It found an
+off-by-one death delay, missing nested-liquid render partitions, authored-order
+dependent coplanar ownership, a mixed-selection normalization failure, Hollow
+resetting contents to Solid, and invisible inside faces under the default
+front-sided material policy. All six were corrected before commit. The second
+read-only review found no remaining liquid correctness blocker.
+
+Validation at the implementation commit and merge boundary:
+
+```text
+psxed-project --lib: 485 passed, 1 diagnostic test ignored
+psxed-ui --lib:       377 passed, 1 diagnostic test ignored
+psx-bsp --lib:         68 passed
+liquid generator:       2 passed
+Select-tool real-egui BSP contents regression: passed after integration
+git diff --check: passed
+```
+
+Final no-image MIPS replay evidence:
+
+```text
+PXBSP: 6,180 bytes
+guest frames: 220
+simulation ticks: 219
+visual frames: 109
+Lava damage events: 12 (10 before death, 2 after respawn)
+hazard respawns: 1, exactly guest frame 181
+visual deadline misses: 0
+visual budget: pass
+cadence: steady
+```
+
+This is emulator and real-target-build evidence, not original-hardware or
+pixel-fidelity evidence. Challenge it with sloped and non-axis-aligned liquid
+brushes, large same-plane overlaps, a player crossing several contents in one
+tick, save/reload and undo after mixed selection, a user-authored translucent
+material, and an original-console run. Full Quake-style vertical swimming,
+air/breathing, screen tint, fog, sounds and liquid-entry effects remain open;
+do not broaden this baseline playtest behavior into a claim of full Quake
+liquid gameplay.
 
 ## 1. Owner objective
 

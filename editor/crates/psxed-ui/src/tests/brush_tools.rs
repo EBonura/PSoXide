@@ -2484,7 +2484,7 @@ fn real_egui_brush_inspector_exposes_and_changes_bsp_contents() {
         .brushes
         .extend([water_brush, solid_brush]);
     harness.workspace.active_workspace = WorkspaceView::Room;
-    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.active_tool = ViewTool::Select;
     harness.workspace.selected_brush = Some(0);
     harness.workspace.selected_brushes = vec![0, 1];
 
