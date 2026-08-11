@@ -1,5 +1,91 @@
 use super::*;
 
+fn save_watch_project(dir: &Path, project: &ProjectDocument) {
+    std::fs::create_dir_all(dir).unwrap();
+    project.save_to_path(&dir.join("project.ron")).unwrap();
+}
+
+#[test]
+fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
+    let dir = test_temp_dir("project-watch-conflict");
+    let project = ProjectDocument::new("watch baseline");
+    save_watch_project(&dir, &project);
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+
+    let mut external = project.clone();
+    external.name = "clean external change with different length".to_string();
+    external.save_to_path(&dir.join("project.ron")).unwrap();
+    workspace.poll_project_watch(true);
+    assert_eq!(workspace.project().name, external.name);
+    assert!(!workspace.is_dirty());
+    assert!(!workspace.has_external_project_conflict());
+
+    workspace.project.name = "unsaved local name".to_string();
+    workspace.mark_dirty();
+    let mut second_external = external.clone();
+    second_external.name = "second external edit with another length".to_string();
+    second_external
+        .save_to_path(&dir.join("project.ron"))
+        .unwrap();
+    assert!(workspace.save().unwrap_err().contains("changed outside"));
+    assert_eq!(workspace.project().name, "unsaved local name");
+    assert!(workspace.has_external_project_conflict());
+
+    workspace.reload();
+    assert_eq!(workspace.project().name, second_external.name);
+    assert!(!workspace.has_external_project_conflict());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn resource_watch_is_metadata_only_and_ignores_large_raw_source_resources() {
+    let dir = test_temp_dir("resource-watch-scope");
+    let runtime_path = dir.join("assets/sfx/hit.wav");
+    let unreferenced_path = dir.join("source_assets/huge.glb");
+    std::fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(unreferenced_path.parent().unwrap()).unwrap();
+    std::fs::write(&runtime_path, b"runtime-audio").unwrap();
+    std::fs::write(&unreferenced_path, vec![0x5a; 2 * 1024 * 1024]).unwrap();
+    let mut project = ProjectDocument::new("watch resources");
+    project.add_resource(
+        "Hit",
+        ResourceData::Audio {
+            source_path: "assets/sfx/hit.wav".to_string(),
+        },
+    );
+    project.add_resource(
+        "Raw source mesh",
+        ResourceData::Mesh {
+            source_path: "source_assets/huge.glb".to_string(),
+        },
+    );
+    save_watch_project(&dir, &project);
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    assert!(workspace
+        .project_watch
+        .resources
+        .contains_key(&runtime_path));
+    assert!(!workspace
+        .project_watch
+        .resources
+        .contains_key(&unreferenced_path));
+
+    let baseline = workspace.project_watch.resources.clone();
+    let old_status = workspace.status.clone();
+    std::fs::write(&unreferenced_path, vec![0x33; 2 * 1024 * 1024 + 1]).unwrap();
+    workspace.poll_project_watch(true);
+    assert_eq!(workspace.project_watch.resources, baseline);
+    assert_eq!(workspace.status, old_status);
+
+    std::fs::write(&runtime_path, b"runtime-audio-changed").unwrap();
+    workspace.poll_project_watch(true);
+    assert_eq!(
+        workspace.status_text(),
+        "Reloaded externally changed project resources"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn room_grid_grow_preserves_spatial_descendant_preview_position() {
     let mut project = ProjectDocument::new("grid-grow");
