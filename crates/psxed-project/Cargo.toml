@@ -45,6 +45,10 @@ name = "gen-brush-first-playable"
 path = "src/bin/gen_brush_first_playable.rs"
 
 [[bin]]
+name = "gen-brush-open-courtyard"
+path = "src/bin/gen_brush_open_courtyard.rs"
+
+[[bin]]
 name = "miniaturise-project"
 path = "src/bin/miniaturise_project.rs"
 
