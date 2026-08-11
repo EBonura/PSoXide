@@ -1,8 +1,8 @@
 //! Portal generation and leaf classification for compiled brush BSPs.
 
-use crate::brush::{BASE_WINDING_EXTENT, Brush, Plane};
+use crate::brush::{Brush, Plane, BASE_WINDING_EXTENT};
 use crate::brush_compile::{
-    BspChild, BspLeafContents, CompiledSurfaceBsp, PolygonSplit, normalized_plane, split_polygon,
+    normalized_plane, split_polygon, BspChild, BspLeafContents, CompiledSurfaceBsp, PolygonSplit,
 };
 
 const PORTAL_NUDGE: f64 = 1.0 / 1024.0;
@@ -191,31 +191,34 @@ pub fn classify_bsp_leaves(
     portals: &[CompiledPortal],
     brushes: &[Brush],
 ) {
-    let brush_planes: Vec<Vec<Plane>> = brushes
+    let brush_planes: Vec<(crate::brush::BrushContents, Vec<Plane>)> = brushes
         .iter()
         .filter(|brush| brush.solve().is_valid())
         .map(|brush| {
-            brush
-                .faces
-                .iter()
-                .filter_map(|face| Plane::from_points(face.points))
-                .collect()
+            (
+                brush.contents,
+                brush
+                    .faces
+                    .iter()
+                    .filter_map(|face| Plane::from_points(face.points))
+                    .collect(),
+            )
         })
         .collect();
 
     for leaf_index in 0..bsp.leaves.len() {
         let sample = leaf_sample(leaf_index, portals).unwrap_or([0.0; 3]);
-        let solid = brush_planes.iter().any(|planes| {
-            planes.iter().all(|plane| {
-                let (normal, distance) = normalized_plane(*plane);
-                dot(normal, sample) <= distance
+        let contents = brush_planes
+            .iter()
+            .filter(|(_, planes)| {
+                planes.iter().all(|plane| {
+                    let (normal, distance) = normalized_plane(*plane);
+                    dot(normal, sample) <= distance
+                })
             })
-        });
-        bsp.leaves[leaf_index].contents = if solid {
-            BspLeafContents::Solid
-        } else {
-            BspLeafContents::Empty
-        };
+            .max_by_key(|(contents, _)| contents.precedence())
+            .map(|(contents, _)| BspLeafContents::from_brush(*contents));
+        bsp.leaves[leaf_index].contents = contents.unwrap_or(BspLeafContents::Empty);
     }
 }
 
