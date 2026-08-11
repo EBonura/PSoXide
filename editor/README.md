@@ -42,7 +42,13 @@ cargo run -p frontend -- --editor --windowed
    values, plus Duplicate, Snap, and Delete.
 4. To change a surface, click the brush face, choose a Material in the
    Inspector, then press **Apply to face**. Imported textures appear as
-   Materials in the Resources panel.
+   Materials in the Resources panel. **Face UV** offset, rotation, and per-axis
+   scale sit under the same section, with **Reset UV** to return to the
+   identity mapping; each edit is one undo step.
+   To texture faster, switch to **Tool → Paint** and click brush faces in the
+   3D view. Paint uses the same Material picker, and a drag across several
+   faces is a single undo step. Its eyedropper reads the material off the face
+   under the cursor back into the picker.
 5. To author a liquid, select a closed brush and change **BSP contents** in the
    Brush Inspector from **Solid** to **Water**, **Slime**, or **Lava**. Liquid
    brushes render their boundary but do not block movement. Every liquid

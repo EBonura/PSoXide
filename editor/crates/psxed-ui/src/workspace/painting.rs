@@ -324,6 +324,95 @@ impl EditorWorkspace {
         (!scene.brushes.is_empty()).then_some(scene.root)
     }
 
+    /// `true` when Material Paint should address BSP brush faces instead of
+    /// grid cells: a brush scene with no active grid Room. Grid painting is
+    /// untouched, so a project with rooms keeps the cell lane.
+    pub(crate) fn bsp_face_paint_active(&self) -> bool {
+        self.active_tool == ViewTool::PaintMaterial
+            && self.active_room_id().is_none()
+            && self.bsp_authoring_root().is_some()
+    }
+
+    /// Material Paint against a BSP brush face: assign the picked material to
+    /// the face under the pointer, or sample it when the eyedropper is armed.
+    ///
+    /// One undo step per gesture. `brush_face_paint_stroke` is cleared on the
+    /// primary press (see `draw_viewport_3d_body`), so dragging across a whole
+    /// wall coalesces into a single snapshot rather than one per face. This is
+    /// deliberately stricter than the grid painter, which snapshots per cell.
+    pub(crate) fn paint_bsp_brush_face(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
+        let Some((brush, face, _)) = self.pick_brush_face_nearest_for_selection_3d(rect, pointer)
+        else {
+            self.status = if self.material_paint_sampling {
+                "Eyedropper needs a BSP brush face under the cursor".to_string()
+            } else {
+                "Material Paint needs a BSP brush face under the cursor".to_string()
+            };
+            return;
+        };
+        if self.material_paint_sampling {
+            self.sample_material_from_brush_face(brush, face);
+            return;
+        }
+        let Some(material) = self.paint_material_for("brick") else {
+            self.status = "Material Paint needs a Material resource".to_string();
+            return;
+        };
+        let Some(current) = self
+            .project
+            .active_scene()
+            .brushes
+            .get(brush)
+            .and_then(|brush| brush.faces.get(face))
+            .map(|face| face.material)
+        else {
+            return;
+        };
+        // Re-painting the same material is a no-op, which also keeps a drag
+        // that dwells on one face from churning the document.
+        if current == Some(material) {
+            return;
+        }
+        if !self.brush_face_paint_stroke {
+            self.push_undo();
+            self.brush_face_paint_stroke = true;
+        }
+        self.project.active_scene_mut().brushes[brush].faces[face].material = Some(material);
+        self.mark_dirty();
+        let name = self
+            .project
+            .resource_name(material)
+            .unwrap_or("(missing)")
+            .to_string();
+        self.status = format!("Painted {name} onto brush {} face {}", brush + 1, face + 1);
+    }
+
+    /// Eyedropper on a BSP brush face. Writes the picker AND the resource
+    /// selection, so the very next paint uses the sampled material.
+    fn sample_material_from_brush_face(&mut self, brush: usize, face: usize) {
+        let Some(Some(material)) = self
+            .project
+            .active_scene()
+            .brushes
+            .get(brush)
+            .and_then(|brush| brush.faces.get(face))
+            .map(|face| face.material)
+        else {
+            self.status = format!("Brush {} face {} has no material", brush + 1, face + 1);
+            return;
+        };
+        let name = self
+            .project
+            .resource_name(material)
+            .unwrap_or("(missing)")
+            .to_string();
+        self.brush_material = Some(material);
+        self.replace_resource_selection(material);
+        self.material_paint_sampling = false;
+        self.status = format!("Sampled {name} from brush {} face {}", brush + 1, face + 1);
+        self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+    }
+
     /// Place the active `PlaceKind` on an upward-facing BSP brush surface.
     /// The one-unit lift mirrors the tracked first-playable spawn and keeps
     /// floor-anchored actors out of the solid boundary. Point lights receive
