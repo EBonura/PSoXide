@@ -459,11 +459,19 @@ impl EditorWorkspace {
         ])
     }
 
+    /// Vertical lift applied to a BSP placement anchor.
+    ///
+    /// Floor-anchored actors get one unit so they never start inside the solid
+    /// boundary, and point lights get a useful room-height default. Logic
+    /// nodes get NOTHING: a Trigger Volume's AABB grows upward from its anchor
+    /// while the character motor stands its feet exactly on the floor plane,
+    /// so a lifted anchor produces a volume that starts one unit above the
+    /// player and can never fire.
     fn bsp_place_height_offset(&self) -> f32 {
-        if self.place_kind == PlaceKind::PointLightMarker {
-            256.0
-        } else {
-            1.0
+        match self.place_kind {
+            PlaceKind::PointLightMarker => 256.0,
+            PlaceKind::Logic => 0.0,
+            _ => 1.0,
         }
     }
 
@@ -492,7 +500,7 @@ impl EditorWorkspace {
         placed
     }
 
-    fn bsp_upward_surface_y(&self, world: [f32; 2], focus_y: f32) -> Option<f32> {
+    pub(crate) fn bsp_upward_surface_y(&self, world: [f32; 2], focus_y: f32) -> Option<f32> {
         let point = world.map(f64::from);
         let mut best: Option<(f64, f64)> = None;
         for brush in &self.project.active_scene().brushes {
@@ -2431,7 +2439,11 @@ impl EditorWorkspace {
                         killtarget: String::new(),
                         master: String::new(),
                         delay_ticks: 0,
-                        wait_ticks: 0,
+                        // Fire once, then retire (hl's `wait -1`). A wait-0
+                        // volume re-activates on EVERY tick the player stands
+                        // inside it, which soft-locks any overlay it opens.
+                        // Authored projects keep whatever they already store.
+                        wait_ticks: -1,
                         enabled: true,
                     },
                 ),

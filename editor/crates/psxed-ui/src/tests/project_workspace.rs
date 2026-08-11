@@ -1470,6 +1470,8 @@ fn create_and_open_project_sets_document_name_and_derived_directory() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     ws.create_and_open_project(&name).unwrap();
@@ -1523,6 +1525,8 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let cook_a = test_temp_dir("bsp-authoring-loop-a");
     let cook_b = test_temp_dir("bsp-authoring-loop-b");
     let cook_c = test_temp_dir("bsp-authoring-loop-c");
@@ -1762,6 +1766,84 @@ fn play_and_rebuild_buttons_emit_requests_through_real_egui_input() {
     );
 }
 
+/// A Trigger Volume placed through the BSP Place lane must fire for a player
+/// who simply walks onto the surface it was placed on.
+///
+/// Two defects made that impossible. The lane lifted every point entity one
+/// unit above the surface, but the cook grows a trigger AABB UPWARD from its
+/// anchor and the character motor stands its feet exactly on the floor plane,
+/// so the volume started one unit above the player. And the placement default
+/// was `wait_ticks: 0`, which re-fires every tick the player stands inside and
+/// soft-locks whatever overlay the trigger opens.
+#[test]
+fn placed_trigger_volume_contains_a_player_standing_on_the_placement_surface() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("trigger-anchor");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+
+    let surface_y = workspace
+        .bsp_upward_surface_y([1024.0, 1024.0], workspace.orthographic_focus[1])
+        .expect("template courtyard floor");
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let placed = workspace.selected_node_id();
+
+    let node = workspace
+        .project()
+        .active_scene()
+        .node(placed)
+        .expect("placed Logic node");
+    assert_eq!(
+        node.transform.translation[1], surface_y,
+        "a Logic anchor sits ON the surface, never lifted above it"
+    );
+    let NodeKind::Logic {
+        kind, wait_ticks, ..
+    } = &node.kind
+    else {
+        panic!("Place must author a Logic node");
+    };
+    assert!(matches!(
+        kind,
+        psxed_project::LogicNodeKind::TriggerVolume { .. }
+    ));
+    assert_eq!(
+        *wait_ticks, -1,
+        "a freshly placed volume fires once, then retires"
+    );
+
+    // Give the volume a target so the cook accepts it, then prove the cooked
+    // AABB contains a player whose feet rest on the placement surface.
+    workspace.push_undo();
+    if let Some(node) = workspace.project.active_scene_mut().node_mut(placed) {
+        if let NodeKind::Logic { target, .. } = &mut node.kind {
+            *target = "Anything".to_string();
+        }
+    }
+    workspace.mark_dirty();
+
+    let project = workspace.project().clone();
+    let (package, report) = psxed_project::playtest::build_package(&project, &dir);
+    assert!(report.is_ok(), "cook errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let trigger = package
+        .logic
+        .iter()
+        .find(|record| record.kind == psx_level::logic_kind::TRIGGER_VOLUME)
+        .expect("cooked trigger volume");
+    assert_eq!(trigger.wait_ticks, -1);
+    let feet = surface_y.round() as i32;
+    assert!(
+        feet >= trigger.min[1] && feet <= trigger.max[1],
+        "player feet at y={feet} must be inside the trigger's y span {}..={}",
+        trigger.min[1],
+        trigger.max[1]
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     let mut workspace =
@@ -1775,6 +1857,8 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let cook_a = test_temp_dir("bsp-blank-slate-a");
     let cook_b = test_temp_dir("bsp-blank-slate-b");
     let _ = std::fs::remove_dir_all(&project_dir);
@@ -1988,6 +2072,8 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     workspace
@@ -2196,6 +2282,8 @@ fn save_renaming_bsp_starter_creates_a_project_copy() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
     let mut workspace = EditorWorkspace::open_directory(&source).unwrap();
 
@@ -2267,6 +2355,8 @@ fn delete_current_project_removes_directory_and_loads_bsp_starter() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     workspace.create_and_open_project(&name).unwrap();
@@ -2376,6 +2466,8 @@ fn create_and_open_project_keeps_old_texture_handles_alive_temporarily() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     ws.create_and_open_project(&name).unwrap();
@@ -2680,6 +2772,8 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let _ = std::fs::remove_dir_all(&project_dir);
 
     workspace.create_and_open_project(&name).unwrap();
@@ -3054,6 +3148,8 @@ fn souls_slice_project_is_authored_through_production_commands() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let cook_a = test_temp_dir("souls-slice-cook-a");
     let cook_b = test_temp_dir("souls-slice-cook-b");
     let _ = std::fs::remove_dir_all(&project_dir);
@@ -3405,11 +3501,11 @@ fn souls_slice_project_is_authored_through_production_commands() {
     workspace.push_undo();
     if let Some(node) = workspace.project.active_scene_mut().node_mut(trigger_node) {
         node.name = "Route Trigger".to_string();
-        // The place lane parks point nodes one unit above the surface, but
-        // the trigger AABB grows upward from its anchor and the motor stands
-        // exactly on the floor plane; anchor on the floor so the volume
-        // contains the player.
-        node.transform.translation[1] = 256.0;
+        // The anchor and wait now come straight from the Place lane: it parks
+        // Logic nodes on the surface (the trigger AABB grows upward from the
+        // anchor and the motor stands exactly on the floor plane) and defaults
+        // to fire-once. Only the extent and the target are authored here.
+        assert_eq!(node.transform.translation[1], 256.0);
         node.kind = NodeKind::Logic {
             kind: psxed_project::LogicNodeKind::TriggerVolume {
                 size: [384, 512, 768],
@@ -3418,9 +3514,8 @@ fn souls_slice_project_is_authored_through_production_commands() {
             killtarget: String::new(),
             master: String::new(),
             delay_ticks: 0,
-            // Fire once then retire (hl's wait -1): a wait-0 volume re-arms
-            // every tick while the player stands inside and reopens the sync
-            // overlay forever. Respawn re-arms the record, the souls rule.
+            // Fire once then retire (hl's wait -1). Respawn re-arms the
+            // record, the souls rule.
             wait_ticks: -1,
             enabled: true,
         };
