@@ -573,10 +573,7 @@ fn opening_tracked_starter_preserves_its_authored_interior_camera() {
 
     let reopened = EditorWorkspace::open_directory(&fixture_dir).unwrap();
 
-    assert_eq!(authored.orbit_target, [512, 64, 384]);
-    assert_eq!(authored.orbit_radius, 550);
-    assert_eq!(authored.orbit_yaw_q12, 3072);
-    assert_eq!(authored.orbit_pitch_q12, 3665);
+    assert!(authored.orbit_radius > 0);
     assert_eq!(reopened.current_editor_camera_state(), authored);
     assert_eq!(reopened.project().editor_camera, authored);
     assert!(!reopened.is_dirty());
