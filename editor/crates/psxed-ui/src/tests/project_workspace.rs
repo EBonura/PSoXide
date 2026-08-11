@@ -818,7 +818,7 @@ fn failing_cook_auto_focuses_the_offending_node_and_keeps_every_target() {
         "the failing cook selected the node the author has to fix"
     );
     let targets: Vec<_> = workspace
-        .last_cook_errors()
+        .last_cook_errors
         .iter()
         .map(|error| error.target)
         .collect();
