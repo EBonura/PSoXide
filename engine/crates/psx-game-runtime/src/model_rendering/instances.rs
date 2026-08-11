@@ -115,6 +115,7 @@ pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEP
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     pose_overrides: &[ModelInstancePoseOverride],
+    // psx-numeric-allow-next-line: one bit per model instance; the width IS the instance capacity
     visible_instance_mask: u64,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
