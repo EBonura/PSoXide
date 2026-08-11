@@ -2401,21 +2401,220 @@ fn blocker_overlap_at_fraction(
         <= square_i32_saturating(radius)
 }
 
-/// Trace one upright moving body against one static prop AABB.
+/// Trace one point or upright moving body against one static prop AABB.
 ///
-/// Like actor cylinders, prop blockers participate only in horizontal body
-/// sweeps and zero-length recovery probes. They are not supporting BSP floors,
-/// and the bounded step lift must not make a low prop silently steppable (the
-/// grid backend has always treated these authored blockers as obstacles).
-/// Candidate fractions cover every AABB side transition and every rounded
+/// Point traces use a deterministic three-axis slab entry for camera and
+/// gameplay visibility. Body blockers participate only in horizontal sweeps
+/// and zero-length recovery probes. They are not supporting BSP floors, and
+/// the bounded step lift must not make a low prop silently steppable (the grid
+/// backend has always treated these authored blockers as obstacles). Body
+/// candidate fractions cover every AABB side transition and every rounded
 /// cylinder/AABB corner; the final entry is refined at Q0.12 precision.
 fn trace_aabb_blocker(
     query: CollisionTraceQuery,
     blocker: CharacterCollisionAabb,
 ) -> Option<CollisionTrace> {
-    let CollisionTraceShape::Body { radius, height } = query.shape else {
+    match query.shape {
+        CollisionTraceShape::Point => trace_point_aabb_blocker(query, blocker),
+        CollisionTraceShape::Body { radius, height } => {
+            trace_body_aabb_blocker(query, blocker, radius, height)
+        }
+    }
+}
+
+/// Trace an integer point segment through a canonical finite-volume AABB.
+///
+/// Axis order X, Y, Z is the stable tie break when a segment enters an edge or
+/// corner. Boundary starts moving inward contact at fraction zero; tangent or
+/// outward motion remains clear. The slab divisions are Q0.12 and the bounded
+/// neighborhood check accounts for their sub-fraction truncation without a
+/// scan proportional to segment length.
+fn trace_point_aabb_blocker(
+    query: CollisionTraceQuery,
+    blocker: CharacterCollisionAabb,
+) -> Option<CollisionTrace> {
+    let min = RoomPoint::new(
+        blocker.min.x.min(blocker.max.x),
+        blocker.min.y.min(blocker.max.y),
+        blocker.min.z.min(blocker.max.z),
+    );
+    let max = RoomPoint::new(
+        blocker.min.x.max(blocker.max.x),
+        blocker.min.y.max(blocker.max.y),
+        blocker.min.z.max(blocker.max.z),
+    );
+    if min.x == max.x || min.y == max.y || min.z == max.z {
         return None;
-    };
+    }
+
+    let movement = [
+        query.end.x.saturating_sub(query.start.x),
+        query.end.y.saturating_sub(query.start.y),
+        query.end.z.saturating_sub(query.start.z),
+    ];
+    if point_strictly_inside_aabb(query.start, min, max) {
+        return Some(CollisionTrace {
+            all_solid: point_inside_aabb(query.end, min, max),
+            start_solid: true,
+            fraction_q12: 0,
+            end: query.start,
+            normal_q12: point_inside_aabb_normal(query.start, min, max),
+            plane_distance: 0,
+        });
+    }
+    if point_inside_aabb(query.start, min, max) {
+        let normal_q12 = point_boundary_entry_normal(query.start, min, max, movement)?;
+        return Some(CollisionTrace {
+            all_solid: false,
+            start_solid: false,
+            fraction_q12: 0,
+            end: query.start,
+            normal_q12,
+            plane_distance: 0,
+        });
+    }
+
+    let starts = [query.start.x, query.start.y, query.start.z];
+    let mins = [min.x, min.y, min.z];
+    let maxs = [max.x, max.y, max.z];
+    let negative_normals = [[-4096, 0, 0], [0, -4096, 0], [0, 0, -4096]];
+    let positive_normals = [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]];
+    let mut enter_q12 = 0i32;
+    let mut exit_q12 = COLLISION_FRACTION_ONE_Q12;
+    let mut entry_normal = [0; 3];
+    let mut axis = 0usize;
+    while axis < 3 {
+        let start = starts[axis];
+        let delta = movement[axis];
+        if delta == 0 {
+            if start < mins[axis] || start > maxs[axis] {
+                return None;
+            }
+            axis += 1;
+            continue;
+        }
+        let (near, far, normal) = if delta > 0 {
+            (mins[axis], maxs[axis], negative_normals[axis])
+        } else {
+            (maxs[axis], mins[axis], positive_normals[axis])
+        };
+        let axis_enter = div_q12_i32(near.saturating_sub(start), delta);
+        let axis_exit = div_q12_i32(far.saturating_sub(start), delta);
+        if axis_enter > enter_q12 {
+            enter_q12 = axis_enter;
+            entry_normal = normal;
+        }
+        exit_q12 = exit_q12.min(axis_exit);
+        if enter_q12 > exit_q12 {
+            return None;
+        }
+        axis += 1;
+    }
+    if exit_q12 < 0 || enter_q12 > COLLISION_FRACTION_ONE_Q12 {
+        return None;
+    }
+
+    // div_q12_i32 is exact to within one Q0.12 unit. Integer interpolation can
+    // move the first inclusive sample by one more unit, so inspect a fixed
+    // five-sample neighborhood around the continuous slab entry.
+    let first = enter_q12
+        .clamp(0, COLLISION_FRACTION_ONE_Q12)
+        .saturating_sub(2);
+    let last = enter_q12
+        .clamp(0, COLLISION_FRACTION_ONE_Q12)
+        .saturating_add(2)
+        .min(COLLISION_FRACTION_ONE_Q12);
+    let mut contact_q12 = None;
+    for fraction in first..=last {
+        if point_inside_aabb(trace_lerp_point(query.start, query.end, fraction), min, max) {
+            contact_q12 = Some(fraction);
+            break;
+        }
+    }
+    let contact_q12 = contact_q12?;
+    let fraction_q12 = contact_q12.min(COLLISION_FRACTION_ONE_Q12 - 1);
+    Some(CollisionTrace {
+        all_solid: false,
+        start_solid: false,
+        fraction_q12,
+        end: trace_lerp_point(query.start, query.end, fraction_q12),
+        normal_q12: entry_normal,
+        plane_distance: 0,
+    })
+}
+
+fn point_inside_aabb(point: RoomPoint, min: RoomPoint, max: RoomPoint) -> bool {
+    point.x >= min.x
+        && point.x <= max.x
+        && point.y >= min.y
+        && point.y <= max.y
+        && point.z >= min.z
+        && point.z <= max.z
+}
+
+fn point_strictly_inside_aabb(point: RoomPoint, min: RoomPoint, max: RoomPoint) -> bool {
+    point.x > min.x
+        && point.x < max.x
+        && point.y > min.y
+        && point.y < max.y
+        && point.z > min.z
+        && point.z < max.z
+}
+
+fn point_boundary_entry_normal(
+    point: RoomPoint,
+    min: RoomPoint,
+    max: RoomPoint,
+    movement: [i32; 3],
+) -> Option<[i16; 3]> {
+    let points = [point.x, point.y, point.z];
+    let mins = [min.x, min.y, min.z];
+    let maxs = [max.x, max.y, max.z];
+    let negative_normals = [[-4096, 0, 0], [0, -4096, 0], [0, 0, -4096]];
+    let positive_normals = [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]];
+    let mut normal = None;
+    let mut axis = 0usize;
+    while axis < 3 {
+        if points[axis] == mins[axis] {
+            if movement[axis] <= 0 {
+                return None;
+            }
+            normal.get_or_insert(negative_normals[axis]);
+        } else if points[axis] == maxs[axis] {
+            if movement[axis] >= 0 {
+                return None;
+            }
+            normal.get_or_insert(positive_normals[axis]);
+        }
+        axis += 1;
+    }
+    normal
+}
+
+fn point_inside_aabb_normal(point: RoomPoint, min: RoomPoint, max: RoomPoint) -> [i16; 3] {
+    let faces = [
+        (point.x.saturating_sub(min.x), [-4096, 0, 0]),
+        (max.x.saturating_sub(point.x), [4096, 0, 0]),
+        (point.y.saturating_sub(min.y), [0, -4096, 0]),
+        (max.y.saturating_sub(point.y), [0, 4096, 0]),
+        (point.z.saturating_sub(min.z), [0, 0, -4096]),
+        (max.z.saturating_sub(point.z), [0, 0, 4096]),
+    ];
+    let mut best = faces[0];
+    for face in faces.into_iter().skip(1) {
+        if face.0 < best.0 {
+            best = face;
+        }
+    }
+    best.1
+}
+
+fn trace_body_aabb_blocker(
+    query: CollisionTraceQuery,
+    blocker: CharacterCollisionAabb,
+    radius: i32,
+    height: i32,
+) -> Option<CollisionTrace> {
     if radius <= 0 || height <= 0 || query.start.y != query.end.y {
         return None;
     }
@@ -2911,6 +3110,106 @@ mod tests {
     }
 
     #[test]
+    fn point_aabb_trace_covers_entry_start_inside_miss_and_corner_tie() {
+        let blocker =
+            CharacterCollisionAabb::new(RoomPoint::new(-2, -2, -2), RoomPoint::new(2, 2, 2));
+        let entry = trace_aabb_blocker(
+            CollisionTraceQuery::point(RoomPoint::new(-10, 0, 0), RoomPoint::new(10, 0, 0)),
+            blocker,
+        )
+        .expect("point enters AABB");
+        assert!(!entry.start_solid);
+        assert!(!entry.all_solid);
+        assert!((1636..=1640).contains(&entry.fraction_q12), "{entry:?}");
+        assert_eq!(entry.end.x, -2);
+        assert_eq!(entry.normal_q12, [-4096, 0, 0]);
+
+        let inside = trace_aabb_blocker(
+            CollisionTraceQuery::point(RoomPoint::ZERO, RoomPoint::new(1, 1, 1)),
+            blocker,
+        )
+        .expect("point starts inside AABB");
+        assert!(inside.start_solid);
+        assert!(inside.all_solid);
+        assert_eq!(inside.fraction_q12, 0);
+        assert_eq!(inside.end, RoomPoint::ZERO);
+        assert_eq!(inside.normal_q12, [-4096, 0, 0]);
+
+        assert_eq!(
+            trace_aabb_blocker(
+                CollisionTraceQuery::point(RoomPoint::new(-10, 8, 0), RoomPoint::new(10, 8, 0)),
+                blocker,
+            ),
+            None,
+            "parallel segment outside one slab stays clear"
+        );
+
+        let corner = trace_aabb_blocker(
+            CollisionTraceQuery::point(RoomPoint::new(-10, -10, 0), RoomPoint::new(10, 10, 0)),
+            blocker,
+        )
+        .expect("point enters an AABB corner");
+        assert_eq!(corner.end, RoomPoint::new(-2, -2, 0));
+        assert_eq!(
+            corner.normal_q12,
+            [-4096, 0, 0],
+            "X wins an exact X/Y entry tie"
+        );
+    }
+
+    #[test]
+    fn point_aabb_boundary_motion_is_directional_and_deterministic() {
+        let blocker =
+            CharacterCollisionAabb::new(RoomPoint::new(-2, -2, -2), RoomPoint::new(2, 2, 2));
+        let inward = trace_aabb_blocker(
+            CollisionTraceQuery::point(RoomPoint::new(-2, 0, 0), RoomPoint::new(0, 0, 0)),
+            blocker,
+        )
+        .expect("inward boundary motion contacts immediately");
+        assert_eq!(inward.fraction_q12, 0);
+        assert!(!inward.start_solid);
+        assert_eq!(inward.normal_q12, [-4096, 0, 0]);
+        assert_eq!(
+            trace_aabb_blocker(
+                CollisionTraceQuery::point(RoomPoint::new(-2, 0, 0), RoomPoint::new(-4, 0, 0)),
+                blocker,
+            ),
+            None,
+            "outward boundary motion is clear"
+        );
+        assert_eq!(
+            trace_aabb_blocker(
+                CollisionTraceQuery::point(RoomPoint::new(-2, 0, 0), RoomPoint::new(-2, 1, 0)),
+                blocker,
+            ),
+            None,
+            "tangent boundary motion is clear"
+        );
+    }
+
+    #[test]
+    fn collidable_prop_blocks_melee_point_segment_and_world_wins_tie() {
+        let query = CollisionTraceQuery::point(RoomPoint::new(-10, 0, 0), RoomPoint::new(10, 0, 0));
+        let blocker =
+            CharacterCollisionAabb::new(RoomPoint::new(-2, -4, -4), RoomPoint::new(2, 4, 4));
+        let prop = trace_aabb_blocker(query, blocker).expect("prop point hit");
+        let world_normal = [0, 0, -4096];
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace {
+                normal_q12: world_normal,
+                ..prop
+            },
+            fail_once: false,
+        };
+        let props = [blocker];
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &props);
+        let trace = trace_collision(&mut provider, query).expect("compound point trace");
+        assert!(trace.hit(), "collidable prop occludes the melee segment");
+        assert_eq!(trace.fraction_q12, prop.fraction_q12);
+        assert_eq!(trace.normal_q12, world_normal, "world retains exact tie");
+    }
+
+    #[test]
     fn aabb_trace_does_not_square_off_rounded_body_corner() {
         let query =
             CollisionTraceQuery::body(RoomPoint::new(0, 0, 6), RoomPoint::new(7, 0, 6), 4, 8);
@@ -3094,6 +3393,13 @@ mod tests {
         let mut output = sentinel;
         assert!(!provider.trace_into(query, &mut output));
         assert_eq!(output, sentinel);
+
+        let point_query = CollisionTraceQuery::point(query.start, query.end);
+        assert!(!provider.trace_into(point_query, &mut output));
+        assert_eq!(
+            output, sentinel,
+            "malformed point-AABB composition preserves every result field"
+        );
 
         let valid =
             CharacterCollisionAabb::new(RoomPoint::new(10, 0, -4), RoomPoint::new(14, 8, 4));
