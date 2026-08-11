@@ -70,12 +70,16 @@ solid is normally fixed by placing it again on the room's upward floor face.
 
 For a windowless acceptance of this exact author/save/Play contract, run
 `make editor-blank-playtest-check` from the repository root. It authors a fresh
-BSP room through the editor command APIs, verifies that the tracked starter
-project, input tape, and neutral texture match their generator byte for byte,
-persists and cooks the authored artifact, builds the real `mipsel-sony-psx`
-guest and disc, then boots it in the headless PSoXide emulator and proves
-rendered frames plus player movement. This is an emulator gate, not a GUI
-automation or original-hardware claim.
+BSP room through the editor command APIs and also drives the visible starter,
+3D selection, Move, and Resize controls with real `egui::RawInput`. It verifies
+that the roofless courtyard and its neutral cobble/brick textures match their
+generator byte for byte, persists and cooks the authored artifact, builds a
+real `mipsel-sony-psx` guest and disc, then replays the disc twice in the
+headless PSoXide emulator. The gate pins the spawn, movement into the authored
+wall, player-radius collision stop, frame and triangle counters, VRAM/display
+hashes, and a byte-identical GPU command census. It rejects any emitted image
+artifact. This is programmatic UI and emulator evidence, not native manual GUI
+or original-hardware evidence.
 
 For a no-image runtime proof of the BSP liquid contract, run
 `make editor-bsp-liquid-check`. It generates a temporary lava-brush project,

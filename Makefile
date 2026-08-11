@@ -723,10 +723,13 @@ EDITOR_PLAYTEST_HARDWARE_FEATURES ?= cd-stream-bench world-order-bucketed world-
 build-editor-playtest:
 	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
 
-# End-to-end acceptance for the shortest BSP editor loop. The unit regression
-# exports the exact persisted project it authored through EditorWorkspace
-# commands; the remaining stages deliberately use the same build-project-disc
-# path as the editor's Play action. No GUI, BIOS, or original hardware is used.
+# End-to-end acceptance for the shortest BSP editor loop. Real egui input first
+# proves the visible starter, 3D brush selection, and Move/Resize controls. The
+# command regression then exports the exact persisted project it authored; the
+# remaining stages use the same cooker, MIPS target, and disc packer contract
+# as the editor's Play action. Two image-free replays must agree byte-for-byte
+# on their GPU census and on pinned movement, wall contact, and display
+# evidence. No native window, BIOS, screenshot, or original hardware is used.
 editor-blank-playtest-check:
 	@set -eu; \
 	check_tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/psoxide-editor-blank-check.XXXXXX"); \
@@ -737,29 +740,44 @@ editor-blank-playtest-check:
 	tracked_fixture="editor/projects/brush-open-courtyard"; \
 	cue="$$project_dir/baked/editor_blank_playtest_acceptance.cue"; \
 	disc="$$project_dir/baked/editor_blank_playtest_acceptance.bin"; \
-	log="$$check_tmp/headless.log"; \
+	log_a="$$check_tmp/headless-a.log"; \
+	log_b="$$check_tmp/headless-b.log"; \
+	gpu_a="$$check_tmp/gpu-a.csv"; \
+	gpu_b="$$check_tmp/gpu-b.csv"; \
 	cargo run -p psxed-project --bin gen-brush-open-courtyard -- "$$generated_fixture"; \
 	cmp "$$generated_fixture/project.ron" "$$tracked_fixture/project.ron"; \
 	cmp "$$generated_fixture/assets/textures/courtyard_cobbles.psxt" "$$tracked_fixture/assets/textures/courtyard_cobbles.psxt"; \
 	cmp "$$generated_fixture/assets/textures/courtyard_brick.psxt" "$$tracked_fixture/assets/textures/courtyard_brick.psxt"; \
 	cd editor; \
+	cargo test -p psxed-ui tests::project_workspace::new_project_release_choice_copies_the_roofless_open_courtyard -- --exact; \
+	cargo test -p psxed-ui tests::brush_tools::tracked_bsp_starter_top_view_emits_headless_brush_outline_shapes -- --exact; \
+	cargo test -p psxed-ui tests::brush_tools::bsp_brush_click_selection_runs_through_real_egui_response_dispatch -- --exact; \
+	cargo test -p psxed-ui tests::brush_tools::select_tool_selected_brush_uses_visible_move_and_resize_via_real_egui -- --exact; \
+	cargo test -p psxed-ui tests::project_workspace::play_and_rebuild_buttons_emit_requests_through_real_egui_input -- --exact; \
 	PSOXIDE_EDITOR_BLANK_PROJECT_OUT="$$project_dir" cargo test -p psxed-ui tests::project_workspace::bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract -- --exact --nocapture; \
 	cd ..; \
 	cd emu; \
 	EDITOR_PLAYTEST_FEATURES='cd-stream-bench emulator-telemetry' cargo run -p frontend --release -- build-project-disc --project "$$project_file"; \
-	if ! cargo run -p frontend --release -- launch \
-		--path "$$cue" \
-		--embedded-playtest \
-		--hold-forward \
-		--guest-frames 180 \
-		--guest-visual-frames 60 \
-		--steps 1000000000 \
-		--dump-hash \
-		--dump-guest-profile > "$$log" 2>&1; then \
-		cat "$$log"; \
-		exit 1; \
-	fi; \
-	cat "$$log"; \
+	for replay in a b; do \
+		case "$$replay" in \
+			a) replay_log="$$log_a"; replay_gpu="$$gpu_a" ;; \
+			b) replay_log="$$log_b"; replay_gpu="$$gpu_b" ;; \
+		esac; \
+		if ! cargo run -p frontend --release -- launch \
+			--path "$$cue" \
+			--embedded-playtest \
+			--hold-forward \
+			--guest-frames 180 \
+			--guest-visual-frames 60 \
+			--steps 1000000000 \
+			--gpu-frame-stats-log "$$replay_gpu" \
+			--dump-hash \
+			--dump-guest-profile > "$$replay_log" 2>&1; then \
+			cat "$$replay_log"; \
+			exit 1; \
+		fi; \
+	done; \
+	cat "$$log_a"; \
 	cd ..; \
 	python3 tools/check-editor-blank-playtest.py \
 		--project "$$project_file" \
@@ -767,7 +785,11 @@ editor-blank-playtest-check:
 		--pxbsp engine/examples/editor-playtest/generated/brush_world.pxbsp \
 		--exe build/examples/mipsel-sony-psx/release/editor-playtest.exe \
 		--disc "$$disc" \
-		--log "$$log"
+		--log-a "$$log_a" \
+		--log-b "$$log_b" \
+		--gpu-a "$$gpu_a" \
+		--gpu-b "$$gpu_b" \
+		--artifact-root "$$check_tmp"
 
 # End-to-end proof that authored PXBSP liquid contents survive the editor cook,
 # enter the shared runtime point hull, apply deterministic hazard damage, and
