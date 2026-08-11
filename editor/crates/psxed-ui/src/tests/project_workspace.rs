@@ -278,6 +278,151 @@ fn editor_viewport_saves_with_project_and_restores_on_open() {
 }
 
 #[test]
+fn opening_legacy_default_bsp_top_view_frames_authored_brushes_without_dirtying() {
+    let project_dir = test_temp_dir("editor-viewport-bsp-default-migration");
+    let _ = std::fs::remove_dir_all(&project_dir);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let mut project = ProjectDocument::new("legacy default BSP viewport");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [1024, 0, 2048],
+            [3072, 512, 4096],
+        ));
+    project.editor_workspace.active = psxed_project::EditorWorkspaceView::Room;
+    project.editor_viewport.view_2d = true;
+    project.editor_viewport.orthographic_view = psxed_project::EditorOrthographicView::Top;
+    project.editor_viewport.orthographic_focus = [0.0; 3];
+    project.editor_viewport.viewport_zoom = DEFAULT_VIEWPORT_ZOOM;
+    project
+        .save_to_path(project_dir.join("project.ron"))
+        .unwrap();
+
+    let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+    assert!(
+        !reopened.is_dirty(),
+        "camera migration is editor-only state"
+    );
+    assert_eq!(reopened.orthographic_focus, [2048.0, 0.0, 3072.0]);
+    assert!(reopened.viewport_zoom < DEFAULT_VIEWPORT_ZOOM);
+
+    let _ = std::fs::remove_dir_all(project_dir);
+}
+
+#[test]
+fn opening_legacy_default_bsp_camera_frames_above_authored_brushes_without_dirtying() {
+    let project_dir = test_temp_dir("editor-camera-bsp-default-migration");
+    let _ = std::fs::remove_dir_all(&project_dir);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let mut project = ProjectDocument::new("legacy default BSP camera");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [1024, 512, 768],
+        ));
+    project.editor_workspace.active = psxed_project::EditorWorkspaceView::Room;
+    project.editor_viewport.view_2d = false;
+    assert_eq!(project.editor_camera, EditorCameraState::default());
+    project
+        .save_to_path(project_dir.join("project.ron"))
+        .unwrap();
+
+    let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+    assert!(
+        !reopened.is_dirty(),
+        "camera migration is session-only state"
+    );
+    assert_eq!(reopened.camera_rig.target, [512, 256, 384]);
+    assert_eq!(reopened.camera_rig.pitch, 3840);
+    assert!(
+        (512..6144).contains(&reopened.camera_rig.radius),
+        "BSP bounds replace the legacy 6144-unit dolly"
+    );
+    assert_eq!(
+        reopened.project().editor_camera,
+        EditorCameraState::default(),
+        "opening must not fabricate persisted camera authoring"
+    );
+
+    let _ = std::fs::remove_dir_all(project_dir);
+}
+
+#[test]
+fn opening_bsp_project_preserves_a_custom_camera_exactly() {
+    let project_dir = test_temp_dir("editor-camera-bsp-custom");
+    let _ = std::fs::remove_dir_all(&project_dir);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let mut project = ProjectDocument::new("custom BSP camera");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [1024, 512, 768],
+        ));
+    project.editor_camera.orbit_yaw_q12 = 3072;
+    project.editor_camera.orbit_pitch_q12 = 3665;
+    project.editor_camera.orbit_radius = 550;
+    project.editor_camera.orbit_target = [512, 64, 384];
+    let expected = project.editor_camera;
+    project
+        .save_to_path(project_dir.join("project.ron"))
+        .unwrap();
+
+    let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+    assert!(!reopened.is_dirty());
+    assert_eq!(reopened.current_editor_camera_state(), expected);
+    assert_eq!(reopened.project().editor_camera, expected);
+
+    let _ = std::fs::remove_dir_all(project_dir);
+}
+
+#[test]
+fn opening_tracked_starter_preserves_its_authored_interior_camera() {
+    let fixture_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+    let authored = ProjectDocument::load_from_path(fixture_dir.join("project.ron"))
+        .unwrap()
+        .editor_camera;
+
+    let reopened = EditorWorkspace::open_directory(&fixture_dir).unwrap();
+
+    assert_eq!(authored.orbit_target, [512, 64, 384]);
+    assert_eq!(authored.orbit_radius, 550);
+    assert_eq!(authored.orbit_yaw_q12, 3072);
+    assert_eq!(authored.orbit_pitch_q12, 3665);
+    assert_eq!(reopened.current_editor_camera_state(), authored);
+    assert_eq!(reopened.project().editor_camera, authored);
+    assert!(!reopened.is_dirty());
+}
+
+#[test]
+fn showing_room_workspace_migrates_only_an_exact_default_bsp_camera() {
+    let mut project = ProjectDocument::new("default BSP camera");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [1024, 512, 768],
+        ));
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    workspace.show_workspace(psxed_project::EditorWorkspaceView::Room);
+
+    assert_eq!(workspace.camera_rig.target, [512, 256, 384]);
+    assert_eq!(workspace.camera_rig.pitch, 3840);
+    assert!(!workspace.is_dirty());
+    assert_eq!(
+        workspace.project().editor_camera,
+        EditorCameraState::default()
+    );
+}
+
+#[test]
 fn typed_brush_cook_issue_selects_and_frames_the_authored_brush() {
     let mut project = ProjectDocument::new("brush diagnostic");
     project
@@ -1378,7 +1523,9 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     workspace.set_orthographic_view(OrthographicView::Top);
     workspace.set_active_tool_cycle_value((ViewTool::Brush, None));
     workspace.begin_brush_drag_2d([0.0, 0.0]);
-    workspace.update_brush_drag_2d([768.0, 768.0]);
+    // Keep the normal one-sector Box Prop well clear of the player so this
+    // authored artifact can also prove movement after it reaches the guest.
+    workspace.update_brush_drag_2d([2048.0, 2048.0]);
     workspace.commit_brush_drag();
     let solid = workspace.selected_brush.expect("new solid selected");
     workspace.hollow_selected_brush(64);
@@ -1397,10 +1544,10 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     assert!(workspace.place_bsp_from_top([192.0, 192.0]));
     let spawn = workspace.selected_node_id();
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointLightMarker)));
-    assert!(workspace.place_bsp_from_top([256.0, 256.0]));
+    assert!(workspace.place_bsp_from_top([512.0, 512.0]));
     let light = workspace.selected_node_id();
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::BoxProp)));
-    assert!(workspace.place_bsp_from_top([384.0, 384.0]));
+    assert!(workspace.place_bsp_from_top([1536.0, 1536.0]));
     let prop = workspace.selected_node_id();
     for id in [spawn, light, prop] {
         assert_eq!(
@@ -1421,7 +1568,7 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     workspace.save().expect("save before rejected portal");
     let before_nodes = workspace.project().active_scene().nodes().len();
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Portal)));
-    assert!(!workspace.place_bsp_from_top([320.0, 320.0]));
+    assert!(!workspace.place_bsp_from_top([1024.0, 1024.0]));
     assert_eq!(
         workspace.project().active_scene().nodes().len(),
         before_nodes
@@ -1431,7 +1578,7 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     // Place the normal default Logic node, then perform the exact kind change
     // exposed by its inspector before binding one hollowed wall as its model.
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
-    assert!(workspace.place_bsp_from_top([64.0, 384.0]));
+    assert!(workspace.place_bsp_from_top([64.0, 1024.0]));
     let door = workspace.selected_node_id();
     workspace.push_undo();
     let node = workspace
@@ -1476,6 +1623,11 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     assert!(report.is_ok(), "{}", report.errors.join("; "));
     let package = package.expect("cooked package");
     assert_eq!(package.box_props.len(), 1);
+    assert_ne!(
+        package.box_props[0].flags & psx_level::box_prop_flags::COLLISION_ENABLED,
+        0,
+        "the authored Box Prop must retain its collision contract"
+    );
     assert_eq!(package.lights.len(), 1);
     assert!(matches!(
         package.world_geometry,
@@ -1504,6 +1656,28 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
             std::fs::read(cook_b.join(filename)).unwrap(),
             "{filename} drifted across unchanged Rebuild"
         );
+    }
+
+    // The opt-in acceptance gate consumes the exact project authored above,
+    // rather than regenerating a lookalike through a second construction
+    // path. Normal unit-test runs leave no artifact behind. The Make target
+    // supplies a fresh temporary destination and carries this persisted
+    // project through the real cook, MIPS link, disc build, and emulator boot.
+    if let Some(export_dir) = std::env::var_os("PSOXIDE_EDITOR_BLANK_PROJECT_OUT") {
+        let export_dir = PathBuf::from(export_dir);
+        assert!(
+            !export_dir.exists(),
+            "blank-slate export destination already exists: {}",
+            export_dir.display()
+        );
+        copy_dir_recursive(&project_dir, &export_dir).expect("export authored BSP project");
+        let export_file = export_dir.join("project.ron");
+        let mut exported = ProjectDocument::load_from_path(&export_file).expect("load export");
+        exported.name = "Editor Blank Playtest Acceptance".to_string();
+        exported
+            .save_to_path(&export_file)
+            .expect("stabilise exported acceptance project name");
+        println!("blank-slate project: {}", export_file.display());
     }
 
     let _ = std::fs::remove_dir_all(project_dir);
@@ -1538,11 +1712,32 @@ fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
         psxed_project::brush_world::BrushWorldCookMode::Release
     );
     assert!(!workspace.project().active_scene().brushes.is_empty());
+    assert!(
+        !workspace.is_dirty(),
+        "the framed new project is already saved"
+    );
+    assert!(workspace.view_2d);
+    assert_eq!(workspace.orthographic_view, OrthographicView::Top);
+    assert_eq!(workspace.active_tool, ViewTool::Brush);
+    assert!(
+        workspace.viewport_zoom < DEFAULT_VIEWPORT_ZOOM,
+        "the starter BSP must be framed instead of opening at 96 px/unit"
+    );
     let saved = ProjectDocument::load_from_path(target.join("project.ron")).unwrap();
     assert_eq!(
         saved.bsp_cook_mode,
         psxed_project::brush_world::BrushWorldCookMode::Release
     );
+    assert!(saved.editor_viewport.view_2d);
+    assert_eq!(
+        saved.editor_viewport.orthographic_view,
+        psxed_project::EditorOrthographicView::Top
+    );
+    assert_eq!(saved.editor_viewport.viewport_zoom, workspace.viewport_zoom);
+    assert_eq!(saved.editor_camera.orbit_target, [512, 64, 384]);
+    assert_eq!(saved.editor_camera.orbit_radius, 550);
+    assert_eq!(saved.editor_camera.orbit_yaw_q12, 3072);
+    assert_eq!(saved.editor_camera.orbit_pitch_q12, 3665);
     let _ = std::fs::remove_dir_all(target);
 }
 

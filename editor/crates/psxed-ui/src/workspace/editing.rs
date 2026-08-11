@@ -1004,17 +1004,30 @@ impl EditorWorkspace {
             return surface.map(|(target, _)| target);
         }
 
-        match (self.pick_entity_bound(rect, pointer, room_filter), surface) {
-            (Some(entity), Some((_surface, surface_distance)))
-                if entity.distance <= surface_distance =>
-            {
-                Some(Viewport3dPointerTarget::Entity(entity))
+        let brush = self
+            .pick_brush_face_with_hit(rect, pointer)
+            .and_then(|(brush, face, hit)| {
+                let (origin, _) = self.camera_ray_for_pointer(rect, pointer)?;
+                Some((
+                    Viewport3dPointerTarget::Brush { brush, face },
+                    distance3_f32(origin, hit),
+                ))
+            });
+
+        // Compare all authored geometry in one distance domain. Preserve the
+        // legacy tie rule where entities consume a click exactly on a surface.
+        let mut best = surface;
+        if let Some((target, distance)) = brush {
+            if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+                best = Some((target, distance));
             }
-            (Some(_), Some((surface, _))) => Some(surface),
-            (Some(entity), None) => Some(Viewport3dPointerTarget::Entity(entity)),
-            (None, Some((surface, _))) => Some(surface),
-            (None, None) => None,
         }
+        if let Some(entity) = self.pick_entity_bound(rect, pointer, room_filter) {
+            if best.is_none_or(|(_, best_distance)| entity.distance <= best_distance) {
+                best = Some((Viewport3dPointerTarget::Entity(entity), entity.distance));
+            }
+        }
+        best.map(|(target, _)| target)
     }
 
     pub(crate) fn draw_node_gizmo(

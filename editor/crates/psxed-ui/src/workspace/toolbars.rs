@@ -80,6 +80,10 @@ impl EditorWorkspace {
                         let (rect, response) =
                             ui.allocate_exact_size(size, Sense::click_and_drag());
                         self.last_viewport_size = rect.size();
+                        #[cfg(test)]
+                        {
+                            self.last_orthographic_viewport_rect = rect;
+                        }
                         let orthographic_view = self.orthographic_view;
                         let top_view = orthographic_view == OrthographicView::Top;
                         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
@@ -159,7 +163,14 @@ impl EditorWorkspace {
                         let painter = ui.painter_at(rect);
                         painter.rect_filled(rect, 0.0, STUDIO_VIEWPORT);
                         if self.show_grid {
-                            draw_world_grid(&painter, transform);
+                            let bsp_only = self.active_room_id().is_none()
+                                && !self.project.active_scene().brushes.is_empty();
+                            let base_step = if bsp_only {
+                                self.snap_units.max(1) as f32
+                            } else {
+                                1.0
+                            };
+                            draw_world_grid(&painter, transform, base_step);
                         }
 
                         let hits = if top_view {
@@ -258,9 +269,7 @@ impl EditorWorkspace {
                                                 self.begin_brush_vertex_drag_2d(world, tolerance)
                                             }
                                         };
-                                        if !grabbed
-                                            && self.pick_brush_face_at_2d(world).is_none()
-                                        {
+                                        if !grabbed && self.pick_brush_face_at_2d(world).is_none() {
                                             self.begin_brush_drag_2d(world);
                                         }
                                     }
@@ -1111,11 +1120,7 @@ impl EditorWorkspace {
 
         {
             let selected = self.active_tool_cycle_value() == (ViewTool::Brush, None);
-            if toolbar_menu_choice(
-                ui,
-                icons::label(ViewTool::Brush.icon(), "Brush"),
-                selected,
-            ) {
+            if toolbar_menu_choice(ui, icons::label(ViewTool::Brush.icon(), "Brush"), selected) {
                 self.set_active_tool_cycle_value((ViewTool::Brush, None));
             }
         }
