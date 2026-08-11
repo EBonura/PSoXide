@@ -139,6 +139,48 @@ fn test_temp_dir(label: &str) -> PathBuf {
     ))
 }
 
+/// Deletes a test-created project directory on drop, panic path included.
+///
+/// Tests that exercise `create_and_open_project` have to write where
+/// `psxed_project::projects_dir()` points, which in a checkout is the TRACKED
+/// `editor/projects/`. That directory's `.gitignore` starts with `*` and
+/// allowlists the real projects, so a directory a failing assertion leaves
+/// behind is invisible to `git status` and stays forever. A trailing
+/// `remove_dir_all` never runs on the panic path; this guard does.
+struct ScratchProjectDir(PathBuf);
+
+impl ScratchProjectDir {
+    fn new(path: PathBuf) -> Self {
+        let _ = std::fs::remove_dir_all(&path);
+        Self(path)
+    }
+}
+
+impl Drop for ScratchProjectDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The guard has to survive a panicking test body, which is the only case
+/// that ever leaked a directory into the tracked `editor/projects/`.
+#[test]
+fn scratch_project_dir_guard_cleans_up_after_a_panic() {
+    let dir = test_temp_dir("scratch-guard");
+    let probe = dir.clone();
+    let result = std::panic::catch_unwind(move || {
+        let _guard = ScratchProjectDir::new(dir.clone());
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        assert!(dir.is_dir());
+        panic!("test body fails after creating the project");
+    });
+    assert!(result.is_err(), "the body must have panicked");
+    assert!(
+        !probe.exists(),
+        "the guard must remove {probe:?} on the panic path"
+    );
+}
+
 fn assert_vec3_approx(actual: [f32; 3], expected: [f32; 3]) {
     for axis in 0..3 {
         assert!(
