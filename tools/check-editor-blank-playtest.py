@@ -34,7 +34,15 @@ EXPECTED_GPU_CENSUS: dict[str, int | str] = {
     "textured_quads": 107,
     "textured_rects": 84,
     "run_draw_words": 13_837,
-    "run_draw_hash": "0x95661662ade300b2",
+    # Re-pinned when the BSP Place lane stopped lifting Logic nodes one unit
+    # above the clicked surface (a lifted Trigger Volume anchor produces an
+    # AABB the player can never enter). The blank fixture's "Simple Door" is
+    # placed as a Logic node, so its anchor moved y=65 -> y=64 and the door
+    # submodel's cooked vertices shifted one unit with it. Everything else
+    # held: rows, commands, draws, fills, all three textured-primitive counts,
+    # run_draw_words, the triangle counters, and BOTH the VRAM and display
+    # hashes above. Same pixels, one unit of different draw words.
+    "run_draw_hash": "0xa1198019c4f18107",
 }
 IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".ppm", ".webp"}
 
