@@ -1160,6 +1160,66 @@ the route twice, and creating one clean commit. The integrated PSoXide and
 Quake worktrees are otherwise clean except for the owner's saved PSoXide
 camera file described above.
 
+### 0.20 F0/S1 execution checkpoint (2026-08-11, finish-line campaign)
+
+The finish-line campaign (`docs/finish-line-plan-2026-08-11.md`) started
+executing. F0 landed as `cd5b0f0d`
+(`docs/convergence-f0-baseline-2026-08-11.md`: worktree inventory, baseline
+validation at PSoXide `2af919d0` and Quake `09ff502`, requirements matrix,
+historical banners on the grid-era docs, souls-editor statements). Both
+baselines reran green before any edit: PSoXide 489/380/70/111/85 host tests
+plus blank-playtest, liquid, and combat-checkpoint gates; Quake check, host
+tests, and MIPS compile from a fresh rc1-pin hydration.
+
+The S1 shared-BSP authority audit completed with a full call-site trace of
+both games into `psx-bsp`. Verdict: hull traversal, trace, contents, leaf
+lookup, mover interpolation, hull selection, and the wire formats each have
+exactly one canonical implementation; the Quake Z-up conversion exists at
+exactly one adapter (`crates/quake-core/src/bsp_axis_adapter.rs`) with no
+second swizzle site; and the pin (`f9f83c35`) to HEAD `psx-bsp` diff is
+purely additive for every kernel Quake consumes, so the planned P3 repin is
+safe. The one semantic change in that window (`FACE_TWO_SIDED` sidedness
+override in the PXBSP render path) is unreachable from Quake, which ships
+its own renderer.
+
+Named divergences retained by decision (S1 exit-gate record):
+
+1. PVS row decompression existed twice in shipping code (canonical
+   `psx-bsp` copy plus a byte-identical copy in Quake `game/src/renderer.rs`,
+   forced by API visibility: the XBSP `ResidentMap` exposed only raw
+   visibility bytes). Resolution: `psx-bsp` now owns one
+   `decompress_leaf_row` kernel used by both resident maps, and the XBSP
+   `ResidentMap` gained the same fail-closed `leaf_visibility_into` API the
+   PXBSP map already had. Quake deletes its renderer copy when its pin
+   advances past this commit (P3/Q4 repin); until then the duplicate is
+   byte-identical and frozen.
+2. Trace-merge solid-flag policy differs deliberately: Quake's composition
+   loops replace the whole best trace when a candidate is start/all-solid
+   and the best is not (original Quake semantics, pinned by the 12-test
+   parity oracle), while `psx-bsp::collision_provider::merge_trace` ORs the
+   solid flags but keeps the earlier geometric hit (PSoXide provider
+   semantics, unit-tested). Both are game policy over the shared kernel and
+   both are tested; they are not required to unify.
+3. Liquid sampling is game policy at two layers by design: Quake
+   `water_level` (feet/+4/+22 offsets, original semantics) versus PSoXide
+   `CollisionHull::sample_liquid_contents` (caller-chosen points). Both
+   bottom out in the shared traversal.
+4. Guest 64-bit inventory (kept visible per the plan, not silently removed):
+   the known historical Quake paths (combat slab arithmetic
+   `quake-core/src/combat.rs:1464`, audio spatialization
+   `game/src/audio.rs:258`, layered sky scroll `game/src/renderer.rs:1239`)
+   are unchanged; `quake-core/src/mover.rs::fixed_seconds_to_ticks` still
+   carries the i64 form whose twin `09ff502` already converted, and the Q1
+   route port replaces it with the exact i32 split plus boundary tests;
+   `psx-bsp` itself retains two pre-existing i64 sites now documented as
+   accepted: `mover.rs::endpoint_axis` (exact interpolation, a few i64
+   mul/divs per moving door per tick, conversion would perturb every pinned
+   replay hash in both games for no functional gain) and
+   `render.rs::pxbsp_scroll_axis` (per animated material per frame,
+   PSoXide-only). Any NEW 64-bit math in guest hot paths remains forbidden.
+5. Housekeeping for the P3 repin: `quake-core/Cargo.toml` still carries a
+   stale `359537cf` revision comment; fix it when the pin moves.
+
 ## 1. Owner objective
 
 The owner wants one coherent PS1 development stack, not three adjacent demos:
