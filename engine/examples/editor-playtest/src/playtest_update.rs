@@ -549,9 +549,9 @@ impl Playtest {
         let aabb_blocker_count = self.collect_static_prop_aabb_blockers(&mut aabb_blockers);
         let motor_frame = if self.bsp.is_some() {
             // The resident provider owns its bounded hull scratch and mover
-            // transforms. Actor/cylinder and authored box/arch blockers compose
-            // over that provider in stable cooked/live order; BSP frames never
-            // build a grid-room collision set.
+            // transforms. Actor/cylinder and authored image/box/arch blockers
+            // compose over that provider in stable cooked/live order; BSP
+            // frames never build a grid-room collision set.
             telemetry::stage_end(telemetry::stage::SIM_COLLISION);
             telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
             self.bsp
