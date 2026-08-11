@@ -1092,8 +1092,9 @@ This monster slice remains incomplete by design. It currently lacks
 monster/player and monster/monster body blocking, the original ballistic Dog
 leap and landing path, thrown `gib2`/`gib3`, and AI/state runtimes for boss,
 demon, enforcer, fish, hell knight, knight, ogre, Old One, shalrath, shambler,
-tarbaby, wizard and zombie. An active follow-up is correcting the first three
-items against preserved C commit `001246d`.
+tarbaby, wizard and zombie. A follow-up worktree was created to correct the
+first three items against preserved C commit `001246d`, but it remained clean
+at its starting head when the owner requested wrap-up.
 
 #### 0.19.3 Active route and merge order
 
@@ -1129,6 +1130,19 @@ suite, but it deliberately still points at older PSoXide and Quake revisions.
 It is not the final convergence disc. Do not repin it between overlapping
 runtime merges, and never commit the shareware PAK or generated Quake/demo disc
 images.
+
+Wrap-up state after the owner's stop request: all three workers were
+interrupted and no background implementation remains active. The monster
+physics worktree and both editor-to-Quake worktrees are clean at their starting
+heads and contain no uncommitted implementation. The E1M1 route worktree is
+the sole unfinished worker tree: its seven tracked source files and new
+`game/src/e1m1_chain_regression.rs` are preserved uncommitted, together with
+temporary untracked diagnostic example directories. Do not merge that tree as
+it stands. Resume by reviewing the diagnostics, finishing buttons 211/212 and
+the final counter/door crossing, deleting the diagnostic examples, rerunning
+the route twice, and creating one clean commit. The integrated PSoXide and
+Quake worktrees are otherwise clean except for the owner's saved PSoXide
+camera file described above.
 
 ## 1. Owner objective
 
