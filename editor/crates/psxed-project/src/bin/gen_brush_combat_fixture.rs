@@ -299,11 +299,12 @@ fn paint(brush: &mut Brush, material: psxed_project::ResourceId) {
 /// One deterministic 60 Hz pad tape telling the complete checkpoint story:
 /// walk to the door and open it, meet the arriving enemy, then land
 /// combo + heavy + combo (98 damage, 110 poise on the 100 pool: the third
-/// hit breaks poise while the enemy still lives, a visible stagger), finish
-/// with a light hit, and walk the cleared doorway route to the far room.
-/// Poise break is strict (`poise_damage > poise`), which is why equal-pool
-/// sequences like four lights kill without ever staggering. Extra presses
-/// whiff harmlessly on the corpse.
+/// hit breaks poise while the enemy still lives, a visible stagger), kill
+/// with the first connecting heavy of the tail, and walk the cleared
+/// doorway route to the far room. Poise break is strict
+/// (`poise_damage > poise`), which is why equal-pool sequences like four
+/// lights kill without ever staggering. Extra presses whiff harmlessly on
+/// the corpse.
 fn write_combat_tape(output_dir: &Path) {
     const UP: u16 = 1 << 4;
     const CROSS: u16 = 1 << 14;
@@ -314,9 +315,14 @@ fn write_combat_tape(output_dir: &Path) {
     // phase consumes ~150 tape frames before gameplay owns input. Every
     // action sits far after that; loading-frame samples are simply eaten.
     const FRAME_COUNT: usize = 1250;
-    const COMBO_PRESSES: [usize; 2] = [420, 560];
-    const HEAVY_PRESSES: [usize; 1] = [490];
-    const LIGHT_PRESSES: [usize; 4] = [630, 690, 750, 810];
+    // Kill sequence: combo + heavy + combo (98 damage, 110 poise: a
+    // survivable stagger), then a heavy tail whose first connection kills.
+    // Tail spacing 37 is deliberately co-prime with the enemy's 45-tick
+    // attack cadence so presses drift out of hit-stun phase lock instead of
+    // colliding with it forever.
+    const COMBO_PRESSES: [usize; 2] = [390, 530];
+    const HEAVY_PRESSES: [usize; 7] = [460, 590, 627, 664, 701, 738, 775];
+    const LIGHT_PRESSES: [usize; 0] = [];
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
     writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
@@ -351,4 +357,36 @@ fn write_combat_tape(output_dir: &Path) {
     }
     std::fs::write(output_dir.join("combat-checkpoint.pxitape.csv"), tape)
         .expect("save combat fixture tape");
+    write_door_occlusion_tape(output_dir);
+}
+
+/// Occlusion tape: walk to the closed door, never open it, and swing at it
+/// while the enemy swings from the other side. World occlusion makes every
+/// contact in both directions a miss, so the replay must end with zero
+/// player melee hits and zero player hits taken while enemy attack enters
+/// stays nonzero (it swung and was blocked).
+fn write_door_occlusion_tape(output_dir: &Path) {
+    const UP: u16 = 1 << 4;
+    const R1: u16 = 1 << 11;
+    const FRAME_COUNT: usize = 900;
+    const LIGHT_PRESSES: [usize; 3] = [480, 560, 640];
+
+    let mut tape = String::with_capacity(FRAME_COUNT * 32);
+    writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
+    writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
+    for frame in 0..FRAME_COUNT {
+        let mut buttons = 0u16;
+        if (240..400).contains(&frame) {
+            buttons |= UP;
+        }
+        if LIGHT_PRESSES
+            .iter()
+            .any(|press| (*press..press + 4).contains(&frame))
+        {
+            buttons |= R1;
+        }
+        writeln!(tape, "{frame},{buttons},128,128,128,128").unwrap();
+    }
+    std::fs::write(output_dir.join("door-blocks-damage.pxitape.csv"), tape)
+        .expect("save door occlusion tape");
 }
