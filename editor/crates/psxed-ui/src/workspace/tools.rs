@@ -1216,7 +1216,10 @@ impl EditorWorkspace {
             dir,
             press_y: 0.0,
             press_ground: view.unproject(world, self.orthographic_focus),
-            applied: 0,
+            normal_3d: None,
+            screen_direction: egui::Vec2::ZERO,
+            units_per_pixel: 0.0,
+            applied: [0; 3],
         });
         true
     }
@@ -1231,17 +1234,17 @@ impl EditorWorkspace {
         let step = self.snap_units.max(1) as f32;
         let raw = current[extrude.axis] - extrude.press_ground[extrude.axis];
         let snapped = ((raw / step).round() * step) as i32;
-        if snapped == extrude.applied {
-            return;
-        }
         let mut delta = [0; 3];
         delta[extrude.axis] = snapped;
+        if delta == extrude.applied {
+            return;
+        }
         let mut preview = extrude.base.clone();
         preview.translate_face(extrude.face, delta);
         if preview.solve().is_valid() {
             self.project.active_scene_mut().brushes[extrude.index] = preview;
             if let Some(state) = self.brush_extrude.as_mut() {
-                state.applied = snapped;
+                state.applied = delta;
             }
         }
     }
@@ -1363,6 +1366,7 @@ impl EditorWorkspace {
             press_ground: self
                 .orthographic_view
                 .unproject(world, self.orthographic_focus),
+            plane_3d: None,
             applied: [0; 3],
         });
     }
@@ -1448,7 +1452,7 @@ impl EditorWorkspace {
         };
         let live = self.project.active_scene().brushes[extrude.index].clone();
         self.project.active_scene_mut().brushes[extrude.index] = extrude.base;
-        if extrude.applied != 0 {
+        if extrude.applied != [0; 3] {
             self.push_undo();
             self.project.active_scene_mut().brushes[extrude.index] = live;
             self.mark_dirty();
@@ -1625,6 +1629,83 @@ impl EditorWorkspace {
                 }
             }
         }
+        if self.active_tool == ViewTool::Brush {
+            if let Some(index) = self.selected_brush {
+                if let Some(brush) = self.project.active_scene().brushes.get(index) {
+                    let solved = brush.solve();
+                    match self.selection_mode {
+                        SelectionMode::Vertex => {
+                            let mut vertices = Vec::new();
+                            for vertex in solved
+                                .polygons
+                                .iter()
+                                .flatten()
+                                .flat_map(|polygon| polygon.verts.iter().copied())
+                            {
+                                if vertices.iter().any(|seen: &[f64; 3]| {
+                                    (0..3).all(|axis| (seen[axis] - vertex[axis]).abs() <= 0.5)
+                                }) {
+                                    continue;
+                                }
+                                vertices.push(vertex);
+                                if let Some(center) = project(vertex) {
+                                    painter.rect_filled(
+                                        egui::Rect::from_center_size(
+                                            center,
+                                            egui::Vec2::splat(7.0),
+                                        ),
+                                        1.0,
+                                        STUDIO_ACCENT,
+                                    );
+                                }
+                            }
+                        }
+                        SelectionMode::Edge => {
+                            for polygon in solved.polygons.iter().flatten() {
+                                for edge in 0..polygon.verts.len() {
+                                    let a = polygon.verts[edge];
+                                    let b = polygon.verts[(edge + 1) % polygon.verts.len()];
+                                    let midpoint = [
+                                        (a[0] + b[0]) * 0.5,
+                                        (a[1] + b[1]) * 0.5,
+                                        (a[2] + b[2]) * 0.5,
+                                    ];
+                                    if let Some(center) = project(midpoint) {
+                                        painter.circle_filled(center, 4.0, STUDIO_ACCENT);
+                                    }
+                                }
+                            }
+                        }
+                        SelectionMode::Face => {
+                            for face in 0..brush.faces.len() {
+                                let Some((center, normal)) =
+                                    Self::face_center_and_normal(brush, face)
+                                else {
+                                    continue;
+                                };
+                                if !self.brush_face_handle_visible(center, normal) {
+                                    continue;
+                                }
+                                let normal_end = [
+                                    center[0] + normal[0] * 48.0,
+                                    center[1] + normal[1] * 48.0,
+                                    center[2] + normal[2] * 48.0,
+                                ];
+                                if let (Some(center), Some(normal_end)) =
+                                    (project(center), project(normal_end))
+                                {
+                                    painter.line_segment(
+                                        [center, normal_end],
+                                        egui::Stroke::new(1.5, STUDIO_ACCENT),
+                                    );
+                                    painter.circle_filled(center, 4.5, STUDIO_ACCENT);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
             draw(&preview, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
@@ -1707,6 +1788,311 @@ fn projected_polygon_area(points: &[egui::Pos2]) -> f32 {
     twice_area * 0.5
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BrushHandle3d {
+    Vertex([f64; 3]),
+    Edge([f64; 3], [f64; 3]),
+    Face {
+        face: usize,
+        center: [f64; 3],
+        normal: [f64; 3],
+    },
+}
+
+impl EditorWorkspace {
+    pub(crate) fn project_brush_point_3d(
+        &self,
+        rect: egui::Rect,
+        world: [f64; 3],
+    ) -> Option<egui::Pos2> {
+        self.viewport_3d_camera()
+            .normalized_panel_point_for_world(world.map(|value| value as f32))
+            .map(|(nx, ny)| {
+                egui::Pos2::new(
+                    rect.center().x + nx * rect.width() * 0.5,
+                    rect.center().y + ny * rect.height() * 0.5,
+                )
+            })
+    }
+
+    pub(crate) fn face_center_and_normal(
+        brush: &psxed_project::brush::Brush,
+        face: usize,
+    ) -> Option<([f64; 3], [f64; 3])> {
+        let solved = brush.solve();
+        let polygon = solved.polygons.get(face)?.as_ref()?;
+        let count = polygon.verts.len() as f64;
+        if count <= 0.0 {
+            return None;
+        }
+        let mut center = [0.0; 3];
+        for vertex in &polygon.verts {
+            for axis in 0..3 {
+                center[axis] += vertex[axis] / count;
+            }
+        }
+        let plane = psxed_project::brush::Plane::from_points(brush.faces.get(face)?.points)?;
+        let length = ((plane.normal[0] as f64).powi(2)
+            + (plane.normal[1] as f64).powi(2)
+            + (plane.normal[2] as f64).powi(2))
+        .sqrt();
+        (length > f64::EPSILON).then(|| {
+            (
+                center,
+                [
+                    plane.normal[0] as f64 / length,
+                    plane.normal[1] as f64 / length,
+                    plane.normal[2] as f64 / length,
+                ],
+            )
+        })
+    }
+
+    fn brush_face_handle_visible(&self, center: [f64; 3], normal: [f64; 3]) -> bool {
+        let camera = self.viewport_3d_camera().basis().position;
+        let to_camera = [
+            f64::from(camera[0]) - center[0],
+            f64::from(camera[1]) - center[1],
+            f64::from(camera[2]) - center[2],
+        ];
+        to_camera[0] * normal[0] + to_camera[1] * normal[1] + to_camera[2] * normal[2] > 0.0
+    }
+
+    pub(crate) fn pick_brush_handle_3d(
+        &self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<(usize, BrushHandle3d)> {
+        const HANDLE_RADIUS: f32 = 9.0;
+        let index = self.selected_brush?;
+        let brush = self.project.active_scene().brushes.get(index)?;
+        let solved = brush.solve();
+        if !solved.is_valid() {
+            return None;
+        }
+        let mut best: Option<(f32, BrushHandle3d)> = None;
+        let mut consider = |screen: egui::Pos2, handle: BrushHandle3d| {
+            let distance2 = screen.distance_sq(pointer);
+            if distance2 <= HANDLE_RADIUS * HANDLE_RADIUS
+                && best.is_none_or(|(best_distance2, _)| distance2 < best_distance2)
+            {
+                best = Some((distance2, handle));
+            }
+        };
+        match self.selection_mode {
+            SelectionMode::Vertex => {
+                let mut vertices = Vec::new();
+                for vertex in solved
+                    .polygons
+                    .iter()
+                    .flatten()
+                    .flat_map(|polygon| polygon.verts.iter().copied())
+                {
+                    if vertices.iter().any(|seen: &[f64; 3]| {
+                        (0..3).all(|axis| (seen[axis] - vertex[axis]).abs() <= 0.5)
+                    }) {
+                        continue;
+                    }
+                    vertices.push(vertex);
+                    if let Some(screen) = self.project_brush_point_3d(rect, vertex) {
+                        consider(screen, BrushHandle3d::Vertex(vertex));
+                    }
+                }
+            }
+            SelectionMode::Edge => {
+                for polygon in solved.polygons.iter().flatten() {
+                    for edge in 0..polygon.verts.len() {
+                        let a = polygon.verts[edge];
+                        let b = polygon.verts[(edge + 1) % polygon.verts.len()];
+                        let midpoint = [
+                            (a[0] + b[0]) * 0.5,
+                            (a[1] + b[1]) * 0.5,
+                            (a[2] + b[2]) * 0.5,
+                        ];
+                        if let Some(screen) = self.project_brush_point_3d(rect, midpoint) {
+                            consider(screen, BrushHandle3d::Edge(a, b));
+                        }
+                    }
+                }
+            }
+            SelectionMode::Face => {
+                for face in 0..brush.faces.len() {
+                    let Some((center, normal)) = Self::face_center_and_normal(brush, face) else {
+                        continue;
+                    };
+                    if !self.brush_face_handle_visible(center, normal) {
+                        continue;
+                    }
+                    if let Some(screen) = self.project_brush_point_3d(rect, center) {
+                        consider(
+                            screen,
+                            BrushHandle3d::Face {
+                                face,
+                                center,
+                                normal,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        best.map(|(_, handle)| (index, handle))
+    }
+
+    fn camera_plane_point(
+        &self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        plane: BrushDragPlane3d,
+    ) -> Option<[f32; 3]> {
+        let (origin, direction) = self.camera_ray_for_pointer(rect, pointer)?;
+        let denominator = direction[0] * plane.normal[0]
+            + direction[1] * plane.normal[1]
+            + direction[2] * plane.normal[2];
+        if denominator.abs() < 1.0e-6 {
+            return None;
+        }
+        let offset = [
+            plane.anchor[0] - origin[0],
+            plane.anchor[1] - origin[1],
+            plane.anchor[2] - origin[2],
+        ];
+        let distance = (offset[0] * plane.normal[0]
+            + offset[1] * plane.normal[1]
+            + offset[2] * plane.normal[2])
+            / denominator;
+        (distance > 0.0).then(|| {
+            [
+                origin[0] + direction[0] * distance,
+                origin[1] + direction[1] * distance,
+                origin[2] + direction[2] * distance,
+            ]
+        })
+    }
+
+    fn begin_brush_vertex_drag_3d(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        index: usize,
+        targets: Vec<[f64; 3]>,
+        anchor: [f64; 3],
+    ) -> bool {
+        let normal = self.viewport_3d_camera().basis().forward;
+        let mut plane = BrushDragPlane3d {
+            anchor: anchor.map(|value| value as f32),
+            normal,
+            press_world: anchor.map(|value| value as f32),
+        };
+        let Some(press_world) = self.camera_plane_point(rect, pointer, plane) else {
+            return false;
+        };
+        plane.press_world = press_world;
+        self.brush_vertex_drag = Some(BrushVertexDrag {
+            index,
+            base: self.project.active_scene().brushes[index].clone(),
+            targets,
+            press_ground: [pointer.x, 0.0, 0.0],
+            plane_3d: Some(plane),
+            applied: [0; 3],
+        });
+        true
+    }
+
+    fn update_brush_vertex_drag_3d(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
+        let Some(drag) = self.brush_vertex_drag.clone() else {
+            return;
+        };
+        let Some(plane) = drag.plane_3d else {
+            return;
+        };
+        let Some(current) = self.camera_plane_point(rect, pointer, plane) else {
+            return;
+        };
+        let step = self.snap_units.max(1) as f32;
+        let mut applied = [0; 3];
+        for axis in 0..3 {
+            applied[axis] =
+                (((current[axis] - plane.press_world[axis]) / step).round() * step) as i32;
+        }
+        if applied == drag.applied {
+            return;
+        }
+        let mut preview = drag.base.clone();
+        if preview.translate_points_near(&drag.targets, applied, 0.5) > 0
+            && preview.solve().is_valid()
+        {
+            self.project.active_scene_mut().brushes[drag.index] = preview;
+            if let Some(state) = self.brush_vertex_drag.as_mut() {
+                state.applied = applied;
+            }
+        }
+    }
+
+    fn begin_brush_face_drag_3d(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        index: usize,
+        face: usize,
+        center: [f64; 3],
+        normal: [f64; 3],
+    ) {
+        const NORMAL_PROJECTION_DISTANCE: f64 = 64.0;
+        let axis = dominant_axis(normal.map(|value| (value * 4096.0) as i64));
+        let axis_aligned =
+            (0..3).all(|candidate| candidate == axis || normal[candidate].abs() <= f64::EPSILON);
+        if axis_aligned {
+            self.replace_brush_selection(index, Some(face));
+            self.brush_extrude = Some(BrushExtrude {
+                index,
+                face,
+                base: self.project.active_scene().brushes[index].clone(),
+                axis,
+                dir: if normal[axis] >= 0.0 { 1 } else { -1 },
+                press_y: pointer.y,
+                press_ground: self
+                    .brush_ground_point_raw(rect, pointer)
+                    .unwrap_or([0.0; 3]),
+                normal_3d: None,
+                screen_direction: egui::Vec2::ZERO,
+                units_per_pixel: 0.0,
+                applied: [0; 3],
+            });
+            return;
+        }
+        let center_screen = self.project_brush_point_3d(rect, center);
+        let end = [
+            center[0] + normal[0] * NORMAL_PROJECTION_DISTANCE,
+            center[1] + normal[1] * NORMAL_PROJECTION_DISTANCE,
+            center[2] + normal[2] * NORMAL_PROJECTION_DISTANCE,
+        ];
+        let end_screen = self.project_brush_point_3d(rect, end);
+        let projected = center_screen.zip(end_screen).map(|(a, b)| b - a);
+        let (screen_direction, units_per_pixel) = match projected {
+            Some(delta) if delta.length() >= 4.0 => (
+                delta.normalized(),
+                NORMAL_PROJECTION_DISTANCE as f32 / delta.length(),
+            ),
+            _ => (egui::Vec2::new(0.0, -1.0), EXTRUDE_UNITS_PER_PIXEL),
+        };
+        self.replace_brush_selection(index, Some(face));
+        self.brush_extrude = Some(BrushExtrude {
+            index,
+            face,
+            base: self.project.active_scene().brushes[index].clone(),
+            axis,
+            dir: 1,
+            press_y: pointer.y,
+            press_ground: [pointer.x, 0.0, 0.0],
+            normal_3d: Some(normal),
+            screen_direction,
+            units_per_pixel,
+            applied: [0; 3],
+        });
+    }
+}
+
 impl ViewportTool3d for BrushTool {
     fn primary_pressed(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
         let Some(pointer) = frame.pointer_interact else {
@@ -1737,34 +2123,47 @@ impl ViewportTool3d for BrushTool {
             }
             return;
         }
+        if let Some((index, handle)) = ws.pick_brush_handle_3d(frame.rect, pointer) {
+            match handle {
+                BrushHandle3d::Vertex(vertex) => {
+                    if ws.begin_brush_vertex_drag_3d(
+                        frame.rect,
+                        pointer,
+                        index,
+                        vec![vertex],
+                        vertex,
+                    ) {
+                        return;
+                    }
+                }
+                BrushHandle3d::Edge(a, b) => {
+                    let center = [
+                        (a[0] + b[0]) * 0.5,
+                        (a[1] + b[1]) * 0.5,
+                        (a[2] + b[2]) * 0.5,
+                    ];
+                    if ws.begin_brush_vertex_drag_3d(frame.rect, pointer, index, vec![a, b], center)
+                    {
+                        return;
+                    }
+                }
+                BrushHandle3d::Face {
+                    face,
+                    center,
+                    normal,
+                } => {
+                    ws.begin_brush_face_drag_3d(frame.rect, pointer, index, face, center, normal);
+                    return;
+                }
+            }
+        }
         if let Some((index, face)) = ws.pick_brush_face(frame.rect, pointer) {
             let base = ws.project.active_scene().brushes[index].clone();
-            let Some(plane) = psxed_project::brush::Plane::from_points(base.faces[face].points)
+            let Some((center, normal)) = EditorWorkspace::face_center_and_normal(&base, face)
             else {
                 return;
             };
-            let n = plane.normal.map(|v| v as f64);
-            let mut axis = 0;
-            for candidate in 1..3 {
-                if n[candidate].abs() > n[axis].abs() {
-                    axis = candidate;
-                }
-            }
-            let dir = if n[axis] >= 0.0 { 1 } else { -1 };
-            let press_ground = ws
-                .brush_ground_point_raw(frame.rect, pointer)
-                .unwrap_or([0.0; 3]);
-            ws.replace_brush_selection(index, Some(face));
-            ws.brush_extrude = Some(BrushExtrude {
-                index,
-                face,
-                base,
-                axis,
-                dir,
-                press_y: pointer.y,
-                press_ground,
-                applied: 0,
-            });
+            ws.begin_brush_face_drag_3d(frame.rect, pointer, index, face, center, normal);
         } else if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
             ws.brush_drag = Some(BrushDrag {
                 anchor: point,
@@ -1778,6 +2177,14 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
+        if ws
+            .brush_vertex_drag
+            .as_ref()
+            .is_some_and(|drag| drag.plane_3d.is_some())
+        {
+            ws.update_brush_vertex_drag_3d(frame.rect, pointer);
+            return;
+        }
         if let Some(mv) = ws.brush_move.clone() {
             let Some(ground) = ws.brush_ground_point_raw(frame.rect, pointer) else {
                 return;
@@ -1796,6 +2203,29 @@ impl ViewportTool3d for BrushTool {
         }
         if let Some(extrude) = ws.brush_extrude.clone() {
             let step = (ws.snap_units.max(1)) as f32;
+            if let Some(normal) = extrude.normal_3d {
+                let press = egui::Pos2::new(extrude.press_ground[0], extrude.press_y);
+                let raw_units =
+                    (pointer - press).dot(extrude.screen_direction) * extrude.units_per_pixel;
+                let snapped = ((raw_units / step).round() * step) as i32;
+                let applied = [
+                    (normal[0] * snapped as f64).round() as i32,
+                    (normal[1] * snapped as f64).round() as i32,
+                    (normal[2] * snapped as f64).round() as i32,
+                ];
+                if applied == extrude.applied {
+                    return;
+                }
+                let mut preview = extrude.base.clone();
+                preview.translate_face(extrude.face, applied);
+                if preview.solve().is_valid() {
+                    ws.project.active_scene_mut().brushes[extrude.index] = preview;
+                    if let Some(state) = ws.brush_extrude.as_mut() {
+                        state.applied = applied;
+                    }
+                }
+                return;
+            }
             let raw_units = if extrude.axis == 1 {
                 // Vertical faces follow pixel drag (up = out for +Y).
                 (extrude.press_y - pointer.y) * EXTRUDE_UNITS_PER_PIXEL * extrude.dir as f32
@@ -1808,24 +2238,21 @@ impl ViewportTool3d for BrushTool {
                 }
             };
             let snapped = ((raw_units / step).round() * step) as i32;
-            if snapped == extrude.applied {
-                return;
-            }
             let mut delta = [0i32; 3];
-            // ponytail: dominant-axis extrude; exact for axis faces (all
-            // created cuboids), approximate for slopes until face-normal
-            // stepping is needed.
             delta[extrude.axis] = if extrude.axis == 1 {
                 snapped * extrude.dir
             } else {
                 snapped
             };
+            if delta == extrude.applied {
+                return;
+            }
             let mut preview = extrude.base.clone();
             preview.translate_face(extrude.face, delta);
             if preview.solve().is_valid() {
                 ws.project.active_scene_mut().brushes[extrude.index] = preview;
                 if let Some(state) = ws.brush_extrude.as_mut() {
-                    state.applied = snapped;
+                    state.applied = delta;
                 }
             }
         } else if let (Some(drag), Some(point)) =
@@ -1840,6 +2267,9 @@ impl ViewportTool3d for BrushTool {
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
         if ws.commit_brush_move_preview() {
+            return;
+        }
+        if ws.commit_brush_vertex_drag_preview() {
             return;
         }
         if ws.commit_brush_extrude_preview() {
