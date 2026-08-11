@@ -1,4 +1,4 @@
-psoxide-tape,v2,clock=video_frame,start_poll=0
+psoxide-tape,v2,clock=pad_poll,start_poll=0
 frame,buttons,right_x,right_y,left_x,left_y
 0,0,128,128,128,128
 1,0,128,128,128,128

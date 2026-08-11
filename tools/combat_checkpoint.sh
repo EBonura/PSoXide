@@ -28,8 +28,16 @@ EXPECT_HITS_TAKEN=3
 EXPECT_PLAYER_X_BIASED=1003625
 # PXBSP-native world-content pass: static brush geometry, the live enemy,
 # both weapons, and the HUD are present without a synthetic PSXW room.
-EXPECT_VRAM_HASH=0x007fb6683f98d82b
-EXPECT_DISPLAY_HASH=0x0739fbd9575fdbb8
+#
+# The image hashes moved on 2026-08-12 when both fixture tapes were re-indexed
+# onto the guest's pad-poll clock (see write_combat_tape). The run now ends
+# three route ticks earlier because it stops when the guest has consumed the
+# last sample rather than when the emulator has stepped the last frame, so the
+# final presented frame is a different one. Nothing behavioural moved: melee 4,
+# stagger 1, death 1, taken 3 and the post-kill x are byte-identical on both
+# clocks and on two differently compiled guests.
+EXPECT_VRAM_HASH=0xdef0e1275bff08b2
+EXPECT_DISPLAY_HASH=0xe3e5eda7f8f5071f
 
 fail() {
     echo "combat-checkpoint: FAIL: $1" >&2
