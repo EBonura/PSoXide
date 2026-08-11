@@ -12,7 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean run run-release editor-ui-screenshot pgo web validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean clean-guest-stage run run-release editor-ui-screenshot pgo web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -249,11 +249,16 @@ lint-policy-guard:
 runtime-numeric-guard:
 	$(PSOXIDE_DEV) runtime-numeric-guard
 
-clean:
+clean: clean-guest-stage
 	cargo clean
 	cd engine && cargo clean
 	cd sdk && cargo clean
 	rm -rf build
+
+# Drop the canonical guest staging tree. It lives outside the repository and
+# is shared by every checkout, so a plain `rm -rf build` would leave it behind.
+clean-guest-stage:
+	rm -rf $(GUEST_STAGE_ROOT)
 
 # Milestone-C regression suite - every SDK example side-loaded into
 # the emulator, multi-signal state pinned. Depends on `examples` so
@@ -272,7 +277,9 @@ PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zjson-target-spec -Zbuild-std=core -Z
 EDITOR_PLAYTEST_PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
 SDK_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../psoxide.ld -Clink-arg=--oformat=binary"
 ENGINE_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
-EDITOR_PLAYTEST_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+# The editor-playtest guest builds through tools/build_guest_staged.sh, which
+# owns its own RUSTFLAGS and target dir so the artifact is reproducible from
+# any checkout path.
 EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX := ../../engine/examples/editor-playtest/generated
 CDDA_DEMO_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 GONCHAROV_WAV ?= assets/audio/cdda/GONCHAROV.wav
@@ -718,12 +725,16 @@ cook-playtest:
 # the tracked placeholder. Does NOT recook - that's the editor's
 # job (or `make cook-playtest` if you want the starter). The playtest runtime is
 # streaming-only, so the default build includes the CD streaming reader.
+# Canonical guest staging root; tools/build_guest_staged.sh owns it and
+# PSOXIDE_GUEST_STAGE_ROOT overrides it there. Declared here so `make clean`
+# can drop it.
+GUEST_STAGE_ROOT ?= /tmp/psoxide-psx-guest-v1
 EDITOR_PLAYTEST_FEATURES ?= cd-stream-bench
 EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS ?= --features "$(EDITOR_PLAYTEST_FEATURES)"
 EDITOR_PLAYTEST_HARDWARE_FEATURES ?= cd-stream-bench world-order-bucketed world-grid-visible ot-2048 vis-anchor-pvs-candidates
 
 build-editor-playtest:
-	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
+	sh tools/build_guest_staged.sh $(EDITOR_PLAYTEST_PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
 
 # End-to-end acceptance for the shortest BSP editor loop. Real egui input first
 # proves the visible starter, 3D brush selection, and Move/Resize controls. The

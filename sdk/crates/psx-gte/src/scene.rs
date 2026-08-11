@@ -917,7 +917,13 @@ pub fn average_cached_z4(depths: [u16; 4]) -> u16 {
 /// saturate to OTZ's unsigned 16-bit range.
 #[inline]
 pub fn average_z3_otz(depths: [u16; 3], zsf3: i16) -> u16 {
+    // ZSF3 is i16 and each depth is u16, so the product reaches ~2^41: the
+    // hardware AVSZ3 accumulates in the GTE's own wide register and this is
+    // the software mirror of it. An i32 accumulator would wrap and hand the
+    // ordering table a near OTZ for far geometry.
+    // psx-numeric-allow-next-line: AVSZ3 wide accumulator, see above
     let sum = depths[0] as i64 + depths[1] as i64 + depths[2] as i64;
+    // psx-numeric-allow-next-line: AVSZ3 wide accumulator
     ((sum * zsf3 as i64) >> 12).clamp(0, u16::MAX as i64) as u16
 }
 
@@ -928,7 +934,9 @@ pub fn average_z3_otz(depths: [u16; 3], zsf3: i16) -> u16 {
 /// should normally prefer [`average_cached_z4`].
 #[inline]
 pub fn average_z4_otz(depths: [u16; 4], zsf4: i16) -> u16 {
+    // psx-numeric-allow-next-line: AVSZ4 wide accumulator, same reasoning as average_z3_otz
     let sum = depths[0] as i64 + depths[1] as i64 + depths[2] as i64 + depths[3] as i64;
+    // psx-numeric-allow-next-line: AVSZ4 wide accumulator
     ((sum * zsf4 as i64) >> 12).clamp(0, u16::MAX as i64) as u16
 }
 
