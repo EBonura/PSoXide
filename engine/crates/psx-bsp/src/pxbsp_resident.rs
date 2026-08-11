@@ -7,7 +7,7 @@ use psx_math::int32::mul_q12_i32;
 
 use crate::collision::CollisionHull;
 use crate::pxbsp::{
-    decompress_visibility, PxbspEntityTable, PxbspEntityTableError, PxbspError, PxbspIndex,
+    decompress_leaf_row, PxbspEntityTable, PxbspEntityTableError, PxbspError, PxbspIndex,
     PxbspLumpKind, PxbspMaterial, PxbspMaterialError, PXBSP_LUMP_COUNT,
 };
 use crate::{
@@ -262,13 +262,7 @@ impl PxbspResidentMap {
         let leaf = self.leaves().get(leaf_index)?;
         let offset = usize::try_from(leaf.visibility_offset).ok()?;
         let visible_leaves = usize::try_from(self.brush_models().get(0)?.visible_leaves).ok()?;
-        let row_bytes = visible_leaves.div_ceil(8);
-        if row_bytes > output.len() {
-            return None;
-        }
-        output[..row_bytes].fill(0);
-        decompress_visibility(self.visibility(), offset, &mut output[..row_bytes])
-            .then_some(visible_leaves)
+        decompress_leaf_row(self.visibility(), offset, visible_leaves, output)
     }
 
     /// Locate a Q20.12 point and decompress its PVS into caller-owned bytes.

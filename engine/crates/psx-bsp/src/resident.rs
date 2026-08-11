@@ -258,6 +258,26 @@ impl ResidentMap {
         self.lump_bytes(LumpKind::Visibility)
     }
 
+    /// Decompress the PVS row for one validated non-solid leaf.
+    ///
+    /// Returns the addressable visible-leaf count. Bit `n` in the
+    /// caller-owned output corresponds to leaf `n + 1`. The solid leaf,
+    /// leaves without a row (negative offset), oversize rows, and malformed
+    /// run-length data return `None` without allocating. This is the same
+    /// canonical row semantics as
+    /// [`PxbspResidentMap::leaf_visibility_into`](crate::pxbsp_resident::PxbspResidentMap::leaf_visibility_into);
+    /// callers should use it instead of decompressing the raw
+    /// [`visibility`](Self::visibility) bytes themselves.
+    pub fn leaf_visibility_into(&self, leaf_index: usize, output: &mut [u8]) -> Option<usize> {
+        if leaf_index == 0 {
+            return None;
+        }
+        let leaf = self.leaves().get(leaf_index)?;
+        let offset = usize::try_from(leaf.visibility_offset).ok()?;
+        let visible_leaves = usize::try_from(self.brush_models().get(0)?.visible_leaves).ok()?;
+        crate::pxbsp::decompress_leaf_row(self.visibility(), offset, visible_leaves, output)
+    }
+
     pub fn model_data(&self) -> &[u8] {
         self.lump_bytes(LumpKind::ModelData)
     }
