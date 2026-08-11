@@ -361,6 +361,7 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
         .add(fl_btn)
         .on_hover_text(
             "Freecam (or tap L3+R3 on a pad) - left stick move, right stick look, R2 boost. \
+             Tap again to return the pad to the game without resetting the view. \
              Hold L3+R3 to reset the camera. Game input is paused while it is on.",
         )
         .clicked()
@@ -373,7 +374,7 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
         state.status_message_set(if state.freelook.enabled {
             "Freecam ON - pad drives the camera, game input paused (hold L3+R3 to reset)"
         } else {
-            "Freecam off - pad returns to the game"
+            "Freecam controls off - framing preserved; pad returns to the game"
         });
     }
     // Wireframe mode lives on the GPU, not a frontend panel -- we

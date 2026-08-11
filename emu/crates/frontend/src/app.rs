@@ -3845,6 +3845,49 @@ fn integrate_freelook(fl: &mut emulator_core::FreelookState, input: &FreelookInp
     fl.tx -= mv * lx;
 }
 
+/// Camera state sent to the projection hook for this frame.
+///
+/// `FreelookState::enabled` doubles as the frontend's "pad controls the
+/// camera" flag. Once those controls are released, a non-identity camera
+/// delta must still be projected so gameplay continues from the framing the
+/// user chose. Only an explicit reset removes that delta.
+fn freelook_for_projection(mut fl: emulator_core::FreelookState) -> emulator_core::FreelookState {
+    let has_camera_delta = fl.yaw != 0.0
+        || fl.pitch != 0.0
+        || fl.tx != 0.0
+        || fl.ty != 0.0
+        || fl.tz != 0.0;
+    fl.enabled |= has_camera_delta;
+    fl
+}
+
+#[cfg(test)]
+mod freelook_projection_tests {
+    use super::freelook_for_projection;
+    use emulator_core::FreelookState;
+
+    #[test]
+    fn moved_camera_stays_projected_after_controls_are_released() {
+        let moved = FreelookState {
+            enabled: false,
+            yaw: 0.25,
+            tx: 64.0,
+            ..Default::default()
+        };
+
+        let projected = freelook_for_projection(moved);
+
+        assert!(projected.enabled);
+        assert_eq!(projected.yaw, moved.yaw);
+        assert_eq!(projected.tx, moved.tx);
+    }
+
+    #[test]
+    fn reset_camera_stops_projecting_after_controls_are_released() {
+        assert!(!freelook_for_projection(FreelookState::default()).enabled);
+    }
+}
+
 pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     let max_steps = state.run_steps_per_frame.max(1);
     // Freelook: integrate held keys into the camera pose, then push it to the
@@ -3852,7 +3895,9 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     if state.freelook.enabled {
         integrate_freelook(&mut state.freelook, &state.freelook_input);
     }
-    state.cpu.set_freelook(state.freelook);
+    state
+        .cpu
+        .set_freelook(freelook_for_projection(state.freelook));
     let Some(bus) = state.bus.as_mut() else {
         state.running = false;
         state.menu.sync_run_label(false);
