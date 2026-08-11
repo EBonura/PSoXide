@@ -162,10 +162,9 @@ this branch do not participate in the contract.
 - RESOLVED in RC1 (section 0.6): melee world occlusion. Both paths now
   trace the world and movers before connecting; the discrepancy report's
   section 3 limitation applies only to revisions before `e57af183`.
-- The grid boundary decision artifact (`docs/legacy-grid-boundary.md`)
-  awaits the owner's accept: grid cook is a live dependency of BSP cooks,
-  NPC hull index is hard-coded to 1, BoxProp/ArchProp AABBs and water are
-  absent from the BSP trace stack.
+- The grid cook dependency and hard-coded NPC hull were subsequently resolved
+  in sections 0.9/0.10; authored BoxProp/ArchProp AABBs join the BSP trace in
+  section 0.11. BSP water contents/swimming remains open.
 - TrenchBroom workflow items remaining: arbitrary plane handles for
   non-axis brushes, 2D marquee brush select, 3D-view vertex/edge handles,
   file watching, and the from-scratch test by a non-implementer.
@@ -409,6 +408,59 @@ state reset; corrupt and oversize PVS rows to confirm fail-closed behaviour;
 and repeat the gate after adding BSP-native prop/water collision. In
 particular, do not mistake the singleton metadata room or header-only
 `WORLD.PAK` for a remaining spatial grid dependency.
+
+### 0.11 BSP-native authored-prop collision (2026-08-11)
+
+Commit `236c52e8` closes the BoxProp/ArchProp half of section 0.10's collision
+gap. `CharacterBlockerTraceProvider::new_with_aabbs` composes static authored
+AABBs after the canonical PXBSP world/mover trace and actor/cylinder blockers.
+Strictly earlier contacts win, so an exact fraction tie remains deterministic:
+world, then cylinders in caller order, then AABBs in caller order. Provider
+failure still leaves the output untouched. Props participate only in
+horizontal body sweeps and recovery probes; they do not become supporting
+floors, and the generic step lift cannot silently climb them. BoxProp dynamic
+state remains authoritative: broken or open-door boxes are omitted by the
+existing collector. Arch segments use their existing cooked AABBs. Both the
+player motor and NPC/game-entity mover receive the same collected slices in a
+BSP world; grid projects retain their existing endpoint collision path.
+
+The first implementation was deliberately rejected during review: rounding
+each diagonal coordinate to an integer could miss a one-fraction rounded
+corner crossing, and retaining the correct predicate in 64-bit Q20.12 added
+about 12 KiB to the PS1 image. The committed implementation uses a broadphase
+and Q24.8 32-bit distance predicate, a bounded entry refinement, and an
+exhaustive Q0.12 path matrix. Tests cover swept tunnelling, rounded-corner
+non-collision, tangent escape, floor-probe exclusion, body-step blocking,
+world/AABB tie priority, failure byte preservation and immediate reuse. The
+exhaustive test is the falsification guard for future arithmetic changes, not
+just a happy-path fixture.
+
+Validation at `236c52e8` plus the documentation commit above it:
+
+```text
+psx-engine --lib:       305 passed
+psx-game-runtime --lib:  78 passed
+real mipsel-sony-psx release link: PASS
+make combat-checkpoint: PASS
+  authored hits 4, stagger 1, death 1, fallback hits taken 3
+  closed-door enemy connection blocked
+  VRAM 0x007fb6683f98d82b (unchanged)
+editor-playtest.exe: 1,415,168 bytes
+  SHA-256 c65253fc5fc8a35b0cb944ffbaf64e876e639346289b7df30b6d64028a75cddc
+brush_world.pxbsp: 12,976 bytes (unchanged)
+  SHA-256 17f044fc65e942990e6e7f33d7f1043400c43759f43bdd5bdb80a52a45291825
+disc BIN SHA-256 b0648a36e89a2ad085c4f84568225d891776cf133413b95a93e108b3ff98d9fa
+```
+
+Do not overclaim this closure. It does not make ImageProp collision native,
+turn props into BSP brushes, add BSP water, prove the worst-case 64-AABB cost
+on original hardware, or provide a tracked emulator tape that walks directly
+into each BoxProp/ArchProp state. The next audit should create a small BSP room
+with a closed box-door, breakable box, arch and cylinder; drive both player and
+enemy into every blocker; open/break the boxes and prove only those contacts
+disappear; then profile dense AABB scenes on silicon. A hidden prop should also
+be challenged separately: PVS rendering and physical collision need not have
+identical policy, but that policy must be explicit rather than accidental.
 
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
