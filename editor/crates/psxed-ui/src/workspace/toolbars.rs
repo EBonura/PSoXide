@@ -515,7 +515,11 @@ impl EditorWorkspace {
         let bsp_place_active = self.active_tool == ViewTool::Place
             && self.bsp_authoring_root().is_some()
             && self.place_kind != PlaceKind::Portal;
-        if !room_active && !bsp_place_active && self.active_tool.requires_room_context() {
+        if !room_active
+            && !bsp_place_active
+            && !self.bsp_face_paint_active()
+            && self.active_tool.requires_room_context()
+        {
             self.active_tool = ViewTool::Select;
             self.material_paint_sampling = false;
         }
@@ -1177,7 +1181,11 @@ impl EditorWorkspace {
             (ViewTool::Water, ViewTool::Water.icon(), "Water"),
             (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
         ] {
-            let enabled = room_active || !tool.requires_room_context();
+            // Material Paint also works without a Room in a brush scene,
+            // where it addresses BSP brush faces instead of grid cells.
+            let enabled = room_active
+                || !tool.requires_room_context()
+                || (tool == ViewTool::PaintMaterial && bsp_active);
             let selected = self.active_tool_cycle_value() == (tool, None);
             ui.add_enabled_ui(enabled, |ui| {
                 if toolbar_menu_choice(ui, icons::label(icon, label), selected) {

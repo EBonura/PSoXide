@@ -638,6 +638,10 @@ pub struct EditorWorkspace {
     /// click samples its logical material into the shared brush/resource
     /// selection, then automatically returns to painting.
     material_paint_sampling: bool,
+    /// `true` once the in-flight Material Paint gesture has painted at least
+    /// one BSP brush face. Cleared at every primary press alongside
+    /// `last_paint_stamp`, so a drag across a whole wall costs one undo step.
+    brush_face_paint_stroke: bool,
     /// Index into the active scene's brushes, when one is selected.
     selected_brush: Option<usize>,
     /// Multi-brush selection (shift-click). Always contains
@@ -2933,6 +2937,7 @@ impl EditorWorkspace {
             brush_material: None,
             material_paint_blend: false,
             material_paint_sampling: false,
+            brush_face_paint_stroke: false,
             selected_brush: None,
             selected_brushes: Vec::new(),
             selected_brush_face: None,

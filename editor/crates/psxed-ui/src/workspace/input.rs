@@ -887,6 +887,9 @@ impl EditorWorkspace {
         ];
         const BSP_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
             (ViewTool::Select, None),
+            // Same cycle slot as the grid project's Paint, but it addresses
+            // BSP brush faces instead of grid cells (`bsp_face_paint_active`).
+            (ViewTool::PaintMaterial, None),
             (ViewTool::Brush, None),
             (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
             (ViewTool::Place, Some(PlaceKind::SpawnMarker)),
