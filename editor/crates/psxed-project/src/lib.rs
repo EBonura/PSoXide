@@ -261,8 +261,8 @@ mod projects_dir_tests {
                 .map(|brush| brush.max[axis])
                 .fold(f64::NEG_INFINITY, f64::max)
         });
-        assert!(world_max[0] - world_min[0] >= 4224.0);
-        assert!(world_max[2] - world_min[2] >= 4224.0);
+        assert!(world_max[0] - world_min[0] >= f64::from(NEW_PROJECT_COURTYARD_OUTER_SIZE));
+        assert!(world_max[2] - world_min[2] >= f64::from(NEW_PROJECT_COURTYARD_OUTER_SIZE));
 
         let spawn = project
             .active_scene()
@@ -272,11 +272,15 @@ mod projects_dir_tests {
             .expect("one player spawn")
             .transform
             .translation;
-        assert_eq!(spawn, [2112.0, 65.0, 3200.0]);
-        const INTERIOR_MIN: f64 = 64.0;
-        const INTERIOR_MAX: f64 = 4160.0;
+        assert_eq!(spawn, [8256.0, 65.0, 12352.0]);
+        const INTERIOR_MIN: f64 = NEW_PROJECT_COURTYARD_WALL_THICKNESS as f64;
+        const INTERIOR_MAX: f64 =
+            (NEW_PROJECT_COURTYARD_WALL_THICKNESS + NEW_PROJECT_COURTYARD_INTERIOR_SIZE) as f64;
         const FLOOR_TOP: f64 = 64.0;
-        assert_eq!(INTERIOR_MAX - INTERIOR_MIN, 4096.0);
+        assert_eq!(
+            INTERIOR_MAX - INTERIOR_MIN,
+            f64::from(NEW_PROJECT_COURTYARD_INTERIOR_SIZE)
+        );
         for brush in &solved {
             let overlaps_interior_xz = brush.min[0] < INTERIOR_MAX
                 && brush.max[0] > INTERIOR_MIN
@@ -284,7 +288,7 @@ mod projects_dir_tests {
                 && brush.max[2] > INTERIOR_MIN;
             assert!(
                 !(overlaps_interior_xz && brush.min[1] > FLOOR_TOP),
-                "starter has an overhead brush covering part of the 4096x4096 interior"
+                "starter has an overhead brush covering part of the 16384x16384 interior"
             );
         }
         let material_paths = project
@@ -396,6 +400,16 @@ pub fn project_file_stem(name: &str) -> String {
 pub fn default_project_dir() -> PathBuf {
     projects_dir().join("default")
 }
+
+/// Exact usable width and depth of the New Project courtyard.
+pub const NEW_PROJECT_COURTYARD_INTERIOR_SIZE: i32 = 16_384;
+/// Thickness of the starter's floor and perimeter walls.
+pub const NEW_PROJECT_COURTYARD_WALL_THICKNESS: i32 = 64;
+/// Full floor footprint including both perimeter walls.
+pub const NEW_PROJECT_COURTYARD_OUTER_SIZE: i32 =
+    NEW_PROJECT_COURTYARD_INTERIOR_SIZE + 2 * NEW_PROJECT_COURTYARD_WALL_THICKNESS;
+/// World coordinate of the interior's centre on X and Z.
+pub const NEW_PROJECT_COURTYARD_CENTER: i32 = NEW_PROJECT_COURTYARD_OUTER_SIZE / 2;
 
 /// BSP-first template copied by the editor's New Project flow.
 ///

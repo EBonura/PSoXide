@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use psxed_project::brush::Brush;
 use psxed_project::{
     MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, Transform3,
+    NEW_PROJECT_COURTYARD_CENTER, NEW_PROJECT_COURTYARD_INTERIOR_SIZE,
+    NEW_PROJECT_COURTYARD_OUTER_SIZE, NEW_PROJECT_COURTYARD_WALL_THICKNESS,
 };
 
 const FLOOR_SOURCE: &str = "cobbles_1a.psxt";
@@ -45,8 +47,12 @@ fn generate(output_dir: &Path) {
     let mut project = ProjectDocument::new("Open Courtyard Starter");
     project.editor_camera.orbit_yaw_q12 = 3584;
     project.editor_camera.orbit_pitch_q12 = 3712;
-    project.editor_camera.orbit_target = [2112, 160, 2112];
-    project.editor_camera.orbit_radius = 4800;
+    project.editor_camera.orbit_target = [
+        NEW_PROJECT_COURTYARD_CENTER,
+        160,
+        NEW_PROJECT_COURTYARD_CENTER,
+    ];
+    project.editor_camera.orbit_radius = 18_000;
     let floor = project.add_resource(
         "Courtyard Cobbles",
         ResourceData::Material(MaterialResource::opaque(Some(FLOOR_RELATIVE.to_string()))),
@@ -57,17 +63,20 @@ fn generate(output_dir: &Path) {
     );
 
     let scene = project.active_scene_mut();
-    // The four walls enclose an exact 4096 x 4096 usable interior. Their
+    // The four walls enclose an exact 16384 x 16384 usable interior. Their
     // 768-unit height gives a clear blockout silhouette without enclosing the
     // sky. There is deliberately no ceiling brush.
-    let mut floor_brush = Brush::cuboid([0, 0, 0], [4224, 64, 4224]);
+    let outer = NEW_PROJECT_COURTYARD_OUTER_SIZE;
+    let wall = NEW_PROJECT_COURTYARD_WALL_THICKNESS;
+    let interior_max = wall + NEW_PROJECT_COURTYARD_INTERIOR_SIZE;
+    let mut floor_brush = Brush::cuboid([0, 0, 0], [outer, wall, outer]);
     paint(&mut floor_brush, floor);
     scene.brushes.push(floor_brush);
     for (mins, maxs) in [
-        ([0, 64, 0], [64, 832, 4224]),
-        ([4160, 64, 0], [4224, 832, 4224]),
-        ([64, 64, 0], [4160, 832, 64]),
-        ([64, 64, 4160], [4160, 832, 4224]),
+        ([0, wall, 0], [wall, 832, outer]),
+        ([interior_max, wall, 0], [outer, 832, outer]),
+        ([wall, wall, 0], [interior_max, 832, wall]),
+        ([wall, wall, interior_max], [interior_max, 832, outer]),
     ] {
         let mut wall = Brush::cuboid(mins, maxs);
         paint(&mut wall, walls);
@@ -83,7 +92,11 @@ fn generate(output_dir: &Path) {
         },
     );
     scene.node_mut(spawn).expect("spawn node").transform = Transform3 {
-        translation: [2112.0, 65.0, 3200.0],
+        translation: [
+            NEW_PROJECT_COURTYARD_CENTER as f32,
+            65.0,
+            (wall + NEW_PROJECT_COURTYARD_INTERIOR_SIZE * 3 / 4) as f32,
+        ],
         rotation_degrees: [0.0, 180.0, 0.0],
         ..Transform3::default()
     };
@@ -91,12 +104,20 @@ fn generate(output_dir: &Path) {
     for (name, translation, color) in [
         (
             "Warm Blockout Light",
-            [1408.0, 600.0, 2112.0],
+            [
+                (wall + NEW_PROJECT_COURTYARD_INTERIOR_SIZE / 3) as f32,
+                600.0,
+                NEW_PROJECT_COURTYARD_CENTER as f32,
+            ],
             [255, 196, 144],
         ),
         (
             "Cool Blockout Light",
-            [2816.0, 600.0, 2112.0],
+            [
+                (wall + NEW_PROJECT_COURTYARD_INTERIOR_SIZE * 2 / 3) as f32,
+                600.0,
+                NEW_PROJECT_COURTYARD_CENTER as f32,
+            ],
             [144, 196, 255],
         ),
     ] {

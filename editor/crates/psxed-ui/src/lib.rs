@@ -1067,7 +1067,7 @@ impl BrushEditMode {
     const fn label(self) -> &'static str {
         match self {
             Self::Move => "Move",
-            Self::Face => "Face",
+            Self::Face => "Resize",
             Self::Edge => "Edge",
             Self::Vertex => "Vertex",
         }
@@ -1085,7 +1085,7 @@ impl BrushEditMode {
     const fn toolbar_hint(self) -> &'static str {
         match self {
             Self::Move => "Drag brush",
-            Self::Face => "Drag face",
+            Self::Face => "Drag face to resize",
             Self::Edge => "Drag edge",
             Self::Vertex => "Drag vertex",
         }

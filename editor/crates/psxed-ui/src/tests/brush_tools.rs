@@ -410,7 +410,11 @@ fn click_visible_brush_mode(workspace: &mut EditorWorkspace, mode: BrushEditMode
     let output = ctx.run(input(0.0, vec![]), |ctx| {
         workspace.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle)
     });
-    for label in ["Move", "Face", "Edge", "Vertex"] {
+    assert!(
+        text_shape_center(&output.shapes, "Brush Transform").is_some(),
+        "selected brush did not expose the Inspector transform section"
+    );
+    for label in ["Move", "Resize", "Edge", "Vertex"] {
         assert!(
             text_shape_center(&output.shapes, label).is_some(),
             "visible brush toolbar omitted {label:?}"
@@ -578,26 +582,90 @@ fn visible_brush_modes_drive_plain_drag_move_and_resize_in_every_2d_view() {
 }
 
 #[test]
-fn select_tool_selected_brush_uses_the_same_visible_plain_drag_move() {
-    let base = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
-    let mut project = ProjectDocument::new("select tool direct brush move");
-    project.active_scene_mut().brushes.push(base.clone());
-    let mut workspace = EditorWorkspace::with_project(test_temp_dir("select-move"), project);
-    workspace.active_workspace = WorkspaceView::Room;
-    workspace.active_tool = ViewTool::Select;
-    workspace.view_2d = true;
-    workspace.orthographic_view = OrthographicView::Top;
-    workspace.orthographic_focus = [64.0; 3];
-    workspace.viewport_zoom = 2.0;
-    workspace.snap_units = 16;
-    workspace.replace_brush_selection(0, None);
+fn select_tool_selected_brush_uses_visible_move_and_resize_via_real_egui() {
+    for mode in [BrushEditMode::Move, BrushEditMode::Face] {
+        let base = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        let mut project = ProjectDocument::new("select tool direct brush transform");
+        project.active_scene_mut().brushes.push(base.clone());
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("select-edit"), project);
+        workspace.active_workspace = WorkspaceView::Room;
+        workspace.active_tool = ViewTool::Select;
+        workspace.view_2d = true;
+        workspace.orthographic_view = OrthographicView::Top;
+        workspace.orthographic_focus = [64.0; 3];
+        workspace.viewport_zoom = 2.0;
+        workspace.snap_units = 16;
+        workspace.replace_brush_selection(0, None);
 
-    click_visible_brush_mode(&mut workspace, BrushEditMode::Move);
-    run_real_egui_orthographic_brush_drag(&mut workspace, [64.0, 64.0], [96.0, 64.0]);
-    assert_ne!(workspace.project.active_scene().brushes[0], base);
+        click_visible_brush_mode(&mut workspace, mode);
+        let (start, end) = match mode {
+            BrushEditMode::Move => ([64.0, 64.0], [96.0, 64.0]),
+            BrushEditMode::Face => ([128.0, 64.0], [160.0, 64.0]),
+            _ => unreachable!(),
+        };
+        run_real_egui_orthographic_brush_drag(&mut workspace, start, end);
+        assert_ne!(workspace.project.active_scene().brushes[0], base);
+        assert!(workspace.is_dirty());
+        workspace.do_undo();
+        assert_eq!(workspace.project.active_scene().brushes[0], base);
+    }
+}
+
+#[test]
+fn numeric_origin_moves_a_multi_selection_and_survives_save_reload() {
+    let dir = test_temp_dir("numeric-group-persistence");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut project = ProjectDocument::new("Numeric Group Persistence");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [256, 0, 0],
+            [384, 128, 128],
+        ));
+    project.save_to_path(dir.join("project.ron")).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_tool = ViewTool::Select;
+    workspace.replace_brush_selection(1, None);
+    workspace.toggle_brush_selection(0);
+    workspace.push_undo();
+
+    assert!(workspace.set_selected_brush_origin([32, 16, -16]));
+    assert_eq!(workspace.selected_brush_origin(), Some([32, 16, -16]));
+    let secondary = workspace.project.active_scene().brushes[1].solve();
+    assert_eq!(secondary.min, [288.0, 16.0, -16.0]);
     assert!(workspace.is_dirty());
+
     workspace.do_undo();
-    assert_eq!(workspace.project.active_scene().brushes[0], base);
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].solve().min,
+        [0.0; 3]
+    );
+    workspace.do_redo();
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].solve().min,
+        [32.0, 16.0, -16.0]
+    );
+    workspace.save().unwrap();
+    assert!(!workspace.is_dirty());
+
+    let reopened = EditorWorkspace::open_directory(&dir).unwrap();
+    assert_eq!(
+        reopened.project.active_scene().brushes[0].solve().min,
+        [32.0, 16.0, -16.0]
+    );
+    assert_eq!(
+        reopened.project.active_scene().brushes[1].solve().min,
+        [288.0, 16.0, -16.0]
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
