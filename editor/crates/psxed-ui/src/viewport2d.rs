@@ -28,7 +28,7 @@ pub(crate) fn draw_viewport_overlay(
         format!("Grid: {snap_units} units"),
         format!("{} nodes", project.active_scene().nodes().len()),
         format!("{} resources", project.resources.len()),
-        format!("{:.0} px/unit", zoom),
+        format_viewport_zoom(zoom),
     ];
     for (idx, line) in lines.iter().enumerate() {
         painter.text(
@@ -38,6 +38,16 @@ pub(crate) fn draw_viewport_overlay(
             FontId::monospace(11.0),
             STUDIO_TEXT,
         );
+    }
+}
+
+pub(crate) fn format_viewport_zoom(zoom: f32) -> String {
+    if zoom >= 10.0 {
+        format!("{zoom:.0} px/unit")
+    } else if zoom >= 1.0 {
+        format!("{zoom:.1} px/unit")
+    } else {
+        format!("{zoom:.3} px/unit")
     }
 }
 
@@ -299,14 +309,27 @@ pub(crate) enum HitShape {
     },
 }
 
-pub(crate) fn draw_world_grid(painter: &egui::Painter, transform: ViewportTransform) {
+pub(crate) fn readable_grid_step(base_step: f32, zoom: f32) -> f32 {
+    let mut step = base_step.max(f32::EPSILON);
+    while step * zoom < 10.0 && step <= (i32::MAX as f32) * 0.5 {
+        step *= 2.0;
+    }
+    step
+}
+
+pub(crate) fn draw_world_grid(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    base_step: f32,
+) {
     let rect = transform.rect;
     let top_left = transform.screen_to_world(rect.left_top());
     let bottom_right = transform.screen_to_world(rect.right_bottom());
-    let min_x = top_left[0].min(bottom_right[0]).floor() as i32 - 1;
-    let max_x = top_left[0].max(bottom_right[0]).ceil() as i32 + 1;
-    let min_z = top_left[1].min(bottom_right[1]).floor() as i32 - 1;
-    let max_z = top_left[1].max(bottom_right[1]).ceil() as i32 + 1;
+    let step = readable_grid_step(base_step, transform.zoom);
+    let min_x = (top_left[0].min(bottom_right[0]) / step).floor() as i32 - 1;
+    let max_x = (top_left[0].max(bottom_right[0]) / step).ceil() as i32 + 1;
+    let min_z = (top_left[1].min(bottom_right[1]) / step).floor() as i32 - 1;
+    let max_z = (top_left[1].max(bottom_right[1]) / step).ceil() as i32 + 1;
 
     let minor = Stroke::new(1.0, Color32::from_rgb(20, 43, 52));
     let major = Stroke::new(1.0, Color32::from_rgb(31, 63, 75));
@@ -320,8 +343,8 @@ pub(crate) fn draw_world_grid(painter: &egui::Painter, transform: ViewportTransf
         } else {
             minor
         };
-        let a = transform.world_to_screen([x as f32, min_z as f32]);
-        let b = transform.world_to_screen([x as f32, max_z as f32]);
+        let a = transform.world_to_screen([x as f32 * step, min_z as f32 * step]);
+        let b = transform.world_to_screen([x as f32 * step, max_z as f32 * step]);
         painter.line_segment([a, b], stroke);
     }
 
@@ -333,8 +356,8 @@ pub(crate) fn draw_world_grid(painter: &egui::Painter, transform: ViewportTransf
         } else {
             minor
         };
-        let a = transform.world_to_screen([min_x as f32, z as f32]);
-        let b = transform.world_to_screen([max_x as f32, z as f32]);
+        let a = transform.world_to_screen([min_x as f32 * step, z as f32 * step]);
+        let b = transform.world_to_screen([max_x as f32 * step, z as f32 * step]);
         painter.line_segment([a, b], stroke);
     }
 }

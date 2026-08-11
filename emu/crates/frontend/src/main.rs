@@ -170,6 +170,8 @@ fn main() {
     let editor_startup = cli.editor.then_some((
         cli.editor_project,
         cli.editor_view.map(cli::EditorViewArg::project_view),
+        cli.editor_view
+            .is_some_and(cli::EditorViewArg::is_room_orthographic),
         cli.editor_resource,
     ));
 
@@ -178,13 +180,16 @@ fn main() {
 
     let mut app = Shell::new(config_dir, fullscreen, gpu_compute);
     #[cfg(feature = "editor")]
-    if let Some((project_dir, view, resource)) = editor_startup {
+    if let Some((project_dir, view, room_orthographic, resource)) = editor_startup {
         if let Err(error) = app
             .state
             .open_editor_startup(project_dir, view, resource.as_deref())
         {
             eprintln!("error: {error}");
             std::process::exit(2);
+        }
+        if room_orthographic {
+            app.state.show_editor_room_orthographic();
         }
     }
     event_loop.run_app(&mut app).expect("event loop");

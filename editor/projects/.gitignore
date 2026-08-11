@@ -5,6 +5,9 @@
 !brush-first-playable/
 !brush-first-playable/project.ron
 !brush-first-playable/walk-through-door.pxitape.csv
+!brush-first-playable/assets/
+!brush-first-playable/assets/textures/
+!brush-first-playable/assets/textures/starter_stone_brick.psxt
 !brush-combat-fixture/
 !brush-combat-fixture/**
 !cortex_ignition_v1/
