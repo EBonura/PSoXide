@@ -163,8 +163,8 @@ this branch do not participate in the contract.
   trace the world and movers before connecting; the discrepancy report's
   section 3 limitation applies only to revisions before `e57af183`.
 - The grid cook dependency and hard-coded NPC hull were subsequently resolved
-  in sections 0.9/0.10; authored BoxProp/ArchProp AABBs join the BSP trace in
-  section 0.11. BSP water contents/swimming remains open.
+  in sections 0.9/0.10; authored ImageProp/BoxProp/ArchProp AABBs join the BSP
+  trace in sections 0.11/0.12. BSP water contents/swimming remains open.
 - TrenchBroom workflow items remaining: arbitrary plane handles for
   non-axis brushes, 2D marquee brush select, 3D-view vertex/edge handles,
   file watching, and the from-scratch test by a non-implementer.
@@ -461,6 +461,65 @@ enemy into every blocker; open/break the boxes and prove only those contacts
 disappear; then profile dense AABB scenes on silicon. A hidden prop should also
 be challenged separately: PVS rendering and physical collision need not have
 identical policy, but that policy must be explicit rather than accidental.
+
+The first sentence of that limitation is superseded by section 0.12; the rest
+of the challenge remains open.
+
+### 0.12 ImageProp collision cook/runtime closure (2026-08-11)
+
+Commit `9a2eee34` closes the editor/runtime seam where ImageProp exposed
+`collision_enabled` and `collision_size`, previewed a collision volume, then
+silently discarded both fields during playtest cooking. A collidable static
+card now cooks the same bottom-centred origin and half-visual-height collision
+centre used by the preview. Its eight X/Y/Z-Q12-rotated box corners are enclosed
+into a conservative room-local AABB on the host. A cylindrical billboard keeps
+an axis-aligned collision box because its visual yaw changes with the camera;
+authored pitch/yaw/roll therefore cannot make physical collision camera
+dependent. Disabled records carry no collision flag and zero bounds.
+
+`LevelImagePropRecord` now carries the precomputed min/max and a dedicated
+`COLLISION_ENABLED` flag. The guest does no trigonometry or allocation: the
+runtime collector filters by room, rejects malformed/degenerate bounds, and
+appends records in cooked order. The player and NPC/game-entity paths both add
+ImageProps after the existing BoxProp and ArchProp blockers, for BSP and legacy
+grid playtests. Image, box and arch collisions share the single 64-AABB room
+budget. The cooker counts all three classes together and fails closed with the
+per-class counts instead of allowing runtime truncation.
+
+Validation at `9a2eee34`:
+
+```text
+psxed-project --lib:       474 passed (1 diagnostic ignored)
+psx-game-runtime --lib:     79 passed
+psx-engine --lib:          305 passed
+real mipsel-sony-psx release link: PASS
+make combat-checkpoint: PASS
+  authored hits 4, stagger 1, death 1, fallback hits taken 3
+  closed-door enemy connection blocked
+  VRAM 0x007fb6683f98d82b (unchanged)
+editor-playtest.exe: 1,415,168 bytes (unchanged)
+  SHA-256 c65253fc5fc8a35b0cb944ffbaf64e876e639346289b7df30b6d64028a75cddc
+brush_world.pxbsp: 12,976 bytes (unchanged)
+  SHA-256 17f044fc65e942990e6e7f33d7f1043400c43759f43bdd5bdb80a52a45291825
+disc BIN: 2,836,512 bytes (unchanged)
+  SHA-256 b0648a36e89a2ad085c4f84568225d891776cf133413b95a93e108b3ff98d9fa
+```
+
+The new regressions prove a 90-degree static-card enclosure,
+camera-independent billboard bounds, disabled-field neutrality, manifest
+emission, shared-budget failure, and stable/capacity-bounded runtime
+collection. The combat fixture has no ImageProp, so its bit-identical
+executable/disc/VRAM result is a neutrality proof, not direct contact evidence.
+
+Challenge this checkpoint before calling ImageProp collision finished. Build a
+tracked BSP room with collidable and non-collidable cards, approach each with
+both player and enemy bodies, and replay contacts at several pitch/yaw/roll
+angles. A rotated thin card is represented by its conservative AABB, so measure
+and document the false-corner tradeoff rather than mistaking it for an OBB.
+Test zero/odd collision sizes and extreme legal origins, fill the complete
+64-record mixed Image/Box/Arch budget, and profile it on original hardware.
+Finally decide explicitly whether PVS-hidden props remain physical: current
+collision is room-scoped and therefore independent of render visibility.
 
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
