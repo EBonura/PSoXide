@@ -1,5 +1,10 @@
 # Brush editing in psxed: integration design
 
+> The PSoXide Editor authors the owner's souls-like game (PXBSP + PSoXide
+> gameplay records). Quake `.map` semantics below are an algorithmic and
+> interaction reference only; the editor does not author Quake levels
+> (`docs/finish-line-plan-2026-08-11.md` section 2).
+
 Status: design drafted 2026-08-10, branch `quake-bsp-world`. Companion to
 docs/quake-bsp-migration-plan.md (P4). Brush editing is an independent
 implementation built from the public Quake `.map` format semantics and
