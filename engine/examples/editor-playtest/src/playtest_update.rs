@@ -151,6 +151,27 @@ impl Playtest {
         self.logic
             .set_spatial_active_mask(spatial_masks.map(|masks| masks.1));
         self.bsp_instance_visible_mask = spatial_masks.map_or(u16::MAX, |masks| masks.2 as u16);
+        if let Some((entity_mask, _, _)) = spatial_masks {
+            // Live entities whose leaf sits outside the player's PVS row
+            // this tick: their idle/patrol AI is gated and their
+            // body/equipment/shadow rendering is suppressed above.
+            let mut suppressed = 0u32;
+            for (index, dead) in entity_dead
+                .iter()
+                .enumerate()
+                .take(self.game_entities.count().min(64))
+            {
+                if !dead && entity_mask & (1u64 << index) == 0 {
+                    suppressed += 1;
+                }
+            }
+            if suppressed > 0 {
+                telemetry::counter(
+                    telemetry::counter::GAME_ENTITY_PVS_SUPPRESSIONS,
+                    suppressed,
+                );
+            }
+        }
         let entity_stats = if npc_tick_due {
             // Souls i-frames: the deferred tick never resolves contact, so
             // this pre-motor value only feeds the shared tick-input contract.
@@ -307,6 +328,7 @@ impl Playtest {
         self.player_health_max = PLAYER_MAX_HEALTH;
         self.hazard_death_ticks_remaining = 0;
         self.death_by_combat = false;
+        self.weapon_attach_reported = false;
         self.swing_hit_mask = 0;
         self.clear_actor_pose_snapshots();
         self.sync_door_box_props();

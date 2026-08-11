@@ -368,6 +368,10 @@ struct Playtest {
     /// Whether the running death sequence was armed by combat damage
     /// rather than an environmental hazard (respawn logging only).
     death_by_combat: bool,
+    /// Whether this life already reported its first successful equipped
+    /// weapon socket-pose resolution (PLAYER_WEAPON_ATTACHMENTS is one
+    /// per life; cleared at gameplay init and on respawn).
+    weapon_attach_reported: bool,
     /// Entities already hit by the CURRENT player swing (bit i =
     /// entity i): one swing connects at most once per enemy. Cleared
     /// when an attack action starts.
