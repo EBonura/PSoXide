@@ -2027,6 +2027,30 @@ fn placed_trigger_volume_contains_a_player_standing_on_the_placement_surface() {
         trigger.max[1]
     );
 
+    // What the author sees must be where it fires. The gizmo is floor
+    // anchored like the cooked box, so its drawn Y span matches the cooked
+    // one; a centred gizmo would sit half the authored height too low.
+    let node = workspace
+        .project()
+        .active_scene()
+        .node(placed)
+        .expect("placed Logic node");
+    assert!(
+        crate::editor_helpers::node_is_floor_anchored(&node.kind),
+        "a Trigger Volume gizmo must be floor anchored to match its cooked AABB"
+    );
+    let (_, half) = crate::editor_helpers::entity_bound_kind_and_size(&workspace, node)
+        .expect("trigger volumes have a preview bound");
+    let drawn_min = node.transform.translation[1];
+    let drawn_max = drawn_min + half[1] * 2.0;
+    assert!(
+        (drawn_min - trigger.min[1] as f32).abs() <= 1.0
+            && (drawn_max - trigger.max[1] as f32).abs() <= 1.0,
+        "gizmo y span {drawn_min}..={drawn_max} must match the cooked {}..={}",
+        trigger.min[1],
+        trigger.max[1]
+    );
+
     let _ = std::fs::remove_dir_all(dir);
 }
 
