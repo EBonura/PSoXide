@@ -600,6 +600,12 @@ impl Bus {
         self.sio0.attach_port1(device);
     }
 
+    /// Unplug the controller from port 1 while preserving its memory card.
+    pub fn detach_pad_port1(&mut self) {
+        let device = std::mem::take(self.sio0.port1_mut()).without_pad();
+        self.sio0.attach_port1(device);
+    }
+
     /// Immutable access to SIO0 for diagnostics.
     pub fn sio0(&self) -> &Sio0 {
         &self.sio0
@@ -804,6 +810,24 @@ impl Bus {
         self.sio0.attach_port2(device);
     }
 
+    /// Plug an original digital-only controller into port 2.
+    pub fn attach_original_digital_pad_port2(&mut self) {
+        let old = std::mem::take(self.sio0.port2_mut());
+        let memcard = old.into_memcard();
+        let mut device =
+            crate::pad::PortDevice::empty().with_pad(crate::pad::DigitalPad::new_digital_only());
+        if let Some(card) = memcard {
+            device = device.with_memcard(card);
+        }
+        self.sio0.attach_port2(device);
+    }
+
+    /// Unplug the controller from port 2 while preserving its memory card.
+    pub fn detach_pad_port2(&mut self) {
+        let device = std::mem::take(self.sio0.port2_mut()).without_pad();
+        self.sio0.attach_port2(device);
+    }
+
     /// Plug a memory card into port 2. Same semantics as
     /// [`Bus::attach_memcard_port1`].
     pub fn attach_memcard_port2(&mut self, initial_bytes: Vec<u8>) {
@@ -842,6 +866,23 @@ impl Bus {
     /// Update the buttons currently held on the port-2 controller.
     pub fn set_port2_buttons(&mut self, buttons: crate::pad::ButtonState) {
         self.sio0.set_port2_buttons(buttons);
+    }
+
+    /// Update the analog-stick positions on the port-2 controller.
+    pub fn set_port2_sticks(&mut self, right_x: u8, right_y: u8, left_x: u8, left_y: u8) {
+        if let Some(pad) = self.sio0.port2_mut().pad_mut() {
+            pad.set_sticks(right_x, right_y, left_x, left_y);
+        }
+    }
+
+    /// Force the port-2 DualShock into Analog mode.
+    pub fn force_port2_analog_mode(&mut self) -> bool {
+        self.sio0.port2_mut().force_analog_mode()
+    }
+
+    /// Current port-2 pad mode, if a pad is attached.
+    pub fn port2_pad_mode(&self) -> Option<crate::pad::PadMode> {
+        self.sio0.port2().pad().map(|pad| pad.mode())
     }
 
     /// Port-2 DualShock motor state. Mirrors
