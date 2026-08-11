@@ -204,11 +204,7 @@ fn toolbar_lanes(row_width: f32) -> ToolbarLanes {
     }
 }
 
-fn draw_toolbar_controls(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    compact: bool,
-) {
+fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool) {
     if compact {
         // The icon buttons retain their hit targets; only whitespace yields.
         ui.spacing_mut().item_spacing.x = 4.0;
