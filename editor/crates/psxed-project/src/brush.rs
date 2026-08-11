@@ -435,8 +435,8 @@ impl Brush {
 impl Brush {
     /// Hollow an axis-aligned brush into six wall slabs of `thickness`,
     /// keeping the outer bounds. Returns `None` when the brush is too
-    /// small to hollow or has no volume. Face materials carry to every
-    /// slab from the source face where unambiguous (outer faces).
+    /// small to hollow or has no volume. Every new face inherits material
+    /// and UV defaults from the source face with the same signed axis.
     pub fn hollow(&self, thickness: i32) -> Option<Vec<Brush>> {
         let solved = self.solve();
         if !solved.is_valid() {
@@ -479,11 +479,47 @@ impl Brush {
                 [inner_max[0], inner_max[1], max[2]],
             ),
         ];
+        let source_faces = self
+            .faces
+            .iter()
+            .filter_map(|face| {
+                let plane = Plane::from_points(face.points)?;
+                Some((signed_dominant_axis(plane.normal), face.material, face.uv))
+            })
+            .collect::<Vec<_>>();
         for slab in &mut slabs {
             slab.mover = self.mover;
+            // Every slab face has one of the source cuboid's six signed axis
+            // directions. Carry both the material and UV transform by that
+            // direction, including the newly exposed cavity faces. A Hollow
+            // action on a textured brush therefore remains immediately
+            // cookable instead of silently producing untextured interior
+            // walls.
+            for face in &mut slab.faces {
+                let Some(plane) = Plane::from_points(face.points) else {
+                    continue;
+                };
+                let key = signed_dominant_axis(plane.normal);
+                if let Some((_, material, uv)) =
+                    source_faces.iter().find(|(source, _, _)| *source == key)
+                {
+                    face.material = *material;
+                    face.uv = *uv;
+                }
+            }
         }
         Some(slabs)
     }
+}
+
+fn signed_dominant_axis(normal: [i64; 3]) -> (usize, bool) {
+    let mut axis = 0;
+    for candidate in 1..3 {
+        if normal[candidate].unsigned_abs() > normal[axis].unsigned_abs() {
+            axis = candidate;
+        }
+    }
+    (axis, normal[axis] >= 0)
 }
 
 /// World units per paraxial texel, the renderer's brush texel density
@@ -807,6 +843,40 @@ mod tests {
         }
         // Too-thin brushes refuse to hollow.
         assert!(Brush::cuboid([0, 0, 0], [30, 128, 256]).hollow(16).is_none());
+    }
+
+    #[test]
+    fn hollow_carries_material_and_uv_to_every_new_face() {
+        let mut brush = Brush::cuboid([0, 0, 0], [256, 128, 256]);
+        for (index, face) in brush.faces.iter_mut().enumerate() {
+            face.material = Some(crate::ResourceId(index as u64 + 1));
+            face.uv = FaceUv {
+                offset_texels: [index as i16, -(index as i16)],
+                rotation_deg: index as i16 * 15,
+                scale_q8: [256 + index as i16, 512 - index as i16],
+            };
+        }
+        let source = brush
+            .faces
+            .iter()
+            .map(|face| {
+                let plane = Plane::from_points(face.points).expect("source face plane");
+                (signed_dominant_axis(plane.normal), face.material, face.uv)
+            })
+            .collect::<Vec<_>>();
+
+        for slab in brush.hollow(16).expect("hollowable") {
+            for face in slab.faces {
+                let plane = Plane::from_points(face.points).expect("slab face plane");
+                let key = signed_dominant_axis(plane.normal);
+                let (_, material, uv) = source
+                    .iter()
+                    .find(|(candidate, _, _)| *candidate == key)
+                    .expect("source signed axis");
+                assert_eq!(face.material, *material);
+                assert_eq!(face.uv, *uv);
+            }
+        }
     }
 
     #[test]
