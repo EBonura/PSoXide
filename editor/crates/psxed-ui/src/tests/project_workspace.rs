@@ -1331,6 +1331,187 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
 }
 
 #[test]
+fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
+    let mut workspace =
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let name = format!(
+        "BSP Blank Slate {} {}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    let cook_a = test_temp_dir("bsp-blank-slate-a");
+    let cook_b = test_temp_dir("bsp-blank-slate-b");
+    let _ = std::fs::remove_dir_all(&project_dir);
+    let _ = std::fs::remove_dir_all(&cook_a);
+    let _ = std::fs::remove_dir_all(&cook_b);
+
+    workspace.create_and_open_project(&name).unwrap();
+    let root = workspace.project().active_scene().root;
+
+    // Challenge the template-copy path from a genuine blank slate. Deleting
+    // authored children and brushes uses the same selection commands as the
+    // scene tree and brush viewport; the World root and Material resource
+    // remain the project's ownership anchors.
+    let children = workspace
+        .project()
+        .active_scene()
+        .node(root)
+        .expect("world root")
+        .children
+        .clone();
+    for child in children {
+        workspace.replace_node_selection(child);
+        workspace.delete_selected();
+    }
+    while !workspace.project().active_scene().brushes.is_empty() {
+        workspace.selected_brush = Some(0);
+        workspace.delete_selected_brushes();
+    }
+    assert!(workspace.project().active_scene().brushes.is_empty());
+    assert_eq!(workspace.bsp_authoring_root(), None);
+
+    let material = workspace.first_material().expect("template material");
+    workspace.set_orthographic_view(OrthographicView::Top);
+    workspace.set_active_tool_cycle_value((ViewTool::Brush, None));
+    workspace.begin_brush_drag_2d([0.0, 0.0]);
+    workspace.update_brush_drag_2d([768.0, 768.0]);
+    workspace.commit_brush_drag();
+    let solid = workspace.selected_brush.expect("new solid selected");
+    workspace.hollow_selected_brush(64);
+    assert_eq!(workspace.bsp_authoring_root(), Some(root));
+    assert_eq!(workspace.project().active_scene().brushes.len(), 6);
+    assert!(workspace.project().active_scene().brushes[solid..]
+        .iter()
+        .flat_map(|brush| &brush.faces)
+        .all(|face| face.material == Some(material)
+            && face.uv == psxed_project::brush::FaceUv::default()));
+
+    // The BSP place lane must root every point/prop entity directly under the
+    // World and preserve world-space coordinates. A portal request is rejected
+    // without mutating or dirtying an otherwise saved document.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PlayerSpawn)));
+    assert!(workspace.place_bsp_from_top([192.0, 192.0]));
+    let spawn = workspace.selected_node_id();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointLightMarker)));
+    assert!(workspace.place_bsp_from_top([256.0, 256.0]));
+    let light = workspace.selected_node_id();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::BoxProp)));
+    assert!(workspace.place_bsp_from_top([384.0, 384.0]));
+    let prop = workspace.selected_node_id();
+    for id in [spawn, light, prop] {
+        assert_eq!(
+            workspace.project().active_scene().node(id).unwrap().parent,
+            Some(root)
+        );
+    }
+    assert_eq!(
+        workspace
+            .project()
+            .active_scene()
+            .node(spawn)
+            .unwrap()
+            .transform
+            .translation,
+        [192.0, 65.0, 192.0]
+    );
+    workspace.save().expect("save before rejected portal");
+    let before_nodes = workspace.project().active_scene().nodes().len();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Portal)));
+    assert!(!workspace.place_bsp_from_top([320.0, 320.0]));
+    assert_eq!(
+        workspace.project().active_scene().nodes().len(),
+        before_nodes
+    );
+    assert!(!workspace.is_dirty(), "rejected BSP portal must not dirty");
+
+    // Place the normal default Logic node, then perform the exact kind change
+    // exposed by its inspector before binding one hollowed wall as its model.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([64.0, 384.0]));
+    let door = workspace.selected_node_id();
+    workspace.push_undo();
+    let node = workspace
+        .project
+        .active_scene_mut()
+        .node_mut(door)
+        .expect("placed Logic node");
+    node.name = "Simple Door".to_string();
+    node.kind = NodeKind::Logic {
+        kind: psxed_project::LogicNodeKind::Door {
+            box_prop: String::new(),
+            start_open: false,
+            open_offset: [0, 192, 0],
+            travel_ticks: 60,
+        },
+        target: String::new(),
+        killtarget: String::new(),
+        master: String::new(),
+        delay_ticks: 0,
+        wait_ticks: 0,
+        enabled: true,
+    };
+    workspace.mark_dirty();
+    workspace.selected_brush = Some(2);
+    workspace.set_selected_brush_mover(Some(door));
+    assert_eq!(
+        workspace.project().active_scene().brushes[2].mover,
+        Some(door)
+    );
+
+    workspace.save_if_dirty().expect("persist full BSP project");
+    workspace.request_play_or_rebuild(EditorPlaytestStatus::Idle);
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Play)
+    );
+    workspace
+        .cook_playtest_to_dir(&cook_a)
+        .expect("cook rooted prop and door");
+    let project = ProjectDocument::load_from_path(project_dir.join("project.ron")).unwrap();
+    let (package, report) = psxed_project::playtest::build_package(&project, &project_dir);
+    assert!(report.is_ok(), "{}", report.errors.join("; "));
+    let package = package.expect("cooked package");
+    assert_eq!(package.box_props.len(), 1);
+    assert_eq!(package.lights.len(), 1);
+    assert!(matches!(
+        package.world_geometry,
+        psxed_project::playtest::PlaytestWorldGeometry::Pxbsp(ref world)
+            if world.movers.len() == 1 && world.movers[0].node == door.raw() as u32
+    ));
+
+    // Rebuild an unchanged persisted revision into a separate directory and
+    // compare both authoritative generated files byte-for-byte.
+    workspace.request_play_or_rebuild(EditorPlaytestStatus::Running {
+        input_captured: false,
+    });
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Rebuild)
+    );
+    workspace
+        .cook_playtest_to_dir(&cook_b)
+        .expect("deterministic BSP rebuild");
+    for filename in [
+        psxed_project::brush_playtest::BRUSH_WORLD_FILENAME,
+        psxed_project::playtest::COOKED_MANIFEST_FILENAME,
+    ] {
+        assert_eq!(
+            std::fs::read(cook_a.join(filename)).unwrap(),
+            std::fs::read(cook_b.join(filename)).unwrap(),
+            "{filename} drifted across unchanged Rebuild"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(project_dir);
+    let _ = std::fs::remove_dir_all(cook_a);
+    let _ = std::fs::remove_dir_all(cook_b);
+}
+
+#[test]
 fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();

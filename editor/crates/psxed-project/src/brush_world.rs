@@ -22,12 +22,13 @@ use crate::{
     NodeId, NodeKind, ProjectDocument, PsxBlendMode, ResourceData, ResourceId, Scene,
 };
 
-use psx_bsp::collision_provider::CookedBodyHull;
+use psx_bsp::collision::{CollisionHull, CONTENTS_SOLID};
+use psx_bsp::collision_provider::{select_body_hull, CookedBodyHull};
 use psx_bsp::pxbsp::{
     entity_class, entity_flags, material_animation, material_blend, material_flags, PxbspBrushDoor,
     PxbspBrushDoorError, PxbspEntity, PxbspMaterial,
 };
-use psx_bsp::{Node, Plane, RecordSlice, Vec3I32};
+use psx_bsp::{ClipNode, Node, Plane, RecordSlice, Vec3I32};
 use psxed_format::texture::Depth;
 
 const DEBUG_BODY_RADIUS: i32 = 16;
@@ -184,7 +185,7 @@ impl fmt::Display for BrushWorldCookError {
             Self::PlayerSpawnInSolid(node) => {
                 write!(
                     formatter,
-                    "Player Spawn node {node:?} is inside solid geometry"
+                    "Player Spawn node {node:?} body overlaps solid geometry"
                 )
             }
             Self::InvalidDoorMotion { node, error } => {
@@ -261,27 +262,9 @@ fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
                     bodies.push((i32::from(settings.radius), i32::from(settings.height)));
                 }
             }
-            NodeKind::SpawnPoint {
-                player: true,
-                character,
-            } => {
-                let resolved = character
-                    .and_then(|id| project.resource(id))
-                    .and_then(|resource| match &resource.data {
-                        ResourceData::Character(character) => Some(character),
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        (character.is_none() && character_resources.len() == 1)
-                            .then(|| character_resources[0])
-                    });
-                if let Some(character) = resolved {
-                    if character.radius > 0 && character.height > 0 {
-                        bodies.push((i32::from(character.radius), i32::from(character.height)));
-                    }
-                } else {
-                    // Characterless BSP projects use the debug motor.
-                    bodies.push((DEBUG_BODY_RADIUS, DEBUG_BODY_HEIGHT));
+            NodeKind::SpawnPoint { player: true, .. } => {
+                if let Some(body) = player_spawn_body(project, node, &character_resources) {
+                    bodies.push(body);
                 }
             }
             _ => {}
@@ -312,6 +295,37 @@ fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
         CookedBodyHull::new(1, smallest.0, smallest.1),
         CookedBodyHull::new(2, largest.0, largest.1),
     ]
+}
+
+fn player_spawn_body(
+    project: &ProjectDocument,
+    node: &crate::SceneNode,
+    character_resources: &[&crate::CharacterResource],
+) -> Option<(i32, i32)> {
+    let NodeKind::SpawnPoint {
+        player: true,
+        character,
+    } = &node.kind
+    else {
+        return None;
+    };
+    let resolved = character
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character),
+            _ => None,
+        })
+        .or_else(|| {
+            (character.is_none() && character_resources.len() == 1).then(|| character_resources[0])
+        });
+    match resolved {
+        Some(character) if character.radius > 0 && character.height > 0 => {
+            Some((i32::from(character.radius), i32::from(character.height)))
+        }
+        Some(_) => None,
+        // Characterless BSP projects use the debug motor.
+        None => Some((DEBUG_BODY_RADIUS, DEBUG_BODY_HEIGHT)),
+    }
 }
 
 fn collision_hull_bounds(body_hulls: [CookedBodyHull; 2]) -> [CollisionHullBounds; 3] {
@@ -388,6 +402,10 @@ pub fn compile_brush_world(
         options.ambient,
         &collision_hulls,
     )?;
+    let collision_planes = RecordSlice::<Plane>::new(&world_collision.planes)
+        .ok_or(BrushWorldCookError::InvalidWorldTree)?;
+    let collision_nodes = RecordSlice::<ClipNode>::new(&world_collision.clipnodes)
+        .ok_or(BrushWorldCookError::InvalidWorldTree)?;
 
     let mut submodels = Vec::new();
     let mut movers = Vec::new();
@@ -495,6 +513,14 @@ pub fn compile_brush_world(
         });
     }
 
+    let character_resources: Vec<_> = project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character),
+            _ => None,
+        })
+        .collect();
     for node in scene.nodes() {
         if !matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }) {
             continue;
@@ -503,6 +529,20 @@ pub fn compile_brush_world(
         let leaf = packed_point_leaf(&world_geometry, origin)?;
         if leaf == 0 {
             return Err(BrushWorldCookError::PlayerSpawnInSolid(node.id));
+        }
+        if let Some((radius, height)) = player_spawn_body(project, node, &character_resources) {
+            let hull_index = select_body_hull(&body_hulls, radius, height)
+                .ok_or(BrushWorldCookError::PlayerSpawnInSolid(node.id))?;
+            let head_node = *world_collision
+                .head_nodes
+                .get(hull_index)
+                .ok_or(BrushWorldCookError::InvalidWorldTree)?;
+            if CollisionHull::new(collision_planes, collision_nodes, head_node)
+                .point_contents(origin)
+                .is_none_or(|contents| contents == CONTENTS_SOLID)
+            {
+                return Err(BrushWorldCookError::PlayerSpawnInSolid(node.id));
+            }
         }
         let angles = node
             .transform
@@ -1135,6 +1175,38 @@ mod tests {
                 z: 512 * 4096,
             }),
             Some(psx_bsp::collision::CONTENTS_EMPTY)
+        );
+    }
+
+    #[test]
+    fn player_spawn_rejects_empty_point_when_authored_body_overlaps_wall() {
+        let mut project = authored_project();
+        let spawn = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
+            .expect("player spawn")
+            .id;
+        project
+            .active_scene_mut()
+            .node_mut(spawn)
+            .expect("player spawn")
+            .transform
+            .translation = [65.0, 65.0, 128.0];
+
+        assert_eq!(
+            compile_brush_world(
+                &project,
+                BrushWorldCookOptions {
+                    project_root: Path::new("."),
+                    mode: BrushWorldCookMode::Draft,
+                    ambient: [24; 3],
+                    texture_asset_base: 0,
+                },
+            )
+            .expect_err("body overlaps the inner X wall even though its origin is empty"),
+            BrushWorldCookError::PlayerSpawnInSolid(spawn)
         );
     }
 
