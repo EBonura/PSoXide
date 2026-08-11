@@ -14,6 +14,11 @@ Snapshot HEAD when this document was created:
 
 ## 0. 2026-08-11 integration checkpoint (current state)
 
+STATUS NAME: this is the **Quake-PSoXide Convergence RC1 hardening
+checkpoint, Level B**. It is deliberately NOT "100 percent convergence":
+section 0.6 records the RC1 hardening pass and the explicit list of open
+Level C/D work that remains after it.
+
 ### 0.1 What landed
 
 PSoXide integration history from the 2026-08-10 snapshot to the final code
@@ -143,8 +148,9 @@ first `cargo run` (README documents this).
 
 - Enemy authored attack volumes still do not exist; enemy damage is the
   documented legacy-arc fallback.
-- Neither the legacy arc nor the capsule path tests world occlusion; melee
-  can connect through thin geometry (discrepancy report section 3).
+- RESOLVED in RC1 (section 0.6): melee world occlusion. Both paths now
+  trace the world and movers before connecting; the discrepancy report's
+  section 3 limitation applies only to revisions before `e57af183`.
 - The grid boundary decision artifact (`docs/legacy-grid-boundary.md`)
   awaits the owner's accept: grid cook is a live dependency of BSP cooks,
   NPC hull index is hard-coded to 1, BoxProp/ArchProp AABBs and water are
@@ -157,7 +163,67 @@ first `cargo run` (README documents this).
 - `/tmp` evidence directories from section 21 were lost to a disk-full
   event; the bit-identical hash reproduction at `c683ba1e` supersedes them.
 
-### 0.6 What the user can test now (supersedes section 2's caveat list)
+### 0.6 RC1 hardening pass (2026-08-11, supersedes 0.2/0.3 replay numbers)
+
+Commits `e57af183..` on top of `af7d400d`:
+
+```text
+e57af183 runtime: block melee connections through world geometry
+bd7cac07 editor: share byte-identical model atlases across cooked models
+8eed84a7 editor: add door-occlusion tape and retime the combat choreography
+e49b29ab tools: add the combat checkpoint regression gate
+afad0b32 runtime: disprove the i32::MIN weapon-origin transient by regression
+```
+
+**Melee world occlusion.** Both the authored capsule path and the legacy
+arc now require a clear point trace between the actors through the static
+PXBSP and the transformed movers (collision-hull eye height, fail-closed on
+provider failure, swing latch and deferred token untouched when blocked,
+grid worlds unchanged). Tracked evidence tape
+`door-blocks-damage.pxitape.csv`: the enemy swings 8 times through the
+closed door and lands 0; the player's 3 swings at the door land 0. The
+canonical tape connects normally once the door is open.
+
+**Atlas dedup.** Byte-identical persistent model atlases now cook once
+(the sword pair shared one .psxt but shipped twice). Fixture evidence:
+assets 31 to 30, guest executable 1,497,088 to 1,431,552 bytes (exactly
+the 65,536-byte atlas), disc 1,240 to 1,207 sectors, model atlas uploads
+4 to 3, packet envelope unchanged, both swords render, and the
+single-actor first-playable replay stays bit-identical.
+
+**i32::MIN weapon-origin transient: disproved.**
+`extreme_legal_inputs_cannot_produce_a_min_sentinel_weapon_origin` drives
+the socket/capsule sampling entry points across quantization-extreme
+translations, pathological 16x scales, spun full-magnitude Q12 rotations,
+million-unit origins, and full-range blade capsules; nothing saturates to
+the sentinel. Pre-refresh sampling is structurally impossible (Option
+snapshots).
+
+**First-class combat regression gate.** `make combat-checkpoint`:
+regenerates the fixture (fails on generator drift), wipes and recooks
+generated content, builds the MIPS guest and disc, replays the canonical
+tape twice and the door tape once, and asserts the pinned counters and
+hashes. Current pins (canonical tape): melee hits 4, staggers 1, deaths 1,
+fallback hits taken 3, traversal x 942, VRAM `0x1ecddf8bf551aefc`,
+display `0xcb43a5cdb7831862`. Door tape: 8 enemy swings, 0 hits either
+direction.
+
+**RC1 matrix.** Host suites at `afad0b32`: psxed-project 468, psxed-ui
+345, psx-bsp 64, psx-engine 298, psx-game-runtime 75 (1,250 total, all
+passing). First-playable walk-through-door replay: VRAM
+`0x5f0c6df40cf31729`, display `0x9eef0b6f25eb5c11`, still bit-identical
+to the pre-session checkpoint. `make combat-checkpoint` passes.
+
+**Open Level C/D work after RC1** (in addition to 0.5): synthetic grid
+scaffold removal from the BSP cook, world-space/leaf-or-area entity
+activation to replace RoomIndex-keyed tables, BSP water volumes, BSP
+prop AABB collision composition, authored NPC hull selection, the
+remaining editor workflow items (arbitrary plane handles, 2D marquee,
+3D vertex/edge handles, file watching, independent from-scratch test),
+enemy-authored attack content, the owner's legacy-grid decision, and
+original-hardware validation.
+
+### 0.7 What the user can test now (supersedes section 2's caveat list)
 
 `make run`, open `editor/projects/brush-combat-fixture/project.ron`, press
 Play: the Level B combat slice live (door, armed enemy, stagger, kill,
