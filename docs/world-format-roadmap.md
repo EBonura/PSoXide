@@ -1,5 +1,9 @@
 # `.psxw` Format Roadmap
 
+> HISTORICAL for new projects (2026-08-11): `.psxw` is the legacy grid world
+> format. New projects are BSP-first (PXBSP); grid remains compatibility-only
+> per `docs/legacy-grid-boundary.md`.
+
 The active world wire format is **VERSION = 5** (`psxed_format::world::VERSION`).
 It's the shape `psxed-project` cooks and the main shape
 `psx_asset::World::from_bytes` accepts; the parser also keeps v1-v4

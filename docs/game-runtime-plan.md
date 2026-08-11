@@ -1,5 +1,11 @@
 # psx-game-runtime: the game layer plan
 
+> HISTORICAL where it mandates a grid world (2026-08-11): new projects are
+> BSP-first and spatial authority for BSP projects is PXBSP/`psx-bsp`, per
+> `docs/finish-line-plan-2026-08-11.md` and `docs/legacy-grid-boundary.md`.
+> The runtime layering principles below remain useful; the "grid world, not
+> BSP" mandate does not apply to new projects.
+
 Status: phase 1 in progress (2026-07-11). This document is the design
 brief for the layer between `psx-engine` (reusable PS1 primitives) and
 a game. It exists because two audits agreed on the same finding from
