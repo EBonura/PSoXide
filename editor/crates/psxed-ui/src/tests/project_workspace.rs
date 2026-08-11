@@ -2080,6 +2080,40 @@ fn save_renames_project_directory_when_project_name_changes() {
 }
 
 #[test]
+fn save_renaming_bsp_starter_creates_a_project_copy() {
+    let source = psxed_project::new_project_template_dir();
+    let source_project = source.join("project.ron");
+    let source_bytes = std::fs::read(&source_project).unwrap();
+    let name = format!(
+        "BSP Starter Copy {} {}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    let _ = std::fs::remove_dir_all(&target);
+    let mut workspace = EditorWorkspace::open_directory(&source).unwrap();
+
+    workspace.project.name = name.clone();
+    workspace.mark_dirty();
+    workspace.save().unwrap();
+
+    assert!(source_project.is_file());
+    assert_eq!(std::fs::read(&source_project).unwrap(), source_bytes);
+    assert!(target.join("project.ron").is_file());
+    assert!(paths_equivalent(workspace.project_root(), &target));
+    assert_eq!(
+        ProjectDocument::load_from_path(target.join("project.ron"))
+            .unwrap()
+            .name,
+        name
+    );
+    let _ = std::fs::remove_dir_all(target);
+}
+
+#[test]
 fn save_rejects_project_rename_collision() {
     let parent = test_temp_dir("rename-project-collision");
     let source = parent.join("old_project");
@@ -2103,20 +2137,22 @@ fn save_rejects_project_rename_collision() {
 }
 
 #[test]
-fn delete_current_project_refuses_default_project() {
-    let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+fn delete_current_project_refuses_bundled_projects() {
+    for project_dir in [
+        psxed_project::default_project_dir(),
+        psxed_project::new_project_template_dir(),
+    ] {
+        let mut workspace = EditorWorkspace::open_directory(&project_dir).unwrap();
 
-    let error = workspace.delete_current_project().unwrap_err();
+        let error = workspace.delete_current_project().unwrap_err();
 
-    assert!(error.contains("default project"));
-    assert!(psxed_project::default_project_dir()
-        .join("project.ron")
-        .is_file());
+        assert!(error.contains("Bundled starter"), "{error}");
+        assert!(project_dir.join("project.ron").is_file());
+    }
 }
 
 #[test]
-fn delete_current_project_removes_directory_and_loads_default() {
+fn delete_current_project_removes_directory_and_loads_bsp_starter() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let name = format!(
@@ -2138,7 +2174,7 @@ fn delete_current_project_removes_directory_and_loads_default() {
     assert!(!target.exists());
     assert!(paths_equivalent(
         workspace.project_root(),
-        &psxed_project::default_project_dir()
+        &psxed_project::new_project_template_dir()
     ));
     assert!(!workspace.is_dirty());
 }

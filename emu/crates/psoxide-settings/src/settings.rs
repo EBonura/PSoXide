@@ -411,8 +411,8 @@ impl Default for EmulatorSettings {
 /// Editor-side preferences that persist across sessions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditorSettings {
-    /// Last-opened project directory. `None` on first launch -- the
-    /// frontend then opens `psxed_project::default_project_dir()`.
+    /// Last-opened project directory. `None` on first launch; the frontend
+    /// then opens the roofless BSP starter project.
     /// Updated by the frontend after every successful
     /// `open_directory` / `create_and_open_project` so re-launches
     /// resume on the project the user was last editing.
