@@ -42,14 +42,42 @@ EXPECT_PLAYER_DEATHS=1
 # door that reset closed, wall-stopping at x 3862 on the route line.
 EXPECT_PLAYER_X_BIASED=1003862
 EXPECT_PLAYER_Z_BIASED=1001536
-# The VRAM pin is canonical for THIS checkout (PSoXide-convergence): the
-# guest binary is not yet checkout-path-reproducible (cargo derives crate
-# metadata from the workspace path, reordering codegen), and the slice's
-# heavy streaming leaves loading-transient pixels outside the gameplay draw
-# window whose final state depends on code layout. Gameplay counters and
-# the DISPLAY hash are checkout-independent (verified across two worktrees
-# on 2026-08-11); a canonical-staging guest build to make VRAM pins
-# portable is an I1 work item.
+# KNOWN RED, and the pins below are deliberately NOT updated. Read this
+# before "fixing" the gate.
+#
+# The guest is now checkout-path-reproducible (tools/build_guest_staged.sh),
+# so the old "canonical per checkout" caveat is gone. What that exposed is
+# worse: this tape's GAMEPLAY COUNTERS depend on guest code layout, not just
+# the VRAM residue. Measured 2026-08-11 at identical sources and an identical
+# cooked generated/ tree, three different guest binaries:
+#
+#   checkout A, in-tree build : melee 4, enemy deaths 1, lava 6, taken 4
+#   checkout B, in-tree build : melee 3, enemy deaths 0, lava 0, taken 10
+#   canonical staged build    : melee 3, enemy deaths 0, lava 0, taken 10
+#                               (vram 0x6bd465ea8cee4049, display 0xddb73017e2e39d82,
+#                                byte-identical across both canonical replays)
+#
+# Route ticks (3000) and pad polls (3001) are identical in all three, so the
+# simulation clock and the input schedule are NOT diverging. Only the visual
+# frame rate is, which means melee hit detection is render-rate dependent: a
+# slower build tests fewer hit windows and a swing misses, the enemy survives,
+# and the run ends in an enemy kill instead of the authored lava death.
+#
+# Re-pinning to the canonical build's numbers would record a run where the
+# enemy never dies and the lava never fires, i.e. it would delete the souls
+# loop this gate exists to prove. So the pins stay at the authored intent and
+# the gate stays red until one of these lands (owner decision):
+#
+#   1. re-author souls-canonical.pxitape.csv with timing margin on the swings;
+#   2. make melee hit detection tick-authoritative rather than per-visual-frame;
+#   3. build replay gates with the `lockstep-visuals` feature, which fixes the
+#      render cadence to the simulation. Measured on the canonical staged
+#      build it restores the full loop (melee 4, enemy deaths 1, player
+#      deaths 1, lava 5, vram 0xd612464ccbd4fb97, display 0x945a5772d6525f52)
+#      but shifts every count, so it needs its own full re-pin.
+#
+# `PSOXIDE_GUEST_STAGE=0 make editor-souls-bsp-check` restores the old
+# per-checkout build if you need the pre-staging behaviour to compare.
 EXPECT_VRAM_HASH=0xc41710bde0e93e15
 EXPECT_DISPLAY_HASH=0x3c7a6bd9154f23de
 
