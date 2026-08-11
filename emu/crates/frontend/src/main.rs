@@ -1880,6 +1880,7 @@ impl ApplicationHandler for Shell {
                     }
                     editor_viewport
                 };
+                let mut pointer_menu_outcome = None;
                 profile.egui = gfx.render(|ctx| {
                     app::build_ui(
                         ctx,
@@ -1890,8 +1891,37 @@ impl ApplicationHandler for Shell {
                         editor_viewport.clone(),
                         display_uv,
                         dt,
-                    )
+                    );
+                    // Pointer actions are discovered while egui paints. Apply
+                    // them in this same redraw so browser file inputs retain
+                    // the click's transient user activation.
+                    if let Some(action) = state.menu.take_pending_pointer_action() {
+                        pointer_menu_outcome = Some(ui::apply_menu_action(state, action));
+                    }
                 });
+                match pointer_menu_outcome {
+                    Some(MenuOutcome::ClearHostKeyboardInput) => self.host_input.clear(),
+                    Some(MenuOutcome::Quit) => {
+                        state.stop_input_recording_if_active();
+                        #[cfg(feature = "editor")]
+                        state.stop_embedded_playtest();
+                        state.flush_pending_input_profile_capture();
+                        state.stop_examples_build();
+                        if let Err(error) = state.flush_memcard_port1() {
+                            eprintln!("[frontend] memcard flush on quit: {error}");
+                        }
+                        #[cfg(feature = "editor")]
+                        if let Err(error) = state.save_editor_project() {
+                            eprintln!("[frontend] editor save on quit: {error}");
+                        }
+                        if let Err(error) = state.save_settings() {
+                            eprintln!("[frontend] settings save on quit: {error}");
+                        }
+                        event_loop.exit();
+                        return;
+                    }
+                    Some(MenuOutcome::None) | None => {}
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 for path in state.take_pending_savestate_thumbnails() {
                     let result = match state.bus.as_ref() {
@@ -2974,6 +3004,17 @@ mod freelook_chord_tests {
         assert_eq!(c.update(true, false), None, "press alone does nothing");
         assert_eq!(c.update(true, false), None, "still held, still nothing");
         assert_eq!(c.update(false, false), Some(FreelookChordAction::Toggle));
+    }
+
+    /// Repeated short presses only switch freecam mode. A second tap must not
+    /// be mistaken for the deliberate hold gesture that resets the camera.
+    #[test]
+    fn a_second_tap_toggles_without_resetting() {
+        let mut c = FreelookChord::default();
+        for _ in 0..2 {
+            assert_eq!(c.update(true, false), None);
+            assert_eq!(c.update(false, false), Some(FreelookChordAction::Toggle));
+        }
     }
 
     /// The reset lands while the buttons are down, fires once however long the
