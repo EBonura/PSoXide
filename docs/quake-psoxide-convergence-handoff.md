@@ -1,6 +1,7 @@
 # Quake, PSoXide BSP, editor, and combat convergence handoff
 
-Last updated: 2026-08-11 (integration checkpoint, section 0). The original
+Last updated: 2026-08-11 (Level C.1 and deterministic-build integration,
+section 0). The original
 2026-08-10 21:50 BST snapshot text is retained below it; where the two
 disagree, section 0 and `docs/convergence-discrepancy-report-2026-08-11.md`
 are current.
@@ -9,8 +10,8 @@ Live integration branch: `codex/quake-psoxide-convergence`
 
 Live integration worktree: `/Users/ebonura/Desktop/repos/PSoXide-convergence`
 
-Snapshot HEAD when this document was created:
-`420e9deb8fd35c546856bd4985cbc957b7ed9857`
+Current PSoXide integration code HEAD before this documentation update:
+`6d7b4a87779843c4797bcb6942bc4c83e85d7a8b`
 
 ## 0. 2026-08-11 integration checkpoint (current state)
 
@@ -671,6 +672,133 @@ whose authored plane points do not coincide with every solved corner, resource
 replacement that preserves file length, external deletion and recreation of a
 runtime asset, repeated conflict/reload/save cycles and a clean from-scratch
 level authored by somebody who did not implement these tools.
+
+### 0.15 Level C.1 corrective authoring pass and open courtyard (2026-08-11)
+
+The owner's first native-editor test falsified two important assumptions in
+the Level C evidence. Brush transforms technically existed, but their gesture
+grammar was hidden behind the old selection control, and the initial window
+showed no obvious Move or Size operation. The same test also found that the
+stale 3D scene could remain visible, Top view could appear empty and brush
+wireframes could be unselectable. Section 0.14's headless evidence was useful,
+but it was not sufficient evidence of a discoverable level-building workflow.
+
+Corrective implementation commit
+`d61a195ada1778c376c7321bfa2a2f859157e5a6` was merged into
+`codex/quake-psoxide-convergence` by
+`6d7b4a87779843c4797bcb6942bc4c83e85d7a8b`.
+
+The corrected authoring contract is:
+
+- Move, Face, Edge and Vertex are separate, always-visible modes in both the
+  brush toolbar and brush Inspector. Move uses a plain drag. Select and Brush
+  tools share selected-brush transforms instead of requiring a hidden tool
+  switch.
+- Select reserves Shift, Ctrl and Command for additive click and marquee
+  behavior. The Brush tool retains its legacy Shift group-move shortcut, but
+  that shortcut is no longer required to discover movement.
+- Mode-specific 2D and 3D handles, cursor feedback and concise gesture hints
+  expose the available operation. Numeric Origin and axis-aligned Size are an
+  exact fallback; non-axis-aligned brushes retain face-plane editing.
+- 2D and 3D brush marquee dispatch uses the true pointer press origin rather
+  than the later drag-threshold crossing position. This was a real defect found
+  while reconciling seven full-suite failures.
+- Exact convex hits take priority, but an 8-pixel screen-space tolerance keeps
+  distant sub-pixel brushes selectable. Repeated clicks cycle coincident
+  projected brushes instead of making the rear brush unreachable.
+- `project.ron` is hashed on every bounded watch poll. File identity also
+  includes creation time and Unix inode/device where available, so same-size,
+  same-timestamp atomic replacement and delete/recreate cycles cannot evade the
+  watcher. Dirty Save remains fail-closed after an external change.
+
+New Project no longer copies the closed two-room door regression. It copies a
+separate tracked fixture at `editor/projects/brush-open-courtyard/`, generated
+by `gen-brush-open-courtyard`:
+
+- exactly 4096 by 4096 units of usable interior inside 4224-unit outer bounds;
+- one 64-unit floor slab and four 768-unit perimeter walls;
+- no ceiling or other above-floor solid anywhere across the usable interior;
+- `cobbles_1a.psxt` on the floor and `brick_1a.psxt` on the walls, replacing
+  the prior Aletha-like starter material;
+- a player spawn whose player-hull zero-length trace is not start-solid, plus
+  two blockout lights;
+- initial Top framing that contains all outer bounds while keeping each
+  64-unit wall more than two pixels thick.
+
+The frozen `brush-first-playable` generator and tracked fixture did not change
+in the C.1 commit. At the time of integration, the convergence worktree has one
+preserved user-owned modification to
+`editor/projects/brush-first-playable/project.ron`: native editor use saved a
+different orbit camera and removed the final newline. Do not reset, stage or
+commit that file without the owner deciding whether to keep it. C.1 merged
+cleanly around it because C.1 does not touch the fixture.
+
+Validation at the implementation commit:
+
+- `cargo test -p psxed-ui --lib`: 375 passed, 1 intentional diagnostic ignore;
+- `cargo test -p psxed-project --lib`: 475 passed, 1 intentional diagnostic
+  ignore;
+- real-egui brush-tool group: 42 passed;
+- courtyard generator tests: 2 passed, including byte identity against all
+  three tracked files;
+- New Project copies both PSXT assets byte-for-byte, cooks PXBSP successfully,
+  starts outside the player hull and proves the whole interior is roofless;
+- touched-file rustfmt and `git diff --check`: passed.
+
+After the merge, the parent reran the PXBSP template/spawn test, the two
+generator tests, all 42 real-egui brush tests and the exact New Project
+courtyard copy/framing test. All passed. No native GUI screenshot, manual
+compositor claim or original-hardware claim was manufactured. The owner should
+now create a fresh project in the convergence worktree and challenge the
+workflow directly; existing projects are deliberately never rewritten by the
+template change.
+
+### 0.16 Quake and demo-disc lanes active after Level C.1
+
+Quake deterministic shipping build commit
+`2d26f9eeb624a562ba00f4ced121b740fd61d4bf` is merged into
+`codex/quake-convergence` at
+`ea183a0`. A canonical content-addressed guest staging path, isolated shipping
+Cargo home, ambient compiler override gate and schema-1 provenance sidecar make
+two clean checkouts produce byte-identical EXE, BIN, CUE and sidecar bytes.
+The merge-level `cargo test` rerun passed all 24 builder tests. This does not
+prove original-hardware behavior.
+
+The first bounded Quake item/weapon checkpoint is clean at
+`2802e5a6da3927e4620554287f2cb4f8c182eb87` on
+`codex/quake-items-weapons`. It adds persistent inventory and pickups, armor,
+keys, ammo, axe, shotgun and a visible fixed-pool rocket launcher with direct,
+splash and self damage. It is not yet merged because a second checkpoint is
+actively adding super shotgun, nailgun, super nailgun, grenade launcher and
+lightning. Do not describe either checkpoint as full Episode 1. Enemy attacks,
+player death/HUD, many entity behaviors, map progression and the Chthon finale
+remain subject to the Episode 1 adversarial audit.
+
+The demo-disc provenance consumer is also active on
+`codex/quake-shareware-demo-disc`. Its current uncommitted schema-3 receipt
+binds clean Quake and PSoXide revisions, the canonical shareware PAK identity,
+guest recipe/toolchain, release/no-feature build and exact EXE/BIN/CUE bytes to
+the Quake schema-1 sidecar. This checkpoint still pins the pre-C.1 PSoXide and
+pre-arsenal Quake revisions for reproducible testing. After the remaining
+Quake and PSoXide changes land, rebuild Quake from the final pins, regenerate
+the sidecar and update the demo receipt in one final repin. Never commit the
+shareware PAK, Quake EXE/BIN/CUE or combined demo-disc image, and do not publish
+the opt-in pressing without the separate legal decision.
+
+Challenge all three claims before final convergence:
+
+1. Create a fresh editor project, select overlapping and distant brushes, use
+   every visible transform mode in 2D and 3D, save, close, reopen, cook and Play.
+2. Rebuild the final Quake revision from two genuinely different clean checkout
+   paths and compare EXE, BIN, CUE and the full sidecar byte-for-byte.
+3. Enumerate the actual entity classnames in every shareware Episode 1 map and
+   map each one to a tested runtime behavior. A green resource/cook gate is not
+   evidence that the entity behaves correctly.
+4. Replay a complete honest map-to-map Episode 1 route including damage, death,
+   doors, lifts, trains, teleports, water/hazards, secrets and Chthon. Missing
+   behavior must fail the gate or remain explicitly open.
+5. Verify the final combined disc receipt, TOC relocation and embedded Quake
+   image from exact final pins. Emulator success is still not silicon proof.
 
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
