@@ -160,6 +160,8 @@ pub(super) const COMBO_ATTACK_BUTTON: u16 = button::L2;
 /// field yet; authoring it is a future editor slice). Death/respawn
 /// handling is phase 4 (checkpoint loops): health floors at 0.
 pub(super) const PLAYER_MAX_HEALTH: u16 = 100;
+/// Delay between fatal BSP hazard contact and checkpoint/spawn reset.
+pub(super) const BSP_HAZARD_DEATH_TICKS: u8 = 30;
 
 #[cfg(feature = "ot-2048")]
 pub(super) const OT_DEPTH: usize = 2048;
