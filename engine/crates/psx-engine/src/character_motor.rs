@@ -119,6 +119,7 @@ impl CharacterCollisionAabb {
 pub struct CharacterBlockerTraceProvider<'provider, 'blockers, P: ?Sized> {
     provider: &'provider mut P,
     blockers: &'blockers [CharacterCollisionCylinder],
+    aabb_blockers: &'blockers [CharacterCollisionAabb],
 }
 
 impl<'provider, 'blockers, P: CollisionTraceProvider + ?Sized>
@@ -129,7 +130,26 @@ impl<'provider, 'blockers, P: CollisionTraceProvider + ?Sized>
         provider: &'provider mut P,
         blockers: &'blockers [CharacterCollisionCylinder],
     ) -> Self {
-        Self { provider, blockers }
+        Self {
+            provider,
+            blockers,
+            aabb_blockers: &[],
+        }
+    }
+
+    /// Compose dynamic actor cylinders and static prop AABBs over `provider`
+    /// without allocation. World geometry wins exact trace-fraction ties,
+    /// followed by cylinders and then AABBs in caller-owned slice order.
+    pub const fn new_with_aabbs(
+        provider: &'provider mut P,
+        blockers: &'blockers [CharacterCollisionCylinder],
+        aabb_blockers: &'blockers [CharacterCollisionAabb],
+    ) -> Self {
+        Self {
+            provider,
+            blockers,
+            aabb_blockers,
+        }
     }
 }
 
@@ -143,6 +163,11 @@ impl<P: CollisionTraceProvider + ?Sized> CollisionTraceProvider
         }
         for &blocker in self.blockers {
             if let Some(candidate) = trace_character_blocker(query, blocker) {
+                merge_collision_trace(&mut best, candidate);
+            }
+        }
+        for &blocker in self.aabb_blockers {
+            if let Some(candidate) = trace_aabb_blocker(query, blocker) {
                 merge_collision_trace(&mut best, candidate);
             }
         }
@@ -2362,6 +2387,263 @@ fn blocker_overlap_at_fraction(
         <= square_i32_saturating(radius)
 }
 
+/// Trace one upright moving body against one static prop AABB.
+///
+/// Like actor cylinders, prop blockers participate only in horizontal body
+/// sweeps and zero-length recovery probes. They are not supporting BSP floors,
+/// and the bounded step lift must not make a low prop silently steppable (the
+/// grid backend has always treated these authored blockers as obstacles).
+/// Candidate fractions cover every AABB side transition and every rounded
+/// cylinder/AABB corner; the final entry is refined at Q0.12 precision.
+fn trace_aabb_blocker(
+    query: CollisionTraceQuery,
+    blocker: CharacterCollisionAabb,
+) -> Option<CollisionTrace> {
+    let CollisionTraceShape::Body { radius, height } = query.shape else {
+        return None;
+    };
+    if radius <= 0 || height <= 0 || query.start.y != query.end.y {
+        return None;
+    }
+    let min = RoomPoint::new(
+        blocker.min.x.min(blocker.max.x),
+        blocker.min.y.min(blocker.max.y),
+        blocker.min.z.min(blocker.max.z),
+    );
+    let max = RoomPoint::new(
+        blocker.min.x.max(blocker.max.x),
+        blocker.min.y.max(blocker.max.y),
+        blocker.min.z.max(blocker.max.z),
+    );
+    if min.x == max.x || min.y == max.y || min.z == max.z {
+        return None;
+    }
+    let body_top = query.start.y.saturating_add(height);
+    let blocker_top = max.y.saturating_add(STEP_UP_HEIGHT);
+    if body_top <= min.y || blocker_top <= query.start.y {
+        return None;
+    }
+    let sweep_min_x = query.start.x.min(query.end.x).saturating_sub(radius);
+    let sweep_max_x = query.start.x.max(query.end.x).saturating_add(radius);
+    let sweep_min_z = query.start.z.min(query.end.z).saturating_sub(radius);
+    let sweep_max_z = query.start.z.max(query.end.z).saturating_add(radius);
+    if sweep_max_x < min.x || max.x < sweep_min_x || sweep_max_z < min.z || max.z < sweep_min_z {
+        return None;
+    }
+
+    let radius_sq = square_i32_saturating(radius);
+    let move_x = query.end.x.saturating_sub(query.start.x);
+    let move_z = query.end.z.saturating_sub(query.start.z);
+    let start_delta = aabb_contact_delta(query.start, min, max);
+    let start_sq =
+        square_i32_saturating(start_delta.0).saturating_add(square_i32_saturating(start_delta.1));
+    if start_sq < radius_sq {
+        return Some(CollisionTrace {
+            all_solid: aabb_overlap_at_fraction(query, min, max, radius, Q12::SCALE),
+            start_solid: true,
+            fraction_q12: 0,
+            end: query.start,
+            normal_q12: aabb_contact_normal(query.start, min, max, move_x, move_z),
+            plane_distance: 0,
+        });
+    }
+    if start_sq == radius_sq {
+        let outward_dot = start_delta
+            .0
+            .saturating_mul(move_x)
+            .saturating_add(start_delta.1.saturating_mul(move_z));
+        if outward_dot >= 0 {
+            return None;
+        }
+        return Some(CollisionTrace {
+            all_solid: false,
+            start_solid: false,
+            fraction_q12: 0,
+            end: query.start,
+            normal_q12: aabb_contact_normal(query.start, min, max, move_x, move_z),
+            plane_distance: 0,
+        });
+    }
+
+    let length_sq = square_i32_saturating(move_x).saturating_add(square_i32_saturating(move_z));
+    if length_sq <= 0 {
+        return None;
+    }
+
+    let mut closest_q12 = 0;
+    let mut closest_sq = aabb_distance_sq_at_fraction_q12(query, min, max, 0);
+    let mut consider = |candidate: i32| {
+        // Q12 interpolation truncation can place a mathematical boundary on
+        // either adjacent discrete fraction. Inspect both neighbors as part of
+        // the candidate without scanning the whole segment.
+        for offset in -1i32..=1 {
+            let fraction = candidate.saturating_add(offset).clamp(0, Q12::SCALE);
+            let distance_sq = aabb_distance_sq_at_fraction_q12(query, min, max, fraction);
+            if distance_sq < closest_sq || (distance_sq == closest_sq && fraction < closest_q12) {
+                closest_sq = distance_sq;
+                closest_q12 = fraction;
+            }
+        }
+    };
+    consider(Q12::SCALE);
+    if move_x != 0 {
+        consider(div_q12_i32(min.x.saturating_sub(query.start.x), move_x));
+        consider(div_q12_i32(max.x.saturating_sub(query.start.x), move_x));
+    }
+    if move_z != 0 {
+        consider(div_q12_i32(min.z.saturating_sub(query.start.z), move_z));
+        consider(div_q12_i32(max.z.saturating_sub(query.start.z), move_z));
+    }
+    for (corner_x, corner_z) in [
+        (min.x, min.z),
+        (min.x, max.z),
+        (max.x, min.z),
+        (max.x, max.z),
+    ] {
+        let to_corner_x = corner_x.saturating_sub(query.start.x);
+        let to_corner_z = corner_z.saturating_sub(query.start.z);
+        let projection = to_corner_x
+            .saturating_mul(move_x)
+            .saturating_add(to_corner_z.saturating_mul(move_z));
+        consider(div_q12_i32(projection, length_sq));
+    }
+    let radius_q8 = radius.saturating_mul(256);
+    if closest_sq > square_i32_saturating(radius_q8)
+        || !aabb_overlap_at_fraction(query, min, max, radius, closest_q12)
+    {
+        return None;
+    }
+
+    let mut clear_q12 = 0i32;
+    let mut contact_q12 = closest_q12;
+    while clear_q12.saturating_add(1) < contact_q12 {
+        let middle = clear_q12.saturating_add(contact_q12) / 2;
+        if aabb_overlap_at_fraction(query, min, max, radius, middle) {
+            contact_q12 = middle;
+        } else {
+            clear_q12 = middle;
+        }
+    }
+    // Q24.8 keeps the hot path 32-bit on PS1, but its per-axis quantisation can
+    // move a rounded-corner entry by a handful of Q0.12 fractions. Search the
+    // bounded neighborhood behind the binary result so the earliest discrete
+    // overlapping fraction remains authoritative.
+    let refine_start = contact_q12.saturating_sub(16);
+    for candidate in refine_start..contact_q12 {
+        if aabb_overlap_at_fraction(query, min, max, radius, candidate) {
+            contact_q12 = candidate;
+            break;
+        }
+    }
+    let fraction_q12 = contact_q12.min(COLLISION_FRACTION_ONE_Q12 - 1);
+    let end = trace_lerp_point(query.start, query.end, fraction_q12);
+    Some(CollisionTrace {
+        all_solid: false,
+        start_solid: false,
+        fraction_q12,
+        end,
+        normal_q12: aabb_contact_normal(end, min, max, move_x, move_z),
+        plane_distance: 0,
+    })
+}
+
+fn aabb_overlap_at_fraction(
+    query: CollisionTraceQuery,
+    min: RoomPoint,
+    max: RoomPoint,
+    radius: i32,
+    fraction_q12: i32,
+) -> bool {
+    let radius_q8 = radius.max(0).saturating_mul(256);
+    aabb_distance_sq_at_fraction_q12(query, min, max, fraction_q12)
+        <= square_i32_saturating(radius_q8)
+}
+
+fn aabb_distance_sq_at_fraction_q12(
+    query: CollisionTraceQuery,
+    min: RoomPoint,
+    max: RoomPoint,
+    fraction_q12: i32,
+) -> i32 {
+    // Keep the moving centre in Q24.8 for the overlap predicate. Rounding X
+    // and Z to whole engine units independently can make a diagonal path's
+    // distance non-convex (and hide a one-fraction corner crossing), while
+    // Q20.12 squared would require costly 64-bit helpers on PS1. Q24.8 retains
+    // 1/256-unit precision using the engine's normal saturating 32-bit math.
+    let fraction_q12 = fraction_q12.clamp(0, Q12::SCALE);
+    let point_x_q8 = query
+        .start
+        .x
+        .saturating_mul(256)
+        .saturating_add(
+            query
+                .end
+                .x
+                .saturating_sub(query.start.x)
+                .saturating_mul(fraction_q12)
+                >> 4,
+        );
+    let point_z_q8 = query
+        .start
+        .z
+        .saturating_mul(256)
+        .saturating_add(
+            query
+                .end
+                .z
+                .saturating_sub(query.start.z)
+                .saturating_mul(fraction_q12)
+                >> 4,
+        );
+    let min_x_q8 = min.x.saturating_mul(256);
+    let max_x_q8 = max.x.saturating_mul(256);
+    let min_z_q8 = min.z.saturating_mul(256);
+    let max_z_q8 = max.z.saturating_mul(256);
+    let dx = point_x_q8.saturating_sub(point_x_q8.clamp(min_x_q8, max_x_q8));
+    let dz = point_z_q8.saturating_sub(point_z_q8.clamp(min_z_q8, max_z_q8));
+    square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
+}
+
+fn aabb_contact_delta(point: RoomPoint, min: RoomPoint, max: RoomPoint) -> (i32, i32) {
+    let closest_x = point.x.clamp(min.x, max.x);
+    let closest_z = point.z.clamp(min.z, max.z);
+    (
+        point.x.saturating_sub(closest_x),
+        point.z.saturating_sub(closest_z),
+    )
+}
+
+fn aabb_contact_normal(
+    point: RoomPoint,
+    min: RoomPoint,
+    max: RoomPoint,
+    move_x: i32,
+    move_z: i32,
+) -> [i16; 3] {
+    let delta = aabb_contact_delta(point, min, max);
+    if delta != (0, 0) {
+        return blocker_contact_normal(delta.0, delta.1, move_x, move_z);
+    }
+    // A recovery probe can begin inside the box. Pick the nearest horizontal
+    // face deterministically; direction breaks only exact distance ties.
+    let faces = [
+        (point.x.saturating_sub(min.x), [-4096, 0, 0]),
+        (max.x.saturating_sub(point.x), [4096, 0, 0]),
+        (point.z.saturating_sub(min.z), [0, 0, -4096]),
+        (max.z.saturating_sub(point.z), [0, 0, 4096]),
+    ];
+    let mut best = faces[0];
+    for face in faces.into_iter().skip(1) {
+        if face.0 < best.0 {
+            best = face;
+        }
+    }
+    if faces.iter().filter(|face| face.0 == best.0).count() > 1 {
+        return blocker_contact_normal(0, 0, move_x, move_z);
+    }
+    best.1
+}
+
 fn trace_lerp_point(start: RoomPoint, end: RoomPoint, fraction_q12: i32) -> RoomPoint {
     let fraction = Q12::from_raw(fraction_q12.clamp(0, Q12::SCALE));
     RoomPoint::new(
@@ -2595,6 +2877,107 @@ mod tests {
     }
 
     #[test]
+    fn aabb_trace_hits_swept_prop_before_endpoint() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(40, 0, 0), 2, 8);
+        let aabbs = [CharacterCollisionAabb::new(
+            RoomPoint::new(10, 0, -4),
+            RoomPoint::new(14, 8, 4),
+        )];
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace::unobstructed(query.end),
+            fail_once: false,
+        };
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &aabbs);
+        let trace = trace_collision(&mut provider, query).expect("compound trace");
+        assert!(trace.hit());
+        assert!(!trace.start_solid);
+        assert!((7..=8).contains(&trace.end.x), "{trace:?}");
+        assert_eq!(trace.normal_q12, [-4096, 0, 0]);
+    }
+
+    #[test]
+    fn aabb_trace_does_not_square_off_rounded_body_corner() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 6), RoomPoint::new(7, 0, 6), 4, 8);
+        let aabbs = [CharacterCollisionAabb::new(
+            RoomPoint::new(10, 0, 10),
+            RoomPoint::new(20, 8, 20),
+        )];
+        let clear = CollisionTrace::unobstructed(query.end);
+        let mut world = FixedTraceProvider {
+            trace: clear,
+            fail_once: false,
+        };
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &aabbs);
+        assert_eq!(trace_collision(&mut provider, query), Ok(clear));
+    }
+
+    #[test]
+    fn aabb_trace_allows_motion_away_from_exact_tangent() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(8, 0, 0), RoomPoint::new(-20, 0, 0), 2, 8);
+        let aabbs = [CharacterCollisionAabb::new(
+            RoomPoint::new(10, 0, -4),
+            RoomPoint::new(14, 8, 4),
+        )];
+        let clear = CollisionTrace::unobstructed(query.end);
+        let mut world = FixedTraceProvider {
+            trace: clear,
+            fail_once: false,
+        };
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &aabbs);
+        assert_eq!(trace_collision(&mut provider, query), Ok(clear));
+    }
+
+    #[test]
+    fn aabb_trace_matches_exhaustive_q12_entry_for_crossing_paths() {
+        let min = RoomPoint::new(-4, 0, -3);
+        let max = RoomPoint::new(5, 8, 6);
+        let blocker = CharacterCollisionAabb::new(min, max);
+        let coordinates = [-16, -9, 0, 9, 16];
+        for radius in [1, 3, 7] {
+            let radius_sq = square_i32_saturating(radius);
+            for start_x in coordinates {
+                for start_z in coordinates {
+                    let start = RoomPoint::new(start_x, 0, start_z);
+                    let start_delta = aabb_contact_delta(start, min, max);
+                    let start_sq = square_i32_saturating(start_delta.0)
+                        .saturating_add(square_i32_saturating(start_delta.1));
+                    if start_sq <= radius_sq {
+                        continue;
+                    }
+                    for end_x in coordinates {
+                        for end_z in coordinates {
+                            let end = RoomPoint::new(end_x, 0, end_z);
+                            if end == start {
+                                continue;
+                            }
+                            let query = CollisionTraceQuery::body(start, end, radius, 8);
+                            let expected = (0..=Q12::SCALE).find(|&fraction| {
+                                aabb_overlap_at_fraction(query, min, max, radius, fraction)
+                            });
+                            let actual = trace_aabb_blocker(query, blocker);
+                            assert_eq!(
+                                actual.is_some(),
+                                expected.is_some(),
+                                "radius={radius} start={start:?} end={end:?} actual={actual:?} expected={expected:?}"
+                            );
+                            if let (Some(actual), Some(expected)) = (actual, expected) {
+                                assert_eq!(
+                                    actual.fraction_q12,
+                                    expected.min(COLLISION_FRACTION_ONE_Q12 - 1),
+                                    "radius={radius} start={start:?} end={end:?} actual={actual:?} expected={expected}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn world_hit_wins_exact_fraction_tie_with_dynamic_blocker() {
         let query =
             CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
@@ -2616,6 +2999,28 @@ mod tests {
     }
 
     #[test]
+    fn world_hit_wins_exact_fraction_tie_with_aabb_blocker() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
+        let blocker =
+            CharacterCollisionAabb::new(RoomPoint::new(10, 0, -4), RoomPoint::new(14, 8, 4));
+        let prop = trace_aabb_blocker(query, blocker).expect("prop candidate");
+        let world_normal = [0, 0, -4096];
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace {
+                normal_q12: world_normal,
+                ..prop
+            },
+            fail_once: false,
+        };
+        let aabbs = [blocker];
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &aabbs);
+        let trace = trace_collision(&mut provider, query).expect("compound trace");
+        assert_eq!(trace.fraction_q12, prop.fraction_q12);
+        assert_eq!(trace.normal_q12, world_normal);
+    }
+
+    #[test]
     fn blocker_layer_preserves_failed_output_and_reuses_immediately() {
         let query =
             CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
@@ -2623,6 +3028,10 @@ mod tests {
             RoomPoint::new(10, 0, 0),
             2,
             8,
+        )];
+        let aabbs = [CharacterCollisionAabb::new(
+            RoomPoint::new(12, 0, -4),
+            RoomPoint::new(16, 8, 4),
         )];
         let mut world = FixedTraceProvider {
             trace: CollisionTrace::unobstructed(query.end),
@@ -2637,7 +3046,8 @@ mod tests {
             plane_distance: 7,
         };
         let mut output = sentinel;
-        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &blockers, &aabbs);
         assert!(!provider.trace_into(query, &mut output));
         assert_eq!(output, sentinel);
         assert!(provider.trace_into(query, &mut output));
@@ -2661,6 +3071,39 @@ mod tests {
         };
         let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
         assert_eq!(trace_collision(&mut provider, query), Ok(clear));
+    }
+
+    #[test]
+    fn downward_floor_probe_ignores_prop_tops() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 20, 0), RoomPoint::new(0, -20, 0), 2, 8);
+        let aabbs = [CharacterCollisionAabb::new(
+            RoomPoint::new(-4, 0, -4),
+            RoomPoint::new(4, 10, 4),
+        )];
+        let clear = CollisionTrace::unobstructed(query.end);
+        let mut world = FixedTraceProvider {
+            trace: clear,
+            fail_once: false,
+        };
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &aabbs);
+        assert_eq!(trace_collision(&mut provider, query), Ok(clear));
+    }
+
+    #[test]
+    fn trace_body_step_respects_aabb_blocker() {
+        let aabbs = [CharacterCollisionAabb::new(
+            RoomPoint::new(8, 0, -4),
+            RoomPoint::new(14, 8, 4),
+        )];
+        let mut world = FlatTraceProvider::new(None);
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &aabbs);
+        let step =
+            commit_body_step_with_trace_provider(&mut provider, RoomPoint::ZERO, 20, 0, 2, 8)
+                .expect("trace body step");
+        assert_eq!(step.position, RoomPoint::ZERO);
+        assert!(!step.moved);
+        assert!(step.blocked);
     }
 
     #[test]

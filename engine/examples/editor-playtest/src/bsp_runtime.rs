@@ -17,10 +17,11 @@ use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, SliceReader, Vec3I32};
 use psx_engine::{
     commit_body_step_with_trace_provider, trace_collision, BodyStep, CharacterBlockerTraceProvider,
-    CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
-    CharacterMotorState, CollisionQueryError, CollisionTraceQuery, CollisionTraceShape, OtFrame,
-    PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
+    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame,
+    CharacterMotorInput, CharacterMotorState, CollisionQueryError, CollisionTraceQuery,
+    CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig,
+    ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_level::{find_asset_of_kind, AssetId, AssetKind};
 
@@ -381,6 +382,7 @@ impl BspRuntime {
         config: CharacterMotorConfig,
         delta_vblanks: u16,
         blockers: &[CharacterCollisionCylinder],
+        aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<CharacterMotorFrame, CollisionQueryError> {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
@@ -398,12 +400,14 @@ impl BspRuntime {
             &mut self.trace_scratch,
         )
         .expect("validated PXBSP player collision provider");
-        let mut provider = CharacterBlockerTraceProvider::new(&mut provider, blockers);
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         motor.update_vblanks_with_trace_provider(&mut provider, input, config, delta_vblanks)
     }
 
     /// Move one gameplay entity through the same static-world, transformed-
-    /// mover, and dynamic-cylinder trace stack used by the player motor.
+    /// mover, dynamic-cylinder, and authored-prop trace stack used by the
+    /// player motor.
     pub(super) fn commit_body_step(
         &mut self,
         start: RoomPoint,
@@ -412,6 +416,7 @@ impl BspRuntime {
         radius: i32,
         height: i32,
         blockers: &[CharacterCollisionCylinder],
+        aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<BodyStep, CollisionQueryError> {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
@@ -428,7 +433,8 @@ impl BspRuntime {
             &mut self.trace_scratch,
         )
         .expect("validated PXBSP entity collision provider");
-        let mut provider = CharacterBlockerTraceProvider::new(&mut provider, blockers);
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         commit_body_step_with_trace_provider(&mut provider, start, dx, dz, radius, height)
     }
 
