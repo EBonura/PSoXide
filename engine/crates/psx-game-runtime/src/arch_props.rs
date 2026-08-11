@@ -158,6 +158,37 @@ pub fn collect_arch_prop_collision_blockers(
     count
 }
 
+/// Append every live arch segment, rejecting malformed indices, bounds, and
+/// output overflow instead of truncating them.
+pub fn collect_arch_prop_collision_blockers_checked(
+    props: &[LevelArchPropRecord],
+    collisions: &[LevelArchPropCollisionRecord],
+    room: RoomIndex,
+    out: &mut [CharacterCollisionAabb],
+) -> Option<usize> {
+    let mut count = 0usize;
+    for prop in props {
+        if prop.room != room || prop.flags & arch_prop_flags::COLLISION_ENABLED == 0 {
+            continue;
+        }
+        let first = usize::from(prop.collision_first);
+        let end = first.checked_add(usize::from(prop.collision_count))?;
+        let records = collisions.get(first..end)?;
+        for collision in records {
+            let blocker = CharacterCollisionAabb::new(
+                RoomPoint::new(collision.min[0], collision.min[1], collision.min[2]),
+                RoomPoint::new(collision.max[0], collision.max[1], collision.max[2]),
+            );
+            if !blocker.is_strictly_valid() {
+                return None;
+            }
+            *out.get_mut(count)? = blocker;
+            count += 1;
+        }
+    }
+    Some(count)
+}
+
 fn surface_front_facing(camera: &WorldCamera, surface: &LevelArchPropSurfaceRecord) -> bool {
     let vx = camera.position.x.saturating_sub(surface.center[0]);
     let vy = camera.position.y.saturating_sub(surface.center[1]);
@@ -167,6 +198,97 @@ fn surface_front_facing(camera: &WorldCamera, surface: &LevelArchPropSurfaceReco
         .saturating_add(surface.normal[1].saturating_mul(vy))
         .saturating_add(surface.normal[2].saturating_mul(vz))
         > 0
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    const fn prop(room: u16, first: u16, count: u8, enabled: bool) -> LevelArchPropRecord {
+        LevelArchPropRecord {
+            room: RoomIndex(room),
+            texture_assets: [None; psx_level::ARCH_PROP_MATERIAL_COUNT],
+            blend_modes: [0; psx_level::ARCH_PROP_MATERIAL_COUNT],
+            uvs: [[(0, 0); 4]; psx_level::ARCH_PROP_MATERIAL_COUNT],
+            surface_first: 0,
+            surface_count: 0,
+            collision_first: first,
+            collision_count: count,
+            center: [0; 3],
+            cull_radius: 1,
+            flags: if enabled {
+                arch_prop_flags::COLLISION_ENABLED
+            } else {
+                0
+            },
+        }
+    }
+
+    #[test]
+    fn checked_arch_collection_rejects_bad_ranges_bounds_and_capacity() {
+        let collisions = [
+            LevelArchPropCollisionRecord {
+                min: [10, 0, -4],
+                max: [14, 8, 4],
+            },
+            LevelArchPropCollisionRecord {
+                min: [20, 0, -4],
+                max: [24, 8, 4],
+            },
+        ];
+        let mut out = [CharacterCollisionAabb::EMPTY; 2];
+        assert_eq!(
+            collect_arch_prop_collision_blockers_checked(
+                &[prop(0, 0, 2, true)],
+                &collisions,
+                RoomIndex(0),
+                &mut out,
+            ),
+            Some(2)
+        );
+        assert_eq!(out[1].min, RoomPoint::new(20, 0, -4));
+        assert_eq!(
+            collect_arch_prop_collision_blockers_checked(
+                &[prop(0, 1, 2, true)],
+                &collisions,
+                RoomIndex(0),
+                &mut out,
+            ),
+            None
+        );
+        assert_eq!(
+            collect_arch_prop_collision_blockers_checked(
+                &[prop(0, 0, 2, true)],
+                &collisions,
+                RoomIndex(0),
+                &mut out[..1],
+            ),
+            None
+        );
+        let malformed = [LevelArchPropCollisionRecord {
+            min: [10, 8, -4],
+            max: [14, 0, 4],
+        }];
+        assert_eq!(
+            collect_arch_prop_collision_blockers_checked(
+                &[prop(0, 0, 1, true)],
+                &malformed,
+                RoomIndex(0),
+                &mut out,
+            ),
+            None
+        );
+        assert_eq!(
+            collect_arch_prop_collision_blockers_checked(
+                &[prop(0, 9, 7, false), prop(1, 9, 7, true)],
+                &[],
+                RoomIndex(0),
+                &mut out,
+            ),
+            Some(0),
+            "non-collidable and other-room records must not inspect ranges"
+        );
+    }
 }
 
 fn arch_prop_uv_at(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> (u8, u8) {

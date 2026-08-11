@@ -559,7 +559,20 @@ impl Playtest {
         let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
         let blocker_count = self.collect_collision_blockers(&mut blockers);
         let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
-        let aabb_blocker_count = self.collect_static_prop_aabb_blockers(&mut aabb_blockers);
+        let aabb_blocker_count = if self.bsp.is_some() {
+            let Some(count) =
+                self.collect_static_prop_aabb_blockers_checked(&mut aabb_blockers)
+            else {
+                // Cooked BSP collision state is authoritative. A malformed or
+                // overflowing prop table freezes this frame instead of
+                // allowing movement through a silently omitted blocker.
+                telemetry::stage_end(telemetry::stage::SIM_COLLISION);
+                return;
+            };
+            count
+        } else {
+            self.collect_static_prop_aabb_blockers(&mut aabb_blockers)
+        };
         let motor_frame = if self.bsp.is_some() {
             // The resident provider owns its bounded hull scratch and mover
             // transforms. Actor/cylinder and authored image/box/arch blockers

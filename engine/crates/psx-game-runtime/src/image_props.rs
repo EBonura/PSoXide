@@ -59,6 +59,38 @@ pub fn collect_image_prop_collision_blockers(
     count
 }
 
+/// Append every collidable ImageProp or reject malformed/overflow state.
+pub fn collect_image_prop_collision_blockers_checked(
+    props: &[LevelImagePropRecord],
+    room: RoomIndex,
+    out: &mut [CharacterCollisionAabb],
+) -> Option<usize> {
+    let mut count = 0usize;
+    for prop in props {
+        if prop.room != room || prop.flags & image_prop_flags::COLLISION_ENABLED == 0 {
+            continue;
+        }
+        let blocker = CharacterCollisionAabb::new(
+            RoomPoint::new(
+                prop.collision_min[0],
+                prop.collision_min[1],
+                prop.collision_min[2],
+            ),
+            RoomPoint::new(
+                prop.collision_max[0],
+                prop.collision_max[1],
+                prop.collision_max[2],
+            ),
+        );
+        if !blocker.is_strictly_valid() {
+            return None;
+        }
+        *out.get_mut(count)? = blocker;
+        count += 1;
+    }
+    Some(count)
+}
+
 /// Draw the authored image props of `current_room`: lit, fogged,
 /// optionally GTE-projected textured cards. `GTE_PROJECT` is a const
 /// parameter so a game that disables the GTE path pays nothing for it
@@ -421,5 +453,33 @@ mod tests {
         assert_eq!(two[0], one[0]);
         assert_eq!(two[1].min, RoomPoint::new(-40, -50, -60));
         assert_eq!(two[1].max, RoomPoint::new(-10, -20, -30));
+    }
+
+    #[test]
+    fn checked_image_prop_collection_rejects_malformed_and_overflow_state() {
+        let enabled = image_prop_flags::COLLISION_ENABLED;
+        let valid = prop(0, [1, 2, 3], [4, 5, 6], enabled);
+        let malformed = prop(0, [4, 2, 3], [1, 5, 6], enabled);
+        let mut out = [CharacterCollisionAabb::EMPTY; 1];
+        assert_eq!(
+            collect_image_prop_collision_blockers_checked(
+                &[valid, malformed],
+                RoomIndex(0),
+                &mut out,
+            ),
+            None
+        );
+        assert_eq!(
+            collect_image_prop_collision_blockers_checked(&[valid, valid], RoomIndex(0), &mut out,),
+            None
+        );
+        assert_eq!(
+            collect_image_prop_collision_blockers_checked(
+                &[prop(0, [0; 3], [0; 3], 0)],
+                RoomIndex(0),
+                &mut out,
+            ),
+            Some(0)
+        );
     }
 }
