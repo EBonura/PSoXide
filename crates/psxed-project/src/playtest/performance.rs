@@ -1,4 +1,18 @@
-use super::{streamed_room_chunk_memory_report, PlaytestPackage};
+use super::{streamed_room_chunk_memory_report, PlaytestPackage, PlaytestWorldGeometry};
+
+fn pxbsp_surface_counts(package: &PlaytestPackage) -> Result<Option<(usize, usize)>, String> {
+    let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
+        return Ok(None);
+    };
+    let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
+    map.load(0, &mut psx_bsp::SliceReader::new(&world.bytes))
+        .map_err(|error| format!("performance envelope: invalid resident PXBSP: {error}"))?;
+    let faces = map.faces().len();
+    let triangles = map.faces().iter().fold(0usize, |total, face| {
+        total.saturating_add((face.vertex_count.max(0) as usize).saturating_sub(2))
+    });
+    Ok(Some((faces, triangles)))
+}
 
 /// Warning-only, camera-independent upper envelope for cooked playtest work.
 ///
@@ -48,6 +62,10 @@ pub fn playtest_performance_envelope(
     let mut pvs_surfaces = Vec::with_capacity(room_count);
     let mut authored_triangles = vec![0usize; room_count];
     let mut prop_surfaces = vec![0usize; room_count];
+    let pxbsp_counts = pxbsp_surface_counts(package)?;
+    if let Some((_, triangles)) = pxbsp_counts {
+        authored_triangles[0] = triangles;
+    }
     for chunk in &package.chunks {
         if let Some(total) = authored_triangles.get_mut(chunk.room as usize) {
             *total = total.saturating_add(chunk.triangles);
@@ -80,7 +98,14 @@ pub fn playtest_performance_envelope(
     }
 
     for room in 0..room_count {
-        pvs_surfaces.push(max_room_pvs_surfaces(package, room)?);
+        pvs_surfaces.push(if room == 0 {
+            match pxbsp_counts {
+                Some((surfaces, _)) => surfaces,
+                None => max_room_pvs_surfaces(package, room)?,
+            }
+        } else {
+            max_room_pvs_surfaces(package, room)?
+        });
     }
     let max_single_room_pvs_surfaces = pvs_surfaces.iter().copied().max().unwrap_or_default();
     let room_surfaces = sum_largest(&mut pvs_surfaces, visible_room_limit);

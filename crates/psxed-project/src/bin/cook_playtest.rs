@@ -90,7 +90,7 @@ fn main() -> ExitCode {
                 let mut total_ram_refs: usize = 0;
                 let mut total_vram_refs: usize = 0;
                 for (i, r) in package.rooms.iter().enumerate() {
-                    let mut ram_seen: Vec<usize> = vec![r.world_asset_index];
+                    let mut ram_seen: Vec<usize> = r.world_asset_index.into_iter().collect();
                     let mut vram_seen: Vec<usize> = Vec::new();
                     let first = r.material_first as usize;
                     let count = r.material_count as usize;

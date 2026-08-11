@@ -18,6 +18,9 @@ const CD_SECTOR_BYTES: usize = 2048;
 fn validate_streamed_room_chunks(package: &PlaytestPackage) -> std::io::Result<()> {
     let mut offenders = Vec::new();
     for room_index in 0..package.rooms.len() {
+        if package.rooms[room_index].world_asset_index.is_none() {
+            continue;
+        }
         let payload = streamed_room_chunk_payload(package, room_index as u16)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if payload.len() > psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES {
@@ -131,8 +134,8 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
             )?;
         }
     }
-    for room_index in 0..package.rooms.len().min(u16::MAX as usize + 1) {
-        let payload = streamed_room_chunk_payload(package, room_index as u16)
+    for room_index in world_pack_order(package) {
+        let payload = streamed_room_chunk_payload(package, room_index)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         // Cook/runtime streaming contract: the runtime's per-room CD slot
         // is sized from this constant; an oversized chunk would fail every
@@ -142,7 +145,7 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         // `validate_streamed_room_chunks`.
         debug_assert!(payload.len() <= psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES);
         std::fs::write(
-            stream_chunks_dir.join(streamed_room_chunk_filename(room_index as u16)),
+            stream_chunks_dir.join(streamed_room_chunk_filename(room_index)),
             payload,
         )?;
     }
@@ -512,6 +515,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     match &package.world_geometry {
         PlaytestWorldGeometry::Grid => {
             out.push_str("pub const PLAYTEST_USES_PXBSP: bool = false;\n");
+            out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [0; 3];\n");
             out.push_str("pub static PXBSP_WORLD: &[u8] = &[];\n");
             out.push_str("pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];\n");
             out.push_str("pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];\n");
@@ -521,6 +525,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         }
         PlaytestWorldGeometry::Pxbsp(world) => {
             out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
+            // Keep actor/prop lighting on the same ambient contract used by
+            // the brush light bake. PXBSP surfaces carry baked vertex light;
+            // dynamic world content consumes this generated constant instead
+            // of depending on a synthetic PSXW room header.
+            out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [32; 3];\n");
             write_aligned_asset_bytes_static(
                 &mut out,
                 "PXBSP_WORLD",
@@ -750,7 +759,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             out,
             "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, position_lag_shift: {}, focus_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
             room.name,
-            room.world_asset_index,
+            room.world_asset_index
+                .unwrap_or(usize::from(u16::MAX)),
             room.origin_x,
             room.origin_z,
             room.origin_y,
@@ -2287,6 +2297,9 @@ pub fn streamed_room_chunk_memory_report(
     let mut report = PlaytestStreamMemoryReport::default();
     let room_count = package.rooms.len().min(u16::MAX as usize + 1);
     for room in 0..room_count {
+        if package.rooms[room].world_asset_index.is_none() {
+            continue;
+        }
         let memory = streamed_room_chunk_memory(package, room as u16)?;
         report.totals.sector_count += memory.sector_count;
         report.totals.payload_bytes += memory.payload_bytes;
@@ -2375,9 +2388,12 @@ fn streamed_room_chunk_layout(
         .rooms
         .get(room as usize)
         .ok_or_else(|| format!("missing room record {room}"))?;
+    let world_asset_index = room_record
+        .world_asset_index
+        .ok_or_else(|| format!("room {room} is resident PXBSP and has no streamed PSXW chunk"))?;
     let asset = package
         .assets
-        .get(room_record.world_asset_index)
+        .get(world_asset_index)
         .ok_or_else(|| format!("room {room} references missing world asset"))?;
     if asset.kind != PlaytestAssetKind::RoomWorld {
         return Err(format!(
@@ -3049,11 +3065,18 @@ fn append_cached_room_surfaces(out: &mut Vec<u8>, surfaces: &[PlaytestCachedRoom
 }
 
 fn world_pack_order(package: &PlaytestPackage) -> Vec<u16> {
-    world_pack_order_from_chunks(
+    let mut order = world_pack_order_from_chunks(
         package.rooms.len(),
         package.spawn.map(|spawn| spawn.room),
         &package.chunks,
-    )
+    );
+    order.retain(|room| {
+        package
+            .rooms
+            .get(*room as usize)
+            .is_some_and(|room| room.world_asset_index.is_some())
+    });
+    order
 }
 
 fn world_pack_order_from_chunks(
@@ -3753,7 +3776,7 @@ fn room_required_assets(
             }
         }
     }
-    let mut required_ram: Vec<usize> = vec![room.world_asset_index];
+    let mut required_ram: Vec<usize> = room.world_asset_index.into_iter().collect();
 
     // Models the room references -- placed MeshInstance bindings
     // plus the player controller's character when its spawn lives
@@ -3872,7 +3895,7 @@ fn package_room_bounds(
     room_index: usize,
 ) -> Option<(i32, i32, i32, i32)> {
     let room = package.rooms.get(room_index)?;
-    let asset = package.assets.get(room.world_asset_index)?;
+    let asset = package.assets.get(room.world_asset_index?)?;
     let world = psx_asset::World::from_bytes(&asset.bytes).ok()?;
     let sector_size = room.sector_size;
     let x0 = room.origin_x.saturating_mul(sector_size);
