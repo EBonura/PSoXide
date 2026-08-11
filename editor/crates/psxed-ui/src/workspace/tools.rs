@@ -230,6 +230,12 @@ impl PaintDispatchTool {
             ws.place_bsp_on_brush_face(brush, face, hit);
             return;
         }
+        // BSP scenes have no grid cells, so Material Paint addresses brush
+        // faces directly instead of falling through to the room lane.
+        if ws.bsp_face_paint_active() {
+            ws.paint_bsp_brush_face(frame.rect, pos);
+            return;
+        }
         let face_hit = ws.pick_face_with_hit(frame.rect, pos);
         let fallback = ws
             .active_room_id()

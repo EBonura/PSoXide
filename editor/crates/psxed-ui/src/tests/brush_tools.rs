@@ -2497,11 +2497,9 @@ fn real_egui_brush_inspector_exposes_and_changes_bsp_contents() {
     use psxed_project::brush::BrushContents;
 
     let mut harness = ViewportHarness::floored_room("brush_contents_egui", 4);
-    let mut water_brush =
-        psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    let mut water_brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
     water_brush.contents = BrushContents::Water;
-    let solid_brush =
-        psxed_project::brush::Brush::cuboid([256, 0, 0], [384, 128, 128]);
+    let solid_brush = psxed_project::brush::Brush::cuboid([256, 0, 0], [384, 128, 128]);
     harness
         .workspace
         .project
@@ -3077,6 +3075,127 @@ fn marquee_3d_selects_multiple_brushes_via_real_egui() {
 
     assert_eq!(workspace.selected_brush_set(), vec![0, 1]);
     assert_eq!(workspace.status_text(), "Selected 2 brushes");
+}
+
+/// Two side-by-side brushes viewed head-on from -Z, with the Material Paint
+/// tool armed on a BSP scene. Returns the workspace plus the screen points
+/// of each brush's centre, so a caller can click or sweep across both.
+fn bsp_face_paint_fixture(label: &str) -> (EditorWorkspace, ResourceId, ResourceId, Pos2, Pos2) {
+    let mut project = ProjectDocument::new("bsp face paint");
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let moss = project.add_resource(
+        "Moss",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    for min_x in [-192, 64] {
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [min_x, 0, -32],
+                [min_x + 128, 64, 32],
+            ));
+    }
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir(label), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.view_2d = false;
+    workspace.set_active_tool_cycle_value((ViewTool::PaintMaterial, None));
+    workspace.brush_material = Some(moss);
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [0, 600, -1400];
+    let (yaw, pitch) = camera_angles_to_look_at([0, 600, -1400], [0, 32, 0]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    let rect = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+    let left = workspace
+        .project_brush_point_3d(rect, [-128.0, 32.0, -32.0])
+        .unwrap();
+    let right = workspace
+        .project_brush_point_3d(rect, [128.0, 32.0, -32.0])
+        .unwrap();
+    (workspace, stone, moss, left, right)
+}
+
+/// Material Paint in a BSP scene paints the brush face under the cursor.
+/// A click paints exactly one face of one brush, and the eyedropper reads a
+/// painted face back into the shared picker.
+#[test]
+fn material_paint_click_paints_one_bsp_brush_face_and_samples_it_back() {
+    let (mut workspace, stone, moss, left, _right) = bsp_face_paint_fixture("bsp-face-paint-click");
+    assert!(
+        workspace.bsp_face_paint_active(),
+        "Material Paint must address brush faces in a roomless brush scene"
+    );
+    let texture_id = egui::TextureId::default();
+    let viewport = EditorViewport3dPresentation::edit(texture_id, Vec::new());
+
+    run_real_egui_viewport_click(&mut workspace, left, viewport.clone());
+
+    let painted: Vec<_> = workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .enumerate()
+        .filter(|(_, face)| face.material.is_some())
+        .collect();
+    assert_eq!(painted.len(), 1, "exactly one face of brush 0 is painted");
+    assert_eq!(painted[0].1.material, Some(moss));
+    assert!(
+        workspace.project.active_scene().brushes[1]
+            .faces
+            .iter()
+            .all(|face| face.material.is_none()),
+        "the brush that was not under the cursor stays untouched"
+    );
+    assert!(workspace.is_dirty());
+
+    // One undo per gesture: a single click is one step.
+    workspace.do_undo();
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .all(|face| face.material.is_none()));
+    workspace.do_undo();
+    assert_eq!(workspace.status, "Nothing to undo");
+    workspace.do_redo();
+
+    // The eyedropper reads the painted face back into the shared picker.
+    workspace.brush_material = Some(stone);
+    workspace.material_paint_sampling = true;
+    run_real_egui_viewport_click(&mut workspace, left, viewport);
+    assert_eq!(workspace.brush_material, Some(moss), "sampled the face");
+    assert!(!workspace.material_paint_sampling, "eyedropper is one-shot");
+}
+
+/// A paint drag that sweeps across two BSP brushes paints both and costs
+/// exactly one undo step, matching the "one undo per gesture" contract.
+#[test]
+fn material_paint_drag_across_bsp_brush_faces_is_one_undo_step() {
+    let (mut workspace, _stone, moss, left, right) = bsp_face_paint_fixture("bsp-face-paint-drag");
+
+    run_real_egui_viewport_plain_drag(&mut workspace, left, right);
+
+    let painted = |workspace: &EditorWorkspace, brush: usize| {
+        workspace.project.active_scene().brushes[brush]
+            .faces
+            .iter()
+            .filter(|face| face.material == Some(moss))
+            .count()
+    };
+    assert_eq!(painted(&workspace, 0), 1, "swept brush 0");
+    assert_eq!(painted(&workspace, 1), 1, "swept brush 1");
+
+    workspace.do_undo();
+    assert_eq!(painted(&workspace, 0), 0);
+    assert_eq!(painted(&workspace, 1), 0);
+    workspace.do_undo();
+    assert_eq!(
+        workspace.status, "Nothing to undo",
+        "a whole paint gesture must cost exactly one undo step"
+    );
 }
 
 /// The Move/Resize/Edge/Vertex mode buttons stay visible and clickable
