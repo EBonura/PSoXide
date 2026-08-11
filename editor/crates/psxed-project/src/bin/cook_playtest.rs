@@ -70,6 +70,15 @@ fn main() -> ExitCode {
             // cook_to_dir) and gives operators a quick read on
             // what landed in generated/.
             if let (Some(package), _) = build_package(&project, &project_root) {
+                // The exact cooked resource envelope. The editor already shows
+                // this after Play; printing it here means a CLI cook, a gate
+                // log and a budget review all quote the same numbers instead
+                // of three people measuring file sizes by hand.
+                println!(
+                    "[cook-playtest] Budget: {}",
+                    psxed_project::playtest::cooked_playtest_budgets(&project, &package)
+                        .concise_summary()
+                );
                 if let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry {
                     println!(
                         "[cook-playtest] PXBSP: {} bytes  Movers: {}",

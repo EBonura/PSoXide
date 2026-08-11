@@ -207,6 +207,7 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
 
     /// Select an owner-defined per-record activation mask, or restore the
     /// legacy room-window gate with `None`.
+    // psx-numeric-allow-next-line: mirrors the fixed 64-record activation mask; bit ops only
     pub fn set_spatial_active_mask(&mut self, mask: Option<u64>) {
         self.spatial_activation_enabled = mask.is_some();
         self.spatial_active_mask = mask.unwrap_or(0);

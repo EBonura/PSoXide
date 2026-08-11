@@ -65,6 +65,10 @@ fn main() {
     // so the fixture takes the plain defaults instead of copying megabytes of
     // unrelated audio.
     project.name = "Brush Combat Fixture".to_string();
+    // The donor sample is a legacy grid project; this generator converts it,
+    // so the format has to be restated. Without it the cook fails closed on
+    // "grid project holding brushes", which is exactly the guard's job.
+    project.set_world_format(psxed_project::ProjectWorldFormat::Bsp);
     let donor = ProjectDocument::new("scene donor");
     project.scenes = donor.scenes;
     project.ui_scenes = donor.ui_scenes;

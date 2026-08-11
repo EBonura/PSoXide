@@ -221,6 +221,7 @@ impl BspRuntime {
     /// Return one bit per world-space point visible from `observer` through
     /// the cooked PXBSP PVS. Invalid/solid points and malformed visibility
     /// fail closed. Positions are engine units; the map lookup consumes Q20.12.
+    // psx-numeric-allow-next-line: one bit per queried point; the width IS the caller's point capacity
     pub(super) fn visible_points_mask(&mut self, observer: RoomPoint, points: &[[i32; 3]]) -> u64 {
         let q12 = |value: i32| value.saturating_mul(4096);
         let observer = Vec3I32 {
@@ -355,6 +356,11 @@ impl BspRuntime {
     }
 
     pub(super) fn nearest_door(&self, player: RoomPoint, distance: i32) -> Option<usize> {
+        // Squared engine-unit distances: a world axis reaches ~2^21, so the
+        // square reaches ~2^42 and an i32 accumulator would wrap and report a
+        // far door as adjacent. One interaction scan per use press, not a
+        // per-frame path, and it narrows back before it leaves.
+        // psx-numeric-allow-next-line: squared-distance accumulator, see above
         let limit = i64::from(distance).saturating_mul(i64::from(distance));
         self.doors
             .iter()
@@ -386,8 +392,11 @@ impl BspRuntime {
                         0
                     }
                 });
+                // psx-numeric-allow-next-line: squared-distance accumulator
                 let dx = i64::from(delta[0]);
+                // psx-numeric-allow-next-line: squared-distance accumulator
                 let dy = i64::from(delta[1]);
+                // psx-numeric-allow-next-line: squared-distance accumulator
                 let dz = i64::from(delta[2]);
                 let squared = dx * dx + dy * dy + dz * dz;
                 (squared <= limit).then_some((squared, index))

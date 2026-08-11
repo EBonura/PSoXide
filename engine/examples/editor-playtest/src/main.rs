@@ -163,6 +163,15 @@ mod generated {
     include!(env!("PSXED_PLAYTEST_MANIFEST"));
 }
 
+/// The cooked project's world format, known at build time.
+///
+/// `psx-bsp` is the only spatial authority when this is true. The grid room
+/// window, room parsing, residency, and streaming paths are unreachable in
+/// that build, and they assert it rather than relying on the cooked tables
+/// happening to be empty: a silent grid fallback in a BSP level renders and
+/// collides nothing, which is the hardest failure of all to diagnose.
+pub(crate) const USES_PXBSP: bool = generated::PLAYTEST_USES_PXBSP;
+
 use generated::{
     ARCH_PROPS, ARCH_PROP_COLLISIONS, ARCH_PROP_SURFACES, ASSETS, BOX_PROPS, BOX_PROP_STATE_COUNT,
     BOX_PROP_SURFACES, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
