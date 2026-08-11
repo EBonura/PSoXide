@@ -39,15 +39,23 @@ fn main() {
     let player_components = clone_components(&project, "Aletha");
     let enemy_components = clone_components(&project, "Mantis Enemy");
     assert!(
-        player_components
-            .iter()
-            .any(|(_, kind)| matches!(kind, NodeKind::Equipment { weapon: Some(_), .. })),
+        player_components.iter().any(|(_, kind)| matches!(
+            kind,
+            NodeKind::Equipment {
+                weapon: Some(_),
+                ..
+            }
+        )),
         "sample player entity must carry armed Equipment"
     );
     assert!(
-        enemy_components
-            .iter()
-            .any(|(_, kind)| matches!(kind, NodeKind::Equipment { weapon: Some(_), .. })),
+        enemy_components.iter().any(|(_, kind)| matches!(
+            kind,
+            NodeKind::Equipment {
+                weapon: Some(_),
+                ..
+            }
+        )),
         "sample enemy entity must carry armed Equipment"
     );
 
@@ -68,17 +76,20 @@ fn main() {
     };
     let scene = project.active_scene_mut();
 
-    // Identical structure to the proven brush-first-playable world: two rooms
-    // split by a doorway column pair and one raised lift door between them.
+    // The same two-room structure as brush-first-playable, scaled fourfold so
+    // the donor's authored 188/192-radius, 1024-high bodies genuinely fit the
+    // world. The previous fixture copied the Cortex bodies into a 384-unit-high
+    // interior and only passed because runtime collision always selected the
+    // unrelated 16x56 debug hull.
     let static_boxes = [
-        ([0, 0, 0], [1024, 64, 768]),
-        ([0, 448, 0], [1024, 512, 768]),
-        ([0, 64, 0], [64, 448, 768]),
-        ([960, 64, 0], [1024, 448, 768]),
-        ([64, 64, 0], [960, 448, 64]),
-        ([64, 64, 704], [960, 448, 768]),
-        ([480, 64, 64], [544, 448, 320]),
-        ([480, 64, 448], [544, 448, 704]),
+        ([0, 0, 0], [4096, 256, 3072]),
+        ([0, 1792, 0], [4096, 2048, 3072]),
+        ([0, 256, 0], [256, 1792, 3072]),
+        ([3840, 256, 0], [4096, 1792, 3072]),
+        ([256, 256, 0], [3840, 1792, 256]),
+        ([256, 256, 2816], [3840, 1792, 3072]),
+        ([2016, 256, 256], [2080, 1792, 1280]),
+        ([2016, 256, 1792], [2080, 1792, 2816]),
     ];
     for (mins, maxs) in static_boxes {
         let mut brush = Brush::cuboid(mins, maxs);
@@ -93,7 +104,7 @@ fn main() {
             kind: LogicNodeKind::Door {
                 box_prop: String::new(),
                 start_open: false,
-                open_offset: [0, 192, 0],
+                open_offset: [0, 1536, 0],
                 travel_ticks: 60,
             },
             target: String::new(),
@@ -105,17 +116,17 @@ fn main() {
         },
     );
     scene.node_mut(door).expect("door node").transform = Transform3 {
-        translation: [512.0, 64.0, 384.0],
+        translation: [2048.0, 256.0, 1536.0],
         ..Transform3::default()
     };
-    let mut door_brush = Brush::cuboid([480, 64, 320], [544, 256, 448]);
+    let mut door_brush = Brush::cuboid([2016, 256, 1280], [2080, 1024, 1792]);
     door_brush.mover = Some(door);
     paint(&mut door_brush, stone_material);
     scene.brushes.push(door_brush);
 
     for (name, translation, color) in [
-        ("Left Lamp", [256.0, 320.0, 384.0], [255, 160, 96]),
-        ("Right Lamp", [768.0, 320.0, 384.0], [96, 160, 255]),
+        ("Left Lamp", [1024.0, 1280.0, 1536.0], [255, 160, 96]),
+        ("Right Lamp", [3072.0, 1280.0, 1536.0], [96, 160, 255]),
     ] {
         let light = scene.add_node(
             NodeId::ROOT,
@@ -152,7 +163,7 @@ fn main() {
             },
         );
         scene.node_mut(spawn).expect("spawn node").transform = Transform3 {
-            translation: [256.0, 65.0, 384.0],
+            translation: [1024.0, 260.0, 1536.0],
             rotation_degrees: [0.0, 270.0, 0.0],
             ..Transform3::default()
         };
@@ -161,14 +172,14 @@ fn main() {
         add_host(
             scene,
             "Player",
-            [256.0, 65.0, 384.0],
+            [1024.0, 260.0, 1536.0],
             270.0,
             &player_components,
         );
         add_host(
             scene,
             "Mantis Enemy",
-            [820.0, 65.0, 384.0],
+            [2300.0, 260.0, 1536.0],
             90.0,
             &enemy_components,
         );
@@ -314,14 +325,14 @@ fn write_combat_tape(output_dir: &Path) {
     // The fixture streams more assets than first-playable, so its loading
     // phase consumes ~150 tape frames before gameplay owns input. Every
     // action sits far after that; loading-frame samples are simply eaten.
-    const FRAME_COUNT: usize = 1250;
+    const FRAME_COUNT: usize = 1750;
     // Kill sequence: combo + heavy + combo (98 damage, 110 poise: a
     // survivable stagger), then a heavy tail whose first connection kills.
     // Tail spacing 37 is deliberately co-prime with the enemy's 45-tick
     // attack cadence so presses drift out of hit-stun phase lock instead of
     // colliding with it forever.
-    const COMBO_PRESSES: [usize; 2] = [390, 530];
-    const HEAVY_PRESSES: [usize; 7] = [460, 590, 627, 664, 701, 738, 775];
+    const COMBO_PRESSES: [usize; 2] = [610, 750];
+    const HEAVY_PRESSES: [usize; 7] = [680, 810, 847, 884, 921, 958, 995];
     const LIGHT_PRESSES: [usize; 0] = [];
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
@@ -329,10 +340,10 @@ fn write_combat_tape(output_dir: &Path) {
     writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
     for frame in 0..FRAME_COUNT {
         let mut buttons = 0u16;
-        if (240..400).contains(&frame) || (870..1150).contains(&frame) {
+        if (240..650).contains(&frame) || (1200..1650).contains(&frame) {
             buttons |= UP;
         }
-        if (266..270).contains(&frame) {
+        if (430..434).contains(&frame) {
             buttons |= CROSS;
         }
         if COMBO_PRESSES
@@ -368,15 +379,15 @@ fn write_combat_tape(output_dir: &Path) {
 fn write_door_occlusion_tape(output_dir: &Path) {
     const UP: u16 = 1 << 4;
     const R1: u16 = 1 << 11;
-    const FRAME_COUNT: usize = 900;
-    const LIGHT_PRESSES: [usize; 3] = [480, 560, 640];
+    const FRAME_COUNT: usize = 1200;
+    const LIGHT_PRESSES: [usize; 3] = [720, 800, 880];
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
     writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
     writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
     for frame in 0..FRAME_COUNT {
         let mut buttons = 0u16;
-        if (240..400).contains(&frame) {
+        if (240..650).contains(&frame) {
             buttons |= UP;
         }
         if LIGHT_PRESSES

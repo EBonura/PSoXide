@@ -514,7 +514,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             out.push_str("pub const PLAYTEST_USES_PXBSP: bool = false;\n");
             out.push_str("pub static PXBSP_WORLD: &[u8] = &[];\n");
             out.push_str("pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];\n");
-            out.push_str("pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];\n\n");
+            out.push_str("pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];\n");
+            out.push_str(
+                "pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[];\n\n",
+            );
         }
         PlaytestWorldGeometry::Pxbsp(world) => {
             out.push_str("pub const PLAYTEST_USES_PXBSP: bool = true;\n");
@@ -541,8 +544,19 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             );
             let _ = writeln!(
                 out,
-                "pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[{model_indices}];\n"
+                "pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[{model_indices}];"
             );
+            out.push_str(
+                "pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[\n",
+            );
+            for hull in world.body_hulls {
+                let _ = writeln!(
+                    out,
+                    "    psx_bsp::collision_provider::CookedBodyHull::new({}, {}, {}),",
+                    hull.hull_index, hull.radius, hull.height,
+                );
+            }
+            out.push_str("];\n\n");
         }
     }
 
