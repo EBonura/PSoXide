@@ -42,6 +42,8 @@ pub(crate) enum StarterCataloguePhase {
     Skeleton,
     Material,
     Model,
+    /// After models: weapons reference their weapon model by id.
+    Weapon,
     AnimationClip,
     AnimationSet,
     Character,
@@ -113,11 +115,18 @@ pub(crate) fn sync_starter_character_catalogue(
     let mut report = StarterCharacterSyncReport::default();
     purge_legacy_obsidian_warden_catalogue(project, project_root, &mut report)?;
     let mut id_map: HashMap<ResourceId, ResourceId> = HashMap::new();
+    // Target resources already consumed by this run. The starter catalogue
+    // legitimately carries several resources sharing one (name, variant)
+    // pair (the legacy and Meshy Gold "Crimson Cross Knight" models); with
+    // first-match-only lookup they would fight over one target and rewrite
+    // it on every sync, so each starter resource claims its own target.
+    let mut claimed: HashSet<ResourceId> = HashSet::new();
 
     for phase in [
         StarterCataloguePhase::Skeleton,
         StarterCataloguePhase::Material,
         StarterCataloguePhase::Model,
+        StarterCataloguePhase::Weapon,
         StarterCataloguePhase::AnimationClip,
         StarterCataloguePhase::AnimationSet,
         StarterCataloguePhase::Character,
@@ -129,7 +138,10 @@ pub(crate) fn sync_starter_character_catalogue(
         {
             let mut data = starter_resource.data.clone();
             remap_resource_data(&mut data, &id_map);
-            if let Some(existing_id) = find_starter_catalogue_target(project, starter_resource) {
+            if let Some(existing_id) =
+                find_starter_catalogue_target(project, starter_resource, &claimed)
+            {
+                claimed.insert(existing_id);
                 if let Some(existing) = project.resource_mut(existing_id) {
                     if existing.name != starter_resource.name || existing.data != data {
                         existing.name = starter_resource.name.clone();
@@ -140,6 +152,7 @@ pub(crate) fn sync_starter_character_catalogue(
                 }
             } else {
                 let id = project.add_resource(starter_resource.name.clone(), data);
+                claimed.insert(id);
                 id_map.insert(starter_resource.id, id);
                 report.resources_added += 1;
             }
@@ -210,13 +223,21 @@ pub(crate) fn starter_catalogue_resource_matches_phase(
         (ResourceData::Skeleton(_), StarterCataloguePhase::Skeleton) => {
             resource.name == "Meshy Biped Skeleton"
                 || resource.name == "Cortex Humanoid 22-Bone Skeleton"
+                // Same parent signature as Meshy Biped but referenced by the
+                // Meshy Gold knight model; the claimed-target pass keeps the
+                // two from collapsing onto one synced skeleton.
+                || resource.name == "Crimson Cross Knight Skeleton"
                 || resource.name == "Aletha Delivered Skeleton"
+                || resource.name == "Sword1 Light Skeleton"
         }
         (ResourceData::Material(_), StarterCataloguePhase::Material) => {
             STARTER_CHARACTER_MATERIAL_NAMES.contains(&resource.name.as_str())
         }
         (ResourceData::Model(_), StarterCataloguePhase::Model) => {
             STARTER_CHARACTER_MODEL_NAMES.contains(&resource.name.as_str())
+        }
+        (ResourceData::Weapon(_), StarterCataloguePhase::Weapon) => {
+            STARTER_WEAPON_NAMES.contains(&resource.name.as_str())
         }
         (ResourceData::AnimationClip(clip), StarterCataloguePhase::AnimationClip) => {
             starter_character_asset_path(&clip.psxanim_path)
@@ -234,11 +255,13 @@ pub(crate) fn starter_catalogue_resource_matches_phase(
 pub(crate) fn find_starter_catalogue_target(
     project: &ProjectDocument,
     starter_resource: &Resource,
+    claimed: &HashSet<ResourceId>,
 ) -> Option<ResourceId> {
     if let ResourceData::Skeleton(starter_skeleton) = &starter_resource.data {
         if let Some(id) = project
             .resources
             .iter()
+            .filter(|resource| !claimed.contains(&resource.id))
             .find_map(|resource| match &resource.data {
                 ResourceData::Skeleton(existing)
                     if existing.signature == starter_skeleton.signature =>
@@ -252,22 +275,31 @@ pub(crate) fn find_starter_catalogue_target(
         }
     }
 
-    if let Some(id) = project.resources.iter().find_map(|resource| {
-        (resource.name == starter_resource.name
-            && same_resource_variant(&resource.data, &starter_resource.data))
-        .then_some(resource.id)
-    }) {
+    if let Some(id) = project
+        .resources
+        .iter()
+        .filter(|resource| !claimed.contains(&resource.id))
+        .find_map(|resource| {
+            (resource.name == starter_resource.name
+                && same_resource_variant(&resource.data, &starter_resource.data))
+            .then_some(resource.id)
+        })
+    {
         return Some(id);
     }
 
     if starter_resource.name == "Obsidian Wraith Enemy"
         && matches!(starter_resource.data, ResourceData::Character(_))
     {
-        return project.resources.iter().find_map(|resource| {
-            (resource.name == LEGACY_WRAITH_HERO_PROFILE_NAME
-                && matches!(resource.data, ResourceData::Character(_)))
-            .then_some(resource.id)
-        });
+        return project
+            .resources
+            .iter()
+            .filter(|resource| !claimed.contains(&resource.id))
+            .find_map(|resource| {
+                (resource.name == LEGACY_WRAITH_HERO_PROFILE_NAME
+                    && matches!(resource.data, ResourceData::Character(_)))
+                .then_some(resource.id)
+            });
     }
 
     None
@@ -291,6 +323,7 @@ pub(crate) fn remap_resource_data(
         }
         ResourceData::AnimationClip(clip) => {
             remap_resource_id_option(&mut clip.skeleton, id_map);
+            remap_resource_id_option(&mut clip.target_model, id_map);
             remap_resource_id_option(&mut clip.source, id_map);
         }
         ResourceData::AnimationSet(set) => {
