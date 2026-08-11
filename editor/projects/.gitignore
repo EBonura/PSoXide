@@ -16,6 +16,8 @@
 !brush-open-courtyard/assets/textures/courtyard_cobbles.psxt
 !brush-combat-fixture/
 !brush-combat-fixture/**
+!souls-bsp-vertical-slice/
+!souls-bsp-vertical-slice/**
 !cortex_ignition_v1/
 !cortex_ignition_v1/project.ron
 !cortex_ignition_v1/assets/
