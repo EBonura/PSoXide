@@ -8,6 +8,12 @@
 !brush-first-playable/assets/
 !brush-first-playable/assets/textures/
 !brush-first-playable/assets/textures/starter_stone_brick.psxt
+!brush-open-courtyard/
+!brush-open-courtyard/project.ron
+!brush-open-courtyard/assets/
+!brush-open-courtyard/assets/textures/
+!brush-open-courtyard/assets/textures/courtyard_brick.psxt
+!brush-open-courtyard/assets/textures/courtyard_cobbles.psxt
 !brush-combat-fixture/
 !brush-combat-fixture/**
 !cortex_ignition_v1/
