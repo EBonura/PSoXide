@@ -299,9 +299,9 @@ pub struct EditorPreviewFrame {
 /// Build a fresh preview frame rendering the active editor room window
 /// from `camera`'s orbit angles.
 ///
-/// Returns an empty frame if the project has no Rooms -- the editor
-/// renderer will then paint a black panel, which is the correct "no
-/// scene to show" affordance.
+/// BSP brushes are world-space geometry and do not require a legacy Room.
+/// Even an empty scene emits its clear/sky frame so a project switch cannot
+/// leave the persistent preview target showing pixels from the old scene.
 #[allow(clippy::too_many_arguments)]
 pub fn build_phase1_frame(
     project: &ProjectDocument,
@@ -339,13 +339,13 @@ pub fn build_phase1_frame(
         selected_primitives,
         validation_issue_primitives,
     );
-    let Some(first) = visible_rooms.first() else {
-        return EditorPreviewFrame {
-            cmd_log: Vec::new(),
-            overlay_lines: Vec::new(),
-        };
-    };
-    let (first_room_id, first_grid) = (first.room, first.grid);
+    let first_room = visible_rooms.first();
+    let preview_context_node = first_room
+        .map(|entry| entry.room)
+        .unwrap_or_else(|| project.active_scene().root);
+    let preview_context_fog = first_room
+        .map(|entry| (entry.grid.fog_enabled && preview_fog, entry.grid.fog_color))
+        .unwrap_or((false, [0; 3]));
 
     let mut scratch = preview_scratch()
         .lock()
@@ -361,16 +361,16 @@ pub fn build_phase1_frame(
     let world_camera = setup_gte_for_camera(camera);
     let resolved_sky = project
         .active_scene()
-        .world_sky_for_node(first_room_id)
+        .world_sky_for_node(preview_context_node)
         .unwrap_or_default()
-        .resolved_for_room(first_grid.fog_enabled && preview_fog, first_grid.fog_color);
+        .resolved_for_room(preview_context_fog.0, preview_context_fog.1);
     push_clear(&mut scratch, resolved_sky.lower_color);
     push_cyclorama(&mut scratch, resolved_sky, world_camera);
     let resolved_far_vista = project
         .active_scene()
-        .world_far_vista_for_node(first_room_id)
+        .world_far_vista_for_node(preview_context_node)
         .unwrap_or_default()
-        .resolved_for_room(first_grid.fog_enabled && preview_fog, first_grid.fog_color);
+        .resolved_for_room(preview_context_fog.0, preview_context_fog.1);
     push_far_vista_ring(
         &mut scratch,
         camera,
@@ -562,7 +562,7 @@ pub fn build_phase1_frame(
                     push_selection_outline(grid, selection, OutlineRole::Hover, &mut scratch);
                 }
             }
-            if room_id == first_room_id {
+            if room_id == preview_context_node {
                 if let Some(preview) = paint_target_preview {
                     push_paint_preview(grid, preview, &mut scratch);
                 }
@@ -1170,8 +1170,10 @@ fn brush_fallback_color(face: usize) -> (u8, u8, u8) {
 
 /// World-space brush solids: each solved face polygon fans into
 /// triangles with paraxial world-aligned UVs. Unlit and fog-free in v1
-/// (brushes are not room-bound); drawn both-sided like box props until
-/// the outward-winding cull is visually verified on content.
+/// (brushes are not room-bound). Solved brush polygons retain their authored
+/// outward winding, so normal material sidedness must remain intact: forcing
+/// both sides makes the hidden exterior planes of hollow-room slabs occlude
+/// an interior editing camera.
 fn walk_brushes(
     project: &ProjectDocument,
     textures: &EditorTextures,
@@ -1195,8 +1197,7 @@ fn walk_brushes(
                 face.material,
                 brush_fallback_color(face_index),
                 textures,
-            )
-            .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
+            );
             let verts = &polygon.verts;
             for i in 1..verts.len().saturating_sub(1) {
                 let tri = [verts[0], verts[i], verts[i + 1]];
@@ -1212,8 +1213,8 @@ fn walk_brushes(
                 else {
                     continue;
                 };
-                let p = [projected[0], projected[1], projected[2]]
-                    .map(preview_projected_from_engine);
+                let p =
+                    [projected[0], projected[1], projected[2]].map(preview_projected_from_engine);
                 let uvs = match shade {
                     FaceShade::Textured { .. } => tri.map(|v| {
                         let raw = paraxial_uv(&plane, v);

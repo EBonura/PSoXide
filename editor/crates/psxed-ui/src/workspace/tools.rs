@@ -78,6 +78,7 @@ impl ViewportTool3d for SelectTool {
                 ws.begin_node_drag(hit, frame.rect);
             }
             Some(Viewport3dPointerTarget::Entity(_)) => {}
+            Some(Viewport3dPointerTarget::Brush { .. }) => {}
             Some(Viewport3dPointerTarget::Surface { .. }) => {
                 ws.begin_primitive_pointer_drag(frame.rect, pointer, frame.modifiers);
             }
@@ -137,6 +138,18 @@ impl ViewportTool3d for SelectTool {
                 let visible_order = ws.scene_node_order();
                 ws.apply_node_selection_modifiers(hit.node, frame.modifiers, &visible_order);
             }
+            Some(Viewport3dPointerTarget::Brush { brush, face, .. }) => {
+                ws.clear_node_selection_state();
+                ws.clear_resource_selection_state();
+                ws.clear_primitive_selection_state();
+                ws.clear_sector_selection();
+                if frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl {
+                    ws.toggle_brush_selection(brush);
+                } else {
+                    ws.replace_brush_selection(brush, Some(face));
+                }
+                ws.status = format!("Selected BSP brush {}", brush + 1);
+            }
             Some(Viewport3dPointerTarget::Surface { .. }) | None => {
                 ws.commit_face_selection(frame.modifiers);
             }
@@ -194,7 +207,11 @@ impl EditorWorkspace {
         }
         let step = (self.snap_units.max(1)) as f32;
         let snap = |v: f32| ((v / step).round() * step) as i32;
-        Some([snap(origin[0] + dir[0] * t), 0, snap(origin[2] + dir[2] * t)])
+        Some([
+            snap(origin[0] + dir[0] * t),
+            0,
+            snap(origin[2] + dir[2] * t),
+        ])
     }
 
     /// Nearest brush face under the pointer, via the kernel's convex
@@ -203,7 +220,7 @@ impl EditorWorkspace {
     /// The hit point is shared with BSP-native entity placement so the
     /// Place tool and Brush tool cannot disagree about which authored
     /// surface was clicked.
-    fn pick_brush_face_with_hit(
+    pub(crate) fn pick_brush_face_with_hit(
         &self,
         rect: egui::Rect,
         pointer: egui::Pos2,
@@ -238,10 +255,6 @@ impl EditorWorkspace {
             .map(|(index, face, _)| (index, face))
     }
 
-    fn pick_brush(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
-        self.pick_brush_face(rect, pointer).map(|(index, _)| index)
-    }
-
     /// Unsnapped camera-ray ground intersection (y = 0).
     fn brush_ground_point_raw(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<[f32; 3]> {
         let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
@@ -249,13 +262,7 @@ impl EditorWorkspace {
             return None;
         }
         let t = -origin[1] / dir[1];
-        (t > 0.0).then(|| {
-            [
-                origin[0] + dir[0] * t,
-                0.0,
-                origin[2] + dir[2] * t,
-            ]
-        })
+        (t > 0.0).then(|| [origin[0] + dir[0] * t, 0.0, origin[2] + dir[2] * t])
     }
 
     /// All selected brush indices: the multi-selection when one exists,
@@ -444,8 +451,7 @@ impl EditorWorkspace {
         let (escape, delete) = ui.input(|input| {
             (
                 input.key_pressed(egui::Key::Escape),
-                input.key_pressed(egui::Key::Delete)
-                    || input.key_pressed(egui::Key::Backspace),
+                input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace),
             )
         });
         if escape {
@@ -591,9 +597,7 @@ impl EditorWorkspace {
                 axis.to_string()
             })
             .unwrap_or_else(|| "degenerate".to_string());
-        ui.label(
-            egui::RichText::new(format!("Face {face} of {}", brush.faces.len())).strong(),
-        );
+        ui.label(egui::RichText::new(format!("Face {face} of {}", brush.faces.len())).strong());
         ui.label(plane_label);
         // Numeric face fallback: slide the plane along its dominant axis.
         if let Some((axis, position)) = self.selected_brush_face_axis() {
@@ -603,8 +607,7 @@ impl EditorWorkspace {
                 ui.add(egui::DragValue::new(&mut edited).speed(1));
             });
             if edited != position && !self.set_selected_brush_face_axis_position(edited) {
-                self.status =
-                    "Face edit rejected: brush would stop enclosing volume".to_string();
+                self.status = "Face edit rejected: brush would stop enclosing volume".to_string();
             }
         }
         let material_name = face_data.material.and_then(|id| {
@@ -1000,6 +1003,7 @@ impl EditorWorkspace {
     /// Select the visible brush face under the active orthographic point.
     /// Smaller projected brushes retain the old Top-view priority; exact
     /// overlaps then prefer the face nearest the positive-axis viewer.
+    #[cfg(test)]
     pub(crate) fn select_brush_at_2d(&mut self, world: [f32; 2]) -> bool {
         match self.pick_brush_face_at_2d(world) {
             Some((index, face)) => {
@@ -1252,7 +1256,12 @@ impl EditorWorkspace {
             return None;
         }
         let mut verts: Vec<[f64; 3]> = Vec::new();
-        for vert in solved.polygons.iter().flatten().flat_map(|p| p.verts.iter()) {
+        for vert in solved
+            .polygons
+            .iter()
+            .flatten()
+            .flat_map(|p| p.verts.iter())
+        {
             if !verts
                 .iter()
                 .any(|seen| (0..3).all(|axis| (seen[axis] - vert[axis]).abs() <= 0.5))
@@ -1412,7 +1421,7 @@ impl EditorWorkspace {
         if mv.applied != [0; 3] {
             self.push_undo();
             let texture_lock = self.brush_texture_lock;
-            let mut commit_one = |ws: &mut Self, index: usize, base: psxed_project::brush::Brush| {
+            let commit_one = |ws: &mut Self, index: usize, base: psxed_project::brush::Brush| {
                 let mut moved = base;
                 if texture_lock {
                     moved.translate_with_uv_lock(
@@ -1580,7 +1589,7 @@ impl EditorWorkspace {
                     )
                 })
         };
-        let mut draw = |brush: &psxed_project::brush::Brush, stroke: egui::Stroke| {
+        let draw = |brush: &psxed_project::brush::Brush, stroke: egui::Stroke| {
             for polygon in brush.solve().polygons.iter().flatten() {
                 let count = polygon.verts.len();
                 for i in 0..count {
@@ -1609,10 +1618,7 @@ impl EditorWorkspace {
                             let a = project(polygon.verts[i]);
                             let b = project(polygon.verts[(i + 1) % count]);
                             if let (Some(a), Some(b)) = (a, b) {
-                                painter.line_segment(
-                                    [a, b],
-                                    egui::Stroke::new(3.5, STUDIO_ACCENT),
-                                );
+                                painter.line_segment([a, b], egui::Stroke::new(3.5, STUDIO_ACCENT));
                             }
                         }
                     }
@@ -1733,8 +1739,7 @@ impl ViewportTool3d for BrushTool {
         }
         if let Some((index, face)) = ws.pick_brush_face(frame.rect, pointer) {
             let base = ws.project.active_scene().brushes[index].clone();
-            let Some(plane) =
-                psxed_project::brush::Plane::from_points(base.faces[face].points)
+            let Some(plane) = psxed_project::brush::Plane::from_points(base.faces[face].points)
             else {
                 return;
             };
@@ -1858,7 +1863,11 @@ impl ViewportTool3d for BrushTool {
         ws.brush_clip_start = None;
         match ws.pick_brush_face(frame.rect, pointer) {
             Some((index, face)) => {
-                if frame.modifiers.shift {
+                ws.clear_node_selection_state();
+                ws.clear_resource_selection_state();
+                ws.clear_primitive_selection_state();
+                ws.clear_sector_selection();
+                if frame.modifiers.shift || frame.modifiers.ctrl {
                     ws.toggle_brush_selection(index);
                 } else {
                     ws.replace_brush_selection(index, Some(face));

@@ -1088,11 +1088,15 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn set_orthographic_view(&mut self, view: OrthographicView) {
-        if !self.view_2d || self.orthographic_view != view {
+        let entering_orthographic = !self.view_2d;
+        if entering_orthographic || self.orthographic_view != view {
             self.cancel_brush_gestures();
         }
         self.view_2d = true;
         self.orthographic_view = view;
+        if entering_orthographic {
+            self.frame_bsp_viewport_if_uninitialized();
+        }
         self.status = format!("Viewport: {}", view.label());
         self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
     }

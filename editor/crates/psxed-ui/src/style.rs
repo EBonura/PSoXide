@@ -8,7 +8,10 @@ use egui::{
 use crate::icons;
 
 pub(crate) const DEFAULT_VIEWPORT_ZOOM: f32 = 96.0;
-pub(crate) const MIN_VIEWPORT_ZOOM: f32 = 24.0;
+// BSP brushes use raw PSX world units (a small room is commonly 1024 wide),
+// unlike the legacy sector-grid canvas. The old 24 px/unit floor made even a
+// one-room BSP map impossible to zoom into view.
+pub(crate) const MIN_VIEWPORT_ZOOM: f32 = 0.001;
 pub(crate) const MAX_VIEWPORT_ZOOM: f32 = 220.0;
 
 // Layout tokens. Keeping compact control geometry here prevents individual

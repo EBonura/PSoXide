@@ -54,6 +54,15 @@ If Play refuses the map, the status strip reports the cook error and focuses
 the first actionable brush/node/resource where possible. A Player Spawn inside
 solid is normally fixed by placing it again on the room's upward floor face.
 
+For a windowless acceptance of this exact author/save/Play contract, run
+`make editor-blank-playtest-check` from the repository root. It authors a fresh
+BSP room through the editor command APIs, verifies that the tracked starter
+project, input tape, and neutral texture match their generator byte for byte,
+persists and cooks the authored artifact, builds the real `mipsel-sony-psx`
+guest and disc, then boots it in the headless PSoXide emulator and proves
+rendered frames plus player movement. This is an emulator gate, not a GUI
+automation or original-hardware claim.
+
 ## Crates
 
 | Crate | Purpose |
