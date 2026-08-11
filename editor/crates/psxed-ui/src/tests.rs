@@ -520,6 +520,9 @@ fn populated_grid(width: u16, depth: u16) -> WorldGrid {
 
 fn workspace_with_populated_grid(label: &str, width: u16, depth: u16) -> (EditorWorkspace, NodeId) {
     let mut project = ProjectDocument::new(label);
+    // A grid fixture has to say so: new documents are BSP, and the grid room
+    // topology a BSP project reports is deliberately empty.
+    project.set_world_format(psxed_project::ProjectWorldFormat::LegacyGrid);
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",

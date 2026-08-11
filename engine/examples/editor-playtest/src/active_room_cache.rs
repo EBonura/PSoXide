@@ -120,6 +120,15 @@ pub(super) fn build_active_room(
     record: &LevelRoomRecord,
     current_record: &LevelRoomRecord,
 ) -> Option<ActiveRuntimeRoom> {
+    // Fail closed: this is where a cooked PSXW room becomes live spatial
+    // state (render room, collision room, residency, surface cache). In a
+    // PXBSP build it used to return `None` in silence, via the
+    // `AssetId(65535)` world-asset sentinel, which is indistinguishable from
+    // a room that simply has not streamed in yet.
+    assert!(
+        !USES_PXBSP,
+        "grid room build reached in a PXBSP build; psx-bsp owns space"
+    );
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
         ensure_room_resident(residency);
     }

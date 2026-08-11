@@ -1439,8 +1439,10 @@ impl Playtest {
                     &self.models,
                     entity_poses,
                     if self.bsp.is_some() {
+                        // psx-numeric-allow-next-line: per-instance visibility bitmask, see the parameter
                         u64::from(self.bsp_instance_visible_mask)
                     } else {
+                        // psx-numeric-allow-next-line: per-instance visibility bitmask, all instances visible
                         u64::MAX
                     },
                     primitive_packets,

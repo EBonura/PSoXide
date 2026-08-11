@@ -1,9 +1,80 @@
 # Legacy grid boundary decision artifact
 
-Status: evidence and proposed classification only. The retire/freeze decision
-is NOT made here; the owner accepts (or amends) the boundary after review, per
-`docs/quake-psoxide-convergence-handoff.md` section 15 ("remove fallback paths
-only after the owner accepts the migration boundary").
+Status: the boundary is now enforced in code; the retire/freeze decision is
+still NOT made here. The owner accepts (or amends) the classification after
+review, per `docs/quake-psoxide-convergence-handoff.md` section 15 ("remove
+fallback paths only after the owner accepts the migration boundary"). No grid
+code is deleted.
+
+> **P3 execution update (2026-08-11).** Sections 0 and 10 are the current
+> state. Sections 1 through 9 are the original 2026-08-10 audit, kept as the
+> evidence they were written as; where they disagree with section 0, section 0
+> wins. The two changes since that audit are `fcb99eeb` (the synthetic grid
+> scaffold described in section 2.8 is gone) and the P3 work described below.
+
+## 0. What changed in P3
+
+**The discriminator is explicit.** `ProjectDocument::world_format` is a
+persisted `ProjectWorldFormat` (`Bsp` | `LegacyGrid`)
+(`editor/crates/psxed-project/src/document_types.rs`). The cook branches on it
+instead of on brush presence. A document saved before the field existed
+resolves exactly once on load, from the same presence rule it was cooked with,
+and is persisted from then on; an already-stored value is never re-derived.
+New documents are `Bsp`.
+
+**Contradictions are named, not silently preferred.** Three hard cook errors
+replace three silent behaviours (`playtest.rs::build_package`):
+
+| Authored state | Old behaviour | New behaviour |
+| --- | --- | --- |
+| `LegacyGrid` + brushes | brushes silently won | error naming the brush count, focus on brush 0 |
+| `Bsp` + no brushes | fell through to the grid pipeline | error: a BSP project has no other world source |
+| `Bsp` + grid Sections | Sections silently discarded | error naming the first Section, focus on its node |
+
+**The cook re-checks its own outputs.** After the walk, a BSP package is
+verified to carry zero room chunks, room visibility rows, visibility cells,
+PVS rows, surface caches, room portals, floor links, water cells and PSXW
+world assets, exactly one room record with no world asset, and a `Pxbsp`
+world-geometry variant. A grid package is verified not to carry a PXBSP
+payload. This is the leak detector: the guards above make the leak impossible
+today, but "impossible today" decays silently, and the failure it decays into
+is a BSP level that streams rooms nobody authored.
+
+**The guest asserts the same boundary.** `USES_PXBSP`
+(`engine/examples/editor-playtest/src/main.rs`) is a build-time constant, so
+`load_active_room_window` and `build_active_room` assert against it at zero
+cost. A grid guest is byte-identical with and without the asserts; a BSP guest
+drops the now-provably-dead grid window and room-build code (933,888 ->
+919,552 bytes).
+
+**Deliberate exceptions, per handoff section 0.10.** Both are documented
+inline at the check site so a future audit does not read them as leaks:
+
+- the singleton `PlaytestRoom` ("PXBSP World"), non-spatial metadata carrying
+  gravity, camera, sky and fog, with `world_asset_index: None` and the
+  `AssetId(65535)` sentinel in the manifest;
+- the header-only `WORLD.PAK`, written from a deliberately empty world-pack
+  order so the disc layout and loader contract stay stable.
+
+**Reserved streaming seams, explicitly NOT removed.** Full PXBSP region
+streaming is not implemented and is not on the critical path, but nothing here
+forecloses it:
+
+- `PxbspLumpKind::StreamingIndex` (`engine/crates/psx-bsp/src/pxbsp.rs`) is
+  still a first-class lump, still written by `brush_pxbsp.rs` (currently
+  empty) and still readable via `PxbspResidentMap::streaming_index()`;
+- the `ReadAt` abstraction (`engine/crates/psx-bsp/src/lib.rs`) is untouched;
+  both resident maps still load through it, so a pageable reader can replace
+  `SliceReader` without touching call sites;
+- the pack boundaries (WORLD.PAK / UI.PAK, their TOCs and start LBAs) and the
+  residency budget checks in `playtest/manifest.rs` are untouched.
+
+One seam did move: the guest assert in `build_active_room` makes the GRID
+residency path (`ROOM_RESIDENCY` -> `ensure_room_resident`) unreachable from a
+BSP build. The record and the machinery still exist and still compile. A
+future pageable PXBSP must add its own residency entry point rather than
+routing through the grid room window, and the assert says so on the first
+attempt instead of silently building an empty window.
 
 Audited tree: `/Users/ebonura/Desktop/repos/PSoXide-convergence`, branch
 `codex/quake-psoxide-convergence`, HEAD `7c714194` (clean worktree at audit
@@ -29,9 +100,13 @@ Nothing below is deleted or gated by this document.
 
 ---
 
-## 1. The discriminator: how grid vs BSP is selected today
+## 1. The discriminator: how grid vs BSP was selected before P3
 
-There is no explicit "format" field. Selection is presence-based at every
+Superseded by section 0: the selection is now the persisted
+`ProjectDocument::world_format`. What follows is the presence-based chain it
+replaced, kept because it is the map of every layer the choice reaches.
+
+There was no explicit "format" field. Selection was presence-based at every
 layer, in one direction (brushes win):
 
 **Authoring data.** A grid world is one or more scene nodes of
@@ -451,3 +526,91 @@ freeze point (section 5), (c) the required test additions (section 6.3), and
 grid behavior stays unchanged, and the current dynamic-blocker-era rule holds
 ("grid projects retain their existing grid/AABB path for compatibility",
 `engine/examples/editor-playtest/src/game_logic_runtime.rs:5-10`).
+
+---
+
+## 10. Current classification and BSP reachability (P3, 2026-08-11)
+
+The section 2 tables stand as the per-path evidence. This is the same
+enumeration re-stated against the tree as it is now, with the column the
+original audit could not have: whether a BSP project can still reach the path.
+
+Reachability vocabulary:
+
+- **unreachable (guarded)**: a BSP project cannot enter it, and trying is a
+  named cook error or a guest assert added in P3.
+- **unreachable (empty input)**: no guard names it, but its only input is a
+  table a BSP cook provably leaves empty; the cook's output check fails closed
+  if that ever stops being true.
+- **shared**: not grid-specific; both worlds use it.
+- **reserved**: currently unused, deliberately kept for a future
+  implementation (see the streaming seams in section 0).
+
+### 10.1 Authoring (editor)
+
+| Path | Class | BSP reachability |
+| --- | --- | --- |
+| `NodeKind::Section { grid: WorldGrid }` + `Room`/`Map` serde aliases | compatibility-only | authored Sections load, but a BSP cook refuses them by name |
+| "Section" in the scene-tree Add menu (`scene_tree.rs`) | retire at the freeze point | still offered in every project; the cook is now the backstop that names the mistake |
+| Grid paint tools (`PaintFloor/Wall/Ceiling`, `PaintMaterial`, `Erase`) | compatibility-only | self-gating; need an active Section |
+| `ViewTool::Water` cell painting, `NodeKind::WaterVolume` on a Section floor | migrated (BSP uses brush contents) | unreachable (empty input): the water walk needs a Section ancestor |
+| Grid face/edge/vertex inspectors, sector inspector | compatibility-only | need a Section |
+| Stacked-floor authoring (`floor_view.rs`, `GridFloorLink`) | retire (no successor needed) | needs a Section |
+| Authored Portal nodes on grid edges (`portal_rooms.rs`) | compatibility-only | BSP derives portals from CSG |
+| Prefab stamping / grid-cell clipboard (`prefab.rs`) | migrate (concept), retire (grid-cell implementation) | grid-cell payloads only |
+| World-node grid settings (`sector_size`, streaming, culling radii) | compatibility-only | `sector_size` still feeds the BSP metadata room; the rest is inert |
+| Room Rings topology overlay (`build_debug_topology`) | compatibility-only | **unreachable (guarded)**: returns empty for a BSP project |
+| New Project flow | done (BSP-only) | this is the BSP path |
+
+### 10.2 Cook
+
+| Path | Class | BSP reachability |
+| --- | --- | --- |
+| `cook_world_grid` / `CookedWorldGrid` / `encode_world_grid_psxw` (`world_cook.rs`) | compatibility-only | **unreachable (guarded)**: only called from the Section walk |
+| `extract_portal_room_grid` -> `WorldGrid` construction | compatibility-only | unreachable (guarded) |
+| `plan_portal_rooms` / portal-room splitting (`portal_rooms.rs`) | compatibility-only | unreachable (guarded) |
+| `PlaytestAssetKind::RoomWorld` (`.psxw`) emission | compatibility-only | unreachable (guarded); asserted absent in the output check |
+| `AuthoredRoomChunk` + `build_playtest_chunks` + `.psxc` stream chunks | compatibility-only | unreachable (guarded); explicitly `Vec::new()` for BSP; asserted absent |
+| `append_room_visibility`, visibility cells, PVS rows (`cook_visibility.rs`) | compatibility-only | unreachable (guarded); asserted absent |
+| `rebuild_portal_connected_visibility_pvs` | compatibility-only | unreachable (empty input); self-guards on empty cells/rows |
+| `append_room_surface_cache` + cached-room tables | compatibility-only | unreachable (guarded); asserted absent |
+| Floor links, floor-stack/terrace portals, cross-Section portals, adjacency portals | compatibility-only | unreachable (empty input): all keyed on the empty chunk map; asserted absent |
+| Water-cell cook from grid floors | migrated (BSP liquids are brush contents) | unreachable (empty input); asserted absent |
+| Room-local placement resolution (`world_cell_to_array`, `node_chunk_local_position`) | compatibility-only | explicitly branched: BSP places in world space against room 0 |
+| Grid budget estimation (`WorldGridBudget`, `WorldGridFootprint`) | compatibility-only | grid packages only |
+| Grid generator bins (`gen_stress_map`, `gen_prefab_gallery`, `gen_prefab_kit`, `prefab_sheet`) | compatibility-only | they author grid projects on purpose |
+| `WORLD.PAK` header + empty world-pack order | **compatibility-only, deliberate exception** | reached by every BSP cook by design (handoff 0.10) |
+| Singleton `PlaytestRoom` metadata record | **not grid state, deliberate exception** | reached by every BSP cook by design (handoff 0.10) |
+| `ROOM_RESIDENCY` record for the metadata room | compatibility-only / reserved | still emitted; its consumer is unreachable in a BSP guest |
+
+### 10.3 Runtime (guest)
+
+| Path | Class | BSP reachability |
+| --- | --- | --- |
+| `load_active_room_window` (`active_rooms.rs`) | compatibility-only | **unreachable (guarded)**: asserts on `USES_PXBSP` |
+| `build_active_room` -> `RuntimeRoom` / `RoomCollision` / `ActiveRuntimeRoom` / residency | compatibility-only | **unreachable (guarded)**: asserts on `USES_PXBSP` |
+| Grid static-surface draw (`world_render.rs`, `playtest_scene.rs`) | compatibility-only | gated by `self.bsp.is_none()` |
+| Grid PVS cell selection (`world_cells.rs`, `world_visibility.rs`, `room_visibility.rs`) | compatibility-only | unreachable (empty input): `chunked_level()` is false with no `ROOM_CHUNKS` |
+| `RoomStreamScheduler`, `RoomMaterialPool`, room-window/visibility storage | compatibility-only / reserved | zero-initialised at boot in every build; never populated in BSP |
+| Grid collision (`RuntimeCollisionRoom`, `floor_sample.rs`) | compatibility-only | only reachable through `build_active_room` |
+| `CharacterMotor` grid backend (`update_vblanks_with_collision`) | compatibility-only | BSP uses the trace-provider backend on the same motor |
+| Third-person camera grid backend | compatibility-only | BSP uses `update_camera` with the point hull |
+| Room-indexed entity activation (`RoomIndex` gate) | superseded by leaf PVS | BSP uses `set_spatial_active_mask` from the PXBSP PVS row |
+| `RoomIndex` type and shared `psx-level` record families | shared | `RoomIndex` still types the metadata room |
+| `psx-bsp` `StreamingIndex` lump, `ReadAt`, pack TOCs | **reserved** | present, empty, intentionally kept |
+
+### 10.4 What still blocks retirement
+
+Unchanged from section 3, minus the item P3 and `fcb99eeb` closed:
+
+1. ~~synthetic grid region inside the BSP cook~~ (closed by `fcb99eeb`).
+2. ~~no explicit discriminator~~ (closed by P3).
+3. Two tracked grid projects still depend on the grid stack:
+   `editor/projects/default` (also the embedded starter and the fixture root
+   for most cook tests) and `editor/samples/cortex_v1` (the combat authoring
+   sample). Until the starter catalogue and the cook fixtures move off the
+   grid project, deleting grid code breaks the editor's own defaults.
+4. The owner's untracked perf-campaign projects and Makefile targets
+   (`profile-demo3*`, `profile-demo7-camera-sweep`, the warp probe) are grid.
+5. Still no tracked grid replay fixture: the compatibility window rests on
+   host unit tests. Section 6.3's list is unchanged and unstarted.

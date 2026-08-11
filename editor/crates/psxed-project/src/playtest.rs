@@ -302,16 +302,62 @@ pub fn build_package(
         .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
         .collect();
     room_nodes.sort_by_key(|node| node.id.raw());
-    let uses_pxbsp = !scene.brushes.is_empty();
+    // The persisted discriminator, not geometry presence, selects the world
+    // pipeline (docs/legacy-grid-boundary.md section 1). Content that
+    // contradicts it is a hard error rather than a silent preference, so a
+    // BSP project can never cook grid spatial state and a legacy project can
+    // never quietly drop authored brushes.
+    let world_format = project.world_format();
+    let uses_pxbsp = world_format.is_bsp();
+    if world_format.is_legacy_grid() && !scene.brushes.is_empty() {
+        report.error_at(
+            PlaytestValidationTarget::Brush {
+                brush: 0,
+                face: None,
+            },
+            format!(
+                "project format is {} but the active scene holds {} brush(es); \
+                 the grid pipeline cannot cook brush geometry and refuses to \
+                 discard it - move the brushes to a BSP project",
+                world_format.label(),
+                scene.brushes.len()
+            ),
+        );
+        return (None, report);
+    }
+    if uses_pxbsp && scene.brushes.is_empty() {
+        report.error(format!(
+            "project format is {} but the active scene holds no brushes; \
+             a BSP project has no other world source and will not fall back \
+             to the grid pipeline",
+            world_format.label()
+        ));
+        return (None, report);
+    }
 
+    if uses_pxbsp && !room_nodes.is_empty() {
+        // Previously these were dropped in silence and the cook went green
+        // with the authored Sections missing from the level. A BSP project
+        // has exactly one spatial authority, so a Section is a contradiction
+        // to resolve in the editor, not a preference to apply here.
+        let node = room_nodes[0];
+        report.error_at(
+            PlaytestValidationTarget::Node(node.id),
+            format!(
+                "project format is {} but the scene holds {} grid Section \
+                 node(s), starting with '{}'; PXBSP is the only spatial \
+                 authority in a BSP project and the Sections would be \
+                 discarded - delete them or open the project as legacy grid",
+                world_format.label(),
+                room_nodes.len(),
+                node.name
+            ),
+        );
+        return (None, report);
+    }
     if room_nodes.is_empty() && !uses_pxbsp {
         report.error("playtest needs at least one Room node - none found");
         return (None, report);
-    }
-    if uses_pxbsp {
-        // The PXBSP payload is authoritative when brushes are present. Ignore
-        // transitional Section nodes instead of cooking two world providers.
-        room_nodes.clear();
     }
 
     // Pass 2: cook each Room. We need the `CookedWorldGrid` for
@@ -2318,6 +2364,76 @@ pub fn build_package(
     lights.sort_by_key(|light| light.room);
     let options = cook_options(project);
 
+    // Fail closed on the boundary itself. Every grid spatial producer above
+    // is reachable only through `room_nodes`, which is provably empty for a
+    // BSP project - but "provably" decays as the cook grows, and the failure
+    // mode it decays into is silent: a BSP level that quietly streams grid
+    // rooms nobody authored. Re-check the outputs instead of trusting the
+    // guards, so a future leak is a named cook error on the first run.
+    //
+    // Two deliberate exceptions, per docs/quake-psoxide-convergence-handoff.md
+    // section 0.10, are NOT leaks and are excluded by name below:
+    //   * the singleton `PlaytestRoom` ("PXBSP World"), which is non-spatial
+    //     metadata (gravity, camera, sky, fog) with `world_asset_index: None`;
+    //   * the header-only WORLD.PAK the manifest writes from an empty world
+    //     pack order, kept so the disc layout and loader contract stay stable.
+    if uses_pxbsp {
+        let leaks: [(&str, usize); 9] = [
+            ("room chunks", chunks.len()),
+            ("room visibility rows", room_visibility.len()),
+            ("visibility cells", visibility_cells.len()),
+            ("visibility PVS rows", visibility_pvs.len()),
+            ("room surface caches", room_surface_caches.len()),
+            ("room portals", room_portals.len()),
+            ("room floor links", room_floor_links.len()),
+            ("water cells", water_cells.len()),
+            (
+                "PSXW world assets",
+                assets
+                    .iter()
+                    .filter(|asset| asset.kind == PlaytestAssetKind::RoomWorld)
+                    .count(),
+            ),
+        ];
+        for (what, count) in leaks {
+            if count != 0 {
+                report.error(format!(
+                    "BSP project cooked {count} {what}; PXBSP is the only \
+                     spatial authority and grid spatial state must never be \
+                     produced for a BSP project"
+                ));
+            }
+        }
+        if rooms.len() != 1 {
+            report.error(format!(
+                "BSP project cooked {} room records; exactly one non-spatial \
+                 metadata room is expected",
+                rooms.len()
+            ));
+        }
+        if rooms.iter().any(|room| room.world_asset_index.is_some()) {
+            report.error(
+                "BSP project cooked a room referencing a PSXW world asset; the \
+                 metadata room must carry no world geometry",
+            );
+        }
+        if !matches!(world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
+            report.error(
+                "BSP project produced a grid world geometry payload; the cook \
+                 would ship a level with no world",
+            );
+        }
+        if !report.is_ok() {
+            return (None, report);
+        }
+    } else if matches!(world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
+        report.error(
+            "legacy grid project produced a PXBSP world payload; the grid \
+             runtime cannot consume it",
+        );
+        return (None, report);
+    }
+
     (
         Some(PlaytestPackage {
             bsp_cook_mode: project.bsp_cook_mode,
@@ -2436,6 +2552,13 @@ pub fn build_package(
 /// overlay from maintaining a second approximation of the cooker.
 pub fn build_debug_topology(project: &ProjectDocument) -> PlaytestDebugTopology {
     let scene = project.active_scene();
+    // A BSP project has no grid rooms, cells, or portals to show. Returning
+    // empty rather than walking any stray Section keeps this overlay from
+    // being the one place that still builds grid topology for a BSP project
+    // (the cook itself refuses that scene outright).
+    if project.world_format().is_bsp() {
+        return PlaytestDebugTopology::default();
+    }
     let mut room_nodes: Vec<&SceneNode> = scene
         .nodes()
         .iter()
