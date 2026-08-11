@@ -1254,6 +1254,99 @@ Merge `072da1c7` (branch `codex/souls-slice-runtime`, commits `c84d4061`,
   PRE-EXISTING violations (11 psx-gte scene.rs, 6 bsp_runtime.rs, none in
   the new lines), to be triaged in the P3 numeric audit.
 
+#### 0.20.2 P1b souls slice and Q1 E1M1 route merges (2026-08-11)
+
+PSoXide merge `449f1a1e` (branch `codex/souls-slice-project`) completes the
+P1 vertical slice:
+
+- `editor/projects/souls-bsp-vertical-slice`: a fresh tracked level authored
+  ONLY through production editor command paths (a deterministic psxed-ui
+  test re-authors it; the gate diffs the export against the tracked copy):
+  two combat spaces, a doorway with a Logic Door brush mover, a lava pool,
+  Box/Arch/Image props, lights, a TriggerVolume-to-Checkpoint chain, a
+  player Character with equipped sword, and a Mantis enemy with sword; a
+  sealed crypt sentinel exercises PVS suppression genuinely.
+- The starter catalogue now ships the VERIFIED combat loadout (sword
+  weapons with exact grips 15077/18462, measured capsules light 12-15 /
+  heavy 11-14 / combo 12-25, Mantis hurtbox r184, joint-13 right_hand_grip
+  sockets). OWNER FLAG: the starter Aletha profile was repointed from the
+  Bonnie/uthana wiring (which dangled on fresh-project sync) to the
+  verified ci_player loadout; the Bonnie resources remain in the default
+  project untouched. Three real sync bugs fixed (AnimationClip
+  target_model remap, duplicate-name sync targets, dangling refs).
+- `make editor-souls-bsp-check`: image-free gate (re-author + drift diff,
+  clean cook, real MIPS guest + disc, canonical tape twice + negative tape)
+  pinning the full souls loop: checkpoint activation 1, door activations 1,
+  attack starts 6, melee hits 4, duplicate rejections 44, stagger 1, enemy
+  deaths 1, hits taken 4, weapon attachments 2 (one per life, two lives),
+  liquid damage events 6, player deaths 1, PVS suppressions 2911,
+  post-respawn crossing gauge x/z 1003862/1001536, VRAM
+  `0x763cda5e46819ea1`, display `0x3c7a6bd9154f23de`; negative tape pins
+  zeros (weapon attachments 1, suppressions 812, parked at spawn).
+- Slice findings recorded for P2: the BSP place lane parks trigger anchors
+  at surface+1 (a placed TriggerVolume cannot fire without an anchor edit);
+  TriggerVolume default wait 0 refires every tick (slice authors wait -1);
+  door-gated PVS suppression is unimplementable at portal-component
+  visibility granularity (a leaf-PVS compiler upgrade would be needed);
+  the Character lane seeds visual_scale_q8 from the model default.
+- GATE DEFECT found and fixed at integration: combat_checkpoint.sh and
+  editor_souls_bsp_check.sh only built the frontend when missing, so a
+  stale binary from before a telemetry-label change silently read new
+  counters as "unknown" (a false red here; a false green elsewhere). Both
+  gates now rebuild the frontend unconditionally (incremental), honoring
+  the "exact source under test" replay rule. The blank/liquid gates
+  already used cargo run and were safe.
+- REPRODUCIBILITY FINDING at integration: the MIPS guest binary is not
+  checkout-path-reproducible. With byte-identical sources AND
+  byte-identical cooked `generated/` content, two worktrees produced
+  same-size exes differing in 312,194 bytes (no embedded path strings;
+  cargo derives per-crate metadata from the workspace path, which
+  reorders codegen). Gameplay is unaffected (every counter identical,
+  display hash identical across trees); the slice's heavy streaming
+  leaves loading-transient pixels outside the gameplay draw window whose
+  final state depends on code layout, so the slice VRAM hash is canonical
+  PER CHECKOUT. The committed souls-gate VRAM pin was re-taken from the
+  canonical integration checkout (`0xc41710bde0e93e15`; the worker-tree
+  value `0x763cda5e46819ea1` is recorded here for provenance), with the
+  sensitivity documented in the gate script. A Quake-style
+  canonical-staging guest build to make PSoXide guest artifacts
+  path-independent is an explicit I1 work item. The small blank/combat
+  fixtures have not exhibited the residue; their pins currently reproduce
+  across trees.
+- `docs/souls-slice-acceptance.md` is the owner's native checklist.
+
+Quake merge `0eca976` (branch `codex/quake-e1m1-route`) completes Q1:
+
+- Discovery: `d7e521e` was NOT an ancestor of `09ff502` (both fork from
+  `531511c`), so the port carried the entire donor commit (target graph,
+  start-route gate) plus the reviewed dirty diff onto the monster/weapon
+  head. Nine commits, every one building.
+- The authored E1M1 chain gate passes deterministically: 55 waypoints,
+  mechanisms `0x1fff` (message, buttons 213/211/212 in order, counter,
+  door t10, crossing, lift/bridge/gates), 532 frames, target edges 16,
+  vram `0x6b0c7f7099ac36fb`, display `0xdd46a732b521efe1`, byte-identical
+  across three runs plus an integration-tree rerun. `start-route-regress`
+  passes for the first time on this base (134 frames, 2 loads).
+- Route corrections vs the donor were derived from the actual BSP data
+  (corridor centerlines, a jump waypoint over the leg-1 ramp lip, use-press
+  message reading per the authored door semantics). Probe version 7 (5/6
+  were taken); `player_activated_movers` is an 8-slot array because one
+  frame can legitimately retire button 212, the counter, and the door
+  together at 15 Hz decision pacing.
+- The stale combat-regress visual pin predated this branch (proven by
+  building bare `09ff502` with identical assets: same new hashes,
+  byte-identical frame dumps); re-pinned with evidence. Full matrix green
+  at the final head, including the new chain gate.
+- The donor's remaining guest i64s in the route path (`mover.rs` and
+  `targets.rs` wait conversions) are now the exact i32 split with boundary
+  tests, closing the S1 fix-before-Q2 item.
+
+Milestone: with P1a+P1b merged and the slice gate green on the integration
+tree, the `PSoXide Authored Souls Slice` milestone criteria are met by
+automated evidence (host suites, real MIPS, two deterministic image-free
+replays with pinned gameplay counters). The owner's native acceptance run
+remains the human half of P2.
+
 ## 1. Owner objective
 
 The owner wants one coherent PS1 development stack, not three adjacent demos:

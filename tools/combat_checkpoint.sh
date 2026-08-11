@@ -80,10 +80,12 @@ echo "combat-checkpoint: disc"
     --ui-pack-order-file "../../$GENERATED/ui_pack_order.txt" \
     --cdda-track-list "../../$GENERATED/cdda_tracks.txt" >/dev/null)
 
-if [ ! -x target/release/frontend ]; then
-    echo "combat-checkpoint: building frontend"
-    (cd emu && cargo build -p frontend --release --quiet)
-fi
+# Always rebuild: a replay gate must use the frontend built from the exact
+# source under test. A stale binary silently drops newer telemetry labels
+# (its counters print as "unknown") and can false-red or false-green the
+# counter assertions. Incremental cargo makes this free when up to date.
+echo "combat-checkpoint: building frontend"
+(cd emu && cargo build -p frontend --release --quiet)
 
 for RUN in 1 2; do
     echo "combat-checkpoint: canonical replay $RUN/2"
