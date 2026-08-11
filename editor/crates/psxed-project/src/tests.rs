@@ -1561,9 +1561,14 @@ fn embedded_default_project_ron_deserializes() {
     assert!(starter_materials.iter().all(|material| {
         material.face_sidedness == MaterialFaceSidedness::Front && !material.double_sided
     }));
-    // Starter seeds the active player with the Cortex animation project's
-    // Bonnie AI model and action map. Resolve the character through the wired
-    // player controller rather than assuming a particular resource id.
+    // Starter seeds the active player with the VERIFIED cortex_v1 combat
+    // loadout: the ci_player model, the Aletha Complete Animation Set (the
+    // clips the measured attack windows were authored against), and the
+    // measured combat capsules. The Bonnie AI / Aletha-uthana resources stay
+    // in the project for experiments, but the starter profile must stay on
+    // catalogue-synced content or it dangles in freshly synced projects.
+    // Resolve the character through the wired player controller rather than
+    // assuming a particular resource id.
     let character_id = project
         .active_scene()
         .nodes()
@@ -1592,19 +1597,29 @@ fn embedded_default_project_ron_deserializes() {
             _ => None,
         })
         .expect("starter player model resource missing");
-    assert!(model
-        .model_path
-        .ends_with("aletha_uthana/aletha_uthana.psxmdl"));
+    assert!(model.model_path.ends_with("ci_player/ci_player.psxmdl"));
     assert!(model
         .texture_path
         .as_deref()
-        .is_some_and(|path| path.ends_with("aletha_uthana.psxt")));
+        .is_some_and(|path| path.ends_with("ci_player.psxt")));
     assert!(model.skeleton.is_some());
     assert_eq!(
         model.collision_radius,
         default_model_collision_radius_for_height(model.world_height)
     );
     assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+    assert!(
+        model
+            .attachments
+            .iter()
+            .any(|socket| socket.name == "right_hand_grip" && socket.joint == 13),
+        "starter player model must expose the verified weapon socket"
+    );
+    assert_eq!(
+        character.combat_capsules.len(),
+        4,
+        "starter Aletha carries the verified hurtbox plus three attack capsules"
+    );
 
     let animation_set_id = character
         .animation_set
@@ -1612,25 +1627,22 @@ fn embedded_default_project_ron_deserializes() {
     let animation_set_resource = project
         .resource(animation_set_id)
         .expect("starter animation set resource missing");
-    assert_eq!(animation_set_resource.name, "bonnie_ai_set");
+    assert_eq!(animation_set_resource.name, "Aletha Complete Animation Set");
     let ResourceData::AnimationSet(animation_set) = &animation_set_resource.data else {
         panic!("starter animation set has the wrong resource kind");
     };
     for (action, stem) in [
         (CharacterAnimationAction::Idle, "idle"),
-        (CharacterAnimationAction::Intro, "wake_up"),
-        (CharacterAnimationAction::HitReact, "hit_react"),
+        (CharacterAnimationAction::Walk, "walk"),
+        (CharacterAnimationAction::Run, "run"),
+        (CharacterAnimationAction::Roll, "roll"),
         (CharacterAnimationAction::LightAttack, "light_attack"),
         (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
         (CharacterAnimationAction::ComboAttack, "combo_attack"),
-        (CharacterAnimationAction::Walk, "walk_fwd"),
-        (CharacterAnimationAction::WalkBackward, "walk_bwd"),
-        (CharacterAnimationAction::StrafeLeft, "walk_lft"),
-        (CharacterAnimationAction::StrafeRight, "walk_rgt"),
-        (CharacterAnimationAction::Run, "run_fwd"),
-        (CharacterAnimationAction::RunBackward, "run_bwd"),
-        (CharacterAnimationAction::RunStrafeLeft, "run_lft"),
-        (CharacterAnimationAction::RunStrafeRight, "run_rgt"),
+        (CharacterAnimationAction::HitReact, "hit_react"),
+        (CharacterAnimationAction::Death, "death"),
+        (CharacterAnimationAction::StrafeLeft, "strafe_left"),
+        (CharacterAnimationAction::StrafeRight, "strafe_right"),
     ] {
         let clip_id = animation_set
             .action_clip(action)
@@ -1644,7 +1656,7 @@ fn embedded_default_project_ron_deserializes() {
             .unwrap_or_else(|| panic!("starter {action:?} clip resource missing"));
         assert_eq!(
             clip.psxanim_path,
-            format!("assets/animations/bonnie_ai/{stem}.psxanim")
+            format!("assets/animations/ci_player_complete/{stem}.psxanim")
         );
         assert_eq!(clip.target_model, Some(model_id));
         assert_eq!(clip.skeleton, model.skeleton);

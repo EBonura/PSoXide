@@ -36,7 +36,7 @@
 	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio hwtest-audio-chain \
 	hwtest-sb4-capture hwtest-sb4 hwtest-sb4-baseline \
 	hello-engine hello-engine-disc run-hello-engine \
-	cook-playtest build-editor-playtest editor-blank-playtest-check editor-bsp-liquid-check profile-demo3 profile-demo3-forward \
+	cook-playtest build-editor-playtest editor-blank-playtest-check editor-bsp-liquid-check editor-souls-bsp-check combat-checkpoint profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
 	profile-demo3-disc-stream-forward profile-demo7-camera-sweep
 
@@ -71,6 +71,8 @@ help:
 	@echo "                      - author a blank BSP level through editor commands, build MIPS, and boot headlessly"
 	@echo "    make editor-bsp-liquid-check"
 	@echo "                      - cook BSP lava, build MIPS, and prove damage/respawn headlessly without image output"
+	@echo "    make editor-souls-bsp-check"
+	@echo "                      - re-author the souls vertical slice through editor commands and replay its full loop headlessly"
 	@echo "    make profile-demo3-forward - streamed demo3 profile while holding forward"
 	@echo "    make profile-demo3-paced20 - alias for streamed 20Hz visual cadence telemetry"
 	@echo "    make profile-demo3-paced20-forward - streamed paced20 profile while holding forward"
@@ -1308,3 +1310,10 @@ cortex-anim-shots: cortex-anim-disc
 # double deterministic replay, door-occlusion replay, pinned assertions.
 combat-checkpoint:
 	sh tools/combat_checkpoint.sh
+
+# Souls vertical-slice regression gate: re-author the tracked slice through
+# production editor commands, clean cook, MIPS guest, disc, double
+# deterministic canonical replay plus a negative replay, pinned souls-loop
+# assertions (checkpoint, door, kill, lava death, respawn, PVS).
+editor-souls-bsp-check:
+	sh tools/editor_souls_bsp_check.sh
