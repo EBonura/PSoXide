@@ -325,7 +325,7 @@ its 13,008-byte PXBSP.
 
 Current `make combat-checkpoint` pins after the corrected geometry/hulls:
 4 authored player hits, 1 stagger, 1 death, 3 fallback hits taken, traversal
-x 3641, VRAM `0x425cf210826f0d92`, display `0xfaa899f4f396509a`.
+x 3625, VRAM `0x2fd148c1585cfcff`, display `0xbe036d63a1eb1abd`.
 The closed-door tape has 3 accepted player attacks and 1 genuine enemy attack
 window, zero door logic fires, and zero connections in either direction. Two
 canonical runs are byte-identical. This supersedes 0.6/0.7's replay pins and
