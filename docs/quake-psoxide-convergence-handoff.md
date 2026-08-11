@@ -338,6 +338,78 @@ passing `psxed-project` tests (1 ignored diagnostic); and 345 passing
 `psxed-ui` tests (1 ignored preview dump). The real MIPS editor-playtest build
 with `cd-stream-bench emulator-telemetry` also passes.
 
+### 0.10 BSP-native ownership checkpoint (2026-08-11)
+
+Commit `fcb99eeb` removes the last synthetic grid world from a PXBSP playtest.
+The singleton `LevelRoomRecord` remains deliberately as non-spatial metadata
+for shared gravity, camera, sky, fog and gameplay tables, but the cook emits no
+`WorldGrid`, PSXW asset, room chunk, room visibility row, surface cache or room
+residency reference. Its `world_asset` is the explicit `AssetId(65535)`
+sentinel. `WORLD.PAK` is a valid header-only compatibility file so the existing
+disc layout and loader contract stay stable; the generated world-pack order is
+explicitly empty. Grid projects retain their old cook, streaming and runtime
+path unchanged.
+
+Resident PXBSP now exposes allocation-free caller-owned PVS decompression.
+The playtest runtime locates the player's body centre in the render BSP,
+decompresses that leaf's visibility row once and caches it while the observer
+remains in the leaf. It tests live enemy body centres, placed model centres and
+logic origins against the same row. The results replace RoomIndex gating for
+idle/patrol AI and trigger touch scans, and suppress model bodies, equipment
+and shadows from non-visible leaves. Already-engaged enemies deliberately stay
+awake so crossing a visibility boundary cannot reset combat. A trigger volume
+containing the player is force-admitted even when its representative origin is
+in another leaf; this avoids a false negative for volumes spanning several
+leaves. Invalid/solid points, malformed PVS data and an oversized row all fail
+closed. The fixed runtime row budget is 1,024 bytes (8,192 visible leaves).
+
+PXBSP also owns its ordinary world-content draw directly: static brush
+surfaces render through `psx-bsp`, while water, entity markers, box/cylinder/
+arch/image props, model instances, live enemy weapons, particles, player,
+player weapon and HUD continue through the shared PSoXide passes without an
+`ActiveRuntimeRoom`. Actor lighting uses the generated `[32; 3]` ambient value
+shared with the brush light bake, rather than recovering ambient from a dummy
+PSXW header. This direct pass was added only after adversarial replay showed
+that deleting the room window could leave the enemy simulation active while
+silently omitting its body and sword from rendering.
+
+Current `make combat-checkpoint` pins after native ownership: 4 authored
+player hits, 1 stagger, 1 death, 3 fallback hits taken, traversal x 3625,
+VRAM `0x007fb6683f98d82b`, display `0x0739fbd9575fdbb8`. The closed-door tape
+still has 3 accepted player attacks, 1 enemy attack window, zero logic fires
+and zero hits in either direction. Both canonical replays are byte-identical.
+The inspected final frame contains the BSP world, live enemy, player and both
+weapons; screenshot SHA-256 is
+`323e1d971fe3152995d6d03fe4779f988a3eb9b1badc7a0bf3375fdc3969a887`.
+Build artifacts at the exact commit:
+
+```text
+editor-playtest.exe  1,406,976 bytes
+SHA-256 0167e06a04be87db22e2b86ffc7ae9486714d99fda0b1692e91ebf0d0f1eb0f4
+brush_world.pxbsp       12,976 bytes
+SHA-256 17f044fc65e942990e6e7f33d7f1043400c43759f43bdd5bdb80a52a45291825
+disc BIN SHA-256 dbf841e9b950cdfc352170f1f944e5c7a8422e08ffe9d93cab509dc1880fa70d
+```
+
+Validation at `fcb99eeb`: 67 `psx-bsp`, 78 `psx-game-runtime`, 111 filtered
+`psx-engine` renderer, 471 passing `psxed-project` (1 ignored), and 345
+passing `psxed-ui` (1 ignored); real `mipsel-sony-psx` release link; complete
+combat gate. This closes RC1's synthetic-grid scaffold and basic leaf-driven
+gameplay/model activation items. It does **not** close BSP water contents and
+swimming, prop AABB composition into BSP collision, large entity/trigger
+touched-leaf sets, PVS regions beyond the fixed row budget, remaining
+TrenchBroom workflow tools, original hardware validation, Quake Episode 1
+completion, or the opt-in Quake shareware demo-disc build.
+
+The next worker must challenge this checkpoint rather than inheriting its
+claims: author two sealed interiors with an actor and a spanning trigger in
+each; prove hidden actors produce neither body, weapon nor shadow packets;
+cross the separating visibility boundary and prove activation changes without
+state reset; corrupt and oversize PVS rows to confirm fail-closed behaviour;
+and repeat the gate after adding BSP-native prop/water collision. In
+particular, do not mistake the singleton metadata room or header-only
+`WORLD.PAK` for a remaining spatial grid dependency.
+
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
 work, uncertainty, dirty-worktree boundaries, validation evidence, and ways to
