@@ -1659,6 +1659,109 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
     let _ = std::fs::remove_dir_all(cook_c);
 }
 
+fn action_bar_text_center(
+    shapes: &[egui::epaint::ClippedShape],
+    label: &str,
+) -> Option<egui::Pos2> {
+    fn find(shape: &egui::Shape, label: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text() == label => {
+                Some(text.pos + text.galley.rect.center().to_vec2())
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| find(shape, label)),
+            _ => None,
+        }
+    }
+    shapes.iter().find_map(|shape| find(&shape.shape, label))
+}
+
+fn click_real_egui_play_control(
+    workspace: &mut EditorWorkspace,
+    status: EditorPlaytestStatus,
+    label: &str,
+) {
+    let ctx = egui::Context::default();
+    let mut fonts = egui::FontDefinitions::default();
+    let proportional = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .expect("default proportional font family");
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("lucide".into()), proportional);
+    ctx.set_fonts(fonts);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 120.0));
+    let input = |time, events| egui::RawInput {
+        screen_rect: Some(screen),
+        time: Some(time),
+        events,
+        ..egui::RawInput::default()
+    };
+    let draw = |ctx: &egui::Context, workspace: &mut EditorWorkspace| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            workspace.draw_build_play_controls(ui, status, None);
+        });
+    };
+    let output = ctx.run(input(0.0, vec![]), |ctx| draw(ctx, workspace));
+    let rendered = crate::icons::label(crate::icons::PLAY, label);
+    let point = action_bar_text_center(&output.shapes, &rendered)
+        .unwrap_or_else(|| panic!("action bar did not render {label:?}"));
+    let _ = ctx.run(
+        input(
+            1.0 / 60.0,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+    let _ = ctx.run(
+        input(
+            2.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+}
+
+#[test]
+fn play_and_rebuild_buttons_emit_requests_through_real_egui_input() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("real-egui-play-control"),
+        ProjectDocument::new("Real egui Play control"),
+    );
+
+    click_real_egui_play_control(&mut workspace, EditorPlaytestStatus::Idle, "Play");
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Play)
+    );
+
+    click_real_egui_play_control(
+        &mut workspace,
+        EditorPlaytestStatus::Running {
+            input_captured: false,
+        },
+        "Rebuild & Play",
+    );
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Rebuild)
+    );
+}
+
 #[test]
 fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     let mut workspace =
