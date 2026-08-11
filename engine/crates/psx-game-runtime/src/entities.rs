@@ -326,6 +326,12 @@ impl DeferredGameEntityAttack {
     pub const fn room(self) -> RoomIndex {
         self.room
     }
+
+    /// Frozen attacker root position for the contact tick, used by callers
+    /// for world-occlusion segments alongside pose-backed capsule tests.
+    pub const fn position(self) -> [i32; 3] {
+        self.position
+    }
 }
 
 /// Caller-owned fixed-capacity contact handoff for one entity tick.
@@ -705,6 +711,25 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
         already_hit: &mut u64,
     ) -> MeleeArcStats {
+        self.apply_melee_arc_occluded(records, arc, damage, poise_damage, already_hit, |_, _| {
+            false
+        })
+    }
+
+    /// [`Self::apply_melee_arc`] with a caller-supplied world occlusion test.
+    /// `occluded(entity, position)` returning true blocks the connection
+    /// WITHOUT latching the swing bit, so a target revealed later in the same
+    /// active window (a door finishing its travel) can still be hit once.
+    pub fn apply_melee_arc_occluded(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        arc: &MeleeArc,
+        damage: u16,
+        poise_damage: u16,
+        // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
+        already_hit: &mut u64,
+        mut occluded: impl FnMut(usize, [i32; 3]) -> bool,
+    ) -> MeleeArcStats {
         // psx-numeric-allow-next-line: the 64-record cap IS the mask width
         const { assert!(MAX_ENTITIES <= 64, "swing mask is a u64") };
         let mut stats = MeleeArcStats::default();
@@ -722,7 +747,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                     self.x[entity],
                     self.z[entity],
                     i32::from(record.radius),
-                );
+                )
+                || occluded(entity, self.position(entity));
             if !skip {
                 *already_hit |= mask;
                 let outcome = self.apply_hit(records, entity, damage, poise_damage);
@@ -2102,6 +2128,56 @@ mod tests {
         assert_eq!(batched.position(0), stepped.position(0));
         assert_eq!(batched.yaw(0), stepped.yaw(0));
         assert_eq!(batched.state_ticks[0], stepped.state_ticks[0]);
+    }
+
+    #[test]
+    fn occluded_melee_arc_blocks_without_latching_the_swing_bit() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        let arc = MeleeArc {
+            room: RoomIndex(0),
+            x: 1200,
+            z: 1000,
+            yaw: 3072,
+            reach: 640,
+            half_angle: 683,
+        };
+        // psx-numeric-allow-next-line: swing bitmask scratch in tests
+        let mut swing = 0u64;
+
+        // A wall between the actors: no hit, no damage, and crucially the
+        // swing bit stays clear so the same swing can connect later.
+        let stats =
+            entities.apply_melee_arc_occluded(&IDLE_ENEMY, &arc, 30, 40, &mut swing, |_, _| true);
+        assert_eq!(stats, MeleeArcStats::default());
+        assert_eq!(entities.health(0), 100);
+        assert_eq!(swing, 0);
+
+        // The occluder clears (door finished opening): the identical swing
+        // connects exactly once and the closure sees the live position.
+        let mut probed = None;
+        let stats = entities.apply_melee_arc_occluded(
+            &IDLE_ENEMY,
+            &arc,
+            30,
+            40,
+            &mut swing,
+            |entity, position| {
+                probed = Some((entity, position));
+                false
+            },
+        );
+        assert_eq!(
+            stats,
+            MeleeArcStats {
+                hits: 1,
+                staggers: 0,
+                deaths: 0
+            }
+        );
+        assert_eq!(entities.health(0), 70);
+        assert_eq!(probed, Some((0, entities.position(0))));
+        assert_ne!(swing, 0);
     }
 
     #[test]
