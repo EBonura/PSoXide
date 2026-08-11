@@ -168,6 +168,9 @@ impl EditorWorkspace {
                     self.clear_sector_selection();
                 }
             }
+            ViewTool::Place if self.bsp_authoring_root().is_some() => {
+                self.place_bsp_from_top(world);
+            }
             tool => {
                 let Some(room_id) = self.active_room_id() else {
                     return;
