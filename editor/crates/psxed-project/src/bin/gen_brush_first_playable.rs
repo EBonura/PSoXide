@@ -1,31 +1,55 @@
 //! Generate the tracked two-room brush Play acceptance map.
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use psxed_project::brush::Brush;
 use psxed_project::{
-    LogicNodeKind, MaterialResource, MaterialTextureMode, NodeId, NodeKind, ProjectDocument,
-    ResourceData, Transform3,
+    LogicNodeKind, MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, Transform3,
 };
 
+const STARTER_STONE_SOURCE: &str = "delven_07_stonebrk4a_q0.psxt";
+const STARTER_STONE_RELATIVE: &str = "assets/textures/starter_stone_brick.psxt";
+
+#[derive(Debug, PartialEq, Eq)]
+enum GeneratorAction {
+    Help,
+    Generate(PathBuf),
+}
+
 fn main() {
-    let output_dir = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("..")
-                .join("projects")
-                .join("brush-first-playable")
-        });
+    let default_output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("projects")
+        .join("brush-first-playable");
+    let output_dir = match parse_generator_args(std::env::args_os().skip(1), default_output)
+        .unwrap_or_else(|error| panic!("{error}"))
+    {
+        GeneratorAction::Help => {
+            println!("Usage: gen-brush-first-playable [OUTPUT_DIR]");
+            return;
+        }
+        GeneratorAction::Generate(output_dir) => output_dir,
+    };
     std::fs::create_dir_all(&output_dir).expect("create brush project directory");
 
     let mut project = ProjectDocument::new("Brush First Playable");
-    let mut stone_material = MaterialResource::opaque(None);
-    stone_material.texture_mode = MaterialTextureMode::Generated;
-    let stone = project.add_resource("Warm Stone", ResourceData::Material(stone_material));
+    // Start inside the left room, looking down toward the door so the first
+    // view includes the floor, both side-wall strips, and the closed door.
+    // This is deliberately authored rather than bounds-framed: an exterior
+    // fit hides the editable interior behind the ceiling and outer walls.
+    project.editor_camera.orbit_yaw_q12 = 3072;
+    project.editor_camera.orbit_pitch_q12 = 3665;
+    project.editor_camera.orbit_target = [512, 64, 384];
+    project.editor_camera.orbit_radius = 550;
+    copy_starter_stone(&output_dir);
+    let stone_material = MaterialResource::opaque(Some(STARTER_STONE_RELATIVE.to_string()));
+    let stone = project.add_resource(
+        "Starter Stone Brick",
+        ResourceData::Material(stone_material),
+    );
     let scene = project.active_scene_mut();
 
     let static_boxes = [
@@ -118,6 +142,44 @@ fn main() {
     write_walkthrough_tape(&output_dir);
 }
 
+fn parse_generator_args(
+    args: impl IntoIterator<Item = OsString>,
+    default_output: PathBuf,
+) -> Result<GeneratorAction, String> {
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return Ok(GeneratorAction::Generate(default_output));
+    };
+    if args.next().is_some() {
+        return Err("Usage: gen-brush-first-playable [OUTPUT_DIR]".to_string());
+    }
+    if first == "--help" || first == "-h" {
+        return Ok(GeneratorAction::Help);
+    }
+    Ok(GeneratorAction::Generate(PathBuf::from(first)))
+}
+
+fn copy_starter_stone(output_dir: &Path) {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("projects")
+        .join("default")
+        .join("assets")
+        .join("textures")
+        .join(STARTER_STONE_SOURCE);
+    let destination = output_dir.join(STARTER_STONE_RELATIVE);
+    std::fs::create_dir_all(destination.parent().expect("starter texture parent"))
+        .expect("create starter texture directory");
+    std::fs::copy(&source, &destination).unwrap_or_else(|error| {
+        panic!(
+            "copy starter texture {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    });
+}
+
 fn paint(brush: &mut Brush, material: psxed_project::ResourceId) {
     for face in &mut brush.faces {
         face.material = Some(material);
@@ -144,4 +206,40 @@ fn write_walkthrough_tape(output_dir: &Path) {
     }
     std::fs::write(output_dir.join("walk-through-door.pxitape.csv"), tape)
         .expect("save brush walkthrough tape");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_is_never_treated_as_an_output_directory() {
+        let default = PathBuf::from("tracked-fixture");
+        assert_eq!(
+            parse_generator_args([OsString::from("--help")], default.clone()).unwrap(),
+            GeneratorAction::Help
+        );
+        assert_eq!(
+            parse_generator_args([OsString::from("-h")], default).unwrap(),
+            GeneratorAction::Help
+        );
+    }
+
+    #[test]
+    fn output_directory_is_optional_and_unique() {
+        let default = PathBuf::from("tracked-fixture");
+        assert_eq!(
+            parse_generator_args([], default.clone()).unwrap(),
+            GeneratorAction::Generate(default)
+        );
+        assert_eq!(
+            parse_generator_args([OsString::from("generated")], PathBuf::new()).unwrap(),
+            GeneratorAction::Generate(PathBuf::from("generated"))
+        );
+        assert!(parse_generator_args(
+            [OsString::from("one"), OsString::from("two")],
+            PathBuf::new()
+        )
+        .is_err());
+    }
 }

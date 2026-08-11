@@ -321,6 +321,7 @@ mod tests {
                 parents: vec![None],
                 signature: "psx-parent-v1:1:root".to_string(),
                 note: "test skeleton".to_string(),
+                joint_names: vec!["root".to_string()],
             }),
         );
         let id = project.add_resource(

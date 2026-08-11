@@ -131,6 +131,8 @@ pub enum EditorViewArg {
     ThreeD,
     #[value(name = "2d")]
     TwoD,
+    /// Room workspace in the Top orthographic BSP authoring view.
+    Top,
     Animation,
     Material,
 }
@@ -141,9 +143,14 @@ impl EditorViewArg {
         match self {
             Self::ThreeD => psxed_project::EditorWorkspaceView::Room,
             Self::TwoD => psxed_project::EditorWorkspaceView::Ui,
+            Self::Top => psxed_project::EditorWorkspaceView::Room,
             Self::Animation => psxed_project::EditorWorkspaceView::Animation,
             Self::Material => psxed_project::EditorWorkspaceView::Material,
         }
+    }
+
+    pub const fn is_room_orthographic(self) -> bool {
+        matches!(self, Self::Top)
     }
 }
 
@@ -2622,6 +2629,9 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
         .map_err(|error| format!("open editor project at {}: {error}", project_root.display()))?;
     let workspace_view = args.view.project_view();
     editor.show_workspace(workspace_view);
+    if args.view.is_room_orthographic() {
+        editor.show_room_orthographic();
+    }
 
     if let Some(selector) = args.resource.as_deref() {
         if !matches!(
@@ -2653,7 +2663,7 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
                     && editor.animation_viewer_resource_is_focused(resource_id)
             }
             EditorViewArg::Material => editor.focus_material_resource(resource_id),
-            EditorViewArg::ThreeD | EditorViewArg::TwoD => false,
+            EditorViewArg::ThreeD | EditorViewArg::TwoD | EditorViewArg::Top => false,
         };
         if !focused {
             return Err(format!(
@@ -2663,11 +2673,22 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
         }
     }
 
+    apply_headless_editor_pre_capture_actions(&mut editor, args.frame_selected);
+
     let ctx = egui::Context::default();
     crate::theme::apply(&ctx);
+    let (viewport_image, viewport_overlay_lines) =
+        if matches!(args.view, EditorViewArg::ThreeD) && args.debug_map_view.is_none() {
+            headless_editor_viewport_image(&editor, &project_root)?
+        } else {
+            (
+                egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
+                Vec::new(),
+            )
+        };
     let viewport_texture = ctx.load_texture(
         "headless-editor-viewport",
-        egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
+        viewport_image,
         egui::TextureOptions::NEAREST,
     );
     let (viewport, play_status) = if let Some(view) = args.debug_map_view.as_deref() {
@@ -2730,7 +2751,7 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
         )
     } else {
         (
-            EditorViewport3dPresentation::edit(viewport_texture.id(), Vec::new()),
+            standalone_editor_preview_presentation(viewport_texture.id(), viewport_overlay_lines),
             EditorPlaytestStatus::Idle,
         )
     };
@@ -2744,19 +2765,8 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
     );
     let mut textures_delta = first.textures_delta;
 
-    let events = if args.frame_selected {
-        vec![egui::Event::Key {
-            key: egui::Key::Period,
-            physical_key: Some(egui::Key::Period),
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        }]
-    } else {
-        Vec::new()
-    };
     let captured = ctx.run(
-        headless_editor_input(args.width, args.height, 1.0 / 60.0, events),
+        headless_editor_input(args.width, args.height, 1.0 / 60.0, Vec::new()),
         |ctx| editor.draw(ctx, viewport.clone(), play_status),
     );
     textures_delta.append(captured.textures_delta);
@@ -2778,6 +2788,79 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
         args.out.display()
     );
     Ok(())
+}
+
+#[cfg(feature = "editor")]
+fn apply_headless_editor_pre_capture_actions(editor: &mut EditorWorkspace, frame_selected: bool) {
+    if frame_selected {
+        editor.frame_current_view();
+    }
+}
+
+#[cfg(feature = "editor")]
+fn standalone_editor_preview_presentation(
+    texture: egui::TextureId,
+    overlay_lines: Vec<psxed_ui::EditorViewportOverlayLine>,
+) -> EditorViewport3dPresentation {
+    let mut viewport = EditorViewport3dPresentation::edit(texture, overlay_lines);
+    // Native edit previews occupy the upper-left 640x480 region of a
+    // 2048x1024 VRAM texture. Headless UI capture uploads an already extracted
+    // 640x480 image, so sampling the native atlas UV here would crop and
+    // stretch its upper-left quadrant instead of reproducing the real view.
+    viewport.uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    viewport
+}
+
+#[cfg(feature = "editor")]
+fn headless_editor_viewport_image(
+    editor: &EditorWorkspace,
+    project_root: &Path,
+) -> Result<(egui::ColorImage, Vec<psxed_ui::EditorViewportOverlayLine>), String> {
+    let project = editor.project();
+    let visibility = project.editor_visibility;
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(project, project_root);
+    textures.refresh_models(project, project_root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(project, project_root);
+    let hidden = HashSet::new();
+    let frame = crate::editor_preview::build_phase1_frame(
+        project,
+        editor.viewport_3d_camera(),
+        visibility.preview_fog,
+        visibility.preview_backface_wireframe,
+        visibility.preview_bounds,
+        visibility.show_grid,
+        visibility.show_portals,
+        visibility.show_lights,
+        &hidden,
+        editor.active_room_id(),
+        0,
+        NodeId::ROOT,
+        None,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        None,
+        &textures,
+        &assets,
+    );
+
+    let (device, queue) = headless_wgpu_device()?;
+    let mut renderer = psx_gpu_render::HwRenderer::new_headless(device, queue);
+    if !renderer.set_internal_scale(2, None) {
+        return Err("headless editor viewport could not select 2x preview scale".to_string());
+    }
+    renderer.render_frame(&Gpu::new(), &frame.cmd_log, textures.vram_words());
+    let scale = renderer.internal_scale();
+    let (width, height, rgba) = renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+    let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+    Ok((image, frame.overlay_lines))
 }
 
 #[cfg(feature = "editor")]
@@ -3428,6 +3511,69 @@ mod press_script_tests {
         };
         assert_eq!(args.memcard, Some(PathBuf::from("slot-1.mcd")));
         assert_eq!(args.memcard2, Some(PathBuf::from("slot-2.mcd")));
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn standalone_editor_ui_preview_maps_the_complete_extracted_image() {
+        let presentation =
+            standalone_editor_preview_presentation(egui::TextureId::Managed(7), Vec::new());
+        assert_eq!(presentation.uv.min, egui::Pos2::ZERO);
+        assert_eq!(presentation.uv.max, egui::pos2(1.0, 1.0));
+
+        // A 640x480 standalone preview's corners and centre must map to the
+        // same normalized texels after only viewport scaling. The native
+        // atlas UV (0.3125, 0.46875) would fail the bottom-right assertion and
+        // recreate the cropped wall close-up this regression guards against.
+        let source = egui::vec2(640.0, 480.0);
+        for pixel in [
+            egui::Pos2::ZERO,
+            egui::pos2(320.0, 0.0),
+            egui::pos2(640.0, 0.0),
+            egui::pos2(640.0, 240.0),
+            egui::pos2(640.0, 480.0),
+            egui::pos2(320.0, 480.0),
+            egui::pos2(0.0, 480.0),
+            egui::pos2(0.0, 240.0),
+            egui::pos2(320.0, 240.0),
+        ] {
+            let normalized = egui::pos2(pixel.x / source.x, pixel.y / source.y);
+            let sampled = presentation.uv.min + normalized.to_vec2() * presentation.uv.size();
+            assert_eq!(sampled, normalized);
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_cli_distinguishes_ui_2d_from_room_top() {
+        assert_eq!(
+            EditorViewArg::TwoD.project_view(),
+            psxed_project::EditorWorkspaceView::Ui
+        );
+        assert!(!EditorViewArg::TwoD.is_room_orthographic());
+        assert_eq!(
+            EditorViewArg::Top.project_view(),
+            psxed_project::EditorWorkspaceView::Room
+        );
+        assert!(EditorViewArg::Top.is_room_orthographic());
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_frame_selection_is_applied_before_preview_extraction() {
+        let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../editor/projects/brush-first-playable");
+        let mut editor = EditorWorkspace::open_directory(project).unwrap();
+        editor.show_workspace(psxed_project::EditorWorkspaceView::Room);
+        assert_eq!(editor.viewport_3d_camera().radius, 550);
+
+        apply_headless_editor_pre_capture_actions(&mut editor, true);
+
+        let framed = editor.viewport_3d_camera();
+        assert_eq!(framed.target, [512, 256, 384]);
+        assert_eq!(framed.radius, 1638);
+        assert_eq!(framed.yaw_q12, 3072);
+        assert_eq!(framed.pitch_q12, 3665);
     }
 
     #[test]
