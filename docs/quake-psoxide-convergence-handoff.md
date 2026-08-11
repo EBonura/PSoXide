@@ -144,6 +144,17 @@ Bootstrap note: the Quake workspace path-depends on `.psoxide/`, so a fresh
 checkout hydrates once with PSoXide's `tools/psoxide-link` CLI before the
 first `cargo run` (README documents this).
 
+RC1 addendum (2026-08-11, Quake `c44e753`): the pin moved to the PSoXide
+RC1 revision `5f911958`, quake-cook's psx-sfx/psxed-audio now resolve from
+the hydrated pin (psoxide-link stays remote by necessity, byte-identical in
+range), and the complete per-workspace matrix plus every gate reran green
+against a clean worktree checked out at exactly the pin with the frontend
+built from the same pinned source. The transcript lives in the Quake
+repository's VALIDATION.md; the exact flow is
+`git worktree add ../PSoXide-rc1-pin 5f911958` then
+`--psoxide ../PSoXide-rc1-pin`. Documentation commits above the pin on
+this branch do not participate in the contract.
+
 ### 0.5 Known limitations and owner decisions
 
 - Enemy authored attack volumes still do not exist; enemy damage is the
