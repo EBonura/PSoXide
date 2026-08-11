@@ -19,6 +19,24 @@ pub const Q12_ONE: i32 = 4096;
 pub const TRACE_PLANE_EPSILON_Q12: i32 = 128;
 pub const TRACE_STACK_CAPACITY: usize = 64;
 
+/// Result of sampling an ordered feet-to-head point sequence through a hull.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct LiquidContentsSample {
+    /// Strongest sampled liquid code: lava, slime, water, then empty.
+    pub contents: i16,
+    /// One-based index of the highest sample in any liquid, or zero.
+    pub water_level: u8,
+}
+
+impl Default for LiquidContentsSample {
+    fn default() -> Self {
+        Self {
+            contents: CONTENTS_EMPTY,
+            water_level: 0,
+        }
+    }
+}
+
 /// Rigid local-to-world transform shared by brush rendering and collision.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct BrushTransform {
@@ -150,6 +168,28 @@ impl<'a> CollisionHull<'a> {
 
     pub fn point_contents(&self, point: Vec3I32) -> Option<i16> {
         self.point_contents_from(self.head_node, &point)
+    }
+
+    /// Sample an ordered feet-to-head point sequence and return Quake-style
+    /// liquid depth plus the strongest encountered hazard. Unknown contents,
+    /// sky, empty, and solid do not count as liquid. Any malformed tree fails
+    /// the whole query instead of returning a partial classification.
+    pub fn sample_liquid_contents(&self, points: &[Vec3I32]) -> Option<LiquidContentsSample> {
+        let mut sample = LiquidContentsSample::default();
+        let mut precedence = 0u8;
+        for (index, point) in points.iter().copied().enumerate() {
+            let contents = self.point_contents(point)?;
+            let candidate = liquid_precedence(contents);
+            if candidate == 0 {
+                break;
+            }
+            sample.water_level = (index + 1).min(u8::MAX as usize) as u8;
+            if candidate > precedence {
+                precedence = candidate;
+                sample.contents = contents;
+            }
+        }
+        Some(sample)
     }
 
     /// Trace a Q20.12 point segment through this Y-up PXBSP hull.
@@ -361,6 +401,15 @@ fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
             .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
     };
     dot.saturating_sub(plane.distance)
+}
+
+const fn liquid_precedence(contents: i16) -> u8 {
+    match contents {
+        CONTENTS_LAVA => 3,
+        CONTENTS_SLIME => 2,
+        CONTENTS_WATER => 1,
+        _ => 0,
+    }
 }
 
 fn interpolate(start: Vec3I32, end: Vec3I32, fraction: i32) -> Vec3I32 {
@@ -652,6 +701,56 @@ mod tests {
         assert_eq!(CONTENTS_SLIME, -4);
         assert_eq!(CONTENTS_LAVA, -5);
         assert_eq!(CONTENTS_SKY, -6);
+    }
+
+    #[test]
+    fn ordered_liquid_samples_report_depth_and_strongest_hazard() {
+        let mut planes = Vec::new();
+        for distance in [0, -Q12_ONE, -2 * Q12_ONE] {
+            planes.extend_from_slice(&plane(
+                Vec3I16 {
+                    x: Q12_ONE as i16,
+                    y: 0,
+                    z: 0,
+                },
+                distance,
+                0,
+            ));
+        }
+        let mut nodes = Vec::new();
+        nodes.extend_from_slice(&node(0, CONTENTS_EMPTY, 1));
+        nodes.extend_from_slice(&node(1, CONTENTS_WATER, 2));
+        nodes.extend_from_slice(&node(2, CONTENTS_SLIME, CONTENTS_LAVA));
+        let hull = hull(&planes, &nodes);
+        let at = |x| Vec3I32 { x, y: 0, z: 0 };
+
+        assert_eq!(
+            hull.sample_liquid_contents(&[at(Q12_ONE), at(Q12_ONE), at(Q12_ONE)]),
+            Some(LiquidContentsSample::default())
+        );
+        assert_eq!(
+            hull.sample_liquid_contents(&[at(-Q12_ONE / 2), at(Q12_ONE), at(Q12_ONE)]),
+            Some(LiquidContentsSample {
+                contents: CONTENTS_WATER,
+                water_level: 1,
+            })
+        );
+        assert_eq!(
+            hull.sample_liquid_contents(&[at(Q12_ONE), at(-Q12_ONE / 2), at(-3 * Q12_ONE)]),
+            Some(LiquidContentsSample::default()),
+            "Quake water level must begin at the feet"
+        );
+        assert_eq!(
+            hull.sample_liquid_contents(&[
+                at(-Q12_ONE / 2),
+                at(-3 * Q12_ONE / 2),
+                at(-3 * Q12_ONE),
+            ]),
+            Some(LiquidContentsSample {
+                contents: CONTENTS_LAVA,
+                water_level: 3,
+            })
+        );
     }
 
     #[test]

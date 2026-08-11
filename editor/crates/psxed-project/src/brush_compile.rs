@@ -11,8 +11,8 @@
 // qbsp-style balanced build with outer sealing replaces this when the
 // full compiler lands.
 
+use crate::brush::{Brush, BrushContents, FaceUv, Plane};
 use crate::ResourceId;
-use crate::brush::{Brush, FaceUv, Plane};
 
 /// Fixed-point scale shared with the runtime: positions and plane
 /// distances are Q20.12, normals Q3.12.
@@ -29,8 +29,7 @@ pub struct CompiledCollision {
     pub head_node: i16,
 }
 
-const CONTENTS_EMPTY: i16 = -1;
-const CONTENTS_SOLID: i16 = -2;
+const CONTENTS_EMPTY: i16 = psx_bsp::collision::CONTENTS_EMPTY;
 const CSG_EPSILON: f64 = 1.0 / 65_536.0;
 
 /// One exterior polygon after union CSG has removed brush interiors.
@@ -44,6 +43,8 @@ pub struct CompiledSurface {
     pub material: Option<ResourceId>,
     /// Texture transform inherited from the authored face.
     pub uv: FaceUv,
+    /// Contents of the authored volume that owns this boundary.
+    pub contents: BrushContents,
     /// Source brush index for diagnostics and deterministic coplanar ties.
     pub source_brush: usize,
     /// Source face index within `source_brush`.
@@ -64,6 +65,34 @@ pub enum BspLeafContents {
     Unclassified,
     Empty,
     Solid,
+    Water,
+    Slime,
+    Lava,
+}
+
+impl BspLeafContents {
+    pub const fn from_brush(contents: BrushContents) -> Self {
+        match contents {
+            BrushContents::Solid => Self::Solid,
+            BrushContents::Water => Self::Water,
+            BrushContents::Slime => Self::Slime,
+            BrushContents::Lava => Self::Lava,
+        }
+    }
+
+    pub const fn runtime_contents(self) -> i16 {
+        match self {
+            Self::Unclassified | Self::Empty => psx_bsp::collision::CONTENTS_EMPTY,
+            Self::Solid => psx_bsp::collision::CONTENTS_SOLID,
+            Self::Water => psx_bsp::collision::CONTENTS_WATER,
+            Self::Slime => psx_bsp::collision::CONTENTS_SLIME,
+            Self::Lava => psx_bsp::collision::CONTENTS_LAVA,
+        }
+    }
+
+    pub const fn is_visible(self) -> bool {
+        !matches!(self, Self::Solid | Self::Unclassified)
+    }
 }
 
 /// One plane partition in the compiled surface BSP.
@@ -140,8 +169,23 @@ pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
                 if other_index == brush_index || !valid[other_index] {
                     continue;
                 }
+                // A liquid never carves structural geometry. Solid faces
+                // remain visible below the surface. A liquid face is clipped
+                // by solid, the same liquid (union CSG), or a stronger liquid.
+                // It must survive a weaker overlapping liquid so the render
+                // BSP retains every effective contents-transition plane.
+                if brush.contents.is_solid() && !brushes[other_index].contents.is_solid() {
+                    continue;
+                }
+                if !brush.contents.is_solid()
+                    && !brushes[other_index].contents.is_solid()
+                    && brushes[other_index].contents.precedence() < brush.contents.precedence()
+                {
+                    continue;
+                }
                 let other_planes = &volume_planes[other_index];
-                let keep_coplanar_inside = brush_index < other_index
+                let keep_coplanar_inside = brush.contents == brushes[other_index].contents
+                    && brush_index < other_index
                     && other_planes
                         .iter()
                         .any(|other| same_facing_plane(face_plane, *other));
@@ -161,6 +205,7 @@ pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
                 vertices,
                 material: face.material,
                 uv: face.uv,
+                contents: brush.contents,
                 source_brush: brush_index,
                 source_face: face_index,
             }));
@@ -402,10 +447,12 @@ pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
     let mut planes: Vec<u8> = Vec::new();
     let mut nodes: Vec<[i16; 3]> = Vec::new();
 
-    // Later brushes are appended first so the chain order matches the
-    // authored order front to back.
+    // Higher-precedence contents are installed last and become the root,
+    // making overlap classification independent of authored order.
+    let mut ordered: Vec<_> = brushes.iter().enumerate().collect();
+    ordered.sort_by_key(|(index, brush)| (core::cmp::Reverse(brush.contents.precedence()), *index));
     let mut escape = CONTENTS_EMPTY;
-    for brush in brushes.iter().rev() {
+    for (_, brush) in ordered.into_iter().rev() {
         if !brush.solve().is_valid() {
             continue;
         }
@@ -427,8 +474,9 @@ pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
         if face_planes.is_empty() {
             continue;
         }
-        // Innermost decision first: inside every plane means solid.
-        let mut inside: i16 = CONTENTS_SOLID;
+        // Innermost decision first: inside every plane means this brush's
+        // authored structural/liquid contents.
+        let mut inside: i16 = brush.contents.runtime_contents();
         for &(plane, flipped) in face_planes.iter().rev() {
             let node_index = nodes.len();
             if node_index > i16::MAX as usize {
@@ -518,7 +566,8 @@ pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<(
 mod tests {
     use super::*;
     use psx_bsp::collision::{
-        CollisionHull, Trace, TraceScratch, CONTENTS_EMPTY, CONTENTS_SOLID,
+        CollisionHull, Trace, TraceScratch, CONTENTS_EMPTY, CONTENTS_LAVA, CONTENTS_SLIME,
+        CONTENTS_SOLID, CONTENTS_WATER,
     };
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
 
@@ -695,6 +744,7 @@ mod tests {
             ],
             material: None,
             uv: FaceUv::default(),
+            contents: BrushContents::Solid,
             source_brush: 0,
             source_face: 0,
         };
@@ -709,6 +759,7 @@ mod tests {
             ],
             material: None,
             uv: FaceUv::default(),
+            contents: BrushContents::Solid,
             source_brush: 1,
             source_face: 0,
         };
@@ -744,6 +795,64 @@ mod tests {
         assert_eq!(hull.point_contents(at(256, 128, 256)), Some(CONTENTS_SOLID));
         assert_eq!(hull.point_contents(at(-64, 128, 256)), Some(CONTENTS_EMPTY));
         assert_eq!(hull.point_contents(at(256, 300, 256)), Some(CONTENTS_EMPTY));
+    }
+
+    #[test]
+    fn liquid_brushes_classify_without_blocking_traces() {
+        for (contents, expected) in [
+            (BrushContents::Water, CONTENTS_WATER),
+            (BrushContents::Slime, CONTENTS_SLIME),
+            (BrushContents::Lava, CONTENTS_LAVA),
+        ] {
+            let mut brush = Brush::cuboid([0, 0, 0], [512, 256, 512]);
+            brush.contents = contents;
+            let compiled = compile_collision(&[brush]);
+            let hull = hull(&compiled);
+            assert_eq!(hull.point_contents(at(256, 128, 256)), Some(expected));
+            assert_eq!(hull.point_contents(at(-64, 128, 256)), Some(CONTENTS_EMPTY));
+            let trace = trace(&hull, at(-64, 128, 256), at(576, 128, 256));
+            assert_eq!(trace.fraction, Q12_ONE, "{} blocked", contents.label());
+            assert!(!trace.start_solid);
+            assert!(trace.in_open);
+            assert!(trace.in_water);
+        }
+    }
+
+    #[test]
+    fn solid_and_hazard_overlap_precedence_is_authored_order_independent() {
+        let mut water = Brush::cuboid([0, 0, 0], [512, 256, 512]);
+        water.contents = BrushContents::Water;
+        let solid = Brush::cuboid([128, 0, 128], [384, 256, 384]);
+        for brushes in [
+            vec![water.clone(), solid.clone()],
+            vec![solid.clone(), water.clone()],
+        ] {
+            let compiled = compile_collision(&brushes);
+            let hull = hull(&compiled);
+            assert_eq!(hull.point_contents(at(256, 128, 256)), Some(CONTENTS_SOLID));
+            assert_eq!(hull.point_contents(at(64, 128, 64)), Some(CONTENTS_WATER));
+        }
+    }
+
+    #[test]
+    fn liquid_overlap_precedence_is_authored_order_independent() {
+        let mut water = Brush::cuboid([0, 0, 0], [512, 256, 512]);
+        water.contents = BrushContents::Water;
+        let mut slime = Brush::cuboid([64, 0, 64], [448, 256, 448]);
+        slime.contents = BrushContents::Slime;
+        let mut lava = Brush::cuboid([128, 0, 128], [384, 256, 384]);
+        lava.contents = BrushContents::Lava;
+        for brushes in [
+            vec![water.clone(), slime.clone(), lava.clone()],
+            vec![lava.clone(), water.clone(), slime.clone()],
+            vec![slime.clone(), lava.clone(), water.clone()],
+        ] {
+            let compiled = compile_collision(&brushes);
+            let hull = hull(&compiled);
+            assert_eq!(hull.point_contents(at(32, 128, 32)), Some(CONTENTS_WATER));
+            assert_eq!(hull.point_contents(at(96, 128, 96)), Some(CONTENTS_SLIME));
+            assert_eq!(hull.point_contents(at(256, 128, 256)), Some(CONTENTS_LAVA));
+        }
     }
 
     #[test]

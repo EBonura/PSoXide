@@ -361,9 +361,9 @@ struct Playtest {
     player_health: u16,
     /// See [`Self::player_health`].
     player_health_max: u16,
-    /// Remaining deep-water death sequence ticks. Non-zero locks player
-    /// input while gravity carries the body below the authored surface.
-    water_death_ticks_remaining: u8,
+    /// Remaining environmental-hazard death sequence ticks. Non-zero locks
+    /// player input until the shared checkpoint/spawn respawn completes.
+    hazard_death_ticks_remaining: u8,
     /// Entities already hit by the CURRENT player swing (bit i =
     /// entity i): one swing connects at most once per enemy. Cleared
     /// when an attack action starts.

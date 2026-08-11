@@ -7,10 +7,9 @@ use crate::brush_compile::{
 use crate::brush_portal::CompiledPortal;
 use crate::ResourceId;
 
-use psx_bsp::{FACE_BACKSIDE, FACE_BAKED_LIGHT};
+use psx_bsp::{FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_TWO_SIDED};
 
-const CONTENTS_EMPTY: i16 = -1;
-const CONTENTS_SOLID: i16 = -2;
+const CONTENTS_SOLID: i16 = psx_bsp::collision::CONTENTS_SOLID;
 const FULLBRIGHT_RGB: u32 = 0x00ff_ffff;
 const MAX_RENDER_FACES: usize = 32_767;
 const MAX_FACE_VERTICES: usize = 39;
@@ -113,7 +112,13 @@ pub fn pack_bsp_geometry(
             )?;
         }
         push_i16(&mut faces, plane_index);
-        let flags = FACE_BAKED_LIGHT | if plane_flipped { FACE_BACKSIDE } else { 0 };
+        let flags = FACE_BAKED_LIGHT
+            | if plane_flipped { FACE_BACKSIDE } else { 0 }
+            | if surface.contents.is_solid() {
+                0
+            } else {
+                FACE_TWO_SIDED
+            };
         push_u16(&mut faces, flags);
         push_i32(&mut faces, first_vertex as i32);
         push_i16(&mut faces, surface.vertices.len() as i16);
@@ -129,7 +134,7 @@ pub fn pack_bsp_geometry(
     let mut leaves = Vec::new();
     pack_leaf_record(&mut leaves, CONTENTS_SOLID, -1, ([0; 3], [0; 3]), 0, 0);
     for (host_leaf, leaf) in bsp.leaves.iter().enumerate() {
-        if leaf.contents != BspLeafContents::Empty {
+        if !leaf.contents.is_visible() {
             continue;
         }
         let first_mark = mark_surfaces.len() / 2;
@@ -138,7 +143,7 @@ pub fn pack_bsp_geometry(
         }
         pack_leaf_record(
             &mut leaves,
-            CONTENTS_EMPTY,
+            leaf.contents.runtime_contents(),
             visibility_offsets[host_leaf],
             leaf_bounds[host_leaf],
             first_mark as u16,
@@ -231,7 +236,7 @@ fn validate_limits(bsp: &CompiledSurfaceBsp) -> Result<(), BrushPackError> {
     let mark_surfaces = bsp
         .leaves
         .iter()
-        .filter(|leaf| leaf.contents == BspLeafContents::Empty)
+        .filter(|leaf| leaf.contents.is_visible())
         .map(|leaf| leaf.mark_surfaces.len())
         .sum();
     limit("mark surfaces", mark_surfaces, u16::MAX as usize)?;
@@ -355,7 +360,10 @@ fn runtime_leaf_mapping(bsp: &CompiledSurfaceBsp) -> Result<(Vec<i16>, usize), B
     for leaf in &bsp.leaves {
         let runtime = match leaf.contents {
             BspLeafContents::Solid => 0,
-            BspLeafContents::Empty => {
+            BspLeafContents::Empty
+            | BspLeafContents::Water
+            | BspLeafContents::Slime
+            | BspLeafContents::Lava => {
                 let index = next_empty;
                 next_empty += 1;
                 index
@@ -392,8 +400,8 @@ fn portal_component_visibility(
 ) -> (Vec<u8>, Vec<i32>) {
     let mut adjacency = vec![Vec::new(); bsp.leaves.len()];
     for portal in portals {
-        if bsp.leaves[portal.front_leaf].contents != BspLeafContents::Empty
-            || bsp.leaves[portal.back_leaf].contents != BspLeafContents::Empty
+        if !bsp.leaves[portal.front_leaf].contents.is_visible()
+            || !bsp.leaves[portal.back_leaf].contents.is_visible()
         {
             continue;
         }
@@ -408,7 +416,7 @@ fn portal_component_visibility(
     let mut pending = Vec::new();
 
     for root in 0..bsp.leaves.len() {
-        if bsp.leaves[root].contents != BspLeafContents::Empty || offsets[root] >= 0 {
+        if !bsp.leaves[root].contents.is_visible() || offsets[root] >= 0 {
             continue;
         }
 
@@ -596,7 +604,7 @@ fn push_i32(output: &mut Vec<u8>, value: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brush::Brush;
+    use crate::brush::{Brush, BrushContents};
     use crate::brush_compile::{build_surface_bsp, compile_csg_surfaces};
     use crate::brush_portal::{classify_bsp_leaves, point_leaf_index, portalize_surface_bsp};
     use psx_bsp::{Face, Leaf, Node, Plane, RecordSlice, Vertex};
@@ -647,6 +655,167 @@ mod tests {
                 .filter(|leaf| leaf.contents == CONTENTS_SOLID)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn liquid_leaf_codes_and_visibility_survive_runtime_packing() {
+        for (contents, expected) in [
+            (BrushContents::Water, psx_bsp::collision::CONTENTS_WATER),
+            (BrushContents::Slime, psx_bsp::collision::CONTENTS_SLIME),
+            (BrushContents::Lava, psx_bsp::collision::CONTENTS_LAVA),
+        ] {
+            let mut brush = Brush::cuboid([0, 0, 0], [128, 64, 256]);
+            brush.contents = contents;
+            let (bsp, packed) = packed(&[brush]);
+            let host_leaf = point_leaf_index(&bsp, [64.0, 32.0, 128.0]);
+            assert_eq!(
+                bsp.leaves[host_leaf].contents,
+                BspLeafContents::from_brush(contents)
+            );
+            let (mapping, _) = runtime_leaf_mapping(&bsp).expect("mapping");
+            let runtime_leaf = mapping[host_leaf];
+            assert!(runtime_leaf > 0);
+            let leaves = RecordSlice::<Leaf>::new(&packed.leaves).expect("leaves");
+            let leaf = leaves.get(runtime_leaf as usize).expect("liquid leaf");
+            assert_eq!(leaf.contents, expected);
+            assert!(leaf.visibility_offset >= 0);
+            let faces = RecordSlice::<Face>::new(&packed.faces).expect("faces");
+            assert!(faces
+                .iter()
+                .all(|face| face.flags & FACE_TWO_SIDED != 0));
+        }
+    }
+
+    #[test]
+    fn nested_and_partial_liquid_precedence_survives_render_bsp_and_packing() {
+        let mut water = Brush::cuboid([0, 0, 0], [512, 256, 512]);
+        water.contents = BrushContents::Water;
+        let mut slime = Brush::cuboid([64, 32, 64], [448, 224, 448]);
+        slime.contents = BrushContents::Slime;
+        let mut lava = Brush::cuboid([128, 64, 128], [384, 192, 384]);
+        lava.contents = BrushContents::Lava;
+        for brushes in [
+            vec![water.clone(), slime.clone(), lava.clone()],
+            vec![lava.clone(), water.clone(), slime.clone()],
+            vec![slime.clone(), lava.clone(), water.clone()],
+        ] {
+            assert_packed_contents(
+                &brushes,
+                [32.0, 128.0, 32.0],
+                psx_bsp::collision::CONTENTS_WATER,
+            );
+            assert_packed_contents(
+                &brushes,
+                [96.0, 128.0, 96.0],
+                psx_bsp::collision::CONTENTS_SLIME,
+            );
+            assert_packed_contents(
+                &brushes,
+                [256.0, 128.0, 256.0],
+                psx_bsp::collision::CONTENTS_LAVA,
+            );
+        }
+
+        let mut partial_water = Brush::cuboid([0, 0, 0], [256, 256, 256]);
+        partial_water.contents = BrushContents::Water;
+        let mut partial_lava = Brush::cuboid([64, 0, 64], [384, 256, 384]);
+        partial_lava.contents = BrushContents::Lava;
+        for brushes in [
+            vec![partial_water.clone(), partial_lava.clone()],
+            vec![partial_lava.clone(), partial_water.clone()],
+        ] {
+            assert_packed_contents(
+                &brushes,
+                [32.0, 128.0, 32.0],
+                psx_bsp::collision::CONTENTS_WATER,
+            );
+            assert_packed_contents(
+                &brushes,
+                [128.0, 128.0, 128.0],
+                psx_bsp::collision::CONTENTS_LAVA,
+            );
+            assert_packed_contents(
+                &brushes,
+                [320.0, 128.0, 320.0],
+                psx_bsp::collision::CONTENTS_LAVA,
+            );
+            assert_packed_contents(
+                &brushes,
+                [448.0, 128.0, 64.0],
+                psx_bsp::collision::CONTENTS_EMPTY,
+            );
+            let (bsp, _) = packed(&brushes);
+            let water_index = brushes
+                .iter()
+                .position(|brush| brush.contents == BrushContents::Water)
+                .expect("water brush");
+            for surface in bsp
+                .surfaces
+                .iter()
+                .filter(|surface| surface.source_brush == water_index)
+            {
+                let inverse_count = 1.0 / surface.vertices.len() as f64;
+                let centroid = surface.vertices.iter().fold([0.0; 3], |mut sum, vertex| {
+                    for axis in 0..3 {
+                        sum[axis] += vertex[axis] * inverse_count;
+                    }
+                    sum
+                });
+                let buried_by_lava = (64.0..=384.0).contains(&centroid[0])
+                    && (0.0..=256.0).contains(&centroid[1])
+                    && (64.0..=384.0).contains(&centroid[2]);
+                assert!(
+                    !buried_by_lava,
+                    "weaker coplanar Water face survived under Lava: {centroid:?}"
+                );
+            }
+        }
+
+        let mut outer_lava = Brush::cuboid([0, 0, 0], [512, 256, 512]);
+        outer_lava.contents = BrushContents::Lava;
+        let mut inner_water = Brush::cuboid([128, 64, 128], [384, 192, 384]);
+        inner_water.contents = BrushContents::Water;
+        for brushes in [
+            vec![outer_lava.clone(), inner_water.clone()],
+            vec![inner_water.clone(), outer_lava.clone()],
+        ] {
+            let (bsp, _) = packed(&brushes);
+            for point in [[32.0, 128.0, 32.0], [256.0, 128.0, 256.0]] {
+                let host_leaf = point_leaf_index(&bsp, point);
+                assert_eq!(
+                    bsp.leaves[host_leaf].contents,
+                    BspLeafContents::Lava,
+                    "a weaker nested liquid must not create a false transition"
+                );
+            }
+            assert!(bsp
+                .leaves
+                .iter()
+                .all(|leaf| leaf.contents != BspLeafContents::Water));
+        }
+    }
+
+    fn assert_packed_contents(brushes: &[Brush], point: [f64; 3], expected: i16) {
+        let (bsp, packed) = packed(brushes);
+        let host_leaf = point_leaf_index(&bsp, point);
+        assert_eq!(
+            bsp.leaves[host_leaf].contents.runtime_contents(),
+            expected,
+            "host render leaf at {point:?}, brush order {:?}",
+            brushes
+                .iter()
+                .map(|brush| brush.contents)
+                .collect::<Vec<_>>()
+        );
+        let (mapping, _) = runtime_leaf_mapping(&bsp).expect("leaf mapping");
+        let leaves = RecordSlice::<Leaf>::new(&packed.leaves).expect("leaves");
+        assert_eq!(
+            leaves
+                .get(mapping[host_leaf] as usize)
+                .expect("packed point leaf")
+                .contents,
+            expected
         );
     }
 
@@ -825,6 +994,7 @@ mod tests {
             } - plane.distance;
             let behind = distance < 0;
             assert_eq!(behind, face.flags & FACE_BACKSIDE != 0);
+            assert_eq!(face.flags & FACE_TWO_SIDED, 0);
         }
     }
 }

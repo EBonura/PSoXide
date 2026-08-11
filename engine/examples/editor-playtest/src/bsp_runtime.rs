@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use psx_bsp::collision::{BrushTransform, TraceScratch};
+use psx_bsp::collision::{BrushTransform, LiquidContentsSample, TraceScratch};
 use psx_bsp::collision_provider::{select_body_hull, PxbspCollisionModel, PxbspCollisionProvider};
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
 use psx_bsp::pxbsp::PXBSP_MAX_VISIBILITY_BYTES;
@@ -267,6 +267,30 @@ impl BspRuntime {
             }
         }
         mask
+    }
+
+    /// Sample the static world's point hull at the player's feet, torso, and
+    /// head. Liquid movers are rejected by the cooker, so model zero is the
+    /// complete contents authority. A malformed query fails safely to no
+    /// liquid behavior rather than inventing a hazard.
+    pub(super) fn player_contents(
+        &self,
+        position: RoomPoint,
+        height: i32,
+    ) -> Option<LiquidContentsSample> {
+        let hull = self.map.model_collision_hull(0, BSP_POINT_HULL_INDEX)?;
+        let height = height.max(1);
+        let sample_y = [
+            position.y.saturating_add(1),
+            position.y.saturating_add(height >> 1),
+            position.y.saturating_add(height.saturating_sub(1)),
+        ];
+        let points = sample_y.map(|y| Vec3I32 {
+            x: position.x.saturating_mul(4096),
+            y: y.saturating_mul(4096),
+            z: position.z.saturating_mul(4096),
+        });
+        hull.sample_liquid_contents(&points)
     }
 
     /// Resolve every PXBSP material through the normal playtest VRAM owner.
