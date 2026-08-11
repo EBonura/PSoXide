@@ -4454,18 +4454,18 @@ fn a_bsp_project_holding_a_grid_section_fails_the_cook_closed() {
         package.is_none(),
         "a BSP project holding a Section must not cook"
     );
-    let joined = report.errors.join(" | ");
+    let joined = report.error_messages().join(" | ");
     assert!(
         joined.contains("grid Section") && joined.contains("Smuggled Section"),
         "expected a named Section diagnostic, got {joined}"
     );
     assert!(
         matches!(
-            report.focus_target,
+            report.focus_target(),
             Some(crate::playtest::PlaytestValidationTarget::Node(_))
         ),
         "the diagnostic must focus the offending node, got {:?}",
-        report.focus_target
+        report.focus_target()
     );
 }
 
