@@ -41,6 +41,7 @@ pub const PLAYTEST_PACKET_CAPACITY: usize = 1536;
 pub static PXBSP_WORLD: &[u8] = &[];
 pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];
 pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];
+pub static PXBSP_BODY_HULLS: &[psx_bsp::collision_provider::CookedBodyHull] = &[];
 pub static ASSETS: &[LevelAssetRecord] = &[];
 pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
