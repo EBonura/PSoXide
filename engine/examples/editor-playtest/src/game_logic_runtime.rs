@@ -250,7 +250,7 @@ impl Playtest {
     /// used only when either side has no authored role at all; inactive
     /// authored frames, invalid authored joints, and authored geometric misses
     /// stay misses.
-    pub(super) fn resolve_enemy_melee(&mut self) {
+    pub(super) fn resolve_enemy_melee(&mut self, ctx: &Ctx) {
         if self.deferred_enemy_attacks.is_empty() {
             return;
         }
@@ -358,9 +358,19 @@ impl Playtest {
             }
         }
         if damage_total > 0 {
-            // Player health floors at zero; death/respawn remains the next
-            // gameplay phase exactly as it was for legacy entity contact.
-            self.player_health = self.player_health.saturating_sub(damage_total);
+            // Combat damage reaching zero arms the SAME delayed
+            // death/respawn sequence the environmental hazards use; a
+            // hit landing during the countdown keeps health floored
+            // without re-arming it.
+            let outcome = psx_game_runtime::character::apply_player_damage(
+                self.player_health,
+                self.hazard_death_ticks_remaining > 0,
+                damage_total,
+            );
+            self.player_health = outcome.health;
+            if outcome.died {
+                self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
+            }
         }
         if hits > 0 {
             telemetry::counter(telemetry::counter::PLAYER_HITS_TAKEN, u32::from(hits));
@@ -515,8 +525,15 @@ impl Playtest {
             let entity_record = &GAME_ENTITIES[entity];
             // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
             let mask = 1u64 << entity;
-            if self.swing_hit_mask & mask != 0
-                || entity_record.room != self.room_index
+            if self.swing_hit_mask & mask != 0 {
+                // One-hit-per-swing: this swing already connected with
+                // the entity, so its remaining active frames reject the
+                // repeat contact here.
+                telemetry::counter(telemetry::counter::PLAYER_DUPLICATE_HIT_REJECTIONS, 1);
+                entity += 1;
+                continue;
+            }
+            if entity_record.room != self.room_index
                 || self.game_entities.state(entity)
                     == psx_game_runtime::entities::GameEntityState::Dead
             {
@@ -694,6 +711,10 @@ impl Playtest {
             }
             match record.kind {
                 psx_level::logic_kind::DOOR => {
+                    // A DOOR fire mark only exists when the door state
+                    // actually changed (same-state uses return before
+                    // marking), so every drain here is one activation.
+                    telemetry::counter(telemetry::counter::LOGIC_DOOR_ACTIVATIONS, 1);
                     if record.link != psx_level::LOGIC_LINK_NONE {
                         let open = self.logic.door_open(index);
                         if let Some(bsp) = self.bsp.as_mut() {
@@ -707,7 +728,11 @@ impl Playtest {
                     self.open_logic_message(index, record);
                 }
                 psx_level::logic_kind::CHECKPOINT => {
-                    self.checkpoint = Some(RuntimeCheckpoint {
+                    // Fired by prompt, trigger-volume touch, or relay
+                    // chain alike: the fire mark is the one dispatch
+                    // surface, so trigger-to-checkpoint chains land
+                    // here exactly like interact prompts.
+                    self.set_checkpoint(RuntimeCheckpoint {
                         room: self.room_index,
                         position: self.motor.position(),
                         yaw: self.motor.yaw(),
