@@ -28,12 +28,6 @@ impl EditorWorkspace {
         self.last_cook_errors.clear();
     }
 
-    /// Hard errors from the last failed cook, newest cook wins.
-    pub(crate) fn last_cook_errors(
-        &self,
-    ) -> &[psxed_project::playtest::PlaytestValidationError] {
-        &self.last_cook_errors
-    }
 
     /// Select the concrete authoring object attached to a typed cook
     /// diagnostic. Returns `false` when the target is stale so the caller can
