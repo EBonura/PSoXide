@@ -881,4 +881,188 @@ mod tests {
             );
         }
     }
+
+    /// Combat runs on the fixed simulation clock, never on the presented
+    /// frame. An attack's active window is expressed in ANIMATION FRAMES,
+    /// and the phase that selects the frame is
+    /// [`animation_phase_at_tick_q12`], a pure function of
+    /// `sim_tick - attack_start_tick`. So the number of simulation ticks a
+    /// swing spends inside its active window has to be the same whether the
+    /// build presents every visual interval or drops most of them.
+    ///
+    /// This drives the real [`FrameScheduler`] (the same one `App::run` uses)
+    /// at several render costs and compares the tick sets. It is the unit-level
+    /// form of the cross-layout stage in `tools/editor_souls_bsp_check.sh`:
+    /// before 2026-08-11 that gate scored melee 4 on one guest build and melee
+    /// 3 on another, and the shape of the bug it was blamed on would show up
+    /// here as an active window that shrinks when rendering gets slower.
+    mod tick_authority {
+        extern crate std;
+
+        use super::super::{PlayerMeleeSpec, UNARMED};
+        use crate::model_rendering::animation_phase_at_tick_q12;
+        use psx_asset::Animation;
+        use psx_engine::{FrameScheduler, SchedulerAction, SchedulerConfig, VideoHz};
+        use std::{boxed::Box, vec::Vec};
+
+        /// Sampled clip rate of the test animation, in Hz. Half the NTSC
+        /// simulation rate, so one animation frame spans two ticks.
+        const CLIP_HZ: u16 = 30;
+        /// Frames in the test attack clip.
+        const CLIP_FRAMES: usize = 20;
+        /// Authored active window, in animation frames (inclusive).
+        const ACTIVE_WINDOW: (u16, u16) = (12, 15);
+        /// Simulation ticks the window must cover: 4 frames at 2 ticks each.
+        const EXPECT_ACTIVE_TICKS: usize = 8;
+        /// Visual pacing under test: render every second simulation tick.
+        const VISUAL_INTERVAL: u16 = 2;
+        /// Simulation ticks each replay runs for.
+        const TICKS: u32 = 400;
+        /// Tick the swing starts on.
+        const ATTACK_START: u32 = 100;
+
+        /// Identity-pose clip whose only job is to carry a frame count and a
+        /// sample rate; the window test reads phase, not joints.
+        fn attack_animation() -> Animation<'static> {
+            const ANIMATION_HEADER_SIZE: usize = 8;
+            const POSE_RECORD_SIZE: usize = 24;
+            let payload_len = ANIMATION_HEADER_SIZE + CLIP_FRAMES * POSE_RECORD_SIZE;
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"PSXA");
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&(payload_len as u32).to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&(CLIP_FRAMES as u16).to_le_bytes());
+            bytes.extend_from_slice(&CLIP_HZ.to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            for _ in 0..CLIP_FRAMES {
+                for value in [4096i16, 0, 0, 0, 4096, 0, 0, 0, 4096] {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in [0i16, 0, 0] {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Animation::from_bytes(Box::leak(bytes.into_boxed_slice())).expect("test clip")
+        }
+
+        /// What one replay observed.
+        struct Replay {
+            /// Simulation ticks the scheduler actually ran, in order.
+            ticks: Vec<u32>,
+            /// Ticks whose attack-clip frame was inside the active window.
+            active_ticks: Vec<u32>,
+            /// Visual frames presented.
+            visual_frames: usize,
+        }
+
+        /// Run `TICKS` fixed updates through the real scheduler, charging
+        /// `render_cost_vblanks` display VBlanks to every presented frame.
+        /// Cost 1 keeps up with the 30 Hz cadence; higher costs overrun it and
+        /// force the scheduler's catch-up bursts, exactly as an overloaded
+        /// build does on hardware.
+        fn replay(render_cost_vblanks: u32, spec: &PlayerMeleeSpec) -> Replay {
+            let animation = attack_animation();
+            let mut scheduler = FrameScheduler::new(SchedulerConfig::new(), VISUAL_INTERVAL);
+            let mut elapsed_vblanks = 0u32;
+            let mut out = Replay {
+                ticks: Vec::new(),
+                active_ticks: Vec::new(),
+                visual_frames: 0,
+            };
+            while (out.ticks.len() as u32) < TICKS {
+                match scheduler.next_action(elapsed_vblanks) {
+                    SchedulerAction::RunFixedUpdate { tick } => {
+                        let tick = tick.as_u32();
+                        out.ticks.push(tick);
+                        if tick >= ATTACK_START {
+                            let phase = animation_phase_at_tick_q12(
+                                animation,
+                                tick - ATTACK_START,
+                                VideoHz::NTSC,
+                                false,
+                                256,
+                                psx_level::CharacterActionFrameRange::FULL,
+                            );
+                            if spec.frame_active(phase >> 12) {
+                                out.active_ticks.push(tick);
+                            }
+                        }
+                        scheduler.complete_fixed_update();
+                    }
+                    SchedulerAction::RunVisualFrame { .. } => {
+                        out.visual_frames += 1;
+                        scheduler.complete_visual_frame();
+                        elapsed_vblanks =
+                            elapsed_vblanks.saturating_add(render_cost_vblanks.max(1));
+                    }
+                    SchedulerAction::WaitForVBlank => {
+                        elapsed_vblanks = elapsed_vblanks.saturating_add(1);
+                    }
+                }
+            }
+            out
+        }
+
+        #[test]
+        fn attack_window_covers_the_same_simulation_ticks_at_every_frame_rate() {
+            let spec = PlayerMeleeSpec {
+                active_window: Some(ACTIVE_WINDOW),
+                ..UNARMED
+            };
+            let baseline = replay(1, &spec);
+            let expected_ticks: Vec<u32> = (0..TICKS).collect();
+            assert_eq!(
+                baseline.ticks, expected_ticks,
+                "the simulation must run every tick exactly once, in order"
+            );
+            assert_eq!(
+                baseline.active_ticks.len(),
+                EXPECT_ACTIVE_TICKS,
+                "a {}-frame window on a {CLIP_HZ} Hz clip is {EXPECT_ACTIVE_TICKS} ticks at 60 Hz",
+                ACTIVE_WINDOW.1 - ACTIVE_WINDOW.0 + 1
+            );
+
+            // Costs above VISUAL_INTERVAL overrun the 30 Hz slot, so the
+            // scheduler drops visuals and catches the simulation up in bursts.
+            for render_cost_vblanks in [3u32, 5, 9] {
+                let slow = replay(render_cost_vblanks, &spec);
+                assert_eq!(
+                    slow.ticks, baseline.ticks,
+                    "render cost {render_cost_vblanks} changed which simulation ticks ran"
+                );
+                assert_eq!(
+                    slow.active_ticks, baseline.active_ticks,
+                    "render cost {render_cost_vblanks} changed the attack's active ticks; \
+                     the hit window is following the presented frame, not the sim clock"
+                );
+                // Non-vacuity: these replays really are different frame rates.
+                assert!(
+                    slow.visual_frames < baseline.visual_frames,
+                    "render cost {render_cost_vblanks} presented {} frames, not fewer than the \
+                     baseline's {}",
+                    slow.visual_frames,
+                    baseline.visual_frames
+                );
+            }
+        }
+
+        #[test]
+        fn dropping_visual_frames_never_dilates_the_attack() {
+            let spec = PlayerMeleeSpec {
+                active_window: Some(ACTIVE_WINDOW),
+                ..UNARMED
+            };
+            // The window opens and closes on fixed offsets from the swing's
+            // start tick, so both edges are frame-rate invariant too.
+            let first = ATTACK_START + 2 * u32::from(ACTIVE_WINDOW.0);
+            let last = ATTACK_START + 2 * u32::from(ACTIVE_WINDOW.1) + 1;
+            for render_cost_vblanks in [1u32, 4, 12] {
+                let run = replay(render_cost_vblanks, &spec);
+                assert_eq!(run.active_ticks.first().copied(), Some(first));
+                assert_eq!(run.active_ticks.last().copied(), Some(last));
+            }
+        }
+    }
 }

@@ -3230,6 +3230,18 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
 /// the Mantis with the verified combo/heavy cadence while taking hits,
 /// walk into the lava pool, die, respawn at the checkpoint, dismiss the
 /// re-fired sync overlay, and walk a short confirmation leg.
+///
+/// The tapes are indexed on the PAD-POLL clock, not the video-frame clock.
+/// A video-frame tape is applied on the emulator's route-tick clock while
+/// the guest reads the pad once per fixed simulation tick, and those two
+/// clocks are not phase-locked: their relative phase drifts with guest
+/// execution cost, which changes with guest code layout. Measured on this
+/// exact route (2026-08-11), the same authored 70-frame doorway retreat
+/// reached one guest as 71 held simulation ticks and another as 70, and
+/// that one extra tick of backward movement is the difference between the
+/// fourth heavy swing reaching the Mantis and missing it. `pad_poll` binds
+/// sample N to poll N, so the guest sees the authored press windows exactly,
+/// whatever the frame rate.
 fn write_souls_slice_canonical_tape(dir: &Path) {
     const UP: u16 = 1 << 4;
     const DOWN: u16 = 1 << 6;
@@ -3248,7 +3260,7 @@ fn write_souls_slice_canonical_tape(dir: &Path) {
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
     use std::fmt::Write as _;
-    writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
+    writeln!(tape, "psoxide-tape,v2,clock=pad_poll,start_poll=0").unwrap();
     writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
     for frame in 0..FRAME_COUNT {
         let mut buttons = 0u16;
@@ -3270,11 +3282,19 @@ fn write_souls_slice_canonical_tape(dir: &Path) {
         }
         // Step into the far room to trip the Mantis aggro, then retreat
         // into the doorway pinch so the fight happens in the frame, the
-        // verified fixture pattern.
+        // verified fixture pattern. The retreat is 71 ticks, not the 70
+        // this leg was authored with: on the video-frame clock the guest
+        // that produced the authored outcome had been handed 71 held
+        // ticks by clock drift, and 70 leaves the fourth heavy swing
+        // short of the Mantis. Moving the tape to the pad-poll clock
+        // makes the count exact, so the authored number is the one the
+        // route actually needs. Anywhere in 1091..=1112 kills the Mantis;
+        // the lava leg that follows is an open-loop stick walk and only
+        // reaches the pool from this standoff pose.
         if (940..1010).contains(&frame) {
             buttons |= UP;
         }
-        if (1020..1090).contains(&frame) {
+        if (1020..1091).contains(&frame) {
             buttons |= DOWN;
         }
         // Lock on to the arriving Mantis so every authored swing faces it.
@@ -3326,7 +3346,9 @@ fn write_souls_slice_negative_tape(dir: &Path) {
     const FRAME_COUNT: usize = 900;
     let mut tape = String::with_capacity(FRAME_COUNT * 24);
     use std::fmt::Write as _;
-    writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
+    // Pad-poll clock for the same reason as the canonical tape: the guest's
+    // own input clock is the only one that is build-independent.
+    writeln!(tape, "psoxide-tape,v2,clock=pad_poll,start_poll=0").unwrap();
     writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
     for frame in 0..FRAME_COUNT {
         writeln!(tape, "{frame},0,128,128,128,128").unwrap();
