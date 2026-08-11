@@ -952,6 +952,18 @@ pub(crate) fn entity_bound_kind_and_size(
 }
 
 pub(crate) fn node_is_floor_anchored(kind: &NodeKind) -> bool {
+    // Trigger Volumes belong here because the cook anchors them floor-up
+    // (`record.min[1] = origin`, growing to `origin + size`), so drawing
+    // them centred on Y would show a box half its authored height below
+    // where it actually fires. Other Logic kinds are point markers with a
+    // symmetric gizmo and stay centred.
+    if let NodeKind::Logic {
+        kind: psxed_project::LogicNodeKind::TriggerVolume { .. },
+        ..
+    } = kind
+    {
+        return true;
+    }
     matches!(
         kind,
         NodeKind::Entity
