@@ -21,6 +21,14 @@ pub const UNDO_CAPACITY: usize = 64;
 /// every mutating action; [`UndoStack::undo`] /
 /// [`UndoStack::redo`] swap the current document with the
 /// adjacent entry in one chronological queue.
+///
+/// The history is deliberately in-session only: it lives on the
+/// workspace, is never serialized, and every project open/reopen
+/// (including watcher-driven Reload and project switching) starts
+/// from an empty timeline. Snapshots capture project metadata but
+/// not filesystem side effects, so persisting them across sessions
+/// would let an undo resurrect references to files that moved or
+/// disappeared while the editor was closed.
 #[derive(Default)]
 pub(crate) struct UndoStack {
     timeline: VecDeque<ProjectDocument>,
