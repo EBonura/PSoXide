@@ -1186,6 +1186,151 @@ fn create_and_open_project_sets_document_name_and_derived_directory() {
 }
 
 #[test]
+fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
+    let mut workspace =
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let name = format!(
+        "BSP Authoring Loop {} {}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    let cook_a = test_temp_dir("bsp-authoring-loop-a");
+    let cook_b = test_temp_dir("bsp-authoring-loop-b");
+    let cook_c = test_temp_dir("bsp-authoring-loop-c");
+    let _ = std::fs::remove_dir_all(&project_dir);
+    let _ = std::fs::remove_dir_all(&cook_a);
+    let _ = std::fs::remove_dir_all(&cook_b);
+    let _ = std::fs::remove_dir_all(&cook_c);
+
+    workspace.create_and_open_project(&name).unwrap();
+    assert!(workspace.active_room_id().is_none());
+    assert_eq!(
+        workspace.bsp_authoring_root(),
+        Some(workspace.project().active_scene().root)
+    );
+    workspace.cycle_tool_group(false);
+    assert_eq!(workspace.active_tool, ViewTool::Place);
+    assert_eq!(workspace.place_kind, PlaceKind::PlayerSpawn);
+    workspace.set_active_tool_cycle_value((ViewTool::Brush, None));
+
+    // Remove the template spawn through the normal scene-tree command so the
+    // BSP Place tool can prove it creates the replacement itself.
+    let old_spawn = workspace
+        .project()
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
+        .expect("BSP template player spawn")
+        .id;
+    workspace.replace_node_selection(old_spawn);
+    workspace.delete_selected();
+    assert!(!workspace.has_player_source());
+
+    // Real Brush commands: drag one solid, inherit the project's selected
+    // material, then Hollow it into a closed six-slab room.
+    let original_brushes = workspace.project().active_scene().brushes.len();
+    let material = workspace.first_material().expect("template material");
+    workspace.set_orthographic_view(OrthographicView::Top);
+    workspace.begin_brush_drag_2d([2048.0, 0.0]);
+    workspace.update_brush_drag_2d([2560.0, 512.0]);
+    workspace.commit_brush_drag();
+    let created = workspace.selected_brush.expect("drag selected new brush");
+    assert!(workspace.project().active_scene().brushes[created]
+        .faces
+        .iter()
+        .all(|face| face.material == Some(material)));
+    workspace.hollow_selected_brush(16);
+    assert_eq!(
+        workspace.project().active_scene().brushes.len(),
+        original_brushes + 6
+    );
+    assert!(workspace.project().active_scene().brushes[created..]
+        .iter()
+        .flat_map(|brush| &brush.faces)
+        .all(|face| face.material == Some(material)));
+
+    // Real Place commands in a scene with no legacy Room/Section. The top
+    // view resolves the new room's upward floor at Y=16 and lifts the spawn
+    // one unit out of the solid boundary.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PlayerSpawn)));
+    workspace.handle_viewport_click([2304.0, 256.0], &[], egui::Modifiers::default());
+    let spawn = workspace
+        .project()
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
+        .expect("placed BSP player spawn");
+    assert_eq!(spawn.parent, Some(workspace.project().active_scene().root));
+    assert_eq!(spawn.transform.translation, [2304.0, 17.0, 256.0]);
+
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointLightMarker)));
+    workspace.handle_viewport_click([2304.0, 384.0], &[], egui::Modifiers::default());
+    assert!(workspace
+        .project()
+        .active_scene()
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind, NodeKind::PointLight { .. })
+            && node.transform.translation == [2304.0, 272.0, 384.0]));
+
+    workspace.save().expect("save authored BSP project");
+    workspace.request_play_or_rebuild(EditorPlaytestStatus::Idle);
+    assert_eq!(
+        workspace.take_playtest_request(),
+        Some(EditorPlaytestRequest::Play)
+    );
+    workspace
+        .cook_playtest_to_dir(&cook_a)
+        .expect("cook first authored revision");
+    let first = std::fs::read(cook_a.join(psxed_project::brush_playtest::BRUSH_WORLD_FILENAME))
+        .expect("first PXBSP");
+
+    // Reopen the persisted project, perform another real Brush command, and
+    // request the same Rebuild path used by Play while already running.
+    let mut reopened = EditorWorkspace::open_directory(&project_dir).expect("reopen saved BSP");
+    assert!(reopened.has_player_source());
+    reopened.set_orthographic_view(OrthographicView::Top);
+    reopened.begin_brush_drag_2d([2816.0, 0.0]);
+    reopened.update_brush_drag_2d([2880.0, 64.0]);
+    reopened.commit_brush_drag();
+    reopened.save_if_dirty().expect("save changed BSP");
+    reopened.request_play_or_rebuild(EditorPlaytestStatus::Running {
+        input_captured: false,
+    });
+    assert_eq!(
+        reopened.take_playtest_request(),
+        Some(EditorPlaytestRequest::Rebuild)
+    );
+    reopened
+        .cook_playtest_to_dir(&cook_b)
+        .expect("cook edited revision");
+    let edited = std::fs::read(cook_b.join(psxed_project::brush_playtest::BRUSH_WORLD_FILENAME))
+        .expect("edited PXBSP");
+    assert_ne!(first, edited, "the saved brush edit must reach the cook");
+
+    // A second cook of unchanged saved data is byte deterministic.
+    reopened
+        .cook_playtest_to_dir(&cook_c)
+        .expect("repeat unchanged cook");
+    assert_eq!(
+        edited,
+        std::fs::read(cook_c.join(psxed_project::brush_playtest::BRUSH_WORLD_FILENAME))
+            .expect("repeat PXBSP")
+    );
+
+    let _ = std::fs::remove_dir_all(project_dir);
+    let _ = std::fs::remove_dir_all(cook_a);
+    let _ = std::fs::remove_dir_all(cook_b);
+    let _ = std::fs::remove_dir_all(cook_c);
+}
+
+#[test]
 fn new_project_release_choice_is_saved_with_the_bsp_first_template() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
