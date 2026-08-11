@@ -228,6 +228,80 @@ mod tests {
         assert_eq!(capsule.end, [1_280, 2_000, 3_000]);
     }
 
+    /// Regression for the historical "spawn-adjacent tick produced an
+    /// `i32::MIN` weapon-origin X" transient (preview-era report, handoff
+    /// 7.1). Under the retained-pose authority the pre-refresh path cannot
+    /// be sampled at all (snapshots are `Option` and consumers skip `None`),
+    /// so what remains to prove is arithmetic: no legal cooked input, even
+    /// at the quantization and scale extremes, can saturate a weapon origin
+    /// or blade endpoint to the `i32::MIN` sentinel. This drives the exact
+    /// socket/capsule sampling entry points combat and equipment use.
+    #[test]
+    fn extreme_legal_inputs_cannot_produce_a_min_sentinel_weapon_origin() {
+        const SANE_WORLD_BOUND: i32 = 16_000_000;
+        let assert_sane = |value: i32, what: &str| {
+            assert_ne!(value, i32::MIN, "{what} saturated to the i32::MIN sentinel");
+            assert!(
+                value.abs() < SANE_WORLD_BOUND,
+                "{what} left the sane world envelope: {value}"
+            );
+        };
+
+        // Full-magnitude Q12 rotation rows, worst-case sign mixing.
+        let spun = Mat3I16 {
+            m: [[0, 0, 4096], [0, -4096, 0], [-4096, 0, 0]],
+        };
+        for translation in [i16::MIN, i16::MAX, 0] {
+            let animation = one_joint_animation(&[translation, translation]);
+            for scale_q12 in [0x1000u16, 0x2000, u16::MAX] {
+                for origin_x in [-1_000_000i32, 1_000_000] {
+                    let pose = ActorPoseSnapshot::new(
+                        SimTick::from_u32(0),
+                        animation,
+                        0,
+                        None,
+                        WorldVertex::new(origin_x, 1_000_000, -1_000_000),
+                        spun,
+                        LocalToWorldScale::from_q12(scale_q12),
+                        ModelPoseTranslation {
+                            x: 32_767,
+                            y: -32_768,
+                            z: 32_767,
+                        },
+                    );
+                    let (joint, _basis) = pose
+                        .joint_world_transform_and_basis(0)
+                        .expect("extreme pose still samples");
+                    assert_sane(joint.translation.x, "weapon origin x");
+                    assert_sane(joint.translation.y, "weapon origin y");
+                    assert_sane(joint.translation.z, "weapon origin z");
+
+                    // The longest authored blade in tracked content is 30k
+                    // model units; push the full compact range both ways.
+                    let record = CombatCapsuleRecord {
+                        joint: 0,
+                        flags: 0,
+                        action: 0,
+                        reserved: 0,
+                        start: [32_767, -32_768, 32_767],
+                        end: [-32_768, 32_767, -32_768],
+                        radius: 255,
+                        active_start_frame: 0,
+                        active_end_frame: 0,
+                        damage: 0,
+                        poise_damage: 0,
+                    };
+                    let capsule =
+                        transform_actor_combat_capsule(&record, pose).expect("extreme capsule");
+                    for (axis, what) in ["x", "y", "z"].iter().enumerate() {
+                        assert_sane(capsule.start[axis], &std::format!("blade start {what}"));
+                        assert_sane(capsule.end[axis], &std::format!("blade end {what}"));
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn completed_spawn_crossfade_cannot_leak_the_outgoing_pose() {
         let outgoing = one_joint_animation(&[i16::MIN, i16::MIN]);
