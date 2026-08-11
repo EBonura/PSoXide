@@ -92,11 +92,66 @@ impl BrushFace {
     }
 }
 
+/// Volume contents assigned to one authored convex brush.
+///
+/// `Solid` is the historical/default behavior. The liquid variants are
+/// non-blocking PXBSP contents volumes: their boundary faces still render,
+/// while point-contents queries distinguish the medium inside them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrushContents {
+    #[default]
+    Solid,
+    Water,
+    Slime,
+    Lava,
+}
+
+impl BrushContents {
+    pub const ALL: [Self; 4] = [Self::Solid, Self::Water, Self::Slime, Self::Lava];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Solid => "Solid",
+            Self::Water => "Water",
+            Self::Slime => "Slime",
+            Self::Lava => "Lava",
+        }
+    }
+
+    pub const fn is_solid(&self) -> bool {
+        matches!(self, Self::Solid)
+    }
+
+    /// PXBSP terminal contents code shared with `psx-bsp` and Quake.
+    pub const fn runtime_contents(self) -> i16 {
+        match self {
+            Self::Solid => psx_bsp::collision::CONTENTS_SOLID,
+            Self::Water => psx_bsp::collision::CONTENTS_WATER,
+            Self::Slime => psx_bsp::collision::CONTENTS_SLIME,
+            Self::Lava => psx_bsp::collision::CONTENTS_LAVA,
+        }
+    }
+
+    /// Deterministic overlap precedence. Structural solid always wins.
+    pub(crate) const fn precedence(self) -> u8 {
+        match self {
+            Self::Solid => 4,
+            Self::Lava => 3,
+            Self::Slime => 2,
+            Self::Water => 1,
+        }
+    }
+}
+
 /// A convex brush as an unordered set of faces.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Brush {
     /// Boundary faces; outward normals derived from their points.
     pub faces: Vec<BrushFace>,
+    /// Structural solid or one of the Quake-compatible liquid contents.
+    /// Omitted for solid brushes so existing project files remain byte-stable.
+    #[serde(default, skip_serializing_if = "BrushContents::is_solid")]
+    pub contents: BrushContents,
     /// Logic mover that owns this brush, or `None` for static world geometry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mover: Option<crate::NodeId>,
@@ -191,6 +246,7 @@ impl Brush {
         ];
         Self {
             faces: faces.map(BrushFace::from_points).into(),
+            contents: BrushContents::Solid,
             mover: None,
         }
     }
@@ -315,6 +371,7 @@ impl Brush {
                 .zip(&solved.polygons)
                 .filter_map(|(face, polygon)| polygon.is_some().then_some(*face))
                 .collect(),
+            contents: self.contents,
             mover: self.mover,
         }
     }
@@ -488,6 +545,7 @@ impl Brush {
             })
             .collect::<Vec<_>>();
         for slab in &mut slabs {
+            slab.contents = self.contents;
             slab.mover = self.mover;
             // Every slab face has one of the source cuboid's six signed axis
             // directions. Carry both the material and UV transform by that
@@ -880,6 +938,17 @@ mod tests {
     }
 
     #[test]
+    fn hollow_preserves_liquid_contents_on_every_slab() {
+        let mut brush = Brush::cuboid([0, 0, 0], [256, 128, 256]);
+        brush.contents = BrushContents::Slime;
+        let slabs = brush.hollow(16).expect("hollowable liquid");
+        assert_eq!(slabs.len(), 6);
+        assert!(slabs
+            .iter()
+            .all(|slab| slab.contents == BrushContents::Slime));
+    }
+
+    #[test]
     fn translate_points_near_retilts_only_anchored_planes() {
         // Drag the top +X/+Z corner column of a cube inward along X:
         // the two vertical faces anchored there tilt, the rest stay.
@@ -1000,5 +1069,36 @@ mod tests {
         assert_eq!(plane.side([128, 0, 0]), 0);
         assert!(plane.side([0, 0, 0]) < 0);
         assert!(plane.side([128, 128, 0]) > 0);
+    }
+}
+
+#[cfg(test)]
+mod contents_tests {
+    use super::*;
+
+    #[test]
+    fn solid_contents_remain_implicit_while_liquids_round_trip() {
+        let solid = Brush::cuboid([0, 0, 0], [64, 64, 64]);
+        let solid_ron = ron::to_string(&solid).expect("solid RON");
+        assert!(!solid_ron.contains("contents"));
+        assert_eq!(
+            ron::from_str::<Brush>(&solid_ron).expect("solid round trip"),
+            solid
+        );
+
+        for contents in [
+            BrushContents::Water,
+            BrushContents::Slime,
+            BrushContents::Lava,
+        ] {
+            let mut liquid = solid.clone();
+            liquid.contents = contents;
+            let ron = ron::to_string(&liquid).expect("liquid RON");
+            assert!(ron.contains(&format!("contents:{}", contents.label())));
+            assert_eq!(
+                ron::from_str::<Brush>(&ron).expect("liquid round trip"),
+                liquid
+            );
+        }
     }
 }

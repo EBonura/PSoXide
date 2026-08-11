@@ -31,6 +31,7 @@ use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
 use crate::{
     Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_BAKED_UV,
+    FACE_TWO_SIDED,
     TEXTURE_INVISIBLE, TEXTURE_LIQUID, TEXTURE_NULL, TEXTURE_SKY,
 };
 
@@ -538,7 +539,11 @@ impl Renderer {
                 stats.unresolved_material_faces = stats.unresolved_material_faces.saturating_add(1);
                 continue;
             };
-            if !pxbsp_material_draws_face(material, front_facing_pxbsp(map, face, camera_origin)) {
+            if !pxbsp_face_draws(
+                material,
+                face.flags,
+                front_facing_pxbsp(map, face, camera_origin),
+            ) {
                 continue;
             }
 
@@ -1163,7 +1168,10 @@ fn pxbsp_scroll_axis(speed_q8: i16, phase: u8, period: u8, tick: u32) -> u8 {
     (travelled_q8 / 256 + i64::from(phase)).rem_euclid(i64::from(period.max(1))) as u8
 }
 
-fn pxbsp_material_draws_face(material: PxbspMaterial, authored_front: bool) -> bool {
+fn pxbsp_face_draws(material: PxbspMaterial, face_flags: u16, authored_front: bool) -> bool {
+    if face_flags & FACE_TWO_SIDED != 0 {
+        return true;
+    }
     match material.flags & material_flags::FACE_MASK {
         material_flags::FACE_BACK => !authored_front,
         material_flags::FACE_BOTH => true,
@@ -1357,12 +1365,14 @@ mod tests {
             flags: material_flags::FACE_BOTH,
             ..front
         };
-        assert!(pxbsp_material_draws_face(front, true));
-        assert!(!pxbsp_material_draws_face(front, false));
-        assert!(!pxbsp_material_draws_face(back, true));
-        assert!(pxbsp_material_draws_face(back, false));
-        assert!(pxbsp_material_draws_face(both, true));
-        assert!(pxbsp_material_draws_face(both, false));
+        assert!(pxbsp_face_draws(front, 0, true));
+        assert!(!pxbsp_face_draws(front, 0, false));
+        assert!(!pxbsp_face_draws(back, 0, true));
+        assert!(pxbsp_face_draws(back, 0, false));
+        assert!(pxbsp_face_draws(both, 0, true));
+        assert!(pxbsp_face_draws(both, 0, false));
+        assert!(pxbsp_face_draws(front, FACE_TWO_SIDED, true));
+        assert!(pxbsp_face_draws(front, FACE_TWO_SIDED, false));
     }
 
     #[test]
@@ -1408,8 +1418,9 @@ mod tests {
             map.faces().get(0).expect("face"),
             camera.origin
         ));
-        assert!(pxbsp_material_draws_face(
+        assert!(pxbsp_face_draws(
             map.materials().get(0).expect("material"),
+            map.faces().get(0).expect("face").flags,
             true
         ));
         assert_eq!(map.faces().get(0).expect("face").texture, 0);

@@ -36,7 +36,7 @@
 	hwtest-capture hwtest-diff hwtest-baseline hwtest-silicon hwtest-verify-code hwtest-audio hwtest-audio-chain \
 	hwtest-sb4-capture hwtest-sb4 hwtest-sb4-baseline \
 	hello-engine hello-engine-disc run-hello-engine \
-	cook-playtest build-editor-playtest editor-blank-playtest-check profile-demo3 profile-demo3-forward \
+	cook-playtest build-editor-playtest editor-blank-playtest-check editor-bsp-liquid-check profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
 	profile-demo3-disc-stream-forward profile-demo7-camera-sweep
 
@@ -69,6 +69,8 @@ help:
 	@echo "    make profile-demo3 - cook/build demo3 BIN and dump streamed screenshot/profile"
 	@echo "    make editor-blank-playtest-check"
 	@echo "                      - author a blank BSP level through editor commands, build MIPS, and boot headlessly"
+	@echo "    make editor-bsp-liquid-check"
+	@echo "                      - cook BSP lava, build MIPS, and prove damage/respawn headlessly without image output"
 	@echo "    make profile-demo3-forward - streamed demo3 profile while holding forward"
 	@echo "    make profile-demo3-paced20 - alias for streamed 20Hz visual cadence telemetry"
 	@echo "    make profile-demo3-paced20-forward - streamed paced20 profile while holding forward"
@@ -769,6 +771,39 @@ editor-blank-playtest-check:
 		--disc "$$disc" \
 		--frame "$$frame" \
 		--log "$$log"
+
+# End-to-end proof that authored PXBSP liquid contents survive the editor cook,
+# enter the shared runtime point hull, apply deterministic hazard damage, and
+# respawn the player. The gate intentionally emits no screenshots or frame
+# dumps: guest telemetry is the behavioral oracle.
+editor-bsp-liquid-check:
+	@set -eu; \
+	check_tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/psoxide-editor-bsp-liquid.XXXXXX"); \
+	trap 'rm -rf "$$check_tmp"' EXIT HUP INT TERM; \
+	project_dir="$$check_tmp/project"; \
+	project_file="$$project_dir/project.ron"; \
+	cue="$$project_dir/baked/bsp_liquid_runtime_proof.cue"; \
+	log="$$check_tmp/headless.log"; \
+	cd editor; \
+	cargo run -p psxed-project --bin gen-brush-liquid-runtime -- "$$project_dir"; \
+	cd ../emu; \
+	EDITOR_PLAYTEST_FEATURES='cd-stream-bench emulator-telemetry' cargo run -p frontend --release -- build-project-disc --project "$$project_file"; \
+	if ! cargo run -p frontend --release -- launch \
+		--path "$$cue" \
+		--embedded-playtest \
+		--guest-frames 220 \
+		--steps 1000000000 \
+		--guest-debug-log \
+		--dump-guest-profile > "$$log" 2>&1; then \
+		cat "$$log"; \
+		exit 1; \
+	fi; \
+	cat "$$log"; \
+	lava_hits=$$(grep -Fc 'player bsp:lava' "$$log"); \
+	respawns=$$(grep -Fc 'player hazard:respawn' "$$log"); \
+	[ "$$lava_hits" -eq 12 ]; \
+	[ "$$respawns" -eq 1 ]; \
+	grep -Eq '^\[guest f181 c[0-9]+\] player hazard:respawn$$' "$$log"
 
 profile-demo3:
 	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_HW)

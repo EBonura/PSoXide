@@ -175,7 +175,7 @@ fn scale(value: [f64; 3], amount: f64) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brush::{BrushFace, FaceUv};
+    use crate::brush::{BrushContents, BrushFace, FaceUv};
 
     fn upward_quad() -> CompiledSurface {
         CompiledSurface {
@@ -188,6 +188,7 @@ mod tests {
             ],
             material: None,
             uv: FaceUv::default(),
+            contents: BrushContents::Solid,
             source_brush: 0,
             source_face: 0,
         }
