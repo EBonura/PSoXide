@@ -162,6 +162,11 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
             room,
             &mut aabbs[aabb_count..],
         );
+        aabb_count += psx_game_runtime::image_props::collect_image_prop_collision_blockers(
+            IMAGE_PROPS,
+            room,
+            &mut aabbs[aabb_count..],
+        );
         if let Some(bsp) = self.bsp.as_deref_mut() {
             let step = bsp
                 .commit_body_step(

@@ -1671,8 +1671,8 @@ pub fn build_package(
                 width,
                 height,
                 cylindrical_billboard,
-                collision_enabled: _,
-                collision_size: _,
+                collision_enabled,
+                collision_size,
             } => {
                 if !push_image_prop(
                     project,
@@ -1687,6 +1687,8 @@ pub fn build_package(
                     *width,
                     *height,
                     *cylindrical_billboard,
+                    *collision_enabled,
+                    *collision_size,
                     &mut texture_asset_for_path,
                     &mut assets,
                     &mut image_props,
@@ -1878,6 +1880,13 @@ pub fn build_package(
     }
 
     for (room_index, room) in rooms.iter().enumerate() {
+        let image_count = image_props
+            .iter()
+            .filter(|prop| {
+                usize::from(prop.room) == room_index
+                    && prop.flags & psx_level::image_prop_flags::COLLISION_ENABLED != 0
+            })
+            .count();
         let box_count = box_props
             .iter()
             .filter(|prop| {
@@ -1890,10 +1899,12 @@ pub fn build_package(
             .filter(|prop| usize::from(prop.room) == room_index)
             .map(|prop| usize::from(prop.collision_count))
             .sum();
-        let total = box_count.saturating_add(arch_count);
+        let total = image_count
+            .saturating_add(box_count)
+            .saturating_add(arch_count);
         if total > psx_level::MAX_STATIC_PROP_AABB_BLOCKERS {
             report.error(format!(
-                "Room '{}' needs {total} static prop collision AABBs ({box_count} box + {arch_count} arch), exceeding the PS1 runtime budget of {}",
+                "Room '{}' needs {total} static prop collision AABBs ({image_count} image + {box_count} box + {arch_count} arch), exceeding the PS1 runtime budget of {}",
                 room.name,
                 psx_level::MAX_STATIC_PROP_AABB_BLOCKERS,
             ));

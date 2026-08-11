@@ -254,6 +254,8 @@ pub(crate) fn push_image_prop(
     width: u16,
     height: u16,
     cylindrical_billboard: bool,
+    collision_enabled: bool,
+    collision_size: [u16; 3],
     texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     image_props: &mut Vec<PlaytestImageProp>,
@@ -277,6 +279,19 @@ pub(crate) fn push_image_prop(
     ) else {
         return true;
     };
+    let (collision_min, collision_max) = if collision_enabled {
+        image_prop_collision_aabb(
+            pos,
+            height.max(1),
+            collision_size,
+            pitch,
+            yaw,
+            roll,
+            cylindrical_billboard,
+        )
+    } else {
+        ([0; 3], [0; 3])
+    };
     image_props.push(PlaytestImageProp {
         room: room_index,
         texture_asset_index,
@@ -290,13 +305,86 @@ pub(crate) fn push_image_prop(
         height: height.max(1),
         tint_rgb,
         baked_vertex_rgb: [rgb_tuple(tint_rgb); 4],
-        flags: if cylindrical_billboard {
+        collision_min,
+        collision_max,
+        flags: (if cylindrical_billboard {
             image_prop_flags::CYLINDRICAL_BILLBOARD
         } else {
             0
-        },
+        }) | (if collision_enabled {
+            image_prop_flags::COLLISION_ENABLED
+        } else {
+            0
+        }),
     });
     true
+}
+
+/// Cook the editor's oriented ImageProp collision wireframe into the
+/// conservative room-local AABB consumed by the PS1 character motor.
+///
+/// The visual plane is bottom-centred, while its collision box is centred at
+/// half the visual height. Cylindrical billboards deliberately keep an
+/// axis-aligned collision box because their visual yaw changes every frame;
+/// static cards use the same X -> Y -> Z Q12 rotation as preview and runtime
+/// rendering before their eight corners are enclosed.
+pub(crate) fn image_prop_collision_aabb(
+    origin: [i32; 3],
+    visual_height: u16,
+    collision_size: [u16; 3],
+    pitch: i16,
+    yaw: i16,
+    roll: i16,
+    cylindrical_billboard: bool,
+) -> ([i32; 3], [i32; 3]) {
+    let half = collision_size.map(|component| ((component as i32) / 2).max(1));
+    let center_y = (visual_height as i32) / 2;
+    if cylindrical_billboard {
+        let center = [
+            origin[0],
+            origin[1].saturating_add(center_y),
+            origin[2],
+        ];
+        return (
+            [
+                center[0].saturating_sub(half[0]),
+                center[1].saturating_sub(half[1]),
+                center[2].saturating_sub(half[2]),
+            ],
+            [
+                center[0].saturating_add(half[0]),
+                center[1].saturating_add(half[1]),
+                center[2].saturating_add(half[2]),
+            ],
+        );
+    }
+
+    let mut min = [i32::MAX; 3];
+    let mut max = [i32::MIN; 3];
+    for z in [-half[2], half[2]] {
+        for y in [center_y.saturating_sub(half[1]), center_y.saturating_add(half[1])] {
+            for x in [-half[0], half[0]] {
+                let rotated = crate::spatial::rotate_euler_local_q12(
+                    [x, y, z],
+                    pitch as u16,
+                    yaw as u16,
+                    roll as u16,
+                );
+                let world = [
+                    origin[0].saturating_add(rotated[0]),
+                    origin[1].saturating_add(rotated[1]),
+                    origin[2].saturating_add(rotated[2]),
+                ];
+                let mut axis = 0usize;
+                while axis < 3 {
+                    min[axis] = min[axis].min(world[axis]);
+                    max[axis] = max[axis].max(world[axis]);
+                    axis += 1;
+                }
+            }
+        }
+    }
+    (min, max)
 }
 
 #[allow(clippy::too_many_arguments)]
