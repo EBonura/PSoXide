@@ -1,5 +1,18 @@
 use super::*;
 
+fn apply_bsp_debug_body_fallback(
+    config: &mut CharacterMotorConfig,
+    uses_bsp: bool,
+    has_character: bool,
+) {
+    if uses_bsp && !has_character {
+        config.radius = BSP_PLAYER_RADIUS;
+        config.height = BSP_PLAYER_HEIGHT;
+        config.walk_speed = BSP_FALLBACK_PLAYER_SPEED;
+        config.run_speed = BSP_FALLBACK_PLAYER_SPEED;
+    }
+}
+
 /// Crossfade length for a specific transition, rather than one number for
 /// every change of state. What reads well depends on BOTH ends: an attack
 /// must start crisply but settle slowly, and a gait change can afford a long
@@ -214,17 +227,11 @@ impl Playtest {
         if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
             config.gravity_per_tick = room.gravity_per_tick;
         }
-        if self.bsp.is_some() {
-            // Hull one is currently the explicit brush-cook player contract.
-            // This assignment is the seam where Draft/Release cooks can select
-            // an authored body hull once the dimensions enter the manifest.
-            config.radius = BSP_PLAYER_RADIUS;
-            config.height = BSP_PLAYER_HEIGHT;
-            if self.character.is_none() {
-                config.walk_speed = BSP_FALLBACK_PLAYER_SPEED;
-                config.run_speed = BSP_FALLBACK_PLAYER_SPEED;
-            }
-        }
+        // Characterless brush projects use the cooker's matching debug body.
+        // Authored characters keep their Character-bound radius and height so
+        // `BspRuntime::update_motor` can select the exact cooked containing
+        // hull instead of silently shrinking the player.
+        apply_bsp_debug_body_fallback(&mut config, self.bsp.is_some(), self.character.is_some());
         config
     }
 
