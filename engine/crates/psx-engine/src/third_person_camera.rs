@@ -1602,7 +1602,20 @@ fn lerp_vertex(from: RoomPoint, to: RoomPoint, num: i32, den: i32) -> RoomPoint 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RuntimeRoom;
+    use crate::{CharacterBlockerTraceProvider, CharacterCollisionAabb, RuntimeRoom};
+
+    struct ClearTraceProvider;
+
+    impl CollisionTraceProvider for ClearTraceProvider {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
+            *output = crate::CollisionTrace::unobstructed(query.end);
+            true
+        }
+    }
 
     struct HalfDistanceTraceProvider {
         fail: bool,
@@ -1660,6 +1673,50 @@ mod tests {
         assert!(frame.collision_pull_in);
         assert_eq!(frame.distance, 540);
         assert_eq!(provider.calls, 1);
+    }
+
+    #[test]
+    fn collidable_prop_aabb_shortens_camera_spring_arm() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let target = trace_target();
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        config.collision_margin = 0;
+
+        let mut clear_camera = ThirdPersonCameraState::new(Angle::HALF);
+        clear_camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+        let clear = clear_camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut ClearTraceProvider,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .expect("clear camera update");
+        assert!(!clear.collision_pull_in);
+
+        let blockers = [CharacterCollisionAabb::new(
+            RoomPoint::new(-64, 1, -800),
+            RoomPoint::new(64, 1_000, -600),
+        )];
+        let mut clear_world = ClearTraceProvider;
+        let mut props =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut clear_world, &[], &blockers);
+        let mut blocked_camera = ThirdPersonCameraState::new(Angle::HALF);
+        blocked_camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+        let blocked = blocked_camera
+            .update_vblanks_with_trace_provider(
+                projection,
+                &mut props,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .expect("prop-blocked camera update");
+        assert!(blocked.collision_pull_in);
+        assert!(blocked.distance < clear.distance);
     }
 
     #[test]
