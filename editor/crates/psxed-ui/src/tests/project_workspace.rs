@@ -2919,3 +2919,658 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
 
     let _ = std::fs::remove_dir_all(project_dir);
 }
+
+/// Souls vertical-slice tape: authored as literals so regeneration is
+/// deterministic and drift-diffable. The canonical route: touch the
+/// checkpoint trigger, dismiss the sync overlay, open the lift door, kill
+/// the Mantis with the verified combo/heavy cadence while taking hits,
+/// walk into the lava pool, die, respawn at the checkpoint, dismiss the
+/// re-fired sync overlay, and walk a short confirmation leg.
+fn write_souls_slice_canonical_tape(dir: &Path) {
+    const UP: u16 = 1 << 4;
+    const DOWN: u16 = 1 << 6;
+    const CROSS: u16 = 1 << 14;
+    const R2: u16 = 1 << 9;
+    const L2: u16 = 1 << 8;
+    const R3: u16 = 1 << 2;
+    const FRAME_COUNT: usize = 3000;
+    // Combo (L2) opener pair, then a heavy (R2) tail; spacing mirrors the
+    // verified combat fixture (37-tick tail, co-prime with the enemy's
+    // 45-tick attack cadence).
+    const COMBO_PRESSES: [usize; 2] = [1250, 1390];
+    const HEAVY_PRESSES: [usize; 7] = [
+        1320, 1450, 1487, 1524, 1561, 1598, 1635,
+    ];
+
+    let mut tape = String::with_capacity(FRAME_COUNT * 32);
+    use std::fmt::Write as _;
+    writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
+    writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
+    for frame in 0..FRAME_COUNT {
+        let mut buttons = 0u16;
+        // Leg 1: spawn to the checkpoint trigger.
+        if (240..430).contains(&frame) {
+            buttons |= UP;
+        }
+        // Dismiss the SYNC RELAY overlay the trigger opened.
+        if (450..454).contains(&frame) {
+            buttons |= CROSS;
+        }
+        // Leg 2: trigger to the closed lift door.
+        if (470..840).contains(&frame) {
+            buttons |= UP;
+        }
+        // Open the door, wait out its travel, walk through to the fight.
+        if (860..864).contains(&frame) {
+            buttons |= CROSS;
+        }
+        // Step into the far room to trip the Mantis aggro, then retreat
+        // into the doorway pinch so the fight happens in the frame, the
+        // verified fixture pattern.
+        if (940..1010).contains(&frame) {
+            buttons |= UP;
+        }
+        if (1020..1090).contains(&frame) {
+            buttons |= DOWN;
+        }
+        // Lock on to the arriving Mantis so every authored swing faces it.
+        if (1100..1104).contains(&frame) {
+            buttons |= R3;
+        }
+        if COMBO_PRESSES
+            .iter()
+            .any(|press| (*press..press + 4).contains(&frame))
+        {
+            buttons |= L2;
+        }
+        if HEAVY_PRESSES
+            .iter()
+            .any(|press| (*press..press + 4).contains(&frame))
+        {
+            buttons |= R2;
+        }
+        // Leg 3: forward-east through the reopened doorway (the fight
+        // drifted the pinch back into room one), then strafe-right south
+        // into the lava pool; stop inside and die to the 15-tick cadence.
+        let mut left_x = 128u8;
+        let mut left_y = 128u8;
+        if (1750..1880).contains(&frame) {
+            left_x = 224;
+            left_y = 32;
+        }
+        if (1880..1960).contains(&frame) {
+            left_x = 224;
+        }
+        // Leg 4: post-respawn overlay dismissal and confirmation walk.
+        if (2400..2404).contains(&frame) {
+            buttons |= CROSS;
+        }
+        if (2450..2560).contains(&frame) {
+            buttons |= DOWN;
+        }
+        writeln!(tape, "{frame},{buttons},128,128,{left_x},{left_y}").unwrap();
+    }
+    std::fs::write(dir.join("souls-canonical.pxitape.csv"), tape)
+        .expect("write souls canonical tape");
+}
+
+/// Negative tape: the pad stays neutral for the whole run. The player never
+/// touches the trigger, never opens the door, never swings; the gate pins
+/// every combat and progression counter to zero while PVS suppressions
+/// still accumulate from the enemy sealed in the far room.
+fn write_souls_slice_negative_tape(dir: &Path) {
+    const FRAME_COUNT: usize = 900;
+    let mut tape = String::with_capacity(FRAME_COUNT * 24);
+    use std::fmt::Write as _;
+    writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
+    writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
+    for frame in 0..FRAME_COUNT {
+        writeln!(tape, "{frame},0,128,128,128,128").unwrap();
+    }
+    std::fs::write(dir.join("souls-negative.pxitape.csv"), tape)
+        .expect("write souls negative tape");
+}
+
+/// The souls vertical slice authored end to end through production editor
+/// command paths: New Project from the courtyard template, the resources
+/// panel starter sync, real brush drags/resizes, the BSP place lanes, the
+/// scene-tree Add Child component path, and the exact inspector mutations.
+/// Save, reopen, cook (twice, byte-deterministic), and verify the cooked
+/// world: nonzero PXBSP, the two authored body-hull envelopes, the door
+/// mover, both equipment records, and the trigger-to-checkpoint chain.
+/// With PSOXIDE_SOULS_SLICE_PROJECT_OUT set, exports the authored project
+/// (plus the canonical and negative tapes) for the tracked copy at
+/// editor/projects/souls-bsp-vertical-slice.
+#[test]
+fn souls_slice_project_is_authored_through_production_commands() {
+    let mut workspace =
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let name = format!(
+        "Souls Slice Authoring {} {}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    let cook_a = test_temp_dir("souls-slice-cook-a");
+    let cook_b = test_temp_dir("souls-slice-cook-b");
+    let _ = std::fs::remove_dir_all(&project_dir);
+    let _ = std::fs::remove_dir_all(&cook_a);
+    let _ = std::fs::remove_dir_all(&cook_b);
+
+    workspace.create_and_open_project(&name).unwrap();
+    let root = workspace.project().active_scene().root;
+
+    // The resources-panel "Starter Characters" action arms the fresh project
+    // with the verified combat catalogue.
+    workspace.push_undo();
+    let target_dir = workspace.project_dir.clone();
+    sync_starter_character_catalogue(&mut workspace.project, &target_dir)
+        .expect("starter character sync");
+    workspace.mark_dirty();
+
+    let resource_id = |workspace: &EditorWorkspace, name: &str, wants: fn(&ResourceData) -> bool| {
+        workspace
+            .project()
+            .resources
+            .iter()
+            .find(|resource| resource.name == name && wants(&resource.data))
+            .unwrap_or_else(|| panic!("missing resource '{name}'"))
+            .id
+    };
+    let cobbles = resource_id(&workspace, "Courtyard Cobbles", |data| {
+        matches!(data, ResourceData::Material(_))
+    });
+    let brick = resource_id(&workspace, "Courtyard Brick", |data| {
+        matches!(data, ResourceData::Material(_))
+    });
+    let aletha_profile = resource_id(&workspace, "Aletha", |data| {
+        matches!(data, ResourceData::Character(_))
+    });
+    let mantis_profile = resource_id(&workspace, "Rust Mantis Enemy", |data| {
+        matches!(data, ResourceData::Character(_))
+    });
+    let sword_light = resource_id(&workspace, "Sword1 Light", |data| {
+        matches!(data, ResourceData::Weapon(_))
+    });
+    let sword_heavy = resource_id(&workspace, "Sword1 Heavy", |data| {
+        matches!(data, ResourceData::Weapon(_))
+    });
+
+    // Blank slate: the courtyard template's nodes and brushes leave through
+    // the same selection commands the scene tree and brush viewport use.
+    let children = workspace
+        .project()
+        .active_scene()
+        .node(root)
+        .expect("world root")
+        .children
+        .clone();
+    for child in children {
+        workspace.replace_node_selection(child);
+        workspace.delete_selected();
+    }
+    while !workspace.project().active_scene().brushes.is_empty() {
+        workspace.selected_brush = Some(0);
+        workspace.delete_selected_brushes();
+    }
+    assert!(workspace.project().active_scene().brushes.is_empty());
+
+    // Author the two combat spaces: a sealed 8192 x 3072 envelope with a
+    // 1536-unit interior height, split by a thin divider whose doorway gap
+    // carries the lift-door brush; a lava pool sits in the far room.
+    workspace.set_orthographic_view(OrthographicView::Top);
+    workspace.set_active_tool_cycle_value((ViewTool::Brush, None));
+    let mut author_box = |workspace: &mut EditorWorkspace,
+                          material: ResourceId,
+                          mins: [i32; 3],
+                          maxs: [i32; 3]|
+     -> usize {
+        workspace.brush_material = Some(material);
+        workspace.orthographic_focus[1] = mins[1] as f32;
+        workspace.begin_brush_drag_2d([mins[0] as f32, mins[2] as f32]);
+        workspace.update_brush_drag_2d([maxs[0] as f32, maxs[2] as f32]);
+        workspace.commit_brush_drag();
+        let created = workspace.selected_brush.expect("committed brush");
+        assert!(
+            workspace.set_selected_brush_size([
+                maxs[0] - mins[0],
+                maxs[1] - mins[1],
+                maxs[2] - mins[2],
+            ]),
+            "brush resize {mins:?} -> {maxs:?}"
+        );
+        created
+    };
+    author_box(&mut workspace, cobbles, [0, 0, 0], [8192, 256, 3072]);
+    author_box(&mut workspace, cobbles, [0, 1792, 0], [8192, 2048, 3072]);
+    author_box(&mut workspace, brick, [0, 256, 0], [256, 1792, 3072]);
+    author_box(&mut workspace, brick, [7936, 256, 0], [8192, 1792, 3072]);
+    author_box(&mut workspace, brick, [256, 256, 0], [7936, 1792, 256]);
+    author_box(&mut workspace, brick, [256, 256, 2816], [7936, 1792, 3072]);
+    author_box(&mut workspace, brick, [4064, 256, 256], [4128, 1792, 1280]);
+    author_box(&mut workspace, brick, [4064, 256, 1792], [4128, 1792, 2816]);
+    // Interior stub in the far room: movers never enter the static PVS, so
+    // the doorway is a permanent visibility hole; this wall seals a pocket
+    // no room-one leaf can see into, guaranteeing the enemy stays
+    // PVS-suppressed until the player rounds it.
+    author_box(&mut workspace, brick, [5120, 256, 256], [5184, 1792, 1280]);
+    let door_brush = author_box(&mut workspace, brick, [4064, 256, 1280], [4128, 1024, 1792]);
+    let lava_brush = author_box(&mut workspace, cobbles, [4800, 256, 2048], [5824, 512, 2816]);
+    // Sealed crypt: the cooked visibility model is portal-component
+    // granular, so nothing reachable through the doorway can ever be
+    // PVS-suppressed; this hollowed box is its own sealed visibility
+    // component and keeps a live sentinel permanently outside the player's
+    // row, exercising the suppression counter deterministically.
+    author_box(&mut workspace, brick, [6400, 256, 256], [7168, 1792, 1024]);
+    workspace.hollow_selected_brush(64);
+    workspace.replace_brush_selection(lava_brush, None);
+    workspace.set_selected_brush_contents(psxed_project::brush::BrushContents::Lava);
+    assert_eq!(
+        workspace.project().active_scene().brushes[lava_brush].contents,
+        psxed_project::brush::BrushContents::Lava
+    );
+
+    // Point placement happens on the interior floor.
+    workspace.orthographic_focus[1] = 256.0;
+
+    // The verified player: the Aletha starter profile placed through the
+    // Character lane (spawn_role Player makes this entity the player
+    // source), then the sample-calibrated renderer scale and spawn facing
+    // applied through the inspector mutation path.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Character)));
+    workspace.replace_resource_selection(aletha_profile);
+    assert!(workspace.place_bsp_from_top([1024.0, 1536.0]));
+    let player_entity = workspace.selected_node_id();
+    assert!(workspace.has_player_source());
+    workspace.push_undo();
+    {
+        let scene = workspace.project.active_scene_mut();
+        scene.node_mut(player_entity).expect("player entity").name = "Player".to_string();
+        scene
+            .node_mut(player_entity)
+            .expect("player entity")
+            .transform
+            .rotation_degrees = [0.0, 270.0, 0.0];
+        let renderer = scene
+            .node(player_entity)
+            .expect("player entity")
+            .children
+            .clone()
+            .into_iter()
+            .find(|id| {
+                matches!(
+                    scene.node(*id).map(|node| &node.kind),
+                    Some(NodeKind::ModelRenderer { .. })
+                )
+            })
+            .expect("player model renderer");
+        if let Some(node) = scene.node_mut(renderer) {
+            if let NodeKind::ModelRenderer {
+                visual_offset,
+                visual_scale_q8,
+                ..
+            } = &mut node.kind
+            {
+                *visual_offset = [0, 1, 0];
+                *visual_scale_q8 = 360;
+            }
+        }
+    }
+    workspace.mark_dirty();
+
+    // The crypt sentinel: a second Mantis sealed inside the hollow box,
+    // placed on its interior floor through the same Character lane.
+    workspace.orthographic_focus[1] = 320.0;
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Character)));
+    workspace.replace_resource_selection(mantis_profile);
+    assert!(workspace.place_bsp_from_top([6784.0, 640.0]));
+    let sentinel_entity = workspace.selected_node_id();
+    workspace.push_undo();
+    workspace
+        .project
+        .active_scene_mut()
+        .node_mut(sentinel_entity)
+        .expect("sentinel entity")
+        .name = "Crypt Sentinel".to_string();
+    workspace.mark_dirty();
+    workspace.orthographic_focus[1] = 256.0;
+
+    // The verified enemy: the Rust Mantis starter profile in the far room,
+    // facing the doorway, with the sample-calibrated renderer scale.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Character)));
+    workspace.replace_resource_selection(mantis_profile);
+    assert!(workspace.place_bsp_from_top([6100.0, 800.0]));
+    let enemy_entity = workspace.selected_node_id();
+    workspace.push_undo();
+    {
+        let scene = workspace.project.active_scene_mut();
+        scene.node_mut(enemy_entity).expect("enemy entity").name = "Mantis Enemy".to_string();
+        scene
+            .node_mut(enemy_entity)
+            .expect("enemy entity")
+            .transform
+            .rotation_degrees = [0.0, 90.0, 0.0];
+        let renderer = scene
+            .node(enemy_entity)
+            .expect("enemy entity")
+            .children
+            .clone()
+            .into_iter()
+            .find(|id| {
+                matches!(
+                    scene.node(*id).map(|node| &node.kind),
+                    Some(NodeKind::ModelRenderer { .. })
+                )
+            })
+            .expect("enemy model renderer");
+        if let Some(node) = scene.node_mut(renderer) {
+            if let NodeKind::ModelRenderer {
+                visual_scale_q8, ..
+            } = &mut node.kind
+            {
+                *visual_scale_q8 = 512;
+            }
+        }
+    }
+    workspace.mark_dirty();
+
+    // Equipment components ride both characters through the scene-tree Add
+    // Child path, then the inspector's weapon selector binds the swords.
+    for (entity, weapon) in [(player_entity, sword_light), (enemy_entity, sword_heavy)] {
+        workspace.replace_node_selection(entity);
+        workspace.add_child(
+            NodeKind::Equipment {
+                weapon: None,
+                character_socket: "right_hand_grip".to_string(),
+                weapon_grip: "grip".to_string(),
+            },
+            "Equipment",
+        );
+        let equipment = workspace.selected_node_id();
+        workspace.push_undo();
+        if let Some(node) = workspace.project.active_scene_mut().node_mut(equipment) {
+            if let NodeKind::Equipment {
+                weapon: weapon_slot,
+                ..
+            } = &mut node.kind
+            {
+                *weapon_slot = Some(weapon);
+            }
+        }
+        workspace.mark_dirty();
+    }
+
+    // Decorations and lighting: a collidable image prop in the far room, a
+    // box prop and arch in the first room, one light per space.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::BoxProp)));
+    workspace.replace_resource_selection(brick);
+    assert!(workspace.place_bsp_from_top([1024.0, 2400.0]));
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::ArchProp)));
+    workspace.replace_resource_selection(brick);
+    assert!(workspace.place_bsp_from_top([2900.0, 300.0]));
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::ImageProp)));
+    workspace.replace_resource_selection(brick);
+    assert!(workspace.place_bsp_from_top([6800.0, 1536.0]));
+    let image_prop = workspace.selected_node_id();
+    workspace.push_undo();
+    if let Some(node) = workspace.project.active_scene_mut().node_mut(image_prop) {
+        if let NodeKind::ImageProp {
+            collision_enabled, ..
+        } = &mut node.kind
+        {
+            *collision_enabled = true;
+        }
+    }
+    workspace.mark_dirty();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointLightMarker)));
+    assert!(workspace.place_bsp_from_top([2048.0, 1200.0]));
+    assert!(workspace.place_bsp_from_top([6100.0, 1536.0]));
+
+    // The lift door: the default Logic placement, the inspector kind switch
+    // to Door, and the brush inspector's Model owner binding.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([4096.0, 1536.0]));
+    let door_node = workspace.selected_node_id();
+    workspace.push_undo();
+    if let Some(node) = workspace.project.active_scene_mut().node_mut(door_node) {
+        node.name = "Lift Door".to_string();
+        node.kind = NodeKind::Logic {
+            kind: psxed_project::LogicNodeKind::Door {
+                box_prop: String::new(),
+                start_open: false,
+                open_offset: [0, 1536, 0],
+                travel_ticks: 60,
+            },
+            target: String::new(),
+            killtarget: String::new(),
+            master: String::new(),
+            delay_ticks: 0,
+            wait_ticks: 0,
+            enabled: true,
+        };
+    }
+    workspace.mark_dirty();
+    workspace.replace_brush_selection(door_brush, None);
+    workspace.set_selected_brush_mover(Some(door_node));
+    assert_eq!(
+        workspace.project().active_scene().brushes[door_brush].mover,
+        Some(door_node)
+    );
+
+    // The checkpoint: an Entity added through the scene tree, carrying an
+    // Interactable switched to Checkpoint exactly as the inspector does.
+    workspace.replace_node_selection(root);
+    workspace.add_child(NodeKind::Entity, "Entity");
+    let checkpoint_entity = workspace.selected_node_id();
+    workspace.push_undo();
+    if let Some(node) = workspace
+        .project
+        .active_scene_mut()
+        .node_mut(checkpoint_entity)
+    {
+        node.name = "Sync Relay".to_string();
+        node.transform.translation = [2048.0, 257.0, 800.0];
+    }
+    workspace.mark_dirty();
+    workspace.add_child(
+        NodeKind::Interactable {
+            kind: psxed_project::InteractableKind::default(),
+            prompt: "READ ECHO".to_string(),
+            radius: 96,
+            enabled: true,
+        },
+        "Interactable",
+    );
+    let interactable = workspace.selected_node_id();
+    workspace.push_undo();
+    if let Some(node) = workspace.project.active_scene_mut().node_mut(interactable) {
+        if let NodeKind::Interactable { kind, prompt, .. } = &mut node.kind {
+            *kind = psxed_project::InteractableKind::Checkpoint {
+                checkpoint_id: String::new(),
+                title: "SYNC RELAY".to_string(),
+                body: "Relay synchronized.".to_string(),
+            };
+            *prompt = "SYNCHRONIZE".to_string();
+        }
+    }
+    workspace.mark_dirty();
+
+    // The route trigger that chains into the checkpoint on touch.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([2048.0, 1536.0]));
+    let trigger_node = workspace.selected_node_id();
+    workspace.push_undo();
+    if let Some(node) = workspace.project.active_scene_mut().node_mut(trigger_node) {
+        node.name = "Route Trigger".to_string();
+        // The place lane parks point nodes one unit above the surface, but
+        // the trigger AABB grows upward from its anchor and the motor stands
+        // exactly on the floor plane; anchor on the floor so the volume
+        // contains the player.
+        node.transform.translation[1] = 256.0;
+        node.kind = NodeKind::Logic {
+            kind: psxed_project::LogicNodeKind::TriggerVolume {
+                size: [384, 512, 768],
+            },
+            target: "Sync Relay".to_string(),
+            killtarget: String::new(),
+            master: String::new(),
+            delay_ticks: 0,
+            // Fire once then retire (hl's wait -1): a wait-0 volume re-arms
+            // every tick while the player stands inside and reopens the sync
+            // overlay forever. Respawn re-arms the record, the souls rule.
+            wait_ticks: -1,
+            enabled: true,
+        };
+    }
+    workspace.mark_dirty();
+
+    workspace.save_if_dirty().expect("persist authored slice");
+    assert!(!workspace.is_dirty());
+
+    // Reopen the persisted project and verify the authored contract before
+    // cooking from the reloaded document.
+    let reopened = EditorWorkspace::open_directory(&project_dir).expect("reopen slice project");
+    assert!(reopened.has_player_source());
+    let scene = reopened.project().active_scene();
+    assert_eq!(scene.brushes.len(), 17);
+    assert_eq!(
+        scene.brushes[lava_brush].contents,
+        psxed_project::brush::BrushContents::Lava
+    );
+    assert_eq!(scene.brushes[door_brush].mover, Some(door_node));
+    let kind_count = |wants: fn(&NodeKind) -> bool| {
+        scene
+            .nodes()
+            .iter()
+            .filter(|node| wants(&node.kind))
+            .count()
+    };
+    assert_eq!(
+        kind_count(|kind| matches!(kind, NodeKind::PointLight { .. })),
+        2
+    );
+    assert_eq!(kind_count(|kind| matches!(kind, NodeKind::BoxProp { .. })), 1);
+    assert_eq!(
+        kind_count(|kind| matches!(kind, NodeKind::ArchProp { .. })),
+        1
+    );
+    assert_eq!(
+        kind_count(|kind| matches!(
+            kind,
+            NodeKind::ImageProp {
+                collision_enabled: true,
+                ..
+            }
+        )),
+        1
+    );
+    assert_eq!(
+        kind_count(|kind| matches!(kind, NodeKind::Equipment { weapon: Some(_), .. })),
+        2
+    );
+    assert_eq!(
+        kind_count(|kind| matches!(
+            kind,
+            NodeKind::Interactable {
+                kind: psxed_project::InteractableKind::Checkpoint { .. },
+                ..
+            }
+        )),
+        1
+    );
+
+    // Cook the persisted revision twice; the artifacts must be nonzero and
+    // byte-deterministic, and the compiled world must carry the authored
+    // body hulls (not the characterless debug fallback), the door mover,
+    // and the full combat cast.
+    let mut reopened = reopened;
+    reopened
+        .cook_playtest_to_dir(&cook_a)
+        .expect("cook souls slice");
+    let pxbsp = std::fs::read(cook_a.join(psxed_project::brush_playtest::BRUSH_WORLD_FILENAME))
+        .expect("cooked PXBSP");
+    assert!(!pxbsp.is_empty(), "PXBSP must not be empty");
+    reopened
+        .cook_playtest_to_dir(&cook_b)
+        .expect("deterministic recook");
+    for filename in [
+        psxed_project::brush_playtest::BRUSH_WORLD_FILENAME,
+        psxed_project::playtest::COOKED_MANIFEST_FILENAME,
+    ] {
+        assert_eq!(
+            std::fs::read(cook_a.join(filename)).unwrap(),
+            std::fs::read(cook_b.join(filename)).unwrap(),
+            "{filename} drifted across an unchanged recook"
+        );
+    }
+
+    let project = ProjectDocument::load_from_path(project_dir.join("project.ron")).unwrap();
+    let (package, report) = psxed_project::playtest::build_package(&project, &project_dir);
+    assert!(report.is_ok(), "{}", report.errors.join("; "));
+    let package = package.expect("cooked package");
+    let psxed_project::playtest::PlaytestWorldGeometry::Pxbsp(ref world) = package.world_geometry
+    else {
+        panic!("slice must cook as PXBSP");
+    };
+    assert_eq!(world.movers.len(), 1, "one lift-door mover");
+    // Hulls must derive from the two authored character envelopes: hull one
+    // for the Aletha body, hull two for the Mantis body, never the 16/56
+    // characterless debug fallback.
+    let hulls: Vec<(usize, i32, i32)> = world
+        .body_hulls
+        .iter()
+        .map(|hull| (hull.hull_index, hull.radius, hull.height))
+        .collect();
+    assert_eq!(hulls, vec![(1, 188, 1024), (2, 192, 1024)]);
+    assert_eq!(
+        package.game_entities.len(),
+        2,
+        "the fightable Mantis plus the sealed crypt sentinel"
+    );
+    assert_eq!(package.equipment.len(), 2, "both equipment records cook");
+    assert_eq!(
+        package
+            .equipment
+            .iter()
+            .filter(|record| record.flags & psx_level::equipment_flags::PLAYER != 0)
+            .count(),
+        1,
+        "exactly one PLAYER-flagged equipment record"
+    );
+    assert_eq!(package.interactables.len(), 1, "the checkpoint interactable");
+    assert!(
+        package.logic.len() >= 3,
+        "trigger + paired checkpoint + door records"
+    );
+    assert_eq!(package.lights.len(), 2);
+    assert_eq!(package.box_props.len(), 1);
+
+    // The opt-in export consumed by the editor-souls-bsp-check gate: the
+    // exact authored project, stabilised name, plus the canonical and
+    // negative tapes.
+    if let Some(export_dir) = std::env::var_os("PSOXIDE_SOULS_SLICE_PROJECT_OUT") {
+        let export_dir = PathBuf::from(export_dir);
+        assert!(
+            !export_dir.exists(),
+            "souls-slice export destination already exists: {}",
+            export_dir.display()
+        );
+        copy_dir_recursive(&project_dir, &export_dir).expect("export authored slice project");
+        let export_file = export_dir.join("project.ron");
+        let mut exported = ProjectDocument::load_from_path(&export_file).expect("load export");
+        exported.name = "Souls BSP Vertical Slice".to_string();
+        exported
+            .save_to_path(&export_file)
+            .expect("stabilise exported slice name");
+        write_souls_slice_canonical_tape(&export_dir);
+        write_souls_slice_negative_tape(&export_dir);
+        println!("souls-slice project: {}", export_file.display());
+    }
+
+    let _ = std::fs::remove_dir_all(project_dir);
+    let _ = std::fs::remove_dir_all(cook_a);
+    let _ = std::fs::remove_dir_all(cook_b);
+}
