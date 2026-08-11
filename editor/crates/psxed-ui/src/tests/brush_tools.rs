@@ -2397,3 +2397,207 @@ fn brush_mover_binding_accepts_doors_and_is_undoable() {
         None
     );
 }
+
+#[test]
+fn brush_contents_apply_to_multiselection_clear_movers_and_are_undoable() {
+    use psxed_project::brush::BrushContents;
+
+    let mut harness = ViewportHarness::floored_room("brush_contents", 4);
+    let door = harness.workspace.project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Liquid Candidate Door",
+        NodeKind::Logic {
+            kind: psxed_project::LogicNodeKind::Door {
+                box_prop: String::new(),
+                start_open: false,
+                open_offset: psxed_project::default_brush_door_open_offset(),
+                travel_ticks: psxed_project::default_brush_door_travel_ticks(),
+            },
+            target: String::new(),
+            killtarget: String::new(),
+            master: String::new(),
+            delay_ticks: 0,
+            wait_ticks: 0,
+            enabled: true,
+        },
+    );
+    let mut first = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    first.mover = Some(door);
+    let second = psxed_project::brush::Brush::cuboid([256, 0, 0], [384, 128, 128]);
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .extend([first, second]);
+    harness.workspace.selected_brush = Some(0);
+    harness.workspace.selected_brushes = vec![0, 1];
+
+    harness
+        .workspace
+        .set_selected_brush_contents(BrushContents::Water);
+    assert!(harness
+        .workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .all(|brush| brush.contents == BrushContents::Water));
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0].mover,
+        None
+    );
+    assert!(harness.workspace.status.contains("removed 1 Door binding"));
+    assert!(harness.workspace.is_dirty());
+
+    harness.workspace.set_selected_brush_mover(Some(door));
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0].mover,
+        None
+    );
+    assert!(harness
+        .workspace
+        .status
+        .contains("cannot be bound to a Door"));
+
+    harness.workspace.do_undo();
+    let brushes = &harness.workspace.project.active_scene().brushes;
+    assert_eq!(brushes[0].contents, BrushContents::Solid);
+    assert_eq!(brushes[0].mover, Some(door));
+    assert_eq!(brushes[1].contents, BrushContents::Solid);
+}
+
+#[test]
+fn real_egui_brush_inspector_exposes_and_changes_bsp_contents() {
+    use psxed_project::brush::BrushContents;
+
+    let mut harness = ViewportHarness::floored_room("brush_contents_egui", 4);
+    let mut water_brush =
+        psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    water_brush.contents = BrushContents::Water;
+    let solid_brush =
+        psxed_project::brush::Brush::cuboid([256, 0, 0], [384, 128, 128]);
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .extend([water_brush, solid_brush]);
+    harness.workspace.active_workspace = WorkspaceView::Room;
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.selected_brush = Some(0);
+    harness.workspace.selected_brushes = vec![0, 1];
+
+    let ctx = egui::Context::default();
+    let mut fonts = egui::FontDefinitions::default();
+    let proportional = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .expect("default proportional font family");
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("lucide".into()), proportional);
+    ctx.set_fonts(fonts);
+    let texture = ctx.load_texture(
+        "brush-contents-inspector",
+        egui::ColorImage::new([1, 1], egui::Color32::BLACK),
+        egui::TextureOptions::NEAREST,
+    );
+    let viewport = EditorViewport3dPresentation::edit(texture.id(), Vec::new());
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1800.0, 1000.0));
+    let input = |time, events| egui::RawInput {
+        screen_rect: Some(screen),
+        time: Some(time),
+        events,
+        ..egui::RawInput::default()
+    };
+    let draw = |ctx: &egui::Context, workspace: &mut EditorWorkspace| {
+        workspace.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle)
+    };
+
+    let initial = ctx.run(input(0.0, vec![]), |ctx| draw(ctx, &mut harness.workspace));
+    assert!(text_shape_center(&initial.shapes, "BSP contents").is_some());
+    let mixed = text_shape_center(&initial.shapes, "Mixed").expect("mixed combo value");
+    let _ = ctx.run(
+        input(
+            1.0 / 60.0,
+            vec![
+                egui::Event::PointerMoved(mixed),
+                egui::Event::PointerButton {
+                    pos: mixed,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        ),
+        |ctx| draw(ctx, &mut harness.workspace),
+    );
+    let _ = ctx.run(
+        input(
+            2.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: mixed,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ),
+        |ctx| draw(ctx, &mut harness.workspace),
+    );
+    let menu = ctx.run(input(3.0 / 60.0, vec![]), |ctx| {
+        draw(ctx, &mut harness.workspace)
+    });
+    for label in ["Water", "Slime", "Lava"] {
+        assert!(
+            text_shape_center(&menu.shapes, label).is_some(),
+            "open contents combo omitted {label}"
+        );
+    }
+    let water = text_shape_center(&menu.shapes, "Water").expect("Water option");
+    let _ = ctx.run(
+        input(
+            4.0 / 60.0,
+            vec![
+                egui::Event::PointerMoved(water),
+                egui::Event::PointerButton {
+                    pos: water,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        ),
+        |ctx| draw(ctx, &mut harness.workspace),
+    );
+    let _ = ctx.run(
+        input(
+            5.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: water,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ),
+        |ctx| draw(ctx, &mut harness.workspace),
+    );
+    assert!(harness
+        .workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .all(|brush| brush.contents == BrushContents::Water));
+    assert!(harness.workspace.is_dirty());
+    harness.workspace.do_undo();
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[0].contents,
+        BrushContents::Water
+    );
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[1].contents,
+        BrushContents::Solid
+    );
+}

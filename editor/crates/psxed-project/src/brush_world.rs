@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::brush::{Brush, BRUSH_UV_UNITS_PER_TEXEL};
+use crate::brush::{Brush, BrushContents, BRUSH_UV_UNITS_PER_TEXEL};
 use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
@@ -116,6 +116,11 @@ pub enum BrushWorldCookError {
         brush: usize,
         node: NodeId,
     },
+    LiquidMover {
+        brush: usize,
+        node: NodeId,
+        contents: BrushContents,
+    },
     UnsupportedMoverTransform(NodeId),
     MoverOriginOutOfRange(NodeId),
     MoverOriginInSolid(NodeId),
@@ -161,6 +166,15 @@ impl fmt::Display for BrushWorldCookError {
             Self::BrushOwnerIsNotDoor { brush, node } => write!(
                 formatter,
                 "brush {brush} is bound to node {node:?}, which is not a Door"
+            ),
+            Self::LiquidMover {
+                brush,
+                node,
+                contents,
+            } => write!(
+                formatter,
+                "brush {brush} uses {} contents but is bound to Door node {node:?}; liquid movers are unsupported",
+                contents.label()
             ),
             Self::UnsupportedMoverTransform(node) => write!(
                 formatter,
@@ -383,6 +397,13 @@ pub fn compile_brush_world(
                         node,
                     });
                 }
+                if !brush.contents.is_solid() {
+                    return Err(BrushWorldCookError::LiquidMover {
+                        brush: brush_index,
+                        node,
+                        contents: brush.contents,
+                    });
+                }
             }
         }
     }
@@ -390,7 +411,15 @@ pub fn compile_brush_world(
         return Err(BrushWorldCookError::EmptyStaticWorld);
     }
 
-    let all_brushes = scene.brushes.clone();
+    // Only structural solids occlude baked light. Liquid boundary faces are
+    // rendered and classified, but the volume must not cast an opaque block
+    // through every surface submerged inside it.
+    let all_brushes: Vec<_> = scene
+        .brushes
+        .iter()
+        .filter(|brush| brush.contents.is_solid())
+        .cloned()
+        .collect();
     let lights = scene_lights(scene);
     let material_tints = material_tints(project);
     let (world_geometry, world_collision) = compile_model(
@@ -984,7 +1013,7 @@ fn flat_white_psxt() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MaterialResource, Transform3};
+    use crate::{brush::BrushContents, MaterialResource, Transform3};
     use psx_bsp::mover::BrushDoorSet;
     use psx_bsp::pxbsp::{entity_class, entity_flags, PxbspBrushDoor};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
@@ -1179,6 +1208,61 @@ mod tests {
     }
 
     #[test]
+    fn cooked_world_point_hull_preserves_water_slime_and_lava_codes() {
+        for (contents, expected) in [
+            (BrushContents::Water, psx_bsp::collision::CONTENTS_WATER),
+            (BrushContents::Slime, psx_bsp::collision::CONTENTS_SLIME),
+            (BrushContents::Lava, psx_bsp::collision::CONTENTS_LAVA),
+        ] {
+            let mut project = authored_project();
+            let material = project
+                .resources
+                .iter()
+                .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+                .expect("material")
+                .id;
+            let mut liquid = Brush::cuboid([640, 64, 640], [896, 160, 896]);
+            liquid.contents = contents;
+            for face in &mut liquid.faces {
+                face.material = Some(material);
+            }
+            project.active_scene_mut().brushes.push(liquid);
+            let compiled = compile_brush_world(
+                &project,
+                BrushWorldCookOptions {
+                    project_root: Path::new("."),
+                    mode: BrushWorldCookMode::Draft,
+                    ambient: [24; 3],
+                    texture_asset_base: 40,
+                },
+            )
+            .expect("liquid world");
+            let mut map = PxbspResidentMap::with_capacity(compiled.pxbsp.bytes.len());
+            map.load(0, &mut SliceReader::new(&compiled.pxbsp.bytes))
+                .expect("resident PXBSP");
+            let hull = map.model_collision_hull(0, 0).expect("point hull");
+            assert_eq!(
+                hull.point_contents(Vec3I32 {
+                    x: 768 * 4096,
+                    y: 96 * 4096,
+                    z: 768 * 4096,
+                }),
+                Some(expected),
+                "{} point contents",
+                contents.label()
+            );
+            assert_eq!(
+                hull.point_contents(Vec3I32 {
+                    x: 512 * 4096,
+                    y: 96 * 4096,
+                    z: 768 * 4096,
+                }),
+                Some(psx_bsp::collision::CONTENTS_EMPTY)
+            );
+        }
+    }
+
+    #[test]
     fn player_spawn_rejects_empty_point_when_authored_body_overlaps_wall() {
         let mut project = authored_project();
         let spawn = project
@@ -1244,6 +1328,35 @@ mod tests {
                 node: NodeId(999),
             }
         );
+    }
+
+    #[test]
+    fn liquid_brush_bound_to_door_fails_with_authored_target() {
+        let mut project = authored_project();
+        let brush = project.active_scene().brushes.len() - 1;
+        let node = project.active_scene().brushes[brush]
+            .mover
+            .expect("door binding");
+        project.active_scene_mut().brushes[brush].contents = BrushContents::Water;
+        let error = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: Path::new("."),
+                mode: BrushWorldCookMode::Draft,
+                ambient: [32; 3],
+                texture_asset_base: 0,
+            },
+        )
+        .expect_err("liquid mover");
+        assert_eq!(
+            error,
+            BrushWorldCookError::LiquidMover {
+                brush,
+                node,
+                contents: BrushContents::Water,
+            }
+        );
+        assert!(error.to_string().contains("Water contents"));
     }
 
     #[test]

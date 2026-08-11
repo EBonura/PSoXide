@@ -13,6 +13,25 @@ fn apply_bsp_debug_body_fallback(
     }
 }
 
+/// Deterministic damage cadence for shared PXBSP hazard contents. Water is
+/// non-damaging; slime deals four health twice per second, lava deals ten
+/// health four times per second at the 60 Hz simulation rate.
+pub(super) const fn bsp_hazard_damage(contents: i16, tick: u32) -> u16 {
+    match contents {
+        psx_bsp::collision::CONTENTS_SLIME if tick % 30 == 0 => 4,
+        psx_bsp::collision::CONTENTS_LAVA if tick % 15 == 0 => 10,
+        _ => 0,
+    }
+}
+
+const _: () = {
+    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_WATER, 30) == 0);
+    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_SLIME, 29) == 0);
+    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_SLIME, 30) == 4);
+    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_LAVA, 14) == 0);
+    assert!(bsp_hazard_damage(psx_bsp::collision::CONTENTS_LAVA, 15) == 10);
+};
+
 /// Crossfade length for a specific transition, rather than one number for
 /// every change of state. What reads well depends on BOTH ends: an attack
 /// must start crisply but settle slowly, and a gait change can afford a long
@@ -49,7 +68,7 @@ impl Playtest {
             .and_then(|index| WATER_CELLS.get(index))
     }
 
-    pub(super) fn respawn_after_water_death(&mut self) {
+    pub(super) fn respawn_after_hazard_death(&mut self) {
         let (room, position, yaw) = if let Some(checkpoint) = self.checkpoint {
             (checkpoint.room, checkpoint.position, checkpoint.yaw)
         } else {
@@ -66,7 +85,7 @@ impl Playtest {
         self.room_index = room;
         self.motor.snap_to(position, yaw);
         self.player_health = self.player_health_max;
-        self.water_death_ticks_remaining = 0;
+        self.hazard_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;
         self.anim_lock_until_tick = SimTick::ZERO;
@@ -93,7 +112,7 @@ impl Playtest {
         if self.bsp.is_none() {
             self.load_active_room_window();
         }
-        telemetry::debug_log("player water:respawn");
+        telemetry::debug_log("player hazard:respawn");
     }
 
     /// Switch the player animation state, recording the outgoing
@@ -586,7 +605,7 @@ impl Playtest {
         ot: &mut OtFrame<'_, OT_DEPTH>,
         primitive_packets: &mut PrimitivePacketArena<'_>,
     ) -> usize {
-        if !self.player_moved_last_tick || self.water_death_ticks_remaining > 0 {
+        if !self.player_moved_last_tick || self.hazard_death_ticks_remaining > 0 {
             return 0;
         }
         let player = self.motor.position();
