@@ -4410,3 +4410,105 @@ fn a_bsp_project_without_brushes_fails_the_cook_closed() {
         report.errors
     );
 }
+
+// --- Fail-closed grid boundary ----------------------------------------
+//
+// A BSP project must never instantiate grid spatial state. The cook's
+// guards are checked from both ends: the authored input that would start a
+// grid build is refused, and the cooked outputs are re-checked so a future
+// leak surfaces as a named error instead of a level that silently streams
+// rooms nobody authored.
+
+/// The tracked BSP first-playable, loaded as a synthetic-mutation base.
+fn bsp_fixture() -> (ProjectDocument, std::path::PathBuf) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../projects/brush-first-playable");
+    let project = ProjectDocument::load_from_path(dir.join("project.ron"))
+        .expect("tracked BSP first-playable loads");
+    assert_eq!(project.world_format(), ProjectWorldFormat::Bsp);
+    (project, dir)
+}
+
+#[test]
+fn a_bsp_project_holding_a_grid_section_fails_the_cook_closed() {
+    let (mut project, dir) = bsp_fixture();
+    let (baseline, report) = crate::playtest::build_package(&project, &dir);
+    assert!(
+        baseline.is_some(),
+        "unmutated fixture cooks: {:?}",
+        report.errors
+    );
+
+    let scene = project.active_scene_mut();
+    let root = scene.root;
+    scene.add_node(
+        root,
+        "Smuggled Section",
+        NodeKind::Section {
+            grid: WorldGrid::stone_room(1, 1, 1024, None, None),
+        },
+    );
+
+    let (package, report) = crate::playtest::build_package(&project, &dir);
+    assert!(
+        package.is_none(),
+        "a BSP project holding a Section must not cook"
+    );
+    let joined = report.errors.join(" | ");
+    assert!(
+        joined.contains("grid Section") && joined.contains("Smuggled Section"),
+        "expected a named Section diagnostic, got {joined}"
+    );
+    assert!(
+        matches!(
+            report.focus_target,
+            Some(crate::playtest::PlaytestValidationTarget::Node(_))
+        ),
+        "the diagnostic must focus the offending node, got {:?}",
+        report.focus_target
+    );
+}
+
+#[test]
+fn a_cooked_bsp_package_carries_no_grid_spatial_state() {
+    let (project, dir) = bsp_fixture();
+    let (package, report) = crate::playtest::build_package(&project, &dir);
+    assert!(report.is_ok(), "BSP fixture cooks: {:?}", report.errors);
+    let package = package.expect("BSP package");
+
+    assert!(package.chunks.is_empty(), "no room chunks");
+    assert!(
+        package.room_visibility.is_empty(),
+        "no room visibility rows"
+    );
+    assert!(package.visibility_cells.is_empty(), "no visibility cells");
+    assert!(package.visibility_pvs.is_empty(), "no visibility PVS rows");
+    assert!(package.room_surface_caches.is_empty(), "no surface caches");
+    assert!(package.room_portals.is_empty(), "no room portals");
+    assert!(package.room_floor_links.is_empty(), "no floor links");
+    assert!(package.water_cells.is_empty(), "no grid water cells");
+    assert!(
+        !package
+            .assets
+            .iter()
+            .any(|asset| asset.kind == crate::playtest::PlaytestAssetKind::RoomWorld),
+        "no PSXW world assets"
+    );
+    // The deliberate exception: one non-spatial metadata room carrying
+    // gravity/camera/sky/fog, with no world geometry behind it. See
+    // docs/quake-psoxide-convergence-handoff.md section 0.10.
+    assert_eq!(package.rooms.len(), 1);
+    assert_eq!(package.rooms[0].world_asset_index, None);
+    assert!(matches!(
+        package.world_geometry,
+        crate::playtest::PlaytestWorldGeometry::Pxbsp(_)
+    ));
+}
+
+#[test]
+fn the_editor_room_topology_overlay_is_empty_for_a_bsp_project() {
+    let (project, _dir) = bsp_fixture();
+    let topology = crate::playtest::build_debug_topology(&project);
+    assert!(topology.cells.is_empty());
+    assert!(topology.portals.is_empty());
+}
