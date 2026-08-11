@@ -153,6 +153,49 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
 
         let start = RoomPoint::new(position[0], position[1], position[2]);
         let mut aabbs = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+        if let Some(bsp) = self.bsp.as_deref_mut() {
+            let Some(mut aabb_count) = self.box_props.collect_collision_blockers_checked(
+                BOX_PROPS,
+                room,
+                &mut aabbs,
+            ) else {
+                return position;
+            };
+            let Some(count) =
+                psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked(
+                    ARCH_PROPS,
+                    ARCH_PROP_COLLISIONS,
+                    room,
+                    &mut aabbs[aabb_count..],
+                )
+            else {
+                return position;
+            };
+            aabb_count += count;
+            let Some(count) =
+                psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked(
+                    IMAGE_PROPS,
+                    room,
+                    &mut aabbs[aabb_count..],
+                )
+            else {
+                return position;
+            };
+            aabb_count += count;
+            let step = bsp
+                .commit_body_step(
+                    start,
+                    dx,
+                    dz,
+                    radius,
+                    height,
+                    &cylinders[..cylinder_count],
+                    &aabbs[..aabb_count],
+                )
+                .expect("PXBSP entity trace failed");
+            return [step.position.x, step.position.y, step.position.z];
+        }
+
         let mut aabb_count = self
             .box_props
             .collect_collision_blockers(BOX_PROPS, room, &mut aabbs);
@@ -167,20 +210,6 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
             room,
             &mut aabbs[aabb_count..],
         );
-        if let Some(bsp) = self.bsp.as_deref_mut() {
-            let step = bsp
-                .commit_body_step(
-                    start,
-                    dx,
-                    dz,
-                    radius,
-                    height,
-                    &cylinders[..cylinder_count],
-                    &aabbs[..aabb_count],
-                )
-                .expect("PXBSP entity trace failed");
-            return [step.position.x, step.position.y, step.position.z];
-        }
 
         // Entity coordinates are their OWN room's local space, so the grid
         // collision room enters with zero offsets (window offsets translate

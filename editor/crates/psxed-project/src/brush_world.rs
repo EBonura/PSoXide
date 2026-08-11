@@ -288,17 +288,38 @@ fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
         bodies.push((DEBUG_BODY_RADIUS, DEBUG_BODY_HEIGHT));
     }
 
-    let smallest = bodies
+    cooked_body_hulls_for(&bodies)
+}
+
+fn cooked_body_hulls_for(bodies: &[(i32, i32)]) -> [CookedBodyHull; 2] {
+    let largest_authored = bodies
         .iter()
         .copied()
-        .min_by_key(|&(radius, height)| {
+        .max_by_key(|&(radius, height)| {
             (
-                i64::from(radius) * i64::from(radius) * i64::from(height),
+                (radius as u32).saturating_mul(height as u32),
                 radius,
                 height,
             )
         })
         .expect("body list is non-empty");
+    // PXBSP has two body hulls. Keep hull one useful for the ordinary body
+    // cluster rather than shrinking it to the smallest authored NPC: remove
+    // the complete largest-envelope cluster, then cover every remaining body
+    // component-wise. Small and standard actors share this tighter hull; the
+    // outlier cluster uses hull two. With only one distinct authored envelope,
+    // hull one is exact.
+    let mut standard = (0, 0);
+    for &(radius, height) in bodies {
+        if (radius, height) == largest_authored {
+            continue;
+        }
+        standard.0 = standard.0.max(radius);
+        standard.1 = standard.1.max(height);
+    }
+    if standard.0 <= 0 || standard.1 <= 0 {
+        standard = largest_authored;
+    }
     let largest = bodies.iter().copied().fold(
         (LEGACY_BIG_HULL_RADIUS, LEGACY_BIG_HULL_HEIGHT),
         |(max_radius, max_height), (radius, height)| {
@@ -306,7 +327,7 @@ fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
         },
     );
     [
-        CookedBodyHull::new(1, smallest.0, smallest.1),
+        CookedBodyHull::new(1, standard.0, standard.1),
         CookedBodyHull::new(2, largest.0, largest.1),
     ]
 }
@@ -1101,6 +1122,44 @@ mod tests {
             },
         )
         .expect("brush world")
+    }
+
+    #[test]
+    fn small_standard_and_large_bodies_use_two_deterministic_cooked_hulls() {
+        let hulls = cooked_body_hulls_for(&[(8, 32), (16, 56), (32, 96)]);
+        assert_eq!(
+            hulls,
+            [
+                CookedBodyHull::new(1, 16, 56),
+                CookedBodyHull::new(2, 32, 96),
+            ]
+        );
+        assert_eq!(select_body_hull(&hulls, 8, 32), Some(1));
+        assert_eq!(select_body_hull(&hulls, 16, 56), Some(1));
+        assert_eq!(select_body_hull(&hulls, 32, 96), Some(2));
+        assert_eq!(
+            cooked_body_hulls_for(&[(32, 96), (8, 32), (16, 56)]),
+            hulls,
+            "authored traversal order must not change cooked envelopes"
+        );
+        assert_eq!(
+            cooked_body_hulls_for(&[(32, 96), (8, 32), (32, 96), (16, 56)]),
+            hulls,
+            "duplicate largest bodies stay in the outlier cluster"
+        );
+        assert_eq!(
+            cooked_body_hulls_for(&[(16, 56), (32, 96), (8, 32), (32, 96)]),
+            hulls,
+            "duplicate-largest clustering is permutation independent"
+        );
+        assert_eq!(
+            cooked_body_hulls_for(&[(20, 72), (20, 72), (20, 72)]),
+            [
+                CookedBodyHull::new(1, 20, 72),
+                CookedBodyHull::new(2, 32, 96),
+            ],
+            "an all-identical cluster retains an exact tight hull"
+        );
     }
 
     #[test]

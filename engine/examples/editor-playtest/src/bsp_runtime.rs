@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use psx_bsp::collision::{BrushTransform, LiquidContentsSample, TraceScratch};
-use psx_bsp::collision_provider::{select_body_hull, PxbspCollisionModel, PxbspCollisionProvider};
+use psx_bsp::collision_provider::{
+    select_body_hull, valid_pxbsp_body_hulls, PxbspCollisionModel, PxbspCollisionProvider,
+};
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
 use psx_bsp::pxbsp::PXBSP_MAX_VISIBILITY_BYTES;
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
@@ -171,12 +173,7 @@ impl BspRuntime {
                 });
             }
         }
-        if PXBSP_BODY_HULLS.len() != 2
-            || PXBSP_BODY_HULLS.iter().any(|hull| {
-                !(1..=2).contains(&hull.hull_index) || hull.radius < 0 || hull.height <= 0
-            })
-            || PXBSP_BODY_HULLS[0].hull_index == PXBSP_BODY_HULLS[1].hull_index
-        {
+        if !valid_pxbsp_body_hulls(PXBSP_BODY_HULLS) {
             return Err(BspRuntimeInitError::InvalidBodyHullTable);
         }
         if map.model_collision_hull(0, BSP_POINT_HULL_INDEX).is_none() {

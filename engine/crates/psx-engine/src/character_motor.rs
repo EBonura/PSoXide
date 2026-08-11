@@ -106,6 +106,12 @@ impl CharacterCollisionAabb {
     pub const fn new(min: RoomPoint, max: RoomPoint) -> Self {
         Self { min, max }
     }
+
+    /// Whether this record describes one finite-volume box in canonical
+    /// minimum/maximum order.
+    pub const fn is_strictly_valid(self) -> bool {
+        self.min.x < self.max.x && self.min.y < self.max.y && self.min.z < self.max.z
+    }
 }
 
 /// Deterministic actor-cylinder layer over one world trace provider.
@@ -157,6 +163,14 @@ impl<P: CollisionTraceProvider + ?Sized> CollisionTraceProvider
     for CharacterBlockerTraceProvider<'_, '_, P>
 {
     fn trace_into(&mut self, query: CollisionTraceQuery, output: &mut CollisionTrace) -> bool {
+        if self.aabb_blockers.len() > psx_level::MAX_STATIC_PROP_AABB_BLOCKERS
+            || self
+                .aabb_blockers
+                .iter()
+                .any(|blocker| !blocker.is_strictly_valid())
+        {
+            return false;
+        }
         let mut best = CollisionTrace::unobstructed(query.end);
         if !self.provider.trace_into(query, &mut best) {
             return false;
@@ -3053,6 +3067,122 @@ mod tests {
         assert!(provider.trace_into(query, &mut output));
         assert!(output.hit());
         assert_ne!(output, sentinel);
+    }
+
+    #[test]
+    fn malformed_or_overflow_prop_state_fails_without_touching_output() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
+        let sentinel = CollisionTrace {
+            all_solid: true,
+            start_solid: true,
+            fraction_q12: 17,
+            end: RoomPoint::new(1, 2, 3),
+            normal_q12: [4, 5, 6],
+            plane_distance: 7,
+        };
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace::unobstructed(query.end),
+            fail_once: false,
+        };
+        let malformed = [CharacterCollisionAabb::new(
+            RoomPoint::new(10, 8, -4),
+            RoomPoint::new(14, 0, 4),
+        )];
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &malformed);
+        let mut output = sentinel;
+        assert!(!provider.trace_into(query, &mut output));
+        assert_eq!(output, sentinel);
+
+        let valid =
+            CharacterCollisionAabb::new(RoomPoint::new(10, 0, -4), RoomPoint::new(14, 8, 4));
+        let overflow = [valid; psx_level::MAX_STATIC_PROP_AABB_BLOCKERS + 1];
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &overflow);
+        assert!(!provider.trace_into(query, &mut output));
+        assert_eq!(output, sentinel);
+    }
+
+    #[test]
+    fn actor_wins_an_exact_fraction_tie_before_prop() {
+        let query =
+            CollisionTraceQuery::body(RoomPoint::new(0, 0, 0), RoomPoint::new(20, 0, 0), 2, 8);
+        let actor = CharacterCollisionCylinder::new(RoomPoint::new(10, 0, 4), 2, 8);
+        let prop = CharacterCollisionAabb::new(RoomPoint::new(12, 0, -8), RoomPoint::new(16, 8, 8));
+        let actor_trace = trace_character_blocker(query, actor).expect("actor candidate");
+        let prop_trace = trace_aabb_blocker(query, prop).expect("prop candidate");
+        assert_eq!(actor_trace.fraction_q12, prop_trace.fraction_q12);
+        assert_ne!(actor_trace.normal_q12, prop_trace.normal_q12);
+        let mut world = FixedTraceProvider {
+            trace: CollisionTrace::unobstructed(query.end),
+            fail_once: false,
+        };
+        let actors = [actor];
+        let props = [prop];
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &actors, &props);
+        let trace = trace_collision(&mut provider, query).expect("compound trace");
+        assert_eq!(trace.fraction_q12, actor_trace.fraction_q12);
+        assert_eq!(trace.normal_q12, actor_trace.normal_q12);
+    }
+
+    #[test]
+    fn multi_room_origins_preserve_prop_contact_coordinates() {
+        for origin in [
+            RoomPoint::new(240_000, 12_000, -180_000),
+            RoomPoint::new(-220_000, -8_000, 190_000),
+        ] {
+            let query = CollisionTraceQuery::body(
+                origin,
+                RoomPoint::new(origin.x + 40, origin.y, origin.z),
+                2,
+                8,
+            );
+            let prop = CharacterCollisionAabb::new(
+                RoomPoint::new(origin.x + 10, origin.y, origin.z - 4),
+                RoomPoint::new(origin.x + 14, origin.y + 8, origin.z + 4),
+            );
+            let mut world = FixedTraceProvider {
+                trace: CollisionTrace::unobstructed(query.end),
+                fail_once: false,
+            };
+            let props = [prop];
+            let mut provider =
+                CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &props);
+            let trace = trace_collision(&mut provider, query).expect("large-origin trace");
+            assert!(trace.hit());
+            assert!((origin.x + 7..=origin.x + 8).contains(&trace.end.x));
+            assert_eq!(trace.end.z, origin.z);
+        }
+    }
+
+    #[test]
+    fn empty_prop_layer_is_one_bounded_wrapped_trace() {
+        struct CountingProvider {
+            calls: u8,
+        }
+        impl CollisionTraceProvider for CountingProvider {
+            fn trace_into(
+                &mut self,
+                query: CollisionTraceQuery,
+                output: &mut CollisionTrace,
+            ) -> bool {
+                self.calls = self.calls.saturating_add(1);
+                *output = CollisionTrace::unobstructed(query.end);
+                true
+            }
+        }
+
+        let query = CollisionTraceQuery::body(RoomPoint::ZERO, RoomPoint::new(20, 0, 0), 2, 8);
+        let mut world = CountingProvider { calls: 0 };
+        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &[]);
+        assert_eq!(
+            trace_collision(&mut provider, query),
+            Ok(CollisionTrace::unobstructed(query.end))
+        );
+        drop(provider);
+        assert_eq!(world.calls, 1);
     }
 
     #[test]

@@ -1452,7 +1452,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
         let _ = writeln!(
             out,
-            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, surface_first: {}, surface_count: {}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, collision_min: {:?}, collision_max: {:?}, surface_first: {}, surface_count: {}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
             prop.room,
             prop.blend_modes,
             prop.uvs,
@@ -1463,6 +1463,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             prop.pitch,
             prop.yaw,
             prop.roll,
+            prop.collision_min,
+            prop.collision_max,
             prop.surface_first,
             prop.surface_count,
             prop.flags,

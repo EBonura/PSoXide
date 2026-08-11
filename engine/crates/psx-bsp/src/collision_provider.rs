@@ -12,6 +12,14 @@ use psx_engine::{
 /// Maximum transformed brush models composed into one production trace.
 pub const MAX_COMPOSED_COLLISION_MODELS: usize = 32;
 
+/// Number of upright body hulls carried by one PXBSP brush model.
+///
+/// `BrushModel::head_nodes` reserves one render head node, one point hull,
+/// and exactly these two body hulls. Small and standard authored bodies may
+/// therefore share the tighter cooked envelope; an oversized body uses the
+/// second envelope.
+pub const PXBSP_BODY_HULL_COUNT: usize = 2;
+
 /// One caller-defined cooked hull envelope for an upright body.
 ///
 /// PXBSP stores Quake-style hull head nodes but deliberately does not impose
@@ -39,21 +47,58 @@ impl CookedBodyHull {
     }
 }
 
-/// Select the first cooked hull envelope that fully contains an authored body.
+/// Select the tightest cooked hull envelope that fully contains an authored body.
 ///
-/// Callers must order `hulls` from their preferred smallest/tightest envelope
-/// to the largest fallback. Invalid bodies and bodies larger than every cooked
-/// envelope return `None` rather than silently using an undersized hull.
+/// Manifest order is not trusted. Invalid bodies, malformed tables, and bodies
+/// larger than every cooked envelope return `None` rather than silently using
+/// an undersized hull.
 pub fn select_body_hull(hulls: &[CookedBodyHull], radius: i32, height: i32) -> Option<usize> {
-    if radius < 0 || height <= 0 {
+    if radius < 0
+        || height <= 0
+        || hulls.is_empty()
+        || hulls.iter().any(|hull| hull.radius < 0 || hull.height <= 0)
+    {
         return None;
     }
+    for (index, hull) in hulls.iter().enumerate() {
+        if hulls[..index]
+            .iter()
+            .any(|earlier| earlier.hull_index == hull.hull_index)
+        {
+            return None;
+        }
+    }
+
+    // Do not trust manifest order. Pick the tightest containing envelope by
+    // a 32-bit footprint proxy, then stable dimensions and hull index. The
+    // authored radii/heights are u16-backed, and saturating arithmetic keeps
+    // this guest path deterministic at corrupted extremes.
     hulls
         .iter()
-        .find(|hull| {
-            hull.radius >= 0 && hull.height > 0 && radius <= hull.radius && height <= hull.height
+        .filter(|hull| radius <= hull.radius && height <= hull.height)
+        .min_by_key(|hull| {
+            (
+                (hull.radius as u32).saturating_mul(hull.height as u32),
+                hull.radius,
+                hull.height,
+                hull.hull_index,
+            )
         })
         .map(|hull| hull.hull_index)
+}
+
+/// Validate the complete body-hull table embedded beside a PXBSP map.
+///
+/// The table must describe hulls one and two exactly once. Validation is a
+/// fixed two-entry pass and allocates nothing.
+pub fn valid_pxbsp_body_hulls(hulls: &[CookedBodyHull]) -> bool {
+    hulls.len() == PXBSP_BODY_HULL_COUNT
+        && hulls.iter().all(|hull| {
+            (1..=PXBSP_BODY_HULL_COUNT).contains(&hull.hull_index)
+                && hull.radius >= 0
+                && hull.height > 0
+        })
+        && hulls[0].hull_index != hulls[1].hull_index
 }
 
 /// One transformed PXBSP submodel included in a world collision query.
@@ -272,13 +317,44 @@ mod tests {
     }
 
     #[test]
-    fn body_hull_selection_skips_malformed_envelopes() {
+    fn body_hull_selection_is_order_independent_and_rejects_malformed_tables() {
+        let reversed = [
+            CookedBodyHull::new(2, 32, 96),
+            CookedBodyHull::new(1, 16, 56),
+        ];
+        assert_eq!(select_body_hull(&reversed, 8, 32), Some(1));
+        assert_eq!(select_body_hull(&reversed, 24, 72), Some(2));
+
         let hulls = [
             CookedBodyHull::new(7, -1, 56),
             CookedBodyHull::new(8, 16, 0),
             CookedBodyHull::new(9, 16, 56),
         ];
-        assert_eq!(select_body_hull(&hulls, 16, 56), Some(9));
+        assert_eq!(select_body_hull(&hulls, 16, 56), None);
+        let duplicate = [
+            CookedBodyHull::new(1, 16, 56),
+            CookedBodyHull::new(1, 32, 96),
+        ];
+        assert_eq!(select_body_hull(&duplicate, 16, 56), None);
+    }
+
+    #[test]
+    fn pxbsp_body_hull_table_is_exact_and_fixed_capacity() {
+        let valid = [
+            CookedBodyHull::new(2, 32, 96),
+            CookedBodyHull::new(1, 16, 56),
+        ];
+        assert!(valid_pxbsp_body_hulls(&valid));
+        assert!(!valid_pxbsp_body_hulls(&valid[..1]));
+        assert!(!valid_pxbsp_body_hulls(&[
+            valid[0],
+            valid[1],
+            CookedBodyHull::new(3, 64, 128),
+        ]));
+        assert!(!valid_pxbsp_body_hulls(&[
+            CookedBodyHull::new(1, 16, 56),
+            CookedBodyHull::new(1, 32, 96),
+        ]));
     }
 
     fn plane_x(distance_units: i32) -> [u8; 14] {
@@ -335,6 +411,46 @@ mod tests {
         assert!(output.fraction_q12 < COLLISION_FRACTION_ONE_Q12 / 2);
         assert_eq!(output.end.x, 2);
         assert_eq!(output.normal_q12, [Q12_ONE as i16, 0, 0]);
+    }
+
+    #[test]
+    fn static_world_and_earlier_movers_retain_exact_fraction_ties() {
+        let mut world = Trace {
+            fraction: 1024,
+            normal: crate::Vec3I16 { x: 1, y: 2, z: 3 },
+            plane_distance: 11,
+            ..Trace::default()
+        };
+        let tied_mover = Trace {
+            fraction: 1024,
+            normal: crate::Vec3I16 { x: 4, y: 5, z: 6 },
+            plane_distance: 22,
+            ..Trace::default()
+        };
+        merge_trace(&mut world, tied_mover);
+        assert_eq!(world.normal, crate::Vec3I16 { x: 1, y: 2, z: 3 });
+        assert_eq!(world.plane_distance, 11, "static world retains the tie");
+
+        let earlier = Trace {
+            fraction: 768,
+            normal: crate::Vec3I16 { x: 7, y: 8, z: 9 },
+            plane_distance: 33,
+            ..Trace::default()
+        };
+        merge_trace(&mut world, earlier);
+        let later_tie = Trace {
+            fraction: 768,
+            normal: crate::Vec3I16 {
+                x: 10,
+                y: 11,
+                z: 12,
+            },
+            plane_distance: 44,
+            ..Trace::default()
+        };
+        merge_trace(&mut world, later_tie);
+        assert_eq!(world.normal, crate::Vec3I16 { x: 7, y: 8, z: 9 });
+        assert_eq!(world.plane_distance, 33, "earlier mover retains the tie");
     }
 
     #[test]
