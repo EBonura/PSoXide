@@ -768,11 +768,21 @@ The first bounded Quake item/weapon checkpoint is clean at
 `2802e5a6da3927e4620554287f2cb4f8c182eb87` on
 `codex/quake-items-weapons`. It adds persistent inventory and pickups, armor,
 keys, ammo, axe, shotgun and a visible fixed-pool rocket launcher with direct,
-splash and self damage. It is not yet merged because a second checkpoint is
-actively adding super shotgun, nailgun, super nailgun, grenade launcher and
-lightning. Do not describe either checkpoint as full Episode 1. Enemy attacks,
-player death/HUD, many entity behaviors, map progression and the Chthon finale
-remain subject to the Episode 1 adversarial audit.
+splash and self damage. It was merged with deterministic provenance into
+`codex/quake-convergence` at `531511c`. That integration exposed and fixed a
+missing `fresh_guest_target` argument in the arsenal disc path. The combined
+tree passes 25 builder tests, 28 quake-core tests, 12 collision-parity tests,
+16 cooker tests and a real MIPS release build.
+
+The combined revision is still not a gameplay or demo-disc candidate. Parent
+review found that the bounded checkpoint subtracts full target distance from
+rocket splash instead of Quake's half-distance falloff and incorrectly applies
+the direct-hit Shambler reduction to splash damage. The second checkpoint is
+actively correcting that policy while adding super shotgun, nailgun, super
+nailgun, grenade launcher and lightning. Do not describe either checkpoint as
+full Episode 1. Enemy attacks, player death/HUD, many entity behaviors, map
+progression and the Chthon finale remain subject to the Episode 1 adversarial
+audit.
 
 The demo-disc provenance consumer is also active on
 `codex/quake-shareware-demo-disc`. Its current uncommitted schema-3 receipt
