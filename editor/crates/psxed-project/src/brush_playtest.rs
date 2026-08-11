@@ -19,8 +19,8 @@ mod tests {
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
     use psx_bsp::{SliceReader, Vec3I32};
     use psx_engine::{
-        commit_body_step_with_trace_provider, CharacterBlockerTraceProvider,
-        CharacterCollisionAabb, CollisionTraceShape, RoomPoint,
+        commit_body_step_with_trace_provider, trace_collision, CharacterBlockerTraceProvider,
+        CharacterCollisionAabb, CollisionTraceQuery, CollisionTraceShape, RoomPoint,
     };
 
     #[test]
@@ -449,6 +449,26 @@ mod tests {
         assert!(box_blocker.is_strictly_valid());
         assert_eq!(decorative.collision_min, [320, 65, 544]);
         assert_eq!(decorative.collision_max, [384, 129, 608]);
+
+        let melee_from = RoomPoint::new(256, 96, 192);
+        let melee_to = RoomPoint::new(440, 96, 192);
+        let mut scratch = TraceScratch::new();
+        let mut pxbsp =
+            PxbspCollisionProvider::new(&map, 0, &[], CollisionTraceShape::Point, &mut scratch)
+                .expect("resident PXBSP point provider");
+        let melee_blockers = [box_blocker];
+        let mut composed =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut pxbsp, &[], &melee_blockers);
+        let melee_trace = trace_collision(
+            &mut composed,
+            CollisionTraceQuery::point(melee_from, melee_to),
+        )
+        .expect("bounded PXBSP prop point trace");
+        assert!(
+            melee_trace.hit(),
+            "the cooked collidable box occludes a gameplay point segment"
+        );
+        assert_eq!(melee_trace.normal_q12, [-4096, 0, 0]);
 
         for (radius, height) in [(16, 56), (8, 32)] {
             let start = RoomPoint::new(256, 65, 192);

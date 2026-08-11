@@ -460,11 +460,16 @@ impl BspRuntime {
     }
 
     /// Whether a melee contact segment between two actor positions is free of
-    /// static world and transformed mover geometry. Actor cylinders are
-    /// deliberately not composed: the attacker and defender are actors.
-    /// Provider failure fails closed (blocked): malformed world data must not
-    /// grant damage through it.
-    pub(super) fn melee_segment_clear(&mut self, from: RoomPoint, to: RoomPoint) -> bool {
+    /// static world, transformed mover geometry, and checked live prop AABBs.
+    /// Actor cylinders are deliberately not composed: the attacker and
+    /// defender are actors. Provider failure fails closed (blocked): malformed
+    /// world or prop data must not grant damage through it.
+    pub(super) fn melee_segment_clear(
+        &mut self,
+        from: RoomPoint,
+        to: RoomPoint,
+        aabb_blockers: &[CharacterCollisionAabb],
+    ) -> bool {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
         let mut provider = PxbspCollisionProvider::new(
@@ -475,6 +480,8 @@ impl BspRuntime {
             &mut self.trace_scratch,
         )
         .expect("validated PXBSP melee occlusion provider");
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
         match trace_collision(&mut provider, CollisionTraceQuery::point(from, to)) {
             Ok(trace) => !trace.hit(),
             Err(_) => false,
@@ -488,6 +495,7 @@ impl BspRuntime {
         input: ThirdPersonCameraInput,
         config: ThirdPersonCameraConfig,
         delta_vblanks: u16,
+        aabb_blockers: &[CharacterCollisionAabb],
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
@@ -499,6 +507,8 @@ impl BspRuntime {
             &mut self.trace_scratch,
         )
         .expect("validated PXBSP camera collision provider");
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
         camera.update_vblanks_with_trace_provider(
             PROJECTION,
             &mut provider,
