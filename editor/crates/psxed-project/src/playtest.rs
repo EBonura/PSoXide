@@ -210,7 +210,8 @@ fn brush_world_validation_target(
         // - Collision other arms: InvalidBounds indexes the requested hull
         //   size list (a cook constant, not authored content) and
         //   LimitExceeded is a whole-map cap.
-        // - Light without a node: the inner error names no light index.
+        // - Light without a node: the reported light index fell outside the
+        //   light list the cook built, so no PointLight node matches it.
         // - Pxbsp: whole-map record counts, alignment and reference checks.
         //   Its InvalidMaterial names a compiled material SLOT, which is a
         //   cook-side index into the merged slot table rather than a resource.
