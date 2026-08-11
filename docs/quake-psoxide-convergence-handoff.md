@@ -1,17 +1,17 @@
 # Quake, PSoXide BSP, editor, and combat convergence handoff
 
-Last updated: 2026-08-11 (Level C.1 authoring, shared BSP liquids, editor
-binary correction, and deterministic-build integration, section 0). The original
-2026-08-10 21:50 BST snapshot text is retained below it; where the two
-disagree, section 0 and `docs/convergence-discrepancy-report-2026-08-11.md`
-are current.
+Last updated: 2026-08-11 (editor first-loop replay, complete weapon checkpoint,
+bounded Soldier/Dog runtime, and active editor-to-Quake integration, section
+0). The original 2026-08-10 21:50 BST snapshot text is retained below it;
+where the two disagree, section 0 and
+`docs/convergence-discrepancy-report-2026-08-11.md` are current.
 
 Live integration branch: `codex/quake-psoxide-convergence`
 
 Live integration worktree: `/Users/ebonura/Desktop/repos/PSoXide-convergence`
 
 Current PSoXide integration code HEAD before this documentation update:
-`f78a879c` (image-free blank-slate playtest gate)
+`5aff6078` (merged editor first-playtest workflow proof)
 
 ## 0. 2026-08-11 integration checkpoint (current state)
 
@@ -952,6 +952,183 @@ The only tracked dirt in the integration worktree remains the user's saved
 camera change in `editor/projects/brush-first-playable/project.ron`. Preserve
 it. The camera-preservation regression now compares the loaded authored value
 instead of hard-coding an old fixture camera.
+
+### 0.19 Editor first loop and Quake monster integration checkpoint (2026-08-11)
+
+This section is the current handoff boundary. It supersedes section 0.18's
+editor binary metadata and section 0.16's description of the Quake weapon
+state. It does not supersede the explicit unfinished Episode 1 and hardware
+requirements.
+
+Current integration heads:
+
+```text
+PSoXide: /Users/ebonura/Desktop/repos/PSoXide-convergence
+branch:   codex/quake-psoxide-convergence
+HEAD:     5aff6078 Merge editor first playtest workflow proof
+
+Quake:   /Users/ebonura/Desktop/repos/quake-psx-convergence
+branch:  codex/quake-convergence
+HEAD:    09ff502 runtime: keep trigger wait math 32-bit
+
+Demo:    /Users/ebonura/Desktop/repos/psx-demo-disc-quake-shareware
+branch:  codex/quake-shareware-demo-disc
+HEAD:    ba250ef disc: prove Quake chainload without image dumps
+```
+
+The PSoXide worktree still contains exactly one preserved user-owned tracked
+change: `editor/projects/brush-first-playable/project.ron`. It records a
+different saved orbit camera and a missing final newline. Do not reset, stage,
+format or commit it unless the owner explicitly chooses to keep that change.
+
+#### 0.19.1 What is genuinely testable in the editor
+
+Commit `645b3f9e`, merged by `5aff6078`, hardens
+`make editor-blank-playtest-check` around the production editor and playtest
+contracts. Real egui input proves that the roofless starter is visible in 2D,
+a brush can be selected in 3D, Select mode exposes working Move and Resize,
+and the Play and Rebuild controls emit the production requests. The command
+authoring regression then saves, reopens, edits and recooks the exact exported
+project. The release frontend builds a real `mipsel-sony-psx` executable and
+disc and replays it twice without any screenshot, framebuffer or other image
+artifact.
+
+The two replays are identical and pin:
+
+```text
+route ticks:                 119 each
+pad polls:                   122 each
+guest/simulation frames:     121
+visual frames:                60
+triangle primitives:       1,053, latest 19
+player XZ:               (192,192) -> (192,80)
+wall contact contract:       64-unit inner wall + 16-unit player radius
+VRAM FNV-1a:                 0xdb1a46181b00783a
+display FNV-1a:              0xac182dca36383a5d, 320x240
+GPU rows/commands/draws:     119 / 2,488 / 1,128
+GPU fills/tris/quads/rects:   60 / 927 / 107 / 84
+GPU draw words/hash:          13,837 / 0x95661662ade300b2
+PXBSP:                         8,140 bytes
+MIPS executable:             985,088 bytes
+disc BIN:                  2,408,448 bytes
+image artifacts:                   0
+```
+
+`cargo test -p psxed-ui --lib` passed 380 tests with one intentional
+diagnostic test ignored. This proves a reliable simple generic PXBSP editor
+loop. It is not proof of native-window ergonomics, arbitrary complex maps,
+the asynchronous embedded viewport lifecycle or original hardware.
+
+Most importantly, it is not yet proof that an editor-authored level runs the
+actual Quake gameplay. The generic editor playtest consumes a PXBSP package;
+the Quake shipping runtime still consumes its Quake-specific cooked PSB map,
+entity and resource bank. A separate active branch is implementing a
+production packaging/import path from editor-authored PXBSP plus spawn/entity
+metadata into the real Quake runtime. Until its real-MIPS shotgun and collision
+replay passes, never tell the owner that editor-to-Quake weapon playtest is
+ready.
+
+#### 0.19.2 Quake weapons and the bounded Soldier/Dog slice
+
+The complete standard weapon checkpoint was merged before this section. Axe,
+Shotgun, Super Shotgun, Nailgun, Super Nailgun, Grenade Launcher, Rocket
+Launcher and Lightning have persistent inventory/HUD integration, fixed
+projectile pools, authored pickup paths where Episode 1 contains them, and an
+image-free deterministic arsenal gate. Episode 1 contains no authored
+Lightning pickup, so its ownership and underwater contract remain host-tested
+and its wall trace is labeled as a runtime diagnostic.
+
+Soldier and Dog runtime commits `2f05186` and `69b99d6` were merged by
+`9d3eaa6`. The implementation has deterministic 10 Hz acquisition, visibility,
+turning, direct world and translated-mover collision, movement, authored frame
+and sound tables, Soldier pellets, Dog bite and bounded leap contact, player
+armor/health damage and death, monster pain, finite death/corpse frames and a
+main-entity gib model swap. Source assertions pin E1M1's 34 Soldiers and 8
+Dogs before filtering, 9 and 1 on Easy, and exact regression sources 21, 82,
+115, 122 and 124.
+
+An adversarial review caught one new guest `i64` muzzle expression after the
+first commit. It was replaced by exact quotient-first i32 math in `69b99d6`.
+The analogous pre-existing trigger wait conversion was removed in `09ff502`.
+The E1 target-route branch is responsible for removing the corresponding
+pre-existing mover conversion before integration. Other historical guest
+64-bit paths in combat slab arithmetic, audio spatialization and layered sky
+scrolling remain visible and must not be misreported as fully removed.
+
+Independent validation on the merged Quake head passed:
+
+```text
+quake-build host tests:       28
+quake-core unit tests:        51
+collision parity tests:       12
+quake-cook tests:             16
+quake-formats tests:           0, doc tests pass
+normal real-MIPS build:       pass
+monster-regression build:     pass
+```
+
+The first parent replay mistakenly paired the clean new SDK checkout with an
+older auto-discovered shared frontend. This was not accepted. The exact clean
+PSoXide `afc28092` worktree frontend was then built at
+`/tmp/psoxide-afc-audit.6nL1HC/worktree/target/release/frontend`, SHA-256
+`2dba395f8f5eba5a3a90458af033fa83edfe4ffa8a9753e8bc014c3b51e39c3a`,
+and the complete two-run image-free regression was repeated with that exact
+binary. It passed with:
+
+```text
+deterministic runs:            2
+probe frames:                273
+present/acquired/moved/damage: 0x03 / 0x03 / 0x03 / 0x03
+player death/final health:     1 / 0
+pain/death/gib:                1 / 1 / 1
+state ranges:                  3 / 3
+pad polls:                  2,299
+display:                     320x240
+VRAM FNV-1a:                  0x66af7e62748914fd
+display FNV-1a:               0x9d6d951b09faa33d
+```
+
+This monster slice remains incomplete by design. It currently lacks
+monster/player and monster/monster body blocking, the original ballistic Dog
+leap and landing path, thrown `gib2`/`gib3`, and AI/state runtimes for boss,
+demon, enforcer, fish, hell knight, knight, ogre, Old One, shalrath, shambler,
+tarbaby, wizard and zombie. An active follow-up is correcting the first three
+items against preserved C commit `001246d`.
+
+#### 0.19.3 Active route and merge order
+
+The E1M1 target-route worktree is
+`/Users/ebonura/Desktop/repos/quake-psx-target-graph-start`, branch
+`codex/quake-target-graph-start`. Its committed base is `d7e521e`; the current
+follow-up is intentionally uncommitted while the canonical route is proved.
+The latest real-MIPS evidence reached the t1 upper lift, bridge, button 213 and
+auxiliary gate t11 with probe mask `0x382`. The next corrected path uses the
+forward lower ramp at y=2000 toward button 211. Buttons 211/212, the counter,
+final door, message and crossing are not yet proved. Diagnostic examples must
+be deleted before the branch commits.
+
+Merge in this order:
+
+1. review and merge the completed E1M1 target-route commit into Quake
+   `09ff502`, resolving `entity.rs`, `quake.rs`, `main.rs` and the host builder
+   without losing the weapon or monster gates;
+2. rerun host/core/cooker tests, normal MIPS compile, Start route, combat,
+   arsenal, monster and new E1M1 route gates with an exact-source frontend;
+3. review and merge the Soldier/Dog physics follow-up;
+4. review the cross-repository editor-to-real-Quake vertical slice and merge
+   its PSoXide and Quake commits in its documented dependency order;
+5. implement the remaining Episode 1 entities, monsters, hazards, inventory,
+   Chthon/intermission and full map-to-map route;
+6. rebuild Quake from clean final pins, repin the demo-disc receipt and prove
+   deterministic chainload without image artifacts;
+7. run the original PlayStation battery before making any hardware or 30 FPS
+   claim.
+
+The demo-disc branch `ba250ef` currently passes its old-pin chainload and test
+suite, but it deliberately still points at older PSoXide and Quake revisions.
+It is not the final convergence disc. Do not repin it between overlapping
+runtime merges, and never commit the shareware PAK or generated Quake/demo disc
+images.
 
 ## 1. Owner objective
 
