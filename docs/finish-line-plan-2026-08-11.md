@@ -2,8 +2,10 @@
 
 Date: 2026-08-11
 
-Status: authoritative execution plan after the architecture correction at
-PSoXide commit `04d53bae`.
+Status: final. Authoritative execution plan after the architecture correction
+at PSoXide commit `04d53bae`. Finalised 2026-08-11: every baseline, pin, and
+worktree fact in section 3 was re-verified against the live checkouts on that
+date.
 
 This plan replaces any continuation plan that treats PSoXide Editor as a
 Quake level editor. The detailed evidence history remains in
@@ -110,12 +112,15 @@ The demo-disc side owns:
 | Quake integration | `/Users/ebonura/Desktop/repos/quake-psx-convergence` | `09ff502` | Clean |
 | Quake E1M1 route | `/Users/ebonura/Desktop/repos/quake-psx-target-graph-start` | committed base `d7e521e` | Dirty, old-base implementation and temporary diagnostics; never merge as-is |
 | Demo disc | `/Users/ebonura/Desktop/repos/psx-demo-disc-quake-shareware` | `ba250ef` | Clean, proven old-pin chain-load |
+| Provisional PSoXide pin | `/Users/ebonura/Desktop/repos/PSoXide-rc1-pin` | `f9f83c35` | Clean, detached at the exact `PSOXIDE_REV` Quake `09ff502` declares |
 
 The PSoXide user change is a saved orbit camera and final-newline difference.
 It must not be reset, staged, formatted, or committed without an owner choice.
 
-The two exploratory editor-to-Quake worktrees are abandoned. They are not a
-source of requirements or implementation.
+The two exploratory editor-to-Quake worktrees are abandoned:
+`PSoXide-quake-editor-vertical-slice` (`5aff6078`) and
+`quake-psx-editor-pxbsp-slice` (`9d3eaa6`). They are not a source of
+requirements or implementation.
 
 ### What is already real
 
@@ -283,9 +288,10 @@ F0 Baseline and contract freeze
            -> R1 release documentation and owner decision
 ```
 
-P1 and Q1 can proceed in parallel after S1. Quake work may use a provisional
-clean PSoXide pin while the shared API is frozen, but its final provenance build
-must use P3. The demo disc must not be repinned between overlapping PSoXide or
+P1 and Q1 can proceed in parallel after S1. Quake work may use the provisional
+clean PSoXide pin `f9f83c35` (the `PSoXide-rc1-pin` worktree, already declared
+as `PSOXIDE_REV` at Quake `09ff502`) while the shared API is frozen, but its
+final provenance build must use P3. The demo disc must not be repinned between overlapping PSoXide or
 Quake runtime merges.
 
 ## 6. Work packages
@@ -665,7 +671,10 @@ make editor-souls-bsp-check       # planned in P1
 ### Quake host, cook, MIPS, and replay
 
 Use a clean worktree at the final PSoXide pin for every command until the
-published dependency and `PSOXIDE_REV` are identical.
+published dependency and `PSOXIDE_REV` are identical. Until P3 produces that
+final pin, the runnable value of `--psoxide` is
+`/Users/ebonura/Desktop/repos/PSoXide-rc1-pin` (`f9f83c35`); the default
+hydration fails closed against anything else.
 
 ```sh
 cd /Users/ebonura/Desktop/repos/quake-psx-convergence
