@@ -25,7 +25,9 @@ impl EditorWorkspace {
     pub(crate) fn clear_validation_issues(&mut self) {
         self.validation_issue_primitives.clear();
         self.validation_issue_rooms.clear();
+        self.last_cook_errors.clear();
     }
+
 
     /// Select the concrete authoring object attached to a typed cook
     /// diagnostic. Returns `false` when the target is stale so the caller can
@@ -887,6 +889,9 @@ impl EditorWorkspace {
         ];
         const BSP_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
             (ViewTool::Select, None),
+            // Same cycle slot as the grid project's Paint, but it addresses
+            // BSP brush faces instead of grid cells (`bsp_face_paint_active`).
+            (ViewTool::PaintMaterial, None),
             (ViewTool::Brush, None),
             (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
             (ViewTool::Place, Some(PlaceKind::SpawnMarker)),
@@ -1982,6 +1987,30 @@ impl EditorWorkspace {
                     "Packets   {}/{}",
                     budget.packet_count, budget.packet_limit,
                 ));
+                if !self.last_cook_errors.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!(
+                            "Last cook failed with {} error{}",
+                            self.last_cook_errors.len(),
+                            if self.last_cook_errors.len() == 1 { "" } else { "s" }
+                        ))
+                        .color(STUDIO_ERROR),
+                    );
+                    // Every row is focusable, not just the first: the author
+                    // reading error four wants error four's brush.
+                    for error in &self.last_cook_errors {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&error.message).color(STUDIO_ERROR).small());
+                        });
+                        if let Some(target) = error.target {
+                            if ui.small_button("Focus").clicked() {
+                                focus_budget_target = Some(target);
+                                ui.close_menu();
+                            }
+                        }
+                    }
+                }
                 if let Some(issue) = budget.first_actionable_issue() {
                     ui.separator();
                     ui.label(RichText::new(issue.message()).color(STUDIO_ERROR));

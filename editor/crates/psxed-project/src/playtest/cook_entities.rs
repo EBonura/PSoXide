@@ -513,21 +513,27 @@ pub(crate) fn cook_player_character(
             let resource = match project.resource(character_id) {
                 Some(r) => r,
                 None => {
-                    report.error(format!(
-                        "Player Spawn '{}' references Character #{} which doesn't exist",
-                        spawn_node.name,
-                        character_id.raw()
-                    ));
+                    report.error_at(
+                        PlaytestValidationTarget::Resource(character_id),
+                        format!(
+                            "Player Spawn '{}' references Character #{} which doesn't exist",
+                            spawn_node.name,
+                            character_id.raw()
+                        ),
+                    );
                     return None;
                 }
             };
             match &resource.data {
                 ResourceData::Character(c) => (c, resource.name.as_str()),
                 _ => {
-                    report.error(format!(
-                        "Player Spawn '{}' references resource '{}' which is not a Character",
-                        spawn_node.name, resource.name
-                    ));
+                    report.error_at(
+                        PlaytestValidationTarget::Resource(character_id),
+                        format!(
+                            "Player Spawn '{}' references resource '{}' which is not a Character",
+                            spawn_node.name, resource.name
+                        ),
+                    );
                     return None;
                 }
             }
@@ -542,7 +548,7 @@ pub(crate) fn cook_player_character(
     let model_resource_id = match model_override.or(character.model) {
         Some(id) => id,
         None => {
-            report.error(format!(
+            report.error_maybe_at(character_id.map(PlaytestValidationTarget::Resource), format!(
                 "Character '{}' has no Model assigned -- add a Model Renderer or set a profile Model",
                 character_name
             ));
@@ -594,10 +600,13 @@ pub(crate) fn cook_player_character(
     });
     if let Some((_, set_name, set)) = animation_set {
         if set.skeleton.is_some() && model_skeleton.is_some() && set.skeleton != model_skeleton {
-            report.error(format!(
-                "Character '{}' clip role map '{}' targets a different skeleton than its model",
-                character_name, set_name
-            ));
+            report.error_maybe_at(
+                character_id.map(PlaytestValidationTarget::Resource),
+                format!(
+                    "Character '{}' clip role map '{}' targets a different skeleton than its model",
+                    character_name, set_name
+                ),
+            );
             return None;
         }
     }
@@ -656,14 +665,14 @@ pub(crate) fn cook_player_character(
                                 character_action_push_for(options),
                             ));
                         }
-                        report.error(format!(
+                        report.error_at(PlaytestValidationTarget::Resource(model_resource_id), format!(
                             "Character '{}' {action_label} clip resolves to {index}, but that clip was not packaged for runtime",
                             character_name
                         ));
                         return None;
                     }
                     None => {
-                        report.error(format!(
+                        report.error_maybe_at(character_id.map(PlaytestValidationTarget::Resource), format!(
                             "Character '{}' action map '{}' {action_label} clip is not compatible with model '{}'",
                             character_name, set_name, model.name
                         ));
@@ -677,10 +686,13 @@ pub(crate) fn cook_player_character(
         // through the AnimationSet (above). A required action with no
         // set entry is an error; an optional one falls back to "none".
         if required {
-            report.error(format!(
-                "Character '{}' has no {action_label} clip -- assign one in its Animation Set",
-                character_name
-            ));
+            report.error_maybe_at(
+                character_id.map(PlaytestValidationTarget::Resource),
+                format!(
+                    "Character '{}' has no {action_label} clip -- assign one in its Animation Set",
+                    character_name
+                ),
+            );
             None
         } else {
             Some((
@@ -711,32 +723,47 @@ pub(crate) fn cook_player_character(
     }
 
     if settings.radius == 0 {
-        report.error(format!("Character '{character_name}' radius must be > 0"));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!("Character '{character_name}' radius must be > 0"),
+        );
         return None;
     }
     if settings.height == 0 {
-        report.error(format!("Character '{character_name}' height must be > 0"));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!("Character '{character_name}' height must be > 0"),
+        );
         return None;
     }
     if settings.walk_speed <= 0 || settings.run_speed <= 0 {
-        report.error(format!(
-            "Character Controller for '{}' walk/run speeds must be > 0",
-            character_name
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!(
+                "Character Controller for '{}' walk/run speeds must be > 0",
+                character_name
+            ),
+        );
         return None;
     }
     if settings.turn_speed_degrees_per_second == 0 {
-        report.error(format!(
-            "Character Controller for '{}' turn_speed must be > 0",
-            character_name
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!(
+                "Character Controller for '{}' turn_speed must be > 0",
+                character_name
+            ),
+        );
         return None;
     }
     if settings.stamina_max_q12 <= 0 {
-        report.error(format!(
-            "Character Controller for '{}' stamina_max must be > 0",
-            character_name
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!(
+                "Character Controller for '{}' stamina_max must be > 0",
+                character_name
+            ),
+        );
         return None;
     }
     if settings.sprint_min_q12 < 0
@@ -745,36 +772,47 @@ pub(crate) fn cook_player_character(
         || settings.roll_cost_q12 < 0
         || settings.backstep_cost_q12 < 0
     {
-        report.error(format!(
-            "Character Controller for '{}' stamina costs and recovery must be >= 0",
-            character_name
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!(
+                "Character Controller for '{}' stamina costs and recovery must be >= 0",
+                character_name
+            ),
+        );
         return None;
     }
     if settings.roll_speed <= 0 || settings.backstep_speed <= 0 {
-        report.error(format!(
-            "Character Controller for '{}' evade speeds must be > 0",
-            character_name
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!(
+                "Character Controller for '{}' evade speeds must be > 0",
+                character_name
+            ),
+        );
         return None;
     }
     if settings.roll_active_frames == 0 || settings.backstep_active_frames == 0 {
-        report.error(format!(
-            "Character Controller for '{}' evade active frames must be > 0",
-            character_name
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!(
+                "Character Controller for '{}' evade active frames must be > 0",
+                character_name
+            ),
+        );
         return None;
     }
     if camera.distance <= 0 {
-        report.error(format!(
-            "Camera for '{character_name}' distance must be > 0"
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!("Camera for '{character_name}' distance must be > 0"),
+        );
         return None;
     }
     if camera.height < 0 || camera.target_height < 0 {
-        report.error(format!(
-            "Camera for '{character_name}' offsets must be >= 0"
-        ));
+        report.error_maybe_at(
+            character_id.map(PlaytestValidationTarget::Resource),
+            format!("Camera for '{character_name}' offsets must be >= 0"),
+        );
         return None;
     }
 
@@ -861,10 +899,13 @@ pub(crate) fn register_model_for_instance(
     }
     let resource = project.resource(model_resource_id)?;
     let ResourceData::Model(model) = &resource.data else {
-        report.error(format!(
-            "MeshInstance references resource #{} which is not a Model",
-            model_resource_id.raw()
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(model_resource_id),
+            format!(
+                "MeshInstance references resource #{} which is not a Model",
+                model_resource_id.raw()
+            ),
+        );
         return None;
     };
 
@@ -875,25 +916,34 @@ pub(crate) fn register_model_for_instance(
     // doesn't ship -- fail loud at cook so the editor surfaces
     // it rather than silently dropping the instance at runtime.
     if model.texture_path.is_none() {
-        report.error(format!(
-            "Model '{}' has no atlas; the runtime can't render untextured models in this pass",
-            resource.name
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(model_resource_id),
+            format!(
+                "Model '{}' has no atlas; the runtime can't render untextured models in this pass",
+                resource.name
+            ),
+        );
         return None;
     }
     let resolved_clips = project.resolved_model_animation_clips(model_resource_id);
     if resolved_clips.is_empty() {
-        report.error(format!(
-            "Model '{}' has no animation clips; the runtime requires at least one clip",
-            resource.name
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(model_resource_id),
+            format!(
+                "Model '{}' has no animation clips; the runtime requires at least one clip",
+                resource.name
+            ),
+        );
         return None;
     }
     if model.collision_radius == 0 {
-        report.error(format!(
+        report.error_at(
+            PlaytestValidationTarget::Resource(model_resource_id),
+            format!(
             "Model '{}' has zero collision radius; actor blockers must be at least 1 engine unit",
             resource.name
-        ));
+        ),
+        );
         return None;
     }
 
@@ -906,21 +956,24 @@ pub(crate) fn register_model_for_instance(
     let mesh_bytes = match std::fs::read(&mesh_path) {
         Ok(b) => b,
         Err(e) => {
-            report.error(format!(
-                "Model '{}' mesh {}: {e}",
-                resource.name,
-                mesh_path.display()
-            ));
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' mesh {}: {e}",
+                    resource.name,
+                    mesh_path.display()
+                ),
+            );
             return None;
         }
     };
     let parsed_model = match psx_asset::Model::from_bytes(&mesh_bytes) {
         Ok(m) => m,
         Err(e) => {
-            report.error(format!(
-                "Model '{}' mesh parse failed: {e:?}",
-                resource.name
-            ));
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!("Model '{}' mesh parse failed: {e:?}", resource.name),
+            );
             return None;
         }
     };
@@ -940,28 +993,27 @@ pub(crate) fn register_model_for_instance(
         let bytes = match std::fs::read(&abs) {
             Ok(b) => b,
             Err(e) => {
-                report.error(format!(
-                    "Model '{}' atlas {}: {e}",
-                    resource.name,
-                    abs.display()
-                ));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!("Model '{}' atlas {}: {e}", resource.name, abs.display()),
+                );
                 return None;
             }
         };
         let parsed_atlas = match psx_asset::Texture::from_bytes(&bytes) {
             Ok(t) => t,
             Err(e) => {
-                report.error(format!(
-                    "Model '{}' atlas parse failed: {e:?}",
-                    resource.name
-                ));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!("Model '{}' atlas parse failed: {e:?}", resource.name),
+                );
                 return None;
             }
         };
         // The runtime model-atlas region accepts both native indexed formats.
         // Reject direct-colour or malformed palettes loudly at cook time.
         if !matches!(parsed_atlas.clut_entries(), 16 | 256) {
-            report.error(format!(
+            report.error_at(PlaytestValidationTarget::Resource(model_resource_id), format!(
                 "Model '{}' atlas must be 4bpp (16-entry CLUT) or 8bpp (256-entry CLUT); found {} entries",
                 resource.name,
                 parsed_atlas.clut_entries(),
@@ -1017,52 +1069,67 @@ pub(crate) fn register_model_for_instance(
         let bytes = match std::fs::read(&abs) {
             Ok(b) => b,
             Err(e) => {
-                report.error(format!(
-                    "Model '{}' clip '{}' {}: {e}",
-                    resource.name,
-                    clip.name,
-                    abs.display()
-                ));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!(
+                        "Model '{}' clip '{}' {}: {e}",
+                        resource.name,
+                        clip.name,
+                        abs.display()
+                    ),
+                );
                 return None;
             }
         };
         let parsed_anim = match psx_asset::Animation::from_bytes(&bytes) {
             Ok(a) => a,
             Err(e) => {
-                report.error(format!(
-                    "Model '{}' clip '{}' parse failed: {e:?}",
-                    resource.name, clip.name
-                ));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!(
+                        "Model '{}' clip '{}' parse failed: {e:?}",
+                        resource.name, clip.name
+                    ),
+                );
                 return None;
             }
         };
         if parsed_anim.joint_count() != model_joint_count {
-            report.error(format!(
-                "Model '{}' clip '{}': animation has {} joints, model has {}",
-                resource.name,
-                clip.name,
-                parsed_anim.joint_count(),
-                model_joint_count
-            ));
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' clip '{}': animation has {} joints, model has {}",
+                    resource.name,
+                    clip.name,
+                    parsed_anim.joint_count(),
+                    model_joint_count
+                ),
+            );
             return None;
         }
         let frame_first = match u16::try_from(model_frame_bounds.len()) {
             Ok(index) => index,
             Err(_) => {
-                report.error(format!(
-                    "Model '{}' clip '{}': too many baked model-bound frames",
-                    resource.name, clip.name
-                ));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!(
+                        "Model '{}' clip '{}': too many baked model-bound frames",
+                        resource.name, clip.name
+                    ),
+                );
                 return None;
             }
         };
         let clip_index = match u16::try_from(model_clips.len()) {
             Ok(index) => index,
             Err(_) => {
-                report.error(format!(
-                    "Model '{}' has too many animation clips for the playtest manifest",
-                    resource.name
-                ));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!(
+                        "Model '{}' has too many animation clips for the playtest manifest",
+                        resource.name
+                    ),
+                );
                 return None;
             }
         };
@@ -1087,10 +1154,13 @@ pub(crate) fn register_model_for_instance(
         let frame_count = match u16::try_from(baked_bounds.len()) {
             Ok(count) => count,
             Err(_) => {
-                report.error(format!(
-                    "Model '{}' clip '{}': too many baked model-bound frames",
-                    resource.name, clip.name
-                ));
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!(
+                        "Model '{}' clip '{}': too many baked model-bound frames",
+                        resource.name, clip.name
+                    ),
+                );
                 return None;
             }
         };
@@ -1142,10 +1212,13 @@ pub(crate) fn register_model_for_instance(
         .copied()
         .flatten()
     else {
-        report.error(format!(
-            "Model '{}' default_clip {authored_default_clip} was not packaged for runtime",
-            resource.name
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(model_resource_id),
+            format!(
+                "Model '{}' default_clip {authored_default_clip} was not packaged for runtime",
+                resource.name
+            ),
+        );
         return None;
     };
 
@@ -1153,24 +1226,33 @@ pub(crate) fn register_model_for_instance(
     let mut seen_sockets: Vec<&str> = Vec::new();
     for socket in &model.attachments {
         if socket.name.trim().is_empty() {
-            report.error(format!(
-                "Model '{}' has an attachment socket with no name",
-                resource.name
-            ));
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' has an attachment socket with no name",
+                    resource.name
+                ),
+            );
             return None;
         }
         if socket.joint >= model_joint_count {
-            report.error(format!(
-                "Model '{}' socket '{}' references joint {}, but the model has {} joints",
-                resource.name, socket.name, socket.joint, model_joint_count
-            ));
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' socket '{}' references joint {}, but the model has {} joints",
+                    resource.name, socket.name, socket.joint, model_joint_count
+                ),
+            );
             return None;
         }
         if seen_sockets.contains(&socket.name.as_str()) {
-            report.error(format!(
-                "Model '{}' has duplicate attachment socket '{}'",
-                resource.name, socket.name
-            ));
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' has duplicate attachment socket '{}'",
+                    resource.name, socket.name
+                ),
+            );
             return None;
         }
         seen_sockets.push(socket.name.as_str());
@@ -1182,10 +1264,13 @@ pub(crate) fn register_model_for_instance(
             .iter()
             .any(|&v| i16::try_from(v).is_err())
         {
-            report.error(format!(
-                "Model '{}' socket '{}' translation is outside the compact joint-local range",
-                resource.name, socket.name
-            ));
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' socket '{}' translation is outside the compact joint-local range",
+                    resource.name, socket.name
+                ),
+            );
             return None;
         }
         model_sockets.push(PlaytestModelSocket {
@@ -1680,16 +1765,19 @@ pub(crate) fn push_model_instance_for_resource(
                 .resolved_model_animation_clips(model_resource_id)
                 .len();
             if idx as usize >= authored_clip_count {
-                report.error(format!(
+                report.error_at(PlaytestValidationTarget::Resource(model_resource_id), format!(
                     "Model instance '{node_name}' clip override {idx} out of range (model has {authored_clip_count})"
                 ));
                 return false;
             }
             let Some(local) = remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
             else {
-                report.error(format!(
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!(
                     "Model instance '{node_name}' clip override {idx} was not packaged for runtime"
-                ));
+                ),
+                );
                 return false;
             };
             local
@@ -1739,24 +1827,27 @@ pub(crate) fn push_character_controller_idle_instance(
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let Some(resource) = project.resource(character_id) else {
-        report.error(format!(
+        report.error_at(PlaytestValidationTarget::Resource(character_id), format!(
             "Non-player Character Controller '{node_name}' references Character #{} which doesn't exist",
             character_id.raw()
         ));
         return false;
     };
     let ResourceData::Character(character) = &resource.data else {
-        report.error(format!(
+        report.error_at(PlaytestValidationTarget::Resource(character_id), format!(
             "Non-player Character Controller '{node_name}' references resource '{}' which is not a Character",
             resource.name
         ));
         return false;
     };
     let Some(model_resource_id) = character.model else {
-        report.error(format!(
-            "Character '{}' has no Model assigned - required for non-player Entity '{}'",
-            resource.name, node_name
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(character_id),
+            format!(
+                "Character '{}' has no Model assigned - required for non-player Entity '{}'",
+                resource.name, node_name
+            ),
+        );
         return false;
     };
     let Some(model_index) = register_model_for_instance(
@@ -1856,7 +1947,7 @@ pub(crate) fn character_idle_clip_for_model_instance(
                     {
                         return Some(local);
                     }
-                    report.error(format!(
+                    report.error_at(PlaytestValidationTarget::Resource(model_resource_id), format!(
                         "Character '{character_name}' idle clip resolves to {index}, but that clip was not packaged for runtime"
                     ));
                     None
@@ -2027,17 +2118,23 @@ pub(crate) fn register_weapon_for_equipment(
         return Some(existing);
     }
     let Some(resource) = project.resource(weapon_resource_id) else {
-        report.error(format!(
-            "Equipment references missing Weapon resource #{}",
-            weapon_resource_id.raw()
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(weapon_resource_id),
+            format!(
+                "Equipment references missing Weapon resource #{}",
+                weapon_resource_id.raw()
+            ),
+        );
         return None;
     };
     let ResourceData::Weapon(weapon) = &resource.data else {
-        report.error(format!(
-            "Equipment references resource '{}' which is not a Weapon",
-            resource.name
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(weapon_resource_id),
+            format!(
+                "Equipment references resource '{}' which is not a Weapon",
+                resource.name
+            ),
+        );
         return None;
     };
 
@@ -2046,28 +2143,37 @@ pub(crate) fn register_weapon_for_equipment(
     // explicitly authored zero trips these.
     let mut arc_ok = true;
     if weapon.arc_reach == 0 {
-        report.error(format!(
-            "Weapon '{}' has melee arc reach 0 - an equipped weapon \
+        report.error_at(
+            PlaytestValidationTarget::Resource(weapon_resource_id),
+            format!(
+                "Weapon '{}' has melee arc reach 0 - an equipped weapon \
              must be able to connect (set Arc Reach > 0)",
-            resource.name
-        ));
+                resource.name
+            ),
+        );
         arc_ok = false;
     }
     if weapon.arc_half_angle_degrees == 0 || weapon.arc_half_angle_degrees > 170 {
-        report.error(format!(
-            "Weapon '{}' has melee arc half-angle {} degrees - it must \
+        report.error_at(
+            PlaytestValidationTarget::Resource(weapon_resource_id),
+            format!(
+                "Weapon '{}' has melee arc half-angle {} degrees - it must \
              be 1..=170 (a zero-width arc never connects; past 170 the \
              front-arc test degenerates)",
-            resource.name, weapon.arc_half_angle_degrees
-        ));
+                resource.name, weapon.arc_half_angle_degrees
+            ),
+        );
         arc_ok = false;
     }
     if weapon.damage == 0 {
-        report.error(format!(
-            "Weapon '{}' has damage 0 - an equipped weapon must \
+        report.error_at(
+            PlaytestValidationTarget::Resource(weapon_resource_id),
+            format!(
+                "Weapon '{}' has damage 0 - an equipped weapon must \
              threaten something (set Damage > 0)",
-            resource.name
-        ));
+                resource.name
+            ),
+        );
         arc_ok = false;
     }
     if !arc_ok {
@@ -2113,10 +2219,13 @@ pub(crate) fn register_weapon_for_equipment(
         .iter()
         .any(|&v| i16::try_from(v).is_err())
     {
-        report.error(format!(
-            "Weapon '{}' grip translation is outside the compact joint-local range",
-            resource.name
-        ));
+        report.error_at(
+            PlaytestValidationTarget::Resource(weapon_resource_id),
+            format!(
+                "Weapon '{}' grip translation is outside the compact joint-local range",
+                resource.name
+            ),
+        );
         return None;
     }
     weapons.push(PlaytestWeapon {

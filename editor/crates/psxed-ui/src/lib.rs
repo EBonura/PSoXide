@@ -515,6 +515,10 @@ pub struct EditorWorkspace {
     /// Room-level validation failures that don't have a finer face
     /// target, such as budget or dimension errors.
     validation_issue_rooms: HashSet<NodeId>,
+    /// Every hard error from the last failed cook, each with the authoring
+    /// object it blames. The auto-focus only ever jumps to the first
+    /// focusable error; this list lets the author pick any row.
+    last_cook_errors: Vec<psxed_project::playtest::PlaytestValidationError>,
     /// Floating duplicate placement created by Cmd+D. While active,
     /// `project` contains the preview copy, but `base_project`
     /// lets Escape cancel without dirtying the document and lets
@@ -638,6 +642,10 @@ pub struct EditorWorkspace {
     /// click samples its logical material into the shared brush/resource
     /// selection, then automatically returns to painting.
     material_paint_sampling: bool,
+    /// `true` once the in-flight Material Paint gesture has painted at least
+    /// one BSP brush face. Cleared at every primary press alongside
+    /// `last_paint_stamp`, so a drag across a whole wall costs one undo step.
+    brush_face_paint_stroke: bool,
     /// Index into the active scene's brushes, when one is selected.
     selected_brush: Option<usize>,
     /// Multi-brush selection (shift-click). Always contains
@@ -2894,6 +2902,7 @@ impl EditorWorkspace {
             vertex_connectivity: VertexConnectivity::default(),
             validation_issue_primitives: Vec::new(),
             validation_issue_rooms: HashSet::new(),
+            last_cook_errors: Vec::new(),
             floating_geometry: None,
             prefab_name: String::new(),
             prefab_library,
@@ -2933,6 +2942,7 @@ impl EditorWorkspace {
             brush_material: None,
             material_paint_blend: false,
             material_paint_sampling: false,
+            brush_face_paint_stroke: false,
             selected_brush: None,
             selected_brushes: Vec::new(),
             selected_brush_face: None,
@@ -3904,15 +3914,16 @@ impl EditorWorkspace {
         psxed_project::playtest::write_cook_result(package.as_ref(), dir)
             .map_err(|e| format!("write playtest output: {e}"))?;
         if !report.is_ok() {
+            self.last_cook_errors = report.errors.clone();
             if !report
-                .focus_target
+                .focus_target()
                 .is_some_and(|target| self.focus_playtest_validation_target(target))
             {
                 self.record_first_playtest_world_cook_issue(&project);
             }
             return Err(format!(
                 "playtest validation failed: {}",
-                report.errors.join("; ")
+                report.error_messages().join("; ")
             ));
         }
         let warning_suffix = if report.warnings.is_empty() {
