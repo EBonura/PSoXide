@@ -21,16 +21,21 @@ cargo run -p frontend -- --editor --windowed
 ```
 
 1. Choose **File → New Project…**, enter a name, leave **Draft** selected,
-   and press **Create**. The project is copied from the buildable BSP-first
-   template and opens in the Top orthographic view with the Brush tool active.
+   and press **Create**. The project copies a buildable 4096 × 4096 roofless
+   open courtyard with cobbles underfoot, brick perimeter walls, a valid
+   Player Spawn, and two blockout lights. It opens in the Top orthographic
+   view with the Brush tool active. This template is used only when creating
+   a project; opening an existing project never rewrites its scene or assets.
 2. The template is already playable. To add another closed room, drag a solid
    footprint with **Tool → Brush**, select it, then press **Hollow** in the
    Inspector. New brushes inherit the selected Material (or the project's
    first Material), and Hollow carries that material onto the six room slabs.
-3. Shape the room in **Top**, **Front**, or **Side**. Choose **Face**, **Edge**,
-   or **Vertex** from the Selection control and drag. Shift-drag moves the
-   selected brush; the Inspector also provides exact Origin/plane values,
-   Duplicate, Snap, and Delete.
+3. Shape the room in **Top**, **Front**, **Side**, or **3D**. Choose the
+   always-visible **Move**, **Face**, **Edge**, or **Vertex** mode and drag the
+   corresponding brush or handle. Move uses a plain drag. Shift/Ctrl/Cmd stay
+   available for additive selection and marquee gestures in Select. The
+   Inspector also provides exact Origin, axis-aligned Size, and face-plane
+   values, plus Duplicate, Snap, and Delete.
 4. To change a surface, click the brush face, choose a Material in the
    Inspector, then press **Apply to face**. Imported textures appear as
    Materials in the Resources panel.
