@@ -1198,3 +1198,8 @@ cortex-anim-shots: cortex-anim-disc
 		--route-screenshot-dir $(CORTEX_ANIM_SHOT_DIR) \
 		--route-screenshot-interval $(CORTEX_ANIM_SHOT_INTERVAL)
 	@echo "[cortex-anim-shots] wrote $$(ls $(CORTEX_ANIM_SHOT_DIR) | wc -l | tr -d ' ') frames to $(CORTEX_ANIM_SHOT_DIR)"
+
+# Combat checkpoint regression gate: clean fixture cook, MIPS guest, disc,
+# double deterministic replay, door-occlusion replay, pinned assertions.
+combat-checkpoint:
+	sh tools/combat_checkpoint.sh
