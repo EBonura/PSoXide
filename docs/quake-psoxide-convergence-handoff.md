@@ -295,7 +295,9 @@ traversal). `editor/projects/brush-first-playable/project.ron` remains the
 minimal blockout anchor. The editor now also has Draft/Release cook with
 exact budget reports and focus actions, numeric origin/face-plane entry,
 ortho vertex/edge editing, multi-brush selection, persisted viewports, and
-brush edits correctly mark the project dirty for Play freshness.
+brush edits correctly mark the project dirty for Play freshness. Section 0.13
+adds the missing BSP-root Place path, material-preserving room creation, and a
+new-project authoring quickstart.
 
 ### 0.9 Authored BSP body-hull corrective pass (2026-08-11)
 
@@ -520,6 +522,59 @@ Test zero/odd collision sizes and extreme legal origins, fill the complete
 64-record mixed Image/Box/Arch budget, and profile it on original hardware.
 Finally decide explicitly whether PVS-hidden props remain physical: current
 collision is room-scoped and therefore independent of render visibility.
+
+### 0.13 BSP-first create/edit/Play authoring lane (2026-08-11)
+
+Agent commit `bbe07790`, merged as `e929128e`, fixes the immediate blocker to
+authoring a fresh simple level. BSP-first scenes deliberately have no legacy
+`Section` room, but every normal Place command required `active_room_id()`.
+Users could reshape template brushes yet could not add or replace the player,
+lights, props, characters, particles or logic through the viewport.
+
+The editor now treats the BSP scene root as the parent for world-space point
+entities whenever the scene owns brushes. The BSP-specific tool cycle and Add
+menu expose the normal placeable kinds but keep authored Portal markers
+disabled because PXBSP portals are compiler output. Top view resolves the
+upward brush surface nearest the shared Y focus; 3D uses the existing nearest
+brush-face ray hit and refuses non-upward faces. Player/content placement lifts
+one unit from the surface, while a new point light gets a useful 256-unit
+height. Once the root is passed to the shared placement implementation, its
+existing no-Room fallback preserves X/Y/Z directly in BSP world units.
+
+Newly dragged brushes inherit the selected material or first project material.
+Hollow now copies a material and UV transform onto every generated slab face,
+including cavity faces, so the first room remains cookable instead of acquiring
+untextured faces. `editor/README.md` documents the shortest supported workflow:
+new Draft project, drag/Hollow, shape, texture, place or replace player/light,
+bind a Logic Door through the brush's Model owner, save, Play, edit, then
+Rebuild & Play.
+
+The deterministic regression uses the real workspace command paths to create a
+new BSP project, delete/replace its player, drag and Hollow a textured room,
+place a light, save and cook, reopen and edit, request Rebuild, and prove both
+that the PXBSP changed and that an unchanged recook is byte-identical.
+
+Validation after merging onto the ImageProp/AABB convergence head:
+
+```text
+psxed-ui --lib:       346 passed, 1 diagnostic ignored
+psxed-project --lib:  474 passed, 1 diagnostic ignored
+cargo check -p frontend: PASS
+real mipsel-sony-psx guest link through make combat-checkpoint: PASS
+make combat-checkpoint: PASS
+  authored hits 4, stagger 1, death 1, fallback hits taken 3
+  closed-door enemy connection blocked
+  VRAM 0x007fb6683f98d82b (unchanged)
+```
+
+This makes the simple BSP create/save/cook/Play route testable today, but the
+evidence is still host-command, compiler, guest-link and existing-fixture replay
+evidence. No one has yet operated the native GUI and embedded emulator through
+the complete fresh-project sequence. An independent worker is now challenging
+the merged path, especially multi-storey Top-view surface choice, prop and door
+authoring beyond player/light, root parenting, dirty/freshness state, portal
+refusal, and whether Hollow's signed-axis material policy is what an author
+expects on cavity faces. Keep those distinctions explicit in the next update.
 
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
