@@ -873,6 +873,53 @@ impl ProjectDocument {
         count
     }
 
+    /// Runtime-ready files whose bytes an open editor project may preview or
+    /// package. This intentionally excludes raw model and animation source
+    /// files: those can be very large and are consumed only by explicit
+    /// import/bake actions, so an idle editor must not poll them.
+    pub fn watched_runtime_resource_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let mut push = |stored: &str| {
+            let stored = stored.trim();
+            if stored.is_empty() {
+                return;
+            }
+            let path = model_import::resolve_path(stored, Some(project_root));
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        };
+        for resource in &self.resources {
+            match &resource.data {
+                ResourceData::Texture { psxt_path } => push(psxt_path),
+                ResourceData::Material(material) => {
+                    for path in material.version_texture_paths() {
+                        push(path);
+                    }
+                }
+                ResourceData::Model(model) => {
+                    push(&model.model_path);
+                    if let Some(path) = model.texture_path.as_deref() {
+                        push(path);
+                    }
+                }
+                ResourceData::AnimationClip(clip) => push(&clip.psxanim_path),
+                ResourceData::Scene { source_path }
+                | ResourceData::Script { source_path }
+                | ResourceData::Audio { source_path } => push(source_path),
+                ResourceData::Skeleton(_)
+                | ResourceData::AnimationSource(_)
+                | ResourceData::AnimationSet(_)
+                | ResourceData::Mesh { .. }
+                | ResourceData::Prefab { .. }
+                | ResourceData::Character(_)
+                | ResourceData::Weapon(_) => {}
+            }
+        }
+        paths.sort();
+        paths
+    }
+
     /// Remove a resource from the project and clear references to it.
     pub fn delete_resource(&mut self, id: ResourceId) -> Option<ResourceDeleteReport> {
         let index = self
