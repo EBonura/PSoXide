@@ -49,6 +49,10 @@ name = "gen-brush-open-courtyard"
 path = "src/bin/gen_brush_open_courtyard.rs"
 
 [[bin]]
+name = "gen-brush-liquid-runtime"
+path = "src/bin/gen_brush_liquid_runtime.rs"
+
+[[bin]]
 name = "miniaturise-project"
 path = "src/bin/miniaturise_project.rs"
 

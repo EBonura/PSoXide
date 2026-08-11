@@ -158,12 +158,11 @@ fn brush_world_validation_target(
             })
         }
         BrushWorldCookError::MissingMover { brush, .. }
-        | BrushWorldCookError::BrushOwnerIsNotDoor { brush, .. } => {
-            Some(PlaytestValidationTarget::Brush {
-                brush: *brush,
-                face: None,
-            })
-        }
+        | BrushWorldCookError::BrushOwnerIsNotDoor { brush, .. }
+        | BrushWorldCookError::LiquidMover { brush, .. } => Some(PlaytestValidationTarget::Brush {
+            brush: *brush,
+            face: None,
+        }),
         BrushWorldCookError::UnsupportedMoverTransform(node)
         | BrushWorldCookError::MoverOriginOutOfRange(node)
         | BrushWorldCookError::MoverOriginInSolid(node)
