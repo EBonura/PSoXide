@@ -610,17 +610,17 @@ impl AppState {
                 .editor
                 .last_project_dir
                 .clone()
-                .unwrap_or_else(psxed_project::default_project_dir);
+                .unwrap_or_else(psxed_project::new_project_template_dir);
             EditorWorkspace::open_directory(&preferred_dir)
                 .or_else(|first_err| {
                     eprintln!(
-                        "[frontend] open editor project at {} failed: {first_err}; falling back to default",
+                        "[frontend] open editor project at {} failed: {first_err}; falling back to BSP starter",
                         preferred_dir.display()
                     );
-                    EditorWorkspace::open_directory(psxed_project::default_project_dir())
+                    EditorWorkspace::open_directory(psxed_project::new_project_template_dir())
                 })
                 .unwrap_or_else(|err| {
-                    panic!("open default editor project: {err}");
+                    panic!("open BSP starter project: {err}");
                 })
         };
         let library = Library::load_or_empty(&paths.library_file());

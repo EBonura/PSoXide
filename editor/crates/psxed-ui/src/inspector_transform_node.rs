@@ -4248,6 +4248,11 @@ pub(crate) fn paths_equivalent(a: &Path, b: &Path) -> bool {
     }
 }
 
+pub(crate) fn bundled_project_is_protected(path: &Path) -> bool {
+    paths_equivalent(path, &psxed_project::default_project_dir())
+        || paths_equivalent(path, &psxed_project::new_project_template_dir())
+}
+
 pub(crate) fn node_kind_is_player_source(kind: &NodeKind) -> bool {
     matches!(
         kind,
