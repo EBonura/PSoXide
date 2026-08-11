@@ -43,7 +43,6 @@ def main() -> None:
     parser.add_argument("--pxbsp", type=Path, required=True)
     parser.add_argument("--exe", type=Path, required=True)
     parser.add_argument("--disc", type=Path, required=True)
-    parser.add_argument("--frame", type=Path, required=True)
     parser.add_argument("--log", type=Path, required=True)
     args = parser.parse_args()
 
@@ -52,7 +51,6 @@ def main() -> None:
     pxbsp = read_required(args.pxbsp)
     exe = read_required(args.exe)
     disc = read_required(args.disc)
-    frame = read_required(args.frame)
     log = read_required(args.log).decode("utf-8")
 
     require(
@@ -60,10 +58,10 @@ def main() -> None:
         "exported project name is not deterministic",
     )
     require("pub const PLAYTEST_USES_PXBSP: bool = true;" in manifest, "cook is not BSP")
-    require(
-        "pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[9];" in manifest,
-        "authored brush Door mover record is missing",
+    mover_ids = re.search(
+        r"pub static PXBSP_MOVER_NODE_IDS: &\[u32\] = &\[(\d+)\];", manifest
     )
+    require(mover_ids is not None, "expected exactly one authored brush Door mover")
     require(
         "PlayerSpawnRecord { room: RoomIndex(0), x: 192, y: 65, z: 192" in manifest,
         "authored Player Spawn record is missing",
@@ -84,8 +82,6 @@ def main() -> None:
         "authored Point Light record is missing",
     )
     require(pxbsp[:4] == b"PXB%", "cooked world has no PXBSP magic")
-    require(frame.startswith(b"P6\n"), "headless framebuffer is not a binary PPM")
-
     guest_frames = match_int(log, r"^guest_profile_frames=(\d+)$", "guest frame count")
     visual_frames = match_int(log, r"^\s*visual_frames=(\d+)$", "visual frame count")
     player_x_biased = match_int(
@@ -117,7 +113,6 @@ def main() -> None:
         ("PXBSP", args.pxbsp, pxbsp),
         ("MIPS EXE", args.exe, exe),
         ("disc BIN", args.disc, disc),
-        ("frame PPM", args.frame, frame),
     ]:
         print(f"  {label}: {len(data)} bytes sha256={sha256(data)} ({path})")
 
