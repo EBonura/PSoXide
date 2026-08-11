@@ -1,5 +1,10 @@
 # Quake, PSoXide BSP, editor, and combat convergence handoff
 
+Authoritative continuation plan: `docs/finish-line-plan-2026-08-11.md`.
+That plan preserves the corrected product boundary: PSoXide Editor authors the
+owner's souls-like game, while Quake-PSX remains a separate game and content
+pipeline over the shared BSP foundation.
+
 Last updated: 2026-08-11 (editor first-loop replay, PSoXide souls-like combat,
 complete Quake weapon checkpoint, and bounded Soldier/Dog runtime, section 0).
 The original 2026-08-10 21:50 BST snapshot text is retained below it;
