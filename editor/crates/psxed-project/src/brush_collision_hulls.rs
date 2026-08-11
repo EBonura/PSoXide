@@ -3,8 +3,7 @@
 use crate::brush::{Brush, Plane};
 use crate::brush_compile::{pack_normalized_plane, pack_plane};
 
-const CONTENTS_EMPTY: i16 = -1;
-const CONTENTS_SOLID: i16 = -2;
+const CONTENTS_EMPTY: i16 = psx_bsp::collision::CONTENTS_EMPTY;
 const HULL_EPSILON: f64 = 1.0 / 1024.0;
 pub const MAX_MAP_HULLS: usize = 4;
 
@@ -47,7 +46,9 @@ pub fn compile_collision_hulls(
     hulls: &[CollisionHullBounds],
 ) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
     limit("collision hulls", hulls.len(), MAX_MAP_HULLS)?;
-    let solved: Vec<_> = brushes.iter().map(Brush::solve).collect();
+    let mut ordered: Vec<_> = brushes.iter().enumerate().collect();
+    ordered.sort_by_key(|(index, brush)| (core::cmp::Reverse(brush.contents.precedence()), *index));
+    let solved: Vec<_> = ordered.iter().map(|(_, brush)| brush.solve()).collect();
     let mut plane_records = Vec::new();
     let mut nodes: Vec<[i16; 3]> = Vec::new();
     let mut head_nodes = Vec::with_capacity(hulls.len());
@@ -57,7 +58,7 @@ pub fn compile_collision_hulls(
             return Err(CollisionHullCompileError::InvalidBounds(hull_index));
         }
         let mut escape = CONTENTS_EMPTY;
-        for (brush, solved) in brushes.iter().zip(&solved).rev() {
+        for ((_, brush), solved) in ordered.iter().zip(&solved).rev() {
             if !solved.is_valid() {
                 continue;
             }
@@ -75,7 +76,7 @@ pub fn compile_collision_hulls(
                 let plane = intern_plane(&mut plane_records, record)?;
                 face_planes.push((plane, flipped));
             }
-            let mut inside = CONTENTS_SOLID;
+            let mut inside = brush.contents.runtime_contents();
             for &(plane, flipped) in face_planes.iter().rev() {
                 limit("clipnodes", nodes.len() + 1, i16::MAX as usize + 1)?;
                 let (front, back) = if flipped {
@@ -345,8 +346,11 @@ fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brush::BrushFace;
-    use psx_bsp::collision::{CollisionHull, Trace, TraceScratch, Q12_ONE};
+    use crate::brush::{BrushContents, BrushFace};
+    use psx_bsp::collision::{
+        CollisionHull, Trace, TraceScratch, CONTENTS_EMPTY, CONTENTS_LAVA, CONTENTS_SOLID,
+        CONTENTS_WATER, Q12_ONE,
+    };
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
 
     fn hull(compiled: &CompiledCollisionHulls, hull: usize) -> CollisionHull<'_> {
@@ -439,6 +443,30 @@ mod tests {
             compile_collision_hulls(&brushes, &hulls),
             compile_collision_hulls(&brushes, &hulls)
         );
+    }
+
+    #[test]
+    fn every_hull_preserves_nonblocking_liquid_contents_and_solid_precedence() {
+        let mut water = Brush::cuboid([0, 0, 0], [512, 256, 512]);
+        water.contents = BrushContents::Water;
+        let mut lava = Brush::cuboid([64, 0, 64], [448, 256, 448]);
+        lava.contents = BrushContents::Lava;
+        let solid = Brush::cuboid([192, 0, 192], [320, 256, 320]);
+        let compiled = compile_collision_hulls(
+            &[water, lava, solid],
+            &[CollisionHullBounds::POINT, PLAYER],
+        )
+        .expect("cook");
+        for hull_index in 0..2 {
+            let hull = hull(&compiled, hull_index);
+            assert_eq!(hull.point_contents(at(-128, 128, -128)), Some(CONTENTS_EMPTY));
+            assert_eq!(hull.point_contents(at(32, 128, 32)), Some(CONTENTS_WATER));
+            assert_eq!(hull.point_contents(at(128, 128, 128)), Some(CONTENTS_LAVA));
+            assert_eq!(hull.point_contents(at(256, 128, 256)), Some(CONTENTS_SOLID));
+            let crossed = trace(&hull, at(-128, 128, 32), at(160, 128, 32));
+            assert_eq!(crossed.fraction, Q12_ONE);
+            assert!(crossed.in_water);
+        }
     }
 
     #[test]

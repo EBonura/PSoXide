@@ -1,4 +1,5 @@
 use super::*;
+use crate::playtest_runtime::bsp_hazard_damage;
 
 impl Playtest {
     /// Phase-3 gameplay layer tick: entity state machines (moved
@@ -304,7 +305,7 @@ impl Playtest {
         self.logic_fired_reported = 0;
         self.player_health = PLAYER_MAX_HEALTH;
         self.player_health_max = PLAYER_MAX_HEALTH;
-        self.water_death_ticks_remaining = 0;
+        self.hazard_death_ticks_remaining = 0;
         self.swing_hit_mask = 0;
         self.clear_actor_pose_snapshots();
         self.sync_door_box_props();
@@ -455,7 +456,8 @@ impl Playtest {
         }
 
         let now = ctx.sim_tick;
-        let action_locked = self.anim_lock_until_tick > now || self.water_death_ticks_remaining > 0;
+        let action_locked =
+            self.anim_lock_until_tick > now || self.hazard_death_ticks_remaining > 0;
         self.refresh_active_interactable();
         if !action_locked {
             if let Some(index) = self.active_interactable {
@@ -509,6 +511,17 @@ impl Playtest {
             }
         }
         let mut config = self.motor_config();
+        let bsp_contents = self
+            .bsp
+            .as_ref()
+            .and_then(|bsp| bsp.player_contents(self.motor.position(), config.height));
+        if bsp_contents.is_some_and(|sample| sample.water_level > 0) {
+            // Shared BSP liquids retain 60 percent locomotion. The same
+            // contents query feeds Quake's richer swim rules; the general
+            // editor playtest has no vertical swim input contract yet.
+            config.walk_speed = config.walk_speed.saturating_mul(60) / 100;
+            config.run_speed = config.run_speed.saturating_mul(60) / 100;
+        }
         if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
             if self.motor.position().y < water.surface_y && water.depth < water.lethal_depth {
                 // The authored percentage is the exact retained locomotion
@@ -617,25 +630,56 @@ impl Playtest {
         }
         telemetry::stage_end(telemetry::stage::SIM_ROOM_TRACK);
 
-        if self.water_death_ticks_remaining > 0 {
-            self.water_death_ticks_remaining = self.water_death_ticks_remaining.saturating_sub(1);
-            if self.water_death_ticks_remaining == 0 {
-                self.respawn_after_water_death();
+        let hazard_countdown_was_active = self.hazard_death_ticks_remaining > 0;
+        if !hazard_countdown_was_active {
+            if let Some(sample) = self
+                .bsp
+                .as_ref()
+                .and_then(|bsp| bsp.player_contents(self.motor.position(), config.height))
+            {
+                let damage = bsp_hazard_damage(sample.contents, now.as_u32());
+                if damage > 0 {
+                    self.player_health = self.player_health.saturating_sub(damage);
+                    telemetry::debug_log(match sample.contents {
+                        psx_bsp::collision::CONTENTS_LAVA => "player bsp:lava",
+                        psx_bsp::collision::CONTENTS_SLIME => "player bsp:slime",
+                        _ => "player bsp:liquid",
+                    });
+                    if self.player_health == 0 {
+                        self.hazard_death_ticks_remaining = BSP_HAZARD_DEATH_TICKS;
+                        self.switch_player_anim(PlayerAnim::Death, now, ctx.video_hz);
+                        self.anim_lock_until_tick =
+                            now.saturating_add(u32::from(BSP_HAZARD_DEATH_TICKS));
+                        self.lock_target = None;
+                        self.soft_lock_target = None;
+                        self.active_interactable = None;
+                    }
+                }
             }
-        } else if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
-            let submerged = self.motor.position().y
-                <= water
-                    .surface_y
-                    .saturating_sub(i32::from(water.death_submerge_depth));
-            if water.depth >= water.lethal_depth && submerged {
-                self.water_death_ticks_remaining = water.death_delay_ticks.max(1);
-                self.player_health = 0;
-                self.switch_player_anim(PlayerAnim::Death, now, ctx.video_hz);
-                self.anim_lock_until_tick = now.saturating_add(u32::from(water.death_delay_ticks));
-                self.lock_target = None;
-                self.soft_lock_target = None;
-                self.active_interactable = None;
-                telemetry::debug_log("player water:death");
+        }
+
+        if hazard_countdown_was_active {
+            self.hazard_death_ticks_remaining = self.hazard_death_ticks_remaining.saturating_sub(1);
+            if self.hazard_death_ticks_remaining == 0 {
+                self.respawn_after_hazard_death();
+            }
+        } else if self.hazard_death_ticks_remaining == 0 {
+            if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
+                let submerged = self.motor.position().y
+                    <= water
+                        .surface_y
+                        .saturating_sub(i32::from(water.death_submerge_depth));
+                if water.depth >= water.lethal_depth && submerged {
+                    self.hazard_death_ticks_remaining = water.death_delay_ticks.max(1);
+                    self.player_health = 0;
+                    self.switch_player_anim(PlayerAnim::Death, now, ctx.video_hz);
+                    self.anim_lock_until_tick =
+                        now.saturating_add(u32::from(water.death_delay_ticks));
+                    self.lock_target = None;
+                    self.soft_lock_target = None;
+                    self.active_interactable = None;
+                    telemetry::debug_log("player water:death");
+                }
             }
         }
 
