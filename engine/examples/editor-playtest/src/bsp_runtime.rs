@@ -15,10 +15,11 @@ use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, SliceReader, Vec3I32};
 use psx_engine::{
-    commit_body_step_with_trace_provider, BodyStep, CharacterBlockerTraceProvider,
-    CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
-    CharacterMotorState, CollisionQueryError, CollisionTraceShape, OtFrame, PrimitivePacketArena,
-    RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
+    commit_body_step_with_trace_provider, trace_collision, BodyStep,
+    CharacterBlockerTraceProvider, CharacterCollisionCylinder, CharacterMotorConfig,
+    CharacterMotorFrame, CharacterMotorInput, CharacterMotorState, CollisionQueryError,
+    CollisionTraceQuery, CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint,
+    ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_level::{find_asset_of_kind, AssetId, AssetKind};
@@ -322,6 +323,28 @@ impl BspRuntime {
         .expect("validated PXBSP entity collision provider");
         let mut provider = CharacterBlockerTraceProvider::new(&mut provider, blockers);
         commit_body_step_with_trace_provider(&mut provider, start, dx, dz, radius, height)
+    }
+
+    /// Whether a melee contact segment between two actor positions is free of
+    /// static world and transformed mover geometry. Actor cylinders are
+    /// deliberately not composed: the attacker and defender are actors.
+    /// Provider failure fails closed (blocked): malformed world data must not
+    /// grant damage through it.
+    pub(super) fn melee_segment_clear(&mut self, from: RoomPoint, to: RoomPoint) -> bool {
+        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
+        let count = self.collision_models(&mut models);
+        let mut provider = PxbspCollisionProvider::new(
+            &self.map,
+            BSP_POINT_HULL_INDEX,
+            &models[..count],
+            CollisionTraceShape::Point,
+            &mut self.trace_scratch,
+        )
+        .expect("validated PXBSP melee occlusion provider");
+        match trace_collision(&mut provider, CollisionTraceQuery::point(from, to)) {
+            Ok(trace) => !trace.hit(),
+            Err(_) => false,
+        }
     }
 
     pub(super) fn update_camera(

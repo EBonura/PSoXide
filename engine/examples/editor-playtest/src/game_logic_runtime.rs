@@ -24,6 +24,23 @@ use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
 use psx_game_runtime::entities::MeleeArcStats;
 
+/// Melee occlusion segments trace at collision scale, not model scale: the
+/// cooked player hull is 56 units tall while character models render far
+/// larger, and the fixture door spans only the lower world units of its
+/// doorway. Half the player hull height keeps the segment inside anything
+/// that blocks movement.
+// ponytail: fixed 28-unit eye lift; derive from the cooked hull if
+// multi-floor melee occlusion ever matters.
+const MELEE_OCCLUSION_EYE_LIFT: i32 = 28;
+
+fn melee_eye_point(position: [i32; 3]) -> RoomPoint {
+    RoomPoint::new(
+        position[0],
+        position[1].saturating_add(MELEE_OCCLUSION_EYE_LIFT),
+        position[2],
+    )
+}
+
 #[derive(Clone, Copy)]
 struct ActivePlayerCapsule {
     capsule: WorldCombatCapsule,
@@ -268,6 +285,19 @@ impl Playtest {
             let Some(damage) = damage else {
                 continue;
             };
+            // World occlusion is authoritative for BOTH the authored capsule
+            // and the legacy arc outcome: a closed door between the frozen
+            // attacker position and the player blocks the connection. The
+            // token is deliberately not consumed, mirroring an i-frame whiff.
+            let attacker = attack.position();
+            if let Some(bsp) = self.bsp.as_mut() {
+                if !bsp.melee_segment_clear(
+                    melee_eye_point(attacker),
+                    melee_eye_point(player_position),
+                ) {
+                    continue;
+                }
+            }
             if self.game_entities.connect_deferred_attack(attack) {
                 hits = hits.saturating_add(1);
                 damage_total = damage_total.saturating_add(damage);
@@ -334,12 +364,22 @@ impl Playtest {
             reach: spec.reach,
             half_angle: spec.half_angle,
         };
-        let stats = self.game_entities.apply_melee_arc(
+        // Same world-occlusion authority as the enemy side: the legacy arc
+        // has no blade geometry, so a closed door inside its reach must
+        // still block the connection on BSP worlds.
+        let player_eye = melee_eye_point([player.x, player.y, player.z]);
+        let entities = &mut self.game_entities;
+        let mut bsp = self.bsp.as_mut();
+        let stats = entities.apply_melee_arc_occluded(
             GAME_ENTITIES,
             &arc,
             spec.damage,
             spec.poise_damage,
             &mut self.swing_hit_mask,
+            |_, target| match bsp.as_deref_mut() {
+                Some(bsp) => !bsp.melee_segment_clear(player_eye, melee_eye_point(target)),
+                None => false,
+            },
         );
         self.report_player_melee_stats(stats);
     }
@@ -429,6 +469,20 @@ impl Playtest {
             let hit =
                 self.authored_capsule_hit_entity(entity_record, &active[..active_count], body);
             if let Some(hit) = hit {
+                // Capsule overlap alone has no world knowledge; a closed door
+                // between the actors blocks the connection without latching
+                // the swing bit, so the same swing can still land once the
+                // door finishes opening inside the active window.
+                let player = self.motor.position();
+                if let Some(bsp) = self.bsp.as_mut() {
+                    if !bsp.melee_segment_clear(
+                        melee_eye_point([player.x, player.y, player.z]),
+                        melee_eye_point(position),
+                    ) {
+                        entity += 1;
+                        continue;
+                    }
+                }
                 self.swing_hit_mask |= mask;
                 let outcome = self.game_entities.apply_hit(
                     GAME_ENTITIES,
