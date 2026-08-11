@@ -728,6 +728,13 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::PLAYER_MELEE_HITS => "player melee hits",
         counter::PLAYER_HITS_TAKEN => "player hits taken",
         counter::PLAYER_ATTACK_STARTS => "player attack starts",
+        counter::PLAYER_DEATHS => "player deaths",
+        counter::PLAYER_CHECKPOINT_ACTIVATIONS => "player checkpoint activations",
+        counter::PLAYER_DUPLICATE_HIT_REJECTIONS => "player duplicate hit rejections",
+        counter::LOGIC_DOOR_ACTIVATIONS => "logic door activations",
+        counter::PLAYER_WEAPON_ATTACHMENTS => "player weapon attachments",
+        counter::GAME_ENTITY_PVS_SUPPRESSIONS => "game entity pvs suppressions",
+        counter::PLAYER_LIQUID_DAMAGE_EVENTS => "player liquid damage events",
         _ => "unknown",
     }
 }

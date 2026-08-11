@@ -761,12 +761,46 @@ id_table! {
     /// not count). Lets headless combat gates assert attempt counts
     /// independently of whether the swings later connect.
     pub const PLAYER_ATTACK_STARTS: u16 = 253;
+
+    /// Player death events, any cause (combat damage reaching zero, BSP
+    /// liquid hazards, lethal water). Counted when the death sequence is
+    /// armed, not when the respawn completes.
+    pub const PLAYER_DEATHS: u16 = 254;
+
+    /// Checkpoint activations that assigned a NEW in-memory checkpoint
+    /// value. The logic-graph CHECKPOINT dispatch and the legacy direct
+    /// interactable path share one assignment point, so an activation is
+    /// never double-counted; re-activating the held checkpoint without
+    /// moving does not count again.
+    pub const PLAYER_CHECKPOINT_ACTIVATIONS: u16 = 255;
+
+    /// Player swing capsule contacts rejected by the one-hit-per-swing
+    /// mask: the authored-capsule entity gate took the already-hit
+    /// branch for an entity this swing had already connected with.
+    pub const PLAYER_DUPLICATE_HIT_REJECTIONS: u16 = 256;
+
+    /// DOOR logic records fired/activated at the runtime effect
+    /// dispatch (prompt, trigger volume, or relay chain alike).
+    pub const LOGIC_DOOR_ACTIVATIONS: u16 = 257;
+
+    /// Equipped player weapon resolved to its socket pose and submitted
+    /// for rendering for the FIRST time after a (re)spawn: one per life.
+    pub const PLAYER_WEAPON_ATTACHMENTS: u16 = 258;
+
+    /// Live game entities whose AI/body was suppressed this tick because
+    /// their leaf is outside the player's PVS row (BSP worlds only; one
+    /// count per suppressed entity per simulation tick).
+    pub const GAME_ENTITY_PVS_SUPPRESSIONS: u16 = 259;
+
+    /// BSP liquid hazard damage applications to the player (each lava or
+    /// slime cadence hit that subtracted health).
+    pub const PLAYER_LIQUID_DAMAGE_EVENTS: u16 = 260;
     }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 254;
+pub const COUNTER_COUNT: usize = 261;
 
-const _: () = assert!(counter::PLAYER_ATTACK_STARTS as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PLAYER_LIQUID_DAMAGE_EVENTS as usize == COUNTER_COUNT - 1);

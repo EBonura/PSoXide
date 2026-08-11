@@ -151,6 +151,27 @@ impl Playtest {
         self.logic
             .set_spatial_active_mask(spatial_masks.map(|masks| masks.1));
         self.bsp_instance_visible_mask = spatial_masks.map_or(u16::MAX, |masks| masks.2 as u16);
+        if let Some((entity_mask, _, _)) = spatial_masks {
+            // Live entities whose leaf sits outside the player's PVS row
+            // this tick: their idle/patrol AI is gated and their
+            // body/equipment/shadow rendering is suppressed above.
+            let mut suppressed = 0u32;
+            for (index, dead) in entity_dead
+                .iter()
+                .enumerate()
+                .take(self.game_entities.count().min(64))
+            {
+                if !dead && entity_mask & (1u64 << index) == 0 {
+                    suppressed += 1;
+                }
+            }
+            if suppressed > 0 {
+                telemetry::counter(
+                    telemetry::counter::GAME_ENTITY_PVS_SUPPRESSIONS,
+                    suppressed,
+                );
+            }
+        }
         let entity_stats = if npc_tick_due {
             // Souls i-frames: the deferred tick never resolves contact, so
             // this pre-motor value only feeds the shared tick-input contract.
@@ -306,6 +327,8 @@ impl Playtest {
         self.player_health = PLAYER_MAX_HEALTH;
         self.player_health_max = PLAYER_MAX_HEALTH;
         self.hazard_death_ticks_remaining = 0;
+        self.death_by_combat = false;
+        self.weapon_attach_reported = false;
         self.swing_hit_mask = 0;
         self.clear_actor_pose_snapshots();
         self.sync_door_box_props();
@@ -652,29 +675,32 @@ impl Playtest {
             {
                 let damage = bsp_hazard_damage(sample.contents, now.as_u32());
                 if damage > 0 {
-                    self.player_health = self.player_health.saturating_sub(damage);
+                    let outcome = psx_game_runtime::character::apply_player_damage(
+                        self.player_health,
+                        false,
+                        damage,
+                    );
+                    self.player_health = outcome.health;
+                    telemetry::counter(telemetry::counter::PLAYER_LIQUID_DAMAGE_EVENTS, 1);
                     telemetry::debug_log(match sample.contents {
                         psx_bsp::collision::CONTENTS_LAVA => "player bsp:lava",
                         psx_bsp::collision::CONTENTS_SLIME => "player bsp:slime",
                         _ => "player bsp:liquid",
                     });
-                    if self.player_health == 0 {
-                        self.hazard_death_ticks_remaining = BSP_HAZARD_DEATH_TICKS;
-                        self.switch_player_anim(PlayerAnim::Death, now, ctx.video_hz);
-                        self.anim_lock_until_tick =
-                            now.saturating_add(u32::from(BSP_HAZARD_DEATH_TICKS));
-                        self.lock_target = None;
-                        self.soft_lock_target = None;
-                        self.active_interactable = None;
+                    if outcome.died {
+                        self.arm_player_death(false, BSP_HAZARD_DEATH_TICKS, now, ctx.video_hz);
                     }
                 }
             }
         }
 
+        // The countdown/respawn below serves EVERY death cause: combat
+        // damage arms it from `resolve_enemy_melee`, hazards and lethal
+        // water from the sites above and below.
         if hazard_countdown_was_active {
             self.hazard_death_ticks_remaining = self.hazard_death_ticks_remaining.saturating_sub(1);
             if self.hazard_death_ticks_remaining == 0 {
-                self.respawn_after_hazard_death();
+                self.respawn_after_death();
             }
         } else if self.hazard_death_ticks_remaining == 0 {
             if let Some(water) = self.water_cell_at(self.room_index, self.motor.position()) {
@@ -683,14 +709,8 @@ impl Playtest {
                         .surface_y
                         .saturating_sub(i32::from(water.death_submerge_depth));
                 if water.depth >= water.lethal_depth && submerged {
-                    self.hazard_death_ticks_remaining = water.death_delay_ticks.max(1);
                     self.player_health = 0;
-                    self.switch_player_anim(PlayerAnim::Death, now, ctx.video_hz);
-                    self.anim_lock_until_tick =
-                        now.saturating_add(u32::from(water.death_delay_ticks));
-                    self.lock_target = None;
-                    self.soft_lock_target = None;
-                    self.active_interactable = None;
+                    self.arm_player_death(false, water.death_delay_ticks, now, ctx.video_hz);
                     telemetry::debug_log("player water:death");
                 }
             }
