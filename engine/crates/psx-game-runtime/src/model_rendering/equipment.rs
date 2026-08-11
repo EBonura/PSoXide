@@ -689,14 +689,12 @@ mod tests {
                         // vertices through the same scaled rotation the
                         // weapon vertex path applies.
                         for tip in [[32_767i32, 32_767, 32_767], [-32_768, -32_768, -32_768]] {
-                            let scaled = scaled_offset(
-                                LocalToWorldScale::from_q12(scale_q12),
-                                tip,
-                            );
+                            let scaled = scaled_offset(LocalToWorldScale::from_q12(scale_q12), tip);
                             let world = rotate_offset_q12(&rotation, scaled);
+                            let origin_components = [origin.x, origin.y, origin.z];
                             for (axis, name) in ["x", "y", "z"].iter().enumerate() {
                                 assert_sane(
-                                    origin.x.saturating_add(world[axis]),
+                                    origin_components[axis].saturating_add(world[axis]),
                                     &format!("blade endpoint {name}"),
                                 );
                             }
