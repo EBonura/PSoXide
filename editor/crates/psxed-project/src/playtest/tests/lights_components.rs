@@ -118,8 +118,10 @@ fn floor_transition_wall_stays_in_single_manual_room() {
     assert_eq!(package.rooms.len(), 1);
     let mut transition_walls = 0usize;
     for room in &package.rooms {
-        let world = psx_asset::World::from_bytes(&package.assets[room.world_asset_index].bytes)
-            .expect("chunk psxw parses");
+        let world = psx_asset::World::from_bytes(
+            &package.assets[room.world_asset_index.expect("grid room world asset")].bytes,
+        )
+        .expect("chunk psxw parses");
         for x in 0..world.width() {
             for z in 0..world.depth() {
                 let Some(sector) = world.sector(x, z) else {
@@ -146,7 +148,7 @@ fn starter_project_bakes_static_surface_lights() {
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let package = package.expect("starter cooks");
     let room = &package.rooms[0];
-    let asset = &package.assets[room.world_asset_index];
+    let asset = &package.assets[room.world_asset_index.expect("grid room world asset")];
     let world = psx_asset::World::from_bytes(&asset.bytes).expect("room psxw parses");
     assert!(world.static_vertex_lighting());
     assert!((0..world.surface_light_count())

@@ -215,9 +215,10 @@ impl PlaytestAsset {
 pub struct PlaytestRoom {
     /// Display name lifted from the editor scene tree.
     pub name: String,
-    /// Index into [`PlaytestPackage::assets`] of the room's
-    /// `RoomWorld` asset.
-    pub world_asset_index: usize,
+    /// Index into [`PlaytestPackage::assets`] of the room's `RoomWorld`
+    /// asset. Resident PXBSP worlds use `None`: their geometry, collision,
+    /// and PVS live in [`PlaytestWorldGeometry::Pxbsp`], not a dummy PSXW.
+    pub world_asset_index: Option<usize>,
     /// Host-baked 4bpp environment map used by reflective model materials in
     /// this runtime room. `None` when the project has no reflective materials.
     pub reflection_probe_asset_index: Option<usize>,

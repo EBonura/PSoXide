@@ -147,6 +147,10 @@ pub struct LogicRuntime<
     queue_drops: u16,
     depth_drops: u16,
     fired: u16,
+    /// Optional owner-supplied per-record activation for touch scans.
+    spatial_activation_enabled: bool,
+    // psx-numeric-allow-next-line: fixed 64-record activation mask; bit ops only, two-word on R3000
+    spatial_active_mask: u64,
 }
 
 impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: usize>
@@ -165,6 +169,8 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         queue_drops: 0,
         depth_drops: 0,
         fired: 0,
+        spatial_activation_enabled: false,
+        spatial_active_mask: 0,
     };
 
     /// Reset and arm runtime state 1:1 from the cooked records
@@ -197,6 +203,13 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
     /// Cooked records that did not fit `MAX_LOGIC` at init.
     pub fn overflow_count(&self) -> u16 {
         self.overflow
+    }
+
+    /// Select an owner-defined per-record activation mask, or restore the
+    /// legacy room-window gate with `None`.
+    pub fn set_spatial_active_mask(&mut self, mask: Option<u64>) {
+        self.spatial_activation_enabled = mask.is_some();
+        self.spatial_active_mask = mask.unwrap_or(0);
     }
 
     /// Rolling counters.
@@ -329,9 +342,15 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
             // Touch requires the player IN the volume's room (cooked
             // bounds are room-local; a raw AABB test aliases across
             // rooms) plus the active-room gate for scan cost.
+            let spatially_active = index < 64 && self.spatial_active_mask & (1u64 << index) != 0;
+            let activation_allows = if self.spatial_activation_enabled {
+                spatially_active
+            } else {
+                room_is_active(record.room, input.active_rooms)
+            };
             if record.kind == logic_kind::TRIGGER_VOLUME
                 && input.player_room == record.room
-                && room_is_active(record.room, input.active_rooms)
+                && activation_allows
                 && point_in_aabb(input.player, record.min, record.max)
                 && self.master_satisfied(records, record.master)
             {
@@ -845,6 +864,32 @@ mod tests {
             active_rooms: &both,
         };
         logic.tick(&FAR_TRIGGER, input, 2);
+        assert!(logic.door_open(1));
+    }
+
+    #[test]
+    fn owner_spatial_mask_replaces_room_gate_for_touch_scan() {
+        static TRIGGER: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                targetname: 1,
+                target: 3,
+                min: [-100, -100, -100],
+                max: [100, 100, 100],
+                ..blank(logic_kind::TRIGGER_VOLUME)
+            },
+            LevelLogicRecord {
+                targetname: 3,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&TRIGGER);
+        logic.set_spatial_active_mask(Some(0));
+        logic.tick(&TRIGGER, input_at([0, 0, 0]), 1);
+        assert!(!logic.door_open(1));
+
+        logic.set_spatial_active_mask(Some(1));
+        logic.tick(&TRIGGER, input_at([0, 0, 0]), 2);
         assert!(logic.door_open(1));
     }
 
