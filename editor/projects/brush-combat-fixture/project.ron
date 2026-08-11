@@ -44,6 +44,7 @@
         viewport_zoom: 96.0,
         snap_units: 16,
     ),
+    world_format: Bsp,
     bsp_cook_mode: Draft,
     runtime_depth_sort_mode: HybridWalls,
     runtime_texture_split_mode: All,

@@ -4281,3 +4281,132 @@ fn legacy_prefab_resources_load_but_do_not_reserialize() {
         .expect("normalized project serializes")
         .contains("Prefab"));
 }
+
+// --- Project world-format discriminator -------------------------------
+//
+// The persisted `world_format` field replaced the presence-based selection
+// chain documented in docs/legacy-grid-boundary.md section 1. These tests
+// pin the compatibility contract: documents written before the field
+// existed must resolve to exactly the format they used to cook as, and a
+// resolved value must survive a round trip untouched.
+
+#[test]
+fn legacy_grid_projects_without_the_field_load_as_grid() {
+    for relative in [
+        "../../projects/default/project.ron",
+        "../../samples/cortex_v1/project.ron",
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let text = std::fs::read_to_string(&path).expect("tracked grid project is readable");
+        assert!(
+            !text.contains("world_format"),
+            "{relative} is the pre-discriminator fixture; it must stay field-free \
+             so the compatibility default keeps being exercised"
+        );
+        let project = ProjectDocument::from_ron_str(&text).expect("tracked grid project parses");
+        assert_eq!(
+            project.world_format(),
+            ProjectWorldFormat::LegacyGrid,
+            "{relative} must keep loading as a legacy grid project"
+        );
+    }
+}
+
+#[test]
+fn bsp_projects_without_the_field_load_as_bsp() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../projects/brush-first-playable/project.ron");
+    let mut text = std::fs::read_to_string(&path).expect("tracked BSP project is readable");
+    // Strip the field if the tracked copy already carries it: the point is
+    // the pre-discriminator shape, which must still resolve to BSP.
+    text = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("world_format:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let project = ProjectDocument::from_ron_str(&text).expect("tracked BSP project parses");
+    assert_eq!(project.world_format(), ProjectWorldFormat::Bsp);
+}
+
+#[test]
+fn world_format_round_trips_and_is_never_re_derived() {
+    // A BSP project whose brushes were all deleted stays BSP: the stored
+    // value wins over geometry presence, so the cook reports the empty world
+    // instead of silently reopening as a grid project.
+    let mut project = ProjectDocument::new("format-round-trip");
+    project.set_world_format(ProjectWorldFormat::Bsp);
+    assert!(project.active_scene().brushes.is_empty());
+
+    let ron = project.to_ron_string().expect("project serializes");
+    assert!(ron.contains("world_format"), "the field must be persisted");
+    let loaded = ProjectDocument::from_ron_str(&ron).expect("project parses");
+    assert_eq!(loaded.world_format(), ProjectWorldFormat::Bsp);
+
+    // And the reverse: a grid project that gains brushes keeps its stored
+    // format (the cook then refuses, see the fail-closed tests).
+    let mut grid = ProjectDocument::new("legacy-format-round-trip");
+    grid.set_world_format(ProjectWorldFormat::LegacyGrid);
+    let ron = grid.to_ron_string().expect("project serializes");
+    let loaded = ProjectDocument::from_ron_str(&ron).expect("project parses");
+    assert_eq!(loaded.world_format(), ProjectWorldFormat::LegacyGrid);
+}
+
+#[test]
+fn a_fresh_document_is_bsp_before_it_has_any_geometry() {
+    // New projects are BSP-only (docs/legacy-grid-boundary.md A13). An empty
+    // scene must not read as "legacy grid" just because it has no brushes yet.
+    let project = ProjectDocument::new("fresh-format");
+    assert!(project.active_scene().brushes.is_empty());
+    assert_eq!(project.world_format(), ProjectWorldFormat::Bsp);
+
+    let ron = project.to_ron_string().expect("project serializes");
+    assert!(ron.contains("world_format: Bsp"));
+    let loaded = ProjectDocument::from_ron_str(&ron).expect("project parses");
+    assert_eq!(loaded.world_format(), ProjectWorldFormat::Bsp);
+}
+
+#[test]
+fn a_legacy_grid_project_holding_brushes_fails_the_cook_closed() {
+    let mut project = ProjectDocument::new("grid-with-brushes");
+    project.set_world_format(ProjectWorldFormat::LegacyGrid);
+    project
+        .active_scene_mut()
+        .brushes
+        .push(crate::brush::Brush::cuboid([0, 0, 0], [256, 256, 256]));
+    let (package, report) =
+        crate::playtest::build_package(&project, std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert!(package.is_none(), "a mixed project must not cook");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("Legacy grid") && error.contains("brush")),
+        "expected a named format mismatch, got {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn a_bsp_project_without_brushes_fails_the_cook_closed() {
+    let mut project = ProjectDocument::new("bsp-without-brushes");
+    project.set_world_format(ProjectWorldFormat::Bsp);
+    let (package, report) =
+        crate::playtest::build_package(&project, std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert!(package.is_none(), "an empty BSP project must not cook");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("BSP") && error.contains("no brushes")),
+        "expected a named empty-world error, got {:?}",
+        report.errors
+    );
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|error| error.contains("at least one Room node")),
+        "a BSP project must never be told to add a grid Room: {:?}",
+        report.errors
+    );
+}

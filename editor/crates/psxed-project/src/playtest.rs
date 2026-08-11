@@ -302,15 +302,47 @@ pub fn build_package(
         .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
         .collect();
     room_nodes.sort_by_key(|node| node.id.raw());
-    let uses_pxbsp = !scene.brushes.is_empty();
+    // The persisted discriminator, not geometry presence, selects the world
+    // pipeline (docs/legacy-grid-boundary.md section 1). Content that
+    // contradicts it is a hard error rather than a silent preference, so a
+    // BSP project can never cook grid spatial state and a legacy project can
+    // never quietly drop authored brushes.
+    let world_format = project.world_format();
+    let uses_pxbsp = world_format.is_bsp();
+    if world_format.is_legacy_grid() && !scene.brushes.is_empty() {
+        report.error_at(
+            PlaytestValidationTarget::Brush {
+                brush: 0,
+                face: None,
+            },
+            format!(
+                "project format is {} but the active scene holds {} brush(es); \
+                 the grid pipeline cannot cook brush geometry and refuses to \
+                 discard it - move the brushes to a BSP project",
+                world_format.label(),
+                scene.brushes.len()
+            ),
+        );
+        return (None, report);
+    }
+    if uses_pxbsp && scene.brushes.is_empty() {
+        report.error(format!(
+            "project format is {} but the active scene holds no brushes; \
+             a BSP project has no other world source and will not fall back \
+             to the grid pipeline",
+            world_format.label()
+        ));
+        return (None, report);
+    }
 
     if room_nodes.is_empty() && !uses_pxbsp {
         report.error("playtest needs at least one Room node - none found");
         return (None, report);
     }
     if uses_pxbsp {
-        // The PXBSP payload is authoritative when brushes are present. Ignore
-        // transitional Section nodes instead of cooking two world providers.
+        // The PXBSP payload is the only world provider. Transitional Section
+        // nodes are dropped here so no grid spatial state can be built below;
+        // `assert_no_grid_spatial_state` re-checks that at the end of the cook.
         room_nodes.clear();
     }
 
