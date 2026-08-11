@@ -318,6 +318,9 @@ pub const TEXTURE_NULL: u8 = 0x80;
 pub const FACE_BACKSIDE: u16 = 1;
 pub const FACE_BAKED_UV: u16 = 2;
 pub const FACE_BAKED_LIGHT: u16 = 4;
+/// PXBSP face override that renders both authored sides regardless of the
+/// shared material's normal sidedness policy.
+pub const FACE_TWO_SIDED: u16 = 8;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Vec2U8 {
