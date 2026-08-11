@@ -628,3 +628,124 @@ fn model_with_no_clips_fails_when_placed() {
         report.errors,
     );
 }
+
+#[test]
+fn byte_identical_model_atlases_cook_into_one_shared_texture_asset() {
+    // Two placed models sharing one atlas file must share one cooked
+    // persistent texture asset (the sword-pair contract).
+    let mut project = ProjectDocument::starter();
+    let player_model = player_model_resource_id(&project);
+    let ResourceData::Model(model) = &project
+        .resource(player_model)
+        .expect("starter player model")
+        .data
+        .clone()
+    else {
+        panic!("player model resource is not a Model");
+    };
+    let atlas_path = model.texture_path.clone().expect("starter model atlas");
+    let atlas_bytes =
+        std::fs::read(starter_project_root().join(&atlas_path)).expect("read starter atlas");
+    let second = project.add_resource("Second Model", ResourceData::Model(model.clone()));
+    place_extra_model_instance(&mut project, second);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    let package = package.unwrap_or_else(|| panic!("cook failed: {:?}", report.errors));
+    let shared = package
+        .assets
+        .iter()
+        .filter(|asset| {
+            asset.kind == PlaytestAssetKind::Texture && asset.bytes == atlas_bytes
+        })
+        .count();
+    assert_eq!(shared, 1, "identical atlases must share one cooked asset");
+}
+
+#[test]
+fn model_atlases_differing_by_one_payload_byte_stay_distinct() {
+    // Dedup is byte identity: ANY differing PSXT byte (metadata or
+    // payload) must keep the cooked assets distinct.
+    let mut project = ProjectDocument::starter();
+    let player_model = player_model_resource_id(&project);
+    let ResourceData::Model(model) = &project
+        .resource(player_model)
+        .expect("starter player model")
+        .data
+        .clone()
+    else {
+        panic!("player model resource is not a Model");
+    };
+    let atlas_path = model.texture_path.clone().expect("starter model atlas");
+    let atlas_bytes =
+        std::fs::read(starter_project_root().join(&atlas_path)).expect("read starter atlas");
+    let mut flipped = atlas_bytes.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x01;
+
+    let dir = unique_temp_dir("psxed-atlas-distinct");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let flipped_path = dir.join("flipped_atlas.psxt");
+    std::fs::write(&flipped_path, &flipped).expect("write flipped atlas");
+
+    let mut second_model = model.clone();
+    second_model.texture_path = Some(flipped_path.to_string_lossy().into_owned());
+    let second = project.add_resource("Second Model", ResourceData::Model(second_model));
+    place_extra_model_instance(&mut project, second);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    let package = package.unwrap_or_else(|| panic!("cook failed: {:?}", report.errors));
+    let originals = package
+        .assets
+        .iter()
+        .filter(|asset| {
+            asset.kind == PlaytestAssetKind::Texture && asset.bytes == atlas_bytes
+        })
+        .count();
+    let variants = package
+        .assets
+        .iter()
+        .filter(|asset| asset.kind == PlaytestAssetKind::Texture && asset.bytes == flipped)
+        .count();
+    assert_eq!(originals, 1, "original atlas cooks once");
+    assert_eq!(variants, 1, "differing atlas must stay a distinct asset");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn place_extra_model_instance(project: &mut ProjectDocument, model: ResourceId) {
+    // Clip resolution is per model resource, so the second model needs one
+    // clip retargeted at it; clone the first clip of the same skeleton.
+    let skeleton = match &project.resource(model).expect("second model").data {
+        ResourceData::Model(second) => second.skeleton,
+        _ => panic!("resource is not a Model"),
+    };
+    let clip = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) if clip.skeleton == skeleton => Some(clip.clone()),
+            _ => None,
+        })
+        .expect("starter has a clip for the player skeleton");
+    let mut retargeted = clip;
+    retargeted.target_model = Some(model);
+    project.add_resource(
+        "Second Model Clip",
+        ResourceData::AnimationClip(retargeted),
+    );
+    let scene = project.active_scene_mut();
+    let room_id = scene
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
+        .map(|n| n.id)
+        .expect("starter has a Section");
+    scene.add_node(
+        room_id,
+        "Dedup Model Instance",
+        NodeKind::MeshInstance {
+            mesh: Some(model),
+            material: None,
+            animation_clip: None,
+        },
+    );
+}
