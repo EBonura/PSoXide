@@ -1007,7 +1007,7 @@ impl EditorWorkspace {
                     transform.world_to_screen([projected[0] as f32, projected[1] as f32]),
                 );
             }
-            if bounds.is_positive() && rect.intersects(bounds) {
+            if bounds.expand(BRUSH_SCREEN_PICK_RADIUS).intersects(rect) {
                 hits.push(index);
                 if !selected.contains(&index) {
                     selected.push(index);
@@ -1052,18 +1052,33 @@ impl EditorWorkspace {
         modifiers: egui::Modifiers,
     ) {
         let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
+        let brushes = !self.project.active_scene().brushes.is_empty();
         self.interaction = Interaction::BoxSelect3d(Viewport3dBoxSelect {
             start,
             current: start,
             room,
             additive,
-            base_primitives: if additive {
+            base_primitives: if additive && !brushes {
                 self.selected_primitive_targets()
             } else {
                 Vec::new()
             },
+            brushes,
+            base_brushes: if additive && brushes {
+                self.selected_brush_set()
+            } else {
+                Vec::new()
+            },
+            base_primary_brush: (additive && brushes)
+                .then_some(self.selected_brush)
+                .flatten(),
         });
-        if !additive {
+        if brushes {
+            if !additive {
+                self.clear_brush_selection();
+            }
+            self.clear_primitive_selection_state();
+        } else if !additive {
             self.selection.selected_primitive = None;
             self.selection.selected_primitives.clear();
         }
@@ -1082,14 +1097,84 @@ impl EditorWorkspace {
         let room = drag.room;
         let additive = drag.additive;
         let base_primitives = drag.base_primitives.clone();
-        self.select_primitives_in_viewport_3d_rect(
-            viewport,
-            rect,
-            room,
-            additive,
-            &base_primitives,
-        );
+        let brushes = drag.brushes;
+        let base_brushes = drag.base_brushes.clone();
+        let base_primary_brush = drag.base_primary_brush;
+        if brushes {
+            self.select_brushes_in_viewport_3d_rect(
+                viewport,
+                rect,
+                additive,
+                &base_brushes,
+                base_primary_brush,
+            );
+        } else {
+            self.select_primitives_in_viewport_3d_rect(
+                viewport,
+                rect,
+                room,
+                additive,
+                &base_primitives,
+            );
+        }
         true
+    }
+
+    fn select_brushes_in_viewport_3d_rect(
+        &mut self,
+        viewport: Rect,
+        rect: Rect,
+        additive: bool,
+        base_brushes: &[usize],
+        base_primary_brush: Option<usize>,
+    ) {
+        let mut selected = if additive {
+            base_brushes.to_vec()
+        } else {
+            Vec::new()
+        };
+        let mut hits = Vec::new();
+        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            let solved = brush.solve();
+            if !solved.is_valid() {
+                continue;
+            }
+            let mut bounds = Rect::NOTHING;
+            for vertex in solved
+                .polygons
+                .iter()
+                .flatten()
+                .flat_map(|polygon| polygon.verts.iter().copied())
+            {
+                if let Some(point) = self.project_brush_point_3d(viewport, vertex) {
+                    bounds.extend_with(point);
+                }
+            }
+            if bounds.expand(BRUSH_SCREEN_PICK_RADIUS).intersects(rect) {
+                hits.push(index);
+                if !selected.contains(&index) {
+                    selected.push(index);
+                }
+            }
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        self.selected_brushes = selected;
+        self.selected_brush = if additive && base_primary_brush.is_some() {
+            base_primary_brush.filter(|index| self.selected_brushes.contains(index))
+        } else {
+            hits.first().copied()
+        }
+        .or_else(|| self.selected_brushes.first().copied());
+        self.selected_brush_face = None;
+        self.clear_node_selection_state();
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.status = match self.selected_brushes.len() {
+            0 => "No brushes in marquee".to_string(),
+            1 => "Selected 1 brush".to_string(),
+            count => format!("Selected {count} brushes"),
+        };
     }
 
     pub(crate) fn end_viewport_3d_box_select(&mut self) {

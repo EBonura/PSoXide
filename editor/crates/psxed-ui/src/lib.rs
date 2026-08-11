@@ -121,12 +121,21 @@ const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
+/// Screen-space forgiveness for selecting BSP brushes and projected brush
+/// bounds. Keeping this in pixels makes tiny, distant brushes usable without
+/// tying the tolerance to authored world scale.
+const BRUSH_SCREEN_PICK_RADIUS: f32 = 8.0;
 const PROJECT_WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WatchedFileMetadata {
     len: u64,
     modified_nanos: Option<u128>,
+    created_nanos: Option<u128>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,9 +170,21 @@ fn watched_file_metadata(path: &Path) -> Option<WatchedFileMetadata> {
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos());
+    let created_nanos = metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
     Some(WatchedFileMetadata {
         len: metadata.len(),
         modified_nanos,
+        created_nanos,
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
     })
 }
 
@@ -615,6 +636,9 @@ pub struct EditorWorkspace {
     selected_brushes: Vec<usize>,
     /// Selected face index within the selected brush.
     selected_brush_face: Option<usize>,
+    /// Visible, mode-driven BSP transform grammar. Move is the default so a
+    /// plain drag performs the most common operation without a modifier.
+    brush_edit_mode: BrushEditMode,
     /// In-flight brush-create drag (Brush tool primary held).
     brush_drag: Option<BrushDrag>,
     /// In-flight brush face-extrude drag (Brush tool primary held on a
@@ -1021,6 +1045,58 @@ impl SelectionMode {
             Self::Face => icons::SQUARE,
             Self::Edge => icons::SCAN,
             Self::Vertex => icons::CIRCLE_DOT,
+        }
+    }
+}
+
+/// Direct BSP transform grammar. This is deliberately separate from the
+/// legacy grid primitive [`SelectionMode`]: brushes need an explicit
+/// whole-object Move state as well as Face/Edge/Vertex reshape states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum BrushEditMode {
+    #[default]
+    Move,
+    Face,
+    Edge,
+    Vertex,
+}
+
+impl BrushEditMode {
+    const ALL: [Self; 4] = [Self::Move, Self::Face, Self::Edge, Self::Vertex];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Move => "Move",
+            Self::Face => "Face",
+            Self::Edge => "Edge",
+            Self::Vertex => "Vertex",
+        }
+    }
+
+    const fn gesture_hint(self) -> &'static str {
+        match self {
+            Self::Move => "Drag the brush to move it",
+            Self::Face => "Drag a face handle to resize",
+            Self::Edge => "Drag an edge handle to reshape",
+            Self::Vertex => "Drag a vertex handle to reshape",
+        }
+    }
+
+    const fn toolbar_hint(self) -> &'static str {
+        match self {
+            Self::Move => "Drag brush",
+            Self::Face => "Drag face",
+            Self::Edge => "Drag edge",
+            Self::Vertex => "Drag vertex",
+        }
+    }
+
+    const fn selection_mode(self) -> Option<SelectionMode> {
+        match self {
+            Self::Move => None,
+            Self::Face => Some(SelectionMode::Face),
+            Self::Edge => Some(SelectionMode::Edge),
+            Self::Vertex => Some(SelectionMode::Vertex),
         }
     }
 }
@@ -1438,6 +1514,9 @@ struct Viewport3dBoxSelect {
     room: Option<NodeId>,
     additive: bool,
     base_primitives: Vec<Selection>,
+    brushes: bool,
+    base_brushes: Vec<usize>,
+    base_primary_brush: Option<usize>,
 }
 
 impl Viewport3dBoxSelect {
@@ -2847,6 +2926,7 @@ impl EditorWorkspace {
             selected_brush: None,
             selected_brushes: Vec::new(),
             selected_brush_face: None,
+            brush_edit_mode: BrushEditMode::Move,
             brush_drag: None,
             brush_extrude: None,
             brush_clip_start: None,
@@ -3248,18 +3328,14 @@ impl EditorWorkspace {
             return;
         }
         let project_path = self.project_dir.join("project.ron");
-        let project_metadata = watched_file_metadata(&project_path);
-        let project_changed = if project_metadata != self.project_watch.project.metadata {
-            let hash = watched_file_hash(&project_path);
-            let changed = hash != self.project_watch.project.hash;
-            self.project_watch.project = WatchedProjectSignature {
-                metadata: project_metadata,
-                hash,
-            };
-            changed
-        } else {
-            false
-        };
+        // project.ron is the small authoritative document, so hash it on
+        // every bounded poll. Metadata alone cannot detect an atomic replace
+        // that preserves length and timestamp on a coarse filesystem. Runtime
+        // resources remain metadata/identity-only below; raw model and
+        // animation sources are still outside the watch set entirely.
+        let project_signature = watched_project_signature(&project_path);
+        let project_changed = project_signature.hash != self.project_watch.project.hash;
+        self.project_watch.project = project_signature;
         let resource_signatures = watched_resource_signatures(&self.project_dir, &self.project);
         let resource_paths_changed = resource_signatures
             .keys()
@@ -3334,9 +3410,9 @@ impl EditorWorkspace {
         let mut opened = Self::open_directory(&target)?;
         opened.project.name = trimmed.to_string();
         opened.project.bsp_cook_mode = cook_mode;
-        // Keep the template's deliberately authored interior 3D camera. A
-        // generic bounds fit lands outside a closed brush room and shows only
-        // its roof; the template starts inside, looking toward the door.
+        // Keep the template's deliberately authored courtyard 3D camera so a
+        // new author can switch from the initial top view to a useful overview
+        // of the roofless blockout without first recovering the camera.
         // New BSP maps open where blockout work begins: the top orthographic
         // viewport with the brush tool active. Existing projects retain their
         // saved workspace/camera state when opened normally.

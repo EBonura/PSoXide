@@ -167,7 +167,12 @@ impl EditorWorkspace {
         hits: &[ViewportHit],
         modifiers: egui::Modifiers,
     ) {
-        if self.orthographic_view != OrthographicView::Top && self.active_tool != ViewTool::Brush {
+        let bsp_select =
+            self.active_tool == ViewTool::Select && !self.project.active_scene().brushes.is_empty();
+        if self.orthographic_view != OrthographicView::Top
+            && self.active_tool != ViewTool::Brush
+            && !bsp_select
+        {
             self.status = format!(
                 "{} is a BSP brush view; use Top for room-grid and node tools",
                 self.orthographic_view.label()
@@ -179,7 +184,8 @@ impl EditorWorkspace {
                 if modifiers.command {
                     let point = self.brush_snap_2d(world);
                     self.brush_clip_click(point);
-                } else if let Some((brush, face)) = self.pick_brush_face_at_2d(world) {
+                } else if let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world)
+                {
                     self.clear_node_selection_state();
                     self.clear_resource_selection_state();
                     self.clear_primitive_selection_state();
@@ -208,7 +214,8 @@ impl EditorWorkspace {
                         self.clear_primitive_selection_state();
                         self.clear_sector_selection();
                     }
-                } else if let Some((brush, face)) = self.pick_brush_face_at_2d(world) {
+                } else if let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world)
+                {
                     self.clear_node_selection_state();
                     self.clear_resource_selection_state();
                     self.clear_primitive_selection_state();
