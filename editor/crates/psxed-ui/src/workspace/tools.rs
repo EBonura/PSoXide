@@ -56,6 +56,15 @@ pub(crate) fn tool_impl_3d(tool: ViewTool) -> &'static dyn ViewportTool3d {
 /// it afterwards.
 pub(crate) const BRUSH_CREATE_HEIGHT: i32 = 256;
 
+fn brush_contents_outline(contents: psxed_project::brush::BrushContents) -> egui::Color32 {
+    match contents {
+        psxed_project::brush::BrushContents::Solid => EDITOR_OUTLINE_ACCENT,
+        psxed_project::brush::BrushContents::Water => egui::Color32::from_rgb(72, 156, 232),
+        psxed_project::brush::BrushContents::Slime => egui::Color32::from_rgb(116, 196, 72),
+        psxed_project::brush::BrushContents::Lava => egui::Color32::from_rgb(240, 112, 48),
+    }
+}
+
 /// Selection, gizmo and drag-translate flows (previously the `select_tool`
 /// branch of `draw_viewport_3d_body`).
 pub(crate) struct SelectTool;
@@ -632,7 +641,7 @@ impl EditorWorkspace {
         let Some(index) = self.selected_brush else {
             return;
         };
-        let Some(brush) = self.project.active_scene().brushes.get(index).cloned() else {
+        let Some(mut brush) = self.project.active_scene().brushes.get(index).cloned() else {
             return;
         };
         let solved = brush.solve();
@@ -716,6 +725,54 @@ impl EditorWorkspace {
             }
         });
 
+        let primary_contents = brush.contents;
+        let mixed_contents = self.selected_brush_set().iter().any(|&selected| {
+            self.project
+                .active_scene()
+                .brushes
+                .get(selected)
+                .is_some_and(|selected_brush| selected_brush.contents != primary_contents)
+        });
+        let mut requested_contents = None;
+        ui.horizontal(|ui| {
+            ui.label("BSP contents");
+            egui::ComboBox::from_id_salt(("brush-contents", index))
+                .selected_text(if mixed_contents {
+                    "Mixed"
+                } else {
+                    primary_contents.label()
+                })
+                .show_ui(ui, |ui| {
+                    for option in psxed_project::brush::BrushContents::ALL {
+                        if ui
+                            .selectable_label(
+                                !mixed_contents && primary_contents == option,
+                                option.label(),
+                            )
+                            .clicked()
+                        {
+                            requested_contents = Some(option);
+                        }
+                    }
+                });
+        });
+        if let Some(contents) = requested_contents {
+            self.set_selected_brush_contents(contents);
+            brush.contents = contents;
+            if !contents.is_solid() {
+                brush.mover = None;
+            }
+        }
+        if !brush.contents.is_solid() {
+            ui.label(
+                egui::RichText::new(
+                    "Liquid contents are non-blocking. The textured boundary remains visible and the runtime samples the volume inside it.",
+                )
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
+        }
+
         let movers: Vec<_> = self
             .project
             .active_scene()
@@ -745,16 +802,18 @@ impl EditorWorkspace {
             } else {
                 "World (static)"
             });
-        ui.horizontal(|ui| {
-            ui.label("Model owner");
-            egui::ComboBox::from_id_salt(("brush-mover", index))
-                .selected_text(mover_label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut mover, None, "World (static)");
-                    for (node, name) in &movers {
-                        ui.selectable_value(&mut mover, Some(*node), name);
-                    }
-                });
+        ui.add_enabled_ui(brush.contents.is_solid(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Model owner");
+                egui::ComboBox::from_id_salt(("brush-mover", index))
+                    .selected_text(mover_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut mover, None, "World (static)");
+                        for (node, name) in &movers {
+                            ui.selectable_value(&mut mover, Some(*node), name);
+                        }
+                    });
+            });
         });
         if mover != brush.mover {
             self.set_selected_brush_mover(mover);
@@ -832,11 +891,65 @@ impl EditorWorkspace {
         self.draw_brush_face_uv_controls(ui);
     }
 
+    /// Set every selected brush to one structural/liquid contents kind as one
+    /// undo step. Liquids are always static world volumes, so changing a Door
+    /// brush to liquid clears its mover binding in the same atomic edit.
+    pub(crate) fn set_selected_brush_contents(
+        &mut self,
+        contents: psxed_project::brush::BrushContents,
+    ) {
+        let targets = self.selected_brush_set();
+        if targets.is_empty()
+            || targets.iter().all(|&index| {
+                self.project
+                    .active_scene()
+                    .brushes
+                    .get(index)
+                    .is_none_or(|brush| brush.contents == contents)
+            })
+        {
+            return;
+        }
+        self.push_undo();
+        let mut unbound = 0usize;
+        for index in targets {
+            let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) else {
+                continue;
+            };
+            brush.contents = contents;
+            if !contents.is_solid() && brush.mover.take().is_some() {
+                unbound += 1;
+            }
+        }
+        self.mark_dirty();
+        self.status = if unbound == 0 {
+            format!("Brush contents set to {}", contents.label())
+        } else {
+            format!(
+                "Brush contents set to {}; removed {unbound} Door binding{} because liquid movers are unsupported",
+                contents.label(),
+                if unbound == 1 { "" } else { "s" }
+            )
+        };
+    }
+
     /// Bind the selected brush to one Door logic node, or return it to model 0.
     pub(crate) fn set_selected_brush_mover(&mut self, mover: Option<NodeId>) {
         let Some(index) = self.selected_brush else {
             return;
         };
+        if mover.is_some()
+            && self
+                .project
+                .active_scene()
+                .brushes
+                .get(index)
+                .is_some_and(|brush| !brush.contents.is_solid())
+        {
+            self.status =
+                "Liquid brushes are static BSP contents and cannot be bound to a Door".to_string();
+            return;
+        }
         if let Some(mover) = mover {
             let valid = self.project.active_scene().node(mover).is_some_and(|node| {
                 matches!(
@@ -1837,7 +1950,7 @@ impl EditorWorkspace {
             let stroke = if selected {
                 egui::Stroke::new(2.0, STUDIO_ACCENT)
             } else {
-                egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
+                egui::Stroke::new(1.0, brush_contents_outline(brush.contents))
             };
             // The face highlight follows only the primary selection.
             draw(
@@ -1988,7 +2101,7 @@ impl EditorWorkspace {
             let stroke = if selected {
                 egui::Stroke::new(2.0, STUDIO_ACCENT)
             } else {
-                egui::Stroke::new(1.0, EDITOR_OUTLINE_ACCENT)
+                egui::Stroke::new(1.0, brush_contents_outline(brush.contents))
             };
             draw(brush, stroke);
             // Emphasize the selected face's polygon on the primary brush.

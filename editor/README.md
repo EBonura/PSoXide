@@ -39,18 +39,27 @@ cargo run -p frontend -- --editor --windowed
 4. To change a surface, click the brush face, choose a Material in the
    Inspector, then press **Apply to face**. Imported textures appear as
    Materials in the Resources panel.
-5. A project may have one player source. Move the template's **Player Spawn**,
+5. To author a liquid, select a closed brush and change **BSP contents** in the
+   Brush Inspector from **Solid** to **Water**, **Slime**, or **Lava**. Liquid
+   brushes render their boundary but do not block movement. Every liquid
+   retains 60 percent movement speed; water is harmless, slime deals 4 health
+   every 30 simulation ticks, and lava deals 10 every 15 ticks. The strongest
+   overlapping liquid wins, and contiguous feet/torso/head samples determine
+   depth. Liquid brushes are static:
+   changing a Door-bound brush to liquid removes its mover binding, and the
+   cooker rejects any malformed liquid mover that reaches it.
+6. A project may have one player source. Move the template's **Player Spawn**,
    or delete it and choose **Tool → Add → Player Spawn**, then click an
    upward-facing brush floor. **Point Light** is available from the same Add
    menu. In Top view, placement uses the upward surface closest to the shared
    Y focus; in 3D, click the visible floor directly.
    For a moving door, add **Logic**, change its Inspector kind to **Door**,
    then select the door brush and choose that node under **Model owner**.
-6. Save with **File → Save** (`Cmd/Ctrl+S`) and press **Play**. Play saves the
+7. Save with **File → Save** (`Cmd/Ctrl+S`) and press **Play**. Play saves the
    authored state, cooks the PXBSP, builds the real PS1 runtime, and boots it
    in the editor viewport. The first build is slower because it compiles the
    guest; later iterations reuse it.
-7. Stop or return to editing, make a change, then press **Rebuild & Play**.
+8. Stop or return to editing, make a change, then press **Rebuild & Play**.
    No generated-file copying or command-line cook is required. Use the Play
    button's chevron to switch between fast **Draft** and lit **Release** cooks
    and to inspect the latest PS1 memory/packet budget.
@@ -67,6 +76,12 @@ persists and cooks the authored artifact, builds the real `mipsel-sony-psx`
 guest and disc, then boots it in the headless PSoXide emulator and proves
 rendered frames plus player movement. This is an emulator gate, not a GUI
 automation or original-hardware claim.
+
+For a no-image runtime proof of the BSP liquid contract, run
+`make editor-bsp-liquid-check`. It generates a temporary lava-brush project,
+cooks the real PXBSP, builds the `mipsel-sony-psx` guest and disc, boots it
+headlessly, and requires guest telemetry showing deterministic lava damage and
+checkpoint/spawn respawn. It writes no screenshots or framebuffer dumps.
 
 ## Crates
 
