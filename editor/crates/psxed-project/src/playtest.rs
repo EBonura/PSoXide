@@ -180,14 +180,47 @@ fn brush_world_validation_target(
             material: Some(resource),
             ..
         } => Some(PlaytestValidationTarget::Resource(*resource)),
+        // Capacity overflows blame the object being compiled when it ran out
+        // of room, not the map as a whole.
+        BrushWorldCookError::ModelIndexOverflow(node) => {
+            Some(PlaytestValidationTarget::Node(*node))
+        }
+        BrushWorldCookError::TextureAssetOverflow {
+            material: Some(resource),
+        } => Some(PlaytestValidationTarget::Resource(*resource)),
+        BrushWorldCookError::Light {
+            node: Some(node), ..
+        } => Some(PlaytestValidationTarget::Node(*node)),
+        BrushWorldCookError::Collision(
+            crate::brush_collision_hulls::CollisionHullCompileError::InvalidPlane(Some(brush)),
+        ) => Some(PlaytestValidationTarget::Brush {
+            brush: *brush,
+            face: None,
+        }),
+        // Genuinely underivable, each for its own reason:
+        // - EmptyStaticWorld / InvalidWorldTree: whole-map conditions.
+        // - InvalidTexture{material: None}: the built-in default brush
+        //   texture, which is not a project resource.
+        // - TextureAssetOverflow{material: None}: same, the default texture.
+        // - Pack: BrushPackError indexes SURFACES, leaves and planes of the
+        //   compiled BSP. CSG splitting means one authored brush becomes many
+        //   surfaces and one surface can come from several brushes, and no
+        //   surface-to-brush provenance table is kept, so a surface index
+        //   cannot be honestly resolved back to a brush the author can select.
+        // - Collision other arms: InvalidBounds indexes the requested hull
+        //   size list (a cook constant, not authored content) and
+        //   LimitExceeded is a whole-map cap.
+        // - Light without a node: the inner error names no light index.
+        // - Pxbsp: whole-map record counts, alignment and reference checks.
+        //   Its InvalidMaterial names a compiled material SLOT, which is a
+        //   cook-side index into the merged slot table rather than a resource.
         BrushWorldCookError::EmptyStaticWorld
         | BrushWorldCookError::InvalidWorldTree
         | BrushWorldCookError::InvalidTexture { material: None, .. }
-        | BrushWorldCookError::ModelIndexOverflow
-        | BrushWorldCookError::TextureAssetOverflow
+        | BrushWorldCookError::TextureAssetOverflow { material: None }
         | BrushWorldCookError::Pack(_)
         | BrushWorldCookError::Collision(_)
-        | BrushWorldCookError::Light(_)
+        | BrushWorldCookError::Light { node: None, .. }
         | BrushWorldCookError::Pxbsp(_) => None,
     }
 }
@@ -951,12 +984,10 @@ pub fn build_package(
         ) {
             Ok(compiled) => compiled,
             Err(error) => {
-                let message = format!("brush world compile failed: {error}");
-                if let Some(target) = brush_world_validation_target(&error) {
-                    report.error_at(target, message);
-                } else {
-                    report.error(message);
-                }
+                report.error_maybe_at(
+                    brush_world_validation_target(&error),
+                    format!("brush world compile failed: {error}"),
+                );
                 return (None, report);
             }
         };
@@ -1287,38 +1318,41 @@ pub fn build_package(
                                 &mut report,
                             )
                         });
-                        if !push_model_instance_for_resource(
-                            project,
-                            project_root,
-                            node.name.as_str(),
-                            model_resource_id,
-                            ModelInstancePlacement {
-                                clip_override: clip,
-                                pose_frame,
-                                room_index,
-                                pos,
-                                yaw,
-                                visual_yaw: renderer.visual_yaw,
-                                pitch,
-                                roll,
-                                visual_offset: renderer.visual_offset,
-                                visual_scale_q8: renderer.visual_scale_q8,
-                                material_override,
-                            },
-                            ModelCookTables {
-                                assets: &mut assets,
-                                models: &mut models,
-                                model_clips: &mut model_clips,
-                                model_clip_bounds: &mut model_clip_bounds,
-                                model_frame_bounds: &mut model_frame_bounds,
-                                model_sockets: &mut model_sockets,
-                                model_instances: &mut model_instances,
-                                model_for_resource: &mut model_for_resource,
-                                runtime_model_clips: &runtime_model_clips,
-                                model_clip_remaps: &mut model_clip_remaps,
-                                report: &mut report,
-                            },
-                        ) {
+                        let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                            push_model_instance_for_resource(
+                                project,
+                                project_root,
+                                node.name.as_str(),
+                                model_resource_id,
+                                ModelInstancePlacement {
+                                    clip_override: clip,
+                                    pose_frame,
+                                    room_index,
+                                    pos,
+                                    yaw,
+                                    visual_yaw: renderer.visual_yaw,
+                                    pitch,
+                                    roll,
+                                    visual_offset: renderer.visual_offset,
+                                    visual_scale_q8: renderer.visual_scale_q8,
+                                    material_override,
+                                },
+                                ModelCookTables {
+                                    assets: &mut assets,
+                                    models: &mut models,
+                                    model_clips: &mut model_clips,
+                                    model_clip_bounds: &mut model_clip_bounds,
+                                    model_frame_bounds: &mut model_frame_bounds,
+                                    model_sockets: &mut model_sockets,
+                                    model_instances: &mut model_instances,
+                                    model_for_resource: &mut model_for_resource,
+                                    runtime_model_clips: &runtime_model_clips,
+                                    model_clip_remaps: &mut model_clip_remaps,
+                                    report,
+                                },
+                            )
+                        });
+                        if !ok {
                             return (None, report);
                         }
                     }
@@ -1353,27 +1387,30 @@ pub fn build_package(
                             ));
                             continue;
                         };
-                        if !push_character_controller_idle_instance(
-                            project,
-                            project_root,
-                            node.name.as_str(),
-                            character_id,
-                            room_index,
-                            pos,
-                            yaw,
-                            &mut texture_asset_for_path,
-                            &mut assets,
-                            &mut models,
-                            &mut model_clips,
-                            &mut model_clip_bounds,
-                            &mut model_frame_bounds,
-                            &mut model_sockets,
-                            &mut model_instances,
-                            &mut model_for_resource,
-                            &runtime_model_clips,
-                            &mut model_clip_remaps,
-                            &mut report,
-                        ) {
+                        let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                            push_character_controller_idle_instance(
+                                project,
+                                project_root,
+                                node.name.as_str(),
+                                character_id,
+                                room_index,
+                                pos,
+                                yaw,
+                                &mut texture_asset_for_path,
+                                &mut assets,
+                                &mut models,
+                                &mut model_clips,
+                                &mut model_clip_bounds,
+                                &mut model_frame_bounds,
+                                &mut model_sockets,
+                                &mut model_instances,
+                                &mut model_for_resource,
+                                &runtime_model_clips,
+                                &mut model_clip_remaps,
+                                report,
+                            )
+                        });
+                        if !ok {
                             return (None, report);
                         }
                     }
@@ -1450,22 +1487,25 @@ pub fn build_package(
                             else {
                                 return (None, report);
                             };
-                            if !push_game_entity(
-                                node.name.as_str(),
-                                archetype.as_str(),
-                                room_index,
-                                pos,
-                                yaw,
-                                &controller.settings,
-                                enemy,
-                                node_model_instance,
-                                state_clips,
-                                combat_capsule_first,
-                                combat_capsule_count,
-                                &mut names,
-                                &mut game_entities,
-                                &mut report,
-                            ) {
+                            let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                                push_game_entity(
+                                    node.name.as_str(),
+                                    archetype.as_str(),
+                                    room_index,
+                                    pos,
+                                    yaw,
+                                    &controller.settings,
+                                    enemy,
+                                    node_model_instance,
+                                    state_clips,
+                                    combat_capsule_first,
+                                    combat_capsule_count,
+                                    &mut names,
+                                    &mut game_entities,
+                                    report,
+                                )
+                            });
+                            if !ok {
                                 return (None, report);
                             }
                         }
@@ -1529,18 +1569,21 @@ pub fn build_package(
                 }
 
                 if let Some(interactable) = component_interactable(scene, node) {
-                    if !push_interactable(
-                        node.name.as_str(),
-                        room_index,
-                        pos,
-                        yaw,
-                        interactable,
-                        &mut names,
-                        &mut interactable_messages,
-                        &mut interactables,
-                        &mut logic,
-                        &mut report,
-                    ) {
+                    let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                        push_interactable(
+                            node.name.as_str(),
+                            room_index,
+                            pos,
+                            yaw,
+                            interactable,
+                            &mut names,
+                            &mut interactable_messages,
+                            &mut interactables,
+                            &mut logic,
+                            report,
+                        )
+                    });
+                    if !ok {
                         return (None, report);
                     }
                 }
@@ -1597,38 +1640,41 @@ pub fn build_package(
                         .map(|_| id)
                 });
                 if let Some(model_resource_id) = model_id {
-                    if !push_model_instance_for_resource(
-                        project,
-                        project_root,
-                        node.name.as_str(),
-                        model_resource_id,
-                        ModelInstancePlacement {
-                            clip_override: *animation_clip,
-                            pose_frame: MODEL_INSTANCE_POSE_ANIMATE,
-                            room_index,
-                            pos,
-                            yaw,
-                            visual_yaw: 0,
-                            pitch,
-                            roll,
-                            visual_offset: [0; 3],
-                            visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
-                            material_override: None,
-                        },
-                        ModelCookTables {
-                            assets: &mut assets,
-                            models: &mut models,
-                            model_clips: &mut model_clips,
-                            model_clip_bounds: &mut model_clip_bounds,
-                            model_frame_bounds: &mut model_frame_bounds,
-                            model_sockets: &mut model_sockets,
-                            model_instances: &mut model_instances,
-                            model_for_resource: &mut model_for_resource,
-                            runtime_model_clips: &runtime_model_clips,
-                            model_clip_remaps: &mut model_clip_remaps,
-                            report: &mut report,
-                        },
-                    ) {
+                    let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                        push_model_instance_for_resource(
+                            project,
+                            project_root,
+                            node.name.as_str(),
+                            model_resource_id,
+                            ModelInstancePlacement {
+                                clip_override: *animation_clip,
+                                pose_frame: MODEL_INSTANCE_POSE_ANIMATE,
+                                room_index,
+                                pos,
+                                yaw,
+                                visual_yaw: 0,
+                                pitch,
+                                roll,
+                                visual_offset: [0; 3],
+                                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
+                                material_override: None,
+                            },
+                            ModelCookTables {
+                                assets: &mut assets,
+                                models: &mut models,
+                                model_clips: &mut model_clips,
+                                model_clip_bounds: &mut model_clip_bounds,
+                                model_frame_bounds: &mut model_frame_bounds,
+                                model_sockets: &mut model_sockets,
+                                model_instances: &mut model_instances,
+                                model_for_resource: &mut model_for_resource,
+                                runtime_model_clips: &runtime_model_clips,
+                                model_clip_remaps: &mut model_clip_remaps,
+                                report,
+                            },
+                        )
+                    });
+                    if !ok {
                         return (None, report);
                     }
                 } else {
@@ -1651,17 +1697,20 @@ pub fn build_package(
                 intensity,
                 radius,
             } => {
-                if !push_point_light(
-                    node.name.as_str(),
-                    placement_sector_size,
-                    room_index,
-                    raw_pos,
-                    *color,
-                    *intensity,
-                    *radius,
-                    &mut lights,
-                    &mut report,
-                ) {
+                let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                    push_point_light(
+                        node.name.as_str(),
+                        placement_sector_size,
+                        room_index,
+                        raw_pos,
+                        *color,
+                        *intensity,
+                        *radius,
+                        &mut lights,
+                        report,
+                    )
+                });
+                if !ok {
                     return (None, report);
                 }
             }
@@ -1710,30 +1759,33 @@ pub fn build_package(
                 // floor-anchored: snapping to the floor grid ignores a box
                 // stacked beneath and would collapse the stack to the floor.
                 let box_props_before = box_props.len();
-                if !push_box_prop(
-                    project,
-                    project_root,
-                    node.name.as_str(),
-                    room_index,
-                    raw_pos,
-                    // Ground beneath the box (floor-anchored Y): where its
-                    // fragments settle and where it falls to if unsupported.
-                    floor_pos[1],
-                    pitch,
-                    yaw,
-                    roll,
-                    materials,
-                    uvs,
-                    *vertices,
-                    *collision_enabled,
-                    *break_flags,
-                    *erosion,
-                    &mut texture_asset_for_path,
-                    &mut assets,
-                    &mut box_props,
-                    &mut box_prop_surfaces,
-                    &mut report,
-                ) {
+                let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                    push_box_prop(
+                        project,
+                        project_root,
+                        node.name.as_str(),
+                        room_index,
+                        raw_pos,
+                        // Ground beneath the box (floor-anchored Y): where its
+                        // fragments settle and where it falls to if unsupported.
+                        floor_pos[1],
+                        pitch,
+                        yaw,
+                        roll,
+                        materials,
+                        uvs,
+                        *vertices,
+                        *collision_enabled,
+                        *break_flags,
+                        *erosion,
+                        &mut texture_asset_for_path,
+                        &mut assets,
+                        &mut box_props,
+                        &mut box_prop_surfaces,
+                        report,
+                    )
+                });
+                if !ok {
                     return (None, report);
                 }
                 // Record the cooked index under the node name so Door
@@ -1755,25 +1807,28 @@ pub fn build_package(
                 geometry,
                 collision_enabled,
             } => {
-                if !push_cylinder_prop(
-                    project,
-                    project_root,
-                    node.name.as_str(),
-                    room_index,
-                    raw_pos,
-                    pitch,
-                    yaw,
-                    roll,
-                    materials,
-                    uvs,
-                    *geometry,
-                    *collision_enabled,
-                    &mut texture_asset_for_path,
-                    &mut assets,
-                    &mut cylinder_props,
-                    &mut cylinder_prop_surfaces,
-                    &mut report,
-                ) {
+                let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                    push_cylinder_prop(
+                        project,
+                        project_root,
+                        node.name.as_str(),
+                        room_index,
+                        raw_pos,
+                        pitch,
+                        yaw,
+                        roll,
+                        materials,
+                        uvs,
+                        *geometry,
+                        *collision_enabled,
+                        &mut texture_asset_for_path,
+                        &mut assets,
+                        &mut cylinder_props,
+                        &mut cylinder_prop_surfaces,
+                        report,
+                    )
+                });
+                if !ok {
                     return (None, report);
                 }
             }
@@ -1783,27 +1838,30 @@ pub fn build_package(
                 geometry,
                 collision_enabled,
             } => {
-                if !push_arch_prop(
-                    project,
-                    project_root,
-                    node.name.as_str(),
-                    room_index,
-                    raw_pos,
-                    pitch,
-                    yaw,
-                    roll,
-                    placement_sector_size,
-                    materials,
-                    uvs,
-                    *geometry,
-                    *collision_enabled,
-                    &mut texture_asset_for_path,
-                    &mut assets,
-                    &mut arch_props,
-                    &mut arch_prop_surfaces,
-                    &mut arch_prop_collisions,
-                    &mut report,
-                ) {
+                let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                    push_arch_prop(
+                        project,
+                        project_root,
+                        node.name.as_str(),
+                        room_index,
+                        raw_pos,
+                        pitch,
+                        yaw,
+                        roll,
+                        placement_sector_size,
+                        materials,
+                        uvs,
+                        *geometry,
+                        *collision_enabled,
+                        &mut texture_asset_for_path,
+                        &mut assets,
+                        &mut arch_props,
+                        &mut arch_prop_surfaces,
+                        &mut arch_prop_collisions,
+                        report,
+                    )
+                });
+                if !ok {
                     return (None, report);
                 }
             }
@@ -1824,23 +1882,26 @@ pub fn build_package(
                         .and_then(|index| u16::try_from(index).ok()),
                     PlaytestWorldGeometry::Grid => None,
                 };
-                if !push_logic_node(
-                    node.name.as_str(),
-                    room_index,
-                    floor_pos,
-                    kind,
-                    target,
-                    killtarget,
-                    master,
-                    *delay_ticks,
-                    *wait_ticks,
-                    *enabled,
-                    bsp_door_link,
-                    &mut names,
-                    &mut logic,
-                    &mut pending_door_links,
-                    &mut report,
-                ) {
+                let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                    push_logic_node(
+                        node.name.as_str(),
+                        room_index,
+                        floor_pos,
+                        kind,
+                        target,
+                        killtarget,
+                        master,
+                        *delay_ticks,
+                        *wait_ticks,
+                        *enabled,
+                        bsp_door_link,
+                        &mut names,
+                        &mut logic,
+                        &mut pending_door_links,
+                        report,
+                    )
+                });
+                if !ok {
                     return (None, report);
                 }
             }
@@ -2278,7 +2339,7 @@ pub fn build_package(
         // the player can see and never use, so that one fails the build.
         match issue.status {
             crate::room_connections::RoomConnectionStatus::Unassigned => report.warn(message),
-            _ => report.error(message),
+            _ => report.error_at(PlaytestValidationTarget::Node(issue.portal), message),
         }
     }
     let room_overlapped_rooms = assign_floor_stack_overlaps(&mut rooms, &room_chunks_by_node);
