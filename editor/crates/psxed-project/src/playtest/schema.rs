@@ -889,6 +889,10 @@ pub struct PlaytestImageProp {
     pub tint_rgb: [u8; 3],
     /// Baked static light base per quad vertex, in perimeter order.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Conservative room-local collision AABB minimum.
+    pub collision_min: [i32; 3],
+    /// Conservative room-local collision AABB maximum.
+    pub collision_max: [i32; 3],
     /// Runtime flags.
     pub flags: u16,
 }

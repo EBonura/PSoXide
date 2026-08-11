@@ -272,6 +272,8 @@ pub mod equipment_flags {
 pub mod image_prop_flags {
     /// Prop rotates around Y to face the active camera while staying upright.
     pub const CYLINDRICAL_BILLBOARD: u16 = 1 << 0;
+    /// Prop emits its cooked conservative AABB to the character motor.
+    pub const COLLISION_ENABLED: u16 = 1 << 1;
 }
 
 /// Face slots on an authored boxed prop.
@@ -291,7 +293,8 @@ pub const ARCH_PROP_MATERIAL_COUNT: usize = 4;
 /// exceeds it (otherwise surfaces on the overflow slots silently vanish at
 /// runtime). Both sides reference this single constant so they can never drift.
 pub const MAX_ROOM_MATERIALS: usize = 16;
-/// Shared fixed AABB blocker budget for BoxProps and ArchProp segments.
+/// Shared fixed AABB blocker budget for ImageProps, BoxProps, and ArchProp
+/// segments.
 pub const MAX_STATIC_PROP_AABB_BLOCKERS: usize = 64;
 
 /// Box prop record flags.
@@ -2055,6 +2058,12 @@ pub struct LevelImagePropRecord {
     pub tint_rgb: [u8; 3],
     /// Baked static light base per quad vertex, in perimeter order.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Conservative room-local collision AABB minimum. Ignored unless
+    /// [`image_prop_flags::COLLISION_ENABLED`] is set.
+    pub collision_min: [i32; 3],
+    /// Conservative room-local collision AABB maximum. Ignored unless
+    /// [`image_prop_flags::COLLISION_ENABLED`] is set.
+    pub collision_max: [i32; 3],
     /// Runtime flags.
     pub flags: u16,
 }

@@ -6,8 +6,8 @@
 //! resolver arrives as a closure until its glue fully migrates.
 
 use psx_engine::{
-    Angle, CullMode, DepthPolicy, LoadedWorldCameraGte, PrimitiveSink, ProjectedVertex,
-    WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    Angle, CharacterCollisionAabb, CullMode, DepthPolicy, LoadedWorldCameraGte, PrimitiveSink,
+    ProjectedVertex, RoomPoint, WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::TextureMaterial,
@@ -21,6 +21,43 @@ use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::VramSlot;
 
 const IMAGE_PROP_DEPTH_BIAS: i32 = 256;
+
+/// Append one cooker-enclosed AABB for each collidable ImageProp in `room`.
+///
+/// Bounds are precomputed by the host because static cards may carry pitch,
+/// yaw, and roll. Runtime collection is therefore allocation-free and avoids
+/// trigonometry on the PS1.
+pub fn collect_image_prop_collision_blockers(
+    props: &[LevelImagePropRecord],
+    room: RoomIndex,
+    out: &mut [CharacterCollisionAabb],
+) -> usize {
+    let mut count = 0usize;
+    for prop in props {
+        if prop.room != room
+            || prop.flags & image_prop_flags::COLLISION_ENABLED == 0
+            || count >= out.len()
+        {
+            continue;
+        }
+        let min = RoomPoint::new(
+            prop.collision_min[0],
+            prop.collision_min[1],
+            prop.collision_min[2],
+        );
+        let max = RoomPoint::new(
+            prop.collision_max[0],
+            prop.collision_max[1],
+            prop.collision_max[2],
+        );
+        if min.x >= max.x || min.y >= max.y || min.z >= max.z {
+            continue;
+        }
+        out[count] = CharacterCollisionAabb::new(min, max);
+        count += 1;
+    }
+    count
+}
 
 /// Draw the authored image props of `current_room`: lit, fogged,
 /// optionally GTE-projected textured cards. `GTE_PROJECT` is a const
@@ -332,4 +369,57 @@ pub fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
         mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
         v[2],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prop(room: u16, min: [i32; 3], max: [i32; 3], flags: u16) -> LevelImagePropRecord {
+        LevelImagePropRecord {
+            room: RoomIndex(room),
+            texture_asset: AssetId(0),
+            x: 0,
+            y: 0,
+            z: 0,
+            pitch: 0,
+            yaw: 0,
+            roll: 0,
+            width: 1,
+            height: 1,
+            tint_rgb: [0x80; 3],
+            baked_vertex_rgb: [(0x80, 0x80, 0x80); 4],
+            collision_min: min,
+            collision_max: max,
+            flags,
+        }
+    }
+
+    #[test]
+    fn image_prop_collision_filters_stably_and_honours_output_capacity() {
+        let enabled = image_prop_flags::COLLISION_ENABLED;
+        let props = [
+            prop(2, [1, 2, 3], [4, 5, 6], enabled),
+            prop(1, [10, 20, 30], [40, 50, 60], 0),
+            prop(1, [100, 200, 300], [400, 500, 600], enabled),
+            prop(1, [7, 8, 9], [7, 10, 11], enabled),
+            prop(1, [-40, -50, -60], [-10, -20, -30], enabled),
+        ];
+        let mut one = [CharacterCollisionAabb::EMPTY; 1];
+        assert_eq!(
+            collect_image_prop_collision_blockers(&props, RoomIndex(1), &mut one),
+            1
+        );
+        assert_eq!(one[0].min, RoomPoint::new(100, 200, 300));
+        assert_eq!(one[0].max, RoomPoint::new(400, 500, 600));
+
+        let mut two = [CharacterCollisionAabb::EMPTY; 2];
+        assert_eq!(
+            collect_image_prop_collision_blockers(&props, RoomIndex(1), &mut two),
+            2
+        );
+        assert_eq!(two[0], one[0]);
+        assert_eq!(two[1].min, RoomPoint::new(-40, -50, -60));
+        assert_eq!(two[1].max, RoomPoint::new(-10, -20, -30));
+    }
 }

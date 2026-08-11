@@ -305,6 +305,155 @@ fn image_prop_preserves_authored_pitch_yaw_roll() {
     assert_eq!(prop.pitch, 512);
     assert_eq!(prop.yaw, 1024);
     assert_eq!(prop.roll, 3072);
+    assert_eq!(prop.flags & image_prop_flags::COLLISION_ENABLED, 0);
+    assert_eq!(prop.collision_min, [0; 3]);
+    assert_eq!(prop.collision_max, [0; 3]);
+}
+
+#[test]
+fn image_prop_cooks_preview_matching_collision_bounds() {
+    let mut project = ProjectDocument::starter();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .expect("starter has a material")
+        .id;
+    let scene = project.active_scene_mut();
+    let room_id = scene
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
+        .map(|node| node.id)
+        .expect("starter has a room");
+
+    let static_id = scene.add_node(
+        room_id,
+        "Collidable Rotated Card",
+        NodeKind::ImageProp {
+            material: Some(material_id),
+            width: 301,
+            height: 600,
+            cylindrical_billboard: false,
+            collision_enabled: true,
+            collision_size: [200, 400, 60],
+        },
+    );
+    scene
+        .node_mut(static_id)
+        .expect("static card")
+        .transform
+        .rotation_degrees = [0.0, 90.0, 0.0];
+
+    let billboard_id = scene.add_node(
+        room_id,
+        "Collidable Billboard",
+        NodeKind::ImageProp {
+            material: Some(material_id),
+            width: 302,
+            height: 600,
+            cylindrical_billboard: true,
+            collision_enabled: true,
+            collision_size: [200, 400, 60],
+        },
+    );
+    scene
+        .node_mut(billboard_id)
+        .expect("billboard")
+        .transform
+        .rotation_degrees = [45.0, 90.0, 270.0];
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let static_prop = package
+        .image_props
+        .iter()
+        .find(|prop| prop.width == 301)
+        .expect("static card cooks");
+    assert_ne!(
+        static_prop.flags & image_prop_flags::COLLISION_ENABLED,
+        0
+    );
+    assert_eq!(
+        static_prop.collision_min,
+        [static_prop.x - 30, static_prop.y + 100, static_prop.z - 100]
+    );
+    assert_eq!(
+        static_prop.collision_max,
+        [static_prop.x + 30, static_prop.y + 500, static_prop.z + 100]
+    );
+
+    let billboard = package
+        .image_props
+        .iter()
+        .find(|prop| prop.width == 302)
+        .expect("billboard cooks");
+    assert_ne!(
+        billboard.flags & image_prop_flags::COLLISION_ENABLED,
+        0
+    );
+    assert_ne!(
+        billboard.flags & image_prop_flags::CYLINDRICAL_BILLBOARD,
+        0
+    );
+    assert_eq!(
+        billboard.collision_min,
+        [billboard.x - 100, billboard.y + 100, billboard.z - 30]
+    );
+    assert_eq!(
+        billboard.collision_max,
+        [billboard.x + 100, billboard.y + 500, billboard.z + 30]
+    );
+
+    let manifest = render_manifest_source(&package);
+    assert!(manifest.contains(&format!(
+        "collision_min: {:?}, collision_max: {:?}",
+        static_prop.collision_min, static_prop.collision_max
+    )));
+}
+
+#[test]
+fn image_prop_collision_participates_in_shared_aabb_budget() {
+    let mut project = ProjectDocument::starter();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .expect("starter has a material")
+        .id;
+    let scene = project.active_scene_mut();
+    let room_id = scene
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
+        .map(|node| node.id)
+        .expect("starter has a room");
+    for index in 0..=psx_level::MAX_STATIC_PROP_AABB_BLOCKERS {
+        scene.add_node(
+            room_id,
+            format!("Budget Card {index}"),
+            NodeKind::ImageProp {
+                material: Some(material_id),
+                width: 64,
+                height: 64,
+                cylindrical_billboard: false,
+                collision_enabled: true,
+                collision_size: [64; 3],
+            },
+        );
+    }
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none(), "over-budget package must fail closed");
+    assert!(
+        report.errors.iter().any(|error| {
+            error.contains("66 static prop collision AABBs")
+                && error.contains("65 image + 1 box + 0 arch")
+        }),
+        "errors: {:?}",
+        report.errors
+    );
 }
 
 #[test]
