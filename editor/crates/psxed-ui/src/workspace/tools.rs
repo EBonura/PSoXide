@@ -157,6 +157,17 @@ impl PaintDispatchTool {
         let Some(pos) = frame.pointer_interact else {
             return;
         };
+        if ws.active_tool == ViewTool::Place
+            && ws.active_room_id().is_none()
+            && ws.bsp_authoring_root().is_some()
+        {
+            let Some((brush, face, hit)) = ws.pick_brush_face_with_hit(frame.rect, pos) else {
+                ws.status = "Place on an upward-facing BSP brush surface".to_string();
+                return;
+            };
+            ws.place_bsp_on_brush_face(brush, face, hit);
+            return;
+        }
         let face_hit = ws.pick_face_with_hit(frame.rect, pos);
         let fallback = ws
             .active_room_id()
@@ -187,20 +198,44 @@ impl EditorWorkspace {
     }
 
     /// Nearest brush face under the pointer, via the kernel's convex
-    /// raycast: `(brush_index, face_index)`.
-    fn pick_brush_face(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<(usize, usize)> {
+    /// raycast: `(brush_index, face_index, world_hit)`.
+    ///
+    /// The hit point is shared with BSP-native entity placement so the
+    /// Place tool and Brush tool cannot disagree about which authored
+    /// surface was clicked.
+    fn pick_brush_face_with_hit(
+        &self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<(usize, usize, [f32; 3])> {
         let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
-        let origin = origin.map(f64::from);
-        let dir = dir.map(f64::from);
+        let origin_f64 = origin.map(f64::from);
+        let dir_f64 = dir.map(f64::from);
         let mut best: Option<(f64, usize, usize)> = None;
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            if let Some((t, face)) = brush.raycast(origin, dir) {
+            if let Some((t, face)) = brush.raycast(origin_f64, dir_f64) {
                 if best.is_none_or(|(best_t, _, _)| t < best_t) {
                     best = Some((t, index, face));
                 }
             }
         }
-        best.map(|(_, index, face)| (index, face))
+        best.map(|(t, index, face)| {
+            (
+                index,
+                face,
+                [
+                    origin[0] + dir[0] * t as f32,
+                    origin[1] + dir[1] * t as f32,
+                    origin[2] + dir[2] * t as f32,
+                ],
+            )
+        })
+    }
+
+    /// Nearest brush face under the pointer: `(brush_index, face_index)`.
+    fn pick_brush_face(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<(usize, usize)> {
+        self.pick_brush_face_with_hit(rect, pointer)
+            .map(|(index, face, _)| (index, face))
     }
 
     fn pick_brush(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
@@ -892,9 +927,18 @@ impl EditorWorkspace {
         let Some(drag) = self.brush_drag.take() else {
             return;
         };
-        let Some(brush) = Self::brush_drag_cuboid(drag) else {
+        let Some(mut brush) = Self::brush_drag_cuboid(drag) else {
             return; // zero-area drag: nothing to commit
         };
+        // New brushes should be cookable and visibly textured immediately.
+        // This follows the same material resolution as the grid tools: an
+        // explicit picker/selected resource wins, then the first project
+        // material. Hollow preserves the face materials on all six slabs.
+        if let Some(material) = self.paint_material_for("brush") {
+            for face in &mut brush.faces {
+                face.material = Some(material);
+            }
+        }
         self.push_undo();
         let scene = self.project.active_scene_mut();
         scene.brushes.push(brush);
