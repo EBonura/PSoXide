@@ -444,6 +444,10 @@ fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
         })
         .expect("starter has a model");
     let mut project = ProjectDocument::new("equipment-test");
+    // A grid fixture: it authors a Section, not brushes, so it has to say
+    // so. New documents are BSP by default and the cook fails closed on a
+    // BSP project with no brush world.
+    project.set_world_format(crate::ProjectWorldFormat::LegacyGrid);
     // Skeleton-scoped animation fixture so the model is renderable and
     // the player has idle/walk via its Animation Set.
     let skeleton = project.add_resource(
