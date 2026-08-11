@@ -885,11 +885,29 @@ impl EditorWorkspace {
             (ViewTool::Place, Some(PlaceKind::ParticleEmitter)),
             (ViewTool::Place, Some(PlaceKind::Portal)),
         ];
-        const SELECT_ONLY: &[(ViewTool, Option<PlaceKind>)] = &[(ViewTool::Select, None)];
+        const BSP_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
+            (ViewTool::Select, None),
+            (ViewTool::Brush, None),
+            (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
+            (ViewTool::Place, Some(PlaceKind::SpawnMarker)),
+            (ViewTool::Place, Some(PlaceKind::ModelInstance)),
+            (ViewTool::Place, Some(PlaceKind::Character)),
+            (ViewTool::Place, Some(PlaceKind::ImageProp)),
+            (ViewTool::Place, Some(PlaceKind::BoxProp)),
+            (ViewTool::Place, Some(PlaceKind::CylinderProp)),
+            (ViewTool::Place, Some(PlaceKind::ArchProp)),
+            (ViewTool::Place, Some(PlaceKind::PointLightMarker)),
+            (ViewTool::Place, Some(PlaceKind::ParticleEmitter)),
+            (ViewTool::Place, Some(PlaceKind::Logic)),
+        ];
+        const BRUSH_ONLY: &[(ViewTool, Option<PlaceKind>)] =
+            &[(ViewTool::Select, None), (ViewTool::Brush, None)];
         let values = if self.active_room_id().is_some() {
             ALL_VALUES
+        } else if self.bsp_authoring_root().is_some() {
+            BSP_VALUES
         } else {
-            SELECT_ONLY
+            BRUSH_ONLY
         };
         let current = self.active_tool_cycle_value();
         let next = cycle_value(values, current, reverse);
