@@ -2793,7 +2793,7 @@ impl EditorWorkspace {
 
     /// Open the project at `dir`. Errors when `dir/project.ron` is
     /// missing or malformed -- the frontend wraps the error and falls
-    /// back to the default project so a real load failure surfaces
+    /// back to the bundled BSP starter so a real load failure surfaces
     /// in the status bar instead of silently spawning a fresh
     /// starter (which masked the path-resolution bug previously).
     pub fn open_directory(dir: impl Into<PathBuf>) -> Result<Self, String> {
@@ -3248,7 +3248,7 @@ impl EditorWorkspace {
         if target.exists() {
             return Err(format!("{} already exists", short_path(&target)));
         }
-        if paths_equivalent(&self.project_dir, &psxed_project::default_project_dir()) {
+        if bundled_project_is_protected(&self.project_dir) {
             copy_dir_recursive(&self.project_dir, &target)
                 .map_err(|error| format!("copy project directory: {error}"))?;
         } else {
@@ -3449,15 +3449,15 @@ impl EditorWorkspace {
         }
     }
 
-    fn current_project_is_default(&self) -> bool {
-        paths_equivalent(&self.project_dir, &psxed_project::default_project_dir())
+    fn current_project_is_bundled(&self) -> bool {
+        bundled_project_is_protected(&self.project_dir)
     }
 
     fn delete_project_fallback_dir(delete_dir: &Path) -> Result<PathBuf, String> {
-        let default_dir = psxed_project::default_project_dir();
-        if !paths_equivalent(delete_dir, &default_dir) && default_dir.join("project.ron").is_file()
+        let bsp_starter = psxed_project::new_project_template_dir();
+        if !paths_equivalent(delete_dir, &bsp_starter) && bsp_starter.join("project.ron").is_file()
         {
-            return Ok(default_dir);
+            return Ok(bsp_starter);
         }
         let projects =
             psxed_project::list_projects().map_err(|error| format!("list projects: {error}"))?;
@@ -3469,8 +3469,8 @@ impl EditorWorkspace {
 
     fn delete_current_project(&mut self) -> Result<(), String> {
         let delete_dir = self.project_dir.clone();
-        if self.current_project_is_default() {
-            return Err("The default project cannot be deleted".to_string());
+        if self.current_project_is_bundled() {
+            return Err("Bundled starter projects cannot be deleted".to_string());
         }
         let projects_root = psxed_project::projects_dir();
         let parent = delete_dir

@@ -1696,12 +1696,12 @@ impl EditorWorkspace {
             ui.menu_button(icons::label(icons::FOLDER, "Project"), |ui| {
                 self.draw_project_switch_menu(ui);
             });
-            let can_delete_project = !self.current_project_is_default();
+            let can_delete_project = !self.current_project_is_bundled();
             let delete_response =
                 ui.add_enabled(can_delete_project, egui::Button::new("Delete Project..."));
             let delete_clicked = delete_response.clicked();
             if !can_delete_project {
-                delete_response.on_hover_text("The default project cannot be deleted");
+                delete_response.on_hover_text("Bundled starter projects cannot be deleted");
             }
             if delete_clicked {
                 self.modal = Modal::DeleteProject { error: None };
