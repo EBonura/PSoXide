@@ -42,7 +42,15 @@ EXPECT_PLAYER_DEATHS=1
 # door that reset closed, wall-stopping at x 3862 on the route line.
 EXPECT_PLAYER_X_BIASED=1003862
 EXPECT_PLAYER_Z_BIASED=1001536
-EXPECT_VRAM_HASH=0x763cda5e46819ea1
+# The VRAM pin is canonical for THIS checkout (PSoXide-convergence): the
+# guest binary is not yet checkout-path-reproducible (cargo derives crate
+# metadata from the workspace path, reordering codegen), and the slice's
+# heavy streaming leaves loading-transient pixels outside the gameplay draw
+# window whose final state depends on code layout. Gameplay counters and
+# the DISPLAY hash are checkout-independent (verified across two worktrees
+# on 2026-08-11); a canonical-staging guest build to make VRAM pins
+# portable is an I1 work item.
+EXPECT_VRAM_HASH=0xc41710bde0e93e15
 EXPECT_DISPLAY_HASH=0x3c7a6bd9154f23de
 
 EXPECT_NEG_ROUTE_TICKS=900
@@ -118,10 +126,12 @@ echo "editor-souls-bsp-check: disc"
     --ui-pack-order-file "../../$GENERATED/ui_pack_order.txt" \
     --cdda-track-list "../../$GENERATED/cdda_tracks.txt" >/dev/null)
 
-if [ ! -x target/release/frontend ]; then
-    echo "editor-souls-bsp-check: building frontend"
-    (cd emu && cargo build -p frontend --release --quiet)
-fi
+# Always rebuild: a replay gate must use the frontend built from the exact
+# source under test. A stale binary silently drops newer telemetry labels
+# (its counters print as "unknown") and can false-red or false-green the
+# counter assertions. Incremental cargo makes this free when up to date.
+echo "editor-souls-bsp-check: building frontend"
+(cd emu && cargo build -p frontend --release --quiet)
 
 for RUN in 1 2; do
     echo "editor-souls-bsp-check: canonical replay $RUN/2"
