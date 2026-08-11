@@ -567,14 +567,34 @@ make combat-checkpoint: PASS
   VRAM 0x007fb6683f98d82b (unchanged)
 ```
 
+Independent challenge commit `ccf80940`, merged as `742c9246`, then rebuilt a
+project from an empty World root using the actual workspace command paths. It
+created and Hollowed a textured room, placed a root-owned Player Spawn, Point
+Light and Box Prop, proved that a rejected BSP Portal neither mutates nor
+dirties the document, converted Logic to Door, assigned a brush Model owner,
+saved, cooked, requested Play and Rebuild, and proved byte-identical PXBSP and
+manifest output across an unchanged rebuild. The cooked package contained the
+prop, light and one PXBSP mover. The independent rerun reached 347 `psxed-ui`
+tests and 475 `psxed-project` tests (one diagnostic test ignored in each), a
+real MIPS guest link, and the unchanged combat checkpoint evidence above.
+
+That challenge found and fixed one real blocker: spawn validation tested only
+the Player Spawn origin against the point hull. An origin could be empty while
+the runtime body overlapped a wall, starting Play embedded in solid. The cooker
+now selects the same authored/debug body envelope used to build the collision
+hulls and tests the spawn origin through that expanded hull, with a focused
+node diagnostic and regression.
+
 This makes the simple BSP create/save/cook/Play route testable today, but the
 evidence is still host-command, compiler, guest-link and existing-fixture replay
 evidence. No one has yet operated the native GUI and embedded emulator through
-the complete fresh-project sequence. An independent worker is now challenging
-the merged path, especially multi-storey Top-view surface choice, prop and door
-authoring beyond player/light, root parenting, dirty/freshness state, portal
-refusal, and whether Hollow's signed-axis material policy is what an author
-expects on cavity faces. Keep those distinctions explicit in the next update.
+the complete fresh-project sequence. Initial overlap against moving doors and
+authored prop blockers is also not rejected at cook time; static BSP solids are
+covered. The door-kind transition regression applies the same in-memory change
+as the Inspector, and the blank-slate artifact was host-cooked while the real
+MIPS build used the canonical fixture. Multi-storey Top-view surface choice,
+Hollow's signed-axis material policy on cavity faces, interactive GUI behavior
+and original hardware remain explicit adversarial checks rather than claims.
 
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
