@@ -1693,15 +1693,16 @@ impl EditorWorkspace {
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     constrain_resizable_dock_content(ui, content_width);
-                                    // Selection priority: brush (while the Brush
-                                    // tool is active) → primitive (Select tool's
-                                    // product -- face, edge, or vertex) → resource
-                                    // (clicked in the bottom panel) → node (scene
-                                    // tree row). The active tool's edit target wins.
-                                    if self.active_tool == ViewTool::Brush
+                                    // Selection priority: selected BSP brush →
+                                    // legacy grid primitive → resource → node.
+                                    // Select and Brush share the same brush transform
+                                    // controls; selecting a brush must never hide the
+                                    // only numeric move/resize path.
+                                    if self.active_workspace == WorkspaceView::Room
                                         && self.selected_brush.is_some()
                                     {
                                         self.draw_brush_inspector(ui);
+                                        return;
                                     } else if let Some(selection) =
                                         self.selection.selected_primitive
                                     {
