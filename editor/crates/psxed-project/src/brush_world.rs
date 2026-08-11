@@ -31,6 +31,13 @@ use psx_bsp::pxbsp::{
 use psx_bsp::{ClipNode, Node, Plane, RecordSlice, Vec3I32};
 use psxed_format::texture::Depth;
 
+// Characterless-fallback contract. These two envelope pairs persist on
+// purpose: DEBUG 16/56 is the body every characterless BSP project (and any
+// player spawn that resolves no Character) compiles into hull one, and
+// LEGACY_BIG 32/96 floors hull two so old fixtures keep their hash anchors.
+// The cook has no fixture-name knowledge; a project with real placed
+// characters derives both hulls fully from its authored data and never sees
+// these numbers.
 const DEBUG_BODY_RADIUS: i32 = 16;
 const DEBUG_BODY_HEIGHT: i32 = 56;
 const LEGACY_BIG_HULL_RADIUS: i32 = 32;

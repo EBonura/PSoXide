@@ -21,11 +21,12 @@ fn starter_project_emits_player_controller_and_character() {
         CharacterAnimationAction::Idle,
         CharacterAnimationAction::Walk,
         CharacterAnimationAction::Run,
+        CharacterAnimationAction::Roll,
         CharacterAnimationAction::LightAttack,
         CharacterAnimationAction::HeavyAttack,
         CharacterAnimationAction::ComboAttack,
-        CharacterAnimationAction::Intro,
         CharacterAnimationAction::HitReact,
+        CharacterAnimationAction::Death,
     ] {
         assert_ne!(
             character.action_clips[action.to_index()],
@@ -33,10 +34,18 @@ fn starter_project_emits_player_controller_and_character() {
             "{action:?} should be mapped for the starter player"
         );
     }
-    assert_eq!(
-        character.action_clips[CharacterAnimationAction::Turn.to_index()],
-        CHARACTER_CLIP_NONE
-    );
+    // The verified Aletha Complete set authors no Intro or Turn clip; the
+    // runtime falls straight into Idle on boot.
+    for action in [
+        CharacterAnimationAction::Intro,
+        CharacterAnimationAction::Turn,
+    ] {
+        assert_eq!(
+            character.action_clips[action.to_index()],
+            CHARACTER_CLIP_NONE,
+            "{action:?} is unauthored in the verified starter set"
+        );
+    }
 }
 
 #[test]
