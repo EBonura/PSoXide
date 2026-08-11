@@ -320,6 +320,17 @@ fn paint(brush: &mut Brush, material: psxed_project::ResourceId) {
 /// (`poise_damage > poise`), which is why equal-pool sequences like four
 /// lights kill without ever staggering. Extra presses whiff harmlessly on
 /// the corpse.
+///
+/// Both tapes here are indexed on the PAD-POLL clock. A video-frame tape is
+/// applied on the emulator's route-tick clock while the guest reads the pad
+/// once per fixed simulation tick, and the phase between those clocks drifts
+/// with guest execution cost, so the same authored press window reaches
+/// differently compiled guests as a different number of held ticks. That is
+/// what desynchronised the souls slice (see the clock history in
+/// tools/editor_souls_bsp_check.sh). This fixture happened not to trip it,
+/// but the exposure was the same; `pad_poll` binds sample N to poll N and
+/// removes it. Converting cost nothing behavioural: every counter, and the
+/// post-kill traversal x, are identical on both clocks.
 fn write_combat_tape(output_dir: &Path) {
     const UP: u16 = 1 << 4;
     const CROSS: u16 = 1 << 14;
@@ -340,7 +351,7 @@ fn write_combat_tape(output_dir: &Path) {
     const LIGHT_PRESSES: [usize; 0] = [];
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
-    writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
+    writeln!(tape, "psoxide-tape,v2,clock=pad_poll,start_poll=0").unwrap();
     writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
     for frame in 0..FRAME_COUNT {
         let mut buttons = 0u16;
@@ -387,7 +398,7 @@ fn write_door_occlusion_tape(output_dir: &Path) {
     const LIGHT_PRESSES: [usize; 3] = [720, 800, 880];
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
-    writeln!(tape, "psoxide-tape,v2,clock=video_frame,start_poll=0").unwrap();
+    writeln!(tape, "psoxide-tape,v2,clock=pad_poll,start_poll=0").unwrap();
     writeln!(tape, "frame,buttons,right_x,right_y,left_x,left_y").unwrap();
     for frame in 0..FRAME_COUNT {
         let mut buttons = 0u16;
