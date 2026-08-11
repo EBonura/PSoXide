@@ -13,6 +13,26 @@ pub const PXBSP_LUMP_COUNT: usize = 16;
 /// Maximum decompressed PVS row supported by the resident PS1 runtime.
 pub const PXBSP_MAX_VISIBILITY_BYTES: usize = 1024;
 
+/// Decompress one leaf's PVS row into caller-owned bytes.
+///
+/// The canonical row semantics shared by every resident map format: the row
+/// spans `visible_leaves.div_ceil(8)` bytes, an oversize row or malformed
+/// run-length data returns `None` without allocating, and success returns the
+/// addressable visible-leaf count.
+pub(crate) fn decompress_leaf_row(
+    visibility: &[u8],
+    offset: usize,
+    visible_leaves: usize,
+    output: &mut [u8],
+) -> Option<usize> {
+    let row_bytes = visible_leaves.div_ceil(8);
+    if row_bytes > output.len() {
+        return None;
+    }
+    output[..row_bytes].fill(0);
+    decompress_visibility(visibility, offset, &mut output[..row_bytes]).then_some(visible_leaves)
+}
+
 pub(crate) fn decompress_visibility(input: &[u8], offset: usize, output: &mut [u8]) -> bool {
     let mut source = offset;
     let mut destination = 0usize;
@@ -996,6 +1016,33 @@ mod tests {
             .expect("door payload");
         assert_eq!(decoded, door);
         assert_eq!(decoded.validate(), Ok(()));
+    }
+
+    #[test]
+    fn leaf_row_decompression_is_bounded_and_fail_closed() {
+        // 10 visible leaves -> 2-byte row. Literal byte then a zero-run of 1.
+        let visibility = [0x2a, 0x00, 0x01];
+        let mut output = [0xffu8; 4];
+        assert_eq!(
+            decompress_leaf_row(&visibility, 0, 10, &mut output),
+            Some(10)
+        );
+        assert_eq!(output[..2], [0x2a, 0x00]);
+
+        // An oversize row must fail without touching the output.
+        let mut untouched = [0xa5u8; 1];
+        assert_eq!(
+            decompress_leaf_row(&visibility, 0, 10, &mut untouched),
+            None
+        );
+        assert_eq!(untouched, [0xa5]);
+
+        // Truncated run-length data fails after zeroing only the row span.
+        let mut truncated = [0xffu8; 2];
+        assert_eq!(decompress_leaf_row(&[0x00], 0, 10, &mut truncated), None);
+
+        // A zero-leaf world decompresses an empty row successfully.
+        assert_eq!(decompress_leaf_row(&[], 0, 0, &mut []), Some(0));
     }
 
     #[test]
