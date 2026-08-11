@@ -1220,6 +1220,40 @@ Named divergences retained by decision (S1 exit-gate record):
 5. Housekeeping for the P3 repin: `quake-core/Cargo.toml` still carries a
    stale `359537cf` revision comment; fix it when the pin moves.
 
+#### 0.20.1 P1a souls runtime and telemetry merge (2026-08-11)
+
+Merge `072da1c7` (branch `codex/souls-slice-runtime`, commits `c84d4061`,
+`3b4f8230`, `c4f9e098`) lands the runtime half of P1:
+
+- Combat damage now kills the player through the shared death flow: the
+  host-tested kill rule `psx_game_runtime::character::apply_player_damage`
+  (kills exactly at zero, never re-arms a running death), one
+  `arm_player_death` helper for every cause, `respawn_after_hazard_death`
+  renamed `respawn_after_death`. Persistence policy documented at the
+  respawn site: the checkpoint persists, enemies/logic/doors/box props
+  reset (souls rule). Respawn also resets the LOGIC_RECORDS_FIRED
+  watermark so the delta counter cannot under-report after death.
+- Trigger-touch-to-checkpoint chaining verified and host-tested
+  (`trigger_touch_chains_to_a_checkpoint_record`); both checkpoint
+  assignment paths route through one counting `set_checkpoint`.
+- New gameplay counters 254-260 with emulator labels: player deaths,
+  player checkpoint activations, player duplicate hit rejections, logic
+  door activations, player weapon attachments (one per life), game entity
+  pvs suppressions, player liquid damage events. `COUNTER_COUNT` 261.
+- Validation at the merge: psx-game-runtime 90 (was 85), psx-bsp 71,
+  psx-engine render 111, psxed-project 489, psxed-ui 380, emulator-core
+  537, and all three gates PASS with UNCHANGED pins (combat vram
+  `0x007fb6683f98d82b`, blank vram `0xdb1a46181b00783a`, liquid 12 lava
+  hits + frame-181 respawn); the counter-table change did not shift any
+  image hash, and the combat gate replays stayed byte-identical twice.
+  The integration tree independently reran the combat gate green.
+- Known follow-ups: PLAYER_CHECKPOINT_ACTIVATIONS and
+  GAME_ENTITY_PVS_SUPPRESSIONS have no guest-replay exercise until the
+  P1b slice fixture provides checkpoint/trigger records and a PVS-hidden
+  enemy; `make runtime-numeric-guard` fails at baseline with 26
+  PRE-EXISTING violations (11 psx-gte scene.rs, 6 bsp_runtime.rs, none in
+  the new lines), to be triaged in the P3 numeric audit.
+
 ## 1. Owner objective
 
 The owner wants one coherent PS1 development stack, not three adjacent demos:
