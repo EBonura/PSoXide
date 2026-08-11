@@ -49,18 +49,108 @@ impl Playtest {
         } else {
             2
         };
-        let entity_stats = if npc_tick_due {
-            let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
-            let mut entity_dead = [false; MAX_GAME_ENTITIES];
-            for (index, slot) in entity_positions
+        let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
+        let mut entity_dead = [false; MAX_GAME_ENTITIES];
+        for (index, slot) in entity_positions
+            .iter_mut()
+            .enumerate()
+            .take(self.game_entities.count())
+        {
+            *slot = self.game_entities.position(index);
+            entity_dead[index] = self.game_entities.state(index)
+                == psx_game_runtime::entities::GameEntityState::Dead;
+        }
+        let spatial_masks = self.bsp.as_mut().map(|bsp| {
+            // Sample the observer and actors inside their body volumes rather
+            // than at the floor seam, which can classify as solid at exact
+            // brush boundaries. Runtime movement still owns the live X/Z.
+            let observer = RoomPoint::new(
+                player.x,
+                player.y.saturating_add(player_height.max(1) >> 1),
+                player.z,
+            );
+            let mut entity_activation_points = entity_positions;
+            for (index, point) in entity_activation_points
                 .iter_mut()
                 .enumerate()
                 .take(self.game_entities.count())
             {
-                *slot = self.game_entities.position(index);
-                entity_dead[index] = self.game_entities.state(index)
-                    == psx_game_runtime::entities::GameEntityState::Dead;
+                let height = GAME_ENTITIES
+                    .get(index)
+                    .map_or(1, |record| i32::from(record.height).max(1));
+                point[1] = point[1].saturating_add(height >> 1);
             }
+            let entity_mask = bsp.visible_points_mask(
+                observer,
+                &entity_activation_points[..self.game_entities.count()],
+            );
+            let mut instance_activation_points = [[0i32; 3]; MAX_MODEL_INSTANCES];
+            for (index, point) in instance_activation_points
+                .iter_mut()
+                .enumerate()
+                .take(MODEL_INSTANCES.len())
+            {
+                let instance = &MODEL_INSTANCES[index];
+                let height = self
+                    .models
+                    .get(instance.model.to_usize())
+                    .copied()
+                    .flatten()
+                    .map_or(1, |model| i32::from(model.world_height).max(1));
+                *point = [
+                    instance.x,
+                    instance.y.saturating_add(height >> 1),
+                    instance.z,
+                ];
+            }
+            for (entity, record) in GAME_ENTITIES.iter().enumerate() {
+                let instance = usize::from(record.model_instance);
+                let Some(point) = instance_activation_points.get_mut(instance) else {
+                    continue;
+                };
+                let position = entity_positions[entity];
+                *point = [
+                    position[0],
+                    position[1].saturating_add(i32::from(record.height).max(1) >> 1),
+                    position[2],
+                ];
+            }
+            let instance_mask = bsp.visible_points_mask(
+                observer,
+                &instance_activation_points[..MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES)],
+            );
+            let mut logic_positions = [[0i32; 3]; MAX_LOGIC_RECORDS];
+            for (slot, record) in logic_positions.iter_mut().zip(LOGIC.iter()) {
+                *slot = [record.x, record.y, record.z];
+            }
+            let mut logic_mask = bsp.visible_points_mask(
+                observer,
+                &logic_positions[..LOGIC.len().min(MAX_LOGIC_RECORDS)],
+            );
+            // A volume may span several leaves while its representative
+            // origin lies in only one. Never suppress a touch that already
+            // contains the player; the logic runtime repeats this inclusive
+            // AABB test before firing the record.
+            for (index, record) in LOGIC.iter().enumerate().take(64) {
+                if record.kind == psx_level::logic_kind::TRIGGER_VOLUME
+                    && player_pos[0] >= record.min[0]
+                    && player_pos[0] <= record.max[0]
+                    && player_pos[1] >= record.min[1]
+                    && player_pos[1] <= record.max[1]
+                    && player_pos[2] >= record.min[2]
+                    && player_pos[2] <= record.max[2]
+                {
+                    logic_mask |= 1u64 << index;
+                }
+            }
+            (entity_mask, logic_mask, instance_mask)
+        });
+        self.game_entities
+            .set_spatial_active_mask(spatial_masks.map(|masks| masks.0));
+        self.logic
+            .set_spatial_active_mask(spatial_masks.map(|masks| masks.1));
+        self.bsp_instance_visible_mask = spatial_masks.map_or(u16::MAX, |masks| masks.2 as u16);
+        let entity_stats = if npc_tick_due {
             // Souls i-frames: the deferred tick never resolves contact, so
             // this pre-motor value only feeds the shared tick-input contract.
             // `resolve_enemy_melee` re-queries invulnerability after the motor
@@ -155,6 +245,9 @@ impl Playtest {
         } else {
             None
         };
+        if self.bsp.is_some() {
+            self.current_ambient_rgb = PXBSP_AMBIENT_RGB;
+        }
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
@@ -229,7 +322,9 @@ impl Playtest {
             self.camera.focus(),
         );
         #[cfg(not(feature = "cd-stream-bench"))]
-        self.load_active_room_window();
+        if self.bsp.is_none() {
+            self.load_active_room_window();
+        }
         #[cfg(feature = "cd-stream-benchmark")]
         cd_stream::run_benchmark(cd_arena());
     }

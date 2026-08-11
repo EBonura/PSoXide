@@ -184,7 +184,7 @@ fn starter_residency_includes_world_and_textures() {
     }
     // Room asset is a RoomWorld at the recorded index.
     assert_eq!(
-        package.assets[room.world_asset_index].kind,
+        package.assets[room.world_asset_index.expect("grid room world asset")].kind,
         PlaytestAssetKind::RoomWorld,
     );
 }
@@ -654,9 +654,7 @@ fn byte_identical_model_atlases_cook_into_one_shared_texture_asset() {
     let shared = package
         .assets
         .iter()
-        .filter(|asset| {
-            asset.kind == PlaytestAssetKind::Texture && asset.bytes == atlas_bytes
-        })
+        .filter(|asset| asset.kind == PlaytestAssetKind::Texture && asset.bytes == atlas_bytes)
         .count();
     assert_eq!(shared, 1, "identical atlases must share one cooked asset");
 }
@@ -697,9 +695,7 @@ fn model_atlases_differing_by_one_payload_byte_stay_distinct() {
     let originals = package
         .assets
         .iter()
-        .filter(|asset| {
-            asset.kind == PlaytestAssetKind::Texture && asset.bytes == atlas_bytes
-        })
+        .filter(|asset| asset.kind == PlaytestAssetKind::Texture && asset.bytes == atlas_bytes)
         .count();
     let variants = package
         .assets
@@ -728,10 +724,7 @@ fn place_extra_model_instance(project: &mut ProjectDocument, model: ResourceId) 
         .expect("starter has a clip for the player skeleton");
     let mut retargeted = clip;
     retargeted.target_model = Some(model);
-    project.add_resource(
-        "Second Model Clip",
-        ResourceData::AnimationClip(retargeted),
-    );
+    project.add_resource("Second Model Clip", ResourceData::AnimationClip(retargeted));
     let scene = project.active_scene_mut();
     let room_id = scene
         .nodes()

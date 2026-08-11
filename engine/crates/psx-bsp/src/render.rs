@@ -23,7 +23,10 @@ use psx_math::int32::mul_q12_i32;
 use psx_math::{cos_q12, sin_q12};
 
 use crate::collision::BrushTransform;
-use crate::pxbsp::{material_blend, material_flags, PxbspMaterial, PxbspMaterialAnimation};
+use crate::pxbsp::{
+    decompress_visibility, material_blend, material_flags, PxbspMaterial, PxbspMaterialAnimation,
+    PXBSP_MAX_VISIBILITY_BYTES,
+};
 use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
 use crate::{
@@ -37,7 +40,6 @@ pub const DEFAULT_PACKET_WORDS: usize = 0x30000 / core::mem::size_of::<u32>();
 // ponytail: these fixed arrays match the first XBSP format and PS1 budget;
 // the PXBSP cook reports them and region paging removes the global ceilings.
 const MAX_FACE_COUNT: usize = 32_767;
-const MAX_VISIBILITY_BYTES: usize = 1024;
 const BATCH_MAX_VERTICES: usize = 39;
 const BATCH_MAX_SURFACES: usize = 13;
 const SUBDIVISION_SCRATCH_VERTICES: usize = 12;
@@ -195,7 +197,7 @@ fn load_view_with_coordinates(camera: Camera, coordinates: Mat3I16) -> ViewTrans
 pub struct Renderer {
     frame: u32,
     face_visible: Vec<u8>,
-    visibility: [u8; MAX_VISIBILITY_BYTES],
+    visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
     cached_visibility: Option<(u32, usize)>,
     cached_pxbsp_visibility: Option<(u32, usize)>,
@@ -212,7 +214,7 @@ impl Renderer {
         Self {
             frame: 0,
             face_visible: vec![0; MAX_FACE_COUNT],
-            visibility: [0; MAX_VISIBILITY_BYTES],
+            visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_visibility: None,
             cached_pxbsp_visibility: None,
@@ -1251,32 +1253,6 @@ fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
             .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
     };
     dot.saturating_sub(plane.distance)
-}
-
-fn decompress_visibility(input: &[u8], offset: usize, output: &mut [u8]) -> bool {
-    let mut source = offset;
-    let mut destination = 0usize;
-    while destination < output.len() {
-        let Some(&value) = input.get(source) else {
-            return false;
-        };
-        source += 1;
-        if value != 0 {
-            output[destination] = value;
-            destination += 1;
-            continue;
-        }
-        let Some(&run) = input.get(source) else {
-            return false;
-        };
-        source += 1;
-        if run == 0 || destination + run as usize > output.len() {
-            return false;
-        }
-        output[destination..destination + run as usize].fill(0);
-        destination += run as usize;
-    }
-    true
 }
 
 fn normalize_baked_color(color: u32) -> u32 {

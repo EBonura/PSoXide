@@ -760,7 +760,7 @@ fn test_room(world_asset_index: usize) -> PlaytestRoom {
     PlaytestRoom {
         reflection_probe_asset_index: None,
         name: format!("Room {world_asset_index}"),
-        world_asset_index,
+        world_asset_index: Some(world_asset_index),
         origin_x: 0,
         origin_z: 0,
         origin_y: 0,

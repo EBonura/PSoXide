@@ -33,9 +33,12 @@ mod tests {
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);
-        assert_eq!(package.assets.len(), 2);
+        assert_eq!(package.rooms[0].world_asset_index, None);
+        assert!(package.chunks.is_empty());
+        assert!(package.room_visibility.is_empty());
+        assert_eq!(package.assets.len(), 1);
         assert_eq!(package.texture_asset_count(), 1);
-        assert_eq!(world.texture_asset_indices, [1]);
+        assert_eq!(world.texture_asset_indices, [0]);
         assert_eq!(
             world.body_hulls,
             [
@@ -47,6 +50,11 @@ mod tests {
         assert_eq!(package.spawn.expect("player spawn").yaw, 3072);
         assert_eq!(package.logic.len(), 1);
         assert_eq!(package.logic[0].link, 0, "door links BSP mover ordinal");
+        let envelope = crate::playtest::playtest_performance_envelope(&package)
+            .expect("resident PXBSP performance envelope");
+        assert!(envelope.room_surfaces > 0);
+        assert!(envelope.authored_triangles > 0);
+        assert_eq!(envelope.resident_stream_bytes, 0);
 
         let source = crate::playtest::render_manifest_source(&package);
         assert!(source.contains("pub const PLAYTEST_USES_PXBSP: bool = true;"));
@@ -54,7 +62,8 @@ mod tests {
         assert!(source.contains("PXBSP_MOVER_NODE_IDS: &[u32] = &[2]"));
         assert!(source.contains("CookedBodyHull::new(1, 16, 56)"));
         assert!(source.contains("CookedBodyHull::new(2, 32, 96)"));
-        assert!(source.contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(1)]"));
+        assert!(source.contains("world_asset: AssetId(65535)"));
+        assert!(source.contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(0)]"));
         assert!(!source.contains("BRUSH_TEXTURES"));
 
         let runtime_main = std::fs::read_to_string(
