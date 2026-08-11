@@ -13,6 +13,45 @@ fn project_center_half_2d(
 }
 
 impl EditorWorkspace {
+    /// Give BSP-only projects created before camera authoring metadata a usable
+    /// first 3D view. The exact default-state checks keep authored cameras and
+    /// any in-session camera movement untouched.
+    pub(crate) fn frame_bsp_camera_if_uninitialized(&mut self) -> bool {
+        let default_camera = EditorCameraState::default();
+        if self.active_room_id().is_some()
+            || self.project.active_scene().brushes.is_empty()
+            || self.project.editor_camera != default_camera
+            || self.current_editor_camera_state() != default_camera
+        {
+            return false;
+        }
+        let Some((center, half)) = self.all_brush_frame_bounds_3d() else {
+            return false;
+        };
+
+        // A wrapped negative pitch places the orbit camera above the level.
+        self.camera_rig.pitch = 3840;
+        self.frame_3d_bounds(center, half);
+        true
+    }
+
+    pub(crate) fn frame_bsp_viewport_if_uninitialized(&mut self) -> bool {
+        let untouched_focus = self
+            .orthographic_focus
+            .into_iter()
+            .all(|value| value.abs() <= f32::EPSILON);
+        let untouched_zoom = (self.viewport_zoom - DEFAULT_VIEWPORT_ZOOM).abs() <= f32::EPSILON;
+        if self.active_room_id().is_none()
+            && !self.project.active_scene().brushes.is_empty()
+            && untouched_focus
+            && untouched_zoom
+        {
+            self.frame_viewport();
+            return true;
+        }
+        false
+    }
+
     /// Stop a transient character action/movement preview when its Animator is
     /// edited. The transient preview carries its own clip override, so leaving
     /// it alive would mask a newly selected `Editor Clip` until the project was
@@ -140,18 +179,24 @@ impl EditorWorkspace {
                 if modifiers.command {
                     let point = self.brush_snap_2d(world);
                     self.brush_clip_click(point);
-                } else if modifiers.shift {
-                    // Shift-click toggles multi-selection membership;
-                    // missing everything leaves the selection alone.
-                    if let Some((index, _)) = self.pick_brush_face_at_2d(world) {
-                        self.toggle_brush_selection(index);
+                } else if let Some((brush, face)) = self.pick_brush_face_at_2d(world) {
+                    self.clear_node_selection_state();
+                    self.clear_resource_selection_state();
+                    self.clear_primitive_selection_state();
+                    self.clear_sector_selection();
+                    if modifiers.shift || modifiers.ctrl {
+                        self.toggle_brush_selection(brush);
+                    } else {
+                        self.replace_brush_selection(brush, Some(face));
                     }
-                } else {
-                    self.select_brush_at_2d(world);
+                    self.status = format!("Selected BSP brush {}", brush + 1);
+                } else if !modifiers.shift && !modifiers.ctrl {
+                    self.clear_brush_selection();
                 }
             }
             ViewTool::Select => {
                 if let Some(hit) = hits.iter().rev().find(|hit| hit.contains(world)) {
+                    self.clear_brush_selection();
                     if let Some(sector) = self
                         .world_to_sector(hit.id, world)
                         .map(|(sx, sz)| (hit.id, sx, sz))
@@ -163,7 +208,19 @@ impl EditorWorkspace {
                         self.clear_primitive_selection_state();
                         self.clear_sector_selection();
                     }
+                } else if let Some((brush, face)) = self.pick_brush_face_at_2d(world) {
+                    self.clear_node_selection_state();
+                    self.clear_resource_selection_state();
+                    self.clear_primitive_selection_state();
+                    self.clear_sector_selection();
+                    if modifiers.shift || modifiers.command || modifiers.ctrl {
+                        self.toggle_brush_selection(brush);
+                    } else {
+                        self.replace_brush_selection(brush, Some(face));
+                    }
+                    self.status = format!("Selected BSP brush {}", brush + 1);
                 } else {
+                    self.clear_brush_selection();
                     self.clear_resource_selection_state();
                     self.clear_sector_selection();
                 }
@@ -2582,6 +2639,7 @@ impl EditorWorkspace {
         self.selected_frame_bounds_3d().or_else(|| {
             self.active_room_id()
                 .and_then(|room_id| self.room_bounds_3d(room_id))
+                .or_else(|| self.all_brush_frame_bounds_3d())
         })
     }
 
@@ -2662,6 +2720,27 @@ impl EditorWorkspace {
             half[axis] = ((solved.max[axis] - solved.min[axis]) * 0.5) as f32;
         }
         Some((center, half))
+    }
+
+    fn all_brush_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
+        let mut bounds = None;
+        for brush in &self.project.active_scene().brushes {
+            let solved = brush.solve();
+            if !solved.is_valid()
+                || !solved.min.into_iter().all(f64::is_finite)
+                || !solved.max.into_iter().all(f64::is_finite)
+            {
+                continue;
+            }
+            let mut center = [0.0; 3];
+            let mut half = [0.0; 3];
+            for axis in 0..3 {
+                center[axis] = ((solved.min[axis] + solved.max[axis]) * 0.5) as f32;
+                half[axis] = ((solved.max[axis] - solved.min[axis]) * 0.5) as f32;
+            }
+            merge_bounds_3d(&mut bounds, center, half);
+        }
+        bounds.map(bounds_3d_to_center_half)
     }
 
     pub(crate) fn selection_bounds_3d(&self, selection: Selection) -> Option<([f32; 3], [f32; 3])> {
@@ -2754,7 +2833,17 @@ impl EditorWorkspace {
             }
         }
 
-        self.node_frame_bounds_2d(self.selection.selected_node)
+        let selected_node_bounds = self.node_frame_bounds_2d(self.selection.selected_node);
+        if self.selection.selected_node != self.project.active_scene().root {
+            return selected_node_bounds;
+        }
+
+        // The World root has a point transform but no useful geometry bounds.
+        // In a BSP-only scene frame all authored brushes instead; retain the
+        // root point as the final fallback for a truly empty scene.
+        self.all_brush_frame_bounds_3d()
+            .map(|(center, half)| project_center_half_2d(self.orthographic_view, center, half))
+            .or(selected_node_bounds)
     }
 
     pub(crate) fn sector_bounds_2d(

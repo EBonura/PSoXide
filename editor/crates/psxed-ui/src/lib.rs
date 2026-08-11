@@ -594,6 +594,8 @@ pub struct EditorWorkspace {
     content_browser_view: ContentBrowserView,
     viewport_zoom: f32,
     last_viewport_size: Vec2,
+    #[cfg(test)]
+    last_orthographic_viewport_rect: Rect,
     /// 3D viewport camera rig (orbit + free-fly params, mode, and all the
     /// camera math). Orbit preserves the original target/radius camera; Free
     /// stores an explicit world position with the same yaw/pitch convention.
@@ -1091,6 +1093,10 @@ enum Viewport3dPointerTarget {
     PrimitiveGizmo(PrimitiveGizmoAxis),
     NodeGizmo(NodeGizmoHandle),
     Entity(EntityBoundHit),
+    Brush {
+        brush: usize,
+        face: usize,
+    },
     Surface {
         face: FaceRef,
         hit: [f32; 3],
@@ -2578,7 +2584,28 @@ impl EditorWorkspace {
     pub fn show_workspace(&mut self, workspace: EditorWorkspaceView) {
         self.active_workspace = WorkspaceView::from_project(workspace);
         self.view_2d = false;
+        if self.active_workspace == WorkspaceView::Room {
+            self.frame_bsp_camera_if_uninitialized();
+        }
         self.status = format!("Workspace: {}", self.active_workspace.label());
+    }
+
+    /// Enter the Room workspace's Top orthographic viewport. This is kept
+    /// separate from the legacy UI workspace even though both are labelled
+    /// "2D" in older command-line surfaces.
+    pub fn show_room_orthographic(&mut self) {
+        self.active_workspace = WorkspaceView::Room;
+        self.view_2d = true;
+        self.orthographic_view = OrthographicView::Top;
+        self.frame_bsp_viewport_if_uninitialized();
+        self.status = "Viewport: Top".to_string();
+    }
+
+    /// Apply the same framing operation as the `.` viewport shortcut.
+    /// Deterministic frontend capture routes use this before extracting their
+    /// solid preview so the preview and editor overlays share one camera.
+    pub fn frame_current_view(&mut self) {
+        self.frame_viewport();
     }
 
     /// Open the project at `dir`. Errors when `dir/project.ron` is
@@ -2600,8 +2627,14 @@ impl EditorWorkspace {
             workspace.apply_debug_terrain_tool_from_env();
         }
         workspace.apply_project_editor_camera();
+        workspace.frame_bsp_camera_if_uninitialized();
         workspace.apply_project_editor_visibility();
         workspace.apply_project_editor_viewport();
+        if workspace.active_workspace == WorkspaceView::Room && workspace.view_2d {
+            let status = workspace.status.clone();
+            workspace.frame_bsp_viewport_if_uninitialized();
+            workspace.status = status;
+        }
         Ok(workspace)
     }
 
@@ -2747,6 +2780,8 @@ impl EditorWorkspace {
             content_browser_view: ContentBrowserView::Resources,
             viewport_zoom: DEFAULT_VIEWPORT_ZOOM,
             last_viewport_size: Vec2::new(1280.0, 720.0),
+            #[cfg(test)]
+            last_orthographic_viewport_rect: Rect::NOTHING,
             camera_rig: CameraRig {
                 mode: camera_mode,
                 yaw: editor_camera.orbit_yaw_q12,
@@ -2906,9 +2941,10 @@ impl EditorWorkspace {
             psxed_project::EditorOrthographicView::Front => OrthographicView::Front,
             psxed_project::EditorOrthographicView::Side => OrthographicView::Side,
         };
-        self.orthographic_focus = editor_viewport
-            .orthographic_focus
-            .map(|value| if value.is_finite() { value } else { 0.0 });
+        self.orthographic_focus =
+            editor_viewport
+                .orthographic_focus
+                .map(|value| if value.is_finite() { value } else { 0.0 });
         self.viewport_zoom = if editor_viewport.viewport_zoom.is_finite() {
             editor_viewport
                 .viewport_zoom
@@ -3071,9 +3107,15 @@ impl EditorWorkspace {
                     .unwrap_or_else(|| format!("Reloaded {}", short_path(&self.project_dir)));
                 self.select_first_room();
                 self.apply_project_editor_camera();
+                self.frame_bsp_camera_if_uninitialized();
                 self.apply_project_editor_visibility();
                 self.apply_project_editor_workspace();
                 self.apply_project_editor_viewport();
+                if self.active_workspace == WorkspaceView::Room && self.view_2d {
+                    let status = self.status.clone();
+                    self.frame_bsp_viewport_if_uninitialized();
+                    self.status = status;
+                }
             }
             Err(error) => {
                 self.status = format!("Reload failed: {error}");
@@ -3115,13 +3157,19 @@ impl EditorWorkspace {
         let mut opened = Self::open_directory(&target)?;
         opened.project.name = trimmed.to_string();
         opened.project.bsp_cook_mode = cook_mode;
-        opened.mark_dirty();
-        opened.save()?;
+        // Keep the template's deliberately authored interior 3D camera. A
+        // generic bounds fit lands outside a closed brush room and shows only
+        // its roof; the template starts inside, looking toward the door.
         // New BSP maps open where blockout work begins: the top orthographic
         // viewport with the brush tool active. Existing projects retain their
         // saved workspace/camera state when opened normally.
+        opened.active_workspace = WorkspaceView::Room;
         opened.view_2d = true;
+        opened.orthographic_view = OrthographicView::Top;
         opened.active_tool = ViewTool::Brush;
+        opened.frame_viewport();
+        opened.mark_dirty();
+        opened.save()?;
         opened.retire_egui_textures(self.drain_live_egui_textures());
         *self = opened;
         self.status = format!("Created {}", short_path(&self.project_dir));
