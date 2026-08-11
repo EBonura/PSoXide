@@ -9,27 +9,27 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use psx_bsp::collision::{BrushTransform, TraceScratch};
-use psx_bsp::collision_provider::{PxbspCollisionModel, PxbspCollisionProvider};
+use psx_bsp::collision_provider::{select_body_hull, PxbspCollisionModel, PxbspCollisionProvider};
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, SliceReader, Vec3I32};
 use psx_engine::{
-    commit_body_step_with_trace_provider, trace_collision, BodyStep,
-    CharacterBlockerTraceProvider, CharacterCollisionCylinder, CharacterMotorConfig,
-    CharacterMotorFrame, CharacterMotorInput, CharacterMotorState, CollisionQueryError,
-    CollisionTraceQuery, CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint,
-    ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
+    commit_body_step_with_trace_provider, trace_collision, BodyStep, CharacterBlockerTraceProvider,
+    CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
+    CharacterMotorState, CollisionQueryError, CollisionTraceQuery, CollisionTraceShape, OtFrame,
+    PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_level::{find_asset_of_kind, AssetId, AssetKind};
 
-use crate::generated::{ASSETS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS, PXBSP_WORLD};
+use crate::generated::{
+    ASSETS, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS, PXBSP_WORLD,
+};
 use crate::{ensure_room_texture_uploaded, find_room_texture_vram_slot, PROJECTION};
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
 pub(super) const BSP_POINT_HULL_INDEX: usize = 0;
-pub(super) const BSP_PLAYER_HULL_INDEX: usize = 1;
 /// Body baked by `compile_brush_world` into hull one.
 pub(super) const BSP_PLAYER_RADIUS: i32 = 16;
 /// Body baked by `compile_brush_world` into hull one.
@@ -44,7 +44,7 @@ pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 128;
 pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 64;
 pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 16;
 pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 16;
-pub(super) const BSP_USE_DISTANCE: i32 = 192;
+pub(super) const BSP_USE_DISTANCE: i32 = 256;
 
 #[derive(Debug)]
 pub(super) enum BspRuntimeInitError {
@@ -63,6 +63,7 @@ pub(super) enum BspRuntimeInitError {
         runtime: usize,
     },
     DuplicateMoverNode(u32),
+    InvalidBodyHullTable,
     MissingWorldHull(usize),
     MissingMoverHull {
         mover: usize,
@@ -100,6 +101,8 @@ impl fmt::Display for BspRuntimeInitError {
                     "PXBSP mover mapping duplicates authored node {node}"
                 )
             }
+            Self::InvalidBodyHullTable => formatter
+                .write_str("PXBSP body hull table must describe valid, unique hulls one and two"),
             Self::MissingWorldHull(hull) => {
                 write!(
                     formatter,
@@ -163,7 +166,30 @@ impl BspRuntime {
                 });
             }
         }
-        for hull in [BSP_POINT_HULL_INDEX, BSP_PLAYER_HULL_INDEX] {
+        if PXBSP_BODY_HULLS.len() != 2
+            || PXBSP_BODY_HULLS.iter().any(|hull| {
+                !(1..=2).contains(&hull.hull_index) || hull.radius < 0 || hull.height <= 0
+            })
+            || PXBSP_BODY_HULLS[0].hull_index == PXBSP_BODY_HULLS[1].hull_index
+        {
+            return Err(BspRuntimeInitError::InvalidBodyHullTable);
+        }
+        if map.model_collision_hull(0, BSP_POINT_HULL_INDEX).is_none() {
+            return Err(BspRuntimeInitError::MissingWorldHull(BSP_POINT_HULL_INDEX));
+        }
+        for (mover, door) in doors.iter().enumerate() {
+            if map
+                .model_collision_hull(door.model_index(), BSP_POINT_HULL_INDEX)
+                .is_none()
+            {
+                return Err(BspRuntimeInitError::MissingMoverHull {
+                    mover,
+                    hull: BSP_POINT_HULL_INDEX,
+                });
+            }
+        }
+        for body_hull in PXBSP_BODY_HULLS {
+            let hull = body_hull.hull_index;
             if map.model_collision_hull(0, hull).is_none() {
                 return Err(BspRuntimeInitError::MissingWorldHull(hull));
             }
@@ -260,10 +286,32 @@ impl BspRuntime {
                 if !door.enabled() {
                     return None;
                 }
+                let model = self.map.brush_models().get(door.model_index())?;
                 let origin = door.transform().origin;
-                let dx = i64::from((origin.x >> 12).saturating_sub(player.x));
-                let dy = i64::from((origin.y >> 12).saturating_sub(player.y));
-                let dz = i64::from((origin.z >> 12).saturating_sub(player.z));
+                let origin = [origin.x >> 12, origin.y >> 12, origin.z >> 12];
+                let mins = [
+                    origin[0].saturating_add(i32::from(model.mins.x)),
+                    origin[1].saturating_add(i32::from(model.mins.y)),
+                    origin[2].saturating_add(i32::from(model.mins.z)),
+                ];
+                let maxs = [
+                    origin[0].saturating_add(i32::from(model.maxs.x)),
+                    origin[1].saturating_add(i32::from(model.maxs.y)),
+                    origin[2].saturating_add(i32::from(model.maxs.z)),
+                ];
+                let player = [player.x, player.y, player.z];
+                let delta = core::array::from_fn::<_, 3, _>(|axis| {
+                    if player[axis] < mins[axis] {
+                        mins[axis].saturating_sub(player[axis])
+                    } else if player[axis] > maxs[axis] {
+                        player[axis].saturating_sub(maxs[axis])
+                    } else {
+                        0
+                    }
+                });
+                let dx = i64::from(delta[0]);
+                let dy = i64::from(delta[1]);
+                let dz = i64::from(delta[2]);
                 let squared = dx * dx + dy * dy + dz * dz;
                 (squared <= limit).then_some((squared, index))
             })
@@ -285,9 +333,11 @@ impl BspRuntime {
             radius: config.radius,
             height: config.height,
         };
+        let hull_index = select_body_hull(PXBSP_BODY_HULLS, config.radius, config.height)
+            .ok_or(CollisionQueryError)?;
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
-            BSP_PLAYER_HULL_INDEX,
+            hull_index,
             &models[..count],
             shape,
             &mut self.trace_scratch,
@@ -313,9 +363,11 @@ impl BspRuntime {
         let radius = radius.max(0);
         let height = height.max(1);
         let shape = CollisionTraceShape::Body { radius, height };
+        let hull_index =
+            select_body_hull(PXBSP_BODY_HULLS, radius, height).ok_or(CollisionQueryError)?;
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
-            BSP_PLAYER_HULL_INDEX,
+            hull_index,
             &models[..count],
             shape,
             &mut self.trace_scratch,

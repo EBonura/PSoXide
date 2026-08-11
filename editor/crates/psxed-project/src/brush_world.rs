@@ -22,6 +22,7 @@ use crate::{
     NodeId, NodeKind, ProjectDocument, PsxBlendMode, ResourceData, ResourceId, Scene,
 };
 
+use psx_bsp::collision_provider::CookedBodyHull;
 use psx_bsp::pxbsp::{
     entity_class, entity_flags, material_animation, material_blend, material_flags, PxbspBrushDoor,
     PxbspBrushDoorError, PxbspEntity, PxbspMaterial,
@@ -29,15 +30,10 @@ use psx_bsp::pxbsp::{
 use psx_bsp::{Node, Plane, RecordSlice, Vec3I32};
 use psxed_format::texture::Depth;
 
-const PLAYER_HULL: CollisionHullBounds = CollisionHullBounds {
-    mins: [-16, 0, -16],
-    maxs: [16, 56, 16],
-};
-const BIG_HULL: CollisionHullBounds = CollisionHullBounds {
-    mins: [-32, 0, -32],
-    maxs: [32, 96, 32],
-};
-const WORLD_HULLS: [CollisionHullBounds; 3] = [CollisionHullBounds::POINT, PLAYER_HULL, BIG_HULL];
+const DEBUG_BODY_RADIUS: i32 = 16;
+const DEBUG_BODY_HEIGHT: i32 = 56;
+const LEGACY_BIG_HULL_RADIUS: i32 = 32;
+const LEGACY_BIG_HULL_HEIGHT: i32 = 96;
 const DEFAULT_LIGHT_RADIUS_UNITS: f64 = 1024.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -100,6 +96,8 @@ pub struct CompiledBrushWorld {
     pub pxbsp: CompiledPxbsp,
     pub textures: Vec<CompiledBrushTexture>,
     pub movers: Vec<CompiledBrushMover>,
+    /// Exact body envelopes used to compile PXBSP collision hulls one and two.
+    pub body_hulls: [CookedBodyHull; 2],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,12 +243,97 @@ impl From<PxbspBuildError> for BrushWorldCookError {
     }
 }
 
+fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
+    let scene = project.active_scene();
+    let character_resources: Vec<_> = project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character),
+            _ => None,
+        })
+        .collect();
+    let mut bodies = Vec::new();
+    for node in scene.nodes() {
+        match &node.kind {
+            NodeKind::CharacterController { settings, .. } => {
+                if settings.radius > 0 && settings.height > 0 {
+                    bodies.push((i32::from(settings.radius), i32::from(settings.height)));
+                }
+            }
+            NodeKind::SpawnPoint {
+                player: true,
+                character,
+            } => {
+                let resolved = character
+                    .and_then(|id| project.resource(id))
+                    .and_then(|resource| match &resource.data {
+                        ResourceData::Character(character) => Some(character),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        (character.is_none() && character_resources.len() == 1)
+                            .then(|| character_resources[0])
+                    });
+                if let Some(character) = resolved {
+                    if character.radius > 0 && character.height > 0 {
+                        bodies.push((i32::from(character.radius), i32::from(character.height)));
+                    }
+                } else {
+                    // Characterless BSP projects use the debug motor.
+                    bodies.push((DEBUG_BODY_RADIUS, DEBUG_BODY_HEIGHT));
+                }
+            }
+            _ => {}
+        }
+    }
+    if bodies.is_empty() {
+        bodies.push((DEBUG_BODY_RADIUS, DEBUG_BODY_HEIGHT));
+    }
+
+    let smallest = bodies
+        .iter()
+        .copied()
+        .min_by_key(|&(radius, height)| {
+            (
+                i64::from(radius) * i64::from(radius) * i64::from(height),
+                radius,
+                height,
+            )
+        })
+        .expect("body list is non-empty");
+    let largest = bodies.iter().copied().fold(
+        (LEGACY_BIG_HULL_RADIUS, LEGACY_BIG_HULL_HEIGHT),
+        |(max_radius, max_height), (radius, height)| {
+            (max_radius.max(radius), max_height.max(height))
+        },
+    );
+    [
+        CookedBodyHull::new(1, smallest.0, smallest.1),
+        CookedBodyHull::new(2, largest.0, largest.1),
+    ]
+}
+
+fn collision_hull_bounds(body_hulls: [CookedBodyHull; 2]) -> [CollisionHullBounds; 3] {
+    let bounds = |hull: CookedBodyHull| CollisionHullBounds {
+        mins: [-hull.radius, 0, -hull.radius],
+        maxs: [hull.radius, hull.height, hull.radius],
+    };
+    [
+        CollisionHullBounds::POINT,
+        bounds(body_hulls[0]),
+        bounds(body_hulls[1]),
+    ]
+}
+
 /// Compile the active brush scene, including every brush-bound Door submodel.
 pub fn compile_brush_world(
     project: &ProjectDocument,
     options: BrushWorldCookOptions<'_>,
 ) -> Result<CompiledBrushWorld, BrushWorldCookError> {
     let scene = project.active_scene();
+    let body_hulls = authored_body_hulls(project);
+    let collision_hulls = collision_hull_bounds(body_hulls);
     let mut static_brushes = Vec::new();
     for (brush_index, brush) in scene.brushes.iter().enumerate() {
         let solved = brush.solve();
@@ -303,6 +386,7 @@ pub fn compile_brush_world(
         &material_tints,
         options.mode,
         options.ambient,
+        &collision_hulls,
     )?;
 
     let mut submodels = Vec::new();
@@ -348,6 +432,7 @@ pub fn compile_brush_world(
             &material_tints,
             options.mode,
             options.ambient,
+            &collision_hulls,
         )?;
         let model_index = u16::try_from(submodels.len() + 1)
             .map_err(|_| BrushWorldCookError::ModelIndexOverflow)?;
@@ -461,6 +546,7 @@ pub fn compile_brush_world(
         pxbsp,
         textures,
         movers,
+        body_hulls,
     })
 }
 
@@ -471,6 +557,7 @@ fn compile_model(
     material_tints: &[BrushMaterialTint],
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
+    collision_hulls: &[CollisionHullBounds; 3],
 ) -> Result<(PackedBspGeometry, CompiledCollisionHulls), BrushWorldCookError> {
     let surfaces = compile_csg_surfaces(brushes);
     let mut bsp = build_surface_bsp(&surfaces);
@@ -489,7 +576,7 @@ fn compile_model(
             pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&lighting))?
         }
     };
-    let collision = compile_collision_hulls(brushes, &WORLD_HULLS)?;
+    let collision = compile_collision_hulls(brushes, collision_hulls)?;
     Ok((geometry, collision))
 }
 

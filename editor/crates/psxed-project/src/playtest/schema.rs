@@ -128,6 +128,8 @@ pub enum PlaytestWorldGeometry {
 pub struct PlaytestPxbspWorld {
     /// Complete PXBSP file emitted by the brush compiler.
     pub bytes: Vec<u8>,
+    /// Exact authored body envelopes used for collision hulls one and two.
+    pub body_hulls: [psx_bsp::collision_provider::CookedBodyHull; 2],
     /// Texture assets referenced by the resident world's material table.
     /// These stay in the ordinary room-residency contract so the shared VRAM
     /// owner cannot evict them while the BSP world is active.
