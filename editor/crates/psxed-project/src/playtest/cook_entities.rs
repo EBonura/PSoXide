@@ -968,14 +968,27 @@ pub(crate) fn register_model_for_instance(
             ));
             return None;
         }
-        let idx = assets.len();
-        assets.push(PlaytestAsset {
-            kind: PlaytestAssetKind::Texture,
-            bytes,
-            filename: format!("{folder}/atlas.psxt"),
-            source_label: format!("{} atlas", resource.name),
-            streamed_class: StreamedClass::PersistentGameplay,
-        });
+        // Models sharing one atlas (the sword pair reuses a single .psxt)
+        // must share one cooked asset: duplicate payloads waste persistent
+        // stream bytes, residency slots, and VRAM uploads. Content identity
+        // is the contract; it also collapses byte-identical file copies.
+        let idx = if let Some(existing) = assets.iter().position(|asset| {
+            asset.kind == PlaytestAssetKind::Texture
+                && asset.streamed_class == StreamedClass::PersistentGameplay
+                && asset.bytes == bytes
+        }) {
+            existing
+        } else {
+            let idx = assets.len();
+            assets.push(PlaytestAsset {
+                kind: PlaytestAssetKind::Texture,
+                bytes,
+                filename: format!("{folder}/atlas.psxt"),
+                source_label: format!("{} atlas", resource.name),
+                streamed_class: StreamedClass::PersistentGameplay,
+            });
+            idx
+        };
         Some(idx)
     } else {
         None
