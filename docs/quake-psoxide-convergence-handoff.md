@@ -16,7 +16,7 @@ Snapshot HEAD when this document was created:
 
 STATUS NAME: this is the **Quake-PSoXide Convergence RC1 hardening
 checkpoint, Level B**. It is deliberately NOT "100 percent convergence":
-section 0.6 records the RC1 hardening pass and the explicit list of open
+sections 0.6 and 0.7 record the RC1/RC1.1 hardening passes and the explicit list of open
 Level C/D work that remains after it.
 
 ### 0.1 What landed
@@ -234,7 +234,61 @@ remaining editor workflow items (arbitrary plane handles, 2D marquee,
 enemy-authored attack content, the owner's legacy-grid decision, and
 original-hardware validation.
 
-### 0.7 What the user can test now (supersedes section 2's caveat list)
+### 0.7 RC1.1 corrective pass (2026-08-11, supersedes 0.6's replay pins)
+
+Commits `c48e0845..c08b35b3` plus this section:
+
+```text
+c48e0845 runtime: regression-test the shipped weapon placement at enforced limits
+0449c303 editor: unit-test the atlas dedup identity contract
+c08b35b3 tools: harden the door-occlusion gate contract
+```
+
+**Weapon-origin transient, upgraded contract.** The cook now enforces the
+compact i16 joint-local range for socket AND weapon grip translations (the
+same envelope capsules already enforced), and the regression drives the
+SHIPPED math: `attachment_socket_pose` into the extracted pure
+`equipped_weapon_placement` (grip inverse composition and weapon-origin
+subtraction exactly as `submit_equipped_weapon` submits them) plus blade
+endpoints, across the enforced envelope, full-format Q12 rotations and u16
+scales, and million-unit origins. No component reaches the `i32::MIN`
+sentinel within that envelope; pre-refresh sampling remains structurally
+impossible (Option snapshots). The claim is scoped to this enforced
+envelope, not to arbitrary inputs.
+
+**Atlas dedup identity tests.** Byte-identical persistent model atlases
+cook into one shared texture asset; an atlas differing by ANY PSXT byte
+(the dedup key is content identity, covering metadata and payload alike)
+stays distinct. Both unit-tested in psxed-project.
+
+**Hardened door-occlusion gate.** New `PLAYER_ATTACK_STARTS` counter
+(accepted attack presses). The door replay now asserts: exactly 3 player
+attack attempts, zero door logic fires (the door never opened), exactly 8
+enemy attack enters, zero connections in either direction. The counter
+changed the guest image: canonical VRAM pin is now `0xd130035937890a00`
+(display hash unchanged at `0xcb43a5cdb7831862`; all behavioural counters
+identical).
+
+**RC1.1 matrix.** Host suites: psxed-project 470, psxed-ui 345, psx-bsp
+64, psx-engine 298, psx-game-runtime 76 (1,253 total, all passing;
+emulator-core 537 also green after the counter-table change).
+`make combat-checkpoint` passes end to end with the hardened asserts.
+
+**Quake source contract, fail-closed.** `psoxide_link::hydrate_pinned`
+copies the hydration library's own compiled checkout labeled with the
+caller's revision string, so an unflagged hydration while the library
+resolves an older revision would copy old sources mislabeled as the pin.
+The builder now derives the compiled psoxide-link revision from its
+embedded lockfile and refuses every unflagged hydration unless that
+revision equals `PSOXIDE_REV`, printing the exact
+`--psoxide ../PSoXide-rc1-pin` instruction; the stamp can only ever carry
+the revision actually hydrated. Unit tests pin the parser, the mismatch
+refusal, the equality path, and the live phase; the publication
+transition (update the psoxide-link rev and lockfile to the published
+`PSOXIDE_REV`, after which default hydration re-enables automatically) is
+documented in the Quake README.
+
+### 0.8 What the user can test now (supersedes section 2's caveat list)
 
 `make run`, open `editor/projects/brush-combat-fixture/project.ron`, press
 Play: the Level B combat slice live (door, armed enemy, stagger, kill,
