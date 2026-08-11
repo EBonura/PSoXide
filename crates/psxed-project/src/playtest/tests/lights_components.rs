@@ -254,6 +254,8 @@ fn billboard_image_props_bake_vertical_static_lighting() {
         height: 512,
         tint_rgb: [128, 128, 128],
         baked_vertex_rgb: [(128, 128, 128); 4],
+        collision_min: [0; 3],
+        collision_max: [0; 3],
         flags: image_prop_flags::CYLINDRICAL_BILLBOARD,
     }];
     let room = CookedRoomBakeInput {

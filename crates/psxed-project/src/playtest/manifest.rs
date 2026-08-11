@@ -1410,7 +1410,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for prop in &package.image_props {
         let _ = writeln!(
             out,
-            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], flags: {} }},",
+            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], collision_min: {:?}, collision_max: {:?}, flags: {} }},",
             prop.room,
             prop.texture_asset_index,
             prop.x,
@@ -1436,6 +1436,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             prop.baked_vertex_rgb[3].0,
             prop.baked_vertex_rgb[3].1,
             prop.baked_vertex_rgb[3].2,
+            prop.collision_min,
+            prop.collision_max,
             prop.flags,
         );
     }
