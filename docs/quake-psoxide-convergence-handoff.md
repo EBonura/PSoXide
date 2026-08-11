@@ -690,7 +690,7 @@ Corrective implementation commit
 
 The corrected authoring contract is:
 
-- Move, Face, Edge and Vertex are separate, always-visible modes in both the
+- Move, Resize, Edge and Vertex are separate, always-visible modes in both the
   brush toolbar and brush Inspector. Move uses a plain drag. Select and Brush
   tools share selected-brush transforms instead of requiring a hidden tool
   switch.
@@ -715,7 +715,9 @@ New Project no longer copies the closed two-room door regression. It copies a
 separate tracked fixture at `editor/projects/brush-open-courtyard/`, generated
 by `gen-brush-open-courtyard`:
 
-- exactly 4096 by 4096 units of usable interior inside 4224-unit outer bounds;
+- exactly 16384 by 16384 units of usable interior inside 16512-unit outer bounds;
+- authored X/Z coordinates stop at 16512, leaving 16255 units below the signed
+  16-bit BSP vertex ceiling;
 - one 64-unit floor slab and four 768-unit perimeter walls;
 - no ceiling or other above-floor solid anywhere across the usable interior;
 - `cobbles_1a.psxt` on the floor and `brick_1a.psxt` on the walls, replacing

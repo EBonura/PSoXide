@@ -1913,8 +1913,9 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
         workspace.viewport_zoom < DEFAULT_VIEWPORT_ZOOM,
         "the starter BSP must be framed instead of opening at 96 px/unit"
     );
-    assert_eq!(workspace.orthographic_focus, [2112.0, 0.0, 2112.0]);
-    let framed_span = 4224.0 * workspace.viewport_zoom;
+    assert_eq!(workspace.orthographic_focus, [8256.0, 0.0, 8256.0]);
+    let framed_span =
+        psxed_project::NEW_PROJECT_COURTYARD_OUTER_SIZE as f32 * workspace.viewport_zoom;
     assert!(
         framed_span <= workspace.last_viewport_size.x.max(320.0) * 0.72 + 0.01
             && framed_span <= workspace.last_viewport_size.y.max(240.0) * 0.72 + 0.01,
@@ -1936,8 +1937,8 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
     );
     assert_eq!(saved.editor_viewport.viewport_zoom, workspace.viewport_zoom);
     assert_eq!(saved.active_scene().brushes.len(), 5);
-    assert_eq!(saved.editor_camera.orbit_target, [2112, 160, 2112]);
-    assert_eq!(saved.editor_camera.orbit_radius, 4800);
+    assert_eq!(saved.editor_camera.orbit_target, [8256, 160, 8256]);
+    assert_eq!(saved.editor_camera.orbit_radius, 18_000);
     assert_eq!(saved.editor_camera.orbit_yaw_q12, 3584);
     assert_eq!(saved.editor_camera.orbit_pitch_q12, 3712);
     let material_paths = saved

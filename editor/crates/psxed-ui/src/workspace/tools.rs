@@ -648,10 +648,12 @@ impl EditorWorkspace {
             solved.max[1] - solved.min[1],
             solved.max[2] - solved.min[2],
         ));
+        let selection_count = self.selected_brush_set().len();
+        ui.label(egui::RichText::new("Brush Transform").strong());
         ui.horizontal_wrapped(|ui| self.draw_brush_edit_mode_controls(ui));
         ui.label(
             egui::RichText::new(format!(
-                "{} mode: {}. Dragging snaps to {} units; Ctrl/Cmd+Z undoes one gesture.",
+                "{} mode: {}. Dragging snaps to {} units. Ctrl/Cmd+Z undoes one gesture.",
                 self.brush_edit_mode.label(),
                 self.brush_edit_mode.gesture_hint(),
                 self.snap_units.max(1)
@@ -659,14 +661,27 @@ impl EditorWorkspace {
             .small()
             .color(STUDIO_TEXT_WEAK),
         );
+        if selection_count > 1 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{selection_count} brushes selected. Move changes the group; Resize and Size change the primary brush."
+                ))
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+            );
+        }
         // Numeric placement fallback: exact (unsnapped) min-corner entry.
         if let Some(origin) = self.selected_brush_origin() {
             let mut edited = origin;
-            ui.horizontal(|ui| {
-                ui.label("Origin");
-                ui.add(egui::DragValue::new(&mut edited[0]).speed(1).prefix("X "));
-                ui.add(egui::DragValue::new(&mut edited[1]).speed(1).prefix("Y "));
-                ui.add(egui::DragValue::new(&mut edited[2]).speed(1).prefix("Z "));
+            ui.label("Move (origin)");
+            ui.columns(3, |columns| {
+                for (axis, column) in columns.iter_mut().enumerate() {
+                    column.label(["X", "Y", "Z"][axis]);
+                    column.add_sized(
+                        [column.available_width(), 22.0],
+                        egui::DragValue::new(&mut edited[axis]).speed(1),
+                    );
+                }
             });
             if edited != origin {
                 self.set_selected_brush_origin(edited);
@@ -674,26 +689,17 @@ impl EditorWorkspace {
         }
         if let Some(size) = self.selected_brush_size() {
             let mut edited = size;
-            ui.horizontal(|ui| {
-                ui.label("Size");
-                ui.add(
-                    egui::DragValue::new(&mut edited[0])
-                        .speed(1)
-                        .prefix("X ")
-                        .range(1..=i32::MAX),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut edited[1])
-                        .speed(1)
-                        .prefix("Y ")
-                        .range(1..=i32::MAX),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut edited[2])
-                        .speed(1)
-                        .prefix("Z ")
-                        .range(1..=i32::MAX),
-                );
+            ui.label("Resize (size)");
+            ui.columns(3, |columns| {
+                for (axis, column) in columns.iter_mut().enumerate() {
+                    column.label(["X", "Y", "Z"][axis]);
+                    column.add_sized(
+                        [column.available_width(), 22.0],
+                        egui::DragValue::new(&mut edited[axis])
+                            .speed(1)
+                            .range(1..=i32::MAX),
+                    );
+                }
             });
             if edited != size && !self.set_selected_brush_size(edited) {
                 self.status =
@@ -982,7 +988,8 @@ impl EditorWorkspace {
     }
 
     /// Numeric fallback for whole-brush placement: translate the selected
-    /// brush so its solved min corner lands exactly on `origin`. No grid
+    /// brush set so the primary brush's solved min corner lands exactly on
+    /// `origin`. No grid
     /// snapping: typing exact off-grid coordinates is the point of the
     /// fallback. Inspector-owned mutation: history is recorded by the
     /// inspector transaction wrapper, not here.
@@ -990,7 +997,7 @@ impl EditorWorkspace {
         let Some(current) = self.selected_brush_origin() else {
             return false;
         };
-        let Some(index) = self.selected_brush else {
+        let Some(primary) = self.selected_brush else {
             return false;
         };
         let delta = [
@@ -1001,14 +1008,20 @@ impl EditorWorkspace {
         if delta == [0; 3] {
             return true;
         }
+        let mut targets = self.selected_brush_set();
+        if !targets.contains(&primary) {
+            targets = vec![primary];
+        }
         let texture_lock = self.brush_texture_lock;
-        let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) else {
-            return false;
-        };
-        if texture_lock {
-            brush.translate_with_uv_lock(delta, psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL);
-        } else {
-            brush.translate(delta);
+        for index in targets {
+            let Some(brush) = self.project.active_scene_mut().brushes.get_mut(index) else {
+                return false;
+            };
+            if texture_lock {
+                brush.translate_with_uv_lock(delta, psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL);
+            } else {
+                brush.translate(delta);
+            }
         }
         self.mark_dirty();
         true
