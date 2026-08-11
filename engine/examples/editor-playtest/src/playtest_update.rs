@@ -545,11 +545,13 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
         let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
         let blocker_count = self.collect_collision_blockers(&mut blockers);
+        let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+        let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
         let motor_frame = if self.bsp.is_some() {
             // The resident provider owns its bounded hull scratch and mover
-            // transforms. Actor cylinders compose over that provider in their
-            // stable cooked/live order; BSP frames never build a grid-room
-            // collision set.
+            // transforms. Actor/cylinder and authored box/arch blockers compose
+            // over that provider in stable cooked/live order; BSP frames never
+            // build a grid-room collision set.
             telemetry::stage_end(telemetry::stage::SIM_COLLISION);
             telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
             self.bsp
@@ -561,6 +563,7 @@ impl Playtest {
                     config,
                     delta_vblanks,
                     &blockers[..blocker_count],
+                    &aabb_blockers[..aabb_blocker_count],
                 )
                 .expect("PXBSP player trace failed")
         } else {
@@ -588,8 +591,6 @@ impl Playtest {
                 1 => single_collision_room.as_ref().map(|room| room.collision()),
                 _ => None,
             };
-            let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
-            let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
             let collision = if collision_room_count <= 1 {
                 CharacterCollision::new_with_aabbs(
                     room_collision,
