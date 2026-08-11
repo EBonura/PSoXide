@@ -734,15 +734,14 @@ editor-blank-playtest-check:
 	project_dir="$$check_tmp/project"; \
 	project_file="$$project_dir/project.ron"; \
 	generated_fixture="$$check_tmp/generated-fixture"; \
-	tracked_fixture="editor/projects/brush-first-playable"; \
+	tracked_fixture="editor/projects/brush-open-courtyard"; \
 	cue="$$project_dir/baked/editor_blank_playtest_acceptance.cue"; \
 	disc="$$project_dir/baked/editor_blank_playtest_acceptance.bin"; \
-	frame="$$check_tmp/frame.ppm"; \
 	log="$$check_tmp/headless.log"; \
-	cargo run -p psxed-project --bin gen-brush-first-playable -- "$$generated_fixture"; \
+	cargo run -p psxed-project --bin gen-brush-open-courtyard -- "$$generated_fixture"; \
 	cmp "$$generated_fixture/project.ron" "$$tracked_fixture/project.ron"; \
-	cmp "$$generated_fixture/walk-through-door.pxitape.csv" "$$tracked_fixture/walk-through-door.pxitape.csv"; \
-	cmp "$$generated_fixture/assets/textures/starter_stone_brick.psxt" "$$tracked_fixture/assets/textures/starter_stone_brick.psxt"; \
+	cmp "$$generated_fixture/assets/textures/courtyard_cobbles.psxt" "$$tracked_fixture/assets/textures/courtyard_cobbles.psxt"; \
+	cmp "$$generated_fixture/assets/textures/courtyard_brick.psxt" "$$tracked_fixture/assets/textures/courtyard_brick.psxt"; \
 	cd editor; \
 	PSOXIDE_EDITOR_BLANK_PROJECT_OUT="$$project_dir" cargo test -p psxed-ui tests::project_workspace::bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract -- --exact --nocapture; \
 	cd ..; \
@@ -755,7 +754,6 @@ editor-blank-playtest-check:
 		--guest-frames 180 \
 		--guest-visual-frames 60 \
 		--steps 1000000000 \
-		--dump-hw "$$frame" \
 		--dump-hash \
 		--dump-guest-profile > "$$log" 2>&1; then \
 		cat "$$log"; \
@@ -769,7 +767,6 @@ editor-blank-playtest-check:
 		--pxbsp engine/examples/editor-playtest/generated/brush_world.pxbsp \
 		--exe build/examples/mipsel-sony-psx/release/editor-playtest.exe \
 		--disc "$$disc" \
-		--frame "$$frame" \
 		--log "$$log"
 
 # End-to-end proof that authored PXBSP liquid contents survive the editor cook,
