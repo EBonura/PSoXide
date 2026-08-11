@@ -68,7 +68,38 @@ impl Playtest {
             .and_then(|index| WATER_CELLS.get(index))
     }
 
-    pub(super) fn respawn_after_hazard_death(&mut self) {
+    /// Arm the shared player death sequence: `delay_ticks` of locked
+    /// Death animation, then [`Self::respawn_after_death`] when the
+    /// countdown in `update_gameplay` reaches zero. One arming point
+    /// for every cause (combat damage, BSP liquid hazards, lethal
+    /// water); callers floor health themselves. PLAYER_DEATHS counts
+    /// here so the death event is recorded even if a run ends before
+    /// the respawn completes.
+    pub(super) fn arm_player_death(
+        &mut self,
+        by_combat: bool,
+        delay_ticks: u8,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) {
+        self.hazard_death_ticks_remaining = delay_ticks.max(1);
+        self.death_by_combat = by_combat;
+        self.switch_player_anim(PlayerAnim::Death, now, video_hz);
+        self.anim_lock_until_tick = now.saturating_add(u32::from(delay_ticks));
+        self.lock_target = None;
+        self.soft_lock_target = None;
+        self.active_interactable = None;
+        telemetry::counter(telemetry::counter::PLAYER_DEATHS, 1);
+    }
+
+    /// Respawn after ANY completed death sequence (combat or hazard).
+    ///
+    /// Persistence policy (the souls rule: the world resets, the
+    /// checkpoint persists): `self.checkpoint` deliberately survives
+    /// death and decides the respawn pose; enemies, logic records
+    /// (including fired-once triggers), door states, and box props are
+    /// TRANSIENT and re-arm 1:1 from their cooked tables below.
+    pub(super) fn respawn_after_death(&mut self) {
         let (room, position, yaw) = if let Some(checkpoint) = self.checkpoint {
             (checkpoint.room, checkpoint.position, checkpoint.yaw)
         } else {
@@ -96,6 +127,11 @@ impl Playtest {
         self.evade_run_hold_consumed = false;
         self.game_entities.spawn_from_records(GAME_ENTITIES);
         self.logic.init_from_records(LOGIC);
+        // The logic runtime restarts its rolling fired total with the
+        // records; restart the reported watermark with it or the
+        // LOGIC_RECORDS_FIRED delta counter under-reports until the new
+        // total passes the pre-death one.
+        self.logic_fired_reported = 0;
         self.box_props.reset_dynamic_state();
         self.sync_door_box_props();
         self.camera.snap_to_player_with_yaw(
@@ -112,7 +148,12 @@ impl Playtest {
         if self.bsp.is_none() {
             self.load_active_room_window();
         }
-        telemetry::debug_log("player hazard:respawn");
+        telemetry::debug_log(if self.death_by_combat {
+            "player combat:respawn"
+        } else {
+            "player hazard:respawn"
+        });
+        self.death_by_combat = false;
     }
 
     /// Switch the player animation state, recording the outgoing
