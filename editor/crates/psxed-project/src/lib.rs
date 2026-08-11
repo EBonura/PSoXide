@@ -17,9 +17,9 @@ pub mod brush_collision_hulls;
 pub mod brush_compile;
 pub mod brush_light;
 pub mod brush_pack;
+pub mod brush_playtest;
 pub mod brush_portal;
 pub mod brush_pxbsp;
-pub mod brush_playtest;
 pub mod brush_world;
 pub mod floor_view;
 pub use animation_pose_correction::*;
@@ -232,23 +232,108 @@ mod projects_dir_tests {
     #[test]
     fn new_project_template_is_a_buildable_pxbsp_level() {
         let root = new_project_template_dir();
+        assert!(root.ends_with("brush-open-courtyard"));
         let project = ProjectDocument::load_from_path(root.join("project.ron"))
             .expect("load BSP-first project template");
-        assert!(!project.active_scene().brushes.is_empty());
-        assert!(
-            project
-                .active_scene()
-                .nodes()
+        assert_eq!(project.active_scene().brushes.len(), 5);
+        assert!(project
+            .active_scene()
+            .nodes()
+            .iter()
+            .all(|node| !matches!(node.kind, NodeKind::Section { .. })));
+
+        let solved = project
+            .active_scene()
+            .brushes
+            .iter()
+            .map(crate::brush::Brush::solve)
+            .collect::<Vec<_>>();
+        assert!(solved.iter().all(crate::brush::SolvedBrush::is_valid));
+        let world_min: [f64; 3] = std::array::from_fn(|axis| {
+            solved
                 .iter()
-                .all(|node| !matches!(node.kind, NodeKind::Section { .. }))
+                .map(|brush| brush.min[axis])
+                .fold(f64::INFINITY, f64::min)
+        });
+        let world_max: [f64; 3] = std::array::from_fn(|axis| {
+            solved
+                .iter()
+                .map(|brush| brush.max[axis])
+                .fold(f64::NEG_INFINITY, f64::max)
+        });
+        assert!(world_max[0] - world_min[0] >= 4224.0);
+        assert!(world_max[2] - world_min[2] >= 4224.0);
+
+        let spawn = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
+            .expect("one player spawn")
+            .transform
+            .translation;
+        assert_eq!(spawn, [2112.0, 65.0, 3200.0]);
+        const INTERIOR_MIN: f64 = 64.0;
+        const INTERIOR_MAX: f64 = 4160.0;
+        const FLOOR_TOP: f64 = 64.0;
+        assert_eq!(INTERIOR_MAX - INTERIOR_MIN, 4096.0);
+        for brush in &solved {
+            let overlaps_interior_xz = brush.min[0] < INTERIOR_MAX
+                && brush.max[0] > INTERIOR_MIN
+                && brush.min[2] < INTERIOR_MAX
+                && brush.max[2] > INTERIOR_MIN;
+            assert!(
+                !(overlaps_interior_xz && brush.min[1] > FLOOR_TOP),
+                "starter has an overhead brush covering part of the 4096x4096 interior"
+            );
+        }
+        let material_paths = project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Material(material) => material.psxt_path.as_deref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            material_paths,
+            [
+                "assets/textures/courtyard_cobbles.psxt",
+                "assets/textures/courtyard_brick.psxt"
+            ]
         );
+        assert!(material_paths
+            .iter()
+            .all(|path| !path.contains("delven") && !path.contains("aletha")));
 
         let (package, report) = playtest::build_package(&project, &root);
         assert!(report.is_ok(), "BSP starter cook: {:?}", report.errors);
-        assert!(matches!(
-            package.expect("BSP starter package").world_geometry,
-            playtest::PlaytestWorldGeometry::Pxbsp(_)
-        ));
+        let package = package.expect("BSP starter package");
+        let playtest::PlaytestWorldGeometry::Pxbsp(world) = package.world_geometry else {
+            panic!("open courtyard did not cook PXBSP");
+        };
+        let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
+        map.load(0, &mut psx_bsp::SliceReader::new(&world.bytes))
+            .expect("load open courtyard PXBSP");
+        let origin = psx_bsp::Vec3I32 {
+            x: spawn[0] as i32 * 4096,
+            y: spawn[1] as i32 * 4096,
+            z: spawn[2] as i32 * 4096,
+        };
+        let mut trace = psx_bsp::collision::Trace::default();
+        assert!(map
+            .model_collision_hull(0, 1)
+            .expect("player hull")
+            .trace_into(
+                &origin,
+                &origin,
+                &mut psx_bsp::collision::TraceScratch::new(),
+                &mut trace,
+            ));
+        assert!(
+            !trace.start_solid && !trace.all_solid,
+            "spawn is solid: {trace:?}"
+        );
     }
 
     /// Seeding must respect a deletion. Re-creating the sample every launch
@@ -314,12 +399,11 @@ pub fn default_project_dir() -> PathBuf {
 
 /// BSP-first template copied by the editor's New Project flow.
 ///
-/// The template is intentionally the same tracked brush-first playable used by
-/// cook, collision, mover, and replay regressions. A newly created project
-/// therefore starts from a level that is already buildable and testable through
-/// the normal PXBSP path instead of inheriting the legacy sector grid.
+/// This is deliberately separate from the closed two-room door regression:
+/// authors start in a large roofless courtyard, while replay evidence keeps its
+/// frozen fixture and hashes. Both use the same normal PXBSP cook path.
 pub fn new_project_template_dir() -> PathBuf {
-    projects_dir().join("brush-first-playable")
+    projects_dir().join("brush-open-courtyard")
 }
 
 /// Enumerate every directory under [`projects_dir`] that contains a

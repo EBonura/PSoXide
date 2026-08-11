@@ -152,6 +152,24 @@ impl EditorWorkspace {
                     )
                 })
         };
+        if response.hovered()
+            && (matches!(self.active_tool, ViewTool::Brush)
+                || (select_tool && self.selected_brush.is_some()))
+        {
+            if let Some(pointer) = response.hover_pos() {
+                let over_handle = self.pick_brush_handle_3d(rect, pointer).is_some();
+                let over_brush = self
+                    .pick_brush_face_nearest_for_selection_3d(rect, pointer)
+                    .is_some();
+                if over_handle || (self.brush_edit_mode == BrushEditMode::Move && over_brush) {
+                    ui.ctx().set_cursor_icon(match self.brush_edit_mode {
+                        BrushEditMode::Move => egui::CursorIcon::Grab,
+                        BrushEditMode::Face => egui::CursorIcon::ResizeVertical,
+                        BrushEditMode::Edge | BrushEditMode::Vertex => egui::CursorIcon::Crosshair,
+                    });
+                }
+            }
+        }
         let hover_entity_hit = pointer_target.and_then(|target| target.entity_hit());
         // Face hover ray-tests every floor / wall / ceiling in the
         // active Room and reports the closest hit. Used by Select
@@ -254,7 +272,21 @@ impl EditorWorkspace {
             };
             let tool = tools::tool_impl_3d(self.active_tool);
             if response.drag_started_by(egui::PointerButton::Primary) {
-                tool.primary_pressed(self, &frame);
+                let press_pointer = ui
+                    .input(|input| input.pointer.press_origin())
+                    .or(frame.pointer_interact);
+                let mut press_frame = frame;
+                press_frame.pointer_interact = press_pointer;
+                press_frame.pointer_hover = press_pointer;
+                press_frame.pointer_target = press_pointer.and_then(|pointer| {
+                    self.resolve_viewport_3d_pointer_target(
+                        rect,
+                        pointer,
+                        hover_room,
+                        select_tool && !dnd_active,
+                    )
+                });
+                tool.primary_pressed(self, &press_frame);
             }
             if response.dragged_by(egui::PointerButton::Primary) {
                 tool.primary_dragged(self, &frame);
