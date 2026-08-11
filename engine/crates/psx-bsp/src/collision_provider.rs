@@ -12,6 +12,50 @@ use psx_engine::{
 /// Maximum transformed brush models composed into one production trace.
 pub const MAX_COMPOSED_COLLISION_MODELS: usize = 32;
 
+/// One caller-defined cooked hull envelope for an upright body.
+///
+/// PXBSP stores Quake-style hull head nodes but deliberately does not impose
+/// game-specific hull dimensions. The cooker/runtime contract supplies those
+/// dimensions through a fixed table and [`select_body_hull`] returns the first
+/// envelope that fully contains the authored body.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CookedBodyHull {
+    /// Collision hull index in the PXBSP brush-model record.
+    pub hull_index: usize,
+    /// Maximum horizontal half-width supported by this hull.
+    pub radius: i32,
+    /// Maximum upright height supported by this hull.
+    pub height: i32,
+}
+
+impl CookedBodyHull {
+    /// Describe one fixed cooked body hull.
+    pub const fn new(hull_index: usize, radius: i32, height: i32) -> Self {
+        Self {
+            hull_index,
+            radius,
+            height,
+        }
+    }
+}
+
+/// Select the first cooked hull envelope that fully contains an authored body.
+///
+/// Callers must order `hulls` from their preferred smallest/tightest envelope
+/// to the largest fallback. Invalid bodies and bodies larger than every cooked
+/// envelope return `None` rather than silently using an undersized hull.
+pub fn select_body_hull(hulls: &[CookedBodyHull], radius: i32, height: i32) -> Option<usize> {
+    if radius < 0 || height <= 0 {
+        return None;
+    }
+    hulls
+        .iter()
+        .find(|hull| {
+            hull.radius >= 0 && hull.height > 0 && radius <= hull.radius && height <= hull.height
+        })
+        .map(|hull| hull.hull_index)
+}
+
 /// One transformed PXBSP submodel included in a world collision query.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PxbspCollisionModel {
@@ -209,6 +253,33 @@ mod tests {
     use super::*;
     use crate::{ClipNode, Plane, RecordSlice};
     use psx_engine::COLLISION_FRACTION_ONE_Q12;
+
+    #[test]
+    fn body_hull_selection_is_ordered_bounded_and_fail_closed() {
+        let hulls = [
+            CookedBodyHull::new(1, 16, 56),
+            CookedBodyHull::new(2, 32, 96),
+        ];
+        assert_eq!(select_body_hull(&hulls, 0, 1), Some(1));
+        assert_eq!(select_body_hull(&hulls, 16, 56), Some(1));
+        assert_eq!(select_body_hull(&hulls, 17, 56), Some(2));
+        assert_eq!(select_body_hull(&hulls, 16, 57), Some(2));
+        assert_eq!(select_body_hull(&hulls, 32, 96), Some(2));
+        assert_eq!(select_body_hull(&hulls, -1, 56), None);
+        assert_eq!(select_body_hull(&hulls, 16, 0), None);
+        assert_eq!(select_body_hull(&hulls, 33, 1), None);
+        assert_eq!(select_body_hull(&hulls, 1, 97), None);
+    }
+
+    #[test]
+    fn body_hull_selection_skips_malformed_envelopes() {
+        let hulls = [
+            CookedBodyHull::new(7, -1, 56),
+            CookedBodyHull::new(8, 16, 0),
+            CookedBodyHull::new(9, 16, 56),
+        ];
+        assert_eq!(select_body_hull(&hulls, 16, 56), Some(9));
+    }
 
     fn plane_x(distance_units: i32) -> [u8; 14] {
         let mut bytes = [0u8; 14];

@@ -25,9 +25,9 @@ EXPECT_MELEE_HITS=4
 EXPECT_STAGGERS=1
 EXPECT_DEATHS=1
 EXPECT_HITS_TAKEN=3
-EXPECT_PLAYER_X_BIASED=1000942
-EXPECT_VRAM_HASH=0xd130035937890a00
-EXPECT_DISPLAY_HASH=0xcb43a5cdb7831862
+EXPECT_PLAYER_X_BIASED=1003641
+EXPECT_VRAM_HASH=0x425cf210826f0d92
+EXPECT_DISPLAY_HASH=0xfaa899f4f396509a
 
 fail() {
     echo "combat-checkpoint: FAIL: $1" >&2
@@ -124,7 +124,7 @@ assert_eq "pinned display hash" "$DISPLAY_1" "$EXPECT_DISPLAY_HASH"
 # number of times, and not one connection crossed the closed door in either
 # direction.
 EXPECT_DOOR_PLAYER_ATTEMPTS=3
-EXPECT_DOOR_ENEMY_SWINGS=8
+EXPECT_DOOR_ENEMY_SWINGS=1
 DOOR="$OUT/door.txt"
 assert_eq "door tape: player attack attempts" \
     "$(counter_or_zero "$DOOR" "player attack starts")" "$EXPECT_DOOR_PLAYER_ATTEMPTS"

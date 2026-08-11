@@ -31,6 +31,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use psx_bsp::collision_provider::select_body_hull;
 use psx_engine::{
     cache_room_vertex_lit_surfaces, CachedRoomCell, CachedRoomSurface, RuntimeRoom,
     WorldRenderMaterial, WorldVertex,
@@ -99,6 +100,49 @@ const ATMOSPHERE_WIND_SPEED_MIN_Q4: i32 = -64;
 const ATMOSPHERE_WIND_SPEED_MAX_Q4: i32 = 64;
 const UI_LARGE_IMAGE_STRIP_WIDTH: u16 = 160;
 const UI_LARGE_IMAGE_MAX_DIMENSION: u16 = 256;
+
+fn validate_pxbsp_body_hulls(
+    project: &ProjectDocument,
+    body_hulls: &[psx_bsp::collision_provider::CookedBodyHull],
+    characters: &[PlaytestCharacter],
+    game_entities: &[PlaytestGameEntity],
+    report: &mut PlaytestValidationReport,
+) {
+    let largest_radius = body_hulls.iter().map(|hull| hull.radius).max().unwrap_or(0);
+    let largest_height = body_hulls.iter().map(|hull| hull.height).max().unwrap_or(0);
+    for character in characters {
+        if select_body_hull(
+            body_hulls,
+            i32::from(character.radius),
+            i32::from(character.height),
+        )
+        .is_none()
+        {
+            let name = project
+                .resource(character.source_resource)
+                .map(|resource| resource.name.as_str())
+                .unwrap_or("<missing Character>");
+            report.error(format!(
+                "Character '{name}' body {}x{} exceeds every cooked PXBSP hull (largest is {}x{})",
+                character.radius, character.height, largest_radius, largest_height,
+            ));
+        }
+    }
+    for (index, entity) in game_entities.iter().enumerate() {
+        if select_body_hull(
+            body_hulls,
+            i32::from(entity.radius),
+            i32::from(entity.height),
+        )
+        .is_none()
+        {
+            report.error(format!(
+                "Game entity {index} body {}x{} exceeds every cooked PXBSP hull (largest is {}x{})",
+                entity.radius, entity.height, largest_radius, largest_height,
+            ));
+        }
+    }
+}
 
 fn brush_world_validation_target(
     error: &crate::brush_world::BrushWorldCookError,
@@ -985,6 +1029,7 @@ pub fn build_package(
         }
         world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
             bytes: compiled.pxbsp.bytes,
+            body_hulls: compiled.body_hulls,
             texture_asset_indices: compiled
                 .textures
                 .iter()
@@ -2140,6 +2185,16 @@ pub fn build_package(
         &mut assets,
         &mut report,
     );
+
+    if let PlaytestWorldGeometry::Pxbsp(world) = &world_geometry {
+        validate_pxbsp_body_hulls(
+            project,
+            &world.body_hulls,
+            &characters,
+            &game_entities,
+            &mut report,
+        );
+    }
 
     if !report.is_ok() {
         return (None, report);

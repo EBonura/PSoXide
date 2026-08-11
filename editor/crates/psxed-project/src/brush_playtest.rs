@@ -36,6 +36,13 @@ mod tests {
         assert_eq!(package.assets.len(), 2);
         assert_eq!(package.texture_asset_count(), 1);
         assert_eq!(world.texture_asset_indices, [1]);
+        assert_eq!(
+            world.body_hulls,
+            [
+                psx_bsp::collision_provider::CookedBodyHull::new(1, 16, 56),
+                psx_bsp::collision_provider::CookedBodyHull::new(2, 32, 96),
+            ]
+        );
         assert_eq!(package.spawn.expect("player spawn").room, 0);
         assert_eq!(package.spawn.expect("player spawn").yaw, 3072);
         assert_eq!(package.logic.len(), 1);
@@ -45,6 +52,8 @@ mod tests {
         assert!(source.contains("pub const PLAYTEST_USES_PXBSP: bool = true;"));
         assert!(source.contains("pub static PXBSP_WORLD: &[u8]"));
         assert!(source.contains("PXBSP_MOVER_NODE_IDS: &[u32] = &[2]"));
+        assert!(source.contains("CookedBodyHull::new(1, 16, 56)"));
+        assert!(source.contains("CookedBodyHull::new(2, 32, 96)"));
         assert!(source.contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(1)]"));
         assert!(!source.contains("BRUSH_TEXTURES"));
 
@@ -55,6 +64,57 @@ mod tests {
         .expect("normal editor-playtest runtime source");
         assert!(runtime_main.contains("mod bsp_runtime;"));
         assert!(!runtime_main.contains("brush_playtest::run()"));
+    }
+
+    #[test]
+    fn brush_combat_cooks_authored_player_and_enemy_body_hulls() {
+        let project = ProjectDocument::from_ron_str(include_str!(
+            "../../../projects/brush-combat-fixture/project.ron"
+        ))
+        .expect("brush combat fixture");
+        let fixture_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-combat-fixture");
+        let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
+        assert!(report.is_ok(), "brush combat package: {:?}", report.errors);
+        let package = package.expect("brush combat package");
+        let PlaytestWorldGeometry::Pxbsp(world) = package.world_geometry else {
+            panic!("brush combat selected the grid provider");
+        };
+        assert_eq!(
+            world.body_hulls,
+            [
+                psx_bsp::collision_provider::CookedBodyHull::new(1, 188, 1024),
+                psx_bsp::collision_provider::CookedBodyHull::new(2, 192, 1024),
+            ]
+        );
+        let mut map = PxbspResidentMap::with_capacity(world.bytes.len());
+        map.load(0, &mut SliceReader::new(&world.bytes))
+            .expect("resident combat PXBSP");
+        let door = map.brush_models().get(1).expect("combat door model");
+        assert_eq!(
+            door.origin,
+            psx_bsp::Vec3I16 {
+                x: 2048,
+                y: 256,
+                z: 1536,
+            }
+        );
+        assert_eq!(
+            door.mins,
+            psx_bsp::Vec3I16 {
+                x: -32,
+                y: 0,
+                z: -256,
+            }
+        );
+        assert_eq!(
+            door.maxs,
+            psx_bsp::Vec3I16 {
+                x: 32,
+                y: 768,
+                z: 256,
+            }
+        );
     }
 
     #[test]
