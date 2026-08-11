@@ -456,7 +456,11 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
-        if self.active_room_id().is_none() && self.active_tool.requires_room_context() {
+        let room_active = self.active_room_id().is_some();
+        let bsp_place_active = self.active_tool == ViewTool::Place
+            && self.bsp_authoring_root().is_some()
+            && self.place_kind != PlaceKind::Portal;
+        if !room_active && !bsp_place_active && self.active_tool.requires_room_context() {
             self.active_tool = ViewTool::Select;
             self.material_paint_sampling = false;
         }
@@ -1065,6 +1069,7 @@ impl EditorWorkspace {
     pub(crate) fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(236.0);
         let room_active = self.active_room_id().is_some();
+        let bsp_active = self.bsp_authoring_root().is_some();
         ui.label("Edit surfaces");
         for (tool, icon, label) in [
             (ViewTool::Select, ViewTool::Select.icon(), "Select"),
@@ -1119,7 +1124,8 @@ impl EditorWorkspace {
         ui.label("Add");
         for kind in PlaceKind::ALL {
             let selected = self.active_tool_cycle_value() == (ViewTool::Place, Some(kind));
-            ui.add_enabled_ui(room_active, |ui| {
+            let enabled = room_active || (bsp_active && kind != PlaceKind::Portal);
+            ui.add_enabled_ui(enabled, |ui| {
                 if toolbar_menu_choice(ui, icons::label(kind.icon(), kind.label()), selected) {
                     self.set_active_tool_cycle_value((ViewTool::Place, Some(kind)));
                 }
