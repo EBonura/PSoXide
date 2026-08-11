@@ -1005,7 +1005,7 @@ impl EditorWorkspace {
         }
 
         let brush = self
-            .pick_brush_face_with_hit(rect, pointer)
+            .pick_brush_face_nearest_for_selection_3d(rect, pointer)
             .and_then(|(brush, face, hit)| {
                 let (origin, _) = self.camera_ray_for_pointer(rect, pointer)?;
                 Some((

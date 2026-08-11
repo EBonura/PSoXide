@@ -249,33 +249,62 @@ impl EditorWorkspace {
                             draw_axes_gizmo(&painter, rect, orthographic_view);
                             return;
                         }
-                        if !dnd_active && matches!(self.active_tool, ViewTool::Brush) {
+                        let brush_edit_active = matches!(self.active_tool, ViewTool::Brush)
+                            || (matches!(self.active_tool, ViewTool::Select)
+                                && self.selected_brush.is_some());
+                        if !dnd_active && brush_edit_active {
+                            if response.hovered()
+                                && pointer_world.is_some_and(|world| {
+                                    self.brush_edit_mode != BrushEditMode::Move
+                                        || self.pick_brush_face_for_move_at_2d(world).is_some()
+                                })
+                            {
+                                ui.ctx().set_cursor_icon(match self.brush_edit_mode {
+                                    BrushEditMode::Move => egui::CursorIcon::Grab,
+                                    BrushEditMode::Face => egui::CursorIcon::ResizeHorizontal,
+                                    BrushEditMode::Edge | BrushEditMode::Vertex => {
+                                        egui::CursorIcon::Crosshair
+                                    }
+                                });
+                            }
                             if response.hovered() {
                                 self.brush_tool_keyboard(ui);
                             }
                             if response.drag_started_by(egui::PointerButton::Primary) {
-                                if let Some(pos) = response.interact_pointer_pos() {
-                                    let world = transform.screen_to_world(pos);
-                                    let modifiers = ui.input(|input| input.modifiers);
-                                    let tolerance = 8.0 / self.viewport_zoom;
-                                    if modifiers.shift {
-                                        self.begin_brush_move_2d(world);
-                                    } else {
-                                        // The Selection group picks the drag
-                                        // grammar: Face resizes planes, Vertex
-                                        // and Edge reshape corners/columns.
-                                        let grabbed = match self.selection_mode {
-                                            SelectionMode::Face => {
-                                                self.begin_brush_resize_2d(world, tolerance)
-                                            }
-                                            SelectionMode::Edge => {
-                                                self.begin_brush_edge_drag_2d(world, tolerance)
-                                            }
-                                            SelectionMode::Vertex => {
-                                                self.begin_brush_vertex_drag_2d(world, tolerance)
+                                let modifiers = ui.input(|input| input.modifiers);
+                                let additive_select = matches!(self.active_tool, ViewTool::Select)
+                                    && (modifiers.shift || modifiers.command || modifiers.ctrl);
+                                if !additive_select {
+                                    if let Some(pos) = ui
+                                        .input(|input| input.pointer.press_origin())
+                                        .or_else(|| response.interact_pointer_pos())
+                                    {
+                                        let world = transform.screen_to_world(pos);
+                                        let tolerance = 8.0 / self.viewport_zoom;
+                                        // Brush keeps its legacy Shift group
+                                        // move; Select reserves modifiers for
+                                        // additive selection and marquee.
+                                        let grabbed = if modifiers.shift
+                                            || self.brush_edit_mode == BrushEditMode::Move
+                                        {
+                                            self.begin_brush_move_2d(world)
+                                        } else {
+                                            match self.brush_edit_mode {
+                                                BrushEditMode::Move => unreachable!(),
+                                                BrushEditMode::Face => {
+                                                    self.begin_brush_resize_2d(world, tolerance)
+                                                }
+                                                BrushEditMode::Edge => {
+                                                    self.begin_brush_edge_drag_2d(world, tolerance)
+                                                }
+                                                BrushEditMode::Vertex => self
+                                                    .begin_brush_vertex_drag_2d(world, tolerance),
                                             }
                                         };
-                                        if !grabbed && self.pick_brush_face_at_2d(world).is_none() {
+                                        if !grabbed
+                                            && matches!(self.active_tool, ViewTool::Brush)
+                                            && self.pick_brush_face_at_2d(world).is_none()
+                                        {
                                             self.begin_brush_drag_2d(world);
                                         }
                                     }
@@ -304,12 +333,18 @@ impl EditorWorkspace {
                         let bsp_brush_marquee = !self.project.active_scene().brushes.is_empty();
                         if !dnd_active
                             && matches!(self.active_tool, ViewTool::Select)
+                            && self.brush_move.is_none()
+                            && self.brush_vertex_drag.is_none()
+                            && self.brush_extrude.is_none()
                             && response.drag_started_by(egui::PointerButton::Primary)
                         {
                             let can_box_select = bsp_brush_marquee
                                 || (top_view && (top_hit.is_none() || top_hit_is_room));
                             if can_box_select {
-                                if let Some(start) = response.interact_pointer_pos() {
+                                if let Some(start) = ui
+                                    .input(|input| input.pointer.press_origin())
+                                    .or_else(|| response.interact_pointer_pos())
+                                {
                                     let modifiers = ui.input(|input| input.modifiers);
                                     self.begin_viewport_box_select(
                                         start,
@@ -332,6 +367,9 @@ impl EditorWorkspace {
                         if top_view
                             && !dnd_active
                             && self.interaction.box_select_2d().is_none()
+                            && self.brush_move.is_none()
+                            && self.brush_vertex_drag.is_none()
+                            && self.brush_extrude.is_none()
                             && response.dragged_by(egui::PointerButton::Primary)
                         {
                             self.drag_selected_node(ui.input(|input| input.pointer.delta()));
@@ -504,18 +542,7 @@ impl EditorWorkspace {
         match self.active_tool {
             ViewTool::Brush => {
                 ui.separator();
-                // The shared Face/Edge/Vertex group doubles as the brush
-                // drag grammar: Face resizes planes, Edge and Vertex
-                // reshape the selected brush's corners in ortho views.
-                toolbar_group_menu(
-                    ui,
-                    4,
-                    self.shortcut_group_glow(ShortcutGroup::Selection),
-                    self.selection_mode.icon(),
-                    "Selection",
-                    self.selection_mode.label(),
-                    |ui| self.draw_selection_group_menu(ui),
-                );
+                self.draw_brush_edit_mode_controls(ui);
                 if ui
                     .button(format!("Clip keeps: {}", self.brush_clip_keep.label()))
                     .on_hover_text("Which side(s) a two-point clip keeps")
@@ -529,6 +556,21 @@ impl EditorWorkspace {
                     .on_hover_text("Keep face textures anchored to the brush when it moves");
                 // The one grid step every brush drag/create/clip snaps to
                 // (shared with the Tool menu's Snap interval).
+                ui.label("Grid");
+                ui.add_sized(
+                    [52.0, 22.0],
+                    egui::DragValue::new(&mut self.snap_units)
+                        .speed(1.0)
+                        .range(1..=256),
+                )
+                .on_hover_text("Grid snap step, world units. All brush drags snap to it.");
+            }
+            ViewTool::Select if self.selected_brush.is_some() => {
+                // A brush selected through the general Select tool remains
+                // directly editable. Do not make the user discover that the
+                // separate Brush tool owns otherwise-identical gestures.
+                ui.separator();
+                self.draw_brush_edit_mode_controls(ui);
                 ui.label("Grid");
                 ui.add_sized(
                     [52.0, 22.0],
@@ -762,6 +804,43 @@ impl EditorWorkspace {
                 );
             }
         }
+    }
+
+    pub(crate) fn draw_brush_edit_mode_controls(&mut self, ui: &mut egui::Ui) {
+        for mode in BrushEditMode::ALL {
+            let response = ui
+                .add(
+                    egui::Button::new(mode.label())
+                        .selected(self.brush_edit_mode == mode)
+                        .min_size(Vec2::new(48.0, 23.0)),
+                )
+                .on_hover_text(format!("{}; snaps to the active grid", mode.gesture_hint()));
+            if response.clicked() {
+                self.set_brush_edit_mode(mode);
+            }
+        }
+        ui.label(
+            RichText::new(self.brush_edit_mode.toolbar_hint())
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+    }
+
+    fn set_brush_edit_mode(&mut self, mode: BrushEditMode) {
+        if self.brush_edit_mode == mode {
+            return;
+        }
+        self.cancel_brush_gestures();
+        self.brush_edit_mode = mode;
+        if let Some(selection_mode) = mode.selection_mode() {
+            self.set_selection_mode(selection_mode);
+        }
+        self.status = format!(
+            "Brush {}: {}; grid snap {}",
+            mode.label(),
+            mode.gesture_hint(),
+            self.snap_units.max(1)
+        );
     }
 
     fn draw_select_tool_toolbar_controls(&mut self, ui: &mut egui::Ui) {
