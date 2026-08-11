@@ -1,5 +1,5 @@
 use super::*;
-use crate::workspace::tools::{tool_impl_3d, ToolFrame3d, BRUSH_CREATE_HEIGHT};
+use crate::workspace::tools::{tool_impl_3d, BrushHandle3d, ToolFrame3d, BRUSH_CREATE_HEIGHT};
 use psxed_project::brush::SolvedBrush;
 
 fn brush_frame(harness: &ViewportHarness, pointer: Pos2) -> ToolFrame3d {
@@ -53,6 +53,69 @@ fn run_real_egui_viewport_click(
             2.0 / 60.0,
             vec![egui::Event::PointerButton {
                 pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+}
+
+fn run_real_egui_viewport_drag(workspace: &mut EditorWorkspace, start: Pos2, end: Pos2) {
+    let ctx = egui::Context::default();
+    let texture = ctx.load_texture(
+        "3d-handle-drag-viewport",
+        egui::ColorImage::new([1, 1], egui::Color32::BLACK),
+        egui::TextureOptions::NEAREST,
+    );
+    let viewport = EditorViewport3dPresentation::edit(texture.id(), Vec::new());
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let input = |time, events| egui::RawInput {
+        screen_rect: Some(screen),
+        time: Some(time),
+        events,
+        ..egui::RawInput::default()
+    };
+    let draw = |ctx: &egui::Context, workspace: &mut EditorWorkspace| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            workspace.draw_viewport_3d_body(ui, viewport.clone());
+        });
+    };
+    let _ = ctx.run(input(0.0, vec![]), |ctx| draw(ctx, workspace));
+    let _ = ctx.run(
+        input(1.0 / 60.0, vec![egui::Event::PointerMoved(start)]),
+        |ctx| draw(ctx, workspace),
+    );
+    let _ = ctx.run(
+        input(
+            2.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+    // Cross egui's drag threshold while remaining inside the 9 px handle
+    // pick radius, then move far enough for one snapped world-space step.
+    let threshold = start + (end - start).normalized() * 7.0;
+    let _ = ctx.run(
+        input(3.0 / 60.0, vec![egui::Event::PointerMoved(threshold)]),
+        |ctx| draw(ctx, workspace),
+    );
+    assert!(workspace.brush_vertex_drag.is_some());
+    let _ = ctx.run(
+        input(4.0 / 60.0, vec![egui::Event::PointerMoved(end)]),
+        |ctx| draw(ctx, workspace),
+    );
+    let _ = ctx.run(
+        input(
+            5.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: end,
                 button: egui::PointerButton::Primary,
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
@@ -132,6 +195,412 @@ fn run_real_egui_orthographic_click(workspace: &mut EditorWorkspace, world: [f32
         ),
         |ctx| draw(ctx, workspace),
     );
+}
+
+fn run_real_egui_orthographic_drag(
+    workspace: &mut EditorWorkspace,
+    start_world: [f32; 2],
+    end_world: [f32; 2],
+    modifiers: egui::Modifiers,
+) {
+    let ctx = egui::Context::default();
+    let mut fonts = egui::FontDefinitions::default();
+    let proportional = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .expect("default proportional font family");
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("lucide".into()), proportional);
+    ctx.set_fonts(fonts);
+    let viewport_texture = ctx.load_texture(
+        "orthographic-drag-viewport",
+        egui::ColorImage::new([1, 1], egui::Color32::BLACK),
+        egui::TextureOptions::NEAREST,
+    );
+    let viewport = EditorViewport3dPresentation::edit(viewport_texture.id(), Vec::new());
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0));
+    let input = |time, events| egui::RawInput {
+        screen_rect: Some(screen),
+        time: Some(time),
+        modifiers,
+        events,
+        ..egui::RawInput::default()
+    };
+    let draw = |ctx: &egui::Context, workspace: &mut EditorWorkspace| {
+        workspace.draw_viewport(ctx, viewport.clone(), EditorPlaytestStatus::Idle);
+    };
+    let _ = ctx.run(input(0.0, vec![]), |ctx| draw(ctx, workspace));
+    let rect = workspace.last_orthographic_viewport_rect;
+    let transform = crate::viewport2d::ViewportTransform::from_focus(
+        rect,
+        workspace
+            .orthographic_view
+            .project_f32(workspace.orthographic_focus),
+        workspace.viewport_zoom,
+    );
+    let clamp_to_view = |point: Pos2| {
+        Pos2::new(
+            point.x.clamp(rect.left() + 3.0, rect.right() - 3.0),
+            point.y.clamp(rect.top() + 3.0, rect.bottom() - 3.0),
+        )
+    };
+    let start = clamp_to_view(transform.world_to_screen(start_world));
+    let end = clamp_to_view(transform.world_to_screen(end_world));
+    let _ = ctx.run(
+        input(1.0 / 60.0, vec![egui::Event::PointerMoved(start)]),
+        |ctx| draw(ctx, workspace),
+    );
+    let hover_response = workspace.last_orthographic_response.unwrap();
+    assert!(hover_response.1, "viewport must be hovered before press");
+    let _ = ctx.run(
+        input(
+            2.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers,
+            }],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+    let press_response = workspace.last_orthographic_response.unwrap();
+    assert_eq!(
+        press_response.0, hover_response.0,
+        "stable viewport response id"
+    );
+    let _ = ctx.run(
+        input(
+            3.0 / 60.0,
+            vec![egui::Event::PointerMoved(start.lerp(end, 0.35))],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+    assert!(ctx.input(|input| input.pointer.primary_down()));
+    assert!(
+        workspace.interaction.box_select_2d().is_some(),
+        "raw drag did not start: pointer={:?}->{:?}, initial_rect={:?}, current_rect={:?}, response={:?}, tool={:?}",
+        start,
+        end,
+        rect,
+        workspace.last_orthographic_viewport_rect,
+        workspace.last_orthographic_response,
+        workspace.active_tool
+    );
+    let _ = ctx.run(
+        input(4.0 / 60.0, vec![egui::Event::PointerMoved(end)]),
+        |ctx| draw(ctx, workspace),
+    );
+    let _ = ctx.run(
+        input(
+            5.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            }],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+}
+
+#[test]
+fn bsp_marquee_multi_selects_brushes_in_every_orthographic_view_via_real_egui() {
+    for view in [
+        OrthographicView::Top,
+        OrthographicView::Front,
+        OrthographicView::Side,
+    ] {
+        let mut project = ProjectDocument::new("real egui BSP marquee");
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [0, 0, 0],
+                [128, 128, 128],
+            ));
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [256, 256, 256],
+                [384, 384, 384],
+            ));
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [600, 600, 600],
+                [728, 728, 728],
+            ));
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("marquee"), project);
+        workspace.active_workspace = WorkspaceView::Room;
+        workspace.view_2d = true;
+        workspace.orthographic_view = view;
+        workspace.active_tool = ViewTool::Select;
+        workspace.frame_viewport();
+
+        run_real_egui_orthographic_drag(
+            &mut workspace,
+            [-32.0, -32.0],
+            [416.0, 416.0],
+            egui::Modifiers::NONE,
+        );
+
+        assert_eq!(
+            workspace.selected_brush_set(),
+            vec![0, 1],
+            "{view:?}: status={}, interaction={:?}",
+            workspace.status,
+            workspace.interaction
+        );
+        assert_eq!(workspace.status_text(), "Selected 2 brushes", "{view:?}");
+        assert!(workspace.selection.selected_sectors.is_empty());
+
+        workspace.replace_brush_selection(2, None);
+        run_real_egui_orthographic_drag(
+            &mut workspace,
+            [-32.0, -32.0],
+            [416.0, 416.0],
+            egui::Modifiers {
+                shift: true,
+                ..egui::Modifiers::NONE
+            },
+        );
+        assert_eq!(workspace.selected_brush_set(), vec![0, 1, 2], "{view:?}");
+        assert_eq!(workspace.selected_brush, Some(2), "{view:?}");
+    }
+}
+
+#[test]
+fn tracked_bsp_starter_top_view_emits_headless_brush_outline_shapes() {
+    let fixture_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+    let project = ProjectDocument::load_from_path(fixture_dir.join("project.ron"))
+        .expect("tracked BSP starter loads");
+    let expected_segments = project
+        .active_scene()
+        .brushes
+        .iter()
+        .map(|brush| {
+            brush
+                .solve()
+                .polygons
+                .iter()
+                .flatten()
+                .map(|polygon| polygon.verts.len())
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    assert!(
+        expected_segments > 0,
+        "tracked fixture must contain solved brushes"
+    );
+
+    let mut workspace = EditorWorkspace::with_project(fixture_dir, project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.view_2d = true;
+    workspace.orthographic_view = OrthographicView::Top;
+    workspace.active_tool = ViewTool::Select;
+    workspace.frame_viewport();
+
+    let ctx = egui::Context::default();
+    let mut fonts = egui::FontDefinitions::default();
+    let proportional = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .expect("default proportional font family");
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("lucide".into()), proportional);
+    ctx.set_fonts(fonts);
+    let texture = ctx.load_texture(
+        "tracked-bsp-top-shapes",
+        egui::ColorImage::new([1, 1], egui::Color32::BLACK),
+        egui::TextureOptions::NEAREST,
+    );
+    let viewport = EditorViewport3dPresentation::edit(texture.id(), Vec::new());
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))),
+            ..egui::RawInput::default()
+        },
+        |ctx| workspace.draw_viewport(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+    );
+    let rect = workspace.last_orthographic_viewport_rect;
+    let outline_segments = output
+        .shapes
+        .iter()
+        .filter(|clipped| clipped.clip_rect.intersects(rect))
+        .filter(|clipped| match &clipped.shape {
+            egui::Shape::LineSegment { points, stroke } => {
+                stroke.color == EDITOR_OUTLINE_ACCENT
+                    && points.iter().all(|point| rect.contains(*point))
+            }
+            _ => false,
+        })
+        .count();
+    assert!(
+        outline_segments >= expected_segments,
+        "Top viewport emitted {outline_segments} outline segments for {expected_segments} solved brush edges"
+    );
+}
+
+fn handle_test_workspace(brush: psxed_project::brush::Brush) -> (EditorWorkspace, Rect) {
+    let mut project = ProjectDocument::new("3D brush handles");
+    project.active_scene_mut().brushes.push(brush);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("3d-handles"), project);
+    workspace.active_tool = ViewTool::Brush;
+    workspace.replace_brush_selection(0, None);
+    workspace.snap_units = 16;
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [500, 420, -700];
+    let (yaw, pitch) = camera_angles_to_look_at([500, 420, -700], [64, 64, 64]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    (
+        workspace,
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)),
+    )
+}
+
+#[test]
+fn arbitrary_plane_face_handle_drags_along_its_normal_and_undoes_once() {
+    let mut wedge = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    wedge.faces[5] =
+        psxed_project::brush::BrushFace::from_points([[0, 128, 0], [0, 128, 128], [128, 0, 128]]);
+    assert!(wedge.solve().is_valid());
+    let base = wedge.clone();
+    let (mut workspace, rect) = handle_test_workspace(wedge);
+    workspace.selection_mode = SelectionMode::Face;
+    let (center, _) = EditorWorkspace::face_center_and_normal(&base, 5).unwrap();
+    let pointer = workspace.project_brush_point_3d(rect, center).unwrap();
+    assert!(matches!(
+        workspace.pick_brush_handle_3d(rect, pointer),
+        Some((0, BrushHandle3d::Face { face: 5, .. }))
+    ));
+
+    let mut frame = ToolFrame3d {
+        rect,
+        pointer_interact: Some(pointer),
+        pointer_hover: Some(pointer),
+        modifiers: egui::Modifiers::NONE,
+        pointer_target: None,
+        hover_room: None,
+        drag_delta_y: 0.0,
+    };
+    tool_impl_3d(ViewTool::Brush).primary_pressed(&mut workspace, &frame);
+    let drag = workspace.brush_extrude.clone().expect("face handle drag");
+    assert!(drag.normal_3d.is_some());
+    let end = pointer + drag.screen_direction * 24.0;
+    frame.pointer_interact = Some(end);
+    frame.pointer_hover = Some(end);
+    tool_impl_3d(ViewTool::Brush).primary_dragged(&mut workspace, &frame);
+    let applied = workspace.brush_extrude.as_ref().unwrap().applied;
+    assert_ne!(
+        applied, [0; 3],
+        "screen={:?} units_per_pixel={} normal={:?}",
+        drag.screen_direction, drag.units_per_pixel, drag.normal_3d
+    );
+    assert_ne!(applied[0], 0, "slope movement must include X");
+    assert_ne!(applied[1], 0, "slope movement must include Y");
+    let moved = workspace.project.active_scene().brushes[0].clone();
+    assert!(moved.solve().is_valid());
+    assert_eq!(
+        psxed_project::brush::Plane::from_points(moved.faces[5].points)
+            .unwrap()
+            .normal,
+        psxed_project::brush::Plane::from_points(base.faces[5].points)
+            .unwrap()
+            .normal
+    );
+    tool_impl_3d(ViewTool::Brush).primary_released(&mut workspace, &frame);
+    assert!(workspace.is_dirty());
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes[0], base);
+}
+
+#[test]
+fn vertex_and_edge_3d_handles_start_camera_plane_edits_and_keep_brush_valid() {
+    for mode in [SelectionMode::Vertex, SelectionMode::Edge] {
+        let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        let (mut workspace, rect) = handle_test_workspace(brush.clone());
+        workspace.selection_mode = mode;
+        let solved = brush.solve();
+        let vertex = solved.polygons.iter().flatten().next().unwrap().verts[0];
+        let anchor = match mode {
+            SelectionMode::Vertex => vertex,
+            SelectionMode::Edge => {
+                let polygon = solved.polygons.iter().flatten().next().unwrap();
+                let a = polygon.verts[0];
+                let b = polygon.verts[1];
+                [
+                    (a[0] + b[0]) * 0.5,
+                    (a[1] + b[1]) * 0.5,
+                    (a[2] + b[2]) * 0.5,
+                ]
+            }
+            SelectionMode::Face => unreachable!(),
+        };
+        let pointer = workspace.project_brush_point_3d(rect, anchor).unwrap();
+        let mut frame = ToolFrame3d {
+            rect,
+            pointer_interact: Some(pointer),
+            pointer_hover: Some(pointer),
+            modifiers: egui::Modifiers::NONE,
+            pointer_target: None,
+            hover_room: None,
+            drag_delta_y: 0.0,
+        };
+        tool_impl_3d(ViewTool::Brush).primary_pressed(&mut workspace, &frame);
+        assert!(workspace.brush_vertex_drag.is_some(), "{mode:?}");
+        let end = pointer + Vec2::new(36.0, -20.0);
+        frame.pointer_interact = Some(end);
+        frame.pointer_hover = Some(end);
+        tool_impl_3d(ViewTool::Brush).primary_dragged(&mut workspace, &frame);
+        let drag = workspace.brush_vertex_drag.as_ref().unwrap();
+        assert_ne!(drag.applied, [0; 3], "{mode:?}");
+        assert!(workspace.project.active_scene().brushes[0]
+            .solve()
+            .is_valid());
+        tool_impl_3d(ViewTool::Brush).primary_released(&mut workspace, &frame);
+        workspace.do_undo();
+        assert_eq!(workspace.project.active_scene().brushes[0], brush);
+    }
+}
+
+#[test]
+fn vertex_3d_handle_drag_runs_through_real_egui_raw_input_and_commits() {
+    let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    let (mut workspace, _) = handle_test_workspace(brush.clone());
+    workspace.selection_mode = SelectionMode::Vertex;
+    let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+    let vertex = brush
+        .solve()
+        .polygons
+        .iter()
+        .flatten()
+        .next()
+        .unwrap()
+        .verts[0];
+    let start = workspace
+        .project_brush_point_3d(viewport, vertex)
+        .expect("vertex projects into the 3D viewport");
+
+    run_real_egui_viewport_drag(&mut workspace, start, start + Vec2::new(42.0, -24.0));
+
+    assert!(workspace.is_dirty());
+    assert_ne!(workspace.project.active_scene().brushes[0], brush);
+    assert!(workspace.project.active_scene().brushes[0]
+        .solve()
+        .is_valid());
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes[0], brush);
 }
 
 #[test]
