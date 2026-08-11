@@ -206,16 +206,12 @@ fn submit_equipped_weapon<
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> Option<TexturedModelRenderStats> {
-    let weapon_rotation = socket_pose
-        .rotation
-        .mul(&euler_q12_rotation_inverse(weapon.grip_rotation_q12));
     let weapon_model = models.get(weapon.model?.to_usize()).copied().flatten()?;
-    let grip = scaled_offset(weapon_model.local_to_world, weapon.grip_translation);
-    let grip_world = rotate_offset_q12(&weapon_rotation, grip);
-    let origin = WorldVertex::new(
-        socket_pose.origin.x.saturating_sub(grip_world[0]),
-        socket_pose.origin.y.saturating_sub(grip_world[1]),
-        socket_pose.origin.z.saturating_sub(grip_world[2]),
+    let (origin, weapon_rotation) = equipped_weapon_placement(
+        socket_pose,
+        weapon.grip_translation,
+        weapon.grip_rotation_q12,
+        weapon_model.local_to_world,
     );
     let anim = weapon_model.clip(clips, weapon_model.default_clip)?;
     let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
@@ -541,6 +537,29 @@ fn compose_socket_pose(
     }
 }
 
+/// Pure equipped-weapon placement: the grip inverse composition and the
+/// weapon-origin subtraction exactly as [`submit_equipped_weapon`] submits
+/// them. Extracted so the spawn-transient regression exercises the shipped
+/// calculation rather than a lookalike.
+fn equipped_weapon_placement(
+    socket_pose: AttachmentPose,
+    grip_translation: [i32; 3],
+    grip_rotation_q12: [i16; 3],
+    weapon_scale: LocalToWorldScale,
+) -> (WorldVertex, Mat3I16) {
+    let weapon_rotation = socket_pose
+        .rotation
+        .mul(&euler_q12_rotation_inverse(grip_rotation_q12));
+    let grip = scaled_offset(weapon_scale, grip_translation);
+    let grip_world = rotate_offset_q12(&weapon_rotation, grip);
+    let origin = WorldVertex::new(
+        socket_pose.origin.x.saturating_sub(grip_world[0]),
+        socket_pose.origin.y.saturating_sub(grip_world[1]),
+        socket_pose.origin.z.saturating_sub(grip_world[2]),
+    );
+    (origin, weapon_rotation)
+}
+
 fn scaled_offset(scale: LocalToWorldScale, offset: [i32; 3]) -> [i32; 3] {
     [
         scale.apply(offset[0]),
@@ -557,4 +576,134 @@ fn euler_q12_rotation_inverse(rotation_q12: [i16; 3]) -> Mat3I16 {
     let ry = Mat3I16::rotate_y(Angle::from_q12(inv_y).rotate_y_arg());
     let rz = Mat3I16::rotate_z(Angle::from_q12(inv_z).rotate_y_arg());
     rx.mul(&ry).mul(&rz)
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::actor_pose::ActorPoseSnapshot;
+    use psx_engine::{LocalToWorldScale, ModelPoseTranslation, SimTick};
+    use psx_level::{LevelModelSocketRecord, ModelIndex};
+    use std::{boxed::Box, format, vec::Vec};
+
+    fn one_joint_animation(translation: i16) -> Animation<'static> {
+        const ANIMATION_HEADER_SIZE: usize = 8;
+        const POSE_RECORD_SIZE: usize = 24;
+        let payload_len = ANIMATION_HEADER_SIZE + 2 * POSE_RECORD_SIZE;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"PSXA");
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(payload_len as u32).to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&30u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        for _ in 0..2 {
+            for value in [4096i16, 0, 0, 0, 4096, 0, 0, 0, 4096] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in [translation, 0, 0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        Animation::from_bytes(Box::leak(bytes.into_boxed_slice())).expect("test animation")
+    }
+
+    /// Regression for the historical "spawn-adjacent tick produced an
+    /// i32::MIN weapon-origin X" transient (handoff 7.1). It drives the
+    /// SHIPPED weapon math: [`attachment_socket_pose`] (socket compose on
+    /// the retained snapshot) into [`equipped_weapon_placement`] (grip
+    /// inverse composition and the weapon-origin subtraction exactly as
+    /// [`submit_equipped_weapon`] uses them), then the blade endpoints
+    /// through the same scaled-rotation offset the vertex path applies.
+    ///
+    /// The swept envelope is the enforced envelope, not a guess:
+    /// socket and grip translations to the compact i16 range the cook now
+    /// rejects beyond; rotations across the full i16 Q12 turn wheel the
+    /// record format admits; model scales across the full u16 Q12 header
+    /// range; origins far beyond any cooked room. Within it, no component
+    /// can reach the i32::MIN sentinel or leave a sane world bound.
+    /// Pre-refresh sampling stays structurally impossible upstream
+    /// (snapshots are Option and every consumer skips None).
+    #[test]
+    fn equipped_weapon_placement_cannot_reach_the_min_sentinel_in_the_enforced_envelope() {
+        const SANE_WORLD_BOUND: i32 = 33_000_000;
+        let assert_sane = |value: i32, what: &str| {
+            assert_ne!(value, i32::MIN, "{what} saturated to the i32::MIN sentinel");
+            assert!(
+                value.abs() < SANE_WORLD_BOUND,
+                "{what} left the sane world envelope: {value}"
+            );
+        };
+        let spun = Mat3I16 {
+            m: [[0, 0, 4096], [0, -4096, 0], [-4096, 0, 0]],
+        };
+
+        for joint_translation in [i16::MIN, i16::MAX, 0] {
+            let animation = one_joint_animation(joint_translation);
+            for scale_q12 in [0x1000u16, 0x2000, u16::MAX] {
+                for origin_x in [-1_000_000i32, 1_000_000] {
+                    let pose = ActorPoseSnapshot::new(
+                        SimTick::from_u32(0),
+                        animation,
+                        0,
+                        None,
+                        WorldVertex::new(origin_x, 1_000_000, -1_000_000),
+                        spun,
+                        LocalToWorldScale::from_q12(scale_q12),
+                        ModelPoseTranslation {
+                            x: 32_767,
+                            y: -32_768,
+                            z: 32_767,
+                        },
+                    );
+                    for extreme in [-32_768i32, 32_767] {
+                        let socket = LevelModelSocketRecord {
+                            model: ModelIndex(0),
+                            name: "right_hand_grip",
+                            joint: 0,
+                            translation: [extreme, -extreme, extreme],
+                            rotation_q12: [i16::MIN, i16::MAX, 0x2000],
+                            flags: 0,
+                        };
+                        let socket_pose = attachment_socket_pose(pose, &socket)
+                            .expect("extreme socket still samples");
+                        assert_sane(socket_pose.origin.x, "socket origin x");
+                        assert_sane(socket_pose.origin.y, "socket origin y");
+                        assert_sane(socket_pose.origin.z, "socket origin z");
+
+                        let (origin, rotation) = equipped_weapon_placement(
+                            socket_pose,
+                            [extreme, extreme, -extreme],
+                            [i16::MAX, i16::MIN, -0x2000],
+                            LocalToWorldScale::from_q12(scale_q12),
+                        );
+                        assert_sane(origin.x, "weapon origin x");
+                        assert_sane(origin.y, "weapon origin y");
+                        assert_sane(origin.z, "weapon origin z");
+
+                        // Blade extremes: the farthest representable model
+                        // vertices through the same scaled rotation the
+                        // weapon vertex path applies.
+                        for tip in [[32_767i32, 32_767, 32_767], [-32_768, -32_768, -32_768]] {
+                            let scaled = scaled_offset(
+                                LocalToWorldScale::from_q12(scale_q12),
+                                tip,
+                            );
+                            let world = rotate_offset_q12(&rotation, scaled);
+                            for (axis, name) in ["x", "y", "z"].iter().enumerate() {
+                                assert_sane(
+                                    origin.x.saturating_add(world[axis]),
+                                    &format!("blade endpoint {name}"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
