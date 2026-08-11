@@ -1043,13 +1043,16 @@ impl EditorWorkspace {
             return;
         };
         let mut edited = current;
+        let mut off_u = i32::from(edited.offset_texels[0]);
+        let mut off_v = i32::from(edited.offset_texels[1]);
+        let mut rot = i32::from(edited.rotation_deg);
+        let mut scale_u = i32::from(edited.scale_q8[0]) * 100 / 256;
+        let mut scale_v = i32::from(edited.scale_q8[1]) * 100 / 256;
+        // Two rows, not one: five DragValues plus a button overflow the
+        // Inspector's width, and an overflowing widget is painted outside the
+        // panel clip rect where the pointer can never reach it.
         ui.horizontal(|ui| {
-            ui.label("UV");
-            let mut off_u = i32::from(edited.offset_texels[0]);
-            let mut off_v = i32::from(edited.offset_texels[1]);
-            let mut rot = i32::from(edited.rotation_deg);
-            let mut scale_u = i32::from(edited.scale_q8[0]) * 100 / 256;
-            let mut scale_v = i32::from(edited.scale_q8[1]) * 100 / 256;
+            ui.label("UV offset");
             ui.add(egui::DragValue::new(&mut off_u).speed(1).prefix("U "));
             ui.add(egui::DragValue::new(&mut off_v).speed(1).prefix("V "));
             ui.add(
@@ -1058,6 +1061,9 @@ impl EditorWorkspace {
                     .range(-359..=359)
                     .suffix("\u{b0}"),
             );
+        });
+        ui.horizontal(|ui| {
+            ui.label("UV scale");
             ui.add(
                 egui::DragValue::new(&mut scale_u)
                     .speed(1)
@@ -1079,7 +1085,10 @@ impl EditorWorkspace {
                 (scale_u * 256 / 100).clamp(1, i32::from(i16::MAX)) as i16,
                 (scale_v * 256 / 100).clamp(1, i32::from(i16::MAX)) as i16,
             ];
-            if ui.button("Reset").clicked() {
+            // Uniquely labelled: the Inspector shows several bare "Reset"
+            // buttons, and this one only ever restores the face UV mapping.
+            // Folded in after the DragValues so a Reset wins over them.
+            if ui.button("Reset UV").clicked() {
                 edited = psxed_project::brush::FaceUv::default();
             }
         });

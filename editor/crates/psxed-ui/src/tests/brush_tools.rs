@@ -380,6 +380,31 @@ fn text_shape_center(shapes: &[egui::epaint::ClippedShape], label: &str) -> Opti
     shapes.iter().find_map(|shape| find(&shape.shape, label))
 }
 
+/// Every rendered widget whose galley text equals `label`. Tests that click
+/// a label by name use this to prove the label is unambiguous first: the
+/// Inspector renders several same-named buttons, and `text_shape_center`
+/// silently returns whichever one is painted first.
+fn text_shape_centers(shapes: &[egui::epaint::ClippedShape], label: &str) -> Vec<Pos2> {
+    fn collect(shape: &egui::Shape, label: &str, found: &mut Vec<Pos2>) {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text() == label => {
+                found.push(text.pos + text.galley.rect.center().to_vec2());
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, label, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for shape in shapes {
+        collect(&shape.shape, label, &mut found);
+    }
+    found
+}
+
 /// Drive an always-visible brush mode button by finding its rendered label,
 /// then issuing real egui pointer events at that label's screen position.
 fn click_visible_brush_mode(workspace: &mut EditorWorkspace, mode: BrushEditMode) {
@@ -2600,6 +2625,293 @@ fn real_egui_brush_inspector_exposes_and_changes_bsp_contents() {
         harness.workspace.project.active_scene().brushes[1].contents,
         BrushContents::Solid
     );
+}
+
+/// Real-egui context plus edit-mode viewport for driving whole
+/// `workspace.draw` frames. Shared by the Inspector click/type helpers so
+/// both see the same font set (the `lucide` icon family is aliased onto the
+/// proportional family, otherwise icon labels render as tofu and cannot be
+/// located by galley text).
+fn real_egui_workspace_ctx(name: &str) -> (egui::Context, EditorViewport3dPresentation) {
+    let ctx = egui::Context::default();
+    let mut fonts = egui::FontDefinitions::default();
+    let proportional = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .expect("default proportional font family");
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("lucide".into()), proportional);
+    ctx.set_fonts(fonts);
+    let texture = ctx.load_texture(
+        name,
+        egui::ColorImage::new([1, 1], egui::Color32::BLACK),
+        egui::TextureOptions::NEAREST,
+    );
+    (
+        ctx,
+        EditorViewport3dPresentation::edit(texture.id(), Vec::new()),
+    )
+}
+
+/// One full `workspace.draw` frame at `time` with `events` delivered.
+fn real_egui_workspace_frame(
+    ctx: &egui::Context,
+    workspace: &mut EditorWorkspace,
+    viewport: &EditorViewport3dPresentation,
+    time: f64,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1800.0, 1000.0))),
+            time: Some(time),
+            events,
+            ..egui::RawInput::default()
+        },
+        |ctx| workspace.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+    )
+}
+
+/// Locate the one widget whose rendered galley text equals `label`, and
+/// prove the pointer can actually reach it.
+///
+/// Panics when the label is missing, ambiguous (the Inspector paints several
+/// same-named buttons, so taking the first match could drive a control from
+/// another section), or painted outside the screen. That last check is not
+/// pedantry: an Inspector row wide enough to overflow its panel still emits
+/// its text shapes, but egui clips the widget out of the interact layer, so
+/// the control becomes permanently unclickable in the real editor.
+fn locate_unique_label(
+    ctx: &egui::Context,
+    workspace: &mut EditorWorkspace,
+    viewport: &EditorViewport3dPresentation,
+    label: &str,
+) -> Pos2 {
+    let frame = real_egui_workspace_frame(ctx, workspace, viewport, 0.0, vec![]);
+    let found = text_shape_centers(&frame.shapes, label);
+    assert_eq!(
+        found.len(),
+        1,
+        "label {label:?} must be visible exactly once in the drawn frame, saw {found:?}"
+    );
+    let point = found[0];
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1800.0, 1000.0));
+    assert!(
+        screen.contains(point),
+        "label {label:?} is painted at {point:?}, outside the {screen:?} screen: \
+         its row overflows the panel and the control is unreachable"
+    );
+    point
+}
+
+fn press_release(point: Pos2) -> (Vec<egui::Event>, Vec<egui::Event>) {
+    (
+        vec![
+            egui::Event::PointerMoved(point),
+            egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+        vec![egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    )
+}
+
+/// Click the widget whose rendered galley text equals `label`, through full
+/// `workspace.draw` frames so the Inspector transaction wrapper owns history
+/// exactly as it does in production.
+fn run_real_egui_workspace_click_on_label(workspace: &mut EditorWorkspace, label: &str) {
+    let (ctx, viewport) = real_egui_workspace_ctx("workspace-label-click");
+    let point = locate_unique_label(&ctx, workspace, &viewport, label);
+    let (press, release) = press_release(point);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 1.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 2.0 / 60.0, release);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 3.0 / 60.0, vec![]);
+}
+
+/// Click the DragValue whose current galley text is `label`, type `entry`,
+/// and commit with Enter.
+fn run_real_egui_type_into_drag_value(workspace: &mut EditorWorkspace, label: &str, entry: &str) {
+    let (ctx, viewport) = real_egui_workspace_ctx("workspace-drag-value-entry");
+    let point = locate_unique_label(&ctx, workspace, &viewport, label);
+    let (press, release) = press_release(point);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 1.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 2.0 / 60.0, release);
+    let _ = real_egui_workspace_frame(
+        &ctx,
+        workspace,
+        &viewport,
+        3.0 / 60.0,
+        vec![egui::Event::Text(entry.to_string())],
+    );
+    for (index, pressed) in [(4.0, true), (5.0, false)] {
+        let _ = real_egui_workspace_frame(
+            &ctx,
+            workspace,
+            &viewport,
+            index / 60.0,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    // One quiet frame so the Inspector undo transaction closes when the
+    // committed edit surrenders keyboard focus.
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 6.0 / 60.0, vec![]);
+}
+
+/// The Inspector's "Apply to face" button paints exactly the selected face
+/// with the PICKED material, as one undo step, through real egui.
+#[test]
+fn apply_to_face_button_paints_only_the_selected_face_and_undoes_once() {
+    let mut project = ProjectDocument::new("face material apply");
+    // Two materials, so a bug that grabbed "the first material" instead of
+    // the picked one would still fail the assertion below.
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let moss = project.add_resource(
+        "Moss",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("apply-face"), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.replace_brush_selection(0, Some(2));
+    workspace.brush_material = Some(moss);
+
+    run_real_egui_workspace_click_on_label(
+        &mut workspace,
+        &icons::label(icons::PALETTE, "Apply to face"),
+    );
+
+    let faces = &workspace.project.active_scene().brushes[0].faces;
+    assert_eq!(faces[2].material, Some(moss), "selected face painted");
+    assert_ne!(faces[2].material, Some(stone), "picked material, not first");
+    for (index, face) in faces.iter().enumerate() {
+        if index != 2 {
+            assert_eq!(face.material, None, "face {index} must stay untouched");
+        }
+    }
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .all(|face| face.material.is_none()));
+    workspace.do_undo();
+    assert_eq!(
+        workspace.status, "Nothing to undo",
+        "apply-to-face must cost exactly one undo step"
+    );
+    workspace.do_redo();
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[2].material,
+        Some(moss)
+    );
+}
+
+/// Face UV offset / rotation / scale numeric edits, typed through the real
+/// Inspector DragValues: each edit is one undo step (owned by the Inspector
+/// transaction wrapper, no local `push_undo` needed), the authored values
+/// land in the cooked brush world, and "Reset UV" restores identity.
+#[test]
+fn face_uv_numeric_edits_cook_into_the_brush_world_and_undo_per_edit() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("face-uv-cook");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.replace_brush_selection(0, Some(0));
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[0].uv,
+        psxed_project::brush::FaceUv::default(),
+        "fixture face must start at the identity UV mapping"
+    );
+
+    let cook_before = test_temp_dir("face-uv-cook-before");
+    workspace.cook_playtest_to_dir(&cook_before).expect("cook");
+
+    run_real_egui_type_into_drag_value(&mut workspace, "U 0", "24");
+    run_real_egui_type_into_drag_value(&mut workspace, "0\u{b0}", "15");
+    run_real_egui_type_into_drag_value(&mut workspace, "100% U", "150");
+
+    let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
+    assert_eq!(uv.offset_texels, [24, 0]);
+    assert_eq!(uv.rotation_deg, 15);
+    assert_eq!(uv.scale_q8, [384, 256], "150% is 384 in Q8");
+    assert!(workspace.is_dirty());
+
+    // The authored UV values reach the cooked brush world.
+    let cook_after = test_temp_dir("face-uv-cook-after");
+    workspace.cook_playtest_to_dir(&cook_after).expect("recook");
+    let world = psxed_project::brush_playtest::BRUSH_WORLD_FILENAME;
+    assert_ne!(
+        std::fs::read(cook_before.join(world)).unwrap(),
+        std::fs::read(cook_after.join(world)).unwrap(),
+        "UV edits must change the cooked brush world"
+    );
+
+    // One undo step per typed edit, unwound in reverse order.
+    workspace.do_undo();
+    let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
+    assert_eq!((uv.scale_q8, uv.rotation_deg), ([256, 256], 15));
+    workspace.do_undo();
+    let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
+    assert_eq!((uv.rotation_deg, uv.offset_texels), (0, [24, 0]));
+    workspace.do_undo();
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[0].uv,
+        psxed_project::brush::FaceUv::default()
+    );
+    workspace.do_undo();
+    assert_eq!(
+        workspace.status, "Nothing to undo",
+        "three typed edits must cost exactly three undo steps"
+    );
+
+    // Redo the full stack, then "Reset UV" restores identity as one step.
+    for _ in 0..3 {
+        workspace.do_redo();
+    }
+    let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
+    assert_eq!(uv.offset_texels, [24, 0]);
+    assert_eq!(uv.scale_q8, [384, 256]);
+    run_real_egui_workspace_click_on_label(&mut workspace, "Reset UV");
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[0].uv,
+        psxed_project::brush::FaceUv::default()
+    );
+    workspace.do_undo();
+    let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
+    assert_eq!(uv.offset_texels, [24, 0], "one undo unwinds Reset UV");
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(cook_before);
+    let _ = std::fs::remove_dir_all(cook_after);
 }
 
 /// Same slope plane as `arbitrary_plane_face_handle_drags_along_its_normal_and_undoes_once`,
