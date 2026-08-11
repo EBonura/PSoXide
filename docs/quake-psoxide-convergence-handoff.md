@@ -298,6 +298,46 @@ exact budget reports and focus actions, numeric origin/face-plane entry,
 ortho vertex/edge editing, multi-brush selection, persisted viewports, and
 brush edits correctly mark the project dirty for Play freshness.
 
+### 0.9 Authored BSP body-hull corrective pass (2026-08-11)
+
+Adversarial re-derivation found that RC1.1's combat replay was a false-green
+for static collision: the fixture copied Cortex bodies with radii 188/192 and
+height 1024 into a room with only 384 units of interior height, while the BSP
+runtime unconditionally traced every player and NPC through the unrelated
+16x56 hull. The actors moved and fought only because their authored body sizes
+were not represented in world collision.
+
+The BSP cook now derives two deterministic body envelopes from the placed
+Character Controller/player sources, compiles those same envelopes into every
+world and mover model, carries the exact descriptors in the playtest package,
+and emits them in the generated manifest. The runtime selects the first hull
+that fully contains each authored body and fails closed if the manifest/body
+contract is malformed or unsupported. `psx-bsp` owns the allocation-free
+ordered selector and its invalid/boundary tests; the game-specific hull sizes
+remain caller/cooker policy.
+
+The tracked combat room is now fourfold Cortex scale, with a 1536-unit
+interior, 512-unit doorway and the genuine 188x1024/192x1024 body pair. Door
+proximity is measured to the transformed brush-model AABB rather than its
+origin, so thick or large-scale doors remain usable. The small first-playable
+fixture still compiles the historical 16x56 and 32x96 envelopes and preserves
+its 13,008-byte PXBSP.
+
+Current `make combat-checkpoint` pins after the corrected geometry/hulls:
+4 authored player hits, 1 stagger, 1 death, 3 fallback hits taken, traversal
+x 3641, VRAM `0x425cf210826f0d92`, display `0xfaa899f4f396509a`.
+The closed-door tape has 3 accepted player attacks and 1 genuine enemy attack
+window, zero door logic fires, and zero connections in either direction. Two
+canonical runs are byte-identical. This supersedes 0.6/0.7's replay pins and
+closes their "authored NPC hull selection" item; it does not close the
+remaining Level C/D world/entity/editor work.
+
+Validation at this checkpoint: `make combat-checkpoint`; 66 `psx-bsp` tests;
+76 `psx-game-runtime` tests; 111 filtered `psx-engine` renderer tests; 471
+passing `psxed-project` tests (1 ignored diagnostic); and 345 passing
+`psxed-ui` tests (1 ignored preview dump). The real MIPS editor-playtest build
+with `cd-stream-bench emulator-telemetry` also passes.
+
 This is the durable continuation packet for a completely new model or human
 worker. Read it in full before editing. It deliberately records unfinished
 work, uncertainty, dirty-worktree boundaries, validation evidence, and ways to
@@ -429,10 +469,56 @@ Required evidence:
 - the combined PSoXide regression matrix passes;
 - Quake consumes a reproducible final PSoXide revision or equivalent local
   source contract and passes its full host, MIPS, all-map, and replay gates;
+- the demo-disc repository can build an opt-in local/test pressing containing
+  that exact Quake build as a whole relocated disc image, and a launch from
+  the carousel reaches the same deterministic Quake checkpoint as the
+  standalone image;
 - documentation describes the actual final architecture, not the old grid
   plan;
 - hardware battery is run when a console is available, or explicitly recorded
   as not run with emulator evidence kept separate.
+
+#### Quake shareware demo-disc integration
+
+Treat this as two independent gates so engineering completion cannot silently
+be mistaken for redistribution permission.
+
+**Local/test pressing (required for Level D):**
+
+- keep the public `make disc` target unchanged and add an explicit opt-in such
+  as `make disc QUAKE=1`;
+- build Quake from the final clean convergence revision against the same exact
+  PSoXide revision used by the other programs on the disc;
+- consume `dist/quake-psx.cue` through `mkdisc --image`, never as a bare EXE,
+  because Quake reads its cooked `WORLD.PAK` after boot;
+- do not commit the downloaded Quake shareware archive, extracted PAK, or
+  generated Quake disc image to the demo-disc repository;
+- record Quake's source revision, PSoXide revision, input PAK digest, cooked
+  image digest, and final combined-disc digest in the validation evidence;
+- fail closed when the Quake cue is absent, stale, built from a dirty checkout,
+  or built against a different PSoXide revision;
+- verify the carousel entry count, total sectors, relocated data reads, launch,
+  Start-map play, and one deterministic Episode 1 route from the combined
+  image. Standalone Quake and relocated Quake must agree on the pinned gameplay
+  counters and display/VRAM hashes unless a documented disc-timing difference
+  makes a particular hash inapplicable;
+- rerun the demo-disc host/relocation checks and preserve the existing public
+  and Half-Life pressing variants.
+
+**Public/web/pressed distribution (separate release gate):**
+
+- remain off by default until the intended package has been reviewed against
+  the Quake shareware data licence and any required permission has been
+  obtained; this document makes no legal conclusion;
+- if redistribution is not cleared, ship the integration recipe only and
+  require the user to supply or let the Quake builder fetch the verified
+  original shareware input locally;
+- if redistribution is cleared, add an explicit public Quake pressing target,
+  update the programme count/descriptions/screenshots and web split-delivery
+  manifest, then validate both the raw `.cue` and browser-streamed build.
+
+The engineering stop condition is therefore a reproducible, opt-in combined
+disc that boots and plays locally. It is not permission to upload that image.
 
 ## 4. Repository and worktree map
 
