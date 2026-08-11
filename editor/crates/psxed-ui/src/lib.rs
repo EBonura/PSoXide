@@ -56,7 +56,7 @@ use crate::material_lab::MaterialLabState;
 use crate::model_animation_viewer::ModelAnimationViewerState;
 use crate::style::*;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -121,6 +121,82 @@ const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
+const PROJECT_WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatchedFileMetadata {
+    len: u64,
+    modified_nanos: Option<u128>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatchedProjectSignature {
+    metadata: Option<WatchedFileMetadata>,
+    hash: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectWatchState {
+    project: WatchedProjectSignature,
+    resources: BTreeMap<PathBuf, Option<WatchedFileMetadata>>,
+    last_poll: Instant,
+    dirty_conflict: bool,
+}
+
+impl ProjectWatchState {
+    fn capture(project_dir: &Path, project: &ProjectDocument) -> Self {
+        Self {
+            project: watched_project_signature(&project_dir.join("project.ron")),
+            resources: watched_resource_signatures(project_dir, project),
+            last_poll: Instant::now(),
+            dirty_conflict: false,
+        }
+    }
+}
+
+fn watched_file_metadata(path: &Path) -> Option<WatchedFileMetadata> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    Some(WatchedFileMetadata {
+        len: metadata.len(),
+        modified_nanos,
+    })
+}
+
+fn watched_file_hash(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in &bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some(hash)
+}
+
+fn watched_project_signature(path: &Path) -> WatchedProjectSignature {
+    WatchedProjectSignature {
+        metadata: watched_file_metadata(path),
+        hash: watched_file_hash(path),
+    }
+}
+
+fn watched_resource_signatures(
+    project_dir: &Path,
+    project: &ProjectDocument,
+) -> BTreeMap<PathBuf, Option<WatchedFileMetadata>> {
+    project
+        .watched_runtime_resource_paths(project_dir)
+        .into_iter()
+        .map(|path| {
+            let signature = watched_file_metadata(&path);
+            (path, signature)
+        })
+        .collect()
+}
 
 fn q12_turns_to_degrees(q12: i32) -> f32 {
     q12.rem_euclid(4096) as f32 * (360.0 / 4096.0)
@@ -596,6 +672,8 @@ pub struct EditorWorkspace {
     last_viewport_size: Vec2,
     #[cfg(test)]
     last_orthographic_viewport_rect: Rect,
+    #[cfg(test)]
+    last_orthographic_response: Option<(egui::Id, bool, bool, bool)>,
     /// 3D viewport camera rig (orbit + free-fly params, mode, and all the
     /// camera math). Orbit preserves the original target/radius camera; Free
     /// stores an explicit world position with the same yaw/pitch convention.
@@ -627,6 +705,10 @@ pub struct EditorWorkspace {
     model_import_dialog: ModelImportDialog,
     import_retired_textures: Vec<(u8, egui::TextureHandle)>,
     dirty: bool,
+    /// Polling watcher for the project document and project-owned resource
+    /// files. A dirty conflict is latched until explicit Reload succeeds, so
+    /// an ordinary Save can never overwrite an external project.ron edit.
+    project_watch: ProjectWatchState,
     status: String,
     /// Most recent host-side PSX envelope. Before a successful cook this is
     /// the authored estimate; after it, the exact emitted-package report.
@@ -1335,6 +1417,12 @@ struct ViewportBoxSelect {
     room: Option<NodeId>,
     additive: bool,
     base_sectors: HashSet<SectorSelection>,
+    /// BSP-first scenes marquee brushes instead of the compatibility grid.
+    /// The base selection makes additive dragging stable while the marquee
+    /// grows and shrinks across frames.
+    brushes: bool,
+    base_brushes: Vec<usize>,
+    base_primary_brush: Option<usize>,
 }
 
 impl ViewportBoxSelect {
@@ -2137,23 +2225,36 @@ pub(crate) struct BrushMove {
     pub(crate) applied: [i32; 3],
 }
 
-/// In-flight brush face-extrude drag: the pressed face slides along its
-/// dominant normal axis; the scene brush previews live and the base is
-/// restored before the single undo-recorded commit on release.
+/// In-flight brush face-extrude drag. Orthographic handles slide on one
+/// visible world axis; 3D handles slide along the face's exact normal.
+/// The scene brush previews live and the base is restored before the single
+/// undo-recorded commit on release.
 #[derive(Debug, Clone)]
 pub(crate) struct BrushExtrude {
     pub(crate) index: usize,
     pub(crate) face: usize,
     pub(crate) base: psxed_project::brush::Brush,
-    /// Dominant axis of the face normal (0/1/2) and its sign.
     pub(crate) axis: usize,
     pub(crate) dir: i32,
     /// Pointer y at press (vertical faces drag by pixels).
     pub(crate) press_y: f32,
     /// Unsnapped ground point at press (horizontal drags measure here).
     pub(crate) press_ground: [f32; 3],
-    /// Last applied delta along the axis, world units.
-    pub(crate) applied: i32,
+    /// Exact outward unit normal for a 3D face drag. `None` is the existing
+    /// orthographic axis grammar.
+    pub(crate) normal_3d: Option<[f64; 3]>,
+    /// Screen direction corresponding to positive movement along normal_3d.
+    pub(crate) screen_direction: Vec2,
+    pub(crate) units_per_pixel: f32,
+    /// Last applied integer translation, world units.
+    pub(crate) applied: [i32; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BrushDragPlane3d {
+    pub(crate) anchor: [f32; 3],
+    pub(crate) normal: [f32; 3],
+    pub(crate) press_world: [f32; 3],
 }
 
 /// In-flight brush vertex/edge drag: the grabbed solved vertices (a
@@ -2168,6 +2269,9 @@ pub(crate) struct BrushVertexDrag {
     pub(crate) targets: Vec<[f64; 3]>,
     /// Unsnapped plane point at press.
     pub(crate) press_ground: [f32; 3],
+    /// Camera-facing drag plane for 3D handles. Orthographic gestures leave
+    /// this empty and continue to use press_ground.
+    pub(crate) plane_3d: Option<BrushDragPlane3d>,
     /// Last applied snapped delta, world units.
     pub(crate) applied: [i32; 3],
 }
@@ -2667,6 +2771,7 @@ impl EditorWorkspace {
             .map(|scene| scene.root)
             .unwrap_or(UiNodeId::ROOT);
         let prefab_library = load_prefab_library().unwrap_or_default();
+        let project_watch = ProjectWatchState::capture(&project_dir, &project);
         Self {
             project,
             project_dir,
@@ -2782,6 +2887,8 @@ impl EditorWorkspace {
             last_viewport_size: Vec2::new(1280.0, 720.0),
             #[cfg(test)]
             last_orthographic_viewport_rect: Rect::NOTHING,
+            #[cfg(test)]
+            last_orthographic_response: None,
             camera_rig: CameraRig {
                 mode: camera_mode,
                 yaw: editor_camera.orbit_yaw_q12,
@@ -2807,6 +2914,7 @@ impl EditorWorkspace {
             model_import_dialog: ModelImportDialog::default(),
             import_retired_textures: Vec::new(),
             dirty: false,
+            project_watch,
             status: "Editor ready".to_string(),
             last_playtest_budget: None,
             pending_playtest_request: None,
@@ -3008,6 +3116,16 @@ impl EditorWorkspace {
     /// Save to `<project_dir>/project.ron`, retargeting the project
     /// directory when the user-facing project name changes.
     pub fn save(&mut self) -> Result<(), String> {
+        // The periodic watcher keeps the UI current, but Save itself is the
+        // safety boundary. Force one last signature check so an external edit
+        // inside the polling interval can never be overwritten.
+        self.poll_project_watch(true);
+        if self.project_watch.dirty_conflict {
+            return Err(
+                "project.ron changed outside PSoXide while this project has unsaved edits; Reload to accept the disk version before saving"
+                    .to_string(),
+            );
+        }
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
         self.persist_editor_workspace_state();
@@ -3030,6 +3148,7 @@ impl EditorWorkspace {
             .map_err(|error| error.to_string())?;
         self.saved_project_name = self.project.name.clone();
         self.dirty = false;
+        self.project_watch = ProjectWatchState::capture(&self.project_dir, &self.project);
         self.status = format!("Saved {}", short_path(&self.project_dir));
         Ok(())
     }
@@ -3103,6 +3222,7 @@ impl EditorWorkspace {
                 self.resource_renaming = None;
                 self.resource_delete_confirm = None;
                 self.dirty = dirty;
+                self.project_watch = ProjectWatchState::capture(&self.project_dir, &self.project);
                 self.status = sync_status
                     .unwrap_or_else(|| format!("Reloaded {}", short_path(&self.project_dir)));
                 self.select_first_room();
@@ -3121,6 +3241,63 @@ impl EditorWorkspace {
                 self.status = format!("Reload failed: {error}");
             }
         }
+    }
+
+    fn poll_project_watch(&mut self, force: bool) {
+        if !force && self.project_watch.last_poll.elapsed() < PROJECT_WATCH_POLL_INTERVAL {
+            return;
+        }
+        let project_path = self.project_dir.join("project.ron");
+        let project_metadata = watched_file_metadata(&project_path);
+        let project_changed = if project_metadata != self.project_watch.project.metadata {
+            let hash = watched_file_hash(&project_path);
+            let changed = hash != self.project_watch.project.hash;
+            self.project_watch.project = WatchedProjectSignature {
+                metadata: project_metadata,
+                hash,
+            };
+            changed
+        } else {
+            false
+        };
+        let resource_signatures = watched_resource_signatures(&self.project_dir, &self.project);
+        let resource_paths_changed = resource_signatures
+            .keys()
+            .ne(self.project_watch.resources.keys());
+        let resources_changed =
+            !resource_paths_changed && resource_signatures != self.project_watch.resources;
+        self.project_watch.last_poll = Instant::now();
+
+        if project_changed {
+            self.project_watch.resources = resource_signatures;
+            if self.dirty {
+                self.project_watch.dirty_conflict = true;
+                self.status = "External project.ron change detected; local edits preserved and Save blocked until Reload"
+                    .to_string();
+            } else {
+                self.reload();
+            }
+            return;
+        }
+
+        if resource_paths_changed {
+            // The in-memory project changed which files it references, for
+            // example after an import or resource-path edit. Rebase without
+            // claiming that an external process changed a file.
+            self.project_watch.resources = resource_signatures;
+        } else if resources_changed {
+            self.project_watch.resources = resource_signatures;
+            for entry in self.texture_thumbs.values_mut() {
+                entry.signature.clear();
+            }
+            self.status = "Reloaded externally changed project resources".to_string();
+        }
+    }
+
+    /// Whether an external project.ron edit is protected from an ordinary
+    /// Save by the dirty-document conflict latch.
+    pub const fn has_external_project_conflict(&self) -> bool {
+        self.project_watch.dirty_conflict
     }
 
     /// Create `editor/projects/<derived-name>/` by recursive-copy of the
