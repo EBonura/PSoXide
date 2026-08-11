@@ -1,8 +1,8 @@
 # Quake, PSoXide BSP, editor, and combat convergence handoff
 
-Last updated: 2026-08-11 (editor first-loop replay, complete weapon checkpoint,
-bounded Soldier/Dog runtime, and active editor-to-Quake integration, section
-0). The original 2026-08-10 21:50 BST snapshot text is retained below it;
+Last updated: 2026-08-11 (editor first-loop replay, PSoXide souls-like combat,
+complete Quake weapon checkpoint, and bounded Soldier/Dog runtime, section 0).
+The original 2026-08-10 21:50 BST snapshot text is retained below it;
 where the two disagree, section 0 and
 `docs/convergence-discrepancy-report-2026-08-11.md` are current.
 
@@ -1019,14 +1019,22 @@ diagnostic test ignored. This proves a reliable simple generic PXBSP editor
 loop. It is not proof of native-window ergonomics, arbitrary complex maps,
 the asynchronous embedded viewport lifecycle or original hardware.
 
-Most importantly, it is not yet proof that an editor-authored level runs the
-actual Quake gameplay. The generic editor playtest consumes a PXBSP package;
-the Quake shipping runtime still consumes its Quake-specific cooked PSB map,
-entity and resource bank. A separate active branch is implementing a
-production packaging/import path from editor-authored PXBSP plus spawn/entity
-metadata into the real Quake runtime. Until its real-MIPS shotgun and collision
-replay passes, never tell the owner that editor-to-Quake weapon playtest is
-ready.
+The editor is for the owner's souls-like game, not for Quake levels. Its target
+gameplay vocabulary is the PSoXide one: player and enemy characters, authored
+equipment, sockets, melee hit/hurt volumes, doors, triggers, props, checkpoints
+and souls-like combat. Quake-PSX is a separate game and separate content
+pipeline that consumes the same reusable `psx-bsp` traversal, PVS, contents,
+mover-transform and collision semantics through its own adapter. It does not
+need to load editor projects, PXBSP packages or PSoXide gameplay records.
+
+The remaining editor integration proof is therefore a PSoXide proof: create a
+fresh BSP level in the editor, place and configure the souls-like gameplay
+records, equip the authored weapons, cook it, and run the real PSoXide gameplay
+runtime with BSP movement, movers, enemies, capsules, damage, stagger, death
+and checkpoint reset. The existing blank-room gate proves brush authoring and
+generic movement, while the tracked combat fixture proves a controlled combat
+slice. Completion requires those paths to meet in a user-authored level without
+resurrecting grid-space authority or fixture-only records.
 
 #### 0.19.2 Quake weapons and the bounded Soldier/Dog slice
 
@@ -1116,8 +1124,9 @@ Merge in this order:
 2. rerun host/core/cooker tests, normal MIPS compile, Start route, combat,
    arsenal, monster and new E1M1 route gates with an exact-source frontend;
 3. review and merge the Soldier/Dog physics follow-up;
-4. review the cross-repository editor-to-real-Quake vertical slice and merge
-   its PSoXide and Quake commits in its documented dependency order;
+4. complete the PSoXide editor-to-souls-like-gameplay path: author a fresh BSP
+   level with the real character, equipment, hitbox, enemy, trigger and
+   checkpoint records, then prove the production PSoXide runtime end to end;
 5. implement the remaining Episode 1 entities, monsters, hazards, inventory,
    Chthon/intermission and full map-to-map route;
 6. rebuild Quake from clean final pins, repin the demo-disc receipt and prove
@@ -1133,8 +1142,10 @@ images.
 
 Wrap-up state after the owner's stop request: all three workers were
 interrupted and no background implementation remains active. The monster
-physics worktree and both editor-to-Quake worktrees are clean at their starting
-heads and contain no uncommitted implementation. The E1M1 route worktree is
+physics worktree is clean at its starting head. Two mistakenly scoped
+editor-to-Quake exploratory worktrees are also clean at their starting heads
+and contain no implementation; abandon them rather than building a Quake level
+importer. The E1M1 route worktree is
 the sole unfinished worker tree: its seven tracked source files and new
 `game/src/e1m1_chain_regression.rs` are preserved uncommitted, together with
 temporary untracked diagnostic example directories. Do not merge that tree as
