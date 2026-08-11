@@ -148,11 +148,19 @@ pub enum BrushWorldCookError {
         material: Option<ResourceId>,
         error: String,
     },
-    ModelIndexOverflow,
-    TextureAssetOverflow,
+    /// Submodel table overflowed while compiling this mover's brush model.
+    ModelIndexOverflow(NodeId),
+    /// Texture asset table overflowed while interning this material's texture.
+    /// `None` is the built-in default brush texture, which has no resource.
+    TextureAssetOverflow { material: Option<ResourceId> },
     Pack(BrushPackError),
     Collision(CollisionHullCompileError),
-    Light(BrushLightError),
+    /// Lighting bake failure, with the PointLight node responsible when the
+    /// inner error names a light index.
+    Light {
+        node: Option<NodeId>,
+        error: BrushLightError,
+    },
     Pxbsp(PxbspBuildError),
 }
 
@@ -229,13 +237,19 @@ impl fmt::Display for BrushWorldCookError {
                 Some(material) => write!(formatter, "material {material:?} is invalid: {error}"),
                 None => write!(formatter, "default brush texture is invalid: {error}"),
             },
-            Self::ModelIndexOverflow => formatter.write_str("PXBSP model index exceeds u16"),
-            Self::TextureAssetOverflow => {
-                formatter.write_str("PXBSP texture asset index exceeds u16")
+            Self::ModelIndexOverflow(node) => {
+                write!(formatter, "PXBSP model index exceeds u16 at node {node:?}")
             }
+            Self::TextureAssetOverflow { material } => match material {
+                Some(material) => write!(
+                    formatter,
+                    "PXBSP texture asset index exceeds u16 at material {material:?}"
+                ),
+                None => formatter.write_str("PXBSP texture asset index exceeds u16"),
+            },
             Self::Pack(error) => write!(formatter, "BSP geometry packing failed: {error:?}"),
             Self::Collision(error) => write!(formatter, "BSP collision compile failed: {error:?}"),
-            Self::Light(error) => write!(formatter, "BSP lighting failed: {error:?}"),
+            Self::Light { error, .. } => write!(formatter, "BSP lighting failed: {error:?}"),
             Self::Pxbsp(error) => write!(formatter, "PXBSP assembly failed: {error:?}"),
         }
     }
@@ -250,12 +264,6 @@ impl From<BrushPackError> for BrushWorldCookError {
 impl From<CollisionHullCompileError> for BrushWorldCookError {
     fn from(value: CollisionHullCompileError) -> Self {
         Self::Collision(value)
-    }
-}
-
-impl From<BrushLightError> for BrushWorldCookError {
-    fn from(value: BrushLightError) -> Self {
-        Self::Light(value)
     }
 }
 
@@ -448,12 +456,13 @@ pub fn compile_brush_world(
         .filter(|brush| brush.contents.is_solid())
         .cloned()
         .collect();
-    let lights = scene_lights(scene);
+    let (lights, light_nodes) = scene_lights(scene);
     let material_tints = material_tints(project);
     let (world_geometry, world_collision) = compile_model(
         &static_brushes,
         &all_brushes,
         &lights,
+        &light_nodes,
         &material_tints,
         options.mode,
         options.ambient,
@@ -504,13 +513,14 @@ pub fn compile_brush_world(
             &local_brushes,
             &local_occluders,
             &local_lights,
+            &light_nodes,
             &material_tints,
             options.mode,
             options.ambient,
             &collision_hulls,
         )?;
         let model_index = u16::try_from(submodels.len() + 1)
-            .map_err(|_| BrushWorldCookError::ModelIndexOverflow)?;
+            .map_err(|_| BrushWorldCookError::ModelIndexOverflow(node.id))?;
         let leaf_probe = model_center_world_q12(origin, geometry.mins, geometry.maxs);
         // ponytail: PXBSP v1 links one representative leaf. Replace this
         // with a touched-leaf span before full entity PVS activation ships.
@@ -651,6 +661,7 @@ fn compile_model(
     brushes: &[Brush],
     light_occluders: &[Brush],
     lights: &[BrushPointLight],
+    light_nodes: &[NodeId],
     material_tints: &[BrushMaterialTint],
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
@@ -669,7 +680,15 @@ fn compile_model(
                 ambient,
                 lights,
                 material_tints,
-            )?;
+            )
+            .map_err(|error| BrushWorldCookError::Light {
+                // `translate_lights` preserves scene order, so the reported
+                // light index indexes the same list `scene_lights` built.
+                node: match error {
+                    BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
+                },
+                error,
+            })?;
             pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&lighting))?
         }
     };
@@ -796,7 +815,9 @@ fn translate_brushes(brushes: &[Brush], origin: [i32; 3]) -> Vec<Brush> {
         .collect()
 }
 
-fn scene_lights(scene: &Scene) -> Vec<BrushPointLight> {
+/// Point lights in scene order, paired with the authoring node each came
+/// from so a bake failure can name the light the author has to fix.
+fn scene_lights(scene: &Scene) -> (Vec<BrushPointLight>, Vec<NodeId>) {
     scene
         .nodes()
         .iter()
@@ -809,17 +830,20 @@ fn scene_lights(scene: &Scene) -> Vec<BrushPointLight> {
             else {
                 return None;
             };
-            Some(BrushPointLight {
-                position: node.transform.translation.map(f64::from),
-                // Existing authoring stores light radius in sector units.
-                radius: f64::from(*radius) * DEFAULT_LIGHT_RADIUS_UNITS,
-                intensity_q8: (f64::from(*intensity) * 256.0)
-                    .round()
-                    .clamp(0.0, u16::MAX as f64) as u16,
-                color: *color,
-            })
+            Some((
+                BrushPointLight {
+                    position: node.transform.translation.map(f64::from),
+                    // Existing authoring stores light radius in sector units.
+                    radius: f64::from(*radius) * DEFAULT_LIGHT_RADIUS_UNITS,
+                    intensity_q8: (f64::from(*intensity) * 256.0)
+                        .round()
+                        .clamp(0.0, u16::MAX as f64) as u16,
+                    color: *color,
+                },
+                node.id,
+            ))
         })
-        .collect()
+        .unzip()
 }
 
 fn translate_lights(lights: &[BrushPointLight], origin: [i32; 3]) -> Vec<BrushPointLight> {
@@ -944,10 +968,10 @@ fn intern_texture(
         });
     }
     let index =
-        u16::try_from(textures.len()).map_err(|_| BrushWorldCookError::TextureAssetOverflow)?;
+        u16::try_from(textures.len()).map_err(|_| BrushWorldCookError::TextureAssetOverflow { material })?;
     let asset_id = base
         .checked_add(index)
-        .ok_or(BrushWorldCookError::TextureAssetOverflow)?;
+        .ok_or(BrushWorldCookError::TextureAssetOverflow { material })?;
     let size = [width as u8, height as u8];
     textures.push(CompiledBrushTexture {
         asset_id,

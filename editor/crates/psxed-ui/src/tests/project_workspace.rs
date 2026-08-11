@@ -37,6 +37,114 @@ fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The conflict latch and the watch baseline have to survive being used over
+/// and over, not just once.
+///
+/// Each round: dirty a local edit, change project.ron externally, watch the
+/// Save get blocked, Reload to accept the disk version, edit again, and Save
+/// cleanly. That last Save only works if `reload` recaptured the watch
+/// baseline; if it did not, round two would latch on a phantom conflict and
+/// the project would become unsaveable. Three rounds, because a latch that
+/// only sticks on the second use would pass a single-cycle test.
+///
+/// The edits add brushes rather than renaming: a name change makes `save`
+/// rename the project DIRECTORY, which is a different flow entirely.
+#[test]
+fn repeated_conflict_reload_save_cycles_keep_the_latch_and_baseline_honest() {
+    let dir = test_temp_dir("project-watch-cycles");
+    let project = ProjectDocument::new("cycle baseline");
+    save_watch_project(&dir, &project);
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    let path = dir.join("project.ron");
+
+    let cuboid = |size: i32| psxed_project::brush::Brush::cuboid([0, 0, 0], [size, size, size]);
+    let brush_count = |document: &ProjectDocument| document.active_scene().brushes.len();
+
+    for round in 1..=3usize {
+        // A local edit the author has not saved yet.
+        let local_before = brush_count(workspace.project());
+        workspace
+            .project
+            .active_scene_mut()
+            .brushes
+            .push(cuboid(64 + round as i32));
+        workspace.mark_dirty();
+        assert!(
+            !workspace.has_external_project_conflict(),
+            "round {round} started latched"
+        );
+
+        // Something outside the editor rewrites project.ron. Each round writes
+        // a different number of brushes, so neither size nor hash can go stale.
+        let mut external = project.clone();
+        for extra in 0..round {
+            external
+                .active_scene_mut()
+                .brushes
+                .push(cuboid(512 + extra as i32));
+        }
+        external.save_to_path(&path).unwrap();
+
+        // Save must refuse and must not touch the local document.
+        let refusal = workspace.save().unwrap_err();
+        assert!(
+            refusal.contains("changed outside"),
+            "round {round} refusal: {refusal}"
+        );
+        assert_eq!(
+            brush_count(workspace.project()),
+            local_before + 1,
+            "round {round} lost the unsaved edit"
+        );
+        assert!(
+            workspace.has_external_project_conflict(),
+            "round {round} did not latch"
+        );
+        assert!(workspace.is_dirty());
+
+        // Reload accepts the disk version and clears the latch.
+        workspace.reload();
+        assert_eq!(
+            brush_count(workspace.project()),
+            round,
+            "round {round} did not adopt the external document"
+        );
+        assert!(
+            !workspace.has_external_project_conflict(),
+            "round {round} stayed latched after Reload"
+        );
+
+        // And the recaptured baseline lets the very next Save through.
+        workspace
+            .project
+            .active_scene_mut()
+            .brushes
+            .push(cuboid(1024));
+        workspace.mark_dirty();
+        workspace
+            .save()
+            .unwrap_or_else(|error| panic!("round {round} Save after Reload: {error}"));
+        assert!(!workspace.is_dirty());
+        assert!(!workspace.has_external_project_conflict());
+
+        // The saved bytes are on disk, and polling the freshly captured
+        // baseline sees no phantom change.
+        assert_eq!(
+            brush_count(&ProjectDocument::load_from_path(&path).unwrap()),
+            round + 1,
+            "round {round} did not reach disk"
+        );
+        workspace.poll_project_watch(true);
+        assert!(
+            !workspace.has_external_project_conflict(),
+            "round {round} polled a phantom conflict after Save"
+        );
+        assert_eq!(brush_count(workspace.project()), round + 1);
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn same_length_atomic_project_replace_is_detected_even_when_metadata_looks_unchanged() {
     let dir = test_temp_dir("project-watch-atomic-same-length");
@@ -643,6 +751,84 @@ fn stale_typed_cook_issue_target_falls_back_cleanly() {
         }
     ));
     assert_eq!(workspace.selected_brush, None);
+}
+
+/// A cook error raised by a per-kind cook helper (which only ever sees a node
+/// NAME) still blames the authoring node, via the caller-side blame scope.
+#[test]
+fn cook_errors_blame_the_authoring_node_that_raised_them() {
+    use psxed_project::playtest::PlaytestValidationTarget;
+
+    // A Trigger Volume with no target is dead content and fails the cook.
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("per-error-targets");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let offender = workspace.selected_node_id();
+
+    let project = workspace.project().clone();
+    let (package, report) = psxed_project::playtest::build_package(&project, &dir);
+    assert!(package.is_none(), "a targetless volume must fail the cook");
+    let blamed: Vec<_> = report
+        .errors
+        .iter()
+        .filter(|error| error.contains("has no target"))
+        .map(|error| error.target)
+        .collect();
+    assert_eq!(
+        blamed,
+        vec![Some(PlaytestValidationTarget::Node(offender))],
+        "the dead volume blames its own node"
+    );
+    assert_eq!(
+        report.focus_target(),
+        Some(PlaytestValidationTarget::Node(offender)),
+        "the convenience accessor still returns the first focusable error"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// End to end: a failing cook driven through the editor's own cook command
+/// auto-focuses the authored node responsible, and keeps every error's target
+/// available so the diagnostics list can focus any row.
+#[test]
+fn failing_cook_auto_focuses_the_offending_node_and_keeps_every_target() {
+    use psxed_project::playtest::PlaytestValidationTarget;
+
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("failing-cook-focus");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let offender = workspace.selected_node_id();
+    workspace.replace_node_selection(workspace.project().active_scene().root);
+
+    let cook = test_temp_dir("failing-cook-focus-out");
+    let error = workspace
+        .cook_playtest_to_dir(&cook)
+        .expect_err("a targetless Trigger Volume must fail validation");
+    assert!(error.contains("has no target"), "{error}");
+    assert_eq!(
+        workspace.selected_node_id(),
+        offender,
+        "the failing cook selected the node the author has to fix"
+    );
+    let targets: Vec<_> = workspace
+        .last_cook_errors
+        .iter()
+        .map(|error| error.target)
+        .collect();
+    assert!(
+        targets.contains(&Some(PlaytestValidationTarget::Node(offender))),
+        "the retained diagnostics keep the offender focusable: {targets:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(cook);
 }
 
 #[test]
@@ -1470,6 +1656,8 @@ fn create_and_open_project_sets_document_name_and_derived_directory() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     ws.create_and_open_project(&name).unwrap();
@@ -1523,6 +1711,8 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let cook_a = test_temp_dir("bsp-authoring-loop-a");
     let cook_b = test_temp_dir("bsp-authoring-loop-b");
     let cook_c = test_temp_dir("bsp-authoring-loop-c");
@@ -1762,6 +1952,84 @@ fn play_and_rebuild_buttons_emit_requests_through_real_egui_input() {
     );
 }
 
+/// A Trigger Volume placed through the BSP Place lane must fire for a player
+/// who simply walks onto the surface it was placed on.
+///
+/// Two defects made that impossible. The lane lifted every point entity one
+/// unit above the surface, but the cook grows a trigger AABB UPWARD from its
+/// anchor and the character motor stands its feet exactly on the floor plane,
+/// so the volume started one unit above the player. And the placement default
+/// was `wait_ticks: 0`, which re-fires every tick the player stands inside and
+/// soft-locks whatever overlay the trigger opens.
+#[test]
+fn placed_trigger_volume_contains_a_player_standing_on_the_placement_surface() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("trigger-anchor");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+
+    let surface_y = workspace
+        .bsp_upward_surface_y([1024.0, 1024.0], workspace.orthographic_focus[1])
+        .expect("template courtyard floor");
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let placed = workspace.selected_node_id();
+
+    let node = workspace
+        .project()
+        .active_scene()
+        .node(placed)
+        .expect("placed Logic node");
+    assert_eq!(
+        node.transform.translation[1], surface_y,
+        "a Logic anchor sits ON the surface, never lifted above it"
+    );
+    let NodeKind::Logic {
+        kind, wait_ticks, ..
+    } = &node.kind
+    else {
+        panic!("Place must author a Logic node");
+    };
+    assert!(matches!(
+        kind,
+        psxed_project::LogicNodeKind::TriggerVolume { .. }
+    ));
+    assert_eq!(
+        *wait_ticks, -1,
+        "a freshly placed volume fires once, then retires"
+    );
+
+    // Give the volume a target so the cook accepts it, then prove the cooked
+    // AABB contains a player whose feet rest on the placement surface.
+    workspace.push_undo();
+    if let Some(node) = workspace.project.active_scene_mut().node_mut(placed) {
+        if let NodeKind::Logic { target, .. } = &mut node.kind {
+            *target = "Anything".to_string();
+        }
+    }
+    workspace.mark_dirty();
+
+    let project = workspace.project().clone();
+    let (package, report) = psxed_project::playtest::build_package(&project, &dir);
+    assert!(report.is_ok(), "cook errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let trigger = package
+        .logic
+        .iter()
+        .find(|record| record.kind == psx_level::logic_kind::TRIGGER_VOLUME)
+        .expect("cooked trigger volume");
+    assert_eq!(trigger.wait_ticks, -1);
+    let feet = surface_y.round() as i32;
+    assert!(
+        feet >= trigger.min[1] && feet <= trigger.max[1],
+        "player feet at y={feet} must be inside the trigger's y span {}..={}",
+        trigger.min[1],
+        trigger.max[1]
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
     let mut workspace =
@@ -1775,6 +2043,8 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let cook_a = test_temp_dir("bsp-blank-slate-a");
     let cook_b = test_temp_dir("bsp-blank-slate-b");
     let _ = std::fs::remove_dir_all(&project_dir);
@@ -1910,7 +2180,7 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
         .expect("cook rooted prop and door");
     let project = ProjectDocument::load_from_path(project_dir.join("project.ron")).unwrap();
     let (package, report) = psxed_project::playtest::build_package(&project, &project_dir);
-    assert!(report.is_ok(), "{}", report.errors.join("; "));
+    assert!(report.is_ok(), "{}", report.error_messages().join("; "));
     let package = package.expect("cooked package");
     assert_eq!(package.box_props.len(), 1);
     assert_ne!(
@@ -1988,6 +2258,8 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     workspace
@@ -2196,6 +2468,8 @@ fn save_renaming_bsp_starter_creates_a_project_copy() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
     let mut workspace = EditorWorkspace::open_directory(&source).unwrap();
 
@@ -2267,6 +2541,8 @@ fn delete_current_project_removes_directory_and_loads_bsp_starter() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     workspace.create_and_open_project(&name).unwrap();
@@ -2376,6 +2652,8 @@ fn create_and_open_project_keeps_old_texture_handles_alive_temporarily() {
             .as_nanos()
     );
     let target = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(target.clone());
     let _ = std::fs::remove_dir_all(&target);
 
     ws.create_and_open_project(&name).unwrap();
@@ -2680,6 +2958,8 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let _ = std::fs::remove_dir_all(&project_dir);
 
     workspace.create_and_open_project(&name).unwrap();
@@ -3054,6 +3334,8 @@ fn souls_slice_project_is_authored_through_production_commands() {
             .as_nanos()
     );
     let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
     let cook_a = test_temp_dir("souls-slice-cook-a");
     let cook_b = test_temp_dir("souls-slice-cook-b");
     let _ = std::fs::remove_dir_all(&project_dir);
@@ -3405,11 +3687,11 @@ fn souls_slice_project_is_authored_through_production_commands() {
     workspace.push_undo();
     if let Some(node) = workspace.project.active_scene_mut().node_mut(trigger_node) {
         node.name = "Route Trigger".to_string();
-        // The place lane parks point nodes one unit above the surface, but
-        // the trigger AABB grows upward from its anchor and the motor stands
-        // exactly on the floor plane; anchor on the floor so the volume
-        // contains the player.
-        node.transform.translation[1] = 256.0;
+        // The anchor and wait now come straight from the Place lane: it parks
+        // Logic nodes on the surface (the trigger AABB grows upward from the
+        // anchor and the motor stands exactly on the floor plane) and defaults
+        // to fire-once. Only the extent and the target are authored here.
+        assert_eq!(node.transform.translation[1], 256.0);
         node.kind = NodeKind::Logic {
             kind: psxed_project::LogicNodeKind::TriggerVolume {
                 size: [384, 512, 768],
@@ -3418,9 +3700,8 @@ fn souls_slice_project_is_authored_through_production_commands() {
             killtarget: String::new(),
             master: String::new(),
             delay_ticks: 0,
-            // Fire once then retire (hl's wait -1): a wait-0 volume re-arms
-            // every tick while the player stands inside and reopens the sync
-            // overlay forever. Respawn re-arms the record, the souls rule.
+            // Fire once then retire (hl's wait -1). Respawn re-arms the
+            // record, the souls rule.
             wait_ticks: -1,
             enabled: true,
         };
@@ -3509,7 +3790,7 @@ fn souls_slice_project_is_authored_through_production_commands() {
 
     let project = ProjectDocument::load_from_path(project_dir.join("project.ron")).unwrap();
     let (package, report) = psxed_project::playtest::build_package(&project, &project_dir);
-    assert!(report.is_ok(), "{}", report.errors.join("; "));
+    assert!(report.is_ok(), "{}", report.error_messages().join("; "));
     let package = package.expect("cooked package");
     let psxed_project::playtest::PlaytestWorldGeometry::Pxbsp(ref world) = package.world_geometry
     else {
