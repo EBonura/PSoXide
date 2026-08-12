@@ -1177,6 +1177,14 @@ impl EditorWorkspace {
             return edited;
         }
         if !shaped {
+            // Release and focus loss normally arrive as exactly this: a
+            // frame where nothing changed. Ending the interaction only on a
+            // CHANGED frame left the captured target alive across the
+            // release, so the next edit on that face solved against a
+            // mapping the user had already stopped editing.
+            if !interacting {
+                self.brush_uv_edit = None;
+            }
             return edited;
         }
         let stale = self
