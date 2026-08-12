@@ -812,9 +812,9 @@ mod tests {
             assert_eq!(hull.point_contents(at(-64, 128, 256)), Some(CONTENTS_EMPTY));
             let trace = trace(&hull, at(-64, 128, 256), at(576, 128, 256));
             assert_eq!(trace.fraction, Q12_ONE, "{} blocked", contents.label());
-            assert!(!trace.start_solid);
-            assert!(trace.in_open);
-            assert!(trace.in_water);
+            assert!(!trace.start_solid.is_set());
+            assert!(trace.in_open.is_set());
+            assert!(trace.in_water.is_set());
         }
     }
 
@@ -875,8 +875,8 @@ mod tests {
         let compiled = compile_collision(&slabs);
         let hull = hull(&compiled);
         let trace = trace(&hull, at(512, 400, 512), at(512, -400, 512));
-        assert!(!trace.start_solid);
-        assert!(trace.in_open);
+        assert!(!trace.start_solid.is_set());
+        assert!(trace.in_open.is_set());
         assert!(trace.fraction < Q12_ONE, "floor must obstruct");
         // Floor top is y=64; the tracer backs off by its epsilon.
         let end_world = trace.end.y as f64 / Q12_ONE as f64;
