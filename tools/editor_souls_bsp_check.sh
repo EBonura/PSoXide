@@ -72,8 +72,14 @@ EXPECT_PLAYER_Z_BIASED=1001536
 # death-by-enemy on another. Both tapes are now on the PAD-POLL clock (sample
 # N lands on poll N), which is the guest's own input clock and therefore
 # frame-rate independent; the retreat carries the 71 ticks the route needs.
-EXPECT_VRAM_HASH=0x82a5257f617b80d6
-EXPECT_DISPLAY_HASH=0x51170064e86c51b9
+# Re-pinned 2026-08-12 at the integration head. The editor's trigger-anchor
+# fix moved the slice's Lift Door origin by one unit (y 257 to 256), which
+# is a real content change and therefore a different final frame. Every
+# simulation-side counter is unchanged (melee 4, enemy death 1, lava 6,
+# player death 1, checkpoint 1, door 1, attachments 2) and both canonical
+# replays agree, so this is a content re-pin, not a determinism failure.
+EXPECT_VRAM_HASH=0xbab02327df64003d
+EXPECT_DISPLAY_HASH=0x3c7a6bd9154f23de
 
 EXPECT_NEG_ROUTE_TICKS=898
 EXPECT_NEG_PAD_POLLS=900
