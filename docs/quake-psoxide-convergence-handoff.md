@@ -1347,6 +1347,156 @@ automated evidence (host suites, real MIPS, two deterministic image-free
 replays with pinned gameplay counters). The owner's native acceptance run
 remains the human half of P2.
 
+### 0.21 P2/P3, tape-clock, and main merges (2026-08-12)
+
+PSoXide integration head `dac903f3`. Merged this session, in order:
+`449f1a1e` P1b slice, `808e70d0` P3 boundary/staging/numeric guard,
+`ad46f6e2` P2 editor, `2dddca0c` the replay-clock fix, `dac903f3` main.
+
+**P3.** Explicit persisted `world_format` discriminator (resolved once from
+the old presence rule on load, then persisted, so a BSP project whose
+brushes were all deleted stays BSP). BSP projects now FAIL CLOSED on every
+grid spatial path (Sections, `WorldGrid`, PSXW assets, room chunks,
+visibility rows, surface caches, residency, and the Room Rings topology
+builder), with the two deliberate exceptions documented inline: the
+singleton non-spatial metadata room and the header-only `WORLD.PAK`. A
+grid guest is byte-identical with and without the new asserts; a BSP guest
+drops 14,336 bytes of provably dead code.
+
+**Canonical guest staging** (`tools/build_guest_staged.sh`) makes the MIPS
+guest checkout-path-reproducible: two checkouts previously produced
+same-size exes differing in 312,194 bytes, and now produce byte-identical
+output (`39c8affc...` from both). `PSOXIDE_GUEST_STAGE=0` restores the old
+in-tree build for comparison.
+
+**The numeric guard is green** for the first time: all 26 pre-existing
+violations triaged, zero conversions and 26 justified exemptions, because
+the guard found no floats at all. Every one is either a bitmask whose width
+is the capacity (8), a squared engine-unit distance that genuinely exceeds
+i32 (`nearest_door`, 6), a cross-multiplied phase rescale (3), or the
+software mirror of the GTE's own wide AVSZ accumulator (11). Comments only:
+the staged guest rebuilds to an identical SHA-256, so no gate hash can move.
+
+**P2.** Face texturing is now covered and the Material Paint tool paints
+BSP faces in the 3D view. A real UX defect surfaced: the face UV **Reset
+button was rendered off-screen at x 1805.6 on an 1800-wide viewport and was
+unclickable in the real editor**; the row is split and the label helper now
+rejects off-screen labels so the next overflow fails a test. Every cook
+error carries its own focus target (the report is a `Vec` of errors rather
+than one message list), with Pack and Pxbsp deliberately untargeted and the
+reason recorded inline. Trigger Volumes are placed where they can fire, new
+volumes default to fire-once, and a `ScratchProjectDir` drop guard stops
+tests leaking project directories. Clip was verified end to end and gained
+its missing keep-Front and post-save-reopen-cook coverage. Persistent
+groups were DROPPED under the owner's scope correction: not in the required
+workflow, and nothing was half-built.
+
+**The trigger gizmo now matches the cook** (lead fix): the cook anchors a
+trigger AABB floor-up from its origin while the editor drew it centred on
+Y, so a default 1024-high volume appeared 512 units below the box that
+fires. The placement test asserts the drawn span equals the cooked span and
+is red without the fix.
+
+**The replay-clock defect, and what it really was.** An audit found the
+souls gate's gameplay counters changing with guest code layout, and the
+suspicion was render-rate-dependent melee. That was REFUTED by reading and
+by measurement: melee resolution is already tick-authoritative, since the
+active frame comes from `animation_phase_at_tick_q12` over
+`sim_tick - anim_start_tick`, a pure function of the tick. The real defect
+was the replay harness: both souls tapes were headed `clock=video_frame`,
+which the emulator applies on its route-tick clock while the guest reads
+the pad once per simulation tick. Those clocks are not phase-locked and
+their phase drifts with guest execution cost. Transcribing what each guest
+actually read showed the authored 70-tick retreat arriving as 70 ticks on
+one build and 71 on another, which was enough to make the fourth swing
+miss. All four fixture tapes are now `clock=pad_poll`, both gates REJECT a
+tape that is not poll-bound, and the souls gate carries a permanent
+cross-layout stage that rebuilds the same sources in-tree and requires
+every simulation-side counter to match. New host tests drive the real
+`FrameScheduler` at four render costs and pin that the attack window covers
+the same tick set at every frame rate.
+
+**Validation at `dac903f3`** (all green): psxed-ui 397, psxed-project 499,
+psx-bsp 71, psx-game-runtime 92, psx-engine 318; `make combat-checkpoint`
+(melee 4, stagger 1, death 1, taken 3, vram `0xdef0e1275bff08b2`),
+`make editor-blank-playtest-check`, `make editor-bsp-liquid-check`,
+`make runtime-numeric-guard`, and `make editor-souls-bsp-check` PASS with
+the full authored loop identical across two guest layouts presenting 988
+and 989 visual frames (hits 4, stagger 1, kill 1, taken 4, checkpoint 1,
+door 1, lava 6, death 1, attachments 2, pvs 2910, vram
+`0xbab02327df64003d`).
+
+### 0.22 Residency measurement for the composed demonstration
+
+Required by the owner's streaming clarification: residency is claimed from
+MEASURED budgets, never from the PXBSP file size. For the souls vertical
+slice, from the cook budget line and the guest link map:
+
+```text
+cook envelope   BSP 30,912 B, PVS 29 B (row 12/1024), light 3,408 B,
+                textures 97,576 B, RAM 238,728/2,097,152 B (22 slots),
+                VRAM 97,408/1,048,576 B (6 slots), packets 601/1,536
+guest link      exe 1,460,224 B; .text 794,664; .data+.rodata 663,504;
+                .bss 182,360; static footprint 1,640,536
+RAM region cap  1,998,848 B (2 MiB less 64 KiB BIOS and 32 KiB stack)
+headroom        358,312 B free, 17.9 percent
+stack reserve   32,768 B
+```
+
+Not printed by any tool and therefore NOT estimated: VRAM page occupancy
+and fragmentation (only the byte total and the 6/64 slot count exist), and
+runtime peak stack usage (only the link-time reserve is known).
+
+Conclusion: the composed demonstration fits as a resident map with measured
+headroom, so it ships whole-resident and is labelled accordingly. The
+documentation line stays exactly: **Comicon BSP demo uses measured
+whole-map residency; P6 microsection streaming remains deferred**
+(`docs/p6-pxbsp-streaming-followup.md`).
+
+### 0.23 Quake integration state (2026-08-12)
+
+Quake head `9e6e5ba`, after merging the bestiary branch (`099f18a`) and the
+entity-systems branch. Together they add dynamic body blocking at all three
+compose sites, seven authored monsters with real AI plus Chthon, and
+teleporters, trains, key doors, centerprints, secrets, skill,
+spikeshooters, fireballs and episode runes. quake-core 114 tests, host 35,
+real MIPS guest builds.
+
+The two merges conflicted only additively and were resolved keeping both
+sides: the Chthon wake/shock dispatch and the spikeshooter dispatch are
+independent target recipients, the two new regression features coexist in
+the guest cfg lists, and the host action list is the union.
+
+**Three gates are RED at this head and are being repaired**, all from the
+same class of cause, which is worth recording because it is a real finding
+rather than test flake: the two branches were green in isolation and their
+COMBINATION changed navigation and timing.
+
+1. `start-route-regress` times out at (508, 1638, 46) with 3 of 7 required
+   mechanisms. Start gained its first genuinely solid brush entities (the
+   episode and boss gates) at the same time monsters started blocking
+   bodies.
+2. `bestiary-regress` loads E1M2 but never reaches E1M4, so the first
+   authored monster stage does not complete.
+3. `audio-regress` fails again on its tail window. Both branches
+   independently pushed that window later (62-67 to 63-68) for the same
+   reason: it asserts silence inside an ABSOLUTE wall-clock window while
+   guest pacing is content-dependent, so every gameplay addition shifts the
+   shot decay by tens of milliseconds. Merged, the shifts compound. The fix
+   is to re-anchor it to an event, not to widen it again.
+
+**Known defect carried into the merge: func_train legs are about 300x too
+long on the guest.** A leg that takes 87 ticks under host tests against the
+real cooked E1M5 lump computes 27,804 ticks in the guest, which is exactly
+`isqrt_i32(i32::MAX) * 60 / 100`, so the squared leg length saturated.
+`travel_ticks` shifts each component right by 12 first, so saturation needs
+a component near 46,340 units, about 1.9e8 in Q12: roughly a factor of 4096
+too large, the signature of a value Q12-scaled twice. `MapEntity::origin`
+is verified to be Q20.12 already and `BrushModel::mins` is declared raw
+i16, so the remaining suspect is what the cooker actually writes into a
+train submodel's mins. Trains must not be described as working until this
+closes.
+
 ## 1. Owner objective
 
 The owner wants one coherent PS1 development stack, not three adjacent demos:
