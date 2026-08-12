@@ -49,6 +49,8 @@ Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hard
 
 | Doc | Topic |
 |-----|-------|
+| [souls-slice-acceptance.md](souls-slice-acceptance.md) | Owner acceptance pass on the tracked souls slice. |
+| [fresh-project-workflow-checklist.md](fresh-project-workflow-checklist.md) | Owner acceptance pass on a newly created project. |
 | [asset-provenance.md](asset-provenance.md) | Asset and media provenance. |
 | [license-audit.md](license-audit.md) | License and provenance audit. |
 | [finalisation-log.md](finalisation-log.md) | Project finalisation log. |
