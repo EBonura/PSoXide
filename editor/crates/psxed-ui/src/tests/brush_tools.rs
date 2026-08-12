@@ -2948,14 +2948,40 @@ fn face_uv_numeric_edits_cook_into_the_brush_world_and_undo_per_edit() {
     let cook_before = test_temp_dir("face-uv-cook-before");
     workspace.cook_playtest_to_dir(&cook_before).expect("cook");
 
+    // A pure offset edit still slides the texture by exactly what was typed.
     run_real_egui_type_into_drag_value(&mut workspace, "U 0", "24");
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[0]
+            .uv
+            .offset_texels,
+        [24, 0],
+        "an Offset U edit must slide the texture by the typed amount"
+    );
+
+    // Rotation and scale re-anchor instead: the offset absorbs whatever
+    // keeps the face's own centroid on the same texel.
+    let before_rotate = workspace.project.active_scene().brushes[0].faces[0].uv;
+    let anchor = workspace.project.active_scene().brushes[0]
+        .face_uv_anchor(0)
+        .expect("solved face anchor");
     run_real_egui_type_into_drag_value(&mut workspace, "0\u{b0}", "15");
     run_real_egui_type_into_drag_value(&mut workspace, "100% U", "150");
 
     let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
-    assert_eq!(uv.offset_texels, [24, 0]);
     assert_eq!(uv.rotation_deg, 15);
     assert_eq!(uv.scale_q8, [384, 256], "150% is 384 in Q8");
+    let held = before_rotate.apply(anchor);
+    let moved = uv.apply(anchor);
+    assert!(
+        (held[0] - moved[0]).abs() <= 1.0 && (held[1] - moved[1]).abs() <= 1.0,
+        "rotation and scale must hold the face anchor: {held:?} became {moved:?}"
+    );
+    assert_ne!(
+        uv.offset_texels,
+        [24, 0],
+        "holding the anchor has to move the stored offset"
+    );
+    let compensated = uv.offset_texels;
     assert!(workspace.is_dirty());
 
     // The authored UV values reach the cooked brush world.
@@ -2991,7 +3017,7 @@ fn face_uv_numeric_edits_cook_into_the_brush_world_and_undo_per_edit() {
         workspace.do_redo();
     }
     let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
-    assert_eq!(uv.offset_texels, [24, 0]);
+    assert_eq!(uv.offset_texels, compensated);
     assert_eq!(uv.scale_q8, [384, 256]);
     run_real_egui_workspace_click_on_label(&mut workspace, "Reset UV");
     assert_eq!(
@@ -3000,7 +3026,7 @@ fn face_uv_numeric_edits_cook_into_the_brush_world_and_undo_per_edit() {
     );
     workspace.do_undo();
     let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
-    assert_eq!(uv.offset_texels, [24, 0], "one undo unwinds Reset UV");
+    assert_eq!(uv.offset_texels, compensated, "one undo unwinds Reset UV");
 
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(cook_before);
@@ -3389,4 +3415,159 @@ fn brush_mode_buttons_visible_and_clickable_with_3d_viewport_active() {
     // before clicking, so this proves visibility with the 3D viewport up.
     click_visible_brush_mode(&mut workspace, BrushEditMode::Vertex);
     assert_eq!(workspace.brush_edit_mode, BrushEditMode::Vertex);
+}
+
+/// The defect this covers: the live move preview called plain `translate`
+/// while the commit called `translate_with_uv_lock`, so a locked drag showed
+/// the texture swimming across the brush and then snapped to a different
+/// mapping the moment the mouse came up.
+#[test]
+fn locked_move_preview_uvs_match_the_committed_uvs() {
+    let mut harness = ViewportHarness::floored_room("brush_uv_preview", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    assert!(harness.workspace.brush_texture_lock, "lock defaults on");
+
+    // Two brushes, both selected, so the rider path is covered too. Neither
+    // sits at the origin and the first carries a non-identity mapping, which
+    // is where an offset-only compensation would go wrong.
+    let scene = harness.workspace.project.active_scene_mut();
+    scene.brushes.push(psxed_project::brush::Brush::cuboid(
+        [1280, 0, 1280],
+        [1408, 128, 1408],
+    ));
+    scene.brushes.push(psxed_project::brush::Brush::cuboid(
+        [1600, 0, 1600],
+        [1728, 128, 1728],
+    ));
+    for face in &mut scene.brushes[0].faces {
+        face.uv = psxed_project::brush::FaceUv {
+            offset_texels: [13, -7],
+            rotation_deg: 20,
+            scale_q8: [320, 192],
+        };
+    }
+    harness.workspace.replace_brush_selection(0, Some(0));
+    harness.workspace.toggle_brush_selection(1);
+    harness.workspace.selected_brush = Some(0);
+
+    assert!(
+        harness.workspace.begin_brush_move_2d([1344.0, 1344.0]),
+        "grab the first brush"
+    );
+    harness.workspace.update_brush_move_2d([1600.0, 1344.0]);
+    // Several mouse moves: the preview must be rebuilt from the base each
+    // time, not compensated again on top of the last preview.
+    harness.workspace.update_brush_move_2d([1728.0, 1472.0]);
+    harness.workspace.update_brush_move_2d([1856.0, 1600.0]);
+
+    let preview: Vec<Vec<psxed_project::brush::FaceUv>> = harness
+        .workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .map(|brush| brush.faces.iter().map(|face| face.uv).collect())
+        .collect();
+
+    harness.workspace.commit_brush_gesture_2d();
+
+    let committed: Vec<Vec<psxed_project::brush::FaceUv>> = harness
+        .workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .map(|brush| brush.faces.iter().map(|face| face.uv).collect())
+        .collect();
+    assert_eq!(
+        preview, committed,
+        "releasing the mouse must not move the texture the drag was showing"
+    );
+    assert!(
+        committed[0].iter().any(|uv| uv.offset_texels != [13, -7]),
+        "the locked move has to compensate the primary brush"
+    );
+    assert!(
+        committed[1].iter().any(|uv| uv.offset_texels != [0, 0]),
+        "and every rider in the multi-selection"
+    );
+}
+
+/// Lock off is a deliberate mode, not a bug: the mapping stays world-aligned
+/// and the brush slides under its texture.
+#[test]
+fn unlocked_move_preview_leaves_the_mapping_world_aligned() {
+    let mut harness = ViewportHarness::floored_room("brush_uv_unlocked", 4);
+    harness.workspace.active_tool = ViewTool::Brush;
+    harness.workspace.brush_texture_lock = false;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [1280, 0, 1280],
+            [1408, 128, 1408],
+        ));
+    harness.workspace.replace_brush_selection(0, Some(0));
+
+    assert!(harness.workspace.begin_brush_move_2d([1344.0, 1344.0]));
+    harness.workspace.update_brush_move_2d([1728.0, 1600.0]);
+    let preview: Vec<psxed_project::brush::FaceUv> =
+        harness.workspace.project.active_scene().brushes[0]
+            .faces
+            .iter()
+            .map(|face| face.uv)
+            .collect();
+    assert!(
+        preview
+            .iter()
+            .all(|uv| *uv == psxed_project::brush::FaceUv::default()),
+        "unlocked moves must not touch the mapping"
+    );
+    harness.workspace.commit_brush_gesture_2d();
+    let committed: Vec<psxed_project::brush::FaceUv> =
+        harness.workspace.project.active_scene().brushes[0]
+            .faces
+            .iter()
+            .map(|face| face.uv)
+            .collect();
+    assert_eq!(preview, committed);
+}
+
+/// Texture lock used to live in the Brush-only toolbar, where the workflow
+/// that needs it (select a brush, drag it, watch the texture) could not find
+/// it. It belongs with the rest of the texture mapping controls, and it has
+/// to be reachable in Select mode too, with or without a face selected.
+#[test]
+fn texture_lock_is_reachable_from_the_inspector_in_both_tools() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("uv-lock-inspector");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+
+    for tool in [ViewTool::Select, ViewTool::Brush] {
+        workspace.active_tool = tool;
+        // No face selected: the lock still shows, with an instruction for
+        // how to reach the per-face controls.
+        workspace.replace_brush_selection(0, None);
+        let before = workspace.brush_texture_lock;
+        run_real_egui_workspace_click_on_label(&mut workspace, "Lock texture while moving");
+        assert_eq!(
+            workspace.brush_texture_lock, !before,
+            "the Inspector lock must toggle in {tool:?} with no face selected"
+        );
+        run_real_egui_workspace_click_on_label(&mut workspace, "Lock texture while moving");
+        assert_eq!(workspace.brush_texture_lock, before);
+
+        // With a face selected the per-face controls come with it.
+        workspace.replace_brush_selection(0, Some(0));
+        let (ctx, viewport) = real_egui_workspace_ctx("uv-lock-labels");
+        for label in ["Texture Coordinates", "UV offset", "UV scale", "Reset UV"] {
+            let _ = locate_unique_label(&ctx, &mut workspace, &viewport, label);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
 }
