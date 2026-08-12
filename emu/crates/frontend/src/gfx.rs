@@ -14,6 +14,28 @@ use winit::window::Window;
 
 use crate::ui::profiler::EguiRenderProfile;
 
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WEB_LOADER_DISMISSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Fade the HTML startup layer only after the first frame reaches the surface.
+#[cfg(target_arch = "wasm32")]
+fn dismiss_web_loader() {
+    WEB_LOADER_DISMISSED.with(|dismissed| {
+        if dismissed.get() {
+            return;
+        }
+        let loader = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("psoxide-loader"));
+        if let Some(loader) = loader {
+            loader.set_class_name("psoxide-loader is-ready");
+            dismissed.set(true);
+        }
+    });
+}
+
 /// Largest logical display window the PSX exposes. The 24bpp fallback
 /// texture is allocated once at this size and each frame uploads the
 /// active display area into its top-left corner.
@@ -664,6 +686,8 @@ impl Graphics {
         }
         self.window.pre_present_notify();
         output.present();
+        #[cfg(target_arch = "wasm32")]
+        dismiss_web_loader();
         profile.submit_present_ms = elapsed_ms(t);
         profile.total_ms = elapsed_ms(total_start);
         profile

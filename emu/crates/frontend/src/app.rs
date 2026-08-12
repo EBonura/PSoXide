@@ -787,7 +787,6 @@ impl AppState {
             .map_err(|e| format!("boot disc: {e:?}"))?;
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
@@ -2311,7 +2310,6 @@ impl AppState {
         );
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
         bus.attach_memcard_port1(Vec::new());
         self.swap_in_booted(bus, cpu);
         Ok(())
@@ -2331,7 +2329,6 @@ impl AppState {
         cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
         bus.enable_hle_bios();
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
         self.swap_in_booted(bus, cpu);
         Ok(())
     }
@@ -3178,7 +3175,6 @@ impl AppState {
         fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &disc_path);
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        let _ = bus.force_port1_analog_mode();
 
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
@@ -3851,6 +3847,46 @@ fn integrate_freelook(fl: &mut emulator_core::FreelookState, input: &FreelookInp
     fl.tx -= mv * lx;
 }
 
+/// Camera state sent to the projection hook for this frame.
+///
+/// `FreelookState::enabled` doubles as the frontend's "pad controls the
+/// camera" flag. Once those controls are released, a non-identity camera
+/// delta must still be projected so gameplay continues from the framing the
+/// user chose. Only an explicit reset removes that delta.
+fn freelook_for_projection(mut fl: emulator_core::FreelookState) -> emulator_core::FreelookState {
+    let has_camera_delta =
+        fl.yaw != 0.0 || fl.pitch != 0.0 || fl.tx != 0.0 || fl.ty != 0.0 || fl.tz != 0.0;
+    fl.enabled |= has_camera_delta;
+    fl
+}
+
+#[cfg(test)]
+mod freelook_projection_tests {
+    use super::freelook_for_projection;
+    use emulator_core::FreelookState;
+
+    #[test]
+    fn moved_camera_stays_projected_after_controls_are_released() {
+        let moved = FreelookState {
+            enabled: false,
+            yaw: 0.25,
+            tx: 64.0,
+            ..Default::default()
+        };
+
+        let projected = freelook_for_projection(moved);
+
+        assert!(projected.enabled);
+        assert_eq!(projected.yaw, moved.yaw);
+        assert_eq!(projected.tx, moved.tx);
+    }
+
+    #[test]
+    fn reset_camera_stops_projecting_after_controls_are_released() {
+        assert!(!freelook_for_projection(FreelookState::default()).enabled);
+    }
+}
+
 pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     let max_steps = state.run_steps_per_frame.max(1);
     // Freelook: integrate held keys into the camera pose, then push it to the
@@ -3858,7 +3894,9 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     if state.freelook.enabled {
         integrate_freelook(&mut state.freelook, &state.freelook_input);
     }
-    state.cpu.set_freelook(state.freelook);
+    state
+        .cpu
+        .set_freelook(freelook_for_projection(state.freelook));
     let Some(bus) = state.bus.as_mut() else {
         state.running = false;
         state.menu.sync_run_label(false);
@@ -4240,6 +4278,7 @@ fn load_sidecar_disc_for_exe(exe_path: &Path) -> Result<Option<Disc>, String> {
 pub fn build_ui(
     ctx: &egui::Context,
     state: &mut AppState,
+    input_router: &mut crate::input::InputRouter,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
     #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
@@ -4249,6 +4288,7 @@ pub fn build_ui(
     ui::draw_layout(
         ctx,
         state,
+        input_router,
         vram_tex,
         display_tex,
         #[cfg(feature = "editor")]

@@ -40,7 +40,94 @@
       /* No text-selection highlight or focus ring around the game canvas. */
       canvas { display: block; outline: none; }
       canvas:focus, canvas:focus-visible { outline: none; }
+
+      .psoxide-loader {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: grid;
+        place-items: center;
+        color: #dce5ee;
+        background:
+          radial-gradient(circle at 50% 42%, rgba(15, 185, 215, 0.10), transparent 34%),
+          linear-gradient(180deg, #090d12 0%, #05070a 100%);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        opacity: 1;
+        visibility: visible;
+        transition: opacity 280ms ease, visibility 280ms step-end;
+      }
+      .psoxide-loader.is-ready {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      .psoxide-loader-card {
+        width: min(360px, calc(100vw - 56px));
+        text-align: center;
+      }
+      .psoxide-loader-mark {
+        margin-bottom: 22px;
+        color: #f4f8fb;
+        font-size: clamp(30px, 7vw, 44px);
+        font-weight: 750;
+        letter-spacing: 0.08em;
+        line-height: 1;
+        text-shadow: 0 0 28px rgba(39, 202, 231, 0.12);
+      }
+      .psoxide-loader-mark span { color: #22c8e5; }
+      .psoxide-loader-track {
+        position: relative;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #1d2630;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.035);
+      }
+      .psoxide-loader-track::after {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 42%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, transparent, #22c8e5 44%, #80efff 58%, transparent);
+        content: "";
+        animation: psoxide-loader-sweep 1.15s cubic-bezier(.45, 0, .55, 1) infinite;
+      }
+      .psoxide-loader-status {
+        margin-top: 14px;
+        color: #8997a6;
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+      .psoxide-loader.has-error .psoxide-loader-track::after {
+        width: 100%;
+        background: #fa5c5c;
+        animation: none;
+      }
+      .psoxide-loader.has-error .psoxide-loader-status { color: #ff9292; }
+      @keyframes psoxide-loader-sweep {
+        from { transform: translateX(-115%); }
+        to { transform: translateX(350%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .psoxide-loader-track::after { animation-duration: 2.4s; }
+        .psoxide-loader { transition-duration: 0ms; }
+      }
     </style>
+    <script>
+      // Keep startup failures visible instead of leaving an endless animation.
+      function showPsoxideLoadError() {
+        var loader = document.getElementById("psoxide-loader");
+        if (!loader || loader.classList.contains("is-ready")) return;
+        loader.classList.add("has-error");
+        var status = document.getElementById("psoxide-loader-status");
+        if (status) status.textContent = "Could not start - reload to try again";
+      }
+      window.addEventListener("error", showPsoxideLoadError);
+      window.addEventListener("unhandledrejection", showPsoxideLoadError);
+    </script>
     <!-- Build the emulator-only frontend (editor feature off) to wasm.
          wasm-opt -O4 is the speed-leaning Binaryen pass stack (an
          emulator's inner loop should not trade speed for density);
@@ -49,5 +136,16 @@
           data-wasm-opt="4"
           data-wasm-opt-params="--strip-debug --strip-producers" />
   </head>
-  <body></body>
+  <body>
+    <div id="psoxide-loader" class="psoxide-loader" role="status" aria-live="polite">
+      <div class="psoxide-loader-card">
+        <div class="psoxide-loader-mark" aria-label="PSoXide">PSo<span>X</span>ide</div>
+        <div class="psoxide-loader-track" aria-hidden="true"></div>
+        <div id="psoxide-loader-status" class="psoxide-loader-status">
+          Loading emulator
+        </div>
+      </div>
+    </div>
+    <noscript>PSoXide requires JavaScript.</noscript>
+  </body>
 </html>

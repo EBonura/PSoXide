@@ -18,11 +18,13 @@ pub mod toolbar;
 pub mod vram;
 
 use crate::app::AppState;
+use crate::input::InputRouter;
 
 /// Paint every panel for this frame, in layering order.
 pub fn draw_layout(
     ctx: &egui::Context,
     state: &mut AppState,
+    input_router: &mut InputRouter,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
     #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
@@ -58,7 +60,7 @@ pub fn draw_layout(
     // Top-bar controls go first so the central panel (framebuffer)
     // clips to what's left under them. The unified debug sidebar
     // docks next so the framebuffer gives it room.
-    toolbar::draw(ctx, state);
+    toolbar::draw(ctx, state, input_router);
 
     // Always called: the sidebar animates itself open/closed from the
     // `debug_sidebar` flag and early-returns when fully closed.

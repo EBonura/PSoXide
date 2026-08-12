@@ -136,6 +136,12 @@ impl PadSample {
         bus.set_port1_buttons(ButtonState::from_bits(self.buttons));
         bus.set_port1_sticks(self.right_x, self.right_y, self.left_x, self.left_y);
     }
+
+    /// Apply this sample to the emulator's second controller port.
+    pub fn apply_to_bus_port2(self, bus: &mut Bus) {
+        bus.set_port2_buttons(ButtonState::from_bits(self.buttons));
+        bus.set_port2_sticks(self.right_x, self.right_y, self.left_x, self.left_y);
+    }
 }
 
 /// Serialize samples to a `PXITAPE1` file.

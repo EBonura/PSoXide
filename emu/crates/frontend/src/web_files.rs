@@ -157,7 +157,13 @@ async function _list(dh) {
   return out.join('\n');
 }
 export function fsaSupported() {
-  return ('showOpenFilePicker' in window) && ('showDirectoryPicker' in window);
+  // The File System Access pickers throw SecurityError from cross-origin
+  // iframes. itch embeds the player from html-classic.itch.zone, so use the
+  // ordinary HTML file inputs there even when Chrome exposes these methods.
+  return window.isSecureContext &&
+         window.self === window.top &&
+         ('showOpenFilePicker' in window) &&
+         ('showDirectoryPicker' in window);
 }
 export async function pickBios() {
   const [h] = await window.showOpenFilePicker();
@@ -655,6 +661,11 @@ fn make_file_input() -> Option<web_sys::HtmlInputElement> {
     let element = document.create_element("input").ok()?;
     let input: web_sys::HtmlInputElement = element.unchecked_into();
     input.set_type("file");
+    input.set_attribute("style", "display:none").ok()?;
+    // Safari is unreliable about opening detached file inputs. Keeping the
+    // element in the document also gives itch's iframe a normal HTML control
+    // to activate instead of a synthetic picker call.
+    document.body()?.append_child(&input).ok()?;
     Some(input)
 }
 
