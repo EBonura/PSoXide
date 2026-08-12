@@ -219,3 +219,52 @@ and Tarbaby. They are registered content and are correctly excluded.
   route ticks, pad polls, CD commands, log digests) because they moved on
   every commit to that repo. Confirm what remains still fails when Quake is
   genuinely broken.
+
+## 8. D1 repin executed, and the two environmental blockers (2026-08-12)
+
+The repin itself is DONE and correct. `make quake-repin` measured the pin
+values from the built Quake tree and they are applied in the demo-disc
+Makefile: `QUAKE_SRC` now points at `quake-psx-convergence`,
+`QUAKE_EXPECTED_REV = fba7a0c3...`, `QUAKE_EXPECTED_PSOXIDE_REV =
+79d51dd2...`, plus the provenance, BIN and EXE digests. The
+`games/PSoXide` submodule was moved to the same PSoXide revision. Demo-disc
+suite: 40 tests green (two of them had hard coded the OLD Quake short
+revision, so a routine repin failed them for no reason; they now derive it
+from the Makefile pin).
+
+The fail-closed chain was observed WORKING, which is the useful part: it
+caught the stale submodule revision, then the stale ordinary-program SDK
+stamp, and it currently refuses because the stamp does not exist at all.
+
+Two blockers are ENVIRONMENTAL, not defects, and both need the owner:
+
+1. **macOS denies read access to `~/Downloads`.** Listing works, reading
+   file content returns EPERM, and this is not the agent sandbox: it fails
+   with sandboxing disabled too, and normal file permissions are
+   `rw-rw-r--` with no flags. It blocks the configured emulator BIOS
+   (`~/Downloads/ps1 bios/SCPH1001.BIN`) and the per-game disc copy step,
+   whose destination is `~/Downloads/ps1 games`. Workarounds used for this
+   session only: the games-library destination is overridable
+   (`GAMES_DIR` / `PSOXIDE_LIB`), and the BIOS path was temporarily
+   repointed at an identical readable SCPH1001 and then RESTORED
+   byte-identical (verified by diff). The owner fixes this properly by
+   granting Full Disk Access, or by moving the BIOS out of `~/Downloads`.
+   Note the owner's remark that PSoXide homebrew does not need a BIOS: the
+   settings do carry `hle_bios_for_side_load: true`, but the disc-boot
+   `launch` path loads the configured BIOS regardless, so an UNREADABLE
+   configured path fails the gate even though a real BIOS is not required.
+   Making that path tolerate a missing BIOS when HLE side-load is enabled
+   would remove this whole class of failure.
+2. **A sibling game's CD-DA audio is absent.** `make disc` stops at
+   `games/gh-psx/data/audio/goncharov.cdda`, and `data/audio/` is
+   gitignored and provenance-managed, so the asset is simply not in this
+   checkout. The combined disc therefore cannot be built here, which means
+   the final artifact, its receipt, the two deterministic chain-loads and
+   the capacity remeasurement all remain OPEN.
+
+A separate provenance hazard was found and fixed while doing this: the
+Quake replay gates resolved the frontend from the OWNER'S canonical
+checkout (`repos/PSoXide/target/release/frontend`) because the pin
+worktree had none built. That is exactly the stale-frontend false-green the
+plan warns about. `PSoXide-final-pin` now carries its own built frontend
+and the gates resolve to it.
