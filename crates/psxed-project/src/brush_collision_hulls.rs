@@ -476,7 +476,7 @@ mod tests {
             assert_eq!(hull.point_contents(at(256, 128, 256)), Some(CONTENTS_SOLID));
             let crossed = trace(&hull, at(-128, 128, 32), at(160, 128, 32));
             assert_eq!(crossed.fraction, Q12_ONE);
-            assert!(crossed.in_water);
+            assert!(crossed.in_water.is_set());
         }
     }
 
