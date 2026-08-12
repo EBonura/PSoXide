@@ -3357,6 +3357,224 @@ fn write_souls_slice_negative_tape(dir: &Path) {
         .expect("write souls negative tape");
 }
 
+/// The owner's first step in `docs/souls-slice-acceptance.md`: File > Open
+/// Project on the tracked slice. `editor-souls-bsp-check` never takes this
+/// route (it re-authors the slice and cooks it through the `cook-playtest`
+/// binary), so nothing proved the persisted project still loads in the
+/// editor itself.
+///
+/// The non-dirty assertion is the load-bearing one. An open-time migration
+/// that silently rewrote this project would still cook, still pass the gate's
+/// counters, and then fail the gate's `diff -r` against the authoring test on
+/// whichever machine happened to save it.
+#[test]
+fn tracked_souls_slice_opens_clean_in_the_editor_and_cooks_without_errors() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../projects/souls-bsp-vertical-slice");
+    let mut workspace = EditorWorkspace::open_directory(&dir).expect("open the tracked slice");
+    assert!(
+        !workspace.is_dirty(),
+        "opening a tracked project must not rewrite it: {}",
+        workspace.status
+    );
+    assert_eq!(workspace.project().active_scene().brushes.len(), 17);
+    assert!(workspace.has_player_source());
+
+    let project = workspace.project().clone();
+    let (package, report) = psxed_project::playtest::build_package(&project, &dir);
+    assert!(
+        report.is_ok(),
+        "the tracked slice must cook clean from the editor: {}",
+        report.error_messages().join("; ")
+    );
+    let package = package.expect("cooked package");
+    assert_eq!(package.interactables.len(), 1, "the checkpoint interactable");
+    assert_eq!(package.game_entities.len(), 2, "the Mantis plus the sentinel");
+
+    let cook = test_temp_dir("tracked-slice-cook");
+    workspace
+        .cook_playtest_to_dir(&cook)
+        .expect("cook the tracked slice through the editor's Play path");
+    let _ = std::fs::remove_dir_all(cook);
+}
+
+/// Drive one Inspector ComboBox through real egui: click the closed combo
+/// (whose selected text is `closed`), assert the popup it opens offers every
+/// label in `expected`, then click `option`.
+///
+/// Both label lookups demand a unique match. The Inspector paints plenty of
+/// same-named text, and a helper that silently took the first hit could drive
+/// a control in another section and still report success.
+fn choose_inspector_combo_option(
+    workspace: &mut EditorWorkspace,
+    closed: &str,
+    expected: &[&str],
+    option: &str,
+) {
+    use super::brush_tools::{
+        press_release, real_egui_workspace_ctx, real_egui_workspace_frame, text_shape_centers,
+    };
+
+    let (ctx, viewport) = real_egui_workspace_ctx("inspector-combo");
+    let closed_frame = real_egui_workspace_frame(&ctx, workspace, &viewport, 0.0, vec![]);
+    let anchors = text_shape_centers(&closed_frame.shapes, closed);
+    assert_eq!(
+        anchors.len(),
+        1,
+        "the closed combo {closed:?} must be visible exactly once, saw {anchors:?}"
+    );
+    let (press, release) = press_release(anchors[0]);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 1.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 2.0 / 60.0, release);
+
+    let open_frame = real_egui_workspace_frame(&ctx, workspace, &viewport, 3.0 / 60.0, vec![]);
+    for label in expected {
+        assert!(
+            !text_shape_centers(&open_frame.shapes, label).is_empty(),
+            "the open {closed:?} combo omitted {label:?}"
+        );
+    }
+    let choices = text_shape_centers(&open_frame.shapes, option);
+    assert_eq!(
+        choices.len(),
+        1,
+        "the open {closed:?} combo must offer {option:?} exactly once, saw {choices:?}"
+    );
+    let (press, release) = press_release(choices[0]);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 4.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 5.0 / 60.0, release);
+    // One quiet frame so the Inspector undo transaction closes.
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 6.0 / 60.0, vec![]);
+}
+
+/// The native-Inspector route to the two souls entities the author has to
+/// switch by hand on a fresh project: the lift Door and the Checkpoint.
+///
+/// `souls_slice_project_is_authored_through_production_commands` writes both
+/// node kinds straight into the document, and the souls gate proves the
+/// cooked door opens and the cooked checkpoint respawns. Neither proves the
+/// Inspector still OFFERS the switches: both live inside a `ComboBox` popup,
+/// so a dropped or renamed entry would leave every gate green while the
+/// authoring step became impossible at the window. Both combos are driven
+/// here through real egui, on a project created the way the author creates
+/// one.
+#[test]
+fn fresh_project_inspector_switches_logic_to_door_and_interactable_to_checkpoint() {
+    let mut workspace =
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let name = format!(
+        "Inspector Kind Switch {} {}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let project_dir = psxed_project::projects_dir().join(psxed_project::project_file_stem(&name));
+    // Removes the created project even if an assertion below panics.
+    let _scratch = ScratchProjectDir::new(project_dir.clone());
+    workspace.create_and_open_project(&name).unwrap();
+    let root = workspace.project().active_scene().root;
+
+    // A Logic node from the Place lane starts as a Trigger Volume, which is
+    // also the node's default NAME; rename it first so the combo's selected
+    // text is the only "Trigger Volume" on screen. The name is not what this
+    // test is about, so it is written the way the souls authoring test does.
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::Logic)));
+    assert!(workspace.place_bsp_from_top([1024.0, 1024.0]));
+    let door_node = workspace.selected_node_id();
+    workspace.push_undo();
+    workspace
+        .project
+        .active_scene_mut()
+        .node_mut(door_node)
+        .expect("placed Logic node")
+        .name = "Lift Door".to_string();
+    workspace.mark_dirty();
+
+    choose_inspector_combo_option(
+        &mut workspace,
+        "Trigger Volume",
+        &["Trigger Volume", "Relay", "Multisource", "Door"],
+        "Door",
+    );
+    let NodeKind::Logic { kind, .. } = &workspace
+        .project()
+        .active_scene()
+        .node(door_node)
+        .expect("Logic node")
+        .kind
+    else {
+        panic!("the placed node must still be a Logic node");
+    };
+    assert_eq!(
+        *kind,
+        psxed_project::LogicNodeKind::Door {
+            box_prop: String::new(),
+            start_open: false,
+            open_offset: psxed_project::default_brush_door_open_offset(),
+            travel_ticks: psxed_project::default_brush_door_travel_ticks(),
+        },
+        "picking Door must seat the shared brush-door defaults"
+    );
+    assert!(workspace.is_dirty());
+    workspace.do_undo();
+    assert!(
+        matches!(
+            workspace
+                .project()
+                .active_scene()
+                .node(door_node)
+                .expect("Logic node")
+                .kind,
+            NodeKind::Logic {
+                kind: psxed_project::LogicNodeKind::TriggerVolume { .. },
+                ..
+            }
+        ),
+        "the kind switch must cost exactly one undo step"
+    );
+    workspace.do_redo();
+
+    // The checkpoint half: an Entity plus the Interactable component, both
+    // through the scene tree's own commands, then the Inspector kind switch.
+    workspace.replace_node_selection(root);
+    workspace.add_child(NodeKind::Entity, "Entity");
+    let checkpoint_entity = workspace.selected_node_id();
+    let (label, template) = crate::scene_tree::component_templates_for_host(&NodeKind::Entity)
+        .into_iter()
+        .find(|(label, _)| *label == "Interactable")
+        .expect("the Entity component menu offers an Interactable");
+    workspace.add_component_to_host(checkpoint_entity, label, template);
+    let interactable = workspace.selected_node_id();
+
+    choose_inspector_combo_option(
+        &mut workspace,
+        "Message",
+        &["Message", "Checkpoint"],
+        "Checkpoint",
+    );
+    let NodeKind::Interactable { kind, prompt, .. } = &workspace
+        .project()
+        .active_scene()
+        .node(interactable)
+        .expect("Interactable component")
+        .kind
+    else {
+        panic!("the added component must still be an Interactable");
+    };
+    assert!(
+        matches!(kind, psxed_project::InteractableKind::Checkpoint { .. }),
+        "picking Checkpoint must switch the interactable kind"
+    );
+    assert_eq!(
+        prompt, "SYNCHRONIZE",
+        "switching to Checkpoint must retire the default message prompt"
+    );
+
+    let _ = std::fs::remove_dir_all(project_dir);
+}
+
 /// The souls vertical slice authored end to end through production editor
 /// command paths: New Project from the courtyard template, the resources
 /// panel starter sync, real brush drags/resizes, the BSP place lanes, the
