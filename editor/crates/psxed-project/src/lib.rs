@@ -335,7 +335,7 @@ mod projects_dir_tests {
                 &mut trace,
             ));
         assert!(
-            !trace.start_solid && !trace.all_solid,
+            !trace.start_solid.is_set() && !trace.all_solid.is_set(),
             "spawn is solid: {trace:?}"
         );
     }

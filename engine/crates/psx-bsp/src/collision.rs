@@ -72,13 +72,78 @@ impl BrushTransform {
     }
 }
 
+/// One byte-backed flag slot in a caller-owned [`Trace`].
+///
+/// [`CollisionHull::trace_into`] guarantees that a failed trace leaves every
+/// output byte, padding included, exactly as the caller left it. The caller
+/// therefore hands this boundary whatever bytes its storage already held, and
+/// those bytes are legal by construction. A `bool` field would make any byte
+/// other than 0 or 1 undefined behaviour the instant the struct was formed or
+/// copied, before a single branch on it ran, and no later read could repair
+/// that: the invalid value would already exist.
+///
+/// Every one of the 256 byte patterns is a valid `TraceFlag`, so the invalid
+/// value cannot be created. [`TraceFlag::is_set`] is the only way to ask what a
+/// slot means, and it normalizes any non-zero byte to `true` at the point a
+/// `bool` is first constructed.
+///
+/// Equality is byte equality, not meaning equality, because the byte-preserving
+/// contract is what callers assert against. The tracer itself only ever writes
+/// [`TraceFlag::CLEAR`] or [`TraceFlag::SET`].
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct TraceFlag(u8);
+
+impl TraceFlag {
+    /// The flag is not set. This is also the [`Default`].
+    pub const CLEAR: Self = Self(0);
+    /// The flag is set, in the canonical byte the tracer writes.
+    pub const SET: Self = Self(1);
+
+    /// The flag a Rust `bool` denotes.
+    pub const fn new(value: bool) -> Self {
+        if value {
+            Self::SET
+        } else {
+            Self::CLEAR
+        }
+    }
+
+    /// Adopt one arbitrary byte. Every byte is a valid flag.
+    pub const fn from_byte(byte: u8) -> Self {
+        Self(byte)
+    }
+
+    /// The stored byte, unnormalized. Useful only for byte-level assertions.
+    pub const fn byte(self) -> u8 {
+        self.0
+    }
+
+    /// Normalize the stored byte into a valid `bool`.
+    pub const fn is_set(self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl From<bool> for TraceFlag {
+    fn from(value: bool) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<TraceFlag> for bool {
+    fn from(flag: TraceFlag) -> Self {
+        flag.is_set()
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct Trace {
-    pub all_solid: bool,
-    pub start_solid: bool,
-    pub in_open: bool,
-    pub in_water: bool,
+    pub all_solid: TraceFlag,
+    pub start_solid: TraceFlag,
+    pub in_open: TraceFlag,
+    pub in_water: TraceFlag,
     pub fraction: i32,
     pub end: Vec3I32,
     pub normal: Vec3I16,
@@ -134,10 +199,10 @@ impl Default for TraceScratch {
 impl Trace {
     const fn unobstructed(end: Vec3I32) -> Self {
         Self {
-            all_solid: true,
-            start_solid: false,
-            in_open: false,
-            in_water: false,
+            all_solid: TraceFlag::SET,
+            start_solid: TraceFlag::CLEAR,
+            in_open: TraceFlag::CLEAR,
+            in_water: TraceFlag::CLEAR,
             fraction: Q12_ONE,
             end,
             normal: Vec3I16 { x: 0, y: 0, z: 0 },
@@ -198,6 +263,11 @@ impl<'a> CollisionHull<'a> {
     /// is Q3.12. Traversal uses only deterministic `i32` fixed-point math and
     /// a plane epsilon of 128 in Q20.12. `false` reports malformed BSP data or
     /// scratch overflow and leaves `output` byte-for-byte unchanged.
+    ///
+    /// Byte-for-byte means exactly that, so a caller's flag slot may hold any
+    /// of the 256 byte patterns across a failed call. [`TraceFlag`] is what
+    /// makes those bytes legal values rather than undefined behaviour; see
+    /// there.
     pub fn trace_into(
         &self,
         start: &Vec3I32,
@@ -270,14 +340,14 @@ impl<'a> CollisionHull<'a> {
             }
 
             if node_index != CONTENTS_SOLID {
-                trace.all_solid = false;
+                trace.all_solid = TraceFlag::CLEAR;
                 if node_index == CONTENTS_EMPTY {
-                    trace.in_open = true;
+                    trace.in_open = TraceFlag::SET;
                 } else {
-                    trace.in_water = true;
+                    trace.in_water = TraceFlag::SET;
                 }
             } else {
-                trace.start_solid = true;
+                trace.start_solid = TraceFlag::SET;
             }
 
             if continuation_count == 0 {
@@ -299,7 +369,7 @@ impl<'a> CollisionHull<'a> {
                 segment_end = continuation.end;
                 continue;
             }
-            if trace.all_solid {
+            if trace.all_solid.is_set() {
                 *output = trace;
                 return true;
             }
@@ -527,6 +597,13 @@ mod tests {
         output
     }
 
+    /// A trace whose every byte, flag slots and padding included, is the
+    /// caller's own arbitrary fill or an arbitrary written value.
+    ///
+    /// The flag slots deliberately keep `fill`, which is normally neither 0 nor
+    /// 1. That is legal precisely because [`TraceFlag`] is byte-backed; with
+    /// `bool` slots this helper had to overwrite them with valid booleans, and
+    /// so could never test the bytes that actually matter.
     fn sentinel_trace(fill: u8) -> Trace {
         let mut output = core::mem::MaybeUninit::<Trace>::uninit();
         unsafe {
@@ -536,10 +613,6 @@ mod tests {
                 core::mem::size_of::<Trace>(),
             );
             let pointer = output.as_mut_ptr();
-            core::ptr::addr_of_mut!((*pointer).all_solid).write(false);
-            core::ptr::addr_of_mut!((*pointer).start_solid).write(true);
-            core::ptr::addr_of_mut!((*pointer).in_open).write(false);
-            core::ptr::addr_of_mut!((*pointer).in_water).write(true);
             core::ptr::addr_of_mut!((*pointer).fraction).write(0x1122_3344);
             core::ptr::addr_of_mut!((*pointer).end).write(Vec3I32 {
                 x: 0x0102_0304,
@@ -632,8 +705,8 @@ mod tests {
             },
             &mut TraceScratch::new(),
         );
-        assert!(!trace.all_solid);
-        assert!(!trace.start_solid);
+        assert!(!trace.all_solid.is_set());
+        assert!(!trace.start_solid.is_set());
         assert_eq!(trace.fraction, 1984);
         assert_eq!(trace.end.x, 128);
         assert_eq!(trace.normal.x, 4096);
@@ -781,10 +854,10 @@ mod tests {
         assert_eq!(
             result,
             Trace {
-                all_solid: false,
-                start_solid: false,
-                in_open: true,
-                in_water: false,
+                all_solid: TraceFlag::CLEAR,
+                start_solid: TraceFlag::CLEAR,
+                in_open: TraceFlag::SET,
+                in_water: TraceFlag::CLEAR,
                 fraction: Q12_ONE,
                 end,
                 normal: Vec3I16 { x: 0, y: 0, z: 0 },
@@ -815,10 +888,10 @@ mod tests {
         assert_eq!(
             result,
             Trace {
-                all_solid: true,
-                start_solid: true,
-                in_open: false,
-                in_water: false,
+                all_solid: TraceFlag::SET,
+                start_solid: TraceFlag::SET,
+                in_open: TraceFlag::CLEAR,
+                in_water: TraceFlag::CLEAR,
                 fraction: Q12_ONE,
                 end,
                 normal: Vec3I16 { x: 0, y: 0, z: 0 },
@@ -846,9 +919,9 @@ mod tests {
             end,
             &mut TraceScratch::new(),
         );
-        assert!(result.start_solid);
-        assert!(!result.all_solid);
-        assert!(result.in_open);
+        assert!(result.start_solid.is_set());
+        assert!(!result.all_solid.is_set());
+        assert!(result.in_open.is_set());
         assert_eq!(result.fraction, Q12_ONE);
         assert_eq!(result.end, end);
     }
@@ -929,8 +1002,8 @@ mod tests {
         );
         assert_eq!(result.fraction, Q12_ONE);
         assert_eq!(result.end, point);
-        assert!(result.in_open);
-        assert!(!result.all_solid);
+        assert!(result.in_open.is_set());
+        assert!(!result.all_solid.is_set());
     }
 
     #[test]
@@ -1052,7 +1125,7 @@ mod tests {
             (TRACE_STACK_CAPACITY as i32 - 1) * Q12_ONE
         );
         assert_eq!(boundary.normal.x, Q12_ONE as i16);
-        assert!(!boundary.all_solid);
+        assert!(!boundary.all_solid.is_set());
 
         let (overflow_planes, overflow_nodes) = deep_crossing_hull(TRACE_STACK_CAPACITY + 1);
         let mut output = sentinel_trace(0x3c);
@@ -1113,5 +1186,72 @@ mod tests {
             &mut TraceScratch::new(),
         );
         assert_eq!(reused, fresh);
+    }
+
+    /// The flag slots are storage for arbitrary bytes, and the boundary that
+    /// turns them into meaning normalizes rather than reinterprets.
+    ///
+    /// Every one of the 256 byte patterns is written into a live flag slot and
+    /// read back, which is only a defined program because the slot is byte
+    /// backed. The guest once produced 0xe7 in exactly this slot; with a `bool`
+    /// there, merely holding that byte was already undefined behaviour and no
+    /// later read could undo it.
+    #[test]
+    fn every_flag_byte_is_a_legal_value_and_normalizes_to_one_bool() {
+        for byte in 0..=u8::MAX {
+            let flag = TraceFlag::from_byte(byte);
+            assert_eq!(flag.byte(), byte, "the slot stores the caller's byte");
+            assert_eq!(flag.is_set(), byte != 0, "0x{byte:02x} normalizes wrong");
+            // Constructing the `bool` may not smuggle the byte through.
+            let boolean: bool = flag.into();
+            let observed = unsafe {
+                core::ptr::read_volatile(core::ptr::from_ref(&boolean).cast::<u8>())
+            };
+            assert!(observed <= 1, "0x{byte:02x} produced an invalid bool byte");
+        }
+        assert_eq!(TraceFlag::default(), TraceFlag::CLEAR);
+        assert_eq!(TraceFlag::new(true), TraceFlag::SET);
+        assert_eq!(TraceFlag::new(false), TraceFlag::CLEAR);
+    }
+
+    /// A failed trace preserves poisoned flag bytes exactly, and the caller can
+    /// still read them afterwards.
+    ///
+    /// This is the pairing that used to be impossible to state: the contract
+    /// says the bytes survive untouched, and with `bool` slots surviving
+    /// untouched meant surviving as an invalid value.
+    #[test]
+    fn a_failed_trace_preserves_poisoned_flag_bytes_and_they_stay_readable() {
+        let (overflow_planes, overflow_nodes) = deep_crossing_hull(TRACE_STACK_CAPACITY + 1);
+        let start = Vec3I32 {
+            x: (TRACE_STACK_CAPACITY as i32 + 2) * Q12_ONE,
+            y: 0,
+            z: 0,
+        };
+        let end = Vec3I32 {
+            x: -Q12_ONE,
+            y: 0,
+            z: 0,
+        };
+        let mut output = Trace {
+            all_solid: TraceFlag::from_byte(0xe7),
+            start_solid: TraceFlag::from_byte(0x00),
+            in_open: TraceFlag::from_byte(0x02),
+            in_water: TraceFlag::from_byte(0xff),
+            ..Trace::default()
+        };
+        let before = trace_bytes(&output);
+        assert!(!hull(&overflow_planes, &overflow_nodes).trace_into(
+            &start,
+            &end,
+            &mut TraceScratch::new(),
+            &mut output,
+        ));
+        assert_eq!(trace_bytes(&output), before);
+        assert_eq!(output.all_solid.byte(), 0xe7);
+        assert!(output.all_solid.is_set());
+        assert!(!output.start_solid.is_set());
+        assert!(output.in_open.is_set());
+        assert!(output.in_water.is_set());
     }
 }
