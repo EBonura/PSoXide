@@ -3571,3 +3571,156 @@ fn texture_lock_is_reachable_from_the_inspector_in_both_tools() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Drive one held Inspector interaction frame by frame, the way a DragValue
+/// does, and report the worst anchor drift plus the mapping it ends on.
+fn drag_uv(
+    workspace: &mut EditorWorkspace,
+    steps: usize,
+    shape: impl Fn(&mut psxed_project::brush::FaceUv, usize),
+) -> (f64, psxed_project::brush::FaceUv) {
+    let start = workspace.project.active_scene().brushes[0].faces[0].uv;
+    let anchor = workspace.project.active_scene().brushes[0]
+        .face_uv_anchor(0)
+        .expect("anchor");
+    let held = start.apply(anchor);
+    let mut worst = 0.0f64;
+    for step in 0..steps {
+        let current = workspace.project.active_scene().brushes[0].faces[0].uv;
+        let mut edited = current;
+        shape(&mut edited, step);
+        let resolved = workspace.apply_face_uv_edit(0, 0, current, edited, false, true);
+        workspace.project.active_scene_mut().brushes[0].faces[0].uv = resolved;
+        let now = resolved.apply(anchor);
+        worst = worst
+            .max((now[0] - held[0]).abs())
+            .max((now[1] - held[1]).abs());
+    }
+    (
+        worst,
+        workspace.project.active_scene().brushes[0].faces[0].uv,
+    )
+}
+
+/// The defect this covers: re-anchoring against the PREVIOUS frame's already
+/// rounded mapping banks up to half a texel of `i16` rounding every frame, so
+/// a hundred one-percent steps walk the texture tens of texels off the face.
+/// One held transaction solves every frame against the phase the interaction
+/// started at, so the whole drag costs one rounding.
+#[test]
+fn a_held_uv_interaction_does_not_accumulate_rounding_drift() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("uv-drag-drift");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+
+    // Q8 scale 256 -> 512 one step at a time, then the same edit in one shot.
+    for (label, shape) in [
+        (
+            "scale U",
+            &(|uv: &mut psxed_project::brush::FaceUv, _step: usize| {
+                uv.scale_q8[0] = uv.scale_q8[0].saturating_add(1);
+            }) as &dyn Fn(&mut psxed_project::brush::FaceUv, usize),
+        ),
+        ("scale V", &|uv: &mut psxed_project::brush::FaceUv,
+                      _step: usize| {
+            uv.scale_q8[1] = uv.scale_q8[1].saturating_add(1);
+        }),
+        ("rotation", &|uv: &mut psxed_project::brush::FaceUv,
+                       _step: usize| {
+            uv.rotation_deg = uv.rotation_deg.saturating_add(1);
+        }),
+    ] {
+        let steps = if label == "rotation" { 180 } else { 256 };
+
+        let mut incremental = EditorWorkspace::open_directory(&dir).unwrap();
+        incremental.active_workspace = WorkspaceView::Room;
+        incremental.replace_brush_selection(0, Some(0));
+        let (worst, ended) = drag_uv(&mut incremental, steps, &shape);
+        assert!(
+            worst <= 1.0,
+            "{label}: a held interaction drifted {worst} texels over {steps} frames"
+        );
+
+        // The same total change applied in one frame has to land on the same
+        // mapping the held drag ended on.
+        let mut one_shot = EditorWorkspace::open_directory(&dir).unwrap();
+        one_shot.active_workspace = WorkspaceView::Room;
+        one_shot.replace_brush_selection(0, Some(0));
+        let current = one_shot.project.active_scene().brushes[0].faces[0].uv;
+        let mut edited = current;
+        for step in 0..steps {
+            shape(&mut edited, step);
+        }
+        let resolved = one_shot.apply_face_uv_edit(0, 0, current, edited, false, false);
+        assert_eq!(
+            resolved, ended,
+            "{label}: {steps} held frames must land where the one-shot edit lands"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The transaction is scoped to one interaction on one face: releasing,
+/// changing selection, undoing or sliding the offset all re-base it.
+#[test]
+fn a_uv_interaction_ends_on_release_selection_change_undo_and_offset_edits() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("uv-drag-scope");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.replace_brush_selection(0, Some(0));
+    let identity = psxed_project::brush::FaceUv::default();
+
+    // Not interacting: the transaction closes the moment it is applied.
+    let shaped = psxed_project::brush::FaceUv {
+        scale_q8: [300, 256],
+        ..identity
+    };
+    let _ = workspace.apply_face_uv_edit(0, 0, identity, shaped, false, false);
+    assert!(workspace.brush_uv_edit.is_none(), "release ends it");
+
+    // Interacting: it stays open, and a selection change drops it.
+    let _ = workspace.apply_face_uv_edit(0, 0, identity, shaped, false, true);
+    assert!(workspace.brush_uv_edit.is_some(), "a live drag holds it");
+    workspace.replace_brush_selection(0, Some(1));
+    assert!(
+        workspace.brush_uv_edit.is_none(),
+        "selection change ends it"
+    );
+
+    // Undo drops it.
+    workspace.replace_brush_selection(0, Some(0));
+    let _ = workspace.apply_face_uv_edit(0, 0, identity, shaped, false, true);
+    assert!(workspace.brush_uv_edit.is_some());
+    workspace.do_undo();
+    assert!(workspace.brush_uv_edit.is_none(), "undo ends it");
+
+    // Reset UV drops it and is not re-anchored.
+    workspace.replace_brush_selection(0, Some(0));
+    let _ = workspace.apply_face_uv_edit(0, 0, identity, shaped, false, true);
+    let reset = workspace.apply_face_uv_edit(0, 0, shaped, identity, true, true);
+    assert_eq!(reset, identity, "Reset UV means the identity mapping");
+    assert!(workspace.brush_uv_edit.is_none(), "Reset UV ends it");
+
+    // A pure offset edit slides by exactly what was typed and re-bases.
+    let _ = workspace.apply_face_uv_edit(0, 0, identity, shaped, false, true);
+    assert!(workspace.brush_uv_edit.is_some());
+    let slid = psxed_project::brush::FaceUv {
+        offset_texels: [9, -4],
+        ..shaped
+    };
+    let resolved = workspace.apply_face_uv_edit(0, 0, shaped, slid, false, true);
+    assert_eq!(
+        resolved.offset_texels,
+        [9, -4],
+        "an offset edit must slide by the typed amount"
+    );
+    assert!(
+        workspace.brush_uv_edit.is_none(),
+        "an offset edit re-bases the next shaping interaction"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

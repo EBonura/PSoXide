@@ -712,6 +712,10 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn reconcile_selection_after_document_change(&mut self) {
+        // Undo, redo and any other document swap replace the mapping a UV
+        // edit interaction captured, so whatever it held is no longer the
+        // phase the user is looking at.
+        self.clear_uv_edit_transaction();
         self.reconcile_brush_selection();
         let valid_nodes: HashSet<NodeId> = self
             .project
