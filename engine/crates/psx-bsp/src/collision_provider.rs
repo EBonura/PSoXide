@@ -1,7 +1,8 @@
 //! `psx-engine` collision-provider adapters for resident PXBSP hulls.
 
 use crate::collision::{
-    BrushTransform, CollisionHull, Trace, TraceScratch, TransformedCollisionHull, Q12_ONE,
+    BrushTransform, CollisionHull, Trace, TraceFlag, TraceScratch, TransformedCollisionHull,
+    Q12_ONE,
 };
 use crate::pxbsp_resident::PxbspResidentMap;
 use crate::Vec3I32;
@@ -272,10 +273,15 @@ fn point_from_q12(point: Vec3I32) -> RoomPoint {
     RoomPoint::new(point.x >> 12, point.y >> 12, point.z >> 12)
 }
 
+/// Cross from the byte-backed shared trace into the engine's boolean result.
+///
+/// This is where the flag bytes become `bool`s, so it is also where they are
+/// normalized: [`psx_bsp::collision::TraceFlag::is_set`] maps any non-zero byte
+/// to `true` rather than reinterpreting the byte as a `bool`.
 fn trace_to_engine(trace: Trace) -> CollisionTrace {
     CollisionTrace {
-        all_solid: trace.all_solid,
-        start_solid: trace.start_solid,
+        all_solid: trace.all_solid.is_set(),
+        start_solid: trace.start_solid.is_set(),
         fraction_q12: trace.fraction,
         end: point_from_q12(trace.end),
         normal_q12: [trace.normal.x, trace.normal.y, trace.normal.z],
@@ -284,8 +290,8 @@ fn trace_to_engine(trace: Trace) -> CollisionTrace {
 }
 
 fn merge_trace(best: &mut Trace, candidate: Trace) {
-    let start_solid = best.start_solid || candidate.start_solid;
-    let all_solid = best.all_solid || candidate.all_solid;
+    let start_solid = TraceFlag::new(best.start_solid.is_set() || candidate.start_solid.is_set());
+    let all_solid = TraceFlag::new(best.all_solid.is_set() || candidate.all_solid.is_set());
     if candidate.fraction < best.fraction {
         *best = candidate;
     }
