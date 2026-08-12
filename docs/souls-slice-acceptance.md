@@ -54,3 +54,7 @@ builds the MIPS guest and disc, and replays two tapes headlessly:
 So this checklist has no pass/fail numbers to collect; it exists for
 the native-window judgment the gate cannot make (readability, feel,
 camera, and audio).
+
+For the same loop starting from File > New Project instead of this
+tracked slice, see
+[fresh-project-workflow-checklist.md](fresh-project-workflow-checklist.md).
