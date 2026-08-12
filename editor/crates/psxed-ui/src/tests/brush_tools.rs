@@ -384,7 +384,7 @@ fn text_shape_center(shapes: &[egui::epaint::ClippedShape], label: &str) -> Opti
 /// a label by name use this to prove the label is unambiguous first: the
 /// Inspector renders several same-named buttons, and `text_shape_center`
 /// silently returns whichever one is painted first.
-fn text_shape_centers(shapes: &[egui::epaint::ClippedShape], label: &str) -> Vec<Pos2> {
+pub(super) fn text_shape_centers(shapes: &[egui::epaint::ClippedShape], label: &str) -> Vec<Pos2> {
     fn collect(shape: &egui::Shape, label: &str, found: &mut Vec<Pos2>) {
         match shape {
             egui::Shape::Text(text) if text.galley.text() == label => {
@@ -2725,7 +2725,7 @@ fn real_egui_brush_inspector_exposes_and_changes_bsp_contents() {
 /// both see the same font set (the `lucide` icon family is aliased onto the
 /// proportional family, otherwise icon labels render as tofu and cannot be
 /// located by galley text).
-fn real_egui_workspace_ctx(name: &str) -> (egui::Context, EditorViewport3dPresentation) {
+pub(super) fn real_egui_workspace_ctx(name: &str) -> (egui::Context, EditorViewport3dPresentation) {
     let ctx = egui::Context::default();
     let mut fonts = egui::FontDefinitions::default();
     let proportional = fonts
@@ -2749,7 +2749,7 @@ fn real_egui_workspace_ctx(name: &str) -> (egui::Context, EditorViewport3dPresen
 }
 
 /// One full `workspace.draw` frame at `time` with `events` delivered.
-fn real_egui_workspace_frame(
+pub(super) fn real_egui_workspace_frame(
     ctx: &egui::Context,
     workspace: &mut EditorWorkspace,
     viewport: &EditorViewport3dPresentation,
@@ -2799,7 +2799,7 @@ fn locate_unique_label(
     point
 }
 
-fn press_release(point: Pos2) -> (Vec<egui::Event>, Vec<egui::Event>) {
+pub(super) fn press_release(point: Pos2) -> (Vec<egui::Event>, Vec<egui::Event>) {
     (
         vec![
             egui::Event::PointerMoved(point),
@@ -3001,6 +3001,80 @@ fn face_uv_numeric_edits_cook_into_the_brush_world_and_undo_per_edit() {
     workspace.do_undo();
     let uv = workspace.project.active_scene().brushes[0].faces[0].uv;
     assert_eq!(uv.offset_texels, [24, 0], "one undo unwinds Reset UV");
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(cook_before);
+    let _ = std::fs::remove_dir_all(cook_after);
+}
+
+/// The author's retexture step, end to end on the starter courtyard: pick the
+/// other material, press "Apply to face", save, reopen, recook.
+///
+/// `apply_to_face_button_paints_only_the_selected_face_and_undoes_once` proves
+/// the click paints the right face of an in-memory document, and
+/// `face_uv_numeric_edits_cook_into_the_brush_world_and_undo_per_edit` proves
+/// UV numbers reach the cook. Neither proves the MATERIAL choice does, which
+/// is the half of a retexture the author actually sees once the map is
+/// running: a cook that dropped it would leave both of those green.
+#[test]
+fn face_material_swap_survives_reopen_and_reaches_the_cooked_brush_world() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("face-material-cook");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+
+    // The starter courtyard carries two materials on purpose, so the swap is
+    // between two real textures rather than to or from "none".
+    let materials = workspace.project.material_options();
+    assert_eq!(
+        materials.len(),
+        2,
+        "the starter courtyard offers exactly Courtyard Cobbles and Courtyard Brick"
+    );
+    workspace.replace_brush_selection(0, Some(0));
+    let original = workspace.project.active_scene().brushes[0].faces[0].material;
+    let swapped = materials
+        .iter()
+        .map(|(id, _)| *id)
+        .find(|id| Some(*id) != original)
+        .expect("a second material to swap to");
+
+    let cook_before = test_temp_dir("face-material-cook-before");
+    workspace
+        .cook_playtest_to_dir(&cook_before)
+        .expect("cook the untouched courtyard");
+
+    workspace.brush_material = Some(swapped);
+    run_real_egui_workspace_click_on_label(
+        &mut workspace,
+        &icons::label(icons::PALETTE, "Apply to face"),
+    );
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[0].material,
+        Some(swapped)
+    );
+    assert!(workspace.is_dirty());
+
+    workspace.save().expect("save the retextured courtyard");
+    let mut reopened = EditorWorkspace::open_directory(&dir).expect("reopen retextured project");
+    assert_eq!(
+        reopened.project().active_scene().brushes[0].faces[0].material,
+        Some(swapped),
+        "a face retexture must survive save and reopen"
+    );
+
+    let cook_after = test_temp_dir("face-material-cook-after");
+    reopened
+        .cook_playtest_to_dir(&cook_after)
+        .expect("recook the retextured courtyard");
+    let world = psxed_project::brush_playtest::BRUSH_WORLD_FILENAME;
+    assert_ne!(
+        std::fs::read(cook_before.join(world)).unwrap(),
+        std::fs::read(cook_after.join(world)).unwrap(),
+        "a face retexture must change the cooked brush world"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(cook_before);
