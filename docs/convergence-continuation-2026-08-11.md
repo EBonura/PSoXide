@@ -16,7 +16,7 @@ worker's confident diagnosis.
 | Lane | Worktree | Branch | Head | State |
 |---|---|---|---|---|
 | PSoXide integration | `PSoXide-convergence` | `codex/quake-psoxide-convergence` | `41875824` | one dirty file: the owner's camera edit in `editor/projects/brush-first-playable/project.ron`. PRESERVE. |
-| Quake integration | `quake-psx-convergence` | `codex/quake-convergence` | `2902765` or later | workers active in this tree; matrix MUST be re-run at the final head |
+| Quake integration | `quake-psx-convergence` | `codex/quake-convergence` | `7a4b0a4` | clean; FULL 14-gate matrix green at this head (see below); a worker is extending it on `codex/quake-q6-routes` |
 | Demo disc | `psx-demo-disc-quake-shareware` | `codex/quake-shareware-demo-disc` | `dc9e41a` | clean; Quake now DEFAULT; still on old pins |
 | Quake source pin | `PSoXide-rc1-pin` | detached | `f9f83c35` | clean; every Quake command needs `--psoxide` pointing here |
 
@@ -74,9 +74,27 @@ L3  make editor-souls-bsp-check     the composed demonstration gate:
     make runtime-numeric-guard      ok, 219 files
 ```
 
-Quake: twelve gates were green at `bb8aa9a` and thirteen minus survival at
-`6abc54c`. Both are HISTORICAL. Several merges have landed since, so the
-complete matrix must be re-run at the final head before any claim.
+Quake at `7a4b0a4`, the FULL matrix green and verified at that exact head:
+check, map-regress, start-route-regress, e1m1-chain-regress,
+systems-regress, combat-regress, monster-regress, bestiary-regress,
+arsenal-regress, audio-regress, ambient-regress, survival-regress,
+episode1-regress, disc. Tests: root 42, quake-core 181 + 12 + 2 + 3. Real
+MIPS build green. Earlier matrices at `bb8aa9a` and `6abc54c` are
+historical and prove nothing about this head.
+
+Landmarks reached at this head: **Chthon is killed with ordinary pad
+input** (`episode_state=0x3fff`, two byte-identical runs) by taking the
+rune, watching him rise, walking the arena, riding the map's own lift 176
+units to the button ring, and driving `event_lightning`, which is the only
+kill there is since he is immune to every weapon. Mover rider carrying is
+implemented over the abstract collision provider and applies to plats,
+trains AND doors, with the pusher removed from the composed hull exactly
+as the original sets `pusher->v.solid = SOLID_NOT`. A blocked pusher rolls
+back together with everything it moved. Two real bugs fell out of that
+work: `func_plat` travel was `size_z + 8` where Quake is `size_z - 8`, and
+lifts were started by a 60-unit proximity field instead of Quake's
+`plat_spawn_inside_trigger` volume, which on E1M7 sent the lift away
+before the player could board and then crushed them under it.
 
 ## 3. Open work, in dependency order
 
