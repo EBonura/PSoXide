@@ -3369,8 +3369,8 @@ fn write_souls_slice_negative_tape(dir: &Path) {
 /// whichever machine happened to save it.
 #[test]
 fn tracked_souls_slice_opens_clean_in_the_editor_and_cooks_without_errors() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../projects/souls-bsp-vertical-slice");
+    let dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/souls-bsp-vertical-slice");
     let mut workspace = EditorWorkspace::open_directory(&dir).expect("open the tracked slice");
     assert!(
         !workspace.is_dirty(),
@@ -3388,8 +3388,16 @@ fn tracked_souls_slice_opens_clean_in_the_editor_and_cooks_without_errors() {
         report.error_messages().join("; ")
     );
     let package = package.expect("cooked package");
-    assert_eq!(package.interactables.len(), 1, "the checkpoint interactable");
-    assert_eq!(package.game_entities.len(), 2, "the Mantis plus the sentinel");
+    assert_eq!(
+        package.interactables.len(),
+        1,
+        "the checkpoint interactable"
+    );
+    assert_eq!(
+        package.game_entities.len(),
+        2,
+        "the Mantis plus the sentinel"
+    );
 
     let cook = test_temp_dir("tracked-slice-cook");
     workspace
