@@ -1584,12 +1584,48 @@ carrying a fraction below one or any plane normal cannot also be
 arbitrary byte can no longer become a `bool`, the completed
 `SetChangeParms` level-change carry-over (drop keys, cap super health at
 100, floor health at 50, floor shells at 25), and its own event-anchored
-audio gate. RECONCILE: the integration tree already fixed the freeze at
-the CONSUMER (`trapped()` requiring both flags) and already re-anchored
-audio. Prefer keeping BOTH freeze fixes, since they are complementary
-(one re-imposes the producer invariant, the other corrects the consumer
-predicate to match `SV_FlyMove`), but keep only ONE audio anchoring, and
-take `SetChangeParms` and the motor diagnostics as-is.
+audio gate.
+
+RECONCILE CAREFULLY. Both lanes diagnosed the same freeze and fixed it in
+DIFFERENT places with DIFFERENT predicates, so this is not a
+keep-both-and-hope merge:
+
+- The integration tree fixed the CONSUMER: `trapped()` is
+  `all_solid && start_solid`, used by `fly_move` and
+  `categorize_position`.
+- The Q2c branch fixed the PRODUCER: `restore_trace_invariants` re-imposes
+  Quake's own rule that a trace carrying a fraction below one or any plane
+  normal cannot also be `allsolid`, and then has `fly_move` give up on
+  `all_solid` ALONE, which is literally what `SV_FlyMove` tests.
+
+The principled end state is the Q2c shape: make the flag honest at the
+source, then test it exactly as the original does. The integration tree's
+two-flag test is a workaround for a dishonest flag, and it is safe only
+because a genuine trap sets both. Merging both is not harmful (a restored
+invariant plus a stricter predicate still admits real traps), but leaving
+both in place permanently hides which one is load-bearing. Decide
+deliberately: take the invariant restoration, then simplify `fly_move`
+back to `all_solid` alone and confirm `start-route-regress` and
+`bestiary-regress` still pass.
+
+The audio anchoring is ALREADY DONE on the integration tree and is the
+one to keep; drop Q2c's version. Take `SetChangeParms`, the motor
+diagnostics, and the byte-level flag read (`trace_from_shared`) as-is.
+
+Matrix confirmed at `bb8aa9a`, all twelve green: check, map-regress,
+start-route-regress, e1m1-chain-regress, systems-regress, combat-regress,
+monster-regress, bestiary-regress, arsenal-regress, audio-regress,
+ambient-regress, disc. Tests: builder 35, quake-core 117 plus 12 parity,
+cooker 16. `tools/routesim` is committed as a dev tool with its own
+workspace, outside the root lockfile, the guest recipe and provenance.
+
+Three thin spots recorded rather than papered over: the audio tail peak is
+509 against a pre-existing 512 threshold, only three counts of margin;
+`ambient-regress` still uses absolute second windows and is the same class
+of design even though a continuously running emitter makes it far less
+fragile; and concurrent gate runs contend on the shared
+`/private/tmp/quake-psx-guest-v1` stage lock, which can look like a
+spurious failure.
 
 `codex/quake-q2c-train`: a host test pinning authored `func_train` leg
 timing against the cooked lumps. Take it; it is the regression guard for
