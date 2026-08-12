@@ -671,6 +671,8 @@ pub struct EditorWorkspace {
     brush_texture_lock: bool,
     /// In-flight whole-brush move drag (Brush tool, shift-press).
     brush_move: Option<BrushMove>,
+    /// In-flight face UV scale/rotation interaction. See [`UvEditTransaction`].
+    brush_uv_edit: Option<UvEditTransaction>,
     /// In-flight vertex/edge drag (Brush tool with Vertex or Edge
     /// selection mode in an orthographic view).
     brush_vertex_drag: Option<BrushVertexDrag>,
@@ -2322,6 +2324,29 @@ pub(crate) struct BrushMove {
     pub(crate) applied: [i32; 3],
 }
 
+/// One face UV scale/rotation interaction, held for as long as the pointer
+/// drag or the focused keyboard edit lasts.
+///
+/// Re-anchoring solves an offset, and that offset is stored in an `i16`. A
+/// DragValue emits one small step per frame, so re-solving each frame
+/// against the PREVIOUS frame's already-rounded mapping banks up to half a
+/// texel of rounding every step: dragging Q8 scale 256 to 512 at an anchor
+/// 136 texels out ends about sixty texels away from the phase it started
+/// at. The interaction therefore captures where it started ONCE and every
+/// later frame solves against that same fixed target, so the error is one
+/// rounding, not one per frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UvEditTransaction {
+    pub(crate) brush: usize,
+    pub(crate) face: usize,
+    /// Face-local anchor in the raw texel space `FaceUv::apply` consumes.
+    pub(crate) anchor: [f64; 2],
+    /// The mapping this interaction started from.
+    pub(crate) origin: psxed_project::brush::FaceUv,
+    /// `origin.apply(anchor)`: the phase every frame has to reproduce.
+    pub(crate) target: [f64; 2],
+}
+
 /// In-flight brush face-extrude drag. Orthographic handles slide on one
 /// visible world axis; 3D handles slide along the face's exact normal.
 /// The scene brush previews live and the base is restored before the single
@@ -2953,6 +2978,7 @@ impl EditorWorkspace {
             brush_clip_keep: BrushClipKeep::Both,
             brush_texture_lock: true,
             brush_move: None,
+            brush_uv_edit: None,
             brush_vertex_drag: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,

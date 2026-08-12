@@ -2557,6 +2557,7 @@ impl EditorWorkspace {
     /// Pop the most recent snapshot back into `project`.
     pub(crate) fn do_undo(&mut self) {
         self.inspector_undo_transaction = None;
+        self.clear_uv_edit_transaction();
         if let Some(prev) = self.history.undo(self.project.clone()) {
             self.project = prev;
             self.clear_resource_selection_state();
@@ -2572,6 +2573,7 @@ impl EditorWorkspace {
 
     pub(crate) fn do_redo(&mut self) {
         self.inspector_undo_transaction = None;
+        self.clear_uv_edit_transaction();
         if let Some(next) = self.history.redo(self.project.clone()) {
             self.project = next;
             self.clear_resource_selection_state();

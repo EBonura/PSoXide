@@ -466,12 +466,16 @@ impl EditorWorkspace {
     /// Plain-click selection: exactly one brush (and optional face),
     /// dropping any multi-selection.
     pub(crate) fn replace_brush_selection(&mut self, index: usize, face: Option<usize>) {
+        if self.selected_brush != Some(index) || self.selected_brush_face != face {
+            self.clear_uv_edit_transaction();
+        }
         self.selected_brush = Some(index);
         self.selected_brushes = vec![index];
         self.selected_brush_face = face;
     }
 
     pub(crate) fn clear_brush_selection(&mut self) {
+        self.clear_uv_edit_transaction();
         self.selected_brush = None;
         self.selected_brushes.clear();
         self.selected_brush_face = None;
@@ -1083,30 +1087,42 @@ impl EditorWorkspace {
         // Two rows, not one: five DragValues plus a button overflow the
         // Inspector's width, and an overflowing widget is painted outside the
         // panel clip rect where the pointer can never reach it.
-        ui.horizontal(|ui| {
-            ui.label("UV offset");
-            ui.add(egui::DragValue::new(&mut off_u).speed(1).prefix("U "));
-            ui.add(egui::DragValue::new(&mut off_v).speed(1).prefix("V "));
-            ui.add(
-                egui::DragValue::new(&mut rot)
-                    .speed(1)
-                    .range(-359..=359)
-                    .suffix("\u{b0}"),
-            );
-        });
-        ui.horizontal(|ui| {
+        // Whether the pointer or the keyboard is still inside one of the
+        // scale/rotation widgets. That is what holds a UV edit transaction
+        // open across frames; see `UvEditTransaction`.
+        let live = |response: &egui::Response| response.dragged() || response.has_focus();
+        let rot_live = ui
+            .horizontal(|ui| {
+                ui.label("UV offset");
+                ui.add(egui::DragValue::new(&mut off_u).speed(1).prefix("U "));
+                ui.add(egui::DragValue::new(&mut off_v).speed(1).prefix("V "));
+                live(
+                    &ui.add(
+                        egui::DragValue::new(&mut rot)
+                            .speed(1)
+                            .range(-359..=359)
+                            .suffix("\u{b0}"),
+                    ),
+                )
+            })
+            .inner;
+        let scale_live = ui.horizontal(|ui| {
             ui.label("UV scale");
-            ui.add(
-                egui::DragValue::new(&mut scale_u)
-                    .speed(1)
-                    .range(10..=1600)
-                    .suffix("% U"),
+            let mut scale_live = live(
+                &ui.add(
+                    egui::DragValue::new(&mut scale_u)
+                        .speed(1)
+                        .range(10..=1600)
+                        .suffix("% U"),
+                ),
             );
-            ui.add(
-                egui::DragValue::new(&mut scale_v)
-                    .speed(1)
-                    .range(10..=1600)
-                    .suffix("% V"),
+            scale_live |= live(
+                &ui.add(
+                    egui::DragValue::new(&mut scale_v)
+                        .speed(1)
+                        .range(10..=1600)
+                        .suffix("% V"),
+                ),
             );
             edited.offset_texels = [
                 off_u.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
@@ -1124,31 +1140,90 @@ impl EditorWorkspace {
                 edited = psxed_project::brush::FaceUv::default();
                 reset = true;
             }
+            scale_live
         });
-        // One compensation for the whole frame, after every scale and
-        // rotation edit above. Reset UV means "identity mapping", so it is
-        // deliberately NOT re-anchored.
-        if !reset
-            && (edited.scale_q8 != current.scale_q8 || edited.rotation_deg != current.rotation_deg)
-        {
-            if let Some(anchor) = self
+        let interacting = rot_live || scale_live.inner;
+        let edited = self.apply_face_uv_edit(index, face, current, edited, reset, interacting);
+        if edited != current {
+            self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
+            self.mark_dirty();
+        }
+    }
+
+    /// Resolve one frame of face UV editing against the in-flight
+    /// [`UvEditTransaction`], and return the mapping to store.
+    ///
+    /// Split out of the widget code so the multi-frame behaviour can be
+    /// driven directly: an interaction is a sequence of these calls with
+    /// `interacting` true, and holding the transaction is the whole reason
+    /// a hundred one-percent steps do not walk the texture off the face.
+    pub(crate) fn apply_face_uv_edit(
+        &mut self,
+        index: usize,
+        face: usize,
+        current: psxed_project::brush::FaceUv,
+        mut edited: psxed_project::brush::FaceUv,
+        reset: bool,
+        interacting: bool,
+    ) -> psxed_project::brush::FaceUv {
+        let shaped =
+            edited.scale_q8 != current.scale_q8 || edited.rotation_deg != current.rotation_deg;
+        let slid = edited.offset_texels != current.offset_texels;
+        // Reset UV means "identity mapping", so it is deliberately not
+        // re-anchored, and a deliberate slide re-bases the next shaping
+        // interaction on the mapping the slide produced.
+        if reset || (slid && !shaped) {
+            self.brush_uv_edit = None;
+            return edited;
+        }
+        if !shaped {
+            return edited;
+        }
+        let stale = self
+            .brush_uv_edit
+            .is_some_and(|held| held.brush != index || held.face != face);
+        if stale {
+            self.brush_uv_edit = None;
+        }
+        if self.brush_uv_edit.is_none() {
+            let Some(anchor) = self
                 .project
                 .active_scene()
                 .brushes
                 .get(index)
                 .and_then(|brush| brush.face_uv_anchor(face))
-            {
-                let slide = [
-                    f64::from(edited.offset_texels[0]) - f64::from(current.offset_texels[0]),
-                    f64::from(edited.offset_texels[1]) - f64::from(current.offset_texels[1]),
-                ];
-                edited.reanchor(&current, anchor, slide);
-            }
+            else {
+                return edited;
+            };
+            self.brush_uv_edit = Some(crate::UvEditTransaction {
+                brush: index,
+                face,
+                anchor,
+                origin: current,
+                target: current.apply(anchor),
+            });
         }
-        if edited != current {
-            self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
-            self.mark_dirty();
+        let held = self.brush_uv_edit.expect("just seeded");
+        // The target is the phase the interaction STARTED at, never the
+        // previous frame's rounded mapping, so the i16 rounding is paid once
+        // instead of once per frame.
+        let slide = [
+            f64::from(edited.offset_texels[0]) - f64::from(current.offset_texels[0]),
+            f64::from(edited.offset_texels[1]) - f64::from(current.offset_texels[1]),
+        ];
+        edited.reanchor_to(held.target, held.anchor, slide);
+        // A single edit that is not part of a live interaction is complete
+        // the moment it is applied.
+        if !interacting {
+            self.brush_uv_edit = None;
         }
+        edited
+    }
+
+    /// Drop any in-flight UV edit interaction. Selection changes, undo,
+    /// redo and project loads all invalidate the mapping it captured.
+    pub(crate) fn clear_uv_edit_transaction(&mut self) {
+        self.brush_uv_edit = None;
     }
 
     /// Solved axis-aligned min corner of the selected brush, rounded to

@@ -92,7 +92,16 @@ impl FaceUv {
     /// after the compensation so typing into Offset U/V still slides the
     /// texture deliberately.
     pub fn reanchor(&mut self, previous: &Self, anchor: [f64; 2], slide_texels: [f64; 2]) {
-        let target = previous.apply(anchor);
+        self.reanchor_to(previous.apply(anchor), anchor, slide_texels);
+    }
+
+    /// [`Self::reanchor`] against an explicit target UV.
+    ///
+    /// A multi-frame edit has to keep solving against the phase the whole
+    /// interaction started at. Re-deriving the target from the previous
+    /// frame's mapping instead banks this function's own `i16` rounding
+    /// once per frame, which walks the texture off the face over a drag.
+    pub fn reanchor_to(&mut self, target: [f64; 2], anchor: [f64; 2], slide_texels: [f64; 2]) {
         let linear = self.apply_linear(anchor);
         self.offset_texels = [
             clamp_offset_texels(target[0] - linear[0] + slide_texels[0]),
