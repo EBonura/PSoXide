@@ -69,7 +69,7 @@ use crate::playtest_input::Port1PadSample;
 use crate::ui::profiler::FrameProfileSample;
 use crate::ui::{menu::MenuInput, MenuOutcome};
 
-use emulator_core::{button, pad::PadMode};
+use emulator_core::button;
 // `counter` / `task` telemetry IDs feed the editor's Play metrics overlay only.
 #[cfg(feature = "editor")]
 use emulator_core::telemetry::{counter, task};
@@ -287,13 +287,13 @@ struct Shell {
     /// (headless CI, devices that can't open a stereo stream).
     /// Emulation keeps running regardless -- silence is fine.
     audio: Option<audio::AudioOut>,
-    /// Host input router -- tracks every connected gamepad, emits
-    /// merged PSX pad-1 masks, detects the Select+Start chord
-    /// that opens the Menu, and logs connect / disconnect events
-    /// for diagnosing missing controllers. Always constructible;
-    /// a failed gilrs init just produces empty frames so the
-    /// keyboard path keeps working.
+    /// Host input router - tracks every connected gamepad, assigns devices
+    /// to PS1 ports, detects the Select+Start menu chord, and logs hotplug
+    /// events. Always constructible; failed native gamepad initialisation
+    /// leaves the keyboard route working.
     input: input::InputRouter,
+    /// Last machine and routing generations applied to the emulated SIO ports.
+    controller_layout_stamp: Option<(u64, u64)>,
     /// Wall-clock debt waiting to be converted into emulated
     /// "frames". Without this, the current `ControlFlow::Poll`
     /// shell runs the guest as fast as redraws can arrive, which
@@ -407,6 +407,7 @@ impl Shell {
             fullscreen,
             audio,
             input,
+            controller_layout_stamp: None,
             emu_frame_accum: 0.0,
             compute_backend,
             display_gpu_compute: gpu_compute,
@@ -419,26 +420,6 @@ impl Shell {
             #[cfg(target_arch = "wasm32")]
             graphics_init: std::rc::Rc::new(std::cell::RefCell::new(None)),
         }
-    }
-}
-
-fn press_port1_analog_button(state: &mut AppState) {
-    let Some(bus) = state.bus.as_mut() else {
-        state.status_message_set("No running pad to toggle");
-        return;
-    };
-
-    let changed = bus.press_port1_analog_button();
-    let mode = match bus.port1_pad_mode() {
-        Some(PadMode::Digital) => "Digital",
-        Some(PadMode::Analog) => "Analog",
-        Some(PadMode::Config) => "Config",
-        None => "No pad",
-    };
-    if changed {
-        state.status_message_set(format!("DualShock Analog button: {mode}"));
-    } else {
-        state.status_message_set(format!("DualShock Analog unchanged: {mode}"));
     }
 }
 
@@ -1100,7 +1081,11 @@ impl ApplicationHandler for Shell {
                     let press_analog = state == ElementState::Pressed
                         && key_is_analog_button(&physical_key, bindings);
                     if press_analog {
-                        press_port1_analog_button(&mut self.state);
+                        let analog = self.input.toggle_keyboard_analog();
+                        self.state.status_message_set(format!(
+                            "Keyboard controller mode: {}",
+                            if analog { "Analog" } else { "Digital" }
+                        ));
                     }
                 }
                 // The Menu *does* honour OS-level key-repeat: holding
@@ -1203,7 +1188,8 @@ impl ApplicationHandler for Shell {
                     input.toggle_open = true;
                 }
                 if pad_frame.analog_button {
-                    press_port1_analog_button(&mut self.state);
+                    self.state
+                        .status_message_set("Controller mode toggled".to_string());
                 }
 
                 // Merge keyboard-emulated and real-pad sticks once; used both
@@ -1211,15 +1197,14 @@ impl ApplicationHandler for Shell {
                 // them) to feed the guest pad below. The gamepad's press
                 // edges fold into SOCD recency *before* resolving, so a
                 // newer pad direction beats an older keyboard one. All
-                // three are `mut`: a menu action that invalidates cached
-                // keyboard input (Reset Controls) rebuilds them below so
-                // the reset frame can't ship stale keyboard state.
+                // A Reset Controls action clears the keyboard cache below;
+                // guest port samples are built afterward from that live cache.
                 self.host_input.note_gamepad_edges(pad_frame.pressed_mask);
-                let mut merged_left =
+                let merged_left =
                     merge_sticks(pad_frame.left_stick, self.host_input.left_stick.vector());
-                let mut merged_right =
+                let merged_right =
                     merge_sticks(pad_frame.right_stick, self.host_input.right_stick.vector());
-                let mut merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
+                let merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
 
                 // Feed the controls panel its live held-target set so
                 // held keys light up on the drawing -- an in-app
@@ -1308,7 +1293,7 @@ impl ApplicationHandler for Shell {
                         self.state.status_message_set(if self.state.freelook.enabled {
                             "Freecam ON - pad drives the camera, game input paused (hold L3+R3 to reset)"
                         } else {
-                            "Freecam off - pad returns to the game"
+                            "Freecam controls off - framing preserved; pad returns to the game"
                         });
                     }
                     Some(FreelookChordAction::Reset) => {
@@ -1417,9 +1402,6 @@ impl ApplicationHandler for Shell {
                             // sample from the gamepad alone, so not even
                             // one stale keyboard frame reaches the guest.
                             self.host_input.clear();
-                            merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
-                            merged_left = pad_frame.left_stick;
-                            merged_right = pad_frame.right_stick;
                         }
                         MenuOutcome::Quit => {
                             self.state.stop_input_recording_if_active();
@@ -1446,6 +1428,21 @@ impl ApplicationHandler for Shell {
                 self.state.poll_embedded_playtest_build();
                 self.state.poll_examples_build();
                 profile.input_ms = elapsed_ms(input_start);
+
+                // Keep the guest SIO topology in sync with the routing panel.
+                // A machine generation change means a boot or save-state load
+                // replaced the Bus, so the same host layout must be applied
+                // again even when the user did not touch the panel.
+                let controller_layout_stamp = (
+                    self.state.gpu_resync_generation,
+                    self.input.routing_generation(),
+                );
+                if self.controller_layout_stamp != Some(controller_layout_stamp) {
+                    if let Some(bus) = self.state.bus.as_mut() {
+                        self.input.apply_layout(bus);
+                    }
+                    self.controller_layout_stamp = Some(controller_layout_stamp);
+                }
 
                 // Arm GPU command capture before stepping so the HW /
                 // compute sidecars see the frame that is about to run.
@@ -1489,21 +1486,43 @@ impl ApplicationHandler for Shell {
                 // and surfaces via the register panel. History captures
                 // only the tail via `push_history`'s ring-buffer semantics.
                 if self.state.running {
-                    // Feed the guest the merged mask + sticks computed above.
+                    // Route keyboard input and each physical controller to the
+                    // selected guest port. UI/freecam shortcuts still use the
+                    // all-device merged state above.
+                    let keyboard_left = self.host_input.left_stick.vector();
+                    let keyboard_right = self.host_input.right_stick.vector();
+                    let mut port1 = pad_frame.port1;
+                    let mut port2 = pad_frame.port2;
+                    match self.input.keyboard_port() {
+                        input::PsxPort::One => {
+                            port1.mask = self.host_input.resolved_mask(port1.mask);
+                            port1.left_stick = merge_sticks(port1.left_stick, keyboard_left);
+                            port1.right_stick = merge_sticks(port1.right_stick, keyboard_right);
+                        }
+                        input::PsxPort::Two => {
+                            port2.mask = self.host_input.resolved_mask(port2.mask);
+                            port2.left_stick = merge_sticks(port2.left_stick, keyboard_left);
+                            port2.right_stick = merge_sticks(port2.right_stick, keyboard_right);
+                        }
+                        input::PsxPort::Off => {}
+                    }
+
+                    // Feed the guest the routed masks + sticks computed above.
                     // While freecam is engaged the pad belongs to the CAMERA,
-                    // so the guest sees a neutral controller: sticks centred
-                    // AND no buttons. Neutralising only the sticks left the
+                    // so both guest ports see neutral controllers: sticks
+                    // centred AND no buttons. Neutralising only the sticks left the
                     // face and shoulder buttons live, so lining up a shot still
                     // fired the weapon, opened menus, or walked the player off
                     // the spot being framed. The chord itself is read from
                     // `merged_mask` above, before this, so L3+R3 keeps working.
-                    let (game_mask, game_left, game_right) = if self.state.freelook.enabled {
-                        (0, (0.0, 0.0), (0.0, 0.0))
-                    } else {
-                        (merged_mask, merged_left, merged_right)
-                    };
+                    if self.state.freelook.enabled {
+                        port1 = input::RoutedPadInput::default();
+                        port2 = input::RoutedPadInput::default();
+                    }
                     let live_pad_sample =
-                        Port1PadSample::from_host(game_mask, game_right, game_left);
+                        Port1PadSample::from_host(port1.mask, port1.right_stick, port1.left_stick);
+                    let live_port2_sample =
+                        Port1PadSample::from_host(port2.mask, port2.right_stick, port2.left_stick);
                     for _ in 0..frames_to_run {
                         // Recording/replay happens at one authoritative video-
                         // frame port-1 boundary for emulator, editor and headless
@@ -1511,6 +1530,7 @@ impl ApplicationHandler for Shell {
                         let pad_sample = self.state.input_sample_for_frame(live_pad_sample);
                         if let Some(bus) = self.state.bus.as_mut() {
                             pad_sample.apply_to_bus(bus);
+                            live_port2_sample.apply_to_bus_port2(bus);
                         }
                         let polls_before = self
                             .state
@@ -1620,6 +1640,7 @@ impl ApplicationHandler for Shell {
                     as f32;
 
                 let state = &mut self.state;
+                let input_router = &mut self.input;
 
                 // Post-step machine stamp. Guest VRAM can only change when
                 // the bus advances (run loop above, or an MCP `step` /
@@ -1885,18 +1906,49 @@ impl ApplicationHandler for Shell {
                     }
                     editor_viewport
                 };
+                let mut pointer_menu_outcome = None;
                 profile.egui = gfx.render(|ctx| {
                     app::build_ui(
                         ctx,
                         state,
+                        input_router,
                         vram_tex,
                         display_tex,
                         #[cfg(feature = "editor")]
                         editor_viewport.clone(),
                         display_uv,
                         dt,
-                    )
+                    );
+                    // Pointer actions are discovered while egui paints. Apply
+                    // them in this same redraw so browser file inputs retain
+                    // the click's transient user activation.
+                    if let Some(action) = state.menu.take_pending_pointer_action() {
+                        pointer_menu_outcome = Some(ui::apply_menu_action(state, action));
+                    }
                 });
+                match pointer_menu_outcome {
+                    Some(MenuOutcome::ClearHostKeyboardInput) => self.host_input.clear(),
+                    Some(MenuOutcome::Quit) => {
+                        state.stop_input_recording_if_active();
+                        #[cfg(feature = "editor")]
+                        state.stop_embedded_playtest();
+                        state.flush_pending_input_profile_capture();
+                        state.stop_examples_build();
+                        if let Err(error) = state.flush_memcard_port1() {
+                            eprintln!("[frontend] memcard flush on quit: {error}");
+                        }
+                        #[cfg(feature = "editor")]
+                        if let Err(error) = state.save_editor_project() {
+                            eprintln!("[frontend] editor save on quit: {error}");
+                        }
+                        if let Err(error) = state.save_settings() {
+                            eprintln!("[frontend] settings save on quit: {error}");
+                        }
+                        event_loop.exit();
+                        return;
+                    }
+                    Some(MenuOutcome::None) | None => {}
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 for path in state.take_pending_savestate_thumbnails() {
                     let result = match state.bus.as_ref() {
@@ -2979,6 +3031,17 @@ mod freelook_chord_tests {
         assert_eq!(c.update(true, false), None, "press alone does nothing");
         assert_eq!(c.update(true, false), None, "still held, still nothing");
         assert_eq!(c.update(false, false), Some(FreelookChordAction::Toggle));
+    }
+
+    /// Repeated short presses only switch freecam mode. A second tap must not
+    /// be mistaken for the deliberate hold gesture that resets the camera.
+    #[test]
+    fn a_second_tap_toggles_without_resetting() {
+        let mut c = FreelookChord::default();
+        for _ in 0..2 {
+            assert_eq!(c.update(true, false), None);
+            assert_eq!(c.update(false, false), Some(FreelookChordAction::Toggle));
+        }
     }
 
     /// The reset lands while the buttons are down, fires once however long the

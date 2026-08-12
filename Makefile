@@ -12,7 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean clean-guest-stage run run-release editor-ui-screenshot pgo web validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean clean-guest-stage run run-release editor-ui-screenshot pgo web web-bundle web-stage-disc itch-web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -60,6 +60,8 @@ help:
 	@echo "                      - render the exact editor view to PNG without opening a window"
 	@echo "    make pgo          - PGO-optimised frontend build (PGO_GAME=<.cue/.exe>, PSOXIDE_BIOS set; ~2x faster core)"
 	@echo "    make web          - serve the wasm web build locally (release, :8080)"
+	@echo "    make web-bundle   - build wasm and stage the streamed demo-disc files"
+	@echo "    make itch-web     - build, validate, and push the complete itch player"
 	@echo "    make validate     - run exact-hash validation matrix"
 	@echo "    make validate-repeat"
 	@echo "                      - run exact-hash validation 3 times for determinism"
@@ -208,6 +210,37 @@ endif
 web:
 	@-lsof -ti tcp:8080 | xargs kill -9 2>/dev/null || true
 	cd emu/crates/frontend && env -u NO_COLOR trunk serve --release
+
+# A Trunk build replaces dist, so the streamed disc must be staged afterward.
+# Keeping this in one target prevents a valid wasm shell from being published
+# without the manifest and disc pieces it fetches at runtime.
+TRUNK ?= trunk
+GH ?= gh
+BUTLER ?= butler
+WEB_FRONTEND_DIR := emu/crates/frontend
+WEB_DIST_DIR := $(WEB_FRONTEND_DIR)/dist
+WEB_DISC_RELEASE_REPO ?= EBonura/PSoXide
+ITCH_WEB_CHANNEL ?= bonnie-studios/psoxide:html5
+ITCH_WEB_VERSION ?= $(shell git describe --tags --always)
+WEB_RUSTFLAGS := -C target-feature=+simd128 -C link-arg=-zstack-size=16777216
+
+web-bundle:
+	@command -v $(TRUNK) >/dev/null || { echo "web-bundle: trunk is required"; exit 1; }
+	cd $(WEB_FRONTEND_DIR) && env -u NO_COLOR RUSTFLAGS='$(WEB_RUSTFLAGS)' \
+		$(TRUNK) build --release --public-url ./
+	$(MAKE) web-stage-disc
+
+web-stage-disc:
+	@command -v $(GH) >/dev/null || { echo "web-stage-disc: gh is required"; exit 1; }
+	$(GH) release download web-disc --repo $(WEB_DISC_RELEASE_REPO) --clobber \
+		--pattern 'demo-disc.cue' --pattern 'web-manifest.txt' \
+		--pattern 'demo-data.bin.gz' --pattern 'track-*.flac' \
+		--dir $(WEB_DIST_DIR)
+	python3 tools/verify-web-dist.py $(WEB_DIST_DIR)
+
+itch-web: web-bundle
+	@command -v $(BUTLER) >/dev/null || { echo "itch-web: butler is required"; exit 1; }
+	$(BUTLER) push $(WEB_DIST_DIR) $(ITCH_WEB_CHANNEL) --userversion "$(ITCH_WEB_VERSION)"
 
 validate:
 	cd emu && cargo run -p frontend --release -- validate --manifest ../validation/suite.ron

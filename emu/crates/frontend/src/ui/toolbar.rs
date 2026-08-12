@@ -26,6 +26,7 @@ use egui::{Align, Button, Color32, Context, Label, Layout, Rect, RichText, TopBo
 
 use crate::app::{self, AppState, ScaleMode};
 use crate::icons;
+use crate::input::{InputRouter, PsxPort};
 
 /// Icon font size in the button row.
 const ICON_SIZE: f32 = 16.0;
@@ -45,7 +46,7 @@ const TOOLBAR_GROUP_GAP: f32 = 8.0;
 /// Comfortable width for every toolbar control with the normal group spacing.
 /// The save-state and controls-panel buttons increased this cluster after the
 /// original fixed-width lane was introduced.
-const CONTROLS_PREFERRED_WIDTH: f32 = 730.0;
+const CONTROLS_PREFERRED_WIDTH: f32 = 764.0;
 /// Keep enough room for the status dot + RUNNING/PAUSED label.
 const METRICS_MIN_WIDTH: f32 = 116.0;
 /// Slider width used in the toolbar.
@@ -73,7 +74,7 @@ const METRIC_LABEL: Color32 = Color32::from_rgb(102, 102, 115);
 /// the row stays anchored to the panel's bottom edge, so the whole
 /// cluster translates up and clips off under the window top. A small
 /// floating tab in the top-right corner brings it back.
-pub fn draw(ctx: &Context, state: &mut AppState) {
+pub fn draw(ctx: &Context, state: &mut AppState, input_router: &mut InputRouter) {
     // 0.0 = fully shown, 1.0 = fully hidden.
     let t = ctx.animate_bool_with_time(egui::Id::new("toolbar_slide"), state.toolbar_hidden, 0.22);
     let height = (BAR_HEIGHT * (1.0 - t)).max(0.0);
@@ -149,6 +150,8 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
     if t > 0.5 {
         draw_restore_tab(ctx, state, ((t - 0.5) / 0.5).clamp(0.0, 1.0));
     }
+
+    draw_controller_panel(ctx, state, input_router);
 }
 
 /// Floating tab shown when the toolbar is hidden. Anchored to the
@@ -218,6 +221,7 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     ui.add_space(group_gap);
     draw_save_states_button(ui, state);
     draw_controls_button(ui, state);
+    draw_controller_button(ui);
     ui.add_space(group_gap);
     draw_audio_controls(ui, state);
     ui.add_space(group_gap);
@@ -245,14 +249,101 @@ fn draw_save_states_button(ui: &mut egui::Ui, state: &mut AppState) {
 /// mid-game (running or paused) is the point of the panel, so it must
 /// not require opening the full Menu overlay first.
 fn draw_controls_button(ui: &mut egui::Ui, state: &mut AppState) {
-    let btn = icon_button(icons::GAMEPAD_2);
+    let btn = icon_button(icons::KEYBOARD);
     if ui
         .add(btn)
-        .on_hover_text("Controls (rebind keyboard keys)")
+        .on_hover_text("Keyboard controls (rebind keys)")
         .clicked()
     {
         state.menu.open_controls();
     }
+}
+
+const CONTROLLER_PANEL_ID: &str = "controller_routing_panel_open";
+
+fn draw_controller_button(ui: &mut egui::Ui) {
+    let btn = icon_button(icons::GAMEPAD_2);
+    if ui
+        .add(btn)
+        .on_hover_text("Input devices (assign ports and Digital/Analog mode)")
+        .clicked()
+    {
+        let id = egui::Id::new(CONTROLLER_PANEL_ID);
+        ui.ctx().data_mut(|data| {
+            let open = data.get_temp::<bool>(id).unwrap_or(false);
+            data.insert_temp(id, !open);
+        });
+    }
+}
+
+fn draw_controller_panel(ctx: &Context, state: &mut AppState, input_router: &mut InputRouter) {
+    let id = egui::Id::new(CONTROLLER_PANEL_ID);
+    let mut open = ctx.data_mut(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    if !open {
+        return;
+    }
+
+    egui::Window::new("Controllers")
+        .id(egui::Id::new("controller_routing_window"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, BAR_HEIGHT + 8.0))
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("Assign each host device to one PS1 controller port.");
+            ui.label(
+                RichText::new("Digital is compatible with early games such as Crash Bandicoot.")
+                    .small()
+                    .color(METRIC_LABEL),
+            );
+            ui.add_space(6.0);
+
+            for device in input_router.devices() {
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [220.0, BUTTON_SIZE.y],
+                        Label::new(RichText::new(&device.name).strong()).truncate(),
+                    )
+                    .on_hover_text(&device.name);
+
+                    let mut port = device.port;
+                    egui::ComboBox::from_id_salt(("controller_port", &device.id))
+                        .selected_text(port.label())
+                        .width(72.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut port, PsxPort::Off, PsxPort::Off.label());
+                            ui.selectable_value(&mut port, PsxPort::One, PsxPort::One.label());
+                            ui.selectable_value(&mut port, PsxPort::Two, PsxPort::Two.label());
+                        });
+                    if port != device.port && input_router.set_device_port(&device.id, port) {
+                        state.status_message_set(format!(
+                            "{} assigned to {}",
+                            device.name,
+                            port.label()
+                        ));
+                    }
+
+                    let mode_label = if device.analog { "Analog" } else { "Digital" };
+                    if ui
+                        .add_sized([62.0, BUTTON_SIZE.y], Button::new(mode_label))
+                        .on_hover_text(if device.analog {
+                            "Expose an Analog DualShock (ID 0x73)"
+                        } else {
+                            "Expose an original digital pad (ID 0x41)"
+                        })
+                        .clicked()
+                        && input_router.set_device_analog(&device.id, !device.analog)
+                    {
+                        state.status_message_set(format!(
+                            "{} will use {} mode",
+                            device.name,
+                            if device.analog { "Digital" } else { "Analog" }
+                        ));
+                    }
+                });
+            }
+        });
+    ctx.data_mut(|data| data.insert_temp(id, open));
 }
 
 fn toolbar_label(text: impl Into<String>, color: Color32) -> Label {
@@ -361,6 +452,7 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
         .add(fl_btn)
         .on_hover_text(
             "Freecam (or tap L3+R3 on a pad) - left stick move, right stick look, R2 boost. \
+             Tap again to return the pad to the game without resetting the view. \
              Hold L3+R3 to reset the camera. Game input is paused while it is on.",
         )
         .clicked()
@@ -373,7 +465,7 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
         state.status_message_set(if state.freelook.enabled {
             "Freecam ON - pad drives the camera, game input paused (hold L3+R3 to reset)"
         } else {
-            "Freecam off - pad returns to the game"
+            "Freecam controls off - framing preserved; pad returns to the game"
         });
     }
     // Wireframe mode lives on the GPU, not a frontend panel -- we
