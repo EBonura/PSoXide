@@ -3724,3 +3724,74 @@ fn a_uv_interaction_ends_on_release_selection_change_undo_and_offset_edits() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The real release sequence. A pointer release or a focus loss arrives as a
+/// frame where nothing changed, so ending the interaction only on a CHANGED
+/// frame left the captured target alive across the release and the next edit
+/// on that face solved against a mapping the user had stopped editing.
+#[test]
+fn an_unchanged_release_frame_ends_the_uv_interaction() {
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("uv-release-frame");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.replace_brush_selection(0, Some(0));
+
+    // 1. A changed shaping frame while the widget is held opens it.
+    let start = workspace.project.active_scene().brushes[0].faces[0].uv;
+    let shaped = psxed_project::brush::FaceUv {
+        scale_q8: [400, 256],
+        ..start
+    };
+    let held = workspace.apply_face_uv_edit(0, 0, start, shaped, false, true);
+    workspace.project.active_scene_mut().brushes[0].faces[0].uv = held;
+    let opened = workspace.brush_uv_edit.expect("a held drag opens one");
+    assert_eq!(opened.origin, start);
+
+    // 2. The release frame changes nothing and is not interacting.
+    let unchanged = workspace.apply_face_uv_edit(0, 0, held, held, false, false);
+    assert_eq!(unchanged, held, "a release frame must not move the mapping");
+    assert!(
+        workspace.brush_uv_edit.is_none(),
+        "an unchanged release frame has to end the interaction"
+    );
+
+    // A focused but unchanged frame mid-drag keeps it, so a paused pointer
+    // does not silently re-base the drag.
+    let _ = workspace.apply_face_uv_edit(0, 0, held, shaped_from(held, 401), false, true);
+    let paused = workspace.apply_face_uv_edit(0, 0, held, held, false, true);
+    assert_eq!(paused, held);
+    assert!(
+        workspace.brush_uv_edit.is_some(),
+        "a focused pause must not end the interaction"
+    );
+    let _ = workspace.apply_face_uv_edit(0, 0, held, held, false, false);
+
+    // 3. A later edit seeds from the CURRENT mapping, not the old target.
+    let anchor = workspace.project.active_scene().brushes[0]
+        .face_uv_anchor(0)
+        .expect("anchor");
+    let next = shaped_from(held, 600);
+    let resolved = workspace.apply_face_uv_edit(0, 0, held, next, false, true);
+    let before = held.apply(anchor);
+    let after = resolved.apply(anchor);
+    assert!(
+        (before[0] - after[0]).abs() <= 1.0 && (before[1] - after[1]).abs() <= 1.0,
+        "the new interaction must hold the phase it started from: {before:?} -> {after:?}"
+    );
+    assert_eq!(
+        workspace.brush_uv_edit.expect("second interaction").origin,
+        held,
+        "the second interaction seeds from the mapping the first one left"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn shaped_from(uv: psxed_project::brush::FaceUv, scale_u: i16) -> psxed_project::brush::FaceUv {
+    psxed_project::brush::FaceUv {
+        scale_q8: [scale_u, uv.scale_q8[1]],
+        ..uv
+    }
+}
