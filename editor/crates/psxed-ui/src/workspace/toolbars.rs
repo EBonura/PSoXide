@@ -555,9 +555,9 @@ impl EditorWorkspace {
                     self.brush_clip_keep = self.brush_clip_keep.next();
                 }
                 // Gesture-mode state only; per-brush and per-face editing
-                // lives in the inspector (draw_brush_inspector).
-                ui.checkbox(&mut self.brush_texture_lock, "Tex lock")
-                    .on_hover_text("Keep face textures anchored to the brush when it moves");
+                // lives in the inspector (draw_brush_inspector), including
+                // texture lock, which sits with the rest of the texture
+                // mapping controls rather than here.
                 // The one grid step every brush drag/create/clip snaps to
                 // (shared with the Tool menu's Snap interval).
                 ui.label("Grid");

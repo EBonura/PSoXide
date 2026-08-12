@@ -55,16 +55,62 @@ impl FaceUv {
 
     /// Apply to a raw paraxial texel coordinate.
     pub fn apply(&self, uv: [f64; 2]) -> [f64; 2] {
+        let linear = self.apply_linear(uv);
+        [
+            linear[0] + f64::from(self.offset_texels[0]),
+            linear[1] + f64::from(self.offset_texels[1]),
+        ]
+    }
+
+    /// [`Self::apply`] without the offset term: the scale and rotation
+    /// alone. Re-anchoring solves for the offset, so it needs the rest of
+    /// the mapping separately.
+    pub fn apply_linear(&self, uv: [f64; 2]) -> [f64; 2] {
         let sx = f64::from(self.scale_q8[0].max(1)) / 256.0;
         let sy = f64::from(self.scale_q8[1].max(1)) / 256.0;
         let scaled = [uv[0] / sx, uv[1] / sy];
         let radians = f64::from(self.rotation_deg).to_radians();
         let (sin, cos) = radians.sin_cos();
         [
-            scaled[0] * cos - scaled[1] * sin + f64::from(self.offset_texels[0]),
-            scaled[0] * sin + scaled[1] * cos + f64::from(self.offset_texels[1]),
+            scaled[0] * cos - scaled[1] * sin,
+            scaled[0] * sin + scaled[1] * cos,
         ]
     }
+
+    /// Re-solve this mapping's offset so `anchor` keeps the UV `previous`
+    /// gave it.
+    ///
+    /// Scale and rotation are applied about the raw projection's own
+    /// origin, which is the world origin, not the face. A face 4000 units
+    /// away therefore SLIDES by thousands of texels when its scale changes
+    /// by a few percent, which is why changing U% read as sliding rather
+    /// than resizing. Anchoring at a point on the face itself (the caller
+    /// passes the solved polygon centroid) leaves the texture where the
+    /// eye expects it and only changes how densely it repeats.
+    ///
+    /// `slide_texels` is any offset edit the same frame made, re-applied
+    /// after the compensation so typing into Offset U/V still slides the
+    /// texture deliberately.
+    pub fn reanchor(&mut self, previous: &Self, anchor: [f64; 2], slide_texels: [f64; 2]) {
+        let target = previous.apply(anchor);
+        let linear = self.apply_linear(anchor);
+        self.offset_texels = [
+            clamp_offset_texels(target[0] - linear[0] + slide_texels[0]),
+            clamp_offset_texels(target[1] - linear[1] + slide_texels[1]),
+        ];
+    }
+}
+
+/// Offsets are stored in an `i16`; a re-anchor of a far-away face at a
+/// steep scale change can solve past that, and saturating is the only
+/// behaviour that keeps the mapping finite.
+fn clamp_offset_texels(value: f64) -> i16 {
+    if value.is_nan() {
+        return 0;
+    }
+    value
+        .round()
+        .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
 
 /// One brush face: three integer points defining the plane, plus the
@@ -345,6 +391,30 @@ impl Brush {
             }
         }
         self.translate(delta);
+    }
+
+    /// The point a face's UV edits should pivot around: its solved polygon
+    /// centroid, in the raw texel space [`FaceUv::apply`] consumes. `None`
+    /// when the face is degenerate or fully cut away.
+    pub fn face_uv_anchor(&self, face: usize) -> Option<[f64; 2]> {
+        let plane = Plane::from_points(self.faces.get(face)?.points)?;
+        let polygon = self.solve().polygons.get(face)?.clone()?;
+        if polygon.verts.is_empty() {
+            return None;
+        }
+        let count = polygon.verts.len() as f64;
+        let mut centroid = [0.0; 3];
+        for vert in &polygon.verts {
+            for axis in 0..3 {
+                centroid[axis] += vert[axis];
+            }
+        }
+        let centroid = centroid.map(|sum| sum / count);
+        let raw = paraxial_uv(&plane, centroid);
+        Some([
+            raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+            raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+        ])
     }
 
     /// Translate one face's plane by an integer delta (the extrude/resize
@@ -996,6 +1066,130 @@ mod tests {
         assert_eq!(decoded.mover, Some(mover));
         let legacy: Brush = ron::from_str("(faces:[])").expect("legacy brush");
         assert_eq!(legacy.mover, None);
+    }
+
+    /// A face far from the world origin is where the old behaviour hurt:
+    /// scale is applied about the projection's origin, so a few percent of
+    /// scale slid the texture by hundreds of texels. Re-anchoring holds the
+    /// face's own centroid still and changes only how densely it repeats.
+    #[test]
+    fn reanchoring_holds_the_anchor_while_the_uv_span_changes() {
+        // Wall at x = 4096: paraxial U is Z, V is -Y.
+        let brush = Brush::cuboid([4096, 0, 2048], [4160, 128, 2304]);
+        let face = brush
+            .faces
+            .iter()
+            .position(|face| {
+                Plane::from_points(face.points)
+                    .map(|plane| plane.normal[0] > 0)
+                    .unwrap_or(false)
+            })
+            .expect("+X face");
+        let anchor = brush.face_uv_anchor(face).expect("anchor");
+
+        let before = FaceUv {
+            offset_texels: [7, -3],
+            rotation_deg: 0,
+            scale_q8: [256, 256],
+        };
+        let held = before.apply(anchor);
+
+        // U only: the anchor stays, the U span halves, V is untouched.
+        let mut wider = FaceUv {
+            scale_q8: [512, 256],
+            ..before
+        };
+        let uncompensated = wider.apply(anchor);
+        assert!(
+            (uncompensated[0] - held[0]).abs() > 8.0,
+            "the raw scale change has to slide this far-away face"
+        );
+        wider.reanchor(&before, anchor, [0.0, 0.0]);
+        let moved = wider.apply(anchor);
+        assert!(
+            (moved[0] - held[0]).abs() <= 1.0 && (moved[1] - held[1]).abs() <= 1.0,
+            "anchor must hold: {held:?} became {moved:?}"
+        );
+        let span_before = span(&before, anchor);
+        let span_wider = span(&wider, anchor);
+        assert!(
+            span_wider[0] < span_before[0] * 0.6,
+            "U% must change the U span: {span_before:?} -> {span_wider:?}"
+        );
+        assert!(
+            (span_wider[1] - span_before[1]).abs() < 1e-9,
+            "a U-only edit must leave the V span alone"
+        );
+
+        // V only, on a floor this time, to catch an axis swap.
+        let floor = Brush::cuboid([2048, 512, 3072], [2304, 576, 3328]);
+        let face = floor
+            .faces
+            .iter()
+            .position(|face| {
+                Plane::from_points(face.points)
+                    .map(|plane| plane.normal[1] > 0)
+                    .unwrap_or(false)
+            })
+            .expect("+Y face");
+        let anchor = floor.face_uv_anchor(face).expect("anchor");
+        let before = FaceUv::default();
+        let held = before.apply(anchor);
+        let mut taller = FaceUv {
+            scale_q8: [256, 512],
+            ..before
+        };
+        taller.reanchor(&before, anchor, [0.0, 0.0]);
+        let moved = taller.apply(anchor);
+        assert!(
+            (moved[0] - held[0]).abs() <= 1.0 && (moved[1] - held[1]).abs() <= 1.0,
+            "floor anchor must hold: {held:?} became {moved:?}"
+        );
+        let span_before = span(&before, anchor);
+        let span_taller = span(&taller, anchor);
+        assert!(
+            (span_taller[0] - span_before[0]).abs() < 1e-9,
+            "a V-only edit must leave the U span alone"
+        );
+        assert!(
+            span_taller[1] < span_before[1] * 0.6,
+            "V% must change the V span: {span_before:?} -> {span_taller:?}"
+        );
+
+        // Rotation holds the anchor too, and a deliberate slide still slides.
+        let mut turned = FaceUv {
+            rotation_deg: 37,
+            ..before
+        };
+        turned.reanchor(&before, anchor, [0.0, 0.0]);
+        let moved = turned.apply(anchor);
+        assert!(
+            (moved[0] - held[0]).abs() <= 1.0 && (moved[1] - held[1]).abs() <= 1.0,
+            "rotation must hold the anchor: {held:?} became {moved:?}"
+        );
+        let mut slid = FaceUv {
+            rotation_deg: 37,
+            ..before
+        };
+        slid.reanchor(&before, anchor, [12.0, -5.0]);
+        let slid_uv = slid.apply(anchor);
+        assert!(
+            (slid_uv[0] - (moved[0] + 12.0)).abs() <= 1.0
+                && (slid_uv[1] - (moved[1] - 5.0)).abs() <= 1.0,
+            "an offset edit in the same frame must still slide"
+        );
+    }
+
+    /// How far apart two raw texels one unit either side of the anchor land
+    /// under a mapping: the visible repetition, per axis.
+    fn span(uv: &FaceUv, anchor: [f64; 2]) -> [f64; 2] {
+        let u = uv.apply([anchor[0] + 1.0, anchor[1]]);
+        let v = uv.apply([anchor[0], anchor[1] + 1.0]);
+        let base = uv.apply(anchor);
+        [
+            ((u[0] - base[0]).powi(2) + (u[1] - base[1]).powi(2)).sqrt(),
+            ((v[0] - base[0]).powi(2) + (v[1] - base[1]).powi(2)).sqrt(),
+        ]
     }
 
     #[test]

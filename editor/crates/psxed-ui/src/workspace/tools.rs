@@ -838,8 +838,17 @@ impl EditorWorkspace {
         }
 
         ui.separator();
+        // Above the per-face early return on purpose: texture lock applies
+        // to the whole brush and has to be reachable with no face selected.
+        self.draw_brush_texture_mapping_header(ui);
         let Some(face) = self.selected_brush_face else {
-            ui.label("Click a face to edit its material and UVs.");
+            ui.label(
+                egui::RichText::new(
+                    "Select a face to edit its material and UVs: click the face in the \
+                     3D view, or click the brush in a 2D view and then its face in 3D.",
+                )
+                .weak(),
+            );
             return;
         };
         let Some(face_data) = brush.faces.get(face) else {
@@ -1034,6 +1043,22 @@ impl EditorWorkspace {
     /// per-axis scale, reset. Runs inside the Inspector, so history is
     /// owned by the inspector transaction wrapper: a slider drag or a
     /// focused text edit coalesces into one undo step.
+    /// The Texture Coordinates heading and the whole-brush texture lock.
+    ///
+    /// Texture lock is a workspace preference, not brush data, but it IS a
+    /// texture-mapping control, so it belongs with the rest of them. It
+    /// draws for any selected BSP brush in Select and Brush mode alike; it
+    /// used to hide in the Brush-only toolbar, where the workflow that
+    /// needs it could not find it.
+    pub(crate) fn draw_brush_texture_mapping_header(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Texture Coordinates").strong());
+        ui.checkbox(&mut self.brush_texture_lock, "Lock texture while moving")
+            .on_hover_text(
+                "Keep face textures anchored to the brush as it moves. Off leaves the \
+                 mapping world-aligned, so the brush slides under its texture.",
+            );
+    }
+
     pub(crate) fn draw_brush_face_uv_controls(&mut self, ui: &mut egui::Ui) {
         let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
             return;
@@ -1049,6 +1074,7 @@ impl EditorWorkspace {
             return;
         };
         let mut edited = current;
+        let mut reset = false;
         let mut off_u = i32::from(edited.offset_texels[0]);
         let mut off_v = i32::from(edited.offset_texels[1]);
         let mut rot = i32::from(edited.rotation_deg);
@@ -1096,8 +1122,29 @@ impl EditorWorkspace {
             // Folded in after the DragValues so a Reset wins over them.
             if ui.button("Reset UV").clicked() {
                 edited = psxed_project::brush::FaceUv::default();
+                reset = true;
             }
         });
+        // One compensation for the whole frame, after every scale and
+        // rotation edit above. Reset UV means "identity mapping", so it is
+        // deliberately NOT re-anchored.
+        if !reset
+            && (edited.scale_q8 != current.scale_q8 || edited.rotation_deg != current.rotation_deg)
+        {
+            if let Some(anchor) = self
+                .project
+                .active_scene()
+                .brushes
+                .get(index)
+                .and_then(|brush| brush.face_uv_anchor(face))
+            {
+                let slide = [
+                    f64::from(edited.offset_texels[0]) - f64::from(current.offset_texels[0]),
+                    f64::from(edited.offset_texels[1]) - f64::from(current.offset_texels[1]),
+                ];
+                edited.reanchor(&current, anchor, slide);
+            }
+        }
         if edited != current {
             self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
             self.mark_dirty();
@@ -1589,14 +1636,31 @@ impl EditorWorkspace {
     }
 
     /// Write the move preview for the grabbed brush and every rider.
+    ///
+    /// The preview has to take the SAME path the commit takes, or the drag
+    /// shows one mapping and releasing the mouse writes another. Every
+    /// preview is rebuilt from its own untouched base, so the lock
+    /// compensation is applied once against the total delta rather than
+    /// accumulating per mouse move.
     fn apply_brush_move_preview(&mut self, mv: &BrushMove, applied: [i32; 3]) {
-        let mut preview = mv.base.clone();
-        preview.translate(applied);
-        self.project.active_scene_mut().brushes[mv.index] = preview;
-        for (index, base) in &mv.others {
+        let texture_lock = self.brush_texture_lock;
+        let preview_of = |base: &psxed_project::brush::Brush| {
             let mut preview = base.clone();
-            preview.translate(applied);
-            self.project.active_scene_mut().brushes[*index] = preview;
+            if texture_lock {
+                preview.translate_with_uv_lock(
+                    applied,
+                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                );
+            } else {
+                preview.translate(applied);
+            }
+            preview
+        };
+        let primary = preview_of(&mv.base);
+        self.project.active_scene_mut().brushes[mv.index] = primary;
+        for (index, base) in &mv.others {
+            let rider = preview_of(base);
+            self.project.active_scene_mut().brushes[*index] = rider;
         }
         if let Some(state) = self.brush_move.as_mut() {
             state.applied = applied;
