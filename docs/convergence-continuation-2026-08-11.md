@@ -20,9 +20,37 @@ worker's confident diagnosis.
 | Demo disc | `psx-demo-disc-quake-shareware` | `codex/quake-shareware-demo-disc` | `dc9e41a` | clean; Quake now DEFAULT; still on old pins |
 | Quake source pin | `PSoXide-rc1-pin` | detached | `f9f83c35` | clean; every Quake command needs `--psoxide` pointing here |
 
-PSoXide is at a clean, fully-gated state and is the candidate for the final
-pin once Quake stabilises. It already contains `main` (merge `dac903f3`), so
-merge-train step 2 is DONE.
+PSoXide is an **automated Comicon candidate**, not "done": P2, P3 and the
+composed souls demonstration are green under automated evidence, while the
+owner's native-GUI acceptance and all hardware acceptance remain open. It
+already contains `main` (merge `dac903f3`), so merge-train step 2 is DONE,
+and it is the candidate for the final pin once Quake stabilises.
+
+P6 microsection streaming stays DEFERRED, and the disclosure stays exact:
+**Comicon BSP demo uses measured whole-map residency; P6 microsection
+streaming remains deferred.** The residency claim rests on the measured
+budgets in handoff section 0.22 (static footprint 1,640,536 of 1,998,848,
+17.9 percent free), not on the PXBSP file size, and two figures in it are
+explicitly unmeasured: VRAM page occupancy/fragmentation, and runtime peak
+stack usage.
+
+D1 is **NOT complete**. The default-inclusion policy is correct and merged,
+but the disc still pins OLD Quake and PSoXide revisions. It finalises only
+after repinning both live final revisions, rebuilding every disc mode,
+rerunning the two-pass deterministic headless checks, remeasuring capacity,
+and regenerating hashes and provenance.
+
+The suspected MIPS aggregate-return ABI problem is a **HYPOTHESIS, not a
+proven root cause**. It must be proved with a guest-side boundary
+diagnostic or a disassembly, or eliminated by converting the risky
+by-value aggregate returns to caller-owned output parameters, and then
+authored `func_train` movement must be proved on the real MIPS guest: a
+host-side leg length is not evidence that the guest moves the train.
+
+Any gate result quoted in this document is evidence **for the head it was
+run at**. The twelve green gates recorded at `bb8aa9a` are historical and
+are not proof for any later head; the complete matrix must be re-run at the
+final head after all merges.
 
 ## 2. What is green, and at what evidence level
 
