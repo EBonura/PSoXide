@@ -15,8 +15,8 @@ worker's confident diagnosis.
 
 | Lane | Worktree | Branch | Head | State |
 |---|---|---|---|---|
-| PSoXide integration | `PSoXide-convergence` | `codex/quake-psoxide-convergence` | `0c0b35d9` | one dirty file: the owner's camera edit in `editor/projects/brush-first-playable/project.ron`. PRESERVE. Fully gated green. |
-| Quake integration | `quake-psx-convergence` | `codex/quake-convergence` | `9e6e5ba` | a repair worker is active in this tree; 3 gates red (below) |
+| PSoXide integration | `PSoXide-convergence` | `codex/quake-psoxide-convergence` | `41875824` | one dirty file: the owner's camera edit in `editor/projects/brush-first-playable/project.ron`. PRESERVE. |
+| Quake integration | `quake-psx-convergence` | `codex/quake-convergence` | `2902765` or later | workers active in this tree; matrix MUST be re-run at the final head |
 | Demo disc | `psx-demo-disc-quake-shareware` | `codex/quake-shareware-demo-disc` | `dc9e41a` | clean; Quake now DEFAULT; still on old pins |
 | Quake source pin | `PSoXide-rc1-pin` | detached | `f9f83c35` | clean; every Quake command needs `--psoxide` pointing here |
 
@@ -58,7 +58,7 @@ Levels: L1 host tests, L2 real MIPS build, L3 two deterministic image-free
 replays from an exact-source frontend, L4 original hardware. **No L4 evidence
 exists anywhere in this campaign.**
 
-PSoXide at `0c0b35d9`, all green:
+PSoXide at `0c0b35d9`, all green (re-verify at the current head):
 
 ```text
 L1  psxed-ui 397, psxed-project 499, psx-bsp 71,
@@ -74,56 +74,68 @@ L3  make editor-souls-bsp-check     the composed demonstration gate:
     make runtime-numeric-guard      ok, 219 files
 ```
 
-Quake at `9e6e5ba`: check, map-regress, e1m1-chain-regress, systems-regress,
-combat-regress, monster-regress, arsenal-regress, ambient-regress PASS;
-quake-core 114 tests, host 35, real MIPS guest builds.
+Quake: twelve gates were green at `bb8aa9a` and thirteen minus survival at
+`6abc54c`. Both are HISTORICAL. Several merges have landed since, so the
+complete matrix must be re-run at the final head before any claim.
 
 ## 3. Open work, in dependency order
 
-### Quake: three red gates (a repair worker is on them)
+### Quake: gates repaired, then extended (all HISTORICAL until re-run)
 
-All three come from the SAME class of cause and that is itself the finding:
-two branches green in isolation changed navigation and timing when combined.
+The three gates that broke when the bestiary and entity-systems branches
+merged were repaired at cause, not by re-tuning routes: the merged guest
+image had outgrown the PS1 heap (the resident-map arena was still PSoXide's
+generic 1.1 MB while the largest cooked map needs 988,918 bytes, so the
+guest died in `handle_alloc_error` before its first gameplay frame, and the
+arena is now Quake policy sized with a build-time check), and a resting
+contact was being read as a trap in `fly_move`. The audio gate was
+re-anchored to the event instead of an absolute wall-clock window.
 
-1. `start-route-regress` times out at (508, 1638, 46) with 3 of 7 mechanisms.
-   Start gained genuinely solid episode/boss gates at the same moment
-   monsters started blocking bodies. Note the earlier fix in this area
-   (skip a brush entity whose hull cannot be evaluated rather than vetoing
-   the world trace) SURVIVED the merge and is verified present.
-2. `bestiary-regress` loads E1M2 but never reaches E1M4.
-3. `audio-regress` tail window. Do NOT widen it again: it asserts silence in
-   an ABSOLUTE wall-clock window while guest pacing is content-dependent, so
-   every gameplay addition shifts it. Re-anchor it to an event.
+The freeze fix then went further: `restore_trace_invariants` re-imposes
+`SV_RecursiveHullCheck`'s own rule at the PRODUCER, and `trapped()` is now
+bare `all_solid`, exactly what `SV_FlyMove` tests. The two-flag workaround
+is gone.
 
-### Quake: func_train legs about 300x too long on the guest
+### Quake: func_train, and what was refuted
 
-Host tests give 87 ticks for an E1M5 leg; the guest computes 27,804, exactly
-`isqrt_i32(i32::MAX) * 60 / 100`, so the squared length saturated.
-`travel_ticks` shifts right by 12 first, so saturation needs a component near
-46,340 units (about 1.9e8 in Q12), roughly 4096x too large: the signature of
-a value Q12-scaled twice. `MapEntity::origin` is verified already Q20.12 and
-`BrushModel::mins` is declared raw i16, so the open suspect is what the
-COOKER writes into a train submodel's mins. **Trains are not working.**
+The guest computes about 300x too many ticks for an authored leg. My
+earlier cooker hypothesis (a doubly-Q12-scaled `mins`) was REFUTED with
+direct evidence: running the shipping `QuakeTrain` against the real cooked
+lumps for all nine maps gives correct legs everywhere (12 trains, 1,586 leg
+samples, longest 87 ticks). The arithmetic and the cooked data are both
+fine; the guest's view of the inputs is not. A regression test pins
+authored leg timing. The MIPS aggregate-return ABI story is a HYPOTHESIS
+and must be proved or eliminated (see section 1). **Trains are not
+working** until guest-side movement is proved on the real MIPS guest.
 
-### Quake: Q2c lane (worker active, branch `codex/quake-q2c-survival`)
+### Quake: Q4 partially delivered
 
-Player freeze investigation (the player stops dead at fixed coordinates,
-bit-identical across runs with different input, which points at the motor
-never running rather than a wall), the `survival-regress` route, the audio
-re-anchoring, and `SetChangeParms` level-change carry-over.
+Delivered: the intermission (authored `info_intermission` camera, level
+title, kill and secret counters, episode-complete headline), the episode
+completion state, and an `episode1-regress` action with two-run agreement.
+Two real defects were found while verifying rather than assuming:
+`item_sigil` never ran its target dispatch, which made the WHOLE Chthon
+encounter unreachable through the authored chain, and `monster_death_use`
+was absent, so his death could never reach the relay driving his exit
+doors.
 
-### Quake: Q4 NOT STARTED
+NOT delivered: per-map authored routes for Start and E1M1 through E1M8,
+the normal and secret full-episode routes, presentation beyond the
+intermission (no particles, sprites, explosion or muzzle feedback, screen
+flashes, and light styles are still frozen at constant 256), and a real
+performance profile. Whole-run averages that include disc stalls are NOT a
+frame-rate claim and were correctly refused as such.
 
-Per-map routes for Start and E1M1-E1M8, the normal and secret routes (the
-secret exit is **E1M4 to E1M8**, and E1M8 returns to E1M5; E1M7 returns to
-Start), Chthon end to end, intermission and the episode ending, plus
-sprites, particles, explosions, flashes, light styles, and the 30 fps
-performance telemetry. This is the largest remaining package.
+Chthon could not be killed because `func_plat` did not carry riders: his
+`event_lightning` button sits on a ring at z 208, the arena floor is
+z 0..63, and the two walkable sets are disjoint with the plat as the only
+access. Rider carrying is being implemented; its blocked-push rollback
+semantics and its rider scope both need the corrections in section 1.
 
-Also open from the monster lane: `bestiary-regress` gates 2 of 7 monsters
-(Ogre, Knight). Zombie, Wizard, Shambler, Demon and Chthon are implemented
-and unit-tested but have no authored-map death gate. Zombie and Shambler
-cannot be gated by a walk-up route with the starting arsenal.
+Also open: `bestiary-regress` gates 2 of 7 monsters (Ogre, Knight). Zombie,
+Wizard, Shambler, Demon and Chthon are implemented and unit-tested with no
+authored-map death gate, and Zombie and Shambler cannot be gated by a
+walk-up route with the starting arsenal.
 
 ### PSoXide: final pin
 
