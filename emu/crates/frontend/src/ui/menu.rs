@@ -759,6 +759,15 @@ impl MenuState {
         None
     }
 
+    /// Take a click action queued while painting this frame.
+    ///
+    /// The shell drains this immediately after [`Self::draw`] so browser file
+    /// pickers still run as part of the click-triggered redraw. Leaving it for
+    /// the next animation frame can lose the browser's transient user gesture.
+    pub fn take_pending_pointer_action(&mut self) -> Option<MenuAction> {
+        self.pending_pointer_action.take()
+    }
+
     /// Public reader for the currently-selected item's action --
     /// tests use it to assert the menu is populated correctly
     /// without driving input events.
@@ -846,6 +855,19 @@ impl MenuState {
             egui::Order::Middle,
             egui::Id::new("menu"),
         ));
+        let pointer_release = ctx.input(|input| {
+            input
+                .pointer
+                .any_released()
+                .then(|| input.pointer.latest_pos())
+                .flatten()
+        });
+        let pointer_hover = ctx.input(|input| input.pointer.hover_pos());
+        let interactive_release = if self.about_open {
+            None
+        } else {
+            pointer_release
+        };
 
         let backdrop_alpha = (self.backdrop_pct as u16 * 255 / 100) as u8;
         painter.rect_filled(
@@ -882,7 +904,10 @@ impl MenuState {
         let center_x = sw / 2.0;
         let center_y = sh * 0.38;
 
-        // Category row.
+        // Category row. These used to be keyboard/gamepad only even though
+        // they look like clickable tabs, which made Settings unreachable by
+        // pointer in the browser build.
+        let mut clicked_category = None;
         for (i, cat) in self.categories.iter().enumerate() {
             let offset = i as f32 - self.anim_x;
             let x = center_x + offset * CATEGORY_SPACING;
@@ -907,12 +932,23 @@ impl MenuState {
             if x < -50.0 || x > sw + 50.0 {
                 continue;
             }
+            let hit_rect =
+                Rect::from_center_size(Pos2::new(x, center_y + 8.0), Vec2::new(64.0, 72.0));
+            let hovered = !self.about_open
+                && pointer_hover.is_some_and(|position| hit_rect.contains(position));
+            if hovered {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             painter.text(
                 Pos2::new(x, center_y),
                 Align2::CENTER_CENTER,
                 cat.icon.to_string(),
                 icons::font(size),
-                color,
+                if hovered && !disabled {
+                    fade(theme::MENU_ACCENT)
+                } else {
+                    color
+                },
             );
             if is_active {
                 painter.text(
@@ -927,6 +963,14 @@ impl MenuState {
                     },
                 );
             }
+            if interactive_release.is_some_and(|position| hit_rect.contains(position)) {
+                clicked_category = Some(i);
+            }
+        }
+        if let Some(index) = clicked_category {
+            self.category_index = index;
+            self.item_index = 0;
+            self.scroll_y = 0.0;
         }
 
         // Item list.
@@ -973,21 +1017,6 @@ impl MenuState {
         let item_width = needed.clamp(ITEM_MIN_WIDTH, max_avail);
         let items_x = center_x - item_width / 2.0;
         let row_stride = ITEM_HEIGHT + ITEM_GAP;
-        let pointer_release = ctx.input(|input| {
-            input
-                .pointer
-                .any_released()
-                .then(|| input.pointer.latest_pos())
-                .flatten()
-        });
-        let pointer_hover = ctx.input(|input| input.pointer.hover_pos());
-
-        // While the About card is up, swallow row-icon clicks behind it.
-        let row_release = if self.about_open {
-            None
-        } else {
-            pointer_release
-        };
 
         // How many full rows fit between `items_start_y` and the
         // bottom edge of the screen (with a small bottom margin so
@@ -1047,15 +1076,30 @@ impl MenuState {
             if row_bottom < items_start_y - row_stride || y > sh - bottom_margin {
                 continue;
             }
+            let rect =
+                Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(item_width, ITEM_HEIGHT));
+            let action_count = usize::from(item.burn_action.is_some())
+                + usize::from(
+                    matches!(item.action, MenuAction::LaunchGame(_)) && item.burn_action.is_some(),
+                );
+            let main_rect = row_main_rect(rect, action_count);
+            let row_hovered = !self.about_open
+                && pointer_hover.is_some_and(|position| main_rect.contains(position));
             let is_selected = i == self.item_index;
+            let highlighted = is_selected || row_hovered;
+            if row_hovered {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if interactive_release.is_some_and(|position| main_rect.contains(position)) {
+                self.item_index = i;
+                self.pending_pointer_action = Some(item.action.clone());
+            }
 
-            let bg = fade(if is_selected {
+            let bg = fade(if highlighted {
                 theme::MENU_ITEM_SEL
             } else {
                 theme::MENU_ITEM_BG
             });
-            let rect =
-                Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(item_width, ITEM_HEIGHT));
             painter.rect_filled(rect, 0.0, bg);
 
             if is_selected {
@@ -1072,13 +1116,11 @@ impl MenuState {
             let launch_action = matches!(item.action, MenuAction::LaunchGame(_))
                 .then_some(&item.action)
                 .filter(|_| item.burn_action.is_some());
-            let action_count =
-                usize::from(item.burn_action.is_some()) + usize::from(launch_action.is_some());
             let content_left = items_x + 14.0;
             let avail_right = items_x + item_width - 12.0 - action_count as f32 * ROW_ACTION_WIDTH;
 
             let value_galley = item.value.as_deref().filter(|v| !v.is_empty()).map(|val| {
-                let vcolor = fade(if is_selected {
+                let vcolor = fade(if highlighted {
                     theme::MENU_TEXT_VALUE
                 } else {
                     theme::MENU_TEXT_DIM
@@ -1089,7 +1131,7 @@ impl MenuState {
             let value_w = value_galley.as_ref().map_or(0.0, |g| g.size().x);
             let value_left = avail_right - value_w;
 
-            let label_color = fade(if is_selected {
+            let label_color = fade(if highlighted {
                 theme::MENU_TEXT_BRIGHT
             } else {
                 theme::MENU_TEXT_DIM
@@ -1134,7 +1176,7 @@ impl MenuState {
                     &painter,
                     row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
-                    row_release,
+                    interactive_release,
                     icons::DISC,
                     "Burn disc",
                     is_selected,
@@ -1151,7 +1193,7 @@ impl MenuState {
                     &painter,
                     row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
-                    row_release,
+                    interactive_release,
                     icons::PLAY,
                     "Play",
                     is_selected,
@@ -1210,7 +1252,7 @@ impl MenuState {
         painter.text(
             Pos2::new(sw / 2.0, sh - 30.0),
             Align2::CENTER_TOP,
-            "Enter: Select   Esc: Close   Arrows: Navigate",
+            "Click/Enter: Select   Esc: Close   Arrows: Navigate",
             FontId::proportional(12.0),
             fade(theme::MENU_HINT),
         );
@@ -1227,6 +1269,17 @@ fn row_action_rect(items_x: f32, item_width: f32, y: f32, index_from_right: usiz
     Rect::from_min_size(
         Pos2::new(right - ROW_ACTION_WIDTH, y),
         Vec2::new(ROW_ACTION_WIDTH, ITEM_HEIGHT),
+    )
+}
+
+/// Clickable body of a row, excluding any dedicated right-side action icons.
+fn row_main_rect(rect: Rect, action_count: usize) -> Rect {
+    Rect::from_min_max(
+        rect.min,
+        Pos2::new(
+            (rect.right() - action_count as f32 * ROW_ACTION_WIDTH).max(rect.left()),
+            rect.bottom(),
+        ),
     )
 }
 
@@ -2664,6 +2717,31 @@ mod tests {
         }
     }
 
+    fn draw_pointer_click(menu: &mut MenuState, position: Pos2) {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 720.0))),
+            events: vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = context.run(input, |context| menu.draw(context, 1.0, None));
+    }
+
     #[test]
     fn fresh_state_has_expected_categories() {
         let s = MenuState::new();
@@ -2856,6 +2934,38 @@ mod tests {
         s.select_category("Settings");
         assert_eq!(s.current_category(), Some("Settings"));
         assert_eq!(s.selected_action(), Some(&MenuAction::ChooseBiosPath));
+    }
+
+    #[test]
+    fn pointer_click_on_row_queues_its_action() {
+        let mut s = MenuState::new();
+        s.select_category("Settings");
+        let first_row_center = Pos2::new(480.0, 720.0 * 0.38 + ICON_SIZE_ACTIVE + 64.0);
+
+        draw_pointer_click(&mut s, first_row_center);
+
+        assert_eq!(
+            s.take_pending_pointer_action(),
+            Some(MenuAction::ChooseBiosPath)
+        );
+    }
+
+    #[test]
+    fn pointer_click_on_category_selects_it() {
+        let mut s = MenuState::new();
+        let settings_index = s
+            .categories
+            .iter()
+            .position(|category| category.name == "Settings")
+            .unwrap();
+        let settings_icon = Pos2::new(
+            480.0 + settings_index as f32 * CATEGORY_SPACING,
+            720.0 * 0.38,
+        );
+
+        draw_pointer_click(&mut s, settings_icon);
+
+        assert_eq!(s.current_category(), Some("Settings"));
     }
 
     #[test]

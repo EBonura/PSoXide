@@ -1,111 +1,272 @@
-//! Host-input router.
+//! Host keyboard and gamepad routing.
 //!
-//! Owns the single [`Gilrs`] context and tracks every connected
-//! gamepad by `GamepadId`. Each frame the shell calls [`poll`]
-//! once; the router drains pending events, logs
-//! connect / disconnect transitions (so the user can see why a
-//! freshly-paired Bluetooth pad isn't recognised), merges every
-//! pad's button state into one PSX pad-1 mask, and detects the
-//! **Select+Start chord** that opens the Menu overlay.
-//!
-//! # Multi-pad policy
-//!
-//! All connected pads OR into port 1. Two users pressing the same
-//! button on different pads looks like one user holding it --
-//! acceptable for the "anything plugged in just works" era of PS1
-//! homebrew. The router's state is keyed by `GamepadId`, so a
-//! future settings panel can peel this apart into `port[0]` /
-//! `port[1]` without reshaping the pipeline.
-//!
-//! # Why an explicit tracked-pad set
-//!
-//! The pre-router code called `gilrs.gamepads().next()` every
-//! frame -- "whatever comes first in gilrs's internal map". That's
-//! fine with one pad plugged in, but a disconnect-then-reconnect
-//! can flip iteration order and the game silently starts reading
-//! a different device. Worse: the only time events were drained
-//! was inside the game-running path, so a BT controller paired
-//! while the Menu was open never got registered until the user
-//! launched a game.
-//!
-//! This router:
-//! 1. Polls every frame regardless of run state, so hot-plugged
-//!    pads show up immediately.
-//! 2. Logs every Connected / Disconnected so the user can see
-//!    what gilrs actually sees.
-//! 3. Keeps its own `HashMap<GamepadId, TrackedPad>` so pad
-//!    identity is stable across reorderings and iteration is
-//!    deterministic.
-//!
-//! # Chord semantics
-//!
-//! `Select + Start` = open / close the Menu. The chord avoids
-//! single-button collisions with in-game input, since any individual
-//! pad button might be a meaningful action while a game is running.
-//!
-//! The chord fires on the **rising edge**: both bits must go from
-//! "not-both-held last frame" to "both-held this frame". Subsequent
-//! frames with the chord still held do nothing -- so the menu
-//! doesn't flicker open/closed while the user is lazy about
-//! releasing.
-//!
-//! When the chord fires, the individual SELECT + START bits are
-//! **stripped** from `pad1_mask` for that frame. Otherwise games
-//! with their own "Select + Start = [special action]" handlers
-//! would also see the combination and fire the in-game action the
-//! moment the menu opens.
-//!
-//! The DualShock Analog button is routed separately from the
-//! standard button mask because PS1 software does not see it as a
-//! normal held button. It toggles the controller's Digital/Analog
-//! response mode instead.
+//! The router discovers every connected controller, assigns host devices to
+//! either PlayStation controller port, and emits both an all-device summary for
+//! UI/freecam shortcuts and independent guest samples for ports 1 and 2.
 
-// gilrs has no wasm32 backend, so the entire gamepad path (router, pad
-// sampling, hot-plug tracking) is native-only. On the web the shell uses the
-// keyboard-only [`InputRouter`] stub at the bottom of this file; keyboard
-// events already flow through winit `WindowEvent`s and work unchanged.
-#[cfg(not(target_arch = "wasm32"))]
-use emulator_core::button;
+use std::collections::BTreeMap;
+
+use emulator_core::{button, Bus};
+
 #[cfg(not(target_arch = "wasm32"))]
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 
-/// Left-stick deadzone for the D-pad proxy path.
-#[cfg(not(target_arch = "wasm32"))]
-const STICK_DEADZONE: f32 = 0.3;
+/// Stable identifier used by the routing panel for keyboard input.
+pub(crate) const KEYBOARD_DEVICE_ID: &str = "keyboard";
 
-/// Analog trigger activation threshold.
+/// Left-stick deadzone for the digital D-pad proxy path.
+const STICK_DEADZONE: f32 = 0.3;
+/// Analog trigger activation threshold on native gamepads.
 #[cfg(not(target_arch = "wasm32"))]
 const TRIGGER_THRESHOLD: f32 = 0.5;
-
-/// The Select+Start combination, precomputed.
-#[cfg(not(target_arch = "wasm32"))]
+/// The Select+Start menu chord.
 const CHORD_MASK: u16 = button::SELECT | button::START;
 
-/// Gamepad hotplug notification surfaced to the frontend toast.
-// Only the native gilrs router constructs these; the wasm router never sees a
-// pad, so the variants are intentionally unconstructed there.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+/// A host device's guest-controller destination.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PsxPort {
+    /// Device is visible to the emulator UI but not to the guest.
+    #[default]
+    Off,
+    /// PlayStation controller port 1.
+    One,
+    /// PlayStation controller port 2.
+    Two,
+}
+
+impl PsxPort {
+    /// Compact label used by the controller panel.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::One => "Port 1",
+            Self::Two => "Port 2",
+        }
+    }
+}
+
+/// One row in the controller-routing panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InputNotice {
-    /// A pad became available to gilrs.
+pub(crate) struct InputDeviceInfo {
+    /// Stable router identifier.
+    pub(crate) id: String,
+    /// Host-provided display name.
+    pub(crate) name: String,
+    /// Current guest port assignment.
+    pub(crate) port: PsxPort,
+    /// Whether the guest sees an Analog DualShock instead of an original pad.
+    pub(crate) analog: bool,
+}
+
+#[derive(Clone, Debug)]
+struct RoutingEntry {
+    name: String,
+    port: PsxPort,
+    analog: bool,
+}
+
+/// Host-device assignments shared by the native and browser backends.
+#[derive(Clone, Debug)]
+struct RoutingTable {
+    devices: BTreeMap<String, RoutingEntry>,
+    generation: u64,
+}
+
+impl Default for RoutingTable {
+    fn default() -> Self {
+        let mut devices = BTreeMap::new();
+        devices.insert(
+            KEYBOARD_DEVICE_ID.to_string(),
+            RoutingEntry {
+                name: "Keyboard".to_string(),
+                port: PsxPort::One,
+                analog: false,
+            },
+        );
+        Self {
+            devices,
+            generation: 1,
+        }
+    }
+}
+
+impl RoutingTable {
+    fn connect(&mut self, id: String, name: String) {
+        if let Some(existing) = self.devices.get_mut(&id) {
+            existing.name = name;
+            return;
+        }
+
+        let controller_count = self
+            .devices
+            .keys()
+            .filter(|device_id| device_id.as_str() != KEYBOARD_DEVICE_ID)
+            .count();
+        let port = if controller_count == 0 {
+            PsxPort::One
+        } else if !self.port_occupied(PsxPort::Two) {
+            PsxPort::Two
+        } else {
+            PsxPort::Off
+        };
+        if port != PsxPort::Off {
+            self.clear_port(port, &id);
+        }
+        self.devices.insert(
+            id,
+            RoutingEntry {
+                name,
+                port,
+                // Original digital pad is the safest default for early games.
+                analog: false,
+            },
+        );
+        self.bump();
+    }
+
+    fn disconnect(&mut self, id: &str) {
+        if id == KEYBOARD_DEVICE_ID || self.devices.remove(id).is_none() {
+            return;
+        }
+        if !self.port_occupied(PsxPort::One) {
+            if let Some(keyboard) = self.devices.get_mut(KEYBOARD_DEVICE_ID) {
+                keyboard.port = PsxPort::One;
+            }
+        }
+        self.bump();
+    }
+
+    fn set_port(&mut self, id: &str, port: PsxPort) -> bool {
+        let Some(previous) = self.devices.get(id).map(|entry| entry.port) else {
+            return false;
+        };
+        if previous == port {
+            return false;
+        }
+        if port != PsxPort::Off {
+            self.clear_port(port, id);
+        }
+        if let Some(entry) = self.devices.get_mut(id) {
+            entry.port = port;
+        }
+        self.bump();
+        true
+    }
+
+    fn set_analog(&mut self, id: &str, analog: bool) -> bool {
+        let Some(entry) = self.devices.get_mut(id) else {
+            return false;
+        };
+        if entry.analog == analog {
+            return false;
+        }
+        entry.analog = analog;
+        self.bump();
+        true
+    }
+
+    fn toggle_analog(&mut self, id: &str) -> bool {
+        let Some(entry) = self.devices.get_mut(id) else {
+            return false;
+        };
+        entry.analog = !entry.analog;
+        let analog = entry.analog;
+        self.bump();
+        analog
+    }
+
+    fn port_for(&self, id: &str) -> PsxPort {
+        self.devices
+            .get(id)
+            .map(|entry| entry.port)
+            .unwrap_or(PsxPort::Off)
+    }
+
+    fn keyboard_port(&self) -> PsxPort {
+        self.port_for(KEYBOARD_DEVICE_ID)
+    }
+
+    fn profile_for(&self, port: PsxPort) -> Option<bool> {
+        self.devices
+            .values()
+            .find(|entry| entry.port == port)
+            .map(|entry| entry.analog)
+    }
+
+    fn port_occupied(&self, port: PsxPort) -> bool {
+        self.devices.values().any(|entry| entry.port == port)
+    }
+
+    fn clear_port(&mut self, port: PsxPort, except_id: &str) {
+        for (id, entry) in &mut self.devices {
+            if id != except_id && entry.port == port {
+                entry.port = PsxPort::Off;
+            }
+        }
+    }
+
+    fn devices(&self) -> Vec<InputDeviceInfo> {
+        self.devices
+            .iter()
+            .map(|(id, entry)| InputDeviceInfo {
+                id: id.clone(),
+                name: entry.name.clone(),
+                port: entry.port,
+                analog: entry.analog,
+            })
+            .collect()
+    }
+
+    fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+/// Buttons and sticks routed to one guest port this frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RoutedPadInput {
+    /// Held PlayStation button bits.
+    pub(crate) mask: u16,
+    /// Left stick in host coordinates.
+    pub(crate) left_stick: (f32, f32),
+    /// Right stick in host coordinates.
+    pub(crate) right_stick: (f32, f32),
+}
+
+impl RoutedPadInput {
+    fn merge(&mut self, mask: u16, left_stick: (f32, f32), right_stick: (f32, f32)) {
+        self.mask |= mask;
+        if self.left_stick == (0.0, 0.0) {
+            self.left_stick = left_stick;
+        }
+        if self.right_stick == (0.0, 0.0) {
+            self.right_stick = right_stick;
+        }
+    }
+}
+
+/// Gamepad hotplug notification surfaced to the frontend toast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InputNotice {
+    /// A controller became available.
     Connected {
-        /// User-facing controller name reported by gilrs.
+        /// User-facing controller name.
         name: String,
-        /// Mapping source summary, e.g. SDL database vs raw HID.
+        /// Mapping source summary.
         mapping: String,
     },
-    /// A previously-tracked pad disappeared.
+    /// A previously tracked controller disappeared.
     Disconnected {
-        /// User-facing controller name captured before disconnect.
+        /// User-facing name captured before disconnect.
         name: String,
     },
 }
 
 impl InputNotice {
     /// Short status-line text for the frontend toast.
-    pub fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         match self {
             Self::Connected { name, mapping } => format!("Gamepad connected: {name} ({mapping})"),
             Self::Disconnected { name } => format!("Gamepad disconnected: {name}"),
@@ -113,614 +274,601 @@ impl InputNotice {
     }
 }
 
-/// Per-frame summary returned by [`InputRouter::poll`].
-///
-/// The shell consumes this to drive both the PSX pad input and
-/// Menu menu navigation in a single call -- separate fields rather
-/// than one blob so each consumer's needs are obvious at the call
-/// site.
+/// Per-frame gamepad summary returned by [`InputRouter::poll`].
 #[derive(Clone, Debug, Default)]
-pub struct InputFrame {
+pub(crate) struct InputFrame {
     /// Hotplug notices drained this frame.
-    pub notices: Vec<InputNotice>,
-
-    /// Merged PSX pad-1 bitmask across every connected pad. The
-    /// Select + Start bits are masked out during frames when the
-    /// chord fires, so in-game Select+Start handlers don't see a
-    /// phantom combo when the user is actually opening the menu.
-    pub pad1_mask: u16,
-
-    /// Buttons that transitioned from up to down during this poll
-    /// (rising edges of the merged mask). The shell folds the
-    /// directional bits into SOCD recency so a fresh gamepad press
-    /// competes fairly with held keyboard directions; consumers
-    /// filter for the bits they care about.
-    pub pressed_mask: u16,
-
-    /// Rising-edge of Select+Start on any pad -- goes `true` for
-    /// exactly one frame after both become held. The shell wires
-    /// this into `MenuInput.toggle_open`, reusing the same path
-    /// Escape goes through.
-    pub toggle_menu: bool,
-
-    /// Rising-edge of the host pad's Analog/Mode button. The shell
-    /// turns this into a DualShock mode toggle rather than a normal
-    /// PSX button press.
-    pub analog_button: bool,
-
-    /// Menu-navigation edges: `true` the frame a direction just
-    /// became held on any pad. Single-press semantics so holding
-    /// the D-pad doesn't spam nav events (cf. keyboard's OS-level
-    /// repeat, which we wouldn't want to imitate on a stick).
-    pub menu_up: bool,
-    /// See [`Self::menu_up`].
-    pub menu_down: bool,
-    /// See [`Self::menu_up`].
-    pub menu_left: bool,
-    /// See [`Self::menu_up`].
-    pub menu_right: bool,
-    /// Rising-edge of Cross -- the Menu's "enter / confirm".
-    pub menu_confirm: bool,
-    /// Rising-edge of Circle -- the Menu's "back / cancel".
-    pub menu_back: bool,
-
-    /// Left stick on the first currently-connected pad, in
-    /// −1.0..=1.0 per axis. Zero when no pad is plugged in.
-    pub left_stick: (f32, f32),
-    /// Right stick on the first currently-connected pad.
-    pub right_stick: (f32, f32),
+    pub(crate) notices: Vec<InputNotice>,
+    /// All connected gamepads merged for menu and freecam shortcuts.
+    pub(crate) pad1_mask: u16,
+    /// Routed guest input for controller port 1.
+    pub(crate) port1: RoutedPadInput,
+    /// Routed guest input for controller port 2.
+    pub(crate) port2: RoutedPadInput,
+    /// Rising edges of the all-device merged mask.
+    pub(crate) pressed_mask: u16,
+    /// Rising edge of Select+Start on any controller.
+    pub(crate) toggle_menu: bool,
+    /// Rising edge of a host Analog/Mode button.
+    pub(crate) analog_button: bool,
+    /// Menu navigation edge.
+    pub(crate) menu_up: bool,
+    /// Menu navigation edge.
+    pub(crate) menu_down: bool,
+    /// Menu navigation edge.
+    pub(crate) menu_left: bool,
+    /// Menu navigation edge.
+    pub(crate) menu_right: bool,
+    /// Menu confirmation edge.
+    pub(crate) menu_confirm: bool,
+    /// Menu cancellation edge.
+    pub(crate) menu_back: bool,
+    /// First active controller's left stick, for freecam.
+    pub(crate) left_stick: (f32, f32),
+    /// First active controller's right stick, for freecam.
+    pub(crate) right_stick: (f32, f32),
 }
 
-/// Buttons that transitioned from up to down between two polls.
-/// Shared by the native and web routers so `InputFrame::pressed_mask`
-/// carries identical semantics on both -- the SOCD recency fed from it
-/// must not behave differently per platform.
-fn rising_edges(prev: u16, now: u16) -> u16 {
-    now & !prev
+fn rising_edges(previous: u16, now: u16) -> u16 {
+    now & !previous
 }
 
-/// One tracked pad. Name is captured at connect time so we can
-/// still identify the pad in a disconnect log message after gilrs
-/// has already dropped the handle.
+fn finish_frame(
+    frame: &mut InputFrame,
+    previous_mask: &mut u16,
+    previous_chord: &mut bool,
+    mut mask: u16,
+) {
+    let raw_mask = mask;
+    let chord = (mask & CHORD_MASK) == CHORD_MASK;
+    frame.toggle_menu = chord && !*previous_chord;
+    if chord {
+        mask &= !CHORD_MASK;
+        frame.port1.mask &= !CHORD_MASK;
+        frame.port2.mask &= !CHORD_MASK;
+    }
+    frame.pressed_mask = rising_edges(*previous_mask, raw_mask);
+    frame.menu_up = frame.pressed_mask & button::UP != 0;
+    frame.menu_down = frame.pressed_mask & button::DOWN != 0;
+    frame.menu_left = frame.pressed_mask & button::LEFT != 0;
+    frame.menu_right = frame.pressed_mask & button::RIGHT != 0;
+    frame.menu_confirm = frame.pressed_mask & button::CROSS != 0;
+    frame.menu_back = frame.pressed_mask & button::CIRCLE != 0;
+    frame.pad1_mask = mask;
+    *previous_mask = raw_mask;
+    *previous_chord = chord;
+}
+
+fn configure_port(bus: &mut Bus, port: PsxPort, analog: Option<bool>) {
+    match (port, analog) {
+        (PsxPort::One, None) => bus.detach_pad_port1(),
+        (PsxPort::One, Some(false)) => bus.attach_original_digital_pad_port1(),
+        (PsxPort::One, Some(true)) => {
+            bus.attach_digital_pad_port1();
+            let _ = bus.force_port1_analog_mode();
+        }
+        (PsxPort::Two, None) => bus.detach_pad_port2(),
+        (PsxPort::Two, Some(false)) => bus.attach_original_digital_pad_port2(),
+        (PsxPort::Two, Some(true)) => {
+            bus.attach_digital_pad_port2();
+            let _ = bus.force_port2_analog_mode();
+        }
+        (PsxPort::Off, _) => {}
+    }
+}
+
+/// Methods that are identical for the native and browser router structs.
+macro_rules! routing_api {
+    () => {
+        /// Whether at least one physical gamepad is connected.
+        pub(crate) fn is_connected(&self) -> bool {
+            !self.pads.is_empty()
+        }
+
+        /// Comma-separated connected gamepad names.
+        pub(crate) fn connected_names(&self) -> String {
+            let mut names: Vec<&str> = self.pads.values().map(|pad| pad.name.as_str()).collect();
+            names.sort_unstable();
+            names.join(", ")
+        }
+
+        /// Current rows for the controller-routing panel.
+        pub(crate) fn devices(&self) -> Vec<InputDeviceInfo> {
+            self.routing.devices()
+        }
+
+        /// Move a host device to Off, port 1, or port 2.
+        pub(crate) fn set_device_port(&mut self, id: &str, port: PsxPort) -> bool {
+            self.routing.set_port(id, port)
+        }
+
+        /// Select original Digital or Analog DualShock identity.
+        pub(crate) fn set_device_analog(&mut self, id: &str, analog: bool) -> bool {
+            self.routing.set_analog(id, analog)
+        }
+
+        /// Toggle the keyboard's configured controller identity.
+        pub(crate) fn toggle_keyboard_analog(&mut self) -> bool {
+            self.routing.toggle_analog(KEYBOARD_DEVICE_ID)
+        }
+
+        /// Port currently receiving keyboard input.
+        pub(crate) fn keyboard_port(&self) -> PsxPort {
+            self.routing.keyboard_port()
+        }
+
+        /// Monotonic stamp changed by any route or mode edit.
+        pub(crate) fn routing_generation(&self) -> u64 {
+            self.routing.generation
+        }
+
+        /// Apply current Digital/Analog controller identities to a new layout.
+        pub(crate) fn apply_layout(&self, bus: &mut Bus) {
+            configure_port(bus, PsxPort::One, self.routing.profile_for(PsxPort::One));
+            configure_port(bus, PsxPort::Two, self.routing.profile_for(PsxPort::Two));
+        }
+    };
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct TrackedPad {
     name: String,
+    route_id: String,
+    previous_mode_button: bool,
 }
 
-/// Central input router. One per shell; polled once per frame.
+/// Central native input router. One instance is polled once per frame.
 #[cfg(not(target_arch = "wasm32"))]
-pub struct InputRouter {
-    /// `None` when gilrs init failed (headless / locked-down
-    /// Linux / missing permissions). Keyboard still works.
+pub(crate) struct InputRouter {
     gilrs: Option<Gilrs>,
-    /// Every pad gilrs has told us about, still connected.
-    /// Updated on `Connected` / `Disconnected` events.
     pads: HashMap<GamepadId, TrackedPad>,
-    /// Previous frame's merged mask -- used for rising-edge
-    /// detection on both the chord and the menu-nav buttons.
-    prev_mask: u16,
-    /// Previous frame's host Analog/Mode button state.
-    prev_analog_button: bool,
-    /// Hotplug notices generated during startup before the first
-    /// frame could display them.
+    routing: RoutingTable,
+    previous_mask: u16,
+    previous_chord: bool,
     pending_notices: Vec<InputNotice>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl InputRouter {
-    /// Initialise gilrs and enumerate any pads already known at
-    /// startup. A failed init is non-fatal -- subsequent polls
-    /// return an empty [`InputFrame`] and the shell happily runs
-    /// on keyboard alone.
-    pub fn new() -> Self {
+    /// Initialise gilrs and enumerate controllers already connected.
+    pub(crate) fn new() -> Self {
         let gilrs = match Gilrs::new() {
-            Ok(g) => {
-                // Log every pad gilrs already enumerated at this
-                // point -- the "did it even see my controller?"
-                // question users will ask when BT pads go missing.
-                for (id, gp) in g.gamepads() {
-                    eprintln!(
-                        "[input] init: id={id:?} name={:?} connected={} mapping={}",
-                        gp.name(),
-                        gp.is_connected(),
-                        if gp.mapping_source() == gilrs::MappingSource::None {
-                            "none (raw HID - face buttons may not map)"
-                        } else {
-                            "SDL_GameControllerDB"
-                        },
-                    );
-                }
-                Some(g)
-            }
-            Err(e) => {
-                eprintln!("[input] gilrs init failed: {e} - keyboard only");
+            Ok(gilrs) => Some(gilrs),
+            Err(error) => {
+                eprintln!("[input] gilrs init failed: {error} - keyboard only");
                 None
             }
         };
-
-        // Pre-seed the tracked-pad map so `is_connected` is honest
-        // from frame zero rather than waiting for the first `poll`.
-        let mut pads: HashMap<GamepadId, TrackedPad> = HashMap::new();
+        let mut routing = RoutingTable::default();
+        let mut pads = HashMap::new();
         let mut pending_notices = Vec::new();
-        if let Some(g) = gilrs.as_ref() {
-            for (id, gp) in g.gamepads() {
-                let mapping = if gp.mapping_source() == gilrs::MappingSource::None {
-                    "raw HID".to_string()
-                } else {
-                    "SDL mapping".to_string()
-                };
+        if let Some(gilrs) = gilrs.as_ref() {
+            for (id, gamepad) in gilrs.gamepads().filter(|(_, pad)| pad.is_connected()) {
+                let name = gamepad.name().to_string();
+                let route_id = format!("native:{id:?}");
+                let mapping = native_mapping_name(&gamepad);
+                routing.connect(route_id.clone(), name.clone());
                 pending_notices.push(InputNotice::Connected {
-                    name: gp.name().to_string(),
-                    mapping,
+                    name: name.clone(),
+                    mapping: mapping.to_string(),
                 });
                 pads.insert(
                     id,
                     TrackedPad {
-                        name: gp.name().to_string(),
+                        name,
+                        route_id,
+                        previous_mode_button: false,
                     },
                 );
             }
         }
-
         Self {
             gilrs,
             pads,
-            prev_mask: 0,
-            prev_analog_button: false,
+            routing,
+            previous_mask: 0,
+            previous_chord: false,
             pending_notices,
         }
     }
 
-    /// Drain pending events, recompute the merged state, and
-    /// return the [`InputFrame`] for this tick. Must be called
-    /// once per frame -- call it even when the game is paused,
-    /// otherwise gilrs's event queue never drains and hot-plugged
-    /// pads go un-noticed.
-    pub fn poll(&mut self) -> InputFrame {
+    /// Drain hotplug events and sample every connected controller.
+    pub(crate) fn poll(&mut self) -> InputFrame {
         let Some(gilrs) = self.gilrs.as_mut() else {
             return InputFrame::default();
         };
-        let mut notices = std::mem::take(&mut self.pending_notices);
+        let mut frame = InputFrame {
+            notices: std::mem::take(&mut self.pending_notices),
+            ..InputFrame::default()
+        };
 
-        // 1. Drain events, maintaining our connected-pad set.
         while let Some(Event { id, event, .. }) = gilrs.next_event() {
             match event {
                 EventType::Connected => {
-                    let gp = gilrs.gamepad(id);
-                    let name = gp.name().to_string();
-                    let mapping = if gp.mapping_source() == gilrs::MappingSource::None {
-                        "none (raw HID - face buttons may not map)"
-                    } else {
-                        "SDL_GameControllerDB"
-                    };
-                    eprintln!("[input] connected: id={id:?} name={name:?} mapping={mapping}",);
-                    notices.push(InputNotice::Connected {
-                        name: name.clone(),
-                        mapping: mapping.to_string(),
-                    });
-                    self.pads.insert(id, TrackedPad { name });
+                    let gamepad = gilrs.gamepad(id);
+                    let name = gamepad.name().to_string();
+                    let route_id = format!("native:{id:?}");
+                    let mapping = native_mapping_name(&gamepad).to_string();
+                    self.routing.connect(route_id.clone(), name.clone());
+                    self.pads.insert(
+                        id,
+                        TrackedPad {
+                            name: name.clone(),
+                            route_id,
+                            previous_mode_button: false,
+                        },
+                    );
+                    frame.notices.push(InputNotice::Connected { name, mapping });
                 }
                 EventType::Disconnected => {
-                    if let Some(p) = self.pads.remove(&id) {
-                        eprintln!("[input] disconnected: id={id:?} name={:?}", p.name);
-                        notices.push(InputNotice::Disconnected { name: p.name });
+                    if let Some(tracked) = self.pads.remove(&id) {
+                        self.routing.disconnect(&tracked.route_id);
+                        frame
+                            .notices
+                            .push(InputNotice::Disconnected { name: tracked.name });
                     }
                 }
-                // Other events (button + axis state) are handled
-                // implicitly by re-reading `gp.is_pressed` /
-                // `gp.value` below -- no per-event bookkeeping.
                 _ => {}
             }
         }
 
-        // 2. Sample every connected pad; OR into the merged mask.
-        //    Record the first connected pad's sticks for the
-        //    caller -- analog routing is single-player even when
-        //    multiple pads contribute to port 1's digital mask.
-        let mut mask: u16 = 0;
-        let mut first_sticks: Option<((f32, f32), (f32, f32))> = None;
-        let mut analog_down = false;
-
-        // Iterate through our *own* tracked set instead of
-        // `gilrs.gamepads()` -- deterministic order across frames
-        // (HashMap iteration order is randomised per-Map, but
-        // stable within one HashMap's lifetime when unchanged).
-        for id in self.pads.keys() {
-            let gp = gilrs.gamepad(*id);
-            if !gp.is_connected() {
+        let mut merged_mask = 0;
+        let mut first_sticks = None;
+        for (id, tracked) in &mut self.pads {
+            let gamepad = gilrs.gamepad(*id);
+            if !gamepad.is_connected() {
                 continue;
             }
-            mask |= sample_pad(&gp);
-            analog_down |= gp.is_pressed(Button::Mode);
-            if first_sticks.is_none() {
-                first_sticks = Some((
-                    (gp.value(Axis::LeftStickX), gp.value(Axis::LeftStickY)),
-                    (gp.value(Axis::RightStickX), gp.value(Axis::RightStickY)),
-                ));
+            let mask = sample_native_pad(&gamepad);
+            let left = (
+                gamepad.value(Axis::LeftStickX),
+                gamepad.value(Axis::LeftStickY),
+            );
+            let right = (
+                gamepad.value(Axis::RightStickX),
+                gamepad.value(Axis::RightStickY),
+            );
+            merged_mask |= mask;
+            first_sticks.get_or_insert((left, right));
+            match self.routing.port_for(&tracked.route_id) {
+                PsxPort::One => frame.port1.merge(mask, left, right),
+                PsxPort::Two => frame.port2.merge(mask, left, right),
+                PsxPort::Off => {}
             }
+
+            let mode_down = gamepad.is_pressed(Button::Mode);
+            if mode_down && !tracked.previous_mode_button {
+                self.routing.toggle_analog(&tracked.route_id);
+                frame.analog_button = true;
+            }
+            tracked.previous_mode_button = mode_down;
         }
-
-        // 3. Edge detection. We compute edges *before* stripping
-        //    the chord, so `menu_confirm` / `menu_back` pick up on
-        //    Cross / Circle normally, but the chord logic sees
-        //    the raw combination too.
-        let edge = rising_edges(self.prev_mask, mask);
-        let chord_active = (mask & CHORD_MASK) == CHORD_MASK;
-        let chord_was_active = (self.prev_mask & CHORD_MASK) == CHORD_MASK;
-        let toggle_menu = chord_active && !chord_was_active;
-        let analog_button = analog_down && !self.prev_analog_button;
-
-        // 4. Build the frame.
-        //    Menu-nav edges are derived from the raw merged mask
-        //    *before* we mask out the chord bits -- pressing just
-        //    Select (without Start) should still behave like the
-        //    pad sees it (no menu_* flag fires for Select alone,
-        //    since CHORD_MASK bits aren't in any menu_* field).
-        let frame = InputFrame {
-            notices,
-            pad1_mask: if chord_active {
-                // Swallow the chord so in-game Select+Start
-                // handlers don't see the menu-open combination.
-                mask & !CHORD_MASK
-            } else {
-                mask
-            },
-            pressed_mask: edge,
-            toggle_menu,
-            analog_button,
-            menu_up: (edge & button::UP) != 0,
-            menu_down: (edge & button::DOWN) != 0,
-            menu_left: (edge & button::LEFT) != 0,
-            menu_right: (edge & button::RIGHT) != 0,
-            menu_confirm: (edge & button::CROSS) != 0,
-            menu_back: (edge & button::CIRCLE) != 0,
-            left_stick: first_sticks.map(|(l, _)| l).unwrap_or((0.0, 0.0)),
-            right_stick: first_sticks.map(|(_, r)| r).unwrap_or((0.0, 0.0)),
-        };
-
-        // 5. Stash for next frame's edge math. We store the raw
-        //    merged mask (chord bits included) so the chord's
-        //    rising-edge math works -- stashing the chord-masked
-        //    value would make the chord re-fire every frame it
-        //    stayed held.
-        self.prev_mask = mask;
-        self.prev_analog_button = analog_down;
-
+        if let Some((left, right)) = first_sticks {
+            frame.left_stick = left;
+            frame.right_stick = right;
+        }
+        finish_frame(
+            &mut frame,
+            &mut self.previous_mask,
+            &mut self.previous_chord,
+            merged_mask,
+        );
         frame
     }
 
-    /// `true` when any pad is currently tracked. Used by the HUD
-    /// + startup banner to show a "pad connected" indicator.
-    pub fn is_connected(&self) -> bool {
-        !self.pads.is_empty()
-    }
+    routing_api!();
+}
 
-    /// Comma-separated list of currently-connected pad names.
-    /// Empty string when nothing is plugged in. Diagnostic --
-    /// surfaced in the startup banner and (eventually) the
-    /// settings panel.
-    pub fn connected_names(&self) -> String {
-        let mut names: Vec<&str> = self.pads.values().map(|p| p.name.as_str()).collect();
-        names.sort_unstable();
-        names.join(", ")
+#[cfg(not(target_arch = "wasm32"))]
+fn native_mapping_name(gamepad: &gilrs::Gamepad<'_>) -> &'static str {
+    if gamepad.mapping_source() == gilrs::MappingSource::None {
+        "raw HID"
+    } else {
+        "SDL mapping"
     }
 }
 
-/// Sample one pad's PSX button mask. Extracted so the mapping
-/// table is in exactly one place -- no ambiguity about which
-/// flavour of `is_pressed` the router uses vs what a hypothetical
-/// "preview current pad" feature might do.
-///
-/// Xbox layout → DualShock:
-///   South (A / bottom) → Cross
-///   East  (B / right)  → Circle
-///   West  (X / left)   → Square
-///   North (Y / top)    → Triangle
 #[cfg(not(target_arch = "wasm32"))]
-fn sample_pad(gp: &gilrs::Gamepad<'_>) -> u16 {
-    let mut mask: u16 = 0;
-
-    if gp.is_pressed(Button::South) {
-        mask |= button::CROSS;
+fn sample_native_pad(gamepad: &gilrs::Gamepad<'_>) -> u16 {
+    let mut mask = 0;
+    for (pressed, bit) in [
+        (gamepad.is_pressed(Button::South), button::CROSS),
+        (gamepad.is_pressed(Button::East), button::CIRCLE),
+        (gamepad.is_pressed(Button::West), button::SQUARE),
+        (gamepad.is_pressed(Button::North), button::TRIANGLE),
+        (gamepad.is_pressed(Button::LeftTrigger), button::L1),
+        (gamepad.is_pressed(Button::RightTrigger), button::R1),
+        (
+            gamepad.is_pressed(Button::LeftTrigger2)
+                || gamepad.value(Axis::LeftZ) > TRIGGER_THRESHOLD,
+            button::L2,
+        ),
+        (
+            gamepad.is_pressed(Button::RightTrigger2)
+                || gamepad.value(Axis::RightZ) > TRIGGER_THRESHOLD,
+            button::R2,
+        ),
+        (gamepad.is_pressed(Button::LeftThumb), button::L3),
+        (gamepad.is_pressed(Button::RightThumb), button::R3),
+        (gamepad.is_pressed(Button::DPadUp), button::UP),
+        (gamepad.is_pressed(Button::DPadDown), button::DOWN),
+        (gamepad.is_pressed(Button::DPadLeft), button::LEFT),
+        (gamepad.is_pressed(Button::DPadRight), button::RIGHT),
+        (gamepad.is_pressed(Button::Select), button::SELECT),
+        (gamepad.is_pressed(Button::Start), button::START),
+    ] {
+        if pressed {
+            mask |= bit;
+        }
     }
-    if gp.is_pressed(Button::East) {
-        mask |= button::CIRCLE;
-    }
-    if gp.is_pressed(Button::West) {
-        mask |= button::SQUARE;
-    }
-    if gp.is_pressed(Button::North) {
-        mask |= button::TRIANGLE;
-    }
-
-    // Shoulders + triggers. Analog-trigger fallback covers pads
-    // whose drivers expose the triggers as `LeftZ` / `RightZ`
-    // axes instead of discrete buttons (macOS + some Xbox BT
-    // firmwares behave this way).
-    if gp.is_pressed(Button::LeftTrigger) {
-        mask |= button::L1;
-    }
-    if gp.is_pressed(Button::RightTrigger) {
-        mask |= button::R1;
-    }
-    if gp.is_pressed(Button::LeftTrigger2) || gp.value(Axis::LeftZ) > TRIGGER_THRESHOLD {
-        mask |= button::L2;
-    }
-    if gp.is_pressed(Button::RightTrigger2) || gp.value(Axis::RightZ) > TRIGGER_THRESHOLD {
-        mask |= button::R2;
-    }
-    if gp.is_pressed(Button::LeftThumb) {
-        mask |= button::L3;
-    }
-    if gp.is_pressed(Button::RightThumb) {
-        mask |= button::R3;
-    }
-
-    // D-pad.
-    if gp.is_pressed(Button::DPadUp) {
-        mask |= button::UP;
-    }
-    if gp.is_pressed(Button::DPadDown) {
-        mask |= button::DOWN;
-    }
-    if gp.is_pressed(Button::DPadLeft) {
-        mask |= button::LEFT;
-    }
-    if gp.is_pressed(Button::DPadRight) {
-        mask |= button::RIGHT;
-    }
-
-    // Left stick as D-pad proxy -- useful for both games that
-    // treat the pad as digital regardless of DualShock capability
-    // AND for Menu nav, which needs directional edges.
-    let lx = gp.value(Axis::LeftStickX);
-    let ly = gp.value(Axis::LeftStickY);
-    if ly > STICK_DEADZONE {
-        mask |= button::UP;
-    }
-    if ly < -STICK_DEADZONE {
-        mask |= button::DOWN;
-    }
-    if lx < -STICK_DEADZONE {
-        mask |= button::LEFT;
-    }
-    if lx > STICK_DEADZONE {
-        mask |= button::RIGHT;
-    }
-
-    // Select / Start.
-    if gp.is_pressed(Button::Select) {
-        mask |= button::SELECT;
-    }
-    if gp.is_pressed(Button::Start) {
-        mask |= button::START;
-    }
-
+    let x = gamepad.value(Axis::LeftStickX);
+    let y = gamepad.value(Axis::LeftStickY);
+    add_stick_dpad(&mut mask, x, y, true);
     mask
 }
 
-/// Keyboard-only input router for the web build. There is no gamepad backend
-/// on wasm (gilrs does not target it), so every poll returns an empty
-/// [`InputFrame`]; keyboard input reaches the guest through winit
-/// `WindowEvent`s in the shell, exactly as on native, so nothing is lost for a
-/// keyboard player. The surface matches the native router so the shell needs no
-/// per-platform branching at the call sites.
 #[cfg(target_arch = "wasm32")]
-#[derive(Default)]
-pub struct InputRouter {
-    /// Previous frame's pad mask, for menu-nav rising edges.
-    prev_mask: u16,
-    /// Previous Select+Start-held state, for the menu-toggle rising edge.
-    prev_chord: bool,
-    /// Previous analog-button state, for its rising edge.
-    prev_analog: bool,
-    /// Whether a pad was connected last frame, for connect/disconnect notices.
-    prev_connected: bool,
-    /// Connected pad's name, kept so the disconnect notice can report it.
-    prev_name: String,
+struct WebTrackedPad {
+    name: String,
+    route_id: String,
+    previous_mode_button: bool,
+}
+
+/// Browser Gamepad API router.
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct InputRouter {
+    pads: BTreeMap<u32, WebTrackedPad>,
+    routing: RoutingTable,
+    previous_mask: u16,
+    previous_chord: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for InputRouter {
+    fn default() -> Self {
+        Self {
+            pads: BTreeMap::new(),
+            routing: RoutingTable::default(),
+            previous_mask: 0,
+            previous_chord: false,
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
 impl InputRouter {
-    /// Construct the web gamepad router. Always succeeds.
-    pub fn new() -> Self {
+    /// Construct the web gamepad router.
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// Poll the browser Gamepad API for the first connected pad and map the
-    /// "standard" layout onto the PSX pad. Keyboard input still flows through
-    /// winit `WindowEvent`s in the shell, exactly as on native.
-    pub fn poll(&mut self) -> InputFrame {
-        use emulator_core::button;
-        use wasm_bindgen::JsCast;
-
+    /// Enumerate and sample every controller exposed by the browser.
+    pub(crate) fn poll(&mut self) -> InputFrame {
+        let connected = connected_web_gamepads();
         let mut frame = InputFrame::default();
-        let gp = first_connected_gamepad();
 
-        // Connect/disconnect notices for the status toast -- also confirms to
-        // the player that the browser actually picked the pad up.
-        match (gp.is_some(), self.prev_connected) {
-            (true, false) => {
-                self.prev_name = gp.as_ref().map(|g| g.id()).unwrap_or_default();
+        let removed: Vec<u32> = self
+            .pads
+            .keys()
+            .filter(|index| !connected.contains_key(index))
+            .copied()
+            .collect();
+        for index in removed {
+            if let Some(tracked) = self.pads.remove(&index) {
+                self.routing.disconnect(&tracked.route_id);
+                frame
+                    .notices
+                    .push(InputNotice::Disconnected { name: tracked.name });
+            }
+        }
+        for (index, gamepad) in &connected {
+            if !self.pads.contains_key(index) {
+                let name = gamepad.id();
+                let route_id = format!("web:{index}");
+                self.routing.connect(route_id.clone(), name.clone());
+                self.pads.insert(
+                    *index,
+                    WebTrackedPad {
+                        name: name.clone(),
+                        route_id,
+                        previous_mode_button: false,
+                    },
+                );
                 frame.notices.push(InputNotice::Connected {
-                    name: self.prev_name.clone(),
-                    mapping: "web gamepad".to_string(),
+                    name,
+                    mapping: "web standard mapping".to_string(),
                 });
             }
-            (false, true) => {
-                frame.notices.push(InputNotice::Disconnected {
-                    name: std::mem::take(&mut self.prev_name),
-                });
+        }
+
+        let mut merged_mask = 0;
+        let mut first_sticks = None;
+        for (index, gamepad) in connected {
+            let Some(tracked) = self.pads.get_mut(&index) else {
+                continue;
+            };
+            let (mask, left, right, mode_down) = sample_web_pad(&gamepad);
+            merged_mask |= mask;
+            first_sticks.get_or_insert((left, right));
+            match self.routing.port_for(&tracked.route_id) {
+                PsxPort::One => frame.port1.merge(mask, left, right),
+                PsxPort::Two => frame.port2.merge(mask, left, right),
+                PsxPort::Off => {}
             }
-            _ => {}
-        }
-        self.prev_connected = gp.is_some();
-
-        let Some(gp) = gp else {
-            self.prev_mask = 0;
-            self.prev_chord = false;
-            self.prev_analog = false;
-            return frame;
-        };
-
-        let buttons = gp.buttons();
-        let pressed = |i: u32| -> bool {
-            let b = buttons.get(i);
-            if b.is_null() || b.is_undefined() {
-                return false;
+            if mode_down && !tracked.previous_mode_button {
+                self.routing.toggle_analog(&tracked.route_id);
+                frame.analog_button = true;
             }
-            b.unchecked_into::<web_sys::GamepadButton>().pressed()
-        };
-
-        // Standard gamepad layout -> PSX pad; face buttons follow Sony's order
-        // (bottom = Cross). See https://w3c.github.io/gamepad/#remapping.
-        let mut mask = 0u16;
-        if pressed(0) {
-            mask |= button::CROSS;
+            tracked.previous_mode_button = mode_down;
         }
-        if pressed(1) {
-            mask |= button::CIRCLE;
+        if let Some((left, right)) = first_sticks {
+            frame.left_stick = left;
+            frame.right_stick = right;
         }
-        if pressed(2) {
-            mask |= button::SQUARE;
-        }
-        if pressed(3) {
-            mask |= button::TRIANGLE;
-        }
-        if pressed(4) {
-            mask |= button::L1;
-        }
-        if pressed(5) {
-            mask |= button::R1;
-        }
-        if pressed(6) {
-            mask |= button::L2;
-        }
-        if pressed(7) {
-            mask |= button::R2;
-        }
-        if pressed(8) {
-            mask |= button::SELECT;
-        }
-        if pressed(9) {
-            mask |= button::START;
-        }
-        if pressed(10) {
-            mask |= button::L3;
-        }
-        if pressed(11) {
-            mask |= button::R3;
-        }
-        if pressed(12) {
-            mask |= button::UP;
-        }
-        if pressed(13) {
-            mask |= button::DOWN;
-        }
-        if pressed(14) {
-            mask |= button::LEFT;
-        }
-        if pressed(15) {
-            mask |= button::RIGHT;
-        }
-
-        // Sticks: axes 0/1 left, 2/3 right, with a small deadzone.
-        let axes = gp.axes();
-        let axis = |i: u32| -> f32 {
-            let v = axes.get(i).as_f64().unwrap_or(0.0) as f32;
-            if v.abs() < 0.15 {
-                0.0
-            } else {
-                v
-            }
-        };
-        frame.left_stick = (axis(0), axis(1));
-        frame.right_stick = (axis(2), axis(3));
-
-        // Select + Start -> menu toggle (rising edge); strip the bits so a game
-        // does not see the combo on the toggle frame.
-        let chord = (mask & button::SELECT != 0) && (mask & button::START != 0);
-        frame.toggle_menu = chord && !self.prev_chord;
-        if chord {
-            mask &= !(button::SELECT | button::START);
-        }
-        self.prev_chord = chord;
-
-        // Analog/Mode toggle from the guide button (index 16) when present.
-        let analog = pressed(16);
-        frame.analog_button = analog && !self.prev_analog;
-        self.prev_analog = analog;
-
-        // Menu-nav rising edges off the D-pad and face buttons, plus
-        // the raw edge mask the shell folds into SOCD recency --
-        // the same `rising_edges` the native router uses.
-        frame.pressed_mask = rising_edges(self.prev_mask, mask);
-        let edge = |bit: u16| (mask & bit != 0) && (self.prev_mask & bit == 0);
-        frame.menu_up = edge(button::UP);
-        frame.menu_down = edge(button::DOWN);
-        frame.menu_left = edge(button::LEFT);
-        frame.menu_right = edge(button::RIGHT);
-        frame.menu_confirm = edge(button::CROSS);
-        frame.menu_back = edge(button::CIRCLE);
-
-        self.prev_mask = mask;
-        frame.pad1_mask = mask;
+        finish_frame(
+            &mut frame,
+            &mut self.previous_mask,
+            &mut self.previous_chord,
+            merged_mask,
+        );
         frame
     }
 
-    /// Whether a gamepad is currently connected.
-    pub fn is_connected(&self) -> bool {
-        first_connected_gamepad().is_some()
-    }
-
-    /// Name of the first connected pad, or empty.
-    pub fn connected_names(&self) -> String {
-        first_connected_gamepad()
-            .map(|g| g.id())
-            .unwrap_or_default()
-    }
+    routing_api!();
 }
 
-/// The first connected pad reported by the browser Gamepad API, if any.
 #[cfg(target_arch = "wasm32")]
-fn first_connected_gamepad() -> Option<web_sys::Gamepad> {
+fn connected_web_gamepads() -> BTreeMap<u32, web_sys::Gamepad> {
     use wasm_bindgen::JsCast;
-    let pads = web_sys::window()?.navigator().get_gamepads().ok()?;
-    for i in 0..pads.length() {
-        let val = pads.get(i);
-        if val.is_null() || val.is_undefined() {
+
+    let mut connected = BTreeMap::new();
+    let Some(window) = web_sys::window() else {
+        return connected;
+    };
+    let Ok(gamepads) = window.navigator().get_gamepads() else {
+        return connected;
+    };
+    for slot in 0..gamepads.length() {
+        let value = gamepads.get(slot);
+        if value.is_null() || value.is_undefined() {
             continue;
         }
-        // getGamepads() slots are Gamepad-or-null; non-null is always a Gamepad.
-        let gp: web_sys::Gamepad = val.unchecked_into();
-        if gp.connected() {
-            return Some(gp);
+        let gamepad: web_sys::Gamepad = value.unchecked_into();
+        if gamepad.connected() {
+            connected.insert(gamepad.index(), gamepad);
         }
     }
-    None
+    connected
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sample_web_pad(gamepad: &web_sys::Gamepad) -> (u16, (f32, f32), (f32, f32), bool) {
+    use wasm_bindgen::JsCast;
+
+    let buttons = gamepad.buttons();
+    let pressed = |index: u32| {
+        let value = buttons.get(index);
+        !value.is_null()
+            && !value.is_undefined()
+            && value.unchecked_into::<web_sys::GamepadButton>().pressed()
+    };
+    let mut mask = 0;
+    for (index, bit) in [
+        (0, button::CROSS),
+        (1, button::CIRCLE),
+        (2, button::SQUARE),
+        (3, button::TRIANGLE),
+        (4, button::L1),
+        (5, button::R1),
+        (6, button::L2),
+        (7, button::R2),
+        (8, button::SELECT),
+        (9, button::START),
+        (10, button::L3),
+        (11, button::R3),
+        (12, button::UP),
+        (13, button::DOWN),
+        (14, button::LEFT),
+        (15, button::RIGHT),
+    ] {
+        if pressed(index) {
+            mask |= bit;
+        }
+    }
+    let axes = gamepad.axes();
+    let axis = |index: u32| -> f32 {
+        let value = axes.get(index).as_f64().unwrap_or(0.0) as f32;
+        if value.abs() < 0.15 {
+            0.0
+        } else {
+            value
+        }
+    };
+    let left = (axis(0), -axis(1));
+    let right = (axis(2), -axis(3));
+    add_stick_dpad(&mut mask, left.0, left.1, true);
+    (mask, left, right, pressed(16))
+}
+
+fn add_stick_dpad(mask: &mut u16, x: f32, y: f32, positive_y_is_up: bool) {
+    let y = if positive_y_is_up { y } else { -y };
+    if y > STICK_DEADZONE {
+        *mask |= button::UP;
+    }
+    if y < -STICK_DEADZONE {
+        *mask |= button::DOWN;
+    }
+    if x < -STICK_DEADZONE {
+        *mask |= button::LEFT;
+    }
+    if x > STICK_DEADZONE {
+        *mask |= button::RIGHT;
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::rising_edges;
+    use super::*;
 
     #[test]
     fn rising_edges_reports_only_new_presses() {
-        use emulator_core::button;
-        // Nothing held before: every held bit is an edge.
         assert_eq!(
             rising_edges(0, button::LEFT | button::CROSS),
             button::LEFT | button::CROSS
         );
-        // Still-held bits stop being edges; releases contribute nothing.
         assert_eq!(rising_edges(button::LEFT, button::LEFT), 0);
         assert_eq!(rising_edges(button::LEFT, 0), 0);
-        // A new press alongside a held one reports only the new press --
-        // the property SOCD recency depends on: the frame gamepad RIGHT
-        // lands while LEFT is held must expose exactly RIGHT.
         assert_eq!(
             rising_edges(button::LEFT, button::LEFT | button::RIGHT),
             button::RIGHT
         );
+    }
+
+    #[test]
+    fn first_controller_takes_port_one_and_second_takes_port_two() {
+        let mut routes = RoutingTable::default();
+        routes.connect("pad-a".to_string(), "Pad A".to_string());
+        assert_eq!(routes.port_for(KEYBOARD_DEVICE_ID), PsxPort::Off);
+        assert_eq!(routes.port_for("pad-a"), PsxPort::One);
+        assert_eq!(routes.profile_for(PsxPort::One), Some(false));
+
+        routes.connect("pad-b".to_string(), "Pad B".to_string());
+        assert_eq!(routes.port_for("pad-b"), PsxPort::Two);
+    }
+
+    #[test]
+    fn assignments_are_unique_and_disconnect_restores_keyboard() {
+        let mut routes = RoutingTable::default();
+        routes.connect("pad-a".to_string(), "Pad A".to_string());
+        routes.connect("pad-b".to_string(), "Pad B".to_string());
+        assert!(routes.set_port("pad-b", PsxPort::One));
+        assert_eq!(routes.port_for("pad-a"), PsxPort::Off);
+        assert_eq!(routes.port_for("pad-b"), PsxPort::One);
+        routes.disconnect("pad-b");
+        assert_eq!(routes.port_for(KEYBOARD_DEVICE_ID), PsxPort::One);
+    }
+
+    #[test]
+    fn analog_choice_is_part_of_the_port_profile() {
+        let mut routes = RoutingTable::default();
+        assert_eq!(routes.profile_for(PsxPort::One), Some(false));
+        assert!(routes.set_analog(KEYBOARD_DEVICE_ID, true));
+        assert_eq!(routes.profile_for(PsxPort::One), Some(true));
+    }
+
+    #[test]
+    fn controller_profiles_rebuild_both_bus_ports() {
+        use emulator_core::pad::PadMode;
+
+        let mut bus = Bus::new_without_bios();
+        configure_port(&mut bus, PsxPort::One, Some(false));
+        configure_port(&mut bus, PsxPort::Two, Some(true));
+        assert_eq!(bus.port1_pad_mode(), Some(PadMode::Digital));
+        assert_eq!(bus.port2_pad_mode(), Some(PadMode::Analog));
+
+        configure_port(&mut bus, PsxPort::One, None);
+        configure_port(&mut bus, PsxPort::Two, None);
+        assert_eq!(bus.port1_pad_mode(), None);
+        assert_eq!(bus.port2_pad_mode(), None);
     }
 }
