@@ -17,10 +17,10 @@ make run-release
 ## 0. Arm the project
 
 New Project copies the roofless starter courtyard: five brushes, two
-materials, no characters. Resources panel > the add/import menu >
-**Starter Characters** syncs the player, the Rust Mantis, both swords and
-their clips into the project. Do this first; without it the Place >
-Character lane has nothing to place.
+materials, no characters. The Resources panel's **+** menu ("Add, import, or
+sync resources") ends in **Starter Characters**, which syncs the player, the
+Rust Mantis, both swords and their clips into the project. Do this first;
+without it the Place > Character lane has nothing to place.
 
 *Proven headlessly:* the template copy is byte-identical to the tracked
 `editor/projects/brush-open-courtyard` (`make editor-blank-playtest-check`
@@ -44,9 +44,8 @@ through real egui pointer events on the real viewport response
 `select_tool_selected_brush_uses_visible_move_and_resize_via_real_egui`, both
 run by `make editor-blank-playtest-check`, plus
 `visible_brush_modes_drive_plain_drag_move_and_resize_in_every_2d_view`).
-Retexturing paints
-exactly the face under the cursor, costs one undo per gesture, survives save
-and reopen, and changes the cooked brush world
+Retexturing paints exactly the face under the cursor, costs one undo per
+gesture, survives save and reopen, and changes the cooked brush world
 (`apply_to_face_button_paints_only_the_selected_face_and_undoes_once`,
 `material_paint_click_paints_one_bsp_brush_face_and_samples_it_back`,
 `face_material_swap_survives_reopen_and_reaches_the_cooked_brush_world`).
@@ -67,8 +66,9 @@ the Resources panel first), then:
   entity's name into **Target**. A volume with no target is rejected at cook
   time with `Trigger Volume '<name>' has no target`, and the editor selects
   and frames the offending node, so an empty Target costs one Play attempt.
-- **Checkpoint**: an Entity, then Add Component > Interactable, then its
-  Inspector **Kind** combo to *Checkpoint*.
+- **Checkpoint**: an Entity, named, since the trigger's Target has to match
+  that name, then the Inspector's Components section > **Add Component** >
+  *Interactable*, then that component's **Kind** combo to *Checkpoint*.
 
 *Proven headlessly:* all five placed on a freshly created project through the
 production command paths, cooked, and verified down to the body hulls, the
@@ -107,9 +107,11 @@ embedded viewport shows the map rather than a loading screen.
 
 ## 4. In the playtest
 
-Walk into the trigger (the SYNC RELAY overlay confirms; CROSS dismisses it),
-open the door with CROSS, fight, die in the lava, and check you respawn at
-the relay with the enemy and door reset.
+Walk into the trigger (the checkpoint overlay confirms; CROSS dismisses it),
+open the door with CROSS, fight the enemy, then die and check you respawn at
+the checkpoint rather than the spawn, with the enemy and door reset. The
+tracked slice dies to a lava brush, which is the cheapest deliberate death to
+author; a fresh map without one has to let the enemy finish the job.
 
 *Proven headlessly:* `make editor-souls-bsp-check` replays the authored tape
 twice and pins the whole loop: 6 attack starts, 4 melee hits, 1 stagger,
