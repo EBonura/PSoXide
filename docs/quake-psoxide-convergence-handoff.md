@@ -1497,6 +1497,114 @@ i16, so the remaining suspect is what the cooker actually writes into a
 train submodel's mins. Trains must not be described as working until this
 closes.
 
+### 0.24 Quake integration repaired, and one suspected guest ABI defect
+
+Quake head `fae302a`. The three red gates are GREEN again (check,
+start-route-regress, bestiary-regress, audio-regress all verified on the
+integration tree), and the repair found causes rather than re-tuning routes:
+
+- **The merged guest image outgrew the PS1 heap.** `ResidentMap::new` still
+  took PSoXide's generic 1,100,000-byte world arena, and alongside the
+  merged entity pools, audio bank and renderer arenas the boot allocations
+  ran the bump allocator out of space: the guest halted in
+  `handle_alloc_error` BEFORE its first gameplay frame. That is why one
+  gate "set up but never ran a route frame" and another spun through its
+  instruction budget. The arena is now Quake policy sized to the cooked
+  corpus (largest map e1m3 needs 988,918 resident bytes, so the arena is
+  1,000,000) and every cook loads every map through an arena of exactly
+  that size, so a re-cook that outgrows it fails the BUILD instead of
+  exhausting the heap at boot.
+- **A resting contact was being read as a trap.** `fly_move` treated
+  `start_solid || all_solid` as Quake's "trapped in another solid", but
+  Quake tests `allsolid` alone, and `SV_FlyMove` deliberately does not test
+  `startsolid` so a slightly embedded entity can still escape. A box
+  resting exactly on a surface and moving down leaves a zero-length near
+  side, so the descent resolves straight into the solid leaf and returns
+  `all_solid` with `start_solid` false, fraction 0, and the floor's own
+  normal. That is a contact. Reading it as a trap zeroed the velocity of a
+  player standing on the newly solid boss gate, forever.
+- **The audio gate no longer measures absolute seconds.** It converts the
+  press tick to a capture position using the run's own
+  frames-per-route-tick ratio, locates the shot from the first audible
+  frame after the press, and requires silence after the last audible frame
+  for the rest of the capture. That is STRONGER than the fixed window it
+  replaces, and it is proven by permanent unit tests rather than a one-off
+  mutation.
+- `tools/routesim` landed as a host route aid: it links the same
+  `quake-core` movement and collision the guest links and runs them over
+  the same cooked `.psb`, answering a waypoint list in milliseconds. It
+  carries its own workspace and is not a path dependency of the builder.
+
+**OPEN DEFECT, and the most important thing in this section: two
+independent symptoms point at a guest ABI problem on MIPS.**
+
+1. An invalid `bool`. `MovementTraceResult::all_solid` read back as byte
+   `0xe7` on E1M1 at origin (40.60, 594.49, 24.03), produced by the
+   composed ground probe over world hull 1 and brush model 3. A byte that
+   is neither 0 nor 1 in a `bool` is undefined behaviour in Rust, so every
+   branch on it is unconstrained; the freeze was only the visible symptom.
+   An investigation could NOT pin a source-level producer: every `Trace` in
+   the guest and in quake-core is created through `Trace::default()`, and
+   there is no `MaybeUninit`, `mem::zeroed`, `transmute`, `set_len` or
+   `repr(packed)` in either. Instrumented in place, every flag byte read
+   back valid. The identical host computation is correct.
+2. `func_train` legs computing about 300x too long ON THE GUEST ONLY. My
+   earlier suspicion that the cooker wrote a doubly-Q12-scaled `mins` was
+   REFUTED with direct evidence: running the shipping `QuakeTrain` itself
+   against the real cooked lumps for all nine maps gives correct legs
+   everywhere (e1m5 entity 19 speed 0 gives 87 ticks per leg; 12 trains,
+   1,586 leg samples, longest 87). `travel_ticks` is right,
+   `BrushModel::mins` is raw units as assumed, and `mins_offset` cancels
+   out of every leg because both endpoints subtract it. A host test now
+   pins authored leg timing so a saturated leg fails immediately.
+
+Both symptoms share a shape: an aggregate returned by value across a call
+boundary arrives corrupted. `find_path_corner` returns
+`Option<PathCorner>` and `TargetEntitySource::entity_at` returns
+`Option<MapEntity>` (50+ bytes), and `corner.origin` is exactly the value
+that would have to be garbage to saturate the sum of squares. The codebase
+ALREADY documents this class in `fly_move`: "the MIPS-I backend can
+confuse the hidden return pointer of a `Vec3I32` helper with the first
+vector component". Treat this as one defect with two faces, and
+investigate it at the codegen/ABI level rather than patching each
+symptom. Until it is understood, **trains are not working** and any
+by-value aggregate return in a guest hot path is suspect.
+
+### 0.25 Unmerged Quake work and how to reconcile it
+
+Two branches are finished but NOT merged, because both overlap fixes the
+integration tree already landed independently. Do not merge either
+wholesale; salvage per item.
+
+`codex/quake-q2c-survival` (off the player-systems branch): the player
+motor diagnostics (`motor_ran`, `moved`, `MovementStalls`), a
+`restore_trace_invariants` that re-imposes Quake's own rule that a trace
+carrying a fraction below one or any plane normal cannot also be
+`allsolid`, a `trace_from_shared` that reads flag slots as bytes so an
+arbitrary byte can no longer become a `bool`, the completed
+`SetChangeParms` level-change carry-over (drop keys, cap super health at
+100, floor health at 50, floor shells at 25), and its own event-anchored
+audio gate. RECONCILE: the integration tree already fixed the freeze at
+the CONSUMER (`trapped()` requiring both flags) and already re-anchored
+audio. Prefer keeping BOTH freeze fixes, since they are complementary
+(one re-imposes the producer invariant, the other corrects the consumer
+predicate to match `SV_FlyMove`), but keep only ONE audio anchoring, and
+take `SetChangeParms` and the motor diagnostics as-is.
+
+`codex/quake-q2c-train`: a host test pinning authored `func_train` leg
+timing against the cooked lumps. Take it; it is the regression guard for
+the ABI defect above.
+
+Still open on the player-systems lane: `survival-regress` does not
+complete. The freeze fix moved it from waypoint 7 to waypoint 15 with a
+healthy motor over 9,001 frames, but the route's hazard stations are sited
+where there are no hazards. Mapped offline for the next worker: E1M1's
+slime channel is x 20..320, y 2660..2990, surface z -136, with a walkway
+beside it; the only submersible water is the deep pool x 540..700,
+y 940..1010, which is walled off from the lower level so its access must
+come from elsewhere; and fall damage needs a drop over 264 units, of which
+the map has only five, none on the corridor.
+
 ## 1. Owner objective
 
 The owner wants one coherent PS1 development stack, not three adjacent demos:
