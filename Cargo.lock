@@ -3519,6 +3519,7 @@ dependencies = [
  "egui",
  "image",
  "psx-asset",
+ "psx-bsp",
  "psx-engine",
  "psx-font",
  "psx-gte",

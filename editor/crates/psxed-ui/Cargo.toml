@@ -20,3 +20,6 @@ psx-level = { path = "../../../engine/crates/psx-level" }
 psxed-project = { path = "../psxed-project" }
 rfd = { version = "0.15", default-features = false }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+psx-bsp = { path = "../../../engine/crates/psx-bsp" }
