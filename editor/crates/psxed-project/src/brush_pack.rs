@@ -82,7 +82,7 @@ pub fn pack_bsp_geometry(
     validate_limits(bsp)?;
     validate_lighting(bsp, &lighting)?;
 
-    let mut plane_records: Vec<[u8; 10]> = Vec::new();
+    let mut plane_records: Vec<[u8; 14]> = Vec::new();
     let mut node_plane_indices = Vec::with_capacity(bsp.nodes.len());
     let mut node_plane_flipped = Vec::with_capacity(bsp.nodes.len());
     for (node_index, node) in bsp.nodes.iter().enumerate() {
@@ -194,9 +194,9 @@ fn validate_limits(bsp: &CompiledSurfaceBsp) -> Result<(), BrushPackError> {
         .iter()
         .map(|surface| surface.vertices.len())
         .sum();
-    // Compact Face stores the offset in 16 bits, but its public semantic
-    // record retains the legacy signed/i32 ABI used by the MIPS guest.
-    limit("vertices", vertices, i16::MAX as usize)?;
+    // Compact Face stores first_vertex as u16; its public i32 semantic field
+    // does not reduce that physical domain.
+    limit("vertices", vertices, u16::MAX as usize)?;
     for (surface, compiled) in bsp.surfaces.iter().enumerate() {
         limit("face vertices", compiled.vertices.len(), MAX_FACE_VERTICES)?;
         if compiled.vertices.len() < 3 {
@@ -267,7 +267,7 @@ fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), BrushPackEr
     }
 }
 
-fn intern_plane(planes: &mut Vec<[u8; 10]>, record: [u8; 10]) -> Result<i16, BrushPackError> {
+fn intern_plane(planes: &mut Vec<[u8; 14]>, record: [u8; 14]) -> Result<i16, BrushPackError> {
     let index = planes
         .iter()
         .position(|plane| *plane == record)

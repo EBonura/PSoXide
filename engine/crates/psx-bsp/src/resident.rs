@@ -164,13 +164,13 @@ impl ResidentMap {
             let source = index.lump(kind);
             let resident_len = resident_lump_len(&index, kind);
             let end = destination + resident_len;
-            if index.version() == PsbVersion::LegacyV1 && is_compact_v2_lump(kind) {
+            if index.version() == PsbVersion::LegacyV1 && is_compact_lump(kind) {
                 let legacy_size =
                     kind.record_size(PsbVersion::LegacyV1)
                         .expect("compacted lump has fixed v1 records") as usize;
                 let compact_size =
-                    kind.record_size(PsbVersion::CompactV2)
-                        .expect("compacted lump has fixed v2 records") as usize;
+                    kind.record_size(PsbVersion::CompactV3)
+                        .expect("compacted lump has fixed v3 records") as usize;
                 for record_index in 0..source.len as usize / legacy_size {
                     let mut legacy = [0u8; 34];
                     let offset = source.offset + (record_index * legacy_size) as u32;
@@ -488,7 +488,7 @@ const fn align_up_4(value: usize) -> usize {
     (value + 3) & !3
 }
 
-const fn is_compact_v2_lump(kind: LumpKind) -> bool {
+const fn is_compact_lump(kind: LumpKind) -> bool {
     matches!(
         kind,
         LumpKind::Planes | LumpKind::Faces | LumpKind::Leaves | LumpKind::Nodes | LumpKind::Models
@@ -497,21 +497,21 @@ const fn is_compact_v2_lump(kind: LumpKind) -> bool {
 
 fn resident_lump_len(index: &PsbIndex, kind: LumpKind) -> usize {
     let source = index.lump(kind).len as usize;
-    if index.version() != PsbVersion::LegacyV1 || !is_compact_v2_lump(kind) {
+    if index.version() != PsbVersion::LegacyV1 || !is_compact_lump(kind) {
         return source;
     }
     let legacy = kind
         .record_size(PsbVersion::LegacyV1)
         .expect("compacted lump has a legacy record size") as usize;
     let compact = kind
-        .record_size(PsbVersion::CompactV2)
+        .record_size(PsbVersion::CompactV3)
         .expect("compacted lump has a compact record size") as usize;
     source / legacy * compact
 }
 
 fn compact_legacy_record(kind: LumpKind, source: &[u8], output: &mut [u8]) -> bool {
     match kind {
-        LumpKind::Planes => output.copy_from_slice(&source[..10]),
+        LumpKind::Planes => output.copy_from_slice(&source[..Plane::SIZE]),
         LumpKind::Faces => {
             let plane = i16::from_le_bytes(source[0..2].try_into().unwrap());
             let flags = u16::from_le_bytes(source[2..4].try_into().unwrap());

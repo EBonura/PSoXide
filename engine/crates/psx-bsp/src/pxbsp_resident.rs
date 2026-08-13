@@ -66,7 +66,7 @@ impl<E: fmt::Display> fmt::Display for PxbspMapLoadError<E> {
             ),
             Self::StaticLegacyVersion { found } => write!(
                 output,
-                "static zero-copy PXBSP requires version 2, found legacy version {found}"
+                "static zero-copy PXBSP requires version 3, found legacy version {found}"
             ),
             Self::LegacyRecord { kind, index } => {
                 write!(output, "legacy {kind:?} record {index} cannot be compacted")
@@ -147,7 +147,7 @@ impl PxbspResidentMap {
     ) -> Result<Self, PxbspMapLoadError<SliceReadError>> {
         let mut reader = SliceReader::new(bytes);
         let index = PxbspIndex::read(&mut reader).map_err(PxbspMapLoadError::Index)?;
-        if index.version() != PxbspVersion::V2 {
+        if index.version() != PxbspVersion::V3 {
             return Err(PxbspMapLoadError::StaticLegacyVersion {
                 found: index.version().wire(),
             });
@@ -209,13 +209,13 @@ impl PxbspResidentMap {
             let source = index.lump(kind);
             let resident_len = resident_lump_len(&index, kind);
             let end = destination + resident_len;
-            if index.version() == PxbspVersion::V1 && is_compact_v2_lump(kind) {
+            if index.version() == PxbspVersion::V1 && is_compact_lump(kind) {
                 let legacy_size =
                     kind.record_size(PxbspVersion::V1)
                         .expect("compacted lump has fixed v1 records") as usize;
                 let compact_size =
-                    kind.record_size(PxbspVersion::V2)
-                        .expect("compacted lump has fixed v2 records") as usize;
+                    kind.record_size(PxbspVersion::V3)
+                        .expect("compacted lump has fixed v3 records") as usize;
                 for record_index in 0..source.len as usize / legacy_size {
                     let mut legacy = [0u8; 34];
                     let offset = source.offset + (record_index * legacy_size) as u32;
@@ -578,7 +578,7 @@ const fn align_up_4(value: usize) -> usize {
     (value + 3) & !3
 }
 
-const fn is_compact_v2_lump(kind: PxbspLumpKind) -> bool {
+const fn is_compact_lump(kind: PxbspLumpKind) -> bool {
     matches!(
         kind,
         PxbspLumpKind::Planes
@@ -591,14 +591,14 @@ const fn is_compact_v2_lump(kind: PxbspLumpKind) -> bool {
 
 fn resident_lump_len(index: &PxbspIndex, kind: PxbspLumpKind) -> usize {
     let source = index.lump(kind).len as usize;
-    if index.version() != PxbspVersion::V1 || !is_compact_v2_lump(kind) {
+    if index.version() != PxbspVersion::V1 || !is_compact_lump(kind) {
         return source;
     }
     let legacy = kind
         .record_size(PxbspVersion::V1)
         .expect("compacted lump has a legacy record size") as usize;
     let compact = kind
-        .record_size(PxbspVersion::V2)
+        .record_size(PxbspVersion::V3)
         .expect("compacted lump has a compact record size") as usize;
     source / legacy * compact
 }
@@ -606,7 +606,7 @@ fn resident_lump_len(index: &PxbspIndex, kind: PxbspLumpKind) -> usize {
 fn compact_legacy_record(kind: PxbspLumpKind, source: &[u8], output: &mut [u8]) -> bool {
     match kind {
         PxbspLumpKind::Planes => {
-            output.copy_from_slice(&source[..10]);
+            output.copy_from_slice(&source[..Plane::SIZE]);
         }
         PxbspLumpKind::Faces => {
             let plane = i16::from_le_bytes(source[0..2].try_into().unwrap());
@@ -739,6 +739,7 @@ pub(crate) mod tests {
         push_i16(&mut plane, 0);
         push_i16(&mut plane, 0);
         push_i32(&mut plane, 0);
+        push_i32(&mut plane, 0);
         lumps[PxbspLumpKind::Planes as usize] = plane;
         lumps[PxbspLumpKind::Materials as usize] = vec![0; PxbspMaterial::SIZE];
 
@@ -812,11 +813,7 @@ pub(crate) mod tests {
         let compact = valid_lumps();
         let mut legacy = compact.clone();
 
-        legacy[PxbspLumpKind::Planes as usize].clear();
-        for plane in compact[PxbspLumpKind::Planes as usize].chunks_exact(Plane::SIZE) {
-            legacy[PxbspLumpKind::Planes as usize].extend_from_slice(plane);
-            legacy[PxbspLumpKind::Planes as usize].extend_from_slice(&0i32.to_le_bytes());
-        }
+        // Plane records deliberately retain the exact v1 physical layout.
 
         legacy[PxbspLumpKind::Faces as usize].clear();
         for face in compact[PxbspLumpKind::Faces as usize].chunks_exact(Face::SIZE) {
