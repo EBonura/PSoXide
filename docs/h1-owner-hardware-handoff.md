@@ -44,22 +44,32 @@ Expected values:
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
 | `PSoXide Demo Disc.cue` | 507 | `b349a5871697fe49e1a79ef62bd82e5c4167a2eb7a54c363770063fba57b52fb` |
-| `PSoXide Demo Disc.bin` | 226,742,208 | `b111ee3720128d239a9e4fe037a8d7a0450cdb0ac1fb3ec07fc6deea1cd18d02` |
-| `PSoXide Demo Disc.quake-provenance.json` | 3,166 | `3c3a6bf22d2107fdfde6db0cb1cb4510b3dcc509683737b716e25060c044757b` |
+| `PSoXide Demo Disc.bin` | 226,742,208 | `105de3bb062185fd1fa7bfaec7ec7fda30197255168bb8616228e02cb901d57e` |
+| `PSoXide Demo Disc.quake-provenance.json` | 3,166 | `3decf160d9c442a4245b29380b850b204bc87877fc5a5aa3e1caf4988a6b74c8` |
 
 The image is 96,404 whole 2,352-byte sectors, about 216.2 MiB, with one Mode
 2 data track and seven CD-DA tracks. Stop if any hash differs. A different
 artifact needs a new receipt, new hashes, and a fresh headless check; do not
 silently treat it as this candidate.
 
-The receipt binds the physical candidate to:
+The candidate and its local source context are:
 
 | Component | Worktree / revision |
 | --- | --- |
-| Demo-disc source | `/Users/ebonura/Desktop/repos/psx-demo-disc-comicon-final`, `codex/comicon-disc-final` at `e23ed6ce34e6de8bf8108a7c843407c6d413364c` |
-| Quake source | `/Users/ebonura/Desktop/repos/quake-psx-comicon-final`, `codex/comicon-quake-final` at `28507a6dd605730a43909d6b2258f081def68a79` |
+| Demo-disc source | `/Users/ebonura/Desktop/repos/psx-demo-disc`, `main` at `2061540e234da16fd7a8378b0fc61f5d810ddd68` |
+| Quake source | `/Users/ebonura/Desktop/repos/quake-psx`, `codex/all-rust-quake` at `28507a6dd605730a43909d6b2258f081def68a79` |
 | Shipping PSoXide engine/program pin | `/Users/ebonura/Desktop/repos/PSoXide-final-pin` at `79d51dd2f2fd78cfb8aa418e2ad123730f56ac3d` |
-| Later editor/UX head | `/Users/ebonura/Desktop/repos/PSoXide-comicon-final`, `codex/comicon-psoxide-final` at functional head `ca2d33e9ec9b5403e6504ee9e737153dd0059dec` |
+| Later editor/UX head | `/Users/ebonura/Desktop/repos/PSoXide`, `main` at functional/docs promotion base `b2db85c4b86c3c1ea9748a92d39c85dff8b7610d`, plus this docs-only descendant |
+
+These are the promoted canonical local worktrees. No repository was pushed.
+The preservation refs, stash objects and pre-promotion owner work are recorded
+in section 12 of the main handoff.
+
+The receipt itself binds the combined BIN/CUE, Quake source and artifact
+hashes, Quake's PSoXide input pin and the ordinary-program PSoXide revision.
+The demo-disc revision comes independently from the launcher identity embedded
+in the BIN and the live local Git state; the later editor head is contextual
+and is not a receipt field.
 
 The later editor head is where level authoring continues. It is not the
 PSoXide revision from which this already-pressed Cortex guest was built. The
@@ -68,7 +78,7 @@ as the visible fallback. It does not contain the new BSP
 `souls-bsp-vertical-slice`. Do not conflate testing the current editor with
 testing the exact on-disc guest.
 
-The launcher identifies itself as `v0.19-31-ge23ed6c`; the Quake menu build
+The launcher identifies itself as `v0.19-32-g2061540`; the Quake menu build
 identifies itself as `q28507a6`. The provenance receipt records Quake EXE LBA
 6601 and proves the 9,476 embedded Quake sectors match its pinned standalone
 image apart from required MSF relocation.
@@ -95,7 +105,7 @@ are the expected result:
 cmp \
   <(dd if="/Users/ebonura/Downloads/ps1 games/PSoXide Demo Disc/PSoXide Demo Disc.bin" \
       bs=2352 skip=16955 count=1 2>/dev/null) \
-  <(dd if="/Users/ebonura/Desktop/repos/psx-demo-disc-comicon-final/audio/knuckle-dust.cdda" \
+  <(dd if="/Users/ebonura/Desktop/repos/psx-demo-disc/audio/knuckle-dust.cdda" \
       bs=2352 skip=750 count=1 2>/dev/null)
 echo $?
 ```
@@ -183,7 +193,7 @@ Record console model, modchip/boot method, burner, media brand, burn date,
 and the three candidate hashes. Test from a true power-off, not only reset.
 
 - [ ] Cold boot through the real BIOS reaches the launcher.
-- [ ] Launcher version reads `v0.19-31-ge23ed6c`.
+- [ ] Launcher version reads `v0.19-32-g2061540`.
 - [ ] Twelve visible entries are present: Cortex Ignition, Voxide,
       NitroXide, Celeste Collection, PSXcel, GH-PSX, Breakout, Space
       Invaders, Magikaaaaarp Pong, Hardware Tests, Quake Shareware, and
@@ -227,8 +237,8 @@ belong to `souls-bsp-vertical-slice`, which is not pressed on this candidate.
 
 Do not turn this into a claim that the latest native editor UI passed on
 hardware. Editor selection, brush manipulation, UV controls, cooking, and
-Rebuild & Play are a separate desktop-owner acceptance against
-`PSoXide-comicon-final`.
+Rebuild & Play are a separate desktop-owner acceptance against canonical
+`/Users/ebonura/Desktop/repos/PSoXide`.
 
 ## 6. Quake Shareware acceptance
 
@@ -341,14 +351,19 @@ The current artifact is already built and headlessly checked. If it must be
 regenerated, use the exact clean inputs:
 
 ```sh
-cd /Users/ebonura/Desktop/repos/psx-demo-disc-comicon-final
+cd /Users/ebonura/Desktop/repos/psx-demo-disc
+make disc
 make check
-make disc \
-  QUAKE_SRC=/Users/ebonura/Desktop/repos/quake-psx-comicon-final
 make quake-headless-check \
-  QUAKE_SRC=/Users/ebonura/Desktop/repos/quake-psx-comicon-final \
-  FRONTEND=/Users/ebonura/Desktop/repos/psx-demo-disc-comicon-final/games/PSoXide/target/release/frontend
+  FRONTEND=/Users/ebonura/Desktop/repos/psx-demo-disc/games/PSoXide/target/release/frontend
 ```
+
+The default `QUAKE_SRC` resolves to canonical sibling
+`/Users/ebonura/Desktop/repos/quake-psx`; no temporary worktree override is
+needed. The canonical rebuild, repository check and deterministic Quake
+headless gate were green for the exact candidate in section 1. The legacy
+Cortex fallback also produced two byte-identical passes with the telemetry
+recorded in the main handoff.
 
 Use the demo repository's exact-pinned `games/PSoXide` submodule for a full
 disc build. Do not pass the detached `PSoXide-final-pin` worktree as
