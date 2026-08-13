@@ -313,7 +313,7 @@ impl Renderer {
                             texture.texture_page,
                             CLUT_DEFAULT,
                             special_texture_window(texture).word(),
-                            ClassicAffineProfile::RUNTIME_ADAPTIVE,
+                            ClassicAffineProfile::QUAKE_REFERENCE,
                         )
                     };
                     next = submitted.next_packet;
@@ -1208,7 +1208,7 @@ unsafe fn flush_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            ClassicAffineProfile::RUNTIME_ADAPTIVE,
+            ClassicAffineProfile::QUAKE_REFERENCE,
         )
     }
 }
@@ -1234,7 +1234,7 @@ unsafe fn flush_windowed_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            ClassicAffineProfile::RUNTIME_ADAPTIVE,
+            ClassicAffineProfile::QUAKE_REFERENCE,
         )
     }
 }
