@@ -294,10 +294,30 @@ assert_eq "negative: player stayed at spawn x (biased)" \
 assert_eq "negative: player stayed at spawn z (biased)" \
     "$(gauge_latest "$NEG" "player local z")" "$EXPECT_NEG_PLAYER_Z_BIASED"
 
-# Cross-layout stage. The same sources and the same cooked world built twice:
-# once through the canonical /tmp stage, once in-tree through the
-# PSOXIDE_GUEST_STAGE=0 escape hatch, so the build runs from two different
-# absolute paths.
+# Frame-cadence lock. Combat timing must depend on the fixed simulation
+# clock, not on how many visual frames the renderer manages to deliver. That
+# is proved directly, by replaying the same authored swing under different
+# render costs and requiring the active window to cover the same simulation
+# ticks either way:
+#   psx-game-runtime combat::tests::tick_authority
+# Nothing else in this gate establishes it, so it is run here explicitly
+# rather than being left to whoever remembers to run the crate's unit tests.
+echo "editor-souls-bsp-check: frame-cadence lock"
+cadence_log="$OUT/tick-authority.txt"
+(cd "$ROOT/engine" && cargo test -p psx-game-runtime --lib combat::tests::tick_authority) \
+    > "$cadence_log" 2>&1 \
+    || { cat "$cadence_log"; fail "the frame-cadence lock (tick_authority) regressed"; }
+# A filter that matches nothing still exits 0, so the count is asserted too:
+# renaming or deleting these tests must break this gate, not silently empty it.
+cadence_ran=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' "$cadence_log" | head -1)
+[ "${cadence_ran:-0}" -eq 2 ] || fail "expected 2 tick_authority tests, ran ${cadence_ran:-0}.
+  psx-game-runtime combat::tests::tick_authority is the only direct evidence
+  that combat timing follows the simulation clock rather than the frame rate."
+
+# Cross-layout reproducibility stage. The same sources and the same cooked
+# world built twice: once through the canonical /tmp stage, once in-tree
+# through the PSOXIDE_GUEST_STAGE=0 escape hatch, so the build runs from two
+# different absolute paths.
 #
 # This stage used to REQUIRE the two images to differ, on the theory that
 # cargo's path-derived crate metadata reorders codegen. Measured on
@@ -306,13 +326,13 @@ assert_eq "negative: player stayed at spawn z (biased)" \
 # path metadata, and a forced full recompile in-tree (cargo reported
 # "Compiling editor-playtest", 6.17s, not a cache hit) produced a
 # byte-identical image to the staged build. Requiring a difference therefore
-# only passed when the two builds were inconsistent with each other, which is
-# the opposite of what this stage is for.
+# only passed when the two builds were inconsistent with each other.
 #
-# The requirement is now the stronger one: the guest image is reproducible
-# across build layouts. The replay below still runs on the second build and
-# its simulation fingerprint is still compared, so the standing lock on
-# "combat depends on the fixed simulation clock" is unchanged.
+# What this stage proves is reproducibility across build layouts, and ONLY
+# that. Two identical executables cannot perturb visual cadence, so the
+# replay below is a second confirmation that the same image replays the same
+# way, not independent evidence of cadence independence. That evidence is the
+# tick_authority run above.
 echo "editor-souls-bsp-check: second guest layout"
 cp "$ROOT/build/examples/mipsel-sony-psx/release/editor-playtest.exe" "$OUT/layout-a.exe"
 PSOXIDE_GUEST_STAGE=0 make build-editor-playtest \
