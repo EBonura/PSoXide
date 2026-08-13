@@ -17,32 +17,29 @@ SPAWN_Z = 192
 ROOM_INNER_MIN_Z = 64
 PLAYER_RADIUS = 16
 TELEMETRY_POSITION_BIAS = 1_000_000
-EXPECTED_ROUTE_TICKS = 119
+EXPECTED_ROUTE_TICKS = 152
 EXPECTED_PAD_POLLS = 122
 EXPECTED_GUEST_FRAMES = 121
 EXPECTED_VISUAL_FRAMES = 60
+MIN_SKY_CYCLES = 100_000
+EXPECTED_SKY_HITS = 57
 EXPECTED_TRI_PRIMS = 1_053
 EXPECTED_LAST_TRI_PRIMS = 19
-EXPECTED_VRAM_HASH = "0xdb1a46181b00783a"
-EXPECTED_DISPLAY_HASH = "0xac182dca36383a5d"
+EXPECTED_VRAM_HASH = "0xda4fdfcfe3c27a87"
+EXPECTED_DISPLAY_HASH = "0xdf10b8075b9d718b"
 EXPECTED_GPU_CENSUS: dict[str, int | str] = {
-    "rows": 119,
-    "commands": 2_488,
-    "draws": 1_128,
+    "rows": 152,
+    "commands": 3_393,
+    "draws": 1_576,
     "fills": 60,
     "textured_tris": 927,
-    "textured_quads": 107,
+    "textured_quads": 555,
     "textured_rects": 84,
-    "run_draw_words": 13_837,
-    # Re-pinned when the BSP Place lane stopped lifting Logic nodes one unit
-    # above the clicked surface (a lifted Trigger Volume anchor produces an
-    # AABB the player can never enter). The blank fixture's "Simple Door" is
-    # placed as a Logic node, so its anchor moved y=65 -> y=64 and the door
-    # submodel's cooked vertices shifted one unit with it. Everything else
-    # held: rows, commands, draws, fills, all three textured-primitive counts,
-    # run_draw_words, the triangle counters, and BOTH the VRAM and display
-    # hashes above. Same pixels, one unit of different draw words.
-    "run_draw_hash": "0xa1198019c4f18107",
+    "run_draw_words": 19_213,
+    # Re-pinned when the authored panorama became available to the resident
+    # PXBSP path. The brush world bytes and movement/triangle pins stay fixed;
+    # the extra rows, draws and textured quads are the streamed cyclorama.
+    "run_draw_hash": "0x9d2fff86ad1adfdc",
 }
 IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".ppm", ".webp"}
 
@@ -54,6 +51,8 @@ class ReplayEvidence:
     guest_frames: int
     sim_ticks: int
     visual_frames: int
+    sky_cycles: int
+    sky_hits: int
     tri_prims: int
     last_tri_prims: int
     player_x: int
@@ -107,6 +106,10 @@ def parse_replay(text: str, label: str) -> ReplayEvidence:
     )
     require("visual_budget_status=pass" in text, f"{label} visual budget did not pass")
     require("cadence_status=steady" in text, f"{label} cadence was not steady")
+    sky = re.search(
+        r"^\s*sky\s+total=(\d+).*?hits=(\d+)$", text, re.MULTILINE
+    )
+    require(sky is not None, f"{label} has no sky-stage profile evidence")
     return ReplayEvidence(
         route_ticks=int(route.group(1)),
         pad_polls=int(route.group(2)),
@@ -117,6 +120,8 @@ def parse_replay(text: str, label: str) -> ReplayEvidence:
         visual_frames=match_int(
             text, r"^\s*visual_frames=(\d+)$", f"{label} visual frame count"
         ),
+        sky_cycles=int(sky.group(1)),
+        sky_hits=int(sky.group(2)),
         tri_prims=int(tri.group(1)),
         last_tri_prims=int(tri.group(2)),
         player_x=player_x - TELEMETRY_POSITION_BIAS,
@@ -185,6 +190,52 @@ def main() -> None:
         "acceptance project lost the neutral courtyard materials",
     )
     require("pub const PLAYTEST_USES_PXBSP: bool = true;" in manifest, "cook is not BSP")
+    pxbsp_room = re.search(
+        r'LevelRoomRecord \{ name: "PXBSP World".*?'
+        r'sky: LevelSkyRecord \{.*?flags: 1,.*?'
+        r'cloud_layer: LevelCloudLayerRecord \{ texture_asset: AssetId\((\d+)\)',
+        manifest,
+        re.DOTALL,
+    )
+    require(pxbsp_room is not None, "PXBSP room has no enabled authored sky panorama")
+    sky_asset_id = int(pxbsp_room.group(1))
+    sky_asset = re.search(
+        rf"LevelAssetRecord \{{ id: AssetId\({sky_asset_id}\), "
+        rf"kind: AssetKind::Texture, bytes: .*?, ram_bytes: (\d+), "
+        rf"vram_bytes: (\d+), flags: asset_flags::STREAMED_GAMEPLAY_TRANSIENT \}}",
+        manifest,
+    )
+    require(sky_asset is not None, "PXBSP sky is not a gameplay-streamed texture asset")
+    sky_bytes = int(sky_asset.group(1))
+    sky_vram_bytes = int(sky_asset.group(2))
+    require(
+        (sky_bytes, sky_vram_bytes) == (65_820, 65_792),
+        f"unexpected 512x256 panorama envelope: {sky_bytes}/{sky_vram_bytes}",
+    )
+    require(
+        re.search(
+            rf"LevelWorldPackEntryRecord \{{ room: RoomIndex\({sky_asset_id}\), "
+            rf"sector_offset: \d+, sector_count: \d+, byte_size: {sky_bytes}, "
+            rf"checksum: \d+ \}}",
+            manifest,
+        )
+        is not None,
+        "PXBSP sky has no matching UI.PAK table entry",
+    )
+    gameplay_stage = re.search(
+        r"pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = (\d+);", manifest
+    )
+    require(
+        gameplay_stage is not None and int(gameplay_stage.group(1)) >= sky_bytes,
+        "gameplay streaming stage cannot hold the PXBSP sky",
+    )
+    room_vram = re.search(
+        r"pub static ROOM_0_REQUIRED_VRAM: &\[AssetId\] = &\[(.*?)\];", manifest
+    )
+    require(
+        room_vram is not None and f"AssetId({sky_asset_id})" in room_vram.group(1),
+        "PXBSP room residency does not retain its sky texture",
+    )
     mover_ids = re.search(
         r"pub static PXBSP_MOVER_NODE_IDS: &\[u32\] = &\[(\d+)\];", manifest
     )
@@ -230,6 +281,12 @@ def main() -> None:
     require(
         replay_a.visual_frames == EXPECTED_VISUAL_FRAMES,
         f"visual frame pin drifted: {replay_a.visual_frames}",
+    )
+    require(
+        replay_a.sky_cycles >= MIN_SKY_CYCLES
+        and replay_a.sky_hits == EXPECTED_SKY_HITS,
+        "PXBSP panorama did not perform the expected rendered work: "
+        f"{replay_a.sky_cycles} cycles/{replay_a.sky_hits} hits",
     )
     require(
         replay_a.tri_prims == EXPECTED_TRI_PRIMS

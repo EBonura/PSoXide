@@ -280,7 +280,11 @@ fn embedded_cdda_track_payloads() -> Result<Vec<PathBuf>, String> {
 
 #[cfg(feature = "editor")]
 fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
-    let generated_dir = editor_playtest_generated_dir();
+    embedded_world_pack_payload_from(&editor_playtest_generated_dir())
+}
+
+#[cfg(feature = "editor")]
+fn embedded_world_pack_payload_from(generated_dir: &Path) -> Result<Option<Vec<u8>>, String> {
     let chunks_dir = generated_dir.join(psxed_project::playtest::STREAM_CHUNKS_DIRNAME);
     if !chunks_dir.is_dir() {
         return Ok(None);
@@ -306,11 +310,26 @@ fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
         let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         rooms.push((chunk_id, bytes));
     }
+    let order_file = generated_dir.join(psxed_project::playtest::WORLD_PACK_ORDER_FILENAME);
     if rooms.is_empty() {
-        return Ok(None);
+        if !order_file.is_file() {
+            return Ok(None);
+        }
+        let order = read_embedded_world_pack_order(&order_file)?;
+        if !order.is_empty() {
+            return Err(format!(
+                "{}: world pack order names rooms but no cooked chunks exist",
+                order_file.display()
+            ));
+        }
+        // Resident PXBSP projects deliberately have no streamed room chunks,
+        // but the cooked manifest still places UI.PAK after a one-sector,
+        // header-only WORLD.PAK. Preserve that sector in Embedded Play so
+        // gameplay-transient assets (notably the sky panorama) use the same
+        // absolute LBAs as CLI-built project discs.
+        return Ok(Some(build_world_pack(&[])));
     }
     rooms.sort_by_key(|(chunk_id, _)| *chunk_id);
-    let order_file = generated_dir.join(psxed_project::playtest::WORLD_PACK_ORDER_FILENAME);
     if order_file.is_file() {
         let order = read_embedded_world_pack_order(&order_file)?;
         apply_embedded_world_pack_order(&mut rooms, &order, &order_file)?;
@@ -665,6 +684,53 @@ mod tests {
             &world_pack_sector[..psx_iso::WORLD_PACK_MAGIC.len()],
             &psx_iso::WORLD_PACK_MAGIC
         );
+    }
+
+    #[test]
+    #[cfg(feature = "editor")]
+    fn pxbsp_empty_world_pack_keeps_streamed_ui_pack_at_the_manifest_lba() {
+        let root = frontend_test_temp_dir("pxbsp-empty-world-pack");
+        let chunks = root.join(psxed_project::playtest::STREAM_CHUNKS_DIRNAME);
+        std::fs::create_dir_all(&chunks).unwrap();
+        std::fs::write(
+            root.join(psxed_project::playtest::WORLD_PACK_ORDER_FILENAME),
+            "# PXBSP has no streamed grid rooms\n",
+        )
+        .unwrap();
+
+        let world_pack = embedded_world_pack_payload_from(&root)
+            .expect("empty PXBSP WORLD.PAK builds")
+            .expect("PXBSP keeps a header-only WORLD.PAK");
+        let mut exe = vec![0u8; psx_iso::EXE_HEADER_BYTES];
+        exe[..8].copy_from_slice(b"PS-X EXE");
+        exe[0x10..0x14].copy_from_slice(&0x8001_2340u32.to_le_bytes());
+        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        let ui_pack = build_world_pack(&[(1, b"sky-panorama".as_slice())]);
+        let image = embedded_playtest_disc_image("PXBSP_SKY", exe, Some(world_pack), Some(ui_pack))
+            .expect("PXBSP playtest disc builds");
+        let disc = Disc::from_bin(image);
+        let world_sector = disc
+            .read_sector_user(psx_iso::WORLD_PACK_DEFAULT_START_LBA)
+            .expect("header-only WORLD.PAK sector exists");
+        let ui_sector = disc
+            .read_sector_user(psx_iso::WORLD_PACK_DEFAULT_START_LBA + 1)
+            .expect("UI.PAK begins after header-only WORLD.PAK");
+
+        assert_eq!(
+            &world_sector[..psx_iso::WORLD_PACK_MAGIC.len()],
+            &psx_iso::WORLD_PACK_MAGIC
+        );
+        assert_eq!(
+            &ui_sector[..psx_iso::WORLD_PACK_MAGIC.len()],
+            &psx_iso::WORLD_PACK_MAGIC
+        );
+        assert_eq!(
+            u32::from_le_bytes(world_sector[12..16].try_into().unwrap()),
+            0
+        );
+        assert_eq!(u32::from_le_bytes(ui_sector[12..16].try_into().unwrap()), 1);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
