@@ -9,9 +9,9 @@ use alloc::vec::Vec;
 
 use psx_engine::{
     compose_classic_alias_transform, materialize_classic_affine_word_vertices,
-    submit_classic_affine_batch, submit_classic_affine_windowed_batch,
-    submit_classic_affine_windowed_fan, submit_classic_alias_model, ClassicAffineBatchSurface,
-    ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex,
+    submit_classic_affine_batch, submit_classic_affine_scoped_windowed_batch,
+    submit_classic_affine_scoped_windowed_fan, submit_classic_alias_model,
+    ClassicAffineBatchSurface, ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex,
     ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
     ClassicAliasProjectedVertex, ClassicAliasVertex,
 };
@@ -50,8 +50,8 @@ const DUMMY_LIGHT_STYLE: usize = 64;
 // Two-level subdivision emits at most 19 packets for one source triangle;
 // 13 words covers the larger textured-Gouraud quad packet.
 const WORST_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 13;
-// A windowed polygon adds one self-contained GP0(E2) word per packet.
-const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 14;
+// A scoped windowed polygon adds its GP0(E2) selector and full-window reset.
+const WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE: usize = 19 * 15;
 const ALIAS_PACKET_WORDS: usize =
     core::mem::size_of::<ClassicTriTextured>() / core::mem::size_of::<u32>();
 const ANIMATION_FRAMES_PER_SECOND: u32 = 30;
@@ -322,7 +322,7 @@ impl Renderer {
                         self.frame,
                     );
                     let submitted = unsafe {
-                        submit_classic_affine_windowed_fan(
+                        submit_classic_affine_scoped_windowed_fan(
                             batch_vertices.as_mut_ptr(),
                             vertex_count,
                             next,
@@ -1244,7 +1244,7 @@ unsafe fn flush_windowed_batch(
         };
     }
     unsafe {
-        submit_classic_affine_windowed_batch(
+        submit_classic_affine_scoped_windowed_batch(
             vertices.as_mut_ptr(),
             vertex_count,
             surfaces.as_ptr(),
@@ -1488,6 +1488,11 @@ mod tests {
             let data_words = (packets[offset] >> 24) as usize;
             assert!(matches!(packets[offset + 2] >> 24, 0x36 | 0x3e));
             assert_eq!(packets[offset + 1], binding.texture_window_word);
+            assert_eq!(
+                packets[offset + data_words],
+                TextureWindow::NONE.word(),
+                "every depth-sorted material packet must restore the full window"
+            );
             assert_eq!(packets[offset + 4] >> 16, u32::from(binding.clut));
             assert_eq!((packets[offset + 7] >> 21) & 3, 2);
             offset += data_words + 1;
