@@ -1500,6 +1500,57 @@ pub unsafe fn submit_classic_affine_windowed_batch(
     output: *mut u32,
     profile: ClassicAffineProfile,
 ) -> ClassicAffineSubmit {
+    unsafe {
+        submit_classic_affine_windowed_batch_impl::<false>(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            profile,
+        )
+    }
+}
+
+/// Project and submit several independently windowed convex fans whose OT
+/// packets restore an unwindowed GP0(E2) state after every polygon.
+///
+/// Use this when windowed surfaces share an ordering table with compact world,
+/// brush-model, or alias packets. OT linking can interleave those consumers at
+/// any depth, so a reset at the end of a CPU-side batch is not sufficient.
+/// The caller's worst-case output capacity must include one additional data
+/// word per emitted polygon for the trailing reset command.
+///
+/// # Safety
+/// The contract matches [`submit_classic_affine_windowed_batch`].
+pub unsafe fn submit_classic_affine_scoped_windowed_batch(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineWindowedBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    unsafe {
+        submit_classic_affine_windowed_batch_impl::<true>(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            profile,
+        )
+    }
+}
+
+unsafe fn submit_classic_affine_windowed_batch_impl<const RESTORE_WINDOW: bool>(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineWindowedBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
     if vertices.is_null()
         || surfaces.is_null()
         || output.is_null()
@@ -1524,7 +1575,7 @@ pub unsafe fn submit_classic_affine_windowed_batch(
     }
 
     let generated = unsafe { vertices.add(vertex_count) };
-    let mut writer = WindowedPacketWriter::<false> {
+    let mut writer = WindowedPacketWriter::<RESTORE_WINDOW> {
         next: output,
         packets: 0,
         clut_high_word: 0,
@@ -2363,6 +2414,57 @@ mod tests {
         });
         assert_eq!(submit.packets, 2);
         assert_eq!(submit.hardware_triangles, 3);
+    }
+
+    #[test]
+    fn scoped_windowed_batch_restores_full_window_inside_its_ot_packet() {
+        psx_gte::host::reset();
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(160);
+        scene::set_avsz_weights(0x155, 0x100);
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::ZERO);
+
+        let mut vertices = [ClassicAffineVertex::default(); 3 + EXTRA_VERTICES];
+        for (index, position) in [[-64, -64, 1024], [64, -64, 1024], [0, 64, 1024]]
+            .into_iter()
+            .enumerate()
+        {
+            vertices[index] = ClassicAffineVertex {
+                position,
+                color: 0x0080_8080,
+                ..ClassicAffineVertex::default()
+            };
+        }
+        let window = TextureWindow::power_of_two_tile(64, 64, 64, 64).word();
+        let surface = ClassicAffineWindowedBatchSurface {
+            first_vertex: 0,
+            vertex_count: 3,
+            tpage: 0x0160,
+            clut: 0x1234,
+            uv_offset: [0; 2],
+            texture_window_word: window,
+            color_command_word: 0x3400_0000,
+        };
+        let mut storage = [0u32; 19 * 15];
+        let submitted = unsafe {
+            submit_classic_affine_scoped_windowed_batch(
+                vertices.as_mut_ptr(),
+                3,
+                &surface,
+                1,
+                storage.as_mut_ptr(),
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        };
+
+        assert_eq!(submitted.packets, 1);
+        let data_words = (storage[0] >> 24) as usize;
+        assert_eq!(storage[1], window);
+        assert_eq!(storage[data_words], TextureWindow::NONE.word());
+        assert_eq!(submitted.next_packet, unsafe {
+            storage.as_mut_ptr().add(data_words + 1)
+        });
     }
 
     #[test]
