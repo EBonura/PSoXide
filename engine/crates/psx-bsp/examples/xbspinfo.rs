@@ -10,8 +10,8 @@
 //! ```
 
 use psx_bsp::{
-    Face, LumpKind, Node, PsbIndex, RecordSlice, SliceReader, LUMP_HEADER_BYTES, PSB_HEADER_BYTES,
-    PSB_MAGIC,
+    CookedRecord, LumpKind, Node, PsbIndex, SliceReader, LUMP_HEADER_BYTES, PSB2_MAGIC,
+    PSB_HEADER_BYTES, PSB_MAGIC,
 };
 
 const PAK_MAGIC: &[u8; 8] = b"PSOXWPAK";
@@ -91,7 +91,9 @@ fn inspect_pack(path: &str, bytes: &[u8]) -> Result<usize, String> {
             .ok_or_else(|| format!("chunk {}: HLZC decode failed", entry.chunk_id))?;
 
         let map = &buf[..decoded];
-        if map.get(..4) == Some(&PSB_MAGIC.to_le_bytes()[..]) {
+        if map.get(..4) == Some(&PSB_MAGIC.to_le_bytes()[..])
+            || map.get(..4) == Some(&PSB2_MAGIC.to_le_bytes()[..])
+        {
             match inspect(map) {
                 Ok(summary) => {
                     maps += 1;
@@ -142,7 +144,7 @@ fn inspect(bytes: &[u8]) -> Result<String, String> {
     ));
     for kind in LumpKind::ALL {
         let range = index.lump(kind);
-        match kind.record_size() {
+        match kind.record_size(index.version()) {
             Some(size) if size > 0 => {
                 if range.len % size != 0 {
                     return Err(format!(
@@ -172,12 +174,16 @@ fn walk(bytes: &[u8], index: &PsbIndex) -> Result<(), String> {
         let range = index.lump(kind);
         &bytes[range.offset as usize..(range.offset + range.len) as usize]
     };
-    let planes = index.lump(LumpKind::Planes).len / LumpKind::Planes.record_size().unwrap();
-    let leaves = index.lump(LumpKind::Leaves).len / LumpKind::Leaves.record_size().unwrap();
+    let planes =
+        index.lump(LumpKind::Planes).len / LumpKind::Planes.record_size(index.version()).unwrap();
+    let leaves =
+        index.lump(LumpKind::Leaves).len / LumpKind::Leaves.record_size(index.version()).unwrap();
 
-    let nodes = RecordSlice::<Node>::new(lump(LumpKind::Nodes)).ok_or("bad node lump")?;
-    for i in 0..nodes.len() {
-        let node = nodes.get(i).ok_or("node read")?;
+    let node_size = LumpKind::Nodes.record_size(index.version()).unwrap() as usize;
+    let node_bytes = lump(LumpKind::Nodes);
+    let node_count = node_bytes.len() / node_size;
+    for (i, record) in node_bytes.chunks_exact(node_size).enumerate() {
+        let node = Node::decode(&record[..Node::SIZE]);
         if u32::from(node.plane) >= planes {
             return Err(format!("node {i}: plane {} out of range", node.plane));
         }
@@ -185,7 +191,7 @@ fn walk(bytes: &[u8], index: &PsbIndex) -> Result<(), String> {
             let ok = if child < 0 {
                 u32::from((-child - 1) as u16) < leaves
             } else {
-                (child as usize) < nodes.len()
+                (child as usize) < node_count
             };
             if !ok {
                 return Err(format!("node {i}: child {child} out of range"));
@@ -193,11 +199,11 @@ fn walk(bytes: &[u8], index: &PsbIndex) -> Result<(), String> {
         }
     }
 
-    let faces = RecordSlice::<Face>::new(lump(LumpKind::Faces)).ok_or("bad face lump")?;
-    for i in 0..faces.len() {
-        let face = faces.get(i).ok_or("face read")?;
-        if u32::from(face.plane.unsigned_abs()) >= planes {
-            return Err(format!("face {i}: plane {} out of range", face.plane));
+    let face_size = LumpKind::Faces.record_size(index.version()).unwrap() as usize;
+    for (i, record) in lump(LumpKind::Faces).chunks_exact(face_size).enumerate() {
+        let plane = i16::from_le_bytes(record[0..2].try_into().unwrap());
+        if plane < 0 || plane as u32 >= planes {
+            return Err(format!("face {i}: plane {plane} out of range"));
         }
     }
     Ok(())
