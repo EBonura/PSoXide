@@ -31,6 +31,7 @@ fn play_chunk_debug_map_follows_player_layer_then_editor_layer() {
     assert_eq!(map.floor_count(), 2);
 }
 
+mod ashen_sanctum;
 mod brush_tools;
 mod entity_resources;
 mod geometry_resources;
