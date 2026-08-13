@@ -986,7 +986,11 @@ pub fn build_package(
                     tile_count: resolved_sky.cloud_layer.tile_count,
                     scroll_speed: resolved_sky.cloud_layer.scroll_speed,
                     noise_seed: resolved_sky.cloud_layer.noise_seed,
-                    flags: 0,
+                    flags: if resolved_sky.cloud_layer.enabled && resolved_sky.enabled {
+                        cloud_layer_flags::ENABLED
+                    } else {
+                        0
+                    },
                 },
             },
             far_vista: PlaytestFarVista {
@@ -1056,6 +1060,18 @@ pub fn build_package(
                 streamed_class: StreamedClass::None,
             });
         }
+        // PXBSP rooms use the same authored panorama and gameplay-transient
+        // lifetime as grid rooms. Register it after the brush textures so
+        // enabling or disabling a sky cannot renumber PXBSP material assets
+        // or perturb the resident world bytes.
+        let sky_texture_asset_index =
+            cook_sky_panorama_texture_asset(resolved_sky, &mut sky_texture_assets, &mut assets);
+        rooms
+            .last_mut()
+            .expect("PXBSP metadata room was just appended")
+            .sky
+            .cloud_layer
+            .texture_asset_index = sky_texture_asset_index;
         world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
             bytes: compiled.pxbsp.bytes,
             body_hulls: compiled.body_hulls,

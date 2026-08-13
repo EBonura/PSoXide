@@ -1277,6 +1277,35 @@ mod tests {
     use crate::pxbsp::PxbspLumpKind;
     use crate::pxbsp_resident::tests::{valid_lumps, write_file};
     use crate::SliceReader;
+    use psx_engine::OtFrame;
+    use psx_gpu::ot::OrderingTable;
+
+    #[test]
+    fn panorama_inserted_after_pxbsp_executes_before_a_same_slot_world_packet() {
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut pxbsp_packet = [0u32, 0x5058_4253];
+        let mut panorama_packet = [0u32, 0x534b_5920];
+
+        unsafe {
+            // Mirrors the PSoXide scene contract: link the PXBSP tagged
+            // stream first, then the panorama into the same farthest slot.
+            ot.add_raw(7, pxbsp_packet.as_mut_ptr(), 1);
+            ot.add_raw(7, panorama_packet.as_mut_ptr(), 1);
+        }
+        drop(ot);
+
+        let mut packets = unsafe { ot_storage.iter_packets() };
+        assert_eq!(
+            packets.next().expect("panorama packet").0,
+            panorama_packet.as_ptr()
+        );
+        assert_eq!(
+            packets.next().expect("PXBSP packet").0,
+            pxbsp_packet.as_ptr()
+        );
+        assert!(packets.next().is_none());
+    }
 
     #[test]
     fn pxbsp_view_projects_y_up_and_turns_toward_positive_z() {

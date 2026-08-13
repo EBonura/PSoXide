@@ -263,14 +263,6 @@ impl Scene for Playtest {
         let mut primitive_packets = unsafe { PrimitivePacketArena::new(&mut PRIMITIVE_PACKETS) };
 
         let room_record = ROOMS.get(self.room_index.to_usize());
-        // Sky inserts into the OT background slot before the world pass borrows
-        // the OT; world geometry (slots 0..=OT_DEPTH-2) then draws in front.
-        if let Some(room_record) = room_record {
-            telemetry::stage_begin(telemetry::stage::SKY);
-            draw_sky_panorama(room_record.sky, camera, &mut ot);
-            telemetry::stage_end(telemetry::stage::SKY);
-        }
-
         // The cooked BSP replaces only static grid surfaces. It writes its
         // tagged packets into the same arena/OT used below, after which the
         // ordinary actor, equipment, effect, and overlay passes continue.
@@ -279,6 +271,15 @@ impl Scene for Playtest {
             telemetry::stage_begin(telemetry::stage::ROOM);
             bsp.draw(camera, bsp_material_tick, &mut primitive_packets, &mut ot);
             telemetry::stage_end(telemetry::stage::ROOM);
+        }
+
+        // Sky shares the farthest OT slot with the maximum-depth PXBSP packet.
+        // OT insertion prepends, so inserting the sky after PXBSP makes DMA
+        // execute the sky first and keeps even a slot-2047 wall in front.
+        if let Some(room_record) = room_record {
+            telemetry::stage_begin(telemetry::stage::SKY);
+            draw_sky_panorama(room_record.sky, camera, &mut ot);
+            telemetry::stage_end(telemetry::stage::SKY);
         }
 
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
