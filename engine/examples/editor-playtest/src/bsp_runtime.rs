@@ -16,7 +16,7 @@ use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
 use psx_bsp::pxbsp::PXBSP_MAX_VISIBILITY_BYTES;
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
-use psx_bsp::{SliceReadError, SliceReader, Vec3I32};
+use psx_bsp::{SliceReadError, Vec3I32};
 use psx_engine::{
     commit_body_step_with_trace_provider, trace_collision, BodyStep, CharacterBlockerTraceProvider,
     CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame,
@@ -147,9 +147,8 @@ impl BspRuntime {
             }
         }
 
-        let mut map = PxbspResidentMap::with_capacity(PXBSP_WORLD.len());
-        map.load(0, &mut SliceReader::new(PXBSP_WORLD))
-            .map_err(BspRuntimeInitError::Map)?;
+        let map =
+            PxbspResidentMap::from_static(0, PXBSP_WORLD).map_err(BspRuntimeInitError::Map)?;
         let mut doors = BrushDoorSet::EMPTY;
         doors
             .init_from_map(&map)
@@ -206,9 +205,10 @@ impl BspRuntime {
         if material_count == 0 {
             return Err(BspRuntimeInitError::NoMaterials);
         }
+        let renderer = Renderer::new_pxbsp(map.faces().len());
         Ok(Self {
             map,
-            renderer: Renderer::new(),
+            renderer,
             doors,
             materials: vec![None; material_count],
             trace_scratch: TraceScratch::new(),
