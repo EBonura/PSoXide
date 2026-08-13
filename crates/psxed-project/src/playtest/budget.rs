@@ -356,7 +356,7 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
 
 fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
     match version {
-        PxbspVersion::V2 => {
+        PxbspVersion::V3 => {
             RecordSlice::<Face>::new(bytes)?
                 .iter()
                 .try_fold(0usize, |total, face| {
@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_v2_budget_decodes_face_counts_and_leaf_stride() {
+    fn compact_v3_budget_decodes_face_counts_and_leaf_stride() {
         let project = ProjectDocument::from_ron_str(include_str!(
             "../../../../projects/brush-open-courtyard/project.ron"
         ))
@@ -581,7 +581,7 @@ mod tests {
             panic!("tracked fixture must cook PXBSP");
         };
         let index = PxbspIndex::read(&mut SliceReader::new(&world.bytes)).expect("PXBSP index");
-        assert_eq!(index.version(), PxbspVersion::V2);
+        assert_eq!(index.version(), PxbspVersion::V3);
         assert_eq!(index.lump(PxbspLumpKind::Faces).len, 38 * Face::SIZE as u32);
 
         // Every emitted fixture face is a quad: 38 * (4 - 2) packets. The
