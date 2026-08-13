@@ -224,7 +224,7 @@ impl ClassicAffineProfile {
         underdraw_slot_bias: 8,
     };
 
-    /// Bounded runtime profile shared by Quake and native PXBSP worlds.
+    /// Experimental bounded-lattice affine-error profile.
     ///
     /// The depth bands preserve the historical close-surface workload. The
     /// additional error trigger uses the measured p90 affine-error bound and
@@ -232,7 +232,11 @@ impl ClassicAffineProfile {
     /// split above eight. A bisection can reduce the worst near-side edge
     /// error by as little as half, so the eight-texel threshold keeps each
     /// resulting edge near the four-texel budget without introducing a third
-    /// lattice level or changing packet-capacity bounds.
+    /// lattice level or changing packet-capacity bounds. This profile is not
+    /// selected by a shipping world renderer until that renderer also owns a
+    /// hard per-frame extra-packet budget. A fixed-camera Quake measurement
+    /// showed that selecting it globally could increase modeled GPU cost by
+    /// 82 percent and reach the emulator's 4,096-draw census envelope.
     pub const RUNTIME_ADAPTIVE: Self = Self {
         screen_width: 320,
         screen_height: 240,
