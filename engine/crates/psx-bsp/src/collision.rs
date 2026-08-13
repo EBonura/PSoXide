@@ -542,9 +542,10 @@ fn normal_dot_point(normal: Vec3I16, point: Vec3I32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CookedRecord;
     use alloc::vec::Vec;
 
-    fn axial_x_plane() -> [u8; 14] {
+    fn axial_x_plane() -> [u8; Plane::SIZE] {
         plane(
             Vec3I16 {
                 x: Q12_ONE as i16,
@@ -556,13 +557,12 @@ mod tests {
         )
     }
 
-    fn plane(normal: Vec3I16, distance: i32, kind: i32) -> [u8; 14] {
-        let mut bytes = [0u8; 14];
+    fn plane(normal: Vec3I16, distance: i32, _kind: i32) -> [u8; Plane::SIZE] {
+        let mut bytes = [0u8; Plane::SIZE];
         bytes[0..2].copy_from_slice(&normal.x.to_le_bytes());
         bytes[2..4].copy_from_slice(&normal.y.to_le_bytes());
         bytes[4..6].copy_from_slice(&normal.z.to_le_bytes());
         bytes[6..10].copy_from_slice(&distance.to_le_bytes());
-        bytes[10..14].copy_from_slice(&kind.to_le_bytes());
         bytes
     }
 

@@ -26,9 +26,34 @@ use core::marker::PhantomData;
 
 /// `PSX%` as emitted by the original Quake PSX map cooker.
 pub const PSB_MAGIC: u32 = 0x2558_5350;
+/// `PSX2` in little-endian byte order: compact structural BSP records.
+pub const PSB2_MAGIC: u32 = 0x3258_5350;
 pub const PSB_HEADER_BYTES: u32 = 4;
 pub const LUMP_HEADER_BYTES: u32 = 8;
 pub const LUMP_COUNT: usize = 15;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PsbVersion {
+    LegacyV1,
+    CompactV2,
+}
+
+impl PsbVersion {
+    pub const fn magic(self) -> u32 {
+        match self {
+            Self::LegacyV1 => PSB_MAGIC,
+            Self::CompactV2 => PSB2_MAGIC,
+        }
+    }
+
+    const fn from_magic(magic: u32) -> Option<Self> {
+        match magic {
+            PSB_MAGIC => Some(Self::LegacyV1),
+            PSB2_MAGIC => Some(Self::CompactV2),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -69,18 +94,33 @@ impl LumpKind {
         Self::Entities,
     ];
 
-    pub const fn record_size(self) -> Option<u32> {
+    pub const fn record_size(self, version: PsbVersion) -> Option<u32> {
         match self {
             Self::TextureData | Self::SoundData | Self::ModelData | Self::Visibility => None,
             Self::Vertices => Some(12),
-            Self::Planes => Some(14),
+            Self::Planes => Some(match version {
+                PsbVersion::LegacyV1 => 14,
+                PsbVersion::CompactV2 => Plane::SIZE as u32,
+            }),
             Self::TextureInfo => Some(14),
-            Self::Faces => Some(14),
+            Self::Faces => Some(match version {
+                PsbVersion::LegacyV1 => 14,
+                PsbVersion::CompactV2 => Face::SIZE as u32,
+            }),
             Self::MarkSurfaces => Some(2),
-            Self::Leaves => Some(26),
-            Self::Nodes => Some(34),
+            Self::Leaves => Some(match version {
+                PsbVersion::LegacyV1 => 26,
+                PsbVersion::CompactV2 => Leaf::SIZE as u32,
+            }),
+            Self::Nodes => Some(match version {
+                PsbVersion::LegacyV1 => 34,
+                PsbVersion::CompactV2 => Node::SIZE as u32,
+            }),
             Self::ClipNodes => Some(6),
-            Self::Models => Some(32),
+            Self::Models => Some(match version {
+                PsbVersion::LegacyV1 => 32,
+                PsbVersion::CompactV2 => BrushModel::SIZE as u32,
+            }),
             Self::Strings => Some(1),
             Self::Entities => Some(50),
         }
@@ -100,8 +140,8 @@ impl LumpRange {
         self.offset + self.len
     }
 
-    pub const fn record_count(self, kind: LumpKind) -> Option<u32> {
-        match kind.record_size() {
+    pub const fn record_count(self, kind: LumpKind, version: PsbVersion) -> Option<u32> {
+        match kind.record_size(version) {
             Some(size) => Some(self.len / size),
             None => None,
         }
@@ -221,6 +261,7 @@ impl<E: fmt::Display> fmt::Display for PsbError<E> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PsbIndex {
+    version: PsbVersion,
     file_len: u32,
     lumps: [LumpRange; LUMP_COUNT],
 }
@@ -235,9 +276,7 @@ impl PsbIndex {
         let mut word = [0u8; 4];
         reader.read_exact_at(0, &mut word).map_err(PsbError::Read)?;
         let magic = u32::from_le_bytes(word);
-        if magic != PSB_MAGIC {
-            return Err(PsbError::BadMagic { found: magic });
-        }
+        let version = PsbVersion::from_magic(magic).ok_or(PsbError::BadMagic { found: magic })?;
 
         let mut lumps = [LumpRange::EMPTY; LUMP_COUNT];
         let mut cursor = PSB_HEADER_BYTES;
@@ -259,7 +298,7 @@ impl PsbIndex {
                 });
             }
             let size = signed_size as u32;
-            if let Some(record_size) = expected.record_size() {
+            if let Some(record_size) = expected.record_size(version) {
                 if size % record_size != 0 {
                     return Err(PsbError::MisalignedLump {
                         kind: expected,
@@ -283,7 +322,19 @@ impl PsbIndex {
                 len: file_len,
             });
         }
-        Ok(Self { file_len, lumps })
+        Ok(Self {
+            version,
+            file_len,
+            lumps,
+        })
+    }
+
+    pub const fn version(&self) -> PsbVersion {
+        self.version
+    }
+
+    pub const fn magic(&self) -> u32 {
+        self.version.magic()
     }
 
     pub const fn file_len(&self) -> u32 {
@@ -468,17 +519,26 @@ pub struct Plane {
     pub normal: Vec3I16,
     /// Q20.12 distance from the origin.
     pub distance: i32,
-    pub kind: i32,
+    pub kind: i16,
 }
 
 impl CookedRecord for Plane {
-    const SIZE: usize = 14;
+    const SIZE: usize = 10;
 
     fn decode(bytes: &[u8]) -> Self {
+        let normal = vec3_i16(bytes, 0);
         Self {
-            normal: vec3_i16(bytes, 0),
+            normal,
             distance: i32_at(bytes, 6),
-            kind: i32_at(bytes, 10),
+            kind: if normal.y == 0 && normal.z == 0 && normal.x == 4096 {
+                0
+            } else if normal.x == 0 && normal.z == 0 && normal.y == 4096 {
+                1
+            } else if normal.x == 0 && normal.y == 0 && normal.z == 4096 {
+                2
+            } else {
+                3
+            },
         }
     }
 }
@@ -522,25 +582,25 @@ impl CookedRecord for TextureInfo {
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Face {
-    pub plane: i16,
+    pub plane: u16,
     pub flags: u16,
-    pub first_vertex: i32,
+    pub first_vertex: u16,
     pub vertex_count: i16,
-    pub texture: i16,
+    pub texture: u16,
     pub light_styles: [u8; 2],
 }
 
 impl CookedRecord for Face {
-    const SIZE: usize = 14;
+    const SIZE: usize = 10;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
-            plane: i16_at(bytes, 0),
-            flags: u16_at(bytes, 2),
-            first_vertex: i32_at(bytes, 4),
-            vertex_count: i16_at(bytes, 8),
-            texture: i16_at(bytes, 10),
-            light_styles: [bytes[12], bytes[13]],
+            plane: u16_at(bytes, 0),
+            first_vertex: u16_at(bytes, 2),
+            texture: u16_at(bytes, 4),
+            flags: bytes[6] as u16,
+            vertex_count: bytes[7] as i16,
+            light_styles: [bytes[8], bytes[9]],
         }
     }
 }
@@ -549,8 +609,6 @@ impl CookedRecord for Face {
 pub struct Leaf {
     pub contents: i16,
     pub visibility_offset: i32,
-    pub mins: Vec3I16,
-    pub maxs: Vec3I16,
     pub first_mark_surface: u16,
     pub mark_surface_count: u16,
     pub lightmap: [u8; 2],
@@ -558,18 +616,19 @@ pub struct Leaf {
 }
 
 impl CookedRecord for Leaf {
-    const SIZE: usize = 26;
+    const SIZE: usize = 10;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
-            contents: i16_at(bytes, 0),
-            visibility_offset: i32_at(bytes, 2),
-            mins: vec3_i16(bytes, 6),
-            maxs: vec3_i16(bytes, 12),
-            first_mark_surface: u16_at(bytes, 18),
-            mark_surface_count: u16_at(bytes, 20),
-            lightmap: [bytes[22], bytes[23]],
-            light_styles: [bytes[24], bytes[25]],
+            contents: bytes[0] as i8 as i16,
+            mark_surface_count: bytes[1] as u16,
+            visibility_offset: match u16_at(bytes, 2) {
+                u16::MAX => -1,
+                offset => offset as i32,
+            },
+            first_mark_surface: u16_at(bytes, 4),
+            lightmap: [bytes[6], bytes[7]],
+            light_styles: [bytes[8], bytes[9]],
         }
     }
 }
@@ -579,27 +638,15 @@ pub struct Node {
     pub plane: u16,
     /// Negative values encode `-(leaf + 1)`.
     pub children: [i16; 2],
-    pub mins: Vec3I16,
-    pub maxs: Vec3I16,
-    pub surface_mins: Vec3I16,
-    pub surface_maxs: Vec3I16,
-    pub first_face: u16,
-    pub face_count: u16,
 }
 
 impl CookedRecord for Node {
-    const SIZE: usize = 34;
+    const SIZE: usize = 6;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
             plane: u16_at(bytes, 0),
             children: [i16_at(bytes, 2), i16_at(bytes, 4)],
-            mins: vec3_i16(bytes, 6),
-            maxs: vec3_i16(bytes, 12),
-            surface_mins: vec3_i16(bytes, 18),
-            surface_maxs: vec3_i16(bytes, 24),
-            first_face: u16_at(bytes, 30),
-            face_count: u16_at(bytes, 32),
         }
     }
 }
@@ -625,7 +672,6 @@ impl CookedRecord for ClipNode {
 pub struct BrushModel {
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
-    pub origin: Vec3I16,
     pub head_nodes: [i16; 4],
     pub visible_leaves: i16,
     pub first_face: u16,
@@ -633,22 +679,21 @@ pub struct BrushModel {
 }
 
 impl CookedRecord for BrushModel {
-    const SIZE: usize = 32;
+    const SIZE: usize = 26;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
             mins: vec3_i16(bytes, 0),
             maxs: vec3_i16(bytes, 6),
-            origin: vec3_i16(bytes, 12),
             head_nodes: [
+                i16_at(bytes, 12),
+                i16_at(bytes, 14),
+                i16_at(bytes, 16),
                 i16_at(bytes, 18),
-                i16_at(bytes, 20),
-                i16_at(bytes, 22),
-                i16_at(bytes, 24),
             ],
-            visible_leaves: i16_at(bytes, 26),
-            first_face: u16_at(bytes, 28),
-            face_count: u16_at(bytes, 30),
+            visible_leaves: i16_at(bytes, 20),
+            first_face: u16_at(bytes, 22),
+            face_count: u16_at(bytes, 24),
         }
     }
 }
@@ -1270,7 +1315,11 @@ mod tests {
     }
 
     fn valid_file() -> Bytes {
-        let mut bytes = Vec::from(PSB_MAGIC.to_le_bytes());
+        valid_file_with_magic(PSB_MAGIC)
+    }
+
+    fn valid_file_with_magic(magic: u32) -> Bytes {
+        let mut bytes = Vec::from(magic.to_le_bytes());
         for kind in LumpKind::ALL {
             bytes.extend_from_slice(&(kind as i32).to_le_bytes());
             bytes.extend_from_slice(&0i32.to_le_bytes());
@@ -1320,6 +1369,21 @@ mod tests {
         assert_eq!(index.file_len(), 4 + LUMP_COUNT as u32 * 8);
         assert_eq!(index.lump(LumpKind::TextureData).offset, 12);
         assert_eq!(index.lump(LumpKind::Entities).len, 0);
+        assert_eq!(index.version(), PsbVersion::LegacyV1);
+        assert_eq!(index.magic(), PSB_MAGIC);
+    }
+
+    #[test]
+    fn recognizes_compact_v2_magic_and_record_contract() {
+        let mut bytes = valid_file_with_magic(PSB2_MAGIC);
+        let index = PsbIndex::read(&mut bytes).expect("compact index");
+        assert_eq!(index.version(), PsbVersion::CompactV2);
+        assert_eq!(index.magic(), PSB2_MAGIC);
+        assert_eq!(LumpKind::Planes.record_size(index.version()), Some(10));
+        assert_eq!(LumpKind::Faces.record_size(index.version()), Some(10));
+        assert_eq!(LumpKind::Leaves.record_size(index.version()), Some(10));
+        assert_eq!(LumpKind::Nodes.record_size(index.version()), Some(6));
+        assert_eq!(LumpKind::Models.record_size(index.version()), Some(26));
     }
 
     #[test]
@@ -1380,25 +1444,10 @@ mod tests {
         bytes[0..2].copy_from_slice(&7u16.to_le_bytes());
         bytes[2..4].copy_from_slice(&3i16.to_le_bytes());
         bytes[4..6].copy_from_slice(&(-5i16).to_le_bytes());
-        bytes[6..8].copy_from_slice(&(-64i16).to_le_bytes());
-        bytes[8..10].copy_from_slice(&32i16.to_le_bytes());
-        bytes[10..12].copy_from_slice(&96i16.to_le_bytes());
-        bytes[30..32].copy_from_slice(&120u16.to_le_bytes());
-        bytes[32..34].copy_from_slice(&9u16.to_le_bytes());
 
         let node = RecordSlice::<Node>::new(&bytes).unwrap().get(0).unwrap();
         assert_eq!(node.plane, 7);
         assert_eq!(node.children, [3, -5]);
-        assert_eq!(
-            node.mins,
-            Vec3I16 {
-                x: -64,
-                y: 32,
-                z: 96
-            }
-        );
-        assert_eq!(node.first_face, 120);
-        assert_eq!(node.face_count, 9);
     }
 
     #[test]
