@@ -1601,7 +1601,6 @@ fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorA
     }
 }
 
-
 fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Option<i32> {
     let height = floor_height_at(room, x, z)?;
     if radius <= 0 {
@@ -2187,10 +2186,16 @@ mod tests {
                 sprint,
                 ..CharacterMotorInput::default()
             };
-            let walked = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO)
-                .update(None, input(false), config());
-            let sprinted = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO)
-                .update(None, input(true), config());
+            let walked = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO).update(
+                None,
+                input(false),
+                config(),
+            );
+            let sprinted = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO).update(
+                None,
+                input(true),
+                config(),
+            );
 
             // Facing is held on the target regardless of speed or direction.
             assert_eq!(walked.yaw, Angle::ZERO);

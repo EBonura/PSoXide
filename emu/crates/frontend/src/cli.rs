@@ -330,6 +330,13 @@ pub struct LaunchArgs {
     /// measure draw composition without retaining the whole command stream.
     #[arg(long)]
     pub gpu_frame_stats_log: Option<PathBuf>,
+    /// Trace the last GP0 command which wrote one visible display pixel.
+    /// Coordinates use `X,Y` in the final 320x240 display, not absolute VRAM.
+    /// The command opcode and complete FIFO are printed without touching guest
+    /// RAM or timing. Do not combine this with `--gpu-frame-stats-log`, which
+    /// intentionally drains the command log after every route tick.
+    #[arg(long, value_name = "X,Y")]
+    pub trace_display_pixel: Option<String>,
     /// Capture the software display at fixed route-tick checkpoints. These
     /// screenshots are emulator-owned and do not alter guest RAM or timing.
     #[arg(long)]
@@ -811,7 +818,9 @@ fn run_headless_launch(
             .as_ref()
             .map(|samples| (samples.len() as u64).saturating_add(args.input_tape_delay_ticks))
     });
-    let capture_gpu_commands = args.dump_hw.is_some() || args.gpu_frame_stats_log.is_some();
+    let capture_gpu_commands = args.dump_hw.is_some()
+        || args.gpu_frame_stats_log.is_some()
+        || args.trace_display_pixel.is_some();
 
     let mut cpu = Cpu::new();
 
@@ -939,6 +948,16 @@ fn run_headless_launch(
             return Err(format!("unsupported file extension: .{other}"));
         }
     };
+    if args.trace_display_pixel.is_some() {
+        if args.gpu_frame_stats_log.is_some() {
+            return Err(
+                "--trace-display-pixel cannot be combined with --gpu-frame-stats-log".to_string(),
+            );
+        }
+        // The branch-specific setup above enables the lighter command log.
+        // Upgrade it to pixel ownership before the first guest instruction.
+        bus.gpu.enable_pixel_tracer();
+    }
 
     if args.scph_9902 {
         bus.apply_scph_9902_profile();
@@ -1828,6 +1847,58 @@ fn run_headless_launch(
         }
     }
 
+    if let Some(spec) = args.trace_display_pixel.as_deref() {
+        let (x, y) = spec
+            .split_once(',')
+            .ok_or_else(|| "--trace-display-pixel expects X,Y".to_string())?;
+        let x = x
+            .parse::<u16>()
+            .map_err(|_| "--trace-display-pixel X must be an unsigned integer".to_string())?;
+        let y = y
+            .parse::<u16>()
+            .map_err(|_| "--trace-display-pixel Y must be an unsigned integer".to_string())?;
+        let display = bus.gpu.display_area();
+        if x >= display.width || y >= display.height {
+            return Err(format!(
+                "--trace-display-pixel ({x},{y}) lies outside the {}x{} display",
+                display.width, display.height
+            ));
+        }
+        let vram_x = display.x + x;
+        let vram_y = display.y + y;
+        if let Some(owner) = bus.gpu.pixel_owner_at(vram_x, vram_y) {
+            let owner_index = owner.index as usize;
+            let fifo = owner
+                .fifo
+                .iter()
+                .map(|word| format!("0x{word:08x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!(
+                "[cli] display pixel ({x},{y}) / VRAM ({vram_x},{vram_y}) owner: index={} opcode=0x{:02x} fifo={fifo}",
+                owner.index, owner.opcode
+            );
+            let start = owner_index.saturating_sub(4);
+            let end = (owner_index + 5).min(bus.gpu.cmd_log.len());
+            for neighbor in &bus.gpu.cmd_log[start..end] {
+                let fifo = neighbor
+                    .fifo
+                    .iter()
+                    .map(|word| format!("0x{word:08x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!(
+                    "[cli] pixel-owner neighbor: index={} opcode=0x{:02x} fifo={fifo}",
+                    neighbor.index, neighbor.opcode
+                );
+            }
+        } else {
+            eprintln!(
+                "[cli] display pixel ({x},{y}) / VRAM ({vram_x},{vram_y}) has no traced GP0 owner"
+            );
+        }
+    }
+
     if let Some(path) = args.dump_display {
         let (rgba, w, h) = bus.gpu.display_rgba8();
         write_rgb_ppm_from_rgba(&path, w, h, &rgba)?;
@@ -2424,6 +2495,7 @@ fn validation_launch_args(
         profile_log: None,
         route_log: None,
         gpu_frame_stats_log: None,
+        trace_display_pixel: None,
         route_screenshot_dir: None,
         route_screenshot_interval: 3_000,
         pc_sample_log: None,
