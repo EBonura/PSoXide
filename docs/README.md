@@ -49,6 +49,7 @@ Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hard
 
 | Doc | Topic |
 |-----|-------|
+| [comicon-playable-beta-handoff-2026-08-13.md](comicon-playable-beta-handoff-2026-08-13.md) | Authoritative playable-beta freeze, exact evidence, WIP recovery, promotion, and adversarial-resume instructions. |
 | [souls-slice-acceptance.md](souls-slice-acceptance.md) | Owner acceptance pass on the tracked souls slice. |
 | [fresh-project-workflow-checklist.md](fresh-project-workflow-checklist.md) | Owner acceptance pass on a newly created project. |
 | [asset-provenance.md](asset-provenance.md) | Asset and media provenance. |
