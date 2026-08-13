@@ -21,7 +21,7 @@ pub const Q12_ONE: i32 = 4096;
 /// Packed collision BSP ready for `psx_bsp` record slices.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompiledCollision {
-    /// Packed 14-byte XBSP plane records.
+    /// Packed compact BSP plane records.
     pub planes: Vec<u8>,
     /// Packed 6-byte XBSP clipnode records.
     pub clipnodes: Vec<u8>,
