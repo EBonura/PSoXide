@@ -109,10 +109,12 @@ impl SkyCyclorama {
     }
 
     /// Draw the cooked sky panorama over a camera-centred dome into the
-    /// OT's reserved background slot (`OT_DEPTH - 1`, the farthest slot,
-    /// behind all world geometry). Streamed sky assets carry empty baked
-    /// bytes and are uploaded on gameplay entry, so residency resolves
-    /// through the caller's slot resolvers; baked builds upload lazily.
+    /// OT's farthest slot (`OT_DEPTH - 1`). Callers whose world renderer can
+    /// also use that slot must insert the sky afterward: OT prepend order then
+    /// executes the sky first and keeps same-slot world packets in front.
+    /// Streamed sky assets carry empty baked bytes and are uploaded on gameplay
+    /// entry, so residency resolves through the caller's slot resolvers; baked
+    /// builds upload lazily.
     pub fn draw_panorama<const OT_DEPTH: usize>(
         &mut self,
         sky: LevelSkyRecord,
@@ -127,9 +129,9 @@ impl SkyCyclorama {
         sky_panorama_clut_word: impl Fn(usize) -> u16,
         ot: &mut OtFrame<'_, OT_DEPTH>,
     ) {
-        // OT slot reserved for the sky cyclorama. It is the farthest slot,
-        // drawn behind all world geometry (which the game's world band caps
-        // at `OT_DEPTH - 2`).
+        // The ordinary world band stops one slot earlier. Renderers that also
+        // use this farthest slot preserve the background contract through the
+        // caller's insertion order documented above.
         let sky_ot_slot = psx_engine::DepthSlot::new(OT_DEPTH - 1);
         if sky.flags & sky_flags::ENABLED == 0 {
             return;

@@ -172,9 +172,10 @@ pub(super) const OT_DEPTH: usize = 512;
 /// Room geometry, actors, and shadows share one depth band so walls can
 /// correctly overpaint the hidden parts of characters in the PS1
 /// painter's algorithm.
-// Farthest slot (OT_DEPTH - 1) is reserved for the sky cyclorama (see
-// SKY_OT_SLOT), so world geometry spans 0..=OT_DEPTH-2 and always draws in
-// front of the sky.
+// The ordinary world pass spans 0..=OT_DEPTH-2 so it stays in front of the
+// sky. PXBSP's classic packet stream may also use the farthest slot; the scene
+// therefore inserts the sky after that stream so same-slot OT prepend order
+// still executes the sky first.
 pub(super) const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 2);
 pub(super) const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
