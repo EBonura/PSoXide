@@ -390,7 +390,9 @@ impl ResidentMap {
 
         for (index, face) in faces.iter().enumerate() {
             let first = usize::try_from(face.first_vertex).ok();
-            if face.plane as usize >= planes.len()
+            if face.plane < 0
+                || face.plane as usize >= planes.len()
+                || face.texture < 0
                 || face.texture as usize >= textures.len()
                 || face.vertex_count < 3
                 || first.is_none()
@@ -572,6 +574,7 @@ const fn valid_leaf_contents(contents: i16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Vec3I16;
 
     #[test]
     fn legacy_structural_records_compact_without_semantic_drift() {
@@ -619,10 +622,42 @@ mod tests {
         let leaf = Leaf::decode(&compact);
         assert_eq!(leaf.contents, -3);
         assert_eq!(leaf.visibility_offset, 40823);
+        assert_eq!(leaf.mins, Vec3I16::default());
+        assert_eq!(leaf.maxs, Vec3I16::default());
         assert_eq!(leaf.first_mark_surface, 99);
         assert_eq!(leaf.mark_surface_count, 78);
         assert_eq!(leaf.lightmap, [1, 2]);
         assert_eq!(leaf.light_styles, [3, 4]);
+
+        let mut node = [0u8; 34];
+        node[0..2].copy_from_slice(&7u16.to_le_bytes());
+        node[2..4].copy_from_slice(&(-2i16).to_le_bytes());
+        node[4..6].copy_from_slice(&3i16.to_le_bytes());
+        node[6..34].fill(0x5a);
+        let mut compact = [0u8; Node::SIZE];
+        assert!(compact_legacy_record(LumpKind::Nodes, &node, &mut compact));
+        let node = Node::decode(&compact);
+        assert_eq!(node.plane, 7);
+        assert_eq!(node.children, [-2, 3]);
+        assert_eq!(node.mins, Vec3I16::default());
+        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(node.surface_mins, Vec3I16::default());
+        assert_eq!(node.surface_maxs, Vec3I16::default());
+        assert_eq!(node.first_face, 0);
+        assert_eq!(node.face_count, 0);
+
+        let mut model = [0u8; 32];
+        model[0..12].fill(1);
+        model[12..18].fill(0x5a);
+        model[18..32].fill(2);
+        let mut compact = [0u8; BrushModel::SIZE];
+        assert!(compact_legacy_record(
+            LumpKind::Models,
+            &model,
+            &mut compact
+        ));
+        let model = BrushModel::decode(&compact);
+        assert_eq!(model.origin, Vec3I16::default());
     }
 
     #[test]
