@@ -519,7 +519,10 @@ pub struct Plane {
     pub normal: Vec3I16,
     /// Q20.12 distance from the origin.
     pub distance: i32,
-    pub kind: i16,
+    /// Derived axial fast-path class. Kept at its legacy semantic width so
+    /// returning `Plane` by value preserves the proven MIPS ABI; compact v2
+    /// does not store this field on the wire.
+    pub kind: i32,
 }
 
 impl CookedRecord for Plane {
@@ -582,11 +585,14 @@ impl CookedRecord for TextureInfo {
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Face {
-    pub plane: u16,
+    /// Non-negative plane index. Compact v2 stores this as `u16`, while the
+    /// semantic type stays legacy-shaped for the MIPS aggregate-return ABI.
+    pub plane: i16,
     pub flags: u16,
-    pub first_vertex: u16,
+    pub first_vertex: i32,
     pub vertex_count: i16,
-    pub texture: u16,
+    /// Non-negative texture/material index; see [`Self::plane`].
+    pub texture: i16,
     pub light_styles: [u8; 2],
 }
 
@@ -595,9 +601,9 @@ impl CookedRecord for Face {
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
-            plane: u16_at(bytes, 0),
-            first_vertex: u16_at(bytes, 2),
-            texture: u16_at(bytes, 4),
+            plane: u16_at(bytes, 0) as i16,
+            first_vertex: u16_at(bytes, 2) as i32,
+            texture: u16_at(bytes, 4) as i16,
             flags: bytes[6] as u16,
             vertex_count: bytes[7] as i16,
             light_styles: [bytes[8], bytes[9]],
@@ -609,6 +615,10 @@ impl CookedRecord for Face {
 pub struct Leaf {
     pub contents: i16,
     pub visibility_offset: i32,
+    /// Legacy semantic bounds retained for the proven MIPS ABI. Compact v2
+    /// omits these unused fields and decodes them as zero.
+    pub mins: Vec3I16,
+    pub maxs: Vec3I16,
     pub first_mark_surface: u16,
     pub mark_surface_count: u16,
     pub lightmap: [u8; 2],
@@ -626,6 +636,8 @@ impl CookedRecord for Leaf {
                 u16::MAX => -1,
                 offset => offset as i32,
             },
+            mins: Vec3I16::default(),
+            maxs: Vec3I16::default(),
             first_mark_surface: u16_at(bytes, 4),
             lightmap: [bytes[6], bytes[7]],
             light_styles: [bytes[8], bytes[9]],
@@ -638,6 +650,14 @@ pub struct Node {
     pub plane: u16,
     /// Negative values encode `-(leaf + 1)`.
     pub children: [i16; 2],
+    /// Legacy semantic bounds/range retained for the proven MIPS ABI.
+    /// Compact v2 omits these unused fields and decodes them as zero.
+    pub mins: Vec3I16,
+    pub maxs: Vec3I16,
+    pub surface_mins: Vec3I16,
+    pub surface_maxs: Vec3I16,
+    pub first_face: u16,
+    pub face_count: u16,
 }
 
 impl CookedRecord for Node {
@@ -647,6 +667,12 @@ impl CookedRecord for Node {
         Self {
             plane: u16_at(bytes, 0),
             children: [i16_at(bytes, 2), i16_at(bytes, 4)],
+            mins: Vec3I16::default(),
+            maxs: Vec3I16::default(),
+            surface_mins: Vec3I16::default(),
+            surface_maxs: Vec3I16::default(),
+            first_face: 0,
+            face_count: 0,
         }
     }
 }
@@ -672,6 +698,10 @@ impl CookedRecord for ClipNode {
 pub struct BrushModel {
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
+    /// Legacy semantic origin retained for the proven MIPS ABI. Entity/mover
+    /// transforms own placement, so compact v2 decodes this unused field as
+    /// zero rather than storing it.
+    pub origin: Vec3I16,
     pub head_nodes: [i16; 4],
     pub visible_leaves: i16,
     pub first_face: u16,
@@ -685,6 +715,7 @@ impl CookedRecord for BrushModel {
         Self {
             mins: vec3_i16(bytes, 0),
             maxs: vec3_i16(bytes, 6),
+            origin: Vec3I16::default(),
             head_nodes: [
                 i16_at(bytes, 12),
                 i16_at(bytes, 14),
@@ -1384,6 +1415,43 @@ mod tests {
         assert_eq!(LumpKind::Leaves.record_size(index.version()), Some(10));
         assert_eq!(LumpKind::Nodes.record_size(index.version()), Some(6));
         assert_eq!(LumpKind::Models.record_size(index.version()), Some(26));
+    }
+
+    #[test]
+    fn compact_wire_records_keep_the_proven_legacy_semantic_abi() {
+        assert_eq!(Plane::SIZE, 10);
+        assert_eq!(Face::SIZE, 10);
+        assert_eq!(Leaf::SIZE, 10);
+        assert_eq!(Node::SIZE, 6);
+        assert_eq!(BrushModel::SIZE, 26);
+
+        // These are semantic Rust values returned by RecordSlice::get on the
+        // MIPS guest, not their compact wire strides. Keep the layouts pinned
+        // independently so future physical-format work cannot silently alter
+        // aggregate-return codegen again.
+        assert_eq!(core::mem::size_of::<Plane>(), 16);
+        assert_eq!(core::mem::align_of::<Plane>(), 4);
+        assert_eq!(core::mem::size_of::<Face>(), 16);
+        assert_eq!(core::mem::align_of::<Face>(), 4);
+        assert_eq!(core::mem::size_of::<Leaf>(), 28);
+        assert_eq!(core::mem::align_of::<Leaf>(), 4);
+        assert_eq!(core::mem::size_of::<Node>(), 34);
+        assert_eq!(core::mem::align_of::<Node>(), 2);
+        assert_eq!(core::mem::size_of::<BrushModel>(), 32);
+        assert_eq!(core::mem::align_of::<BrushModel>(), 2);
+
+        let leaf = Leaf::decode(&[-1i8 as u8, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(leaf.mins, Vec3I16::default());
+        assert_eq!(leaf.maxs, Vec3I16::default());
+        let node = Node::decode(&[0; Node::SIZE]);
+        assert_eq!(node.mins, Vec3I16::default());
+        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(node.surface_mins, Vec3I16::default());
+        assert_eq!(node.surface_maxs, Vec3I16::default());
+        assert_eq!(node.first_face, 0);
+        assert_eq!(node.face_count, 0);
+        let model = BrushModel::decode(&[0; BrushModel::SIZE]);
+        assert_eq!(model.origin, Vec3I16::default());
     }
 
     #[test]

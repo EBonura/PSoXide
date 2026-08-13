@@ -194,7 +194,9 @@ fn validate_limits(bsp: &CompiledSurfaceBsp) -> Result<(), BrushPackError> {
         .iter()
         .map(|surface| surface.vertices.len())
         .sum();
-    limit("vertices", vertices, u16::MAX as usize)?;
+    // Compact Face stores the offset in 16 bits, but its public semantic
+    // record retains the legacy signed/i32 ABI used by the MIPS guest.
+    limit("vertices", vertices, i16::MAX as usize)?;
     for (surface, compiled) in bsp.surfaces.iter().enumerate() {
         limit("face vertices", compiled.vertices.len(), MAX_FACE_VERTICES)?;
         if compiled.vertices.len() < 3 {
