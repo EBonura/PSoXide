@@ -9,11 +9,11 @@ use psx_bsp::pxbsp::{
     PXBSP_ENTITY_TABLE_HEADER_BYTES, PXBSP_HEADER_BYTES, PXBSP_LUMP_COUNT, PXBSP_MAGIC,
     PXBSP_VERSION,
 };
-use psx_bsp::CookedRecord;
+use psx_bsp::{CookedRecord, Plane};
 
 const WORLD_COLLISION_HULLS: usize = 3;
 const VERTEX_BYTES: usize = 12;
-const PLANE_BYTES: usize = 10;
+const PLANE_BYTES: usize = Plane::SIZE;
 const FACE_BYTES: usize = 10;
 const MARK_SURFACE_BYTES: usize = 2;
 const LEAF_BYTES: usize = 10;
@@ -320,7 +320,7 @@ fn append_geometry(
     limit(
         "vertices",
         vertex_base.saturating_add(vertex_count),
-        i16::MAX as usize,
+        u16::MAX as usize,
     )?;
     output.vertices.extend_from_slice(&input.vertices);
 
@@ -338,12 +338,7 @@ fn append_geometry(
             .and_then(|value| i16::try_from(value).ok())
             .map(|value| value as u16)
             .ok_or(PxbspBuildError::InvalidReference("face plane"))?;
-        let first_vertex = usize::from(read_u16(face, 2));
-        let first_vertex = first_vertex
-            .checked_add(vertex_base)
-            .and_then(|value| i16::try_from(value).ok())
-            .map(|value| value as u16)
-            .ok_or(PxbspBuildError::InvalidReference("face vertex"))?;
+        let first_vertex = remap_face_vertex(read_u16(face, 2), vertex_base)?;
         let material = usize::from(read_u16(face, 4));
         let material = material_remap
             .get(material)
@@ -467,6 +462,13 @@ fn append_geometry(
         first_face: face_base,
         face_count,
     })
+}
+
+fn remap_face_vertex(first_vertex: u16, vertex_base: usize) -> Result<u16, PxbspBuildError> {
+    usize::from(first_vertex)
+        .checked_add(vertex_base)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or(PxbspBuildError::InvalidReference("face vertex"))
 }
 
 fn append_unique_records(
@@ -792,6 +794,16 @@ mod tests {
         mins: [-32, 0, -32],
         maxs: [32, 96, 32],
     };
+
+    #[test]
+    fn face_vertex_remap_preserves_the_full_u16_wire_domain() {
+        assert_eq!(remap_face_vertex(1, 32_768), Ok(32_769));
+        assert_eq!(remap_face_vertex(32_767, 32_768), Ok(u16::MAX));
+        assert_eq!(
+            remap_face_vertex(32_768, 32_768),
+            Err(PxbspBuildError::InvalidReference("face vertex"))
+        );
+    }
 
     fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
         let mut output = Trace::default();

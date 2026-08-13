@@ -10,7 +10,7 @@
 //! ```
 
 use psx_bsp::{
-    CookedRecord, LumpKind, Node, PsbIndex, SliceReader, LUMP_HEADER_BYTES, PSB2_MAGIC,
+    CookedRecord, LumpKind, Node, PsbIndex, SliceReader, LUMP_HEADER_BYTES, PSB3_MAGIC,
     PSB_HEADER_BYTES, PSB_MAGIC,
 };
 
@@ -92,7 +92,7 @@ fn inspect_pack(path: &str, bytes: &[u8]) -> Result<usize, String> {
 
         let map = &buf[..decoded];
         if map.get(..4) == Some(&PSB_MAGIC.to_le_bytes()[..])
-            || map.get(..4) == Some(&PSB2_MAGIC.to_le_bytes()[..])
+            || map.get(..4) == Some(&PSB3_MAGIC.to_le_bytes()[..])
         {
             match inspect(map) {
                 Ok(summary) => {
