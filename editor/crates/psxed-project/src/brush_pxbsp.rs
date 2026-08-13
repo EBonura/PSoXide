@@ -320,7 +320,7 @@ fn append_geometry(
     limit(
         "vertices",
         vertex_base.saturating_add(vertex_count),
-        u16::MAX as usize,
+        i16::MAX as usize,
     )?;
     output.vertices.extend_from_slice(&input.vertices);
 
@@ -335,18 +335,21 @@ fn append_geometry(
         let plane = plane_remap
             .get(plane)
             .copied()
-            .and_then(|value| u16::try_from(value).ok())
+            .and_then(|value| i16::try_from(value).ok())
+            .map(|value| value as u16)
             .ok_or(PxbspBuildError::InvalidReference("face plane"))?;
         let first_vertex = usize::from(read_u16(face, 2));
         let first_vertex = first_vertex
             .checked_add(vertex_base)
-            .and_then(|value| u16::try_from(value).ok())
+            .and_then(|value| i16::try_from(value).ok())
+            .map(|value| value as u16)
             .ok_or(PxbspBuildError::InvalidReference("face vertex"))?;
         let material = usize::from(read_u16(face, 4));
         let material = material_remap
             .get(material)
             .copied()
-            .and_then(|value| u16::try_from(value).ok())
+            .and_then(|value| i16::try_from(value).ok())
+            .map(|value| value as u16)
             .ok_or(PxbspBuildError::InvalidReference("face material"))?;
         let mut remapped = face.to_vec();
         remapped[0..2].copy_from_slice(&plane.to_le_bytes());

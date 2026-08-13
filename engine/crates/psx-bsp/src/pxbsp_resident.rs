@@ -492,7 +492,9 @@ impl PxbspResidentMap {
 
         for (index, face) in faces.iter().enumerate() {
             let first = usize::try_from(face.first_vertex).ok();
-            if face.plane as usize >= planes.len()
+            if face.plane < 0
+                || face.plane as usize >= planes.len()
+                || face.texture < 0
                 || face.texture as usize >= materials.len()
                 || face.vertex_count < 3
                 || first.is_none()
@@ -670,6 +672,7 @@ pub(crate) mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::Vec3I16;
     use crate::pxbsp::{
         PxbspEntity, PXBSP_DIRECTORY_ENTRY_BYTES, PXBSP_ENTITY_TABLE_HEADER_BYTES,
         PXBSP_HEADER_BYTES, PXBSP_MAGIC, PXBSP_VERSION,
@@ -908,8 +911,19 @@ pub(crate) mod tests {
         assert_eq!(map.planes().len(), 1);
         assert_eq!(map.faces().get(0).expect("face").vertex_count, 3);
         assert_eq!(map.leaves().get(1).expect("leaf").visibility_offset, 0);
-        assert_eq!(map.nodes().get(0).expect("node").children, [-2, -1]);
-        assert_eq!(map.brush_models().len(), 1);
+        let leaf = map.leaves().get(1).expect("leaf");
+        assert_eq!(leaf.mins, Vec3I16::default());
+        assert_eq!(leaf.maxs, Vec3I16::default());
+        let node = map.nodes().get(0).expect("node");
+        assert_eq!(node.children, [-2, -1]);
+        assert_eq!(node.mins, Vec3I16::default());
+        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(node.surface_mins, Vec3I16::default());
+        assert_eq!(node.surface_maxs, Vec3I16::default());
+        assert_eq!(node.first_face, 0);
+        assert_eq!(node.face_count, 0);
+        let model = map.brush_models().get(0).expect("model");
+        assert_eq!(model.origin, Vec3I16::default());
         assert!(map.resident_bytes() < bytes.len());
     }
 
