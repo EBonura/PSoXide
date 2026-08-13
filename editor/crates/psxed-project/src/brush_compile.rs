@@ -13,6 +13,7 @@
 
 use crate::brush::{Brush, BrushContents, FaceUv, Plane};
 use crate::ResourceId;
+use psx_bsp::CookedRecord;
 
 /// Fixed-point scale shared with the runtime: positions and plane
 /// distances are Q20.12, normals Q3.12.
@@ -464,7 +465,7 @@ pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
             let Some((packed, flipped)) = pack_plane(&plane) else {
                 continue;
             };
-            let index = planes.len() / 10;
+            let index = planes.len() / psx_bsp::Plane::SIZE;
             if index > i16::MAX as usize {
                 break;
             }
@@ -510,12 +511,11 @@ pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
     }
 }
 
-/// Pack one kernel plane as a 10-byte compact BSP record: Q3.12 unit normal
-/// and Q20.12 distance. The runtime derives the axial fast-path kind from the
-/// packed normal. Returns the bytes and whether the
-/// stored plane is flipped relative to the face's outward normal
-/// (axial planes are canonicalized to positive normals).
-pub(crate) fn pack_plane(plane: &Plane) -> Option<([u8; 10], bool)> {
+/// Pack one kernel plane as the canonical 14-byte BSP record: Q3.12 unit
+/// normal, Q20.12 distance, and the stored i32 axial fast-path kind. Returns
+/// the bytes and whether the stored plane is flipped relative to the face's
+/// outward normal (axial planes are canonicalized to positive normals).
+pub(crate) fn pack_plane(plane: &Plane) -> Option<([u8; 14], bool)> {
     let n = plane.normal.map(|v| v as f64);
     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
     if len <= 0.0 {
@@ -527,7 +527,7 @@ pub(crate) fn pack_plane(plane: &Plane) -> Option<([u8; 10], bool)> {
     pack_normalized_plane(unit, dist_world)
 }
 
-pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<([u8; 10], bool)> {
+pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<([u8; 14], bool)> {
     if !unit.into_iter().all(f64::is_finite) || !dist_world.is_finite() {
         return None;
     }
@@ -535,16 +535,16 @@ pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<(
     let axis = (0..3).find(|&a| {
         unit[a].abs() > 1.0 - 1e-9 && (0..3).all(|other| other == a || unit[other].abs() < 1e-9)
     });
-    let (stored_unit, stored_dist, _kind, flipped) = match axis {
+    let (stored_unit, stored_dist, kind, flipped) = match axis {
         Some(a) if unit[a] < 0.0 => {
             let mut s = [0.0; 3];
             s[a] = 1.0;
-            (s, -dist_world, a as i16, true)
+            (s, -dist_world, a as i32, true)
         }
         Some(a) => {
             let mut s = [0.0; 3];
             s[a] = 1.0;
-            (s, dist_world, a as i16, false)
+            (s, dist_world, a as i32, false)
         }
         None => (unit, dist_world, 3, false),
     };
@@ -554,11 +554,12 @@ pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<(
     if distance_q12.abs() >= i32::MAX as f64 {
         return None;
     }
-    let mut bytes = [0u8; 10];
+    let mut bytes = [0u8; 14];
     bytes[0..2].copy_from_slice(&q12(stored_unit[0]).to_le_bytes());
     bytes[2..4].copy_from_slice(&q12(stored_unit[1]).to_le_bytes());
     bytes[4..6].copy_from_slice(&q12(stored_unit[2]).to_le_bytes());
     bytes[6..10].copy_from_slice(&(distance_q12 as i32).to_le_bytes());
+    bytes[10..14].copy_from_slice(&kind.to_le_bytes());
     Some((bytes, flipped))
 }
 
@@ -570,6 +571,22 @@ mod tests {
         CONTENTS_SOLID, CONTENTS_WATER,
     };
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
+
+    #[test]
+    fn packed_planes_retain_the_cooker_authored_classifier() {
+        for (normal, expected_kind) in [
+            ([1.0, 0.0, 0.0], 0),
+            ([0.0, 1.0, 0.0], 1),
+            ([0.0, 0.0, 1.0], 2),
+            ([0.5, 0.5, 0.7071067811865476], 3),
+        ] {
+            let (packed, _) = pack_normalized_plane(normal, 12.0).expect("valid plane");
+            assert_eq!(
+                i32::from_le_bytes(packed[10..14].try_into().unwrap()),
+                expected_kind
+            );
+        }
+    }
 
     fn hull(compiled: &CompiledCollision) -> CollisionHull<'_> {
         CollisionHull::new(

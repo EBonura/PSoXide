@@ -116,7 +116,7 @@ pub fn compile_collision_hulls(
     })
 }
 
-fn point_hull_planes(brush: &Brush) -> Result<Vec<([u8; 10], bool)>, CollisionHullCompileError> {
+fn point_hull_planes(brush: &Brush) -> Result<Vec<([u8; 14], bool)>, CollisionHullCompileError> {
     brush
         .faces
         .iter()
@@ -129,7 +129,7 @@ fn expanded_hull_planes(
     brush: &Brush,
     solved: &crate::brush::SolvedBrush,
     hull: CollisionHullBounds,
-) -> Result<Vec<([u8; 10], bool)>, CollisionHullCompileError> {
+) -> Result<Vec<([u8; 14], bool)>, CollisionHullCompileError> {
     let brush_vertices = unique_brush_vertices(solved);
     let expanded_points = expanded_points(&brush_vertices, hull);
     let mut planes = Vec::new();
@@ -303,8 +303,8 @@ fn unique_edge_directions(solved: &crate::brush::SolvedBrush) -> Vec<[f64; 3]> {
 }
 
 fn intern_plane(
-    planes: &mut Vec<[u8; 10]>,
-    plane: [u8; 10],
+    planes: &mut Vec<[u8; 14]>,
+    plane: [u8; 14],
 ) -> Result<i16, CollisionHullCompileError> {
     let index = planes
         .iter()

@@ -26,8 +26,13 @@ use core::marker::PhantomData;
 
 /// `PSX%` as emitted by the original Quake PSX map cooker.
 pub const PSB_MAGIC: u32 = 0x2558_5350;
-/// `PSX2` in little-endian byte order: compact structural BSP records.
+/// `PSX2` in little-endian byte order: unsupported experimental compact records.
+///
+/// This value is retained so callers can identify and reject the short-lived
+/// Plane10 layout without ever interpreting it as the final compact format.
 pub const PSB2_MAGIC: u32 = 0x3258_5350;
+/// `PSX3` in little-endian byte order: compact structural BSP records.
+pub const PSB3_MAGIC: u32 = 0x3358_5350;
 pub const PSB_HEADER_BYTES: u32 = 4;
 pub const LUMP_HEADER_BYTES: u32 = 8;
 pub const LUMP_COUNT: usize = 15;
@@ -35,21 +40,21 @@ pub const LUMP_COUNT: usize = 15;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PsbVersion {
     LegacyV1,
-    CompactV2,
+    CompactV3,
 }
 
 impl PsbVersion {
     pub const fn magic(self) -> u32 {
         match self {
             Self::LegacyV1 => PSB_MAGIC,
-            Self::CompactV2 => PSB2_MAGIC,
+            Self::CompactV3 => PSB3_MAGIC,
         }
     }
 
     const fn from_magic(magic: u32) -> Option<Self> {
         match magic {
             PSB_MAGIC => Some(Self::LegacyV1),
-            PSB2_MAGIC => Some(Self::CompactV2),
+            PSB3_MAGIC => Some(Self::CompactV3),
             _ => None,
         }
     }
@@ -100,26 +105,26 @@ impl LumpKind {
             Self::Vertices => Some(12),
             Self::Planes => Some(match version {
                 PsbVersion::LegacyV1 => 14,
-                PsbVersion::CompactV2 => Plane::SIZE as u32,
+                PsbVersion::CompactV3 => Plane::SIZE as u32,
             }),
             Self::TextureInfo => Some(14),
             Self::Faces => Some(match version {
                 PsbVersion::LegacyV1 => 14,
-                PsbVersion::CompactV2 => Face::SIZE as u32,
+                PsbVersion::CompactV3 => Face::SIZE as u32,
             }),
             Self::MarkSurfaces => Some(2),
             Self::Leaves => Some(match version {
                 PsbVersion::LegacyV1 => 26,
-                PsbVersion::CompactV2 => Leaf::SIZE as u32,
+                PsbVersion::CompactV3 => Leaf::SIZE as u32,
             }),
             Self::Nodes => Some(match version {
                 PsbVersion::LegacyV1 => 34,
-                PsbVersion::CompactV2 => Node::SIZE as u32,
+                PsbVersion::CompactV3 => Node::SIZE as u32,
             }),
             Self::ClipNodes => Some(6),
             Self::Models => Some(match version {
                 PsbVersion::LegacyV1 => 32,
-                PsbVersion::CompactV2 => BrushModel::SIZE as u32,
+                PsbVersion::CompactV3 => BrushModel::SIZE as u32,
             }),
             Self::Strings => Some(1),
             Self::Entities => Some(50),
@@ -519,29 +524,22 @@ pub struct Plane {
     pub normal: Vec3I16,
     /// Q20.12 distance from the origin.
     pub distance: i32,
-    /// Derived axial fast-path class. Kept at its legacy semantic width so
-    /// returning `Plane` by value preserves the proven MIPS ABI; compact v2
-    /// does not store this field on the wire.
+    /// Cooker-authored axial fast-path class. Kept at its legacy semantic and
+    /// physical width because exact real-MIPS A/B evidence proves that
+    /// reclassifying the quantized normal is not visually equivalent.
     pub kind: i32,
 }
 
 impl CookedRecord for Plane {
-    const SIZE: usize = 10;
+    // Exact real-MIPS A/B evidence requires the cooker-authored classification
+    // for visual parity; reclassifying the quantized normal dropped geometry.
+    const SIZE: usize = 14;
 
     fn decode(bytes: &[u8]) -> Self {
-        let normal = vec3_i16(bytes, 0);
         Self {
-            normal,
+            normal: vec3_i16(bytes, 0),
             distance: i32_at(bytes, 6),
-            kind: if normal.y == 0 && normal.z == 0 && normal.x == 4096 {
-                0
-            } else if normal.x == 0 && normal.z == 0 && normal.y == 4096 {
-                1
-            } else if normal.x == 0 && normal.y == 0 && normal.z == 4096 {
-                2
-            } else {
-                3
-            },
+            kind: i32_at(bytes, 10),
         }
     }
 }
@@ -585,7 +583,7 @@ impl CookedRecord for TextureInfo {
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Face {
-    /// Non-negative plane index. Compact v2 stores this as `u16`, while the
+    /// Non-negative plane index. Compact v3 stores this as `u16`, while the
     /// semantic type stays legacy-shaped for the MIPS aggregate-return ABI.
     pub plane: i16,
     pub flags: u16,
@@ -615,7 +613,7 @@ impl CookedRecord for Face {
 pub struct Leaf {
     pub contents: i16,
     pub visibility_offset: i32,
-    /// Legacy semantic bounds retained for the proven MIPS ABI. Compact v2
+    /// Legacy semantic bounds retained for the proven MIPS ABI. Compact v3
     /// omits these unused fields and decodes them as zero.
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
@@ -651,7 +649,7 @@ pub struct Node {
     /// Negative values encode `-(leaf + 1)`.
     pub children: [i16; 2],
     /// Legacy semantic bounds/range retained for the proven MIPS ABI.
-    /// Compact v2 omits these unused fields and decodes them as zero.
+    /// Compact v3 omits these unused fields and decodes them as zero.
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
     pub surface_mins: Vec3I16,
@@ -699,7 +697,7 @@ pub struct BrushModel {
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
     /// Legacy semantic origin retained for the proven MIPS ABI. Entity/mover
-    /// transforms own placement, so compact v2 decodes this unused field as
+    /// transforms own placement, so compact v3 decodes this unused field as
     /// zero rather than storing it.
     pub origin: Vec3I16,
     pub head_nodes: [i16; 4],
@@ -1405,12 +1403,12 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_compact_v2_magic_and_record_contract() {
-        let mut bytes = valid_file_with_magic(PSB2_MAGIC);
+    fn recognizes_compact_v3_magic_and_record_contract() {
+        let mut bytes = valid_file_with_magic(PSB3_MAGIC);
         let index = PsbIndex::read(&mut bytes).expect("compact index");
-        assert_eq!(index.version(), PsbVersion::CompactV2);
-        assert_eq!(index.magic(), PSB2_MAGIC);
-        assert_eq!(LumpKind::Planes.record_size(index.version()), Some(10));
+        assert_eq!(index.version(), PsbVersion::CompactV3);
+        assert_eq!(index.magic(), PSB3_MAGIC);
+        assert_eq!(LumpKind::Planes.record_size(index.version()), Some(14));
         assert_eq!(LumpKind::Faces.record_size(index.version()), Some(10));
         assert_eq!(LumpKind::Leaves.record_size(index.version()), Some(10));
         assert_eq!(LumpKind::Nodes.record_size(index.version()), Some(6));
@@ -1418,8 +1416,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_experimental_psb2_before_reading_ambiguous_records() {
+        let mut bytes = Vec::from(PSB2_MAGIC.to_le_bytes());
+        for kind in LumpKind::ALL {
+            bytes.extend_from_slice(&(kind as i32).to_le_bytes());
+            // Seventy is divisible by both the experimental 10-byte and final
+            // 14-byte plane strides. The magic rejects it before that
+            // structurally ambiguous payload can be interpreted.
+            let payload_len = if kind == LumpKind::Planes { 70 } else { 0 };
+            bytes.extend_from_slice(&(payload_len as i32).to_le_bytes());
+            bytes.resize(bytes.len() + payload_len, 0);
+        }
+        assert!(matches!(
+            PsbIndex::read(&mut Bytes(bytes)),
+            Err(PsbError::BadMagic { found: PSB2_MAGIC })
+        ));
+    }
+
+    #[test]
     fn compact_wire_records_keep_the_proven_legacy_semantic_abi() {
-        assert_eq!(Plane::SIZE, 10);
+        assert_eq!(Plane::SIZE, 14);
         assert_eq!(Face::SIZE, 10);
         assert_eq!(Leaf::SIZE, 10);
         assert_eq!(Node::SIZE, 6);
