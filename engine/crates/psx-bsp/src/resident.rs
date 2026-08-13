@@ -11,8 +11,8 @@ use psx_math::int32::mul_q12_i32;
 
 use crate::{
     AliasModelTable, BrushModel, ClipNode, CookedRecord, Face, Leaf, LumpKind, LumpRange,
-    MapEntity, Node, Plane, PsbError, PsbIndex, ReadAt, RecordSlice, TextureInfo, Vec3I32, Vertex,
-    LUMP_COUNT,
+    MapEntity, Node, Plane, PsbError, PsbIndex, PsbVersion, ReadAt, RecordSlice, TextureInfo,
+    Vec3I32, Vertex, LUMP_COUNT,
 };
 
 /// Texture atlas location used by the original XBSP cooker.
@@ -51,6 +51,7 @@ pub enum MapLoadError<E> {
     Index(PsbError<E>),
     Read(E),
     TooLarge { required: usize, capacity: usize },
+    LegacyRecord { kind: LumpKind, index: usize },
     BadTextureData,
     BadVertexData,
     BadAliasModels,
@@ -73,6 +74,9 @@ impl<E: fmt::Display> fmt::Display for MapLoadError<E> {
                 output,
                 "resident map needs {required} bytes, capacity is {capacity} bytes"
             ),
+            Self::LegacyRecord { kind, index } => {
+                write!(output, "legacy {kind:?} record {index} cannot be compacted")
+            }
             Self::BadTextureData => output.write_str("texture data has an invalid row count"),
             Self::BadVertexData => output.write_str("vertex data is not four-byte aligned"),
             Self::BadAliasModels => output.write_str("alias-model data is invalid"),
@@ -138,7 +142,7 @@ impl ResidentMap {
             total
                 .checked_add(3)
                 .map(|value| value & !3)
-                .and_then(|aligned| aligned.checked_add(index.lump(kind).len as usize))
+                .and_then(|aligned| aligned.checked_add(resident_lump_len(&index, kind)))
         });
         let Some(total) = total else {
             return Err(MapLoadError::TooLarge {
@@ -158,8 +162,36 @@ impl ResidentMap {
         for kind in RESIDENT_LUMPS {
             destination = align_up_4(destination);
             let source = index.lump(kind);
-            let end = destination + source.len as usize;
-            if let Err(error) =
+            let resident_len = resident_lump_len(&index, kind);
+            let end = destination + resident_len;
+            if index.version() == PsbVersion::LegacyV1 && is_compact_v2_lump(kind) {
+                let legacy_size =
+                    kind.record_size(PsbVersion::LegacyV1)
+                        .expect("compacted lump has fixed v1 records") as usize;
+                let compact_size =
+                    kind.record_size(PsbVersion::CompactV2)
+                        .expect("compacted lump has fixed v2 records") as usize;
+                for record_index in 0..source.len as usize / legacy_size {
+                    let mut legacy = [0u8; 34];
+                    let offset = source.offset + (record_index * legacy_size) as u32;
+                    if let Err(error) = reader.read_exact_at(offset, &mut legacy[..legacy_size]) {
+                        self.clear_loaded_state();
+                        return Err(MapLoadError::Read(error));
+                    }
+                    let start = destination + record_index * compact_size;
+                    if !compact_legacy_record(
+                        kind,
+                        &legacy[..legacy_size],
+                        &mut self.bytes[start..start + compact_size],
+                    ) {
+                        self.clear_loaded_state();
+                        return Err(MapLoadError::LegacyRecord {
+                            kind,
+                            index: record_index,
+                        });
+                    }
+                }
+            } else if let Err(error) =
                 reader.read_exact_at(source.offset, &mut self.bytes[destination..end])
             {
                 self.clear_loaded_state();
@@ -167,7 +199,7 @@ impl ResidentMap {
             }
             self.ranges[kind as usize] = LumpRange {
                 offset: destination as u32,
-                len: source.len,
+                len: resident_len as u32,
             };
             destination = end;
         }
@@ -358,9 +390,7 @@ impl ResidentMap {
 
         for (index, face) in faces.iter().enumerate() {
             let first = usize::try_from(face.first_vertex).ok();
-            if face.plane < 0
-                || face.plane as usize >= planes.len()
-                || face.texture < 0
+            if face.plane as usize >= planes.len()
                 || face.texture as usize >= textures.len()
                 || face.vertex_count < 3
                 || first.is_none()
@@ -382,12 +412,11 @@ impl ResidentMap {
             let marks_end = leaf.first_mark_surface as usize + leaf.mark_surface_count as usize;
             let bad_visibility =
                 leaf.visibility_offset >= 0 && leaf.visibility_offset as usize >= visibility.len();
-            if marks_end > marks.len() || bad_visibility {
+            if !valid_leaf_contents(leaf.contents) || marks_end > marks.len() || bad_visibility {
                 return Err(MapLoadError::BadLeaf(index));
             }
         }
         for (index, node) in nodes.iter().enumerate() {
-            let faces_end = node.first_face as usize + node.face_count as usize;
             let bad_child = node.children.into_iter().any(|child| {
                 if child >= 0 {
                     child as usize >= nodes.len()
@@ -395,7 +424,7 @@ impl ResidentMap {
                     (-1i32 - child as i32) as usize >= leaves.len()
                 }
             });
-            if node.plane as usize >= planes.len() || faces_end > faces.len() || bad_child {
+            if node.plane as usize >= planes.len() || bad_child {
                 return Err(MapLoadError::BadNode(index));
             }
         }
@@ -455,4 +484,165 @@ fn validate_texture_data<E>(index: &PsbIndex) -> Result<(), MapLoadError<E>> {
 
 const fn align_up_4(value: usize) -> usize {
     (value + 3) & !3
+}
+
+const fn is_compact_v2_lump(kind: LumpKind) -> bool {
+    matches!(
+        kind,
+        LumpKind::Planes | LumpKind::Faces | LumpKind::Leaves | LumpKind::Nodes | LumpKind::Models
+    )
+}
+
+fn resident_lump_len(index: &PsbIndex, kind: LumpKind) -> usize {
+    let source = index.lump(kind).len as usize;
+    if index.version() != PsbVersion::LegacyV1 || !is_compact_v2_lump(kind) {
+        return source;
+    }
+    let legacy = kind
+        .record_size(PsbVersion::LegacyV1)
+        .expect("compacted lump has a legacy record size") as usize;
+    let compact = kind
+        .record_size(PsbVersion::CompactV2)
+        .expect("compacted lump has a compact record size") as usize;
+    source / legacy * compact
+}
+
+fn compact_legacy_record(kind: LumpKind, source: &[u8], output: &mut [u8]) -> bool {
+    match kind {
+        LumpKind::Planes => output.copy_from_slice(&source[..10]),
+        LumpKind::Faces => {
+            let plane = i16::from_le_bytes(source[0..2].try_into().unwrap());
+            let flags = u16::from_le_bytes(source[2..4].try_into().unwrap());
+            let first = i32::from_le_bytes(source[4..8].try_into().unwrap());
+            let count = i16::from_le_bytes(source[8..10].try_into().unwrap());
+            let texture = i16::from_le_bytes(source[10..12].try_into().unwrap());
+            let (Ok(plane), Ok(flags), Ok(first), Ok(count), Ok(texture)) = (
+                u16::try_from(plane),
+                u8::try_from(flags),
+                u16::try_from(first),
+                u8::try_from(count),
+                u16::try_from(texture),
+            ) else {
+                return false;
+            };
+            output[0..2].copy_from_slice(&plane.to_le_bytes());
+            output[2..4].copy_from_slice(&first.to_le_bytes());
+            output[4..6].copy_from_slice(&texture.to_le_bytes());
+            output[6] = flags;
+            output[7] = count;
+            output[8..10].copy_from_slice(&source[12..14]);
+        }
+        LumpKind::Leaves => {
+            let contents = i16::from_le_bytes(source[0..2].try_into().unwrap());
+            let visibility = i32::from_le_bytes(source[2..6].try_into().unwrap());
+            let count = u16::from_le_bytes(source[20..22].try_into().unwrap());
+            let (Ok(contents), Some(visibility), Ok(count)) = (
+                i8::try_from(contents),
+                if visibility == -1 {
+                    Some(u16::MAX)
+                } else {
+                    u16::try_from(visibility)
+                        .ok()
+                        .filter(|&offset| offset != u16::MAX)
+                },
+                u8::try_from(count),
+            ) else {
+                return false;
+            };
+            output[0] = contents as u8;
+            output[1] = count;
+            output[2..4].copy_from_slice(&visibility.to_le_bytes());
+            output[4..6].copy_from_slice(&source[18..20]);
+            output[6..10].copy_from_slice(&source[22..26]);
+        }
+        LumpKind::Nodes => output.copy_from_slice(&source[..6]),
+        LumpKind::Models => {
+            output[..12].copy_from_slice(&source[..12]);
+            output[12..26].copy_from_slice(&source[18..32]);
+        }
+        _ => return false,
+    }
+    true
+}
+
+const fn valid_leaf_contents(contents: i16) -> bool {
+    matches!(contents, -6..=-1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_structural_records_compact_without_semantic_drift() {
+        let mut plane = [0u8; 14];
+        plane[0..2].copy_from_slice(&4096i16.to_le_bytes());
+        plane[6..10].copy_from_slice(&(64i32 << 12).to_le_bytes());
+        let mut compact = [0u8; Plane::SIZE];
+        assert!(compact_legacy_record(
+            LumpKind::Planes,
+            &plane,
+            &mut compact
+        ));
+        assert_eq!(Plane::decode(&compact).kind, 0);
+        assert_eq!(Plane::decode(&compact).distance, 64 << 12);
+
+        let mut face = [0u8; 14];
+        face[0..2].copy_from_slice(&7i16.to_le_bytes());
+        face[2..4].copy_from_slice(&5u16.to_le_bytes());
+        face[4..8].copy_from_slice(&1234i32.to_le_bytes());
+        face[8..10].copy_from_slice(&24i16.to_le_bytes());
+        face[10..12].copy_from_slice(&72i16.to_le_bytes());
+        face[12..14].copy_from_slice(&[3, 64]);
+        let mut compact = [0u8; Face::SIZE];
+        assert!(compact_legacy_record(LumpKind::Faces, &face, &mut compact));
+        assert_eq!(
+            Face::decode(&compact),
+            Face {
+                plane: 7,
+                flags: 5,
+                first_vertex: 1234,
+                vertex_count: 24,
+                texture: 72,
+                light_styles: [3, 64],
+            }
+        );
+
+        let mut leaf = [0u8; 26];
+        leaf[0..2].copy_from_slice(&(-3i16).to_le_bytes());
+        leaf[2..6].copy_from_slice(&40823i32.to_le_bytes());
+        leaf[18..20].copy_from_slice(&99u16.to_le_bytes());
+        leaf[20..22].copy_from_slice(&78u16.to_le_bytes());
+        leaf[22..26].copy_from_slice(&[1, 2, 3, 4]);
+        let mut compact = [0u8; Leaf::SIZE];
+        assert!(compact_legacy_record(LumpKind::Leaves, &leaf, &mut compact));
+        let leaf = Leaf::decode(&compact);
+        assert_eq!(leaf.contents, -3);
+        assert_eq!(leaf.visibility_offset, 40823);
+        assert_eq!(leaf.first_mark_surface, 99);
+        assert_eq!(leaf.mark_surface_count, 78);
+        assert_eq!(leaf.lightmap, [1, 2]);
+        assert_eq!(leaf.light_styles, [3, 4]);
+    }
+
+    #[test]
+    fn legacy_structural_compaction_rejects_unrepresentable_values() {
+        let mut face = [0u8; 14];
+        face[0..2].copy_from_slice(&(-1i16).to_le_bytes());
+        face[8..10].copy_from_slice(&3i16.to_le_bytes());
+        assert!(!compact_legacy_record(
+            LumpKind::Faces,
+            &face,
+            &mut [0; Face::SIZE],
+        ));
+
+        let mut leaf = [0u8; 26];
+        leaf[0..2].copy_from_slice(&(-1i16).to_le_bytes());
+        leaf[2..6].copy_from_slice(&(u16::MAX as i32).to_le_bytes());
+        assert!(!compact_legacy_record(
+            LumpKind::Leaves,
+            &leaf,
+            &mut [0; Leaf::SIZE],
+        ));
+    }
 }
