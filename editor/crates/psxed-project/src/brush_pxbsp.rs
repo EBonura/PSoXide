@@ -13,11 +13,11 @@ use psx_bsp::CookedRecord;
 
 const WORLD_COLLISION_HULLS: usize = 3;
 const VERTEX_BYTES: usize = 12;
-const PLANE_BYTES: usize = 14;
-const FACE_BYTES: usize = 14;
+const PLANE_BYTES: usize = 10;
+const FACE_BYTES: usize = 10;
 const MARK_SURFACE_BYTES: usize = 2;
-const LEAF_BYTES: usize = 26;
-const NODE_BYTES: usize = 34;
+const LEAF_BYTES: usize = 10;
+const NODE_BYTES: usize = 6;
 const CLIPNODE_BYTES: usize = 6;
 
 /// Entity base plus its class-specific, bounded payload.
@@ -113,20 +113,13 @@ pub fn build_pxbsp_with_submodels(
 
     let mut clipnodes = Vec::new();
     let world_collision_heads = append_collision(&mut geometry.planes, &mut clipnodes, &collision)?;
-    let mut models = pack_brush_model(
-        &geometry,
-        [0; 3],
-        geometry.root_node,
-        &world_collision_heads,
-        0,
-    )?;
+    let mut models = pack_brush_model(&geometry, geometry.root_node, &world_collision_heads, 0)?;
     for submodel in submodels {
         let model = append_geometry(&mut geometry, submodel.geometry)?;
         let collision_heads =
             append_collision(&mut geometry.planes, &mut clipnodes, &submodel.collision)?;
         models.extend_from_slice(&pack_brush_model(
             &model,
-            submodel.origin,
             model.root_node,
             &collision_heads,
             model.first_face,
@@ -327,7 +320,7 @@ fn append_geometry(
     limit(
         "vertices",
         vertex_base.saturating_add(vertex_count),
-        i32::MAX as usize,
+        u16::MAX as usize,
     )?;
     output.vertices.extend_from_slice(&input.vertices);
 
@@ -338,20 +331,27 @@ fn append_geometry(
         u16::MAX as usize + 1,
     )?;
     for face in input.faces.chunks_exact(FACE_BYTES) {
-        let plane = read_i16(face, 0);
-        let plane = remap_signed_index(plane, &plane_remap, "face plane")?;
-        let first_vertex = read_i32(face, 4);
-        let first_vertex = usize::try_from(first_vertex)
-            .ok()
-            .and_then(|value| value.checked_add(vertex_base))
-            .and_then(|value| i32::try_from(value).ok())
+        let plane = usize::from(read_u16(face, 0));
+        let plane = plane_remap
+            .get(plane)
+            .copied()
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or(PxbspBuildError::InvalidReference("face plane"))?;
+        let first_vertex = usize::from(read_u16(face, 2));
+        let first_vertex = first_vertex
+            .checked_add(vertex_base)
+            .and_then(|value| u16::try_from(value).ok())
             .ok_or(PxbspBuildError::InvalidReference("face vertex"))?;
-        let material = read_i16(face, 10);
-        let material = remap_signed_index(material, &material_remap, "face material")?;
+        let material = usize::from(read_u16(face, 4));
+        let material = material_remap
+            .get(material)
+            .copied()
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or(PxbspBuildError::InvalidReference("face material"))?;
         let mut remapped = face.to_vec();
         remapped[0..2].copy_from_slice(&plane.to_le_bytes());
-        remapped[4..8].copy_from_slice(&first_vertex.to_le_bytes());
-        remapped[10..12].copy_from_slice(&material.to_le_bytes());
+        remapped[2..4].copy_from_slice(&first_vertex.to_le_bytes());
+        remapped[4..6].copy_from_slice(&material.to_le_bytes());
         output.faces.extend_from_slice(&remapped);
     }
 
@@ -380,7 +380,7 @@ fn append_geometry(
             max: i32::MAX as usize,
         },
     )?;
-    limit("visibility", visibility_end, i32::MAX as usize)?;
+    limit("visibility", visibility_end, u16::MAX as usize)?;
     output.visibility.extend_from_slice(&input.visibility);
 
     let leaf_count = input.leaves.len() / LEAF_BYTES;
@@ -390,19 +390,19 @@ fn append_geometry(
         i16::MAX as usize + 1,
     )?;
     for leaf in input.leaves.chunks_exact(LEAF_BYTES) {
-        let visibility = read_i32(leaf, 2);
-        let visibility = if visibility < 0 {
+        let visibility = read_u16(leaf, 2);
+        let visibility = if visibility == u16::MAX {
             visibility
         } else {
-            usize::try_from(visibility)
-                .ok()
+            Some(usize::from(visibility))
                 .filter(|&value| value < input.visibility.len())
                 .and_then(|value| value.checked_add(visibility_base))
-                .and_then(|value| i32::try_from(value).ok())
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|&value| value != u16::MAX)
                 .ok_or(PxbspBuildError::InvalidReference("leaf visibility"))?
         };
-        let first_mark = read_u16(leaf, 18) as usize;
-        let mark_count = read_u16(leaf, 20) as usize;
+        let first_mark = read_u16(leaf, 4) as usize;
+        let mark_count = leaf[1] as usize;
         if first_mark.saturating_add(mark_count) > input.mark_surfaces.len() / MARK_SURFACE_BYTES {
             return Err(PxbspBuildError::InvalidReference("leaf mark surfaces"));
         }
@@ -411,8 +411,8 @@ fn append_geometry(
             .and_then(|value| u16::try_from(value).ok())
             .ok_or(PxbspBuildError::InvalidReference("leaf mark surfaces"))?;
         let mut remapped = leaf.to_vec();
-        remapped[2..6].copy_from_slice(&visibility.to_le_bytes());
-        remapped[18..20].copy_from_slice(&first_mark.to_le_bytes());
+        remapped[2..4].copy_from_slice(&visibility.to_le_bytes());
+        remapped[4..6].copy_from_slice(&first_mark.to_le_bytes());
         output.leaves.extend_from_slice(&remapped);
     }
 
@@ -443,20 +443,10 @@ fn append_geometry(
             node_count,
             leaf_count,
         )?;
-        let first_face = read_u16(node, 30) as usize;
-        let local_face_count = read_u16(node, 32) as usize;
-        if first_face.saturating_add(local_face_count) > face_count {
-            return Err(PxbspBuildError::InvalidReference("node faces"));
-        }
-        let first_face = face_base
-            .checked_add(first_face)
-            .and_then(|value| u16::try_from(value).ok())
-            .ok_or(PxbspBuildError::InvalidReference("node faces"))?;
         let mut remapped = node.to_vec();
         remapped[0..2].copy_from_slice(&plane.to_le_bytes());
         remapped[2..4].copy_from_slice(&front.to_le_bytes());
         remapped[4..6].copy_from_slice(&back.to_le_bytes());
-        remapped[30..32].copy_from_slice(&first_face.to_le_bytes());
         output.nodes.extend_from_slice(&remapped);
     }
 
@@ -607,7 +597,6 @@ fn append_collision(
 
 fn pack_brush_model(
     geometry: &impl GeometryModel,
-    origin: [i16; 3],
     render_head: i16,
     collision_heads: &[i16],
     first_face: usize,
@@ -615,10 +604,9 @@ fn pack_brush_model(
     let face_count = geometry.face_count();
     limit("model first face", first_face, u16::MAX as usize)?;
     limit("model faces", face_count, u16::MAX as usize)?;
-    let mut output = Vec::with_capacity(32);
+    let mut output = Vec::with_capacity(26);
     pack_vec3_i16(&mut output, geometry.mins());
     pack_vec3_i16(&mut output, geometry.maxs());
-    pack_vec3_i16(&mut output, origin);
     push_i16(&mut output, render_head);
     for &head in collision_heads {
         push_i16(&mut output, head);
@@ -770,15 +758,6 @@ fn read_i16(bytes: &[u8], offset: usize) -> i16 {
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-fn read_i32(bytes: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
 }
 
 fn push_i16(output: &mut Vec<u8>, value: i16) {
@@ -1009,14 +988,6 @@ mod tests {
         let models = map.brush_models();
         assert_eq!(models.len(), 2);
         let door = models.get(1).expect("door");
-        assert_eq!(
-            door.origin,
-            Vec3I16 {
-                x: 512,
-                y: 64,
-                z: 512
-            }
-        );
         assert_eq!(door.first_face as usize, world_face_count);
         assert_eq!(door.face_count as usize, door_face_count);
         assert!(door.head_nodes[0] as usize >= world_node_count);

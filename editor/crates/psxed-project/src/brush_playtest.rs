@@ -37,7 +37,7 @@ mod tests {
         let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
             panic!("brush project selected the grid provider");
         };
-        assert_eq!(world.bytes.len(), 13_008);
+        assert_eq!(world.bytes.len(), 10_060);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);
@@ -180,14 +180,12 @@ mod tests {
         map.load(0, &mut SliceReader::new(&world.bytes))
             .expect("resident combat PXBSP");
         let door = map.brush_models().get(1).expect("combat door model");
-        assert_eq!(
-            door.origin,
-            psx_bsp::Vec3I16 {
-                x: 2048,
-                y: 256,
-                z: 1536,
-            }
-        );
+        let entities = map.entities();
+        let door_entity = (0..entities.len())
+            .filter_map(|index| entities.get(index))
+            .find(|entity| entity.class_id == entity_class::BRUSH_DOOR)
+            .expect("door entity");
+        assert_eq!(door_entity.origin.x, 2048 * 4096);
         assert_eq!(
             door.mins,
             psx_bsp::Vec3I16 {

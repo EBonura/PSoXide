@@ -82,7 +82,7 @@ pub fn pack_bsp_geometry(
     validate_limits(bsp)?;
     validate_lighting(bsp, &lighting)?;
 
-    let mut plane_records: Vec<[u8; 14]> = Vec::new();
+    let mut plane_records: Vec<[u8; 10]> = Vec::new();
     let mut node_plane_indices = Vec::with_capacity(bsp.nodes.len());
     let mut node_plane_flipped = Vec::with_capacity(bsp.nodes.len());
     for (node_index, node) in bsp.nodes.iter().enumerate() {
@@ -111,7 +111,7 @@ pub fn pack_bsp_geometry(
                 vertex_light(&lighting, surface_index, vertex_index),
             )?;
         }
-        push_i16(&mut faces, plane_index);
+        push_u16(&mut faces, plane_index as u16);
         let flags = FACE_BAKED_LIGHT
             | if plane_flipped { FACE_BACKSIDE } else { 0 }
             | if surface.contents.is_solid() {
@@ -119,20 +119,20 @@ pub fn pack_bsp_geometry(
             } else {
                 FACE_TWO_SIDED
             };
-        push_u16(&mut faces, flags);
-        push_i32(&mut faces, first_vertex as i32);
-        push_i16(&mut faces, surface.vertices.len() as i16);
-        push_i16(&mut faces, texture_index);
+        push_u16(&mut faces, first_vertex as u16);
+        push_u16(&mut faces, texture_index as u16);
+        faces.push(flags as u8);
+        faces.push(surface.vertices.len() as u8);
         faces.extend_from_slice(&[0, 64]);
     }
 
     let (leaf_mapping, visible_leaves) = runtime_leaf_mapping(bsp)?;
     let (visibility, visibility_offsets) =
         portal_component_visibility(bsp, portals, &leaf_mapping, visible_leaves);
-    let leaf_bounds = leaf_bounds(bsp, portals);
+    limit("visibility", visibility.len(), u16::MAX as usize)?;
     let mut mark_surfaces = Vec::new();
     let mut leaves = Vec::new();
-    pack_leaf_record(&mut leaves, CONTENTS_SOLID, -1, ([0; 3], [0; 3]), 0, 0);
+    pack_leaf_record(&mut leaves, CONTENTS_SOLID, -1, 0, 0)?;
     for (host_leaf, leaf) in bsp.leaves.iter().enumerate() {
         if !leaf.contents.is_visible() {
             continue;
@@ -145,13 +145,11 @@ pub fn pack_bsp_geometry(
             &mut leaves,
             leaf.contents.runtime_contents(),
             visibility_offsets[host_leaf],
-            leaf_bounds[host_leaf],
             first_mark as u16,
             leaf.mark_surfaces.len() as u16,
-        );
+        )?;
     }
 
-    let subtree_bounds = subtree_bounds(bsp);
     let mut nodes = Vec::new();
     for (node_index, node) in bsp.nodes.iter().enumerate() {
         push_u16(&mut nodes, node_plane_indices[node_index] as u16);
@@ -164,15 +162,6 @@ pub fn pack_bsp_geometry(
         }
         push_i16(&mut nodes, children[0]);
         push_i16(&mut nodes, children[1]);
-        pack_bounds(&mut nodes, subtree_bounds[node_index]);
-        pack_bounds(
-            &mut nodes,
-            surface_bounds(
-                &bsp.surfaces[node.first_surface..node.first_surface + node.surface_count],
-            ),
-        );
-        push_u16(&mut nodes, node.first_surface as u16);
-        push_u16(&mut nodes, node.surface_count as u16);
     }
 
     let root_node = match bsp.root {
@@ -205,7 +194,7 @@ fn validate_limits(bsp: &CompiledSurfaceBsp) -> Result<(), BrushPackError> {
         .iter()
         .map(|surface| surface.vertices.len())
         .sum();
-    limit("vertices", vertices, i32::MAX as usize)?;
+    limit("vertices", vertices, u16::MAX as usize)?;
     for (surface, compiled) in bsp.surfaces.iter().enumerate() {
         limit("face vertices", compiled.vertices.len(), MAX_FACE_VERTICES)?;
         if compiled.vertices.len() < 3 {
@@ -230,7 +219,7 @@ fn validate_limits(bsp: &CompiledSurfaceBsp) -> Result<(), BrushPackError> {
         limit(
             "leaf mark surfaces",
             leaf.mark_surfaces.len(),
-            u16::MAX as usize,
+            u8::MAX as usize,
         )?;
     }
     let mark_surfaces = bsp
@@ -276,7 +265,7 @@ fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), BrushPackEr
     }
 }
 
-fn intern_plane(planes: &mut Vec<[u8; 14]>, record: [u8; 14]) -> Result<i16, BrushPackError> {
+fn intern_plane(planes: &mut Vec<[u8; 10]>, record: [u8; 10]) -> Result<i16, BrushPackError> {
     let index = planes
         .iter()
         .position(|plane| *plane == record)
@@ -472,41 +461,6 @@ fn compress_visibility(row: &[u8]) -> Vec<u8> {
     output
 }
 
-fn leaf_bounds(bsp: &CompiledSurfaceBsp, portals: &[CompiledPortal]) -> Vec<([i16; 3], [i16; 3])> {
-    let mut bounds = vec![Bounds::empty(); bsp.leaves.len()];
-    for portal in portals {
-        for &leaf in &[portal.front_leaf, portal.back_leaf] {
-            for &vertex in &portal.vertices {
-                bounds[leaf].include(vertex);
-            }
-        }
-    }
-    bounds.into_iter().map(Bounds::packed).collect()
-}
-
-fn subtree_bounds(bsp: &CompiledSurfaceBsp) -> Vec<([i16; 3], [i16; 3])> {
-    let mut output = vec![([0; 3], [0; 3]); bsp.nodes.len()];
-    fn visit(
-        child: BspChild,
-        bsp: &CompiledSurfaceBsp,
-        output: &mut [([i16; 3], [i16; 3])],
-    ) -> Bounds {
-        let BspChild::Node(index) = child else {
-            return Bounds::empty();
-        };
-        let node = &bsp.nodes[index];
-        let mut bounds = Bounds::from_surfaces(
-            &bsp.surfaces[node.first_surface..node.first_surface + node.surface_count],
-        );
-        bounds.merge(visit(node.front, bsp, output));
-        bounds.merge(visit(node.back, bsp, output));
-        output[index] = bounds.packed();
-        bounds
-    }
-    visit(bsp.root, bsp, &mut output);
-    output
-}
-
 fn surface_bounds(surfaces: &[CompiledSurface]) -> ([i16; 3], [i16; 3]) {
     Bounds::from_surfaces(surfaces).packed()
 }
@@ -542,13 +496,6 @@ impl Bounds {
         }
     }
 
-    fn merge(&mut self, other: Self) {
-        if other.min[0].is_finite() {
-            self.include(other.min);
-            self.include(other.max);
-        }
-    }
-
     fn packed(self) -> ([i16; 3], [i16; 3]) {
         if !self.min[0].is_finite() {
             return ([0; 3], [0; 3]);
@@ -568,25 +515,37 @@ fn pack_leaf_record(
     output: &mut Vec<u8>,
     contents: i16,
     visibility_offset: i32,
-    bounds: ([i16; 3], [i16; 3]),
     first_mark: u16,
     mark_count: u16,
-) {
-    push_i16(output, contents);
-    push_i32(output, visibility_offset);
-    pack_bounds(output, bounds);
+) -> Result<(), BrushPackError> {
+    let contents = i8::try_from(contents).map_err(|_| BrushPackError::LimitExceeded {
+        kind: "leaf contents",
+        count: contents as usize,
+        max: i8::MAX as usize,
+    })?;
+    let mark_count = u8::try_from(mark_count).map_err(|_| BrushPackError::LimitExceeded {
+        kind: "leaf mark surfaces",
+        count: mark_count as usize,
+        max: u8::MAX as usize,
+    })?;
+    let visibility = if visibility_offset == -1 {
+        u16::MAX
+    } else {
+        u16::try_from(visibility_offset)
+            .ok()
+            .filter(|&offset| offset != u16::MAX)
+            .ok_or(BrushPackError::LimitExceeded {
+                kind: "visibility offset",
+                count: usize::try_from(visibility_offset).unwrap_or(usize::MAX),
+                max: u16::MAX as usize - 1,
+            })?
+    };
+    output.push(contents as u8);
+    output.push(mark_count);
+    push_u16(output, visibility);
     push_u16(output, first_mark);
-    push_u16(output, mark_count);
     output.extend_from_slice(&[0, 0, 0, 64]);
-}
-
-fn pack_bounds(output: &mut Vec<u8>, bounds: ([i16; 3], [i16; 3])) {
-    for component in bounds.0 {
-        push_i16(output, component);
-    }
-    for component in bounds.1 {
-        push_i16(output, component);
-    }
+    Ok(())
 }
 
 fn push_i16(output: &mut Vec<u8>, value: i16) {
@@ -594,10 +553,6 @@ fn push_i16(output: &mut Vec<u8>, value: i16) {
 }
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {
-    output.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_i32(output: &mut Vec<u8>, value: i32) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -681,9 +636,7 @@ mod tests {
             assert_eq!(leaf.contents, expected);
             assert!(leaf.visibility_offset >= 0);
             let faces = RecordSlice::<Face>::new(&packed.faces).expect("faces");
-            assert!(faces
-                .iter()
-                .all(|face| face.flags & FACE_TWO_SIDED != 0));
+            assert!(faces.iter().all(|face| face.flags & FACE_TWO_SIDED != 0));
         }
     }
 
