@@ -7,9 +7,9 @@ mod tests {
     use std::path::Path;
 
     use crate::brush_world::{compile_brush_world, BrushWorldCookMode, BrushWorldCookOptions};
-    use crate::playtest::PlaytestWorldGeometry;
+    use crate::playtest::{PlaytestAssetKind, PlaytestWorldGeometry, StreamedClass};
     use crate::{
-        ArchPropGeometry, BoxPropErosion, GridUvTransform, NodeKind, ProjectDocument,
+        ArchPropGeometry, BoxPropErosion, GridUvTransform, NodeKind, ProjectDocument, SkyMode,
         ARCH_PROP_MATERIAL_COUNT, BOX_PROP_FACE_COUNT,
     };
     use psx_bsp::collision::{Trace, TraceScratch, Q12_ONE};
@@ -44,9 +44,24 @@ mod tests {
         assert_eq!(package.rooms[0].world_asset_index, None);
         assert!(package.chunks.is_empty());
         assert!(package.room_visibility.is_empty());
-        assert_eq!(package.assets.len(), 1);
-        assert_eq!(package.texture_asset_count(), 1);
+        assert_eq!(package.assets.len(), 2);
+        assert_eq!(package.texture_asset_count(), 2);
         assert_eq!(world.texture_asset_indices, [0]);
+        assert_eq!(package.rooms[0].sky.flags, psx_level::sky_flags::ENABLED);
+        let sky_asset_index = package.rooms[0]
+            .sky
+            .cloud_layer
+            .texture_asset_index
+            .expect("PXBSP room has its authored sky panorama");
+        assert_eq!(sky_asset_index, 1);
+        let sky_asset = &package.assets[sky_asset_index];
+        assert_eq!(sky_asset.kind, PlaytestAssetKind::Texture);
+        assert_eq!(sky_asset.streamed_class, StreamedClass::Gameplay);
+        assert_eq!(sky_asset.filename, "sky/sky_000.psxt");
+        assert_eq!(sky_asset.source_label, "Cooked Sky Panorama 0");
+        let sky_texture = psx_asset::Texture::from_bytes(&sky_asset.bytes)
+            .expect("cooked PXBSP sky panorama parses as PSXT");
+        assert_eq!((sky_texture.width(), sky_texture.height()), (512, 256));
         assert_eq!(
             world.body_hulls,
             [
@@ -71,7 +86,9 @@ mod tests {
         assert!(source.contains("CookedBodyHull::new(1, 16, 56)"));
         assert!(source.contains("CookedBodyHull::new(2, 32, 96)"));
         assert!(source.contains("world_asset: AssetId(65535)"));
-        assert!(source.contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(0)]"));
+        assert!(source.contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(1), AssetId(0)]"));
+        assert!(source.contains("flags: asset_flags::STREAMED_GAMEPLAY_TRANSIENT"));
+        assert!(source.contains("texture_asset: AssetId(1)"));
         assert!(!source.contains("BRUSH_TEXTURES"));
 
         let runtime_main = std::fs::read_to_string(
@@ -81,6 +98,61 @@ mod tests {
         .expect("normal editor-playtest runtime source");
         assert!(runtime_main.contains("mod bsp_runtime;"));
         assert!(!runtime_main.contains("brush_playtest::run()"));
+    }
+
+    #[test]
+    fn pxbsp_sky_off_omits_the_panorama_and_preserves_brush_texture_ids() {
+        let mut project = ProjectDocument::from_ron_str(include_str!(
+            "../../../projects/brush-first-playable/project.ron"
+        ))
+        .expect("brush first-playable fixture");
+        let world_id = project.active_scene().root;
+        let world = project
+            .active_scene_mut()
+            .node_mut(world_id)
+            .expect("brush world node");
+        let NodeKind::World { sky, .. } = &mut world.kind else {
+            panic!("scene root is not a World");
+        };
+        sky.mode = SkyMode::Off;
+
+        let fixture_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+        let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
+        assert!(report.is_ok(), "normal brush package: {:?}", report.errors);
+        let package = package.expect("normal package");
+        let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
+            panic!("brush project selected the grid provider");
+        };
+
+        let enabled_world_bytes = {
+            let enabled_project = ProjectDocument::from_ron_str(include_str!(
+                "../../../projects/brush-first-playable/project.ron"
+            ))
+            .expect("enabled brush first-playable fixture");
+            let enabled_package = crate::playtest::build_package(&enabled_project, &fixture_dir)
+                .0
+                .expect("enabled normal package");
+            let crate::playtest::PlaytestWorldGeometry::Pxbsp(enabled_world) =
+                enabled_package.world_geometry
+            else {
+                panic!("enabled brush project selected the grid provider");
+            };
+            enabled_world.bytes
+        };
+
+        assert_eq!(package.rooms[0].sky.flags, 0);
+        assert_eq!(package.rooms[0].sky.cloud_layer.flags, 0);
+        assert_eq!(package.rooms[0].sky.cloud_layer.texture_asset_index, None);
+        assert_eq!(package.assets.len(), 1);
+        assert_eq!(world.texture_asset_indices, [0]);
+        assert_eq!(world.bytes, enabled_world_bytes);
+        assert!(package
+            .assets
+            .iter()
+            .all(|asset| !asset.filename.starts_with("sky/")));
+        assert!(crate::playtest::render_manifest_source(&package)
+            .contains("ROOM_0_REQUIRED_VRAM: &[AssetId] = &[AssetId(0)]"));
     }
 
     #[test]
