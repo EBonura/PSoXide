@@ -32,9 +32,11 @@ Do not begin by implementing anything. First try to disprove this handoff.
 5. Challenge the PSoXide native-editor UX personally before changing code.
    The final texture-lock and UV fixes have automated egui coverage, but the
    owner has not yet accepted their feel in the native window.
-6. Preserve user work. The canonical PSoXide and Quake folders are dirty and
-   overlap the final history. Never reset, clean, switch, stash everything, or
-   merge in those directories without following section 12.
+6. Preserve user work. Canonical promotion is complete, but the pre-promotion
+   backup refs, stash objects, Quake preservation commit and PSoXide untracked
+   paths in section 12 remain recovery evidence. Never clean, drop or rewrite
+   them until the owner has accepted the promoted repositories and hardware
+   candidate.
 7. Preserve the WIP listed in section 11 by immutable stash object hash. Never
    apply it directly onto a release branch and never integrate a mixed worker
    tree wholesale.
@@ -42,7 +44,7 @@ Do not begin by implementing anything. First try to disprove this handoff.
    judgment is the point; a screenshot is not a substitute for telemetry,
    hashes, deterministic replays, or native owner acceptance.
 9. Do not rebase, push, publish, or change repository default branches unless
-   the owner asks. The final branches are currently local-only.
+   the owner asks. The canonical promotions are currently local-only.
 10. If a claim in this file disagrees with live code or a live artifact, the
     live evidence wins. Record the discrepancy instead of rationalising it.
 
@@ -74,10 +76,10 @@ The scoped beta has reached a useful stopping point:
 - The combined disc was built and its launcher-to-Quake chain-load passed two
   deterministic headless replays. This is a burn candidate, not hardware
   certification.
-- The final worktrees are linked worktrees of the proper repositories, not
-  disconnected clones. Their commits already exist in the official Git object
-  stores. Canonical folder promotion is deferred only because the owner's
-  current PSoXide and Quake folders contain overlapping uncommitted work.
+- The validated histories have been promoted into the canonical PSoXide,
+  Quake and demo-disc folders. All overlapping owner work was preserved first
+  through immutable refs, a tracked-only stash or a dedicated preservation
+  commit. The promotion remains local and unpushed.
 
 For tomorrow: launch the editor, perform the short native checklist in section
 7, then start building the Comicon level. Do not wait for exhaustive Quake
@@ -126,19 +128,21 @@ entity rules and transition budgets. Do not block current level design on it.
 
 ## 3. Exact frozen state
 
-| Product | Worktree | Branch | Functional/final revision | State |
+| Product | Canonical worktree | Branch | Functional/final revision | State |
 | --- | --- | --- | --- | --- |
-| PSoXide editor | `/Users/ebonura/Desktop/repos/PSoXide-comicon-final` | `codex/comicon-psoxide-final` | `ca2d33e9ec9b5403e6504ee9e737153dd0059dec` | clean before this docs-only handoff commit |
-| Quake-PSX | `/Users/ebonura/Desktop/repos/quake-psx-comicon-final` | `codex/comicon-quake-final` | `28507a6dd605730a43909d6b2258f081def68a79` | clean |
-| Demo disc | `/Users/ebonura/Desktop/repos/psx-demo-disc-comicon-final` | `codex/comicon-disc-final` | `e23ed6ce34e6de8bf8108a7c843407c6d413364c` | clean |
+| PSoXide editor | `/Users/ebonura/Desktop/repos/PSoXide` | `main` | `b2db85c4b86c3c1ea9748a92d39c85dff8b7610d` | functional/docs promotion base; this update is docs-only |
+| Quake-PSX | `/Users/ebonura/Desktop/repos/quake-psx` | `codex/all-rust-quake` | `28507a6dd605730a43909d6b2258f081def68a79` | promoted and clean |
+| Demo disc | `/Users/ebonura/Desktop/repos/psx-demo-disc` | `main` | `2061540e234da16fd7a8378b0fc61f5d810ddd68` | promoted, rebuilt and clean |
 | Shipping engine pin | `/Users/ebonura/Desktop/repos/PSoXide-final-pin` | detached/pinned | `79d51dd2f2fd78cfb8aa418e2ad123730f56ac3d` | exact Quake and disc contract |
 
-The PSoXide branch receives this handoff as a documentation-only descendant of
-`ca2d33e9`. The editor/runtime evidence remains tied to the named functional
-heads below; adding prose does not turn old test output into new-head evidence.
+Canonical PSoXide `main` receives this update as a documentation-only
+descendant of `b2db85c4`. The editor/runtime evidence remains tied to the named
+functional heads below; adding prose does not turn old test output into
+new-head evidence.
 
 The demo disc deliberately pins PSoXide `79d51dd2`, not editor head
-`ca2d33e9`. The later PSoXide commits are host editor/UX and gate hardening.
+`b2db85c4`. The later PSoXide commits are host editor/UX, documentation and
+gate hardening.
 Quake's shipping provenance declares the exact `79d51dd2` engine input. Do not
 casually advance the demo gitlink or rewrite that contract.
 
@@ -163,7 +167,7 @@ Quake-PSX
 
 PSoXide demo disc
   -> PSoXide gitlink at 79d51dd2
-  -> Quake clean sibling checkout, not a submodule
+  -> canonical Quake sibling checkout, not a submodule
   -> six fail-closed Quake source/artifact pins
   -> legacy grid Cortex fallback is visible as program 1/11
   -> relocates the Quake image and exposes it as program 11/11
@@ -346,16 +350,16 @@ manual playthrough is now more valuable than further speculative automation.
 ### 7.1 Direct editor launch
 
 ```sh
-cd /Users/ebonura/Desktop/repos/PSoXide-comicon-final/emu
+cd /Users/ebonura/Desktop/repos/PSoXide/emu
 cargo run -p frontend --release -- --editor --windowed
 ```
 
 To open the tracked souls slice directly:
 
 ```sh
-cd /Users/ebonura/Desktop/repos/PSoXide-comicon-final/emu
+cd /Users/ebonura/Desktop/repos/PSoXide/emu
 cargo run -p frontend --release -- --editor --windowed \
-  --editor-project /Users/ebonura/Desktop/repos/PSoXide-comicon-final/editor/projects/souls-bsp-vertical-slice \
+  --editor-project /Users/ebonura/Desktop/repos/PSoXide/editor/projects/souls-bsp-vertical-slice \
   --editor-view 3d
 ```
 
@@ -406,7 +410,7 @@ show a real memory problem.
 Run only when needed; they are not a prerequisite for every brush edit:
 
 ```sh
-cd /Users/ebonura/Desktop/repos/PSoXide-comicon-final
+cd /Users/ebonura/Desktop/repos/PSoXide
 make editor-blank-playtest-check
 make editor-souls-bsp-check
 make editor-bsp-liquid-check
@@ -457,9 +461,9 @@ Current artifacts:
 
 | Artifact | Size / SHA-256 |
 | --- | --- |
-| `PSoXide Demo Disc.bin` | 226,742,208 bytes; `b111ee3720128d239a9e4fe037a8d7a0450cdb0ac1fb3ec07fc6deea1cd18d02` |
+| `PSoXide Demo Disc.bin` | 226,742,208 bytes; `105de3bb062185fd1fa7bfaec7ec7fda30197255168bb8616228e02cb901d57e` |
 | `PSoXide Demo Disc.cue` | `b349a5871697fe49e1a79ef62bd82e5c4167a2eb7a54c363770063fba57b52fb` |
-| `PSoXide Demo Disc.quake-provenance.json` | `3c3a6bf22d2107fdfde6db0cb1cb4510b3dcc509683737b716e25060c044757b` |
+| `PSoXide Demo Disc.quake-provenance.json` | `3decf160d9c442a4245b29380b850b204bc87877fc5a5aa3e1caf4988a6b74c8` |
 
 The default image is 96,404 whole sectors, about 216.2 MiB, with 11 programs,
 one CREDITS card and 7 CD-DA tracks. Its 12 visible entries are, in order:
@@ -468,12 +472,14 @@ Breakout, Space Invaders, Magikaaaaarp Pong, Hardware Tests, Quake Shareware
 and Credits. Half-Life is absent. Cortex is the legacy grid fallback, not the
 new BSP slice.
 
-Launcher identity: `v0.19-31-ge23ed6c`.
+Launcher identity: `v0.19-32-g2061540`.
 Quake menu identity: `q28507a6`, program 11/11 and visible entry 11/12.
 
 ### 9.2 Exact combined-disc evidence
 
-The definitive `make quake-headless-check` ran after a clean launcher rebuild.
+The definitive `make quake-headless-check` ran from the promoted canonical
+repositories after a clean launcher rebuild. Canonical `make disc` and
+`make check` also passed at demo-disc `2061540e`.
 Both passes:
 
 - used 12 visible menu entries and selected Quake with Right at tick 400,
@@ -533,14 +539,16 @@ replace the working legacy fallback in the meantime.
 ### 9.4 Rebuild and verify commands
 
 ```sh
-cd /Users/ebonura/Desktop/repos/psx-demo-disc-comicon-final
+cd /Users/ebonura/Desktop/repos/psx-demo-disc
+make disc
 make check
-make disc \
-  QUAKE_SRC=/Users/ebonura/Desktop/repos/quake-psx-comicon-final
 make quake-headless-check \
-  QUAKE_SRC=/Users/ebonura/Desktop/repos/quake-psx-comicon-final \
-  FRONTEND=/Users/ebonura/Desktop/repos/psx-demo-disc-comicon-final/games/PSoXide/target/release/frontend
+  FRONTEND=/Users/ebonura/Desktop/repos/psx-demo-disc/games/PSoXide/target/release/frontend
 ```
+
+The default `QUAKE_SRC` is the canonical sibling
+`/Users/ebonura/Desktop/repos/quake-psx`; no temporary worktree override is
+required.
 
 For full-disc builds, use the demo repository's exact-pinned
 `games/PSoXide` submodule. Do **not** pass the detached
@@ -559,7 +567,7 @@ measure and repin.
 The owner should:
 
 1. boot the disc through the real BIOS;
-2. confirm launcher `v0.19-31-ge23ed6c`;
+2. confirm launcher `v0.19-32-g2061540`;
 3. launch visible Cortex Ignition twice and verify the legacy grid fallback,
    characters, animation, attachments, movement/camera and stable audio;
 4. select Quake Shareware `q28507a6` and launch it twice;
@@ -619,7 +627,7 @@ cd <recovery-dir>
 git stash apply <stash-object>
 ```
 
-Never apply these directly to `codex/comicon-quake-final`.
+Never apply these directly to canonical `codex/all-rust-quake`.
 
 Additional dirty WIP:
 
@@ -640,61 +648,74 @@ or `bc5efae` on top of final; their equivalents are present.
 
 ## 12. Official repository promotion
 
-### 12.1 Why the different folders are safe
+### 12.1 Completed canonical heads
 
-The three `*-comicon-final` directories are linked worktrees of the official
-repositories. They share the same `.git` common directories and remotes.
-There is no copy operation and no commit migration left to do.
+The owner-approved local promotion completed without rebasing, rewriting or
+copying repositories:
 
-### 12.2 Why promotion has not happened
+- `/Users/ebonura/Desktop/repos/PSoXide` is on `main` at promotion base
+  `b2db85c4b86c3c1ea9748a92d39c85dff8b7610d`; this handoff update is its
+  docs-only descendant.
+- `/Users/ebonura/Desktop/repos/quake-psx` remains on the established
+  `codex/all-rust-quake` branch and was fast-forwarded to
+  `28507a6dd605730a43909d6b2258f081def68a79`.
+- `/Users/ebonura/Desktop/repos/psx-demo-disc` is on `main` at
+  `2061540e234da16fd7a8378b0fc61f5d810ddd68`. This includes the canonical
+  `../quake-psx` source default and its documentation normalization.
+- The exact shipping engine pin remains the detached clean worktree
+  `/Users/ebonura/Desktop/repos/PSoXide-final-pin` at `79d51dd2`.
 
-The canonical folders contain owner work:
+The `*-comicon-final` worktrees remain linked historical checkpoints, but the
+canonical folders above are now the working locations.
 
-- `/Users/ebonura/Desktop/repos/PSoXide` is at `5c5656a9` on
-  `codex/windowed-classic-affine`, with 8 tracked modifications and 87
-  untracked paths. Five tracked files overlap the final history, including
-  frontend app/CLI and engine movement/render files.
-- `/Users/ebonura/Desktop/repos/quake-psx` is at `4eed586` on
-  `codex/all-rust-quake`, with 12 tracked modifications and 5 untracked
-  paths. Every tracked file overlaps final, and untracked
-  `crates/quake-core/src/movement.rs` becomes tracked in final.
-- `/Users/ebonura/Desktop/repos/psx-demo-disc` is clean on main `10d6f24`.
+### 12.2 Recovery points preserved before promotion
 
-Do not switch or merge the first two in place until that work is preserved.
+Do not delete these until the owner has accepted the promoted repositories and
+physical disc:
 
-### 12.3 Safe future sequence
+- PSoXide backup branch
+  `codex/pre-comicon-psoxide-promotion-20260813` points to exact old head
+  `5c5656a9c3fcddaf52661abf74f899bd85ea0c5a`.
+- PSoXide's eight tracked owner edits are in tracked-only stash object
+  `8f2bcb89dc1e336eea90cbd9b259a03d54185fb8`. Do not reapply it wholesale
+  onto promoted `main`; recover from the old-base branch or restore selected
+  files deliberately.
+- PSoXide's 87 pre-existing untracked paths were left in place and were not
+  captured, moved or deleted during promotion.
+- Quake backup branch `codex/pre-comicon-promotion-quake-20260813` contains
+  preservation commit `50ad111d34ae02dca54fe3bb533c3c08debb7815`, which
+  banks all 17 pre-promotion tracked and untracked source paths. Do not
+  cherry-pick it wholesale onto the promoted port.
+- The four route stashes remain unchanged:
+  `c6273e32eeeba77f058db64fba4dbd30decaf2d5`,
+  `28060b555f33ad503f28044a67db464a769a9557`,
+  `a6b41b8b4789f03125f3ab16ecdda40767faf5fe` and
+  `5f81afe86d4f87f42b4954f7f35c9cb755775cc7`.
+- Demo-disc backup branch `codex/pre-comicon-disc-promotion-20260813` points
+  to exact old `main` head `10d6f24b29972d5f0124b8930b0391ed6001ebc5`.
 
-Recheck all statuses first. Then, only with owner approval:
+### 12.3 Canonical rebuild and publication state
 
-1. Create immutable backup refs at the current canonical heads.
-2. In PSoXide, stash **tracked files only** so the large untracked capture set
-   remains untouched. Do not restore that stash onto the release line.
-3. Switch the canonical folder to `main` and fast-forward it to
-   `codex/comicon-psoxide-final` with `git merge --ff-only`.
-4. In Quake, use a named `git stash push -u` because the small untracked source
-   set includes a path that collides with final. Do not restore it onto the
-   release line.
-5. Switch Quake canonical to `main` and fast-forward it to
-   `codex/comicon-quake-final`.
-6. Rebuild Quake's ignored shipping `dist/` from the canonical official path
-   and verify its provenance.
-7. Change the demo-disc default `QUAKE_SRC` from temporary sibling
-   `../quake-psx-comicon-final` to official sibling `../quake-psx`. Correct the
-   broad README boot claim noted in section 9.2.
-8. Fast-forward demo-disc main to `codex/comicon-disc-final`, commit the path
-   correction, rebuild the default disc and rerun the two-pass headless smoke.
-9. Record the new launcher identity and artifact hashes. Keep all backup refs,
-   stashes and route WIP until the hardware burn passes.
+Canonical Quake was hydrated from exact PSoXide pin `79d51dd2`, its ignored
+assets and shipping `dist/` were rebuilt from source, its provenance matched,
+and `cargo test -p quake-core` passed. Canonical demo-disc `make disc`,
+`make check` and the deterministic two-pass `make quake-headless-check` all
+passed. The legacy Cortex chain-load also passed twice with byte-identical
+logs and the same telemetry recorded in section 9.3.
 
-Use fast-forward merges, never rebase or a mass cherry-pick. Push PSoXide and
-Quake before pushing a demo-disc revision that claims remote reproducibility.
-Local burning may happen before push.
+The rebuilt default candidate identifies the launcher as
+`v0.19-32-g2061540`; its current hashes are recorded in section 9.1. No
+repository was pushed. Before any remote demo-disc publication, publish the
+required PSoXide and Quake source history first so its source contract is
+actually reproducible. Local burning and owner hardware acceptance may happen
+before push.
 
 ## 13. Challenge checklist for a resumed session
 
 The next model should answer these with live evidence:
 
-- Do all three final worktrees still have the expected ancestry and cleanliness?
+- Do all three canonical repositories still descend from the promoted heads,
+  and do all recovery refs, stash objects and preserved paths still exist?
 - Does the combined receipt still match the exact current bin and cue hashes?
 - Does the receipt pin Quake `28507a6` and PSoXide `79d51dd2`?
 - Does Quake's own sidecar have empty shipping features and the same hashes?
