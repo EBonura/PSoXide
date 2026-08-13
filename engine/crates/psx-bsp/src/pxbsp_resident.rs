@@ -12,7 +12,7 @@ use crate::pxbsp::{
 };
 use crate::{
     BrushModel, ClipNode, CookedRecord, Face, Leaf, LumpRange, Node, Plane, ReadAt, RecordSlice,
-    Vec3I32, Vertex,
+    SliceReadError, SliceReader, Vec3I32, Vertex,
 };
 
 use crate::resident::MAX_RESIDENT_MAP_BYTES;
@@ -92,10 +92,21 @@ impl<E: fmt::Display> fmt::Display for PxbspMapLoadError<E> {
 pub struct PxbspResidentMap {
     map_id: Option<u32>,
     generation: u32,
-    bytes: Vec<u8>,
+    storage: PxbspResidentStorage,
     ranges: [LumpRange; PXBSP_LUMP_COUNT],
     source_ranges: [LumpRange; PXBSP_LUMP_COUNT],
     source_file_len: u32,
+}
+
+/// Backing bytes for a validated resident map.
+///
+/// Streaming callers retain the packed owned form. A map compiled directly
+/// into the guest executable can instead be validated and viewed in place,
+/// avoiding a second whole-world allocation from the PS1 bump heap.
+#[derive(Debug)]
+enum PxbspResidentStorage {
+    Owned(Vec<u8>),
+    Static(&'static [u8]),
 }
 
 impl PxbspResidentMap {
@@ -109,11 +120,44 @@ impl PxbspResidentMap {
         Self {
             map_id: None,
             generation: 0,
-            bytes: Vec::with_capacity(capacity),
+            storage: PxbspResidentStorage::Owned(Vec::with_capacity(capacity)),
             ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
             source_ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
             source_file_len: 0,
         }
+    }
+
+    /// Validate a PXBSP file that already has static guest lifetime.
+    ///
+    /// Lump ranges continue to address the source file directly. The caller
+    /// must provide a four-byte-aligned base when the vertex lump is nonempty;
+    /// generated `PXBSP_WORLD` assets satisfy that contract explicitly.
+    pub fn from_static(
+        map_id: u32,
+        bytes: &'static [u8],
+    ) -> Result<Self, PxbspMapLoadError<SliceReadError>> {
+        let mut reader = SliceReader::new(bytes);
+        let index = PxbspIndex::read(&mut reader).map_err(PxbspMapLoadError::Index)?;
+        let mut map = Self {
+            map_id: None,
+            generation: 0,
+            storage: PxbspResidentStorage::Static(bytes),
+            ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
+            source_ranges: [LumpRange::EMPTY; PXBSP_LUMP_COUNT],
+            source_file_len: index.file_len(),
+        };
+        for kind in PxbspLumpKind::ALL {
+            let range = index.lump(kind);
+            map.ranges[kind as usize] = range;
+            map.source_ranges[kind as usize] = range;
+        }
+        if let Err(error) = map.validate_references() {
+            map.clear_loaded_state();
+            return Err(error);
+        }
+        map.map_id = Some(map_id);
+        map.generation = 1;
+        Ok(map)
     }
 
     /// Read and validate one map, associating caller-owned identity with it.
@@ -122,7 +166,7 @@ impl PxbspResidentMap {
         map_id: u32,
         reader: &mut R,
     ) -> Result<(), PxbspMapLoadError<R::Error>> {
-        self.clear_loaded_state();
+        self.prepare_owned_load();
         let index = PxbspIndex::read(reader).map_err(PxbspMapLoadError::Index)?;
 
         let total = RESIDENT_LUMPS.iter().try_fold(0usize, |total, &kind| {
@@ -134,25 +178,25 @@ impl PxbspResidentMap {
         let Some(total) = total else {
             return Err(PxbspMapLoadError::TooLarge {
                 required: usize::MAX,
-                capacity: self.bytes.capacity(),
+                capacity: self.storage_capacity(),
             });
         };
-        if total > self.bytes.capacity() {
+        if total > self.storage_capacity() {
             return Err(PxbspMapLoadError::TooLarge {
                 required: total,
-                capacity: self.bytes.capacity(),
+                capacity: self.storage_capacity(),
             });
         }
 
-        self.bytes.resize(total, 0);
+        self.owned_bytes_mut().resize(total, 0);
         let mut destination = 0usize;
         for kind in RESIDENT_LUMPS {
             destination = align_up_4(destination);
             let source = index.lump(kind);
             let end = destination + source.len as usize;
-            if let Err(error) =
-                reader.read_exact_at(source.offset, &mut self.bytes[destination..end])
-            {
+            let read =
+                reader.read_exact_at(source.offset, &mut self.owned_bytes_mut()[destination..end]);
+            if let Err(error) = read {
                 self.clear_loaded_state();
                 return Err(PxbspMapLoadError::Read(error));
             }
@@ -191,9 +235,12 @@ impl PxbspResidentMap {
         self.source_file_len
     }
 
-    /// Bytes occupied by the packed resident payload.
+    /// Bytes occupied by the active backing payload.
+    ///
+    /// Owned maps report the packed resident lumps. Static maps report the
+    /// complete validated source file that remains embedded in place.
     pub fn resident_bytes(&self) -> usize {
-        self.bytes.len()
+        self.storage_bytes().len()
     }
 
     /// Source-file range for caller-owned texture and sound streaming.
@@ -328,15 +375,53 @@ impl PxbspResidentMap {
 
     fn clear_loaded_state(&mut self) {
         self.map_id = None;
-        self.bytes.clear();
+        match &mut self.storage {
+            PxbspResidentStorage::Owned(bytes) => bytes.clear(),
+            PxbspResidentStorage::Static(_) => self.storage = PxbspResidentStorage::Static(&[]),
+        }
         self.ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
         self.source_ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
         self.source_file_len = 0;
     }
 
+    fn prepare_owned_load(&mut self) {
+        let capacity = self.storage_capacity();
+        match &mut self.storage {
+            PxbspResidentStorage::Owned(bytes) => bytes.clear(),
+            PxbspResidentStorage::Static(_) => {
+                self.storage = PxbspResidentStorage::Owned(Vec::with_capacity(capacity));
+            }
+        }
+        self.map_id = None;
+        self.ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
+        self.source_ranges = [LumpRange::EMPTY; PXBSP_LUMP_COUNT];
+        self.source_file_len = 0;
+    }
+
+    fn storage_capacity(&self) -> usize {
+        match &self.storage {
+            PxbspResidentStorage::Owned(bytes) => bytes.capacity(),
+            PxbspResidentStorage::Static(bytes) => bytes.len(),
+        }
+    }
+
+    fn storage_bytes(&self) -> &[u8] {
+        match &self.storage {
+            PxbspResidentStorage::Owned(bytes) => bytes,
+            PxbspResidentStorage::Static(bytes) => bytes,
+        }
+    }
+
+    fn owned_bytes_mut(&mut self) -> &mut Vec<u8> {
+        match &mut self.storage {
+            PxbspResidentStorage::Owned(bytes) => bytes,
+            PxbspResidentStorage::Static(_) => unreachable!("prepared owned PXBSP load"),
+        }
+    }
+
     fn lump_bytes(&self, kind: PxbspLumpKind) -> &[u8] {
         let range = self.ranges[kind as usize];
-        &self.bytes[range.offset as usize..range.end() as usize]
+        &self.storage_bytes()[range.offset as usize..range.end() as usize]
     }
 
     fn records<T: CookedRecord>(&self, kind: PxbspLumpKind) -> RecordSlice<'_, T> {
@@ -597,6 +682,27 @@ pub(crate) mod tests {
         Ok(map)
     }
 
+    fn leak_aligned(bytes: Vec<u8>) -> &'static [u8] {
+        let byte_len = bytes.len();
+        let mut words = vec![0u32; byte_len.div_ceil(core::mem::size_of::<u32>())];
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), words.as_mut_ptr().cast(), byte_len);
+        }
+        let words = words.leak();
+        unsafe { core::slice::from_raw_parts(words.as_ptr().cast(), byte_len) }
+    }
+
+    fn leak_misaligned(bytes: Vec<u8>) -> &'static [u8] {
+        let byte_len = bytes.len();
+        let mut words = vec![0u32; (byte_len + 1).div_ceil(core::mem::size_of::<u32>())];
+        let output = unsafe { words.as_mut_ptr().cast::<u8>().add(1) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), output, byte_len);
+        }
+        let words = words.leak();
+        unsafe { core::slice::from_raw_parts(words.as_ptr().cast::<u8>().add(1), byte_len) }
+    }
+
     #[test]
     fn loads_checked_pxbsp_record_views() {
         let bytes = write_file(&valid_lumps());
@@ -611,6 +717,44 @@ pub(crate) mod tests {
         assert_eq!(map.string_at(0), Some(&b"world"[..]));
         assert!(map.resident_bytes() < bytes.len());
         assert_eq!(map.source_lump(PxbspLumpKind::TextureData).len, 0);
+    }
+
+    #[test]
+    fn validates_static_pxbsp_without_copying_its_lumps() {
+        let bytes = leak_aligned(write_file(&valid_lumps()));
+        let map = PxbspResidentMap::from_static(23, bytes).expect("static resident map");
+        let vertex_source = map.source_lump(PxbspLumpKind::Vertices);
+
+        assert_eq!(map.map_id(), Some(23));
+        assert_eq!(map.generation(), 1);
+        assert_eq!(map.source_file_len(), bytes.len() as u32);
+        assert_eq!(map.resident_bytes(), bytes.len());
+        assert_eq!(map.vertices().len(), 3);
+        assert_eq!(
+            map.vertex_data().as_ptr(),
+            unsafe { bytes.as_ptr().add(vertex_source.offset as usize) },
+            "static map must view the embedded source bytes directly"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_static_pxbsp_before_publishing_it() {
+        let mut lumps = valid_lumps();
+        lumps[PxbspLumpKind::Materials as usize][7] = 9;
+        let bytes = leak_aligned(write_file(&lumps));
+        assert_eq!(
+            PxbspResidentMap::from_static(23, bytes).expect_err("invalid static map"),
+            PxbspMapLoadError::BadMaterial(0, PxbspMaterialError::InvalidBlendMode(9))
+        );
+    }
+
+    #[test]
+    fn rejects_static_pxbsp_with_a_misaligned_base() {
+        let bytes = leak_misaligned(write_file(&valid_lumps()));
+        assert_eq!(
+            PxbspResidentMap::from_static(23, bytes).expect_err("misaligned static map"),
+            PxbspMapLoadError::BadVertexData
+        );
     }
 
     #[test]

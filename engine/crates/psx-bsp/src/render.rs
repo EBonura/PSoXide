@@ -31,8 +31,7 @@ use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
 use crate::{
     Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_BAKED_UV,
-    FACE_TWO_SIDED,
-    TEXTURE_INVISIBLE, TEXTURE_LIQUID, TEXTURE_NULL, TEXTURE_SKY,
+    FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID, TEXTURE_NULL, TEXTURE_SKY,
 };
 
 /// Packet storage used by the original renderer's double-buffered arenas.
@@ -210,17 +209,34 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
+        Self::with_capacities(MAX_FACE_COUNT, MAX_ALIAS_VERTICES, MAX_RENDER_ENTITIES)
+    }
+
+    /// Construct the render scratch needed by a validated PXBSP world.
+    ///
+    /// PXBSP skeletal entities are submitted by the game runtime, outside
+    /// this world renderer. Sizing the face marks to the cooked map avoids
+    /// reserving the legacy 32K-face XBSP ceiling on the PS1 heap.
+    pub fn new_pxbsp(face_count: usize) -> Self {
+        Self::with_capacities(face_count, 0, 0)
+    }
+
+    fn with_capacities(
+        face_count: usize,
+        alias_vertex_count: usize,
+        render_entity_count: usize,
+    ) -> Self {
         let mut light_styles = [256; DUMMY_LIGHT_STYLE + 1];
         light_styles[DUMMY_LIGHT_STYLE] = 0;
         Self {
             frame: 0,
-            face_visible: vec![0; MAX_FACE_COUNT],
+            face_visible: vec![0; face_count],
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_visibility: None,
             cached_pxbsp_visibility: None,
-            alias_projected: vec![ClassicAliasProjectedVertex::default(); MAX_ALIAS_VERTICES],
-            visible_entity_indices: Vec::with_capacity(MAX_RENDER_ENTITIES),
+            alias_projected: vec![ClassicAliasProjectedVertex::default(); alias_vertex_count],
+            visible_entity_indices: Vec::with_capacity(render_entity_count),
             cached_frustum: None,
             light_styles,
         }
@@ -1438,7 +1454,7 @@ mod tests {
             texture_size: [64; 2],
         };
         let mut packets = [0u32; 512];
-        let mut renderer = Renderer::new();
+        let mut renderer = Renderer::new_pxbsp(map.faces().len());
         assert_eq!(map.point_leaf_index(camera.origin), Some(1));
         assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
         assert_eq!(renderer.face_visible[0], 1);
@@ -1479,6 +1495,14 @@ mod tests {
         }
         assert_eq!(offset, frame.packet_words);
         assert_eq!(packet_count, frame.stats.packets);
+    }
+
+    #[test]
+    fn pxbsp_renderer_allocates_only_world_face_marks() {
+        let renderer = Renderer::new_pxbsp(37);
+        assert_eq!(renderer.face_visible.len(), 37);
+        assert!(renderer.alias_projected.is_empty());
+        assert_eq!(renderer.visible_entity_indices.capacity(), 0);
     }
 
     #[test]
