@@ -1369,15 +1369,13 @@ fn face_element_gizmo_drag_moves_the_face_via_real_egui() {
     workspace.set_brush_edit_mode(BrushEditMode::Face);
     let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
     workspace.apply_brush_element_selection(BrushElement::Face(5), egui::Modifiers::NONE);
-    // Face-only Move selections offer a single normal arrow at slot 0.
     let polylines = workspace
         .brush_element_gizmo_polylines_3d(viewport)
         .expect("gizmo axes project");
-    assert!(polylines[1].is_empty() && polylines[2].is_empty());
-    let start = polyline_grab_point(&polylines[0]);
+    let start = polyline_grab_point(&polylines[1]);
     assert_eq!(
         workspace.pick_brush_element_gizmo_axis_3d(viewport, start),
-        Some(0)
+        Some(1)
     );
 
     run_real_egui_viewport_drag(&mut workspace, start, start + Vec2::new(0.0, -48.0));
