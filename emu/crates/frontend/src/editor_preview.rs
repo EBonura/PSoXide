@@ -381,7 +381,25 @@ pub fn build_phase1_frame(
     let preview_tick = preview_elapsed_vblanks();
     // World-space brushes render once, against the camera GTE state
     // installed above (rooms and their local offsets do not apply).
-    walk_brushes(project, textures, world_camera, &mut scratch);
+    walk_brushes(
+        project,
+        textures,
+        world_camera,
+        hidden_scene_nodes,
+        &mut scratch,
+    );
+    // World-space light gizmos (BSP scenes): rooms never iterate here, so
+    // roomless lights draw their ring + bulb right after the brushes,
+    // while the camera GTE state is still installed.
+    if show_lights {
+        walk_roomless_light_gizmos(
+            project,
+            hidden_scene_nodes,
+            selected,
+            hovered_entity_node,
+            &mut scratch,
+        );
+    }
     for floor_entry in &visible_rooms {
         if scratch.geometry_full() {
             break;
@@ -588,6 +606,22 @@ pub fn build_phase1_frame(
 
         let _ = setup_gte_for_camera(camera);
     }
+
+    // World-space (BSP) entity models: prime the camera GTE first (the
+    // room loop leaves per-room state), draw, then fall through to the
+    // shared re-prime below for the bounds pass.
+    let _ = setup_gte_for_camera(camera);
+    walk_bsp_model_instances(
+        project,
+        textures,
+        assets,
+        selected,
+        &world_camera,
+        hidden_scene_nodes,
+        preview_tick,
+        character_motion,
+        &mut scratch,
+    );
 
     // Re-prime the GTE with the camera matrix -- model
     // rendering left it set to the last joint's view, which
@@ -1168,6 +1202,26 @@ fn brush_fallback_color(face: usize) -> (u8, u8, u8) {
     (shade, shade, shade)
 }
 
+/// Ambient term for world-space (BSP) preview lighting, matching the
+/// Release bake contract (`PXBSP_AMBIENT_RGB` in the cooked manifest).
+const PXBSP_PREVIEW_AMBIENT: [u8; 3] = [32; 3];
+
+/// Whether any ancestor of `id` is a Section room. World-space (BSP)
+/// passes use this to skip nodes the per-room walkers already own.
+pub(super) fn node_has_section_ancestor(scene: &Scene, id: NodeId) -> bool {
+    let mut current = scene.node(id).and_then(|node| node.parent);
+    while let Some(parent_id) = current {
+        let Some(parent) = scene.node(parent_id) else {
+            return false;
+        };
+        if matches!(parent.kind, NodeKind::Section { .. }) {
+            return true;
+        }
+        current = parent.parent;
+    }
+    false
+}
+
 /// World-space brush solids: each solved face polygon fans into
 /// triangles with paraxial world-aligned UVs. Unlit and fog-free in v1
 /// (brushes are not room-bound). Solved brush polygons retain their authored
@@ -1178,9 +1232,16 @@ fn walk_brushes(
     project: &ProjectDocument,
     textures: &EditorTextures,
     camera: psx_engine::WorldCamera,
+    hidden_scene_nodes: &HashSet<NodeId>,
     scratch: &mut PreviewScratch,
 ) {
     use psxed_project::brush::{paraxial_uv, Plane};
+    // Live light preview: per-face analytic point lighting against the
+    // scene's lights, using the Release bake's ambient contract
+    // (PXBSP_AMBIENT_RGB = [32; 3]). No occlusion; the true shadowed
+    // result comes from the Release cook. With zero lights the historic
+    // unlit shading is kept, so lightless maps don't go dark.
+    let lights = collect_bsp_preview_lights(project, hidden_scene_nodes);
     for brush in &project.active_scene().brushes {
         if scratch.geometry_full() {
             break;
@@ -1192,12 +1253,24 @@ fn walk_brushes(
             let Some(plane) = Plane::from_points(face.points) else {
                 continue;
             };
-            let shade = face_shade(
+            let mut shade = face_shade(
                 project,
                 face.material,
                 brush_fallback_color(face_index),
                 textures,
             );
+            if !lights.is_empty() {
+                let count = polygon.verts.len().max(1) as f64;
+                let mut center = [0.0f64; 3];
+                for vert in &polygon.verts {
+                    for axis in 0..3 {
+                        center[axis] += vert[axis];
+                    }
+                }
+                let center =
+                    center.map(|sum| (sum / count).round() as i32);
+                shade = light_face(shade, center, &lights, PXBSP_PREVIEW_AMBIENT);
+            }
             let verts = &polygon.verts;
             for i in 1..verts.len().saturating_sub(1) {
                 let tri = [verts[0], verts[i], verts[i + 1]];
@@ -2207,6 +2280,164 @@ fn walk_model_instances(
         &mut instances_meta,
     );
 
+    resolve_and_draw_model_instances(
+        project,
+        textures,
+        assets,
+        camera,
+        fog,
+        &lights,
+        ambient,
+        tick,
+        &instances_meta,
+        scratch,
+    );
+}
+
+/// BSP-scene counterpart of `walk_model_instances`: model-backed entities
+/// hang off the scene root in raw world units, so the render origin is the
+/// authored translation directly (no floor grid to anchor to). Uses
+/// `preview_model_reference`, not the static variant: there is no separate
+/// player-spawn preview pass here, so the player entity's model renders
+/// like everyone else's. Fog-free, matching `walk_brushes`.
+#[allow(clippy::too_many_arguments)]
+fn walk_bsp_model_instances(
+    project: &ProjectDocument,
+    textures: &EditorTextures,
+    assets: &crate::editor_assets::EditorAssets,
+    selected: psxed_project::NodeId,
+    camera: &psx_engine::WorldCamera,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    tick: u32,
+    character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    let lights = collect_bsp_preview_lights(project, hidden_scene_nodes);
+    let fog = PreviewFog {
+        enabled: false,
+        rgb: (0, 0, 0),
+        near: 0,
+        far: 1,
+    };
+    let mut instances_meta: Vec<InstanceMeta> = Vec::new();
+    for node in scene.nodes() {
+        if instances_meta.len() >= MAX_PREVIEW_MODEL_INSTANCES {
+            break;
+        }
+        if node_has_section_ancestor(scene, node.id) {
+            continue;
+        }
+        let Some(reference) = preview_model_reference(scene, node) else {
+            continue;
+        };
+        if preview_reference_hidden(
+            scene,
+            hidden_scene_nodes,
+            node.id,
+            reference.renderer_node,
+            reference.animator_node,
+            None,
+        ) {
+            continue;
+        }
+        let Some(model_resource) = project.resource(reference.model_id) else {
+            continue;
+        };
+        let ResourceData::Model(model) = &model_resource.data else {
+            continue;
+        };
+        if model.texture_path.is_none() {
+            continue;
+        }
+        let Some(atlas_slot) = textures.model_atlas_slot(reference.model_id) else {
+            continue;
+        };
+        let preview_transform = character_motion.filter(|preview| preview.entity == node.id);
+        let clip_local = preview_transform
+            .map(|preview| preview.clip)
+            .or(reference.clip_override)
+            .unwrap_or(0);
+        if (clip_local as usize)
+            >= project
+                .resolved_model_animation_clips(reference.model_id)
+                .len()
+        {
+            continue;
+        }
+        let translation = node.transform.translation;
+        let mut origin = psx_engine::WorldVertex::new(
+            translation[0].round() as i32,
+            translation[1].round() as i32,
+            translation[2].round() as i32,
+        );
+        let yaw_q12 = apply_character_motion_preview(
+            node.id,
+            &mut origin,
+            yaw_to_q12(node.transform.rotation_degrees[1]),
+            character_motion,
+        );
+        let model_rotation = euler_rotation_q12(
+            yaw_to_q12(node.transform.rotation_degrees[0]),
+            yaw_q12.wrapping_add(reference.visual_yaw_q12),
+            yaw_to_q12(node.transform.rotation_degrees[2]),
+        );
+        instances_meta.push(InstanceMeta {
+            mesh_id: reference.model_id,
+            clip_local,
+            origin,
+            model_rotation,
+            atlas: atlas_slot,
+            material_override: reference.material_override,
+            is_selected: preview_reference_selected(
+                selected,
+                node.id,
+                reference.renderer_node,
+                reference.animator_node,
+                None,
+            ),
+            autoplay: preview_transform.is_some() || reference.autoplay,
+            yaw_q12,
+            collision_radius: model.collision_radius as i32,
+            world_height: model.world_height as i32,
+            visual_offset: reference.visual_offset,
+            visual_scale_q8: reference.visual_scale_q8,
+        });
+    }
+    if instances_meta.is_empty() {
+        return;
+    }
+    resolve_and_draw_model_instances(
+        project,
+        textures,
+        assets,
+        camera,
+        fog,
+        &lights,
+        PXBSP_PREVIEW_AMBIENT,
+        tick,
+        &instances_meta,
+        scratch,
+    );
+}
+
+/// Shared tail of the model walkers: resolve cached mesh/clip bytes for
+/// each gathered `InstanceMeta`, shade, and draw shadows, gizmos, and the
+/// instances themselves. Requires the GTE to hold the camera matrix on
+/// entry (the model pass leaves joint-space state behind).
+#[allow(clippy::too_many_arguments)]
+fn resolve_and_draw_model_instances(
+    project: &ProjectDocument,
+    textures: &EditorTextures,
+    assets: &crate::editor_assets::EditorAssets,
+    camera: &psx_engine::WorldCamera,
+    fog: PreviewFog,
+    lights: &[psx_engine::PointLightSample],
+    ambient: [u8; 3],
+    tick: u32,
+    instances_meta: &[InstanceMeta],
+    scratch: &mut PreviewScratch,
+) {
     // Resolve parsed model + animation per instance straight
     // out of the cache. Each meta carries its own
     // `(mesh_id, clip_local)` pair so two instances of the
@@ -2214,7 +2445,7 @@ fn walk_model_instances(
     // animation entries -- fixes the prior shared-buffer bug
     // where whichever clip got loaded first won.
     let mut instances: Vec<PreviewModelInstance> = Vec::new();
-    for meta in &instances_meta {
+    for meta in instances_meta {
         let Some(mesh_bytes) = assets.mesh_bytes(meta.mesh_id) else {
             continue;
         };
@@ -2249,14 +2480,14 @@ fn walk_model_instances(
             origin,
             model_rotation: meta.model_rotation,
             visual_scale_q8: meta.visual_scale_q8,
-            tint: shade_model_tint(origin, *camera, fog, &lights, ambient, base_tint),
+            tint: shade_model_tint(origin, *camera, fog, lights, ambient, base_tint),
             blend_mode: material_override
                 .map(|material| material.blend_mode)
                 .unwrap_or(BlendMode::Opaque),
             secondary_layer: material_override.and_then(|material| {
                 material.secondary_layer.map(|mut layer| {
                     layer.tint =
-                        shade_model_tint(origin, *camera, fog, &lights, ambient, layer.tint);
+                        shade_model_tint(origin, *camera, fog, lights, ambient, layer.tint);
                     layer
                 })
             }),
@@ -2274,7 +2505,7 @@ fn walk_model_instances(
     }
 
     let shadow_slot = textures.shadow_slot();
-    for meta in &instances_meta {
+    for meta in instances_meta {
         draw_model_shadow(meta, shadow_slot, *camera, scratch);
     }
 
@@ -2282,7 +2513,7 @@ fn walk_model_instances(
     // the engine model pass overrides rotation/translation
     // per joint so any project_vertex after a model render uses
     // joint-space, not world-space.
-    for meta in &instances_meta {
+    for meta in instances_meta {
         if meta.is_selected {
             draw_model_selection_gizmo(meta, scratch);
         }

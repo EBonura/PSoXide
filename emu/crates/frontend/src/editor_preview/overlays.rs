@@ -73,6 +73,68 @@ pub(super) fn walk_light_gizmos(
     }
 }
 
+/// Ring + bulb gizmos for lights that live in world space (no enclosing
+/// Section room), the BSP-scene counterpart of [`walk_light_gizmos`].
+/// Positions are raw world units; the radius scales by the World sector
+/// size, matching both the brush bake and the runtime light records.
+pub(super) fn walk_roomless_light_gizmos(
+    project: &ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: psxed_project::NodeId,
+    hovered: Option<psxed_project::NodeId>,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    let radius_units = scene
+        .world_sector_size_for_node(scene.root)
+        .unwrap_or(1024)
+        .max(1) as f32;
+    for light in preview_lights(scene, hidden_scene_nodes) {
+        if node_has_section_ancestor(scene, light.host_id) {
+            continue;
+        }
+        let center_world = light.transform.translation.map(|value| value.round() as i32);
+        let center_world = [center_world[0], center_world[1], center_world[2]];
+        let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
+        let is_hovered = hovered
+            .is_some_and(|id| preview_reference_selected(id, light.host_id, None, None, None));
+        let style = if is_selected {
+            FaceOutlineStyle {
+                rgb: (0xFF, 0xE0, 0x80),
+                thickness_px: EDITOR_PREVIEW_SELECTED_STROKE_WIDTH,
+            }
+        } else if is_hovered {
+            FaceOutlineStyle {
+                rgb: (0xFF, 0xF0, 0x90),
+                thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
+            }
+        } else {
+            FaceOutlineStyle {
+                rgb: (
+                    light.color[0].max(0x40),
+                    light.color[1].max(0x40),
+                    light.color[2].max(0x40),
+                ),
+                thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
+            }
+        };
+        let radius_engine = (light.radius * radius_units) as i32;
+        if radius_engine > 0 {
+            push_horizontal_ring(scratch, center_world, radius_engine, 16, style);
+        }
+        push_light_bulb_icon(
+            scratch,
+            center_world,
+            (
+                light.color[0].max(0x40),
+                light.color[1].max(0x40),
+                light.color[2].max(0x40),
+            ),
+            is_selected || is_hovered,
+        );
+    }
+}
+
 /// Wireframe AABB + facing arrow per selectable scene entity.
 /// Bounds are gathered by `EditorWorkspace::collect_entity_bounds`
 /// -- every entity-kind node carries an AABB the user can click to
