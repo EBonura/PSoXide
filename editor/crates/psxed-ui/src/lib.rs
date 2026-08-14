@@ -2442,6 +2442,9 @@ pub(crate) struct BrushVertexDrag {
     pub(crate) plane_3d: Option<BrushDragPlane3d>,
     /// Last applied snapped delta, world units.
     pub(crate) applied: [i32; 3],
+    /// Per-axis constraint from the element gizmo: a masked-off axis
+    /// never receives delta. Free handle drags leave all three true.
+    pub(crate) axis_mask: [bool; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

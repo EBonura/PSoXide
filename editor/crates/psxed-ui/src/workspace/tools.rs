@@ -75,6 +75,15 @@ impl ViewportTool3d for SelectTool {
             return;
         };
         let additive = frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl;
+        // The element gizmo owns its screen area: an axis grab starts an
+        // axis-constrained group drag of the selected elements.
+        if !additive {
+            if let Some(axis) = ws.pick_brush_element_gizmo_axis_3d(frame.rect, pointer) {
+                if ws.begin_brush_element_gizmo_drag(frame.rect, pointer, axis) {
+                    return;
+                }
+            }
+        }
         // Reshape handles (Resize/Edge/Vertex) stick out past the brush
         // silhouette, so a handle hit forwards to the Brush gestures even
         // when the pick ray misses the solid itself; whole-brush Move still
@@ -183,6 +192,13 @@ impl ViewportTool3d for SelectTool {
             }
             return;
         }
+        // A click on the element gizmo is a no-op (the gizmo is for
+        // dragging); without this it would fall through to face picking.
+        if let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) {
+            if ws.pick_brush_element_gizmo_axis_3d(frame.rect, pointer).is_some() {
+                return;
+            }
+        }
         // Sub-element clicks come first: a click never fires the drag-start
         // event, so this is the ONLY path that can select the handle under
         // the cursor. Running it before the pointer_target match also stops
@@ -212,10 +228,26 @@ impl ViewportTool3d for SelectTool {
                     })
                     .map(|(brush, face, _)| (brush, face))
                     .unwrap_or((brush, face));
-                // Face mode on the already-primary brush selects the FACE
-                // as an element (the UV-editing entry); everything else
-                // stays whole-brush selection.
-                if ws.brush_edit_mode == BrushEditMode::Face && ws.selected_brush == Some(brush) {
+                // Face mode selects the face under the cursor as an
+                // element from the FIRST click (the UV-editing entry).
+                // Deliberately the NEAREST face, not the click-through
+                // cycle: cycling made repeat clicks land on back faces.
+                if ws.brush_edit_mode == BrushEditMode::Face {
+                    let (brush, face) = frame
+                        .pointer_interact
+                        .or(frame.pointer_hover)
+                        .and_then(|pointer| {
+                            ws.pick_brush_face_nearest_for_selection_3d(frame.rect, pointer)
+                        })
+                        .map(|(brush, face, _)| (brush, face))
+                        .unwrap_or((brush, face));
+                    if ws.selected_brush != Some(brush) {
+                        ws.clear_node_selection_state();
+                        ws.clear_resource_selection_state();
+                        ws.clear_primitive_selection_state();
+                        ws.clear_sector_selection();
+                        ws.replace_brush_selection(brush, Some(face));
+                    }
                     ws.apply_brush_element_selection(BrushElement::Face(face), frame.modifiers);
                     return;
                 }
@@ -760,10 +792,107 @@ impl EditorWorkspace {
                         push(*b, &mut targets);
                     }
                 }
-                BrushElement::Face(_) => {}
+                BrushElement::Face(face) => {
+                    if let Some(Some(polygon)) = solved.polygons.get(*face) {
+                        for vertex in &polygon.verts {
+                            push(*vertex, &mut targets);
+                        }
+                    }
+                }
             }
         }
         targets
+    }
+
+    /// Centroid of the selected element targets: the element gizmo anchor.
+    pub(crate) fn selected_brush_element_centroid(&self) -> Option<[f64; 3]> {
+        let targets = self.selected_brush_element_targets();
+        if targets.is_empty() {
+            return None;
+        }
+        let count = targets.len() as f64;
+        let mut centroid = [0.0; 3];
+        for target in &targets {
+            for axis in 0..3 {
+                centroid[axis] += target[axis] / count;
+            }
+        }
+        Some(centroid)
+    }
+
+    /// Screen segments of the element gizmo's three axes, world-space
+    /// arrows from the selection centroid. `None` without a selection.
+    fn brush_element_gizmo_axes_3d(
+        &self,
+        rect: egui::Rect,
+    ) -> Option<[(egui::Pos2, egui::Pos2); 3]> {
+        let centroid = self.selected_brush_element_centroid()?;
+        let origin = self.project_brush_point_3d(rect, centroid)?;
+        let mut axes = [(origin, origin); 3];
+        for axis in 0..3 {
+            let mut tip = centroid;
+            tip[axis] += BRUSH_ELEMENT_GIZMO_LENGTH;
+            axes[axis] = (origin, self.project_brush_point_3d(rect, tip)?);
+        }
+        Some(axes)
+    }
+
+    /// The gizmo axis under the pointer, if any (9px pick radius).
+    pub(crate) fn pick_brush_element_gizmo_axis_3d(
+        &self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<usize> {
+        if self.selected_brush_elements.is_empty()
+            || matches!(
+                self.brush_edit_mode,
+                BrushEditMode::Move | BrushEditMode::Clip
+            )
+        {
+            return None;
+        }
+        let axes = self.brush_element_gizmo_axes_3d(rect)?;
+        let mut best: Option<(f32, usize)> = None;
+        for (axis, (a, b)) in axes.iter().enumerate() {
+            let d2 = point_segment_distance2(
+                [f64::from(pointer.x), f64::from(pointer.y)],
+                [f64::from(a.x), f64::from(a.y)],
+                [f64::from(b.x), f64::from(b.y)],
+            ) as f32;
+            if d2 <= 81.0 && best.is_none_or(|(best_d2, _)| d2 < best_d2) {
+                best = Some((d2, axis));
+            }
+        }
+        best.map(|(_, axis)| axis)
+    }
+
+    /// Begin an axis-constrained group drag of the selected elements from
+    /// the element gizmo. Returns false when nothing is selected.
+    fn begin_brush_element_gizmo_drag(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        axis: usize,
+    ) -> bool {
+        let Some(index) = self.selected_brush else {
+            return false;
+        };
+        let Some(anchor) = self.selected_brush_element_centroid() else {
+            return false;
+        };
+        let targets = self.selected_brush_element_targets();
+        if targets.is_empty() {
+            return false;
+        }
+        if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
+            return false;
+        }
+        if let Some(drag) = self.brush_vertex_drag.as_mut() {
+            let mut mask = [false; 3];
+            mask[axis] = true;
+            drag.axis_mask = mask;
+        }
+        true
     }
 
     /// Drag targets for a grabbed vertex/edge handle: the whole selected
@@ -2495,6 +2624,7 @@ impl EditorWorkspace {
                 .unproject(world, self.orthographic_focus),
             plane_3d: None,
             applied: [0; 3],
+            axis_mask: [true; 3],
         });
     }
 
@@ -2918,6 +3048,17 @@ impl EditorWorkspace {
                 let mut emphasize = |face: usize| {
                     if let Some(Some(polygon)) = solved.polygons.get(face) {
                         let count = polygon.verts.len();
+                        // Translucent fill so a selected face reads as
+                        // SELECTED at a glance (matches the 2D views).
+                        let screen: Vec<egui::Pos2> =
+                            polygon.verts.iter().filter_map(|vert| project(*vert)).collect();
+                        if screen.len() == count {
+                            painter.add(egui::Shape::convex_polygon(
+                                screen,
+                                STUDIO_ACCENT.gamma_multiply(0.18),
+                                egui::Stroke::NONE,
+                            ));
+                        }
                         for i in 0..count {
                             let a = project(polygon.verts[i]);
                             let b = project(polygon.verts[(i + 1) % count]);
@@ -3071,6 +3212,22 @@ impl EditorWorkspace {
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
             draw(&preview, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
+        // Element move gizmo: three world-axis arrows at the selection
+        // centroid; dragging one is an axis-constrained group move.
+        if !self.selected_brush_elements.is_empty()
+            && !matches!(
+                self.brush_edit_mode,
+                BrushEditMode::Move | BrushEditMode::Clip
+            )
+        {
+            if let Some(axes) = self.brush_element_gizmo_axes_3d(rect) {
+                for (axis, (origin, tip)) in axes.into_iter().enumerate() {
+                    let color = ELEMENT_GIZMO_AXIS_COLORS[axis];
+                    painter.line_segment([origin, tip], egui::Stroke::new(2.5, color));
+                    painter.circle_filled(tip, 4.5, color);
+                }
+            }
+        }
     }
 }
 
@@ -3093,6 +3250,16 @@ fn brush_preview_ok(brush: &psxed_project::brush::Brush) -> bool {
 
 /// Dropped-side tint in the clip preview.
 const CLIP_DROP_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 96, 96);
+
+/// World length of the element gizmo axes.
+const BRUSH_ELEMENT_GIZMO_LENGTH: f64 = 128.0;
+
+/// Element gizmo axis colors (X red, Y green, Z blue).
+const ELEMENT_GIZMO_AXIS_COLORS: [egui::Color32; 3] = [
+    egui::Color32::from_rgb(232, 84, 84),
+    egui::Color32::from_rgb(104, 220, 112),
+    egui::Color32::from_rgb(96, 148, 244),
+];
 
 fn dominant_axis(normal: [i64; 3]) -> usize {
     let mut axis = 0;
@@ -3371,6 +3538,7 @@ impl EditorWorkspace {
             press_ground: [pointer.x, 0.0, 0.0],
             plane_3d: Some(plane),
             applied: [0; 3],
+            axis_mask: [true; 3],
         });
         true
     }
@@ -3388,6 +3556,9 @@ impl EditorWorkspace {
         let step = self.snap_units.max(1) as f32;
         let mut applied = [0; 3];
         for axis in 0..3 {
+            if !drag.axis_mask[axis] {
+                continue;
+            }
             applied[axis] =
                 (((current[axis] - plane.press_world[axis]) / step).round() * step) as i32;
         }
@@ -3508,6 +3679,11 @@ impl ViewportTool3d for BrushTool {
                 }
             }
             return;
+        }
+        if let Some(axis) = ws.pick_brush_element_gizmo_axis_3d(frame.rect, pointer) {
+            if ws.begin_brush_element_gizmo_drag(frame.rect, pointer, axis) {
+                return;
+            }
         }
         if let Some((index, handle)) = ws.pick_brush_handle_3d(frame.rect, pointer) {
             match handle {
@@ -3678,7 +3854,18 @@ impl ViewportTool3d for BrushTool {
         }
         match ws.pick_brush_face_cycled_for_selection_3d(frame.rect, pointer) {
             Some((index, face, _)) => {
-                if ws.brush_edit_mode == BrushEditMode::Face && ws.selected_brush == Some(index) {
+                if ws.brush_edit_mode == BrushEditMode::Face {
+                    let (index, face) = ws
+                        .pick_brush_face_nearest_for_selection_3d(frame.rect, pointer)
+                        .map(|(brush, face, _)| (brush, face))
+                        .unwrap_or((index, face));
+                    if ws.selected_brush != Some(index) {
+                        ws.clear_node_selection_state();
+                        ws.clear_resource_selection_state();
+                        ws.clear_primitive_selection_state();
+                        ws.clear_sector_selection();
+                        ws.replace_brush_selection(index, Some(face));
+                    }
                     ws.apply_brush_element_selection(BrushElement::Face(face), frame.modifiers);
                     return;
                 }
