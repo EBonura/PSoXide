@@ -2677,7 +2677,9 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn selected_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
-        if self.active_tool == ViewTool::Brush {
+        // Brushes select through Select and Brush alike, so `.` frames
+        // them from either tool.
+        if matches!(self.active_tool, ViewTool::Brush | ViewTool::Select) {
             if let Some(bounds) = self.selected_brush_frame_bounds_3d() {
                 return Some(bounds);
             }
@@ -2734,23 +2736,39 @@ impl EditorWorkspace {
     }
 
     fn selected_brush_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
-        let brush = self
-            .project
-            .active_scene()
-            .brushes
-            .get(self.selected_brush?)?;
-        let solved = brush.solve();
-        if !solved.is_valid()
-            || !solved.min.into_iter().all(f64::is_finite)
-            || !solved.max.into_iter().all(f64::is_finite)
-        {
-            return None;
+        // Union of every selected brush, so multi-selections frame as
+        // a group instead of only the primary.
+        self.selected_brush?;
+        let scene = self.project.active_scene();
+        let mut merged: Option<([f64; 3], [f64; 3])> = None;
+        for index in self.selected_brush_set() {
+            let Some(brush) = scene.brushes.get(index) else {
+                continue;
+            };
+            let solved = brush.solve();
+            if !solved.is_valid()
+                || !solved.min.into_iter().all(f64::is_finite)
+                || !solved.max.into_iter().all(f64::is_finite)
+            {
+                continue;
+            }
+            merged = Some(match merged {
+                None => (solved.min, solved.max),
+                Some((mut min, mut max)) => {
+                    for axis in 0..3 {
+                        min[axis] = min[axis].min(solved.min[axis]);
+                        max[axis] = max[axis].max(solved.max[axis]);
+                    }
+                    (min, max)
+                }
+            });
         }
+        let (min, max) = merged?;
         let mut center = [0.0; 3];
         let mut half = [0.0; 3];
         for axis in 0..3 {
-            center[axis] = ((solved.min[axis] + solved.max[axis]) * 0.5) as f32;
-            half[axis] = ((solved.max[axis] - solved.min[axis]) * 0.5) as f32;
+            center[axis] = ((min[axis] + max[axis]) * 0.5) as f32;
+            half[axis] = ((max[axis] - min[axis]) * 0.5) as f32;
         }
         Some((center, half))
     }
