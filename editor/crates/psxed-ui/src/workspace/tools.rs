@@ -585,6 +585,135 @@ impl EditorWorkspace {
         }
     }
 
+    /// Elements under `world` in the 2D view for the active edit mode:
+    /// the whole depth column behind one projected vertex or edge, since
+    /// a 2D click cannot distinguish depth. Empty when nothing is within
+    /// `tolerance` (projected units) or the mode has no point handles.
+    pub(crate) fn pick_brush_elements_2d(
+        &self,
+        world: [f32; 2],
+        tolerance: f32,
+    ) -> Vec<BrushElement> {
+        let Some((index, verts)) = self.selected_brush_solved_verts() else {
+            return Vec::new();
+        };
+        let view = self.orthographic_view;
+        let point = world.map(f64::from);
+        let tolerance2 = f64::from(tolerance.max(0.0)).powi(2);
+        match self.brush_edit_mode {
+            BrushEditMode::Vertex => {
+                let mut best: Option<(f64, [f64; 2])> = None;
+                for vert in &verts {
+                    let projected = view.project_f64(*vert);
+                    let d2 =
+                        (projected[0] - point[0]).powi(2) + (projected[1] - point[1]).powi(2);
+                    if d2 <= tolerance2 && best.is_none_or(|(best_d2, _)| d2 < best_d2) {
+                        best = Some((d2, projected));
+                    }
+                }
+                let Some((_, projected)) = best else {
+                    return Vec::new();
+                };
+                Self::brush_vertex_column(view, &verts, projected)
+                    .into_iter()
+                    .map(|vertex| {
+                        BrushElement::Vertex(brush_elements::quantize_element_point(vertex))
+                    })
+                    .collect()
+            }
+            BrushEditMode::Edge => {
+                let solved = self.project.active_scene().brushes[index].solve();
+                let edges = brush_elements::unique_edges(&solved);
+                let mut best: Option<(f64, [f64; 2], [f64; 2])> = None;
+                for (a, b) in &edges {
+                    let pa = view.project_f64(*a);
+                    let pb = view.project_f64(*b);
+                    let d2 = point_segment_distance2(point, pa, pb);
+                    if d2 <= tolerance2 && best.is_none_or(|(best_d2, _, _)| d2 < best_d2) {
+                        best = Some((d2, pa, pb));
+                    }
+                }
+                let Some((_, pa, pb)) = best else {
+                    return Vec::new();
+                };
+                // Every 3D edge whose projection coincides with the found
+                // segment (either endpoint order): the edge depth column.
+                let near = |a: [f64; 2], b: [f64; 2]| {
+                    (0..2).all(|axis| (a[axis] - b[axis]).abs() <= 0.5)
+                };
+                edges
+                    .iter()
+                    .filter(|(a, b)| {
+                        let qa = view.project_f64(*a);
+                        let qb = view.project_f64(*b);
+                        (near(qa, pa) && near(qb, pb)) || (near(qa, pb) && near(qb, pa))
+                    })
+                    .map(|(a, b)| {
+                        let (ka, kb) = brush_elements::edge_element_key(*a, *b);
+                        BrushElement::Edge(ka, kb)
+                    })
+                    .collect()
+            }
+            BrushEditMode::Move | BrushEditMode::Face => Vec::new(),
+        }
+    }
+
+    /// 2D handle-first click routing: select the element column under
+    /// `world`. Returns true when something was picked, so callers skip
+    /// face/body selection and silhouette handle clicks never clear.
+    pub(crate) fn select_brush_elements_2d(
+        &mut self,
+        world: [f32; 2],
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        if self.selected_brush.is_none()
+            || matches!(
+                self.brush_edit_mode,
+                BrushEditMode::Move | BrushEditMode::Face
+            )
+        {
+            return false;
+        }
+        let tolerance = 8.0 / self.viewport_zoom.max(f32::EPSILON);
+        let elements = self.pick_brush_elements_2d(world, tolerance);
+        if elements.is_empty() {
+            return false;
+        }
+        self.apply_brush_element_selection_set(&elements, modifiers);
+        true
+    }
+
+    /// Apply a 2D column pick: plain click replaces the element set with
+    /// the column, additive toggles the whole column as one unit.
+    pub(crate) fn apply_brush_element_selection_set(
+        &mut self,
+        elements: &[BrushElement],
+        modifiers: egui::Modifiers,
+    ) {
+        if elements.is_empty() {
+            return;
+        }
+        let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
+        if additive {
+            let all_present = elements
+                .iter()
+                .all(|element| self.selected_brush_elements.contains(element));
+            if all_present {
+                self.selected_brush_elements
+                    .retain(|element| !elements.contains(element));
+            } else {
+                for element in elements {
+                    if !self.selected_brush_elements.contains(element) {
+                        self.selected_brush_elements.push(*element);
+                    }
+                }
+            }
+        } else {
+            self.selected_brush_elements = elements.to_vec();
+        }
+        self.status = self.brush_element_status();
+    }
+
     /// Solved world positions of every selected vertex and edge endpoint,
     /// deduped: the drag target set for a group move.
     pub(crate) fn selected_brush_element_targets(&self) -> Vec<[f64; 3]> {
@@ -2442,6 +2571,16 @@ impl EditorWorkspace {
                             // Screen-space dedup on top of the canonical
                             // enumeration: distinct 3D edges of one depth
                             // column project onto the same 2D segment.
+                            let midpoint_matches =
+                                |element: &BrushElement, center: Pos2| {
+                                    let BrushElement::Edge(ka, kb) = element else {
+                                        return false;
+                                    };
+                                    let mid = to_screen(std::array::from_fn(|axis| {
+                                        (ka[axis] as f64 + kb[axis] as f64) * 0.5
+                                    }));
+                                    mid.distance(center) <= 1.0
+                                };
                             let mut seen = Vec::<Pos2>::new();
                             for (a, b) in brush_elements::unique_edges(&solved) {
                                 let center = to_screen(std::array::from_fn(|axis| {
@@ -2451,16 +2590,48 @@ impl EditorWorkspace {
                                     continue;
                                 }
                                 seen.push(center);
+                                let selected = self
+                                    .selected_brush_elements
+                                    .iter()
+                                    .any(|element| midpoint_matches(element, center));
+                                let hovered = self
+                                    .selection
+                                    .hovered_brush_handle
+                                    .as_ref()
+                                    .is_some_and(|element| midpoint_matches(element, center));
+                                let stroke = if selected {
+                                    egui::Stroke::new(2.5, egui::Color32::WHITE)
+                                } else if hovered {
+                                    egui::Stroke::new(2.5, HANDLE_HOVER_COLOR)
+                                } else {
+                                    egui::Stroke::new(1.5, STUDIO_ACCENT)
+                                };
                                 painter.rect_stroke(
                                     Rect::from_center_size(center, Vec2::splat(7.0)),
                                     0.0,
-                                    egui::Stroke::new(1.5, STUDIO_ACCENT),
+                                    stroke,
                                     egui::StrokeKind::Inside,
                                 );
                             }
                         }
                         BrushEditMode::Vertex => {
                             if let Some((_, verts)) = self.selected_brush_solved_verts() {
+                                // A 2D square represents a whole depth
+                                // column, so highlight by projected
+                                // position rather than exact key.
+                                let projected_matches = |element: &BrushElement,
+                                                         projected: [f64; 2]| {
+                                    let BrushElement::Vertex(key) = element else {
+                                        return false;
+                                    };
+                                    let p = view.project_f64([
+                                        key[0] as f64,
+                                        key[1] as f64,
+                                        key[2] as f64,
+                                    ]);
+                                    (p[0] - projected[0]).abs() <= 0.5
+                                        && (p[1] - projected[1]).abs() <= 0.5
+                                };
                                 let mut seen: Vec<[f64; 2]> = Vec::new();
                                 for vert in verts {
                                     let projected = view.project_f64(vert);
@@ -2471,10 +2642,28 @@ impl EditorWorkspace {
                                         continue;
                                     }
                                     seen.push(projected);
+                                    let selected = self
+                                        .selected_brush_elements
+                                        .iter()
+                                        .any(|element| projected_matches(element, projected));
+                                    let hovered = self
+                                        .selection
+                                        .hovered_brush_handle
+                                        .as_ref()
+                                        .is_some_and(|element| {
+                                            projected_matches(element, projected)
+                                        });
+                                    let (size, color) = if selected {
+                                        (9.0, egui::Color32::WHITE)
+                                    } else if hovered {
+                                        (9.0, HANDLE_HOVER_COLOR)
+                                    } else {
+                                        (7.0, STUDIO_ACCENT)
+                                    };
                                     painter.rect_filled(
-                                        Rect::from_center_size(to_screen(vert), Vec2::splat(7.0)),
+                                        Rect::from_center_size(to_screen(vert), Vec2::splat(size)),
                                         1.0,
-                                        STUDIO_ACCENT,
+                                        color,
                                     );
                                 }
                             }
@@ -2576,14 +2765,17 @@ impl EditorWorkspace {
                         }
                         BrushEditMode::Vertex => {
                             for vertex in brush_elements::unique_vertices(&solved) {
-                                let selected = self.selected_brush_elements.contains(
-                                    &BrushElement::Vertex(
-                                        brush_elements::quantize_element_point(vertex),
-                                    ),
+                                let key = BrushElement::Vertex(
+                                    brush_elements::quantize_element_point(vertex),
                                 );
+                                let selected = self.selected_brush_elements.contains(&key);
+                                let hovered =
+                                    self.selection.hovered_brush_handle == Some(key);
                                 if let Some(center) = project(vertex) {
                                     let (size, color) = if selected {
                                         (9.0, egui::Color32::WHITE)
+                                    } else if hovered {
+                                        (9.0, HANDLE_HOVER_COLOR)
                                     } else {
                                         (7.0, STUDIO_ACCENT)
                                     };
@@ -2601,22 +2793,28 @@ impl EditorWorkspace {
                         BrushEditMode::Edge => {
                             for (a, b) in brush_elements::unique_edges(&solved) {
                                 let (ka, kb) = brush_elements::edge_element_key(a, b);
-                                let selected = self
-                                    .selected_brush_elements
-                                    .contains(&BrushElement::Edge(ka, kb));
+                                let key = BrushElement::Edge(ka, kb);
+                                let selected = self.selected_brush_elements.contains(&key);
+                                let hovered =
+                                    self.selection.hovered_brush_handle == Some(key);
                                 let midpoint = [
                                     (a[0] + b[0]) * 0.5,
                                     (a[1] + b[1]) * 0.5,
                                     (a[2] + b[2]) * 0.5,
                                 ];
                                 if let Some(center) = project(midpoint) {
-                                    if selected {
-                                        painter.circle_filled(center, 5.5, egui::Color32::WHITE);
-                                        // The selected edge itself brightens too.
+                                    if selected || hovered {
+                                        let color = if selected {
+                                            egui::Color32::WHITE
+                                        } else {
+                                            HANDLE_HOVER_COLOR
+                                        };
+                                        painter.circle_filled(center, 5.5, color);
+                                        // The edge itself brightens too.
                                         if let (Some(sa), Some(sb)) = (project(a), project(b)) {
                                             painter.line_segment(
                                                 [sa, sb],
-                                                egui::Stroke::new(2.5, egui::Color32::WHITE),
+                                                egui::Stroke::new(2.5, color),
                                             );
                                         }
                                     } else {
@@ -2661,6 +2859,10 @@ impl EditorWorkspace {
 /// Vertical extrude sensitivity, world units per pixel (matches the
 /// primitive height-drag feel: 8 px per 64-unit quantum).
 const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
+
+/// Pre-click hover tint for brush sub-element handles (yellow, matching
+/// the entity-bounds hover convention; selected stays white).
+const HANDLE_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 240, 144);
 
 fn dominant_axis(normal: [i64; 3]) -> usize {
     let mut axis = 0;

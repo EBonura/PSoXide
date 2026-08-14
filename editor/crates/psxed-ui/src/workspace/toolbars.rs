@@ -253,6 +253,16 @@ impl EditorWorkspace {
                             || (matches!(self.active_tool, ViewTool::Select)
                                 && self.selected_brush.is_some());
                         if !dnd_active && brush_edit_active {
+                            self.selection.hovered_brush_handle = None;
+                            if response.hovered() {
+                                if let Some(world) = pointer_world {
+                                    let tolerance = 8.0 / self.viewport_zoom.max(f32::EPSILON);
+                                    self.selection.hovered_brush_handle = self
+                                        .pick_brush_elements_2d(world, tolerance)
+                                        .first()
+                                        .copied();
+                                }
+                            }
                             if response.hovered()
                                 && pointer_world.is_some_and(|world| {
                                     self.brush_edit_mode != BrushEditMode::Move
