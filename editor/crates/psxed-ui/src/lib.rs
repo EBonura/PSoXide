@@ -2447,6 +2447,9 @@ pub(crate) struct BrushVertexDrag {
     /// Per-axis constraint from the element gizmo: a masked-off axis
     /// never receives delta. Free handle drags leave all three true.
     pub(crate) axis_mask: [bool; 3],
+    /// Selected Face elements riding this drag: their WHOLE authored
+    /// planes translate (authored points need not sit at solved corners).
+    pub(crate) faces: Vec<usize>,
 }
 
 /// In-flight rotate/scale gesture from the element gizmo: the selected
@@ -2461,6 +2464,8 @@ pub(crate) struct BrushElementTransformDrag {
     pub(crate) axis: usize,
     /// true = rotate (5 degree steps, Shift 1), false = scale (5% steps).
     pub(crate) rotate: bool,
+    /// Selected Face elements: whole authored planes transform rigidly.
+    pub(crate) faces: Vec<usize>,
     pub(crate) start_pointer: Pos2,
     /// Last applied snapped amount: degrees for rotate, percent-delta
     /// steps for scale. Zero means the base brush is still in place.
