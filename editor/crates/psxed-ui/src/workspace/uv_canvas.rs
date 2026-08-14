@@ -170,10 +170,11 @@ pub(crate) fn scale_gesture(
             continue;
         }
         let factor = ((mouse[axis] - drag.center[axis]) / start_arm).clamp(0.05, 20.0);
-        edited.scale_q8[axis] = (f64::from(drag.start_uv.scale_q8[axis]) / factor)
-            .round()
-            .clamp(f64::from(SCALE_Q8_MIN), f64::from(SCALE_Q8_MAX))
-            as i16;
+        let scaled = f64::from(drag.start_uv.scale_q8[axis]) / factor;
+        let magnitude = scaled
+            .abs()
+            .clamp(f64::from(SCALE_Q8_MIN), f64::from(SCALE_Q8_MAX));
+        edited.scale_q8[axis] = magnitude.copysign(scaled).round() as i16;
     }
     edited
 }
