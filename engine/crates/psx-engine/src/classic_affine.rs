@@ -1368,6 +1368,75 @@ pub unsafe fn submit_classic_affine_batch(
     unsafe { writer.finish(output) }
 }
 
+/// Submit several contiguous convex fans whose source vertices already carry
+/// screen coordinates and cached GTE depths.
+///
+/// This is the indexed-cache counterpart to [`submit_classic_affine_batch`].
+/// A retained renderer can project shared positions once, scatter those
+/// results into its per-corner attribute stream, and preserve the exact same
+/// clipping, subdivision, packet topology, and ordering-table behaviour.
+///
+/// # Safety
+/// `vertices` must point to `vertex_count + 12` writable records, with the
+/// final records reserved for shared subdivision scratch. `surfaces` must
+/// contain `surface_count` descriptors whose vertex ranges fit entirely in
+/// the first `vertex_count` records. Every source record's `screen` and
+/// `depth` fields must have been produced for the currently intended camera.
+/// `output` must have room for every fan's worst-case packet expansion and
+/// remain live until submission completes.
+pub unsafe fn submit_classic_affine_projected_batch(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    if vertices.is_null()
+        || surfaces.is_null()
+        || output.is_null()
+        || vertex_count == 0
+        || surface_count == 0
+    {
+        return ClassicAffineSubmit {
+            next_packet: output,
+            packets: 0,
+            hardware_triangles: 0,
+        };
+    }
+
+    let generated = unsafe { vertices.add(vertex_count) };
+    let mut writer = PacketWriter {
+        next: output,
+        packets: 0,
+        clut_high_word: 0,
+        tpage_high_word: 0,
+        profile,
+    };
+    let surface_end = unsafe { surfaces.add(surface_count) };
+    let mut surface_ptr = surfaces;
+    while surface_ptr != surface_end {
+        let surface = unsafe { ptr::read(surface_ptr) };
+        let first_vertex = surface.first_vertex as usize;
+        let surface_vertices = surface.vertex_count as usize;
+        debug_assert!(surface_vertices >= 3);
+        debug_assert!(first_vertex + surface_vertices <= vertex_count);
+        writer.tpage_high_word = (surface.tpage as u32) << 16;
+        writer.clut_high_word = (surface.clut as u32) << 16;
+        unsafe {
+            submit_classic_affine_projected_fan_into_writer(
+                vertices.add(first_vertex),
+                surface_vertices,
+                generated,
+                &mut writer,
+            );
+        }
+        surface_ptr = unsafe { surface_ptr.add(1) };
+    }
+
+    unsafe { writer.finish(output) }
+}
+
 /// Project and submit one convex fan with a self-contained GP0(E2) texture
 /// window in every emitted polygon packet.
 ///
@@ -2124,6 +2193,25 @@ mod tests {
         assert_eq!(output[1].position, [31, -19, 5]);
         assert_eq!(output[1].uv, [9, 17]);
         assert_eq!(output[1].color, 0x00ab_cdef);
+    }
+
+    #[test]
+    fn projected_batch_rejects_empty_inputs_without_touching_output() {
+        let mut output = [0xdead_beefu32; 4];
+        let submitted = unsafe {
+            submit_classic_affine_projected_batch(
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null(),
+                0,
+                output.as_mut_ptr(),
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        };
+        assert_eq!(submitted.next_packet, output.as_mut_ptr());
+        assert_eq!(submitted.packets, 0);
+        assert_eq!(submitted.hardware_triangles, 0);
+        assert_eq!(output, [0xdead_beef; 4]);
     }
 
     #[test]
