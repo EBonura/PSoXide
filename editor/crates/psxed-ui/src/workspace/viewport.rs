@@ -321,9 +321,22 @@ impl EditorWorkspace {
         if response.hovered() {
             self.brush_tool_keyboard(ui);
             self.update_free_camera_keyboard(ui);
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
-            if scroll.abs() > f32::EPSILON {
-                self.scroll_viewport_3d_camera(scroll);
+            let (scroll, shift) = ui.input(|i| (i.raw_scroll_delta, i.modifiers.shift));
+            // Shift+scroll drills the selection through overlapping
+            // brushes under the cursor instead of moving the camera.
+            // Trackpads report shifted scrolls on the x axis, so take
+            // the dominant component.
+            let drill_delta = if scroll.y.abs() >= scroll.x.abs() {
+                scroll.y
+            } else {
+                scroll.x
+            };
+            if shift && drill_delta.abs() > f32::EPSILON {
+                if let Some(pointer) = response.hover_pos() {
+                    self.drill_selection_3d(rect, pointer, if drill_delta < 0.0 { 1 } else { -1 });
+                }
+            } else if scroll.y.abs() > f32::EPSILON {
+                self.scroll_viewport_3d_camera(scroll.y);
             }
         }
 

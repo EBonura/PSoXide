@@ -1582,3 +1582,46 @@ fn select_and_replace_material_uses() {
         Some(from)
     );
 }
+
+#[test]
+fn drill_scroll_cycles_through_stacked_brushes() {
+    let mut rig = MouseRig::single_cube("drill");
+    // A second, larger cube fully behind the first along the view ray.
+    rig.workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [-256, -64, 384],
+            [768, 384, 896],
+        ));
+    let center = RIG_VIEWPORT.center();
+    rig.click(center);
+    assert_eq!(rig.workspace.selected_brush, Some(0), "nearest first");
+
+    rig.workspace.drill_selection_3d(RIG_VIEWPORT, center, 1);
+    assert_eq!(rig.workspace.selected_brush, Some(1), "drill goes deeper");
+    rig.workspace.drill_selection_3d(RIG_VIEWPORT, center, 1);
+    assert_eq!(rig.workspace.selected_brush, Some(0), "drill wraps");
+    rig.workspace.drill_selection_3d(RIG_VIEWPORT, center, -1);
+    assert_eq!(rig.workspace.selected_brush, Some(1), "drill backs out");
+
+    // The scroll route: Shift+wheel over the viewport drills too.
+    rig.click(center);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    let shift = egui::Modifiers::SHIFT;
+    rig.pump_with(vec![egui::Event::PointerMoved(center)], shift);
+    rig.pump_with(
+        vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -40.0),
+            modifiers: shift,
+        }],
+        shift,
+    );
+    assert_eq!(
+        rig.workspace.selected_brush,
+        Some(1),
+        "shift+scroll drills through the front brush"
+    );
+}
