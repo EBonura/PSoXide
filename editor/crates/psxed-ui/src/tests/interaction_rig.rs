@@ -303,44 +303,6 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
                         "{label}: element click selects the element"
                     );
 
-                    // 3. Face moves have exactly ONE meaningful direction
-                    // (the plane normal), so the gizmo offers a single
-                    // arrow at slot 0 and nothing else.
-                    if mode == BrushEditMode::Face && gizmo_mode == TransformGizmoMode::Move {
-                        let polylines = rig
-                            .workspace
-                            .brush_element_gizmo_polylines_3d(RIG_VIEWPORT)
-                            .expect("face move gizmo visible");
-                        if axis > 0 {
-                            assert!(
-                                polylines[axis].is_empty(),
-                                "{label}: face move offers only the normal arrow"
-                            );
-                            continue;
-                        }
-                        let (grab, to) = rig.gizmo_drag_vector(0);
-                        rig.drag(grab, to);
-                        let after = rig.brush();
-                        assert_ne!(after, base, "{label}: normal arrow extrudes the face");
-                        let solved = after.solve();
-                        assert!(solved.is_valid(), "{label}");
-                        // The top face's plane normal survives the move.
-                        let normal = psxed_project::brush::Plane::from_points(
-                            after.faces[5].points,
-                        )
-                        .unwrap()
-                        .normal;
-                        let base_normal = psxed_project::brush::Plane::from_points(
-                            base.faces[5].points,
-                        )
-                        .unwrap()
-                        .normal;
-                        assert_eq!(normal, base_normal, "{label}: plane translated, not tilted");
-                        rig.workspace.do_undo();
-                        assert_eq!(rig.brush(), base, "{label}: one undo restores");
-                        continue;
-                    }
-
                     // Grab THIS axis and drag along its natural screen
                     // direction (tangential for rings).
                     let (grab, to) = rig.gizmo_drag_vector(axis);
@@ -357,6 +319,22 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
                                 ),
                             "{label}: result stays valid and bounded"
                         );
+                        // Face moves translate or shear, never tilt:
+                        // the selected plane's normal is invariant.
+                        if mode == BrushEditMode::Face
+                            && gizmo_mode == TransformGizmoMode::Move
+                        {
+                            let normal = |brush: &psxed_project::brush::Brush| {
+                                psxed_project::brush::Plane::from_points(brush.faces[5].points)
+                                    .unwrap()
+                                    .normal
+                            };
+                            assert_eq!(
+                                normal(&after),
+                                normal(&base),
+                                "{label}: face plane must not tilt"
+                            );
+                        }
                         // Move is axis-constrained: bounds on the two
                         // masked axes must not change.
                         if gizmo_mode == TransformGizmoMode::Move {
@@ -623,8 +601,7 @@ fn mouse_face_move_translates_off_corner_authored_planes() {
     )
     .unwrap()
     .normal;
-    // Single normal arrow (slot 0): drag along it.
-    let (grab, to) = rig.gizmo_drag_vector(0);
+    let (grab, to) = rig.gizmo_drag_vector(1);
     rig.drag(grab, to);
 
     let face = rig.workspace.project.active_scene().brushes[0].faces[5];
