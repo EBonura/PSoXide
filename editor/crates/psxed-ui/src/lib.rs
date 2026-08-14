@@ -663,6 +663,10 @@ pub struct EditorWorkspace {
     /// was placed on, which synthesizes the third point for two-point
     /// cuts so sloped surfaces cut perpendicular to themselves.
     brush_clip_points: Vec<BrushClipPoint>,
+    /// Drill-through anchor: pointer position and depth into the ray
+    /// hit list under it. Shift+scroll cycles the depth; moving the
+    /// pointer re-anchors from the current selection.
+    brush_drill: Option<(egui::Pos2, usize)>,
     /// Which side(s) the next brush clip keeps.
     brush_clip_keep: BrushClipKeep,
     /// Keep face textures anchored to the brush when it moves.
@@ -3095,6 +3099,7 @@ impl EditorWorkspace {
             brush_drag: None,
             brush_extrude: None,
             brush_clip_points: Vec::new(),
+            brush_drill: None,
             brush_clip_keep: BrushClipKeep::Both,
             brush_texture_lock: true,
             brush_move: None,
