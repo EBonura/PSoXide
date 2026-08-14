@@ -636,6 +636,131 @@ impl Brush {
         self.translate_selected(&[], targets, delta, epsilon, false)
     }
 
+    /// Re-author this brush from its solved geometry: each surviving
+    /// face's plane points are rewritten to lie on its polygon corners
+    /// (spread for a stable plane), dead planes are pruned, and
+    /// material, UV, contents, and mover carry over. The plane of every
+    /// face is unchanged, so texture mappings are untouched. Returns
+    /// `None` unless the result round-trips: same surviving faces, same
+    /// bounds (within a unit), still pickable. Legacy brushes authored
+    /// with far-flung plane points become identical to freshly drawn
+    /// ones, which is what the editing gestures are tuned for.
+    pub fn normalized(&self) -> Option<Brush> {
+        let solved = self.solve();
+        if !solved.is_valid() || !solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT) {
+            return None;
+        }
+        // Already-normal fast path: every authored point sits on its own
+        // face's polygon corners and no dead planes remain. Freshly
+        // drawn brushes take this branch, so normalization never churns
+        // (or dirties) a healthy project.
+        let already_normal = self.faces.iter().enumerate().all(|(index, face)| {
+            solved
+                .polygons
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(|polygon| {
+                    face.points.iter().all(|point| {
+                        polygon.verts.iter().any(|vertex| {
+                            (0..3).all(|axis| {
+                                (vertex[axis] - f64::from(point[axis])).abs() <= 0.5
+                            })
+                        })
+                    })
+                })
+        });
+        if already_normal {
+            return Some(self.clone());
+        }
+        let mut faces = Vec::new();
+        for (index, polygon) in solved.polygons.iter().enumerate() {
+            let Some(polygon) = polygon else { continue };
+            let source = self.faces.get(index)?;
+            let count = polygon.verts.len();
+            if count < 3 {
+                return None;
+            }
+            // First vertex plus the two spreading the widest area keeps
+            // the plane numerically stable after i32 rounding.
+            let a = polygon.verts[0];
+            let mut best = (1usize, 2usize, 0.0f64);
+            for i in 1..count {
+                for j in (i + 1)..count {
+                    let u = [
+                        polygon.verts[i][0] - a[0],
+                        polygon.verts[i][1] - a[1],
+                        polygon.verts[i][2] - a[2],
+                    ];
+                    let v = [
+                        polygon.verts[j][0] - a[0],
+                        polygon.verts[j][1] - a[1],
+                        polygon.verts[j][2] - a[2],
+                    ];
+                    let cross = [
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    ];
+                    let area =
+                        (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2])
+                            .sqrt();
+                    if area > best.2 {
+                        best = (i, j, area);
+                    }
+                }
+            }
+            let round = |p: [f64; 3]| {
+                [
+                    p[0].round() as i32,
+                    p[1].round() as i32,
+                    p[2].round() as i32,
+                ]
+            };
+            let mut candidate = BrushFace {
+                points: [round(a), round(polygon.verts[best.0]), round(polygon.verts[best.1])],
+                material: source.material,
+                uv: source.uv,
+            };
+            // Keep the authored outward winding: the rebuilt plane must
+            // face the same way as the source plane.
+            let source_plane = Plane::from_points(source.points)?;
+            let plane = Plane::from_points(candidate.points)?;
+            let dot = (0..3)
+                .map(|axis| source_plane.normal[axis] as f64 * plane.normal[axis] as f64)
+                .sum::<f64>();
+            if dot < 0.0 {
+                candidate.points.swap(1, 2);
+            }
+            faces.push(candidate);
+        }
+        if faces.len() < 4 {
+            return None;
+        }
+        let candidate = Brush {
+            faces,
+            contents: self.contents,
+            mover: self.mover,
+        };
+        // Round-trip gate: the normalized brush must be the same solid.
+        let resolved = candidate.solve();
+        if !resolved.is_valid()
+            || !resolved.within_extent(BRUSH_EDIT_EXTENT_LIMIT)
+            || !candidate.is_pickable()
+            || resolved.polygons.iter().flatten().count()
+                != solved.polygons.iter().flatten().count()
+        {
+            return None;
+        }
+        for axis in 0..3 {
+            if (resolved.min[axis] - solved.min[axis]).abs() > 1.0
+                || (resolved.max[axis] - solved.max[axis]).abs() > 1.0
+            {
+                return None;
+            }
+        }
+        Some(candidate)
+    }
+
     /// Whether this brush is a sane, clickable solid: it solves to a
     /// BOUNDED volume. A plane re-authored inside-out still yields a
     /// "valid" solve, but one clipped only by the base winding

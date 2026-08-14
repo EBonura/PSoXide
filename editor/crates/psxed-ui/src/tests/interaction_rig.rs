@@ -985,3 +985,71 @@ fn face_moves_keep_the_texture_riding_when_locked() {
         }
     }
 }
+
+/// Legacy brushes (plane points authored far off the polygon) normalize
+/// on load into fresh-drawn form: same solid, same textures, plane
+/// points on the corners. The pass is idempotent so projects only dirty
+/// once, and damaged brushes are left untouched.
+#[test]
+fn legacy_brushes_normalize_on_load_same_solid_same_textures() {
+    let mut legacy = psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 256, 256]);
+    // Re-author the top plane with far-flung points (same plane) and a
+    // non-identity texture mapping that must survive.
+    legacy.faces[5] = psxed_project::brush::BrushFace::from_points([
+        [-4096, 256, 8192],
+        [8192, 256, 8192],
+        [8192, 256, -4096],
+    ]);
+    legacy.faces[5].uv = psxed_project::brush::FaceUv {
+        offset_texels: [12, -7],
+        rotation_deg: 30,
+        scale_q8: [512, 256],
+    };
+    let source_bounds = legacy.solve();
+
+    let clean = legacy.normalized().expect("legacy brush normalizes");
+    let clean_bounds = clean.solve();
+    for axis in 0..3 {
+        assert!(
+            (clean_bounds.min[axis] - source_bounds.min[axis]).abs() <= 1.0
+                && (clean_bounds.max[axis] - source_bounds.max[axis]).abs() <= 1.0,
+            "same solid"
+        );
+    }
+    // Plane points now sit on the polygon (inside the solid bounds).
+    for face in &clean.faces {
+        for point in face.points {
+            assert!(
+                (-1..=513).contains(&point[0])
+                    && (-1..=257).contains(&point[1])
+                    && (-1..=257).contains(&point[2]),
+                "authored point {point:?} lies on the solid"
+            );
+        }
+    }
+    // Texture mapping carried over untouched.
+    assert!(clean.faces.iter().any(|face| face.uv
+        == psxed_project::brush::FaceUv {
+            offset_texels: [12, -7],
+            rotation_deg: 30,
+            scale_q8: [512, 256],
+        }));
+    // Idempotent: normalizing the normalized brush changes nothing.
+    assert_eq!(clean.normalized().as_ref(), Some(&clean));
+
+    // Load path: opening a project normalizes and marks it dirty once.
+    let mut project = ProjectDocument::new("legacy-normalize");
+    project.active_scene_mut().brushes.push(legacy);
+    let workspace =
+        EditorWorkspace::with_project(test_temp_dir("legacy-normalize"), project);
+    assert!(workspace.is_dirty(), "normalization wants a save");
+    assert!(
+        workspace.status.contains("Normalized"),
+        "status: {}",
+        workspace.status
+    );
+    let reopened = workspace.project.clone();
+    let workspace =
+        EditorWorkspace::with_project(test_temp_dir("legacy-normalize-2"), reopened);
+    assert!(!workspace.is_dirty(), "second open is a no-op");
+}

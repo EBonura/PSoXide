@@ -2953,7 +2953,21 @@ impl EditorWorkspace {
     /// Construct a workspace around an already-loaded project. Used
     /// by `open_directory` and `create_and_open_project`; not part
     /// of the public API.
-    fn with_project(project_dir: PathBuf, project: ProjectDocument) -> Self {
+    fn with_project(project_dir: PathBuf, mut project: ProjectDocument) -> Self {
+        // Normalize legacy brushes on load: re-author their planes from
+        // the solved geometry (same solid, same textures) so old
+        // projects edit exactly like freshly drawn ones. Gated on a
+        // strict round-trip inside `Brush::normalized`.
+        let mut normalized = 0usize;
+        for brush in &mut project.active_scene_mut().brushes {
+            if let Some(clean) = brush.normalized() {
+                if clean != *brush {
+                    *brush = clean;
+                    normalized += 1;
+                }
+            }
+        }
+
         // Diagnose brushes whose planes describe a different solid than
         // their visible shell: they render normally but eat every pick
         // ray, so clicks pass straight through. There is no safe auto
@@ -3142,11 +3156,9 @@ impl EditorWorkspace {
             texture_import_dialog: TextureImportDialog::default(),
             model_import_dialog: ModelImportDialog::default(),
             import_retired_textures: Vec::new(),
-            dirty: false,
+            dirty: normalized > 0,
             project_watch,
-            status: if unpickable.is_empty() {
-                "Editor ready".to_string()
-            } else {
+            status: if !unpickable.is_empty() {
                 format!(
                     "WARNING: brush{} {} damaged (clicks pass through); delete and redraw {}",
                     if unpickable.len() == 1 { "" } else { "es" },
@@ -3157,6 +3169,13 @@ impl EditorWorkspace {
                         .join(", "),
                     if unpickable.len() == 1 { "it" } else { "them" },
                 )
+            } else if normalized > 0 {
+                format!(
+                    "Normalized {normalized} legacy brush{}; save to keep",
+                    if normalized == 1 { "" } else { "es" },
+                )
+            } else {
+                "Editor ready".to_string()
             },
             last_playtest_budget: None,
             pending_playtest_request: None,
