@@ -2118,7 +2118,12 @@ impl EditorWorkspace {
         for axis in 0..3 {
             let mut delta = [0; 3];
             delta[axis] = size[axis] - current[axis];
-            edited.translate_face(positive_faces[axis].unwrap(), delta);
+            translate_face_locked(
+                &mut edited,
+                positive_faces[axis].unwrap(),
+                delta,
+                self.brush_texture_lock,
+            );
         }
         if !brush_preview_ok(&edited) {
             return false;
@@ -2168,7 +2173,7 @@ impl EditorWorkspace {
         let Some(mut edited) = self.project.active_scene().brushes.get(index).cloned() else {
             return false;
         };
-        edited.translate_face(face, delta);
+        translate_face_locked(&mut edited, face, delta, self.brush_texture_lock);
         if !brush_preview_ok(&edited) {
             return false;
         }
@@ -2774,7 +2779,7 @@ impl EditorWorkspace {
             return;
         }
         let mut preview = extrude.base.clone();
-        preview.translate_face(extrude.face, delta);
+        translate_face_locked(&mut preview, extrude.face, delta, self.brush_texture_lock);
         if brush_preview_ok(&preview) {
             self.project.active_scene_mut().brushes[extrude.index] = preview;
             if let Some(state) = self.brush_extrude.as_mut() {
@@ -2938,8 +2943,10 @@ impl EditorWorkspace {
         if applied == drag.applied {
             return;
         }
+        let uv_lock = self.brush_texture_lock;
         let mut preview = drag.base.clone();
-        let moved = preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5);
+        let moved =
+            preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock);
         if moved > 0 && brush_preview_ok(&preview) {
             self.project.active_scene_mut().brushes[drag.index] = preview;
             if let Some(state) = self.brush_vertex_drag.as_mut() {
@@ -3550,6 +3557,22 @@ const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
 /// the entity-bounds hover convention; selected stays white).
 const HANDLE_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 240, 144);
 
+
+/// Plane translate honoring the texture lock: the face keeps its
+/// applied texture when the lock is on.
+fn translate_face_locked(
+    brush: &mut psxed_project::brush::Brush,
+    face: usize,
+    delta: [i32; 3],
+    lock: bool,
+) {
+    if lock {
+        brush.translate_face_with_uv_lock(face, delta);
+    } else {
+        brush.translate_face(face, delta);
+    }
+}
+
 /// A reshape preview may be applied only when it still encloses a
 /// BOUNDED volume: `is_valid` alone accepts infinite wedges (planes
 /// dragged parallel) whose solved vertices sit at the base-winding
@@ -3875,8 +3898,9 @@ impl EditorWorkspace {
         if applied == drag.applied {
             return;
         }
+        let uv_lock = self.brush_texture_lock;
         let mut preview = drag.base.clone();
-        if preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5) > 0
+        if preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock) > 0
             && brush_preview_ok(&preview)
         {
             self.project.active_scene_mut().brushes[drag.index] = preview;
@@ -4096,7 +4120,7 @@ impl ViewportTool3d for BrushTool {
                     return;
                 }
                 let mut preview = extrude.base.clone();
-                preview.translate_face(extrude.face, applied);
+                translate_face_locked(&mut preview, extrude.face, applied, ws.brush_texture_lock);
                 if brush_preview_ok(&preview) {
                     ws.project.active_scene_mut().brushes[extrude.index] = preview;
                     if let Some(state) = ws.brush_extrude.as_mut() {
@@ -4127,7 +4151,7 @@ impl ViewportTool3d for BrushTool {
                 return;
             }
             let mut preview = extrude.base.clone();
-            preview.translate_face(extrude.face, delta);
+            translate_face_locked(&mut preview, extrude.face, delta, ws.brush_texture_lock);
             if brush_preview_ok(&preview) {
                 ws.project.active_scene_mut().brushes[extrude.index] = preview;
                 if let Some(state) = ws.brush_extrude.as_mut() {
