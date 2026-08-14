@@ -1132,7 +1132,7 @@ impl BrushEditMode {
     const fn gesture_hint(self) -> &'static str {
         match self {
             Self::Move => "Whole brush: drag to move; the gizmo moves, rotates, and scales it",
-            Self::Face => "Click a face to select it; drag its handle to resize, Cmd-drag to extrude a new brush",
+            Self::Face => "Click a face to select it; drag its handle to resize, Cmd-drag or E to extrude a new brush",
             Self::Edge => "Drag an edge handle to reshape",
             Self::Vertex => "Drag a vertex handle to reshape",
             Self::Clip => "Click 2-3 points; Enter cuts, X flips the kept side, Esc clears",

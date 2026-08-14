@@ -1172,3 +1172,36 @@ fn extrude_button_grows_the_selected_face_one_grid_step()
     rig.workspace.do_undo();
     assert_eq!(rig.workspace.project.active_scene().brushes.len(), 1);
 }
+
+/// E extrudes the selected face by one grid step, except in Free camera
+/// mode where E belongs to the fly keys.
+#[test]
+fn e_key_extrudes_in_orbit_but_stays_camera_in_free_mode()
+{
+    let mut rig = MouseRig::single_cube("rig-extrude-key");
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert!(matches!(
+        rig.workspace.selected_brush_elements.as_slice(),
+        [BrushElement::Face(5)]
+    ));
+
+    // Free camera (the rig default): E must NOT extrude.
+    rig.key(body, egui::Key::E);
+    assert_eq!(
+        rig.workspace.project.active_scene().brushes.len(),
+        1,
+        "E is the fly key in Free mode"
+    );
+
+    // Orbit: E extrudes one grid step.
+    rig.workspace.set_viewport_3d_camera_mode(ViewportCameraMode::Orbit);
+    rig.key(RIG_VIEWPORT.center(), egui::Key::E);
+    assert_eq!(
+        rig.workspace.project.active_scene().brushes.len(),
+        2,
+        "E extrudes in Orbit mode"
+    );
+    assert_eq!(rig.workspace.selected_brush, Some(1));
+}
