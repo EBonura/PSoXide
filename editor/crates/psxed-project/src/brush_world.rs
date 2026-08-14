@@ -818,6 +818,13 @@ fn translate_brushes(brushes: &[Brush], origin: [i32; 3]) -> Vec<Brush> {
 /// Point lights in scene order, paired with the authoring node each came
 /// from so a bake failure can name the light the author has to fix.
 fn scene_lights(scene: &Scene) -> (Vec<BrushPointLight>, Vec<NodeId>) {
+    // Radius is authored in sector units. Use the scene's World sector size
+    // so the bake agrees with the runtime PlaytestLight records, which scale
+    // by the same value (cook_props_lights::push_point_light).
+    let radius_units = scene
+        .world_sector_size_for_node(scene.root)
+        .map(f64::from)
+        .unwrap_or(DEFAULT_LIGHT_RADIUS_UNITS);
     scene
         .nodes()
         .iter()
@@ -833,8 +840,7 @@ fn scene_lights(scene: &Scene) -> (Vec<BrushPointLight>, Vec<NodeId>) {
             Some((
                 BrushPointLight {
                     position: node.transform.translation.map(f64::from),
-                    // Existing authoring stores light radius in sector units.
-                    radius: f64::from(*radius) * DEFAULT_LIGHT_RADIUS_UNITS,
+                    radius: f64::from(*radius) * radius_units,
                     intensity_q8: (f64::from(*intensity) * 256.0)
                         .round()
                         .clamp(0.0, u16::MAX as f64) as u16,
