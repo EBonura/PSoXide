@@ -454,7 +454,7 @@ fn click_visible_brush_mode(workspace: &mut EditorWorkspace, mode: BrushEditMode
         text_shape_center(&output.shapes, "Brush Transform").is_some(),
         "selected brush did not expose the Inspector transform section"
     );
-    for label in ["Move", "Face", "Edge", "Vertex", "Clip"] {
+    for label in ["Brush", "Face", "Edge", "Vertex", "Clip"] {
         assert!(
             text_shape_center(&output.shapes, label).is_some(),
             "visible brush toolbar omitted {label:?}"
