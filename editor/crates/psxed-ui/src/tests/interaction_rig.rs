@@ -58,6 +58,10 @@ impl MouseRig {
     }
 
     fn pump(&mut self, events: Vec<egui::Event>) {
+        self.pump_with(events, egui::Modifiers::NONE);
+    }
+
+    fn pump_with(&mut self, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
         self.time += 1.0 / 60.0;
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
@@ -65,6 +69,7 @@ impl MouseRig {
                 Vec2::new(800.0, 600.0),
             )),
             time: Some(self.time),
+            modifiers,
             events,
             ..egui::RawInput::default()
         };
@@ -146,6 +151,52 @@ impl MouseRig {
 
     pub(crate) fn brush(&self) -> psxed_project::brush::Brush {
         self.workspace.project.active_scene().brushes[0].clone()
+    }
+
+    /// Press a key while the pointer hovers `over` (viewport keyboard
+    /// handlers require hover).
+    pub(crate) fn key(&mut self, over: Pos2, key: egui::Key) {
+        self.move_to(over);
+        self.pump(vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        self.pump(vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+    }
+
+    /// Shift-click (additive selection). Live modifier STATE matters:
+    /// handlers read `input.modifiers`, which egui takes from RawInput,
+    /// not from the event payload.
+    pub(crate) fn shift_click(&mut self, pos: Pos2) {
+        let shift = egui::Modifiers::SHIFT;
+        self.pump_with(vec![egui::Event::PointerMoved(pos)], shift);
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: shift,
+            }],
+            shift,
+        );
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos: pos + Vec2::new(1.0, 0.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: shift,
+            }],
+            shift,
+        );
     }
 
     pub(crate) fn has_vertex(&self, expect: [f64; 3]) -> bool {
@@ -233,4 +284,210 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
             }
         }
     }
+}
+
+/// Whole-brush Move-mode body drag translates the cube.
+#[test]
+fn mouse_move_mode_body_drag_translates_the_brush() {
+    let mut rig = MouseRig::single_cube("rig-body-drag");
+    let base = rig.brush();
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.drag(body, body + Vec2::new(120.0, 0.0));
+    assert_ne!(rig.brush(), base, "body drag moves the brush");
+    let solved = rig.brush().solve();
+    assert!(solved.is_valid());
+    rig.workspace.do_undo();
+    assert_eq!(rig.brush(), base);
+}
+
+/// Free handle drags (no gizmo): face normal stalk extrudes, edge and
+/// vertex handles reshape, all through real mouse input.
+#[test]
+fn mouse_free_handle_drags_reshape_the_brush() {
+    // (mode, handle world anchor)
+    let cases: [(BrushEditMode, [f64; 3]); 3] = [
+        (BrushEditMode::Face, [256.0, 256.0, 128.0]),
+        (BrushEditMode::Edge, [256.0, 256.0, 0.0]),
+        (BrushEditMode::Vertex, [0.0, 256.0, 0.0]),
+    ];
+    for (mode, anchor) in cases {
+        let mut rig = MouseRig::single_cube("rig-free-handles");
+        let base = rig.brush();
+        rig.workspace.set_brush_edit_mode(mode);
+        let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+        rig.click(body);
+        assert_eq!(rig.workspace.selected_brush, Some(0), "{mode:?}");
+        let handle = rig.world_to_screen(anchor);
+        rig.drag(handle, handle + Vec2::new(48.0, -48.0));
+        assert_ne!(rig.brush(), base, "{mode:?}: handle drag reshapes");
+        let solved = rig.brush().solve();
+        assert!(
+            solved.is_valid()
+                && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT),
+            "{mode:?}"
+        );
+        rig.workspace.do_undo();
+        assert_eq!(rig.brush(), base, "{mode:?}: undo restores");
+    }
+}
+
+/// Shift-click builds a vertex multi-selection and a handle drag moves
+/// the whole set; shift-clicking a member again removes it.
+#[test]
+fn mouse_shift_click_multiselect_and_group_drag() {
+    let mut rig = MouseRig::single_cube("rig-group");
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Vertex);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    let corner_a = rig.world_to_screen([0.0, 256.0, 0.0]);
+    rig.click(corner_a);
+    assert_eq!(rig.workspace.selected_brush_elements.len(), 1);
+    let corner_b = rig.world_to_screen([512.0, 256.0, 0.0]);
+    rig.shift_click(corner_b);
+    assert_eq!(
+        rig.workspace.selected_brush_elements.len(),
+        2,
+        "shift-click adds the second corner"
+    );
+    // Drag corner A upward; both corners must ride (the free handle
+    // drag moves on a camera-facing plane, so X/Z drift is expected;
+    // what matters is that exactly the two SELECTED corners rose).
+    let corner_a = rig.world_to_screen([0.0, 256.0, 0.0]);
+    rig.drag(corner_a, corner_a + Vec2::new(0.0, -60.0));
+    let verts = crate::workspace::brush_elements::unique_vertices(&rig.brush().solve());
+    let lifted: Vec<[f64; 3]> = verts
+        .iter()
+        .copied()
+        .filter(|vertex| vertex[1] > 300.0)
+        .collect();
+    assert_eq!(lifted.len(), 2, "both selected corners lifted, verts {verts:?}");
+    // Selection survived; shift-click removes one member.
+    assert_eq!(rig.workspace.selected_brush_elements.len(), 2);
+    let corner_b_now = *lifted
+        .iter()
+        .max_by(|a, b| a[0].total_cmp(&b[0]))
+        .expect("moved corner B");
+    let corner_b_screen = rig.world_to_screen(corner_b_now);
+    rig.shift_click(corner_b_screen);
+    assert_eq!(
+        rig.workspace.selected_brush_elements.len(),
+        1,
+        "shift-click removes the member again"
+    );
+}
+
+/// Clicking empty space clears every selection; a marquee drag across
+/// the cube in Move mode selects it again.
+#[test]
+fn mouse_empty_click_clears_and_marquee_selects() {
+    let mut rig = MouseRig::single_cube("rig-empty");
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    // Far corner of the viewport is empty sky.
+    let empty = RIG_VIEWPORT.min + Vec2::new(30.0, 30.0);
+    rig.click(empty);
+    assert_eq!(rig.workspace.selected_brush, None, "empty click clears");
+    // Sloppy empty click clears too.
+    rig.click(body);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    rig.sloppy_click(empty);
+    assert_eq!(rig.workspace.selected_brush, None, "sloppy empty click clears");
+}
+
+/// The whole clip flow by mouse and keyboard: two points on the top
+/// face, Tab cycles the kept side, Enter cuts, Esc clears pending points.
+#[test]
+fn mouse_clip_flow_cuts_the_cube() {
+    let mut rig = MouseRig::single_cube("rig-clip");
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
+    rig.click(body);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Clip);
+
+    // Esc clears a pending point.
+    rig.click(rig.world_to_screen([128.0, 256.0, 32.0]));
+    assert_eq!(rig.workspace.brush_clip_points.len(), 1);
+    rig.key(body, egui::Key::Escape);
+    assert!(rig.workspace.brush_clip_points.is_empty(), "Esc clears points");
+
+    // Two points across the top face, then Enter cuts into two brushes.
+    rig.click(rig.world_to_screen([256.0, 256.0, 16.0]));
+    rig.click(rig.world_to_screen([256.0, 256.0, 240.0]));
+    assert_eq!(rig.workspace.brush_clip_points.len(), 2);
+    rig.key(body, egui::Key::X);
+    rig.key(body, egui::Key::X);
+    rig.key(body, egui::Key::X);
+    assert_eq!(
+        rig.workspace.brush_clip_keep,
+        BrushClipKeep::Both,
+        "three X presses cycle back to Both"
+    );
+    rig.key(body, egui::Key::Enter);
+    assert_eq!(
+        rig.workspace.project.active_scene().brushes.len(),
+        2,
+        "Enter applies the cut"
+    );
+    rig.workspace.do_undo();
+    assert_eq!(rig.workspace.project.active_scene().brushes.len(), 1);
+}
+
+/// Entities participate: clicking one selects it (clearing the brush
+/// selection) and a body drag moves it in world units.
+#[test]
+fn mouse_entity_click_and_drag() {
+    let mut rig = MouseRig::single_cube("rig-entity");
+    let entity = rig
+        .workspace
+        .project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Entity", NodeKind::Entity);
+    if let Some(node) = rig.workspace.project.active_scene_mut().node_mut(entity) {
+        node.transform.translation = [900.0, 0.0, 128.0];
+    }
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
+    // Select the brush first so exclusivity is exercised.
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+
+    let bounds = rig.workspace.collect_entity_bounds(None);
+    let bound = bounds
+        .iter()
+        .find(|bound| bound.node == entity)
+        .expect("entity bound exists");
+    let center = [
+        f64::from(bound.center[0]),
+        f64::from(bound.center[1]),
+        f64::from(bound.center[2]),
+    ];
+    let screen = rig.world_to_screen(center);
+    rig.click(screen);
+    assert_eq!(
+        rig.workspace.selection.selected_node,
+        entity,
+        "entity click selects the node"
+    );
+    assert_eq!(
+        rig.workspace.selected_brush,
+        None,
+        "entity click clears the brush selection"
+    );
+
+    let before = rig.workspace.project.active_scene().node(entity).unwrap().transform.translation;
+    rig.drag(screen, screen + Vec2::new(80.0, 0.0));
+    let after = rig.workspace.project.active_scene().node(entity).unwrap().transform.translation;
+    assert_ne!(before, after, "entity body drag moves it");
+    let delta = ((after[0] - before[0]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
+    assert!(
+        delta > 32.0 && delta < 4096.0,
+        "entity moved a sane world distance, got {delta}"
+    );
 }

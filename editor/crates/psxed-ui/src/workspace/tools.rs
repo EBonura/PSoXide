@@ -75,6 +75,16 @@ impl ViewportTool3d for SelectTool {
             return;
         };
         let additive = frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl;
+        // An additive press on a handle or the gizmo must NOT start the
+        // box-select marquee (its live updates would fight the element
+        // toggle the click performs on release).
+        if additive
+            && ws.selected_brush.is_some()
+            && (ws.pick_brush_element_gizmo_axis_3d(frame.rect, pointer).is_some()
+                || ws.pick_brush_handle_3d(frame.rect, pointer).is_some())
+        {
+            return;
+        }
         // The element gizmo owns its screen area: an axis grab starts an
         // axis-constrained group drag of the selected elements.
         if !additive {
@@ -1285,16 +1295,18 @@ impl EditorWorkspace {
             self.delete_selected_brushes();
         }
         if self.brush_edit_mode == BrushEditMode::Clip {
-            let (enter, tab) = ui.input(|input| {
+            let (enter, cycle) = ui.input(|input| {
                 (
                     input.key_pressed(egui::Key::Enter),
-                    input.key_pressed(egui::Key::Tab),
+                    // X is the reliable cycle key; Tab also works but
+                    // egui's focus traversal eats it in busy layouts.
+                    input.key_pressed(egui::Key::X) || input.key_pressed(egui::Key::Tab),
                 )
             });
             if enter {
                 self.apply_brush_clip();
             }
-            if tab {
+            if cycle {
                 self.brush_clip_keep = self.brush_clip_keep.next();
                 self.status = format!("Clip keeps: {}", self.brush_clip_keep.label());
             }
@@ -2175,7 +2187,7 @@ impl EditorWorkspace {
         }
         self.brush_clip_points.push(clip_point);
         self.status = format!(
-            "Clip point {}/3 placed; Enter cuts ({}), Tab flips, Esc clears",
+            "Clip point {}/3 placed; Enter cuts ({}), X flips, Esc clears",
             self.brush_clip_points.len(),
             self.brush_clip_keep.label(),
         );
