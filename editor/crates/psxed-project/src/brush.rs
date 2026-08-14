@@ -761,6 +761,121 @@ impl Brush {
         Some(candidate)
     }
 
+    /// Grow a NEW prism brush out of `face`: base on the face's plane,
+    /// cap `distance` units along its outward normal, one side per
+    /// polygon edge (TrenchBroom-style face extrude). The cap inherits
+    /// the face's material and texture, offset-compensated so it looks
+    /// identical to the source face; the sides take the material with a
+    /// fresh mapping. `None` for non-positive distances or degenerate
+    /// results.
+    pub fn extruded_from_face(&self, face: usize, distance: i32) -> Option<Brush> {
+        if distance <= 0 {
+            return None;
+        }
+        let solved = self.solve();
+        let polygon = solved.polygons.get(face)?.as_ref()?;
+        if polygon.verts.len() < 3 {
+            return None;
+        }
+        let source = self.faces.get(face)?;
+        let plane = Plane::from_points(source.points)?;
+        let length = ((plane.normal[0] as f64).powi(2)
+            + (plane.normal[1] as f64).powi(2)
+            + (plane.normal[2] as f64).powi(2))
+        .sqrt();
+        if length <= f64::EPSILON {
+            return None;
+        }
+        let normal = [
+            plane.normal[0] as f64 / length,
+            plane.normal[1] as f64 / length,
+            plane.normal[2] as f64 / length,
+        ];
+        let offset = [
+            (normal[0] * f64::from(distance)).round() as i32,
+            (normal[1] * f64::from(distance)).round() as i32,
+            (normal[2] * f64::from(distance)).round() as i32,
+        ];
+        if offset == [0; 3] {
+            return None;
+        }
+        let round = |p: [f64; 3]| {
+            [
+                p[0].round() as i32,
+                p[1].round() as i32,
+                p[2].round() as i32,
+            ]
+        };
+        let base: Vec<[i32; 3]> = polygon.verts.iter().copied().map(round).collect();
+        let cap: Vec<[i32; 3]> = base
+            .iter()
+            .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]])
+            .collect();
+        let count = base.len();
+        let side_material = source.material;
+        let build = |flip: bool| -> Brush {
+            // `flip` mirrors EVERY winding: the solved polygon's vertex
+            // order is orientation-dependent, so one of the two mirrored
+            // prisms is the correctly wound solid.
+            let wind = |a: [i32; 3], b: [i32; 3], c: [i32; 3]| {
+                if flip {
+                    [a, c, b]
+                } else {
+                    [a, b, c]
+                }
+            };
+            let mut faces = Vec::with_capacity(count + 2);
+            // Base: on the source plane, facing back toward the old brush.
+            faces.push(BrushFace {
+                points: wind(base[0], base[2], base[1]),
+                material: side_material,
+                uv: FaceUv::default(),
+            });
+            // Cap: the moved copy of the source face, same appearance.
+            let mut cap_face = BrushFace {
+                points: wind(cap[0], cap[1], cap[2]),
+                material: source.material,
+                uv: source.uv,
+            };
+            let raw = paraxial_uv(
+                &plane,
+                [
+                    f64::from(offset[0]),
+                    f64::from(offset[1]),
+                    f64::from(offset[2]),
+                ],
+            );
+            cap_face.uv.compensate_shift([
+                raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+            ]);
+            faces.push(cap_face);
+            for edge in 0..count {
+                let (a, b) = (base[edge], base[(edge + 1) % count]);
+                let c = cap[(edge + 1) % count];
+                faces.push(BrushFace {
+                    points: wind(a, b, c),
+                    material: side_material,
+                    uv: FaceUv::default(),
+                });
+            }
+            Brush {
+                faces,
+                contents: self.contents,
+                mover: None,
+            }
+        };
+        // Polygon winding orientation varies; try both side windings and
+        // keep whichever encloses a sane solid.
+        for flip in [false, true] {
+            let candidate = build(flip);
+            if candidate.is_pickable() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     /// Whether this brush is a sane, clickable solid: it solves to a
     /// BOUNDED volume. A plane re-authored inside-out still yields a
     /// "valid" solve, but one clipped only by the base winding

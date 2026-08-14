@@ -136,6 +136,39 @@ impl MouseRig {
         self.button(pos + Vec2::new(2.0, 0.0), false);
     }
 
+    /// Cmd-held drag: press at `from`, step to `to`, release, all with
+    /// the COMMAND modifier state live.
+    pub(crate) fn cmd_drag(&mut self, from: Pos2, to: Pos2) {
+        let cmd = egui::Modifiers::COMMAND;
+        self.pump_with(vec![egui::Event::PointerMoved(from)], cmd);
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: cmd,
+            }],
+            cmd,
+        );
+        let steps = 6;
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            self.pump_with(
+                vec![egui::Event::PointerMoved(from + (to - from) * t)],
+                cmd,
+            );
+        }
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: cmd,
+            }],
+            cmd,
+        );
+    }
+
     /// Press at `from`, drag through intermediate steps to `to`, release.
     pub(crate) fn drag(&mut self, from: Pos2, to: Pos2) {
         self.move_to(from);
@@ -1052,4 +1085,54 @@ fn legacy_brushes_normalize_on_load_same_solid_same_textures() {
     let workspace =
         EditorWorkspace::with_project(test_temp_dir("legacy-normalize-2"), reopened);
     assert!(!workspace.is_dirty(), "second open is a no-op");
+}
+
+/// Cmd+drag on a face handle extrudes a NEW brush out of the face
+/// (TrenchBroom-style growth): grid-snapped prism along the normal,
+/// selected on release, one undo step removes it.
+#[test]
+fn cmd_drag_on_a_face_handle_extrudes_a_new_brush() {
+    let mut rig = MouseRig::single_cube("rig-face-extrude");
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert!(matches!(
+        rig.workspace.selected_brush_elements.as_slice(),
+        [BrushElement::Face(5)]
+    ));
+    assert_eq!(rig.workspace.project.active_scene().brushes.len(), 1);
+
+    // Drag the top-face handle upward along the projected +Y normal.
+    let handle = rig.world_to_screen([256.0, 256.0, 128.0]);
+    let above = rig.world_to_screen([256.0, 448.0, 128.0]);
+    rig.cmd_drag(handle, above);
+
+    let scene = rig.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 2, "extrusion created a new brush");
+    let solved = scene.brushes[1].solve();
+    assert!(solved.is_valid() && scene.brushes[1].is_pickable());
+    assert!(
+        (solved.min[1] - 256.0).abs() <= 1.0,
+        "prism sits on the source face, min y {}",
+        solved.min[1]
+    );
+    assert!(
+        solved.max[1] > 256.0 + 15.0,
+        "prism has real thickness, max y {}",
+        solved.max[1]
+    );
+    // Footprint matches the source face.
+    assert!((solved.min[0] - 0.0).abs() <= 1.0 && (solved.max[0] - 512.0).abs() <= 1.0);
+    assert!((solved.min[2] - 0.0).abs() <= 1.0 && (solved.max[2] - 256.0).abs() <= 1.0);
+    assert_eq!(
+        rig.workspace.selected_brush,
+        Some(1),
+        "the new brush is selected"
+    );
+    rig.workspace.do_undo();
+    assert_eq!(
+        rig.workspace.project.active_scene().brushes.len(),
+        1,
+        "one undo removes the extrusion"
+    );
 }

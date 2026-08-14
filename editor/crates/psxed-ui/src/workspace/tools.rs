@@ -75,6 +75,18 @@ impl ViewportTool3d for SelectTool {
             return;
         };
         let additive = frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl;
+        // Cmd+drag on a FACE handle extrudes a new brush out of the face
+        // (TrenchBroom-style); a Cmd CLICK still toggles selection via
+        // the no-op-release synthesis.
+        if frame.modifiers.command && ws.brush_edit_mode == BrushEditMode::Face {
+            if let Some((index, BrushHandle3d::Face { face, .. })) =
+                ws.pick_brush_handle_3d(frame.rect, pointer)
+            {
+                if ws.begin_brush_face_extrude_new(frame.rect, pointer, index, face) {
+                    return;
+                }
+            }
+        }
         // An additive press on a handle or the gizmo must NOT start the
         // box-select marquee (its live updates would fight the element
         // toggle the click performs on release).
@@ -142,6 +154,7 @@ impl ViewportTool3d for SelectTool {
             || ws.brush_extrude.is_some()
             || ws.brush_drag.is_some()
             || ws.brush_element_transform.is_some()
+            || ws.brush_extrude_new.is_some()
         {
             BrushTool.primary_dragged(ws, frame);
             return;
@@ -185,6 +198,7 @@ impl ViewportTool3d for SelectTool {
             || ws.brush_extrude.is_some()
             || ws.brush_drag.is_some()
             || ws.brush_element_transform.is_some()
+            || ws.brush_extrude_new.is_some()
         {
             BrushTool.primary_released(ws, _frame);
             if synthesize_click {
@@ -1130,7 +1144,8 @@ impl EditorWorkspace {
         let gesture_active = self.brush_move.is_some()
             || self.brush_vertex_drag.is_some()
             || self.brush_extrude.is_some()
-            || self.brush_element_transform.is_some();
+            || self.brush_element_transform.is_some()
+            || self.brush_extrude_new.is_some();
         if gesture_active {
             return self
                 .brush_move
@@ -1147,11 +1162,114 @@ impl EditorWorkspace {
                 && self
                     .brush_element_transform
                     .as_ref()
+                    .is_none_or(|gesture| gesture.applied == 0)
+                && self
+                    .brush_extrude_new
+                    .as_ref()
                     .is_none_or(|gesture| gesture.applied == 0);
         }
         // No gesture and no interaction: the press landed on a brush
         // body arm that consumes nothing (non-Move edit modes).
         self.brush_drag.is_none() && matches!(self.interaction, Interaction::Idle)
+    }
+
+    /// Begin extruding a NEW brush out of `face` (Cmd+drag its handle):
+    /// pointer travel along the projected outward normal sets the
+    /// snapped extrusion distance.
+    fn begin_brush_face_extrude_new(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        index: usize,
+        face: usize,
+    ) -> bool {
+        let Some(brush) = self.project.active_scene().brushes.get(index) else {
+            return false;
+        };
+        let Some((center, normal)) = Self::face_center_and_normal(brush, face) else {
+            return false;
+        };
+        let Some(center_screen) = self.project_brush_point_3d(rect, center) else {
+            return false;
+        };
+        let probe = [
+            center[0] + normal[0] * 64.0,
+            center[1] + normal[1] * 64.0,
+            center[2] + normal[2] * 64.0,
+        ];
+        let Some(probe_screen) = self.project_brush_point_3d(rect, probe) else {
+            return false;
+        };
+        let px = center_screen.distance(probe_screen).max(0.5);
+        let direction = probe_screen - center_screen;
+        let screen_dir = if direction.length_sq() > f32::EPSILON {
+            direction.normalized()
+        } else {
+            Vec2::RIGHT
+        };
+        self.brush_extrude_new = Some(BrushFaceExtrudeNew {
+            source: index,
+            face,
+            screen_dir,
+            units_per_px: 64.0 / px,
+            start_pointer: pointer,
+            applied: 0,
+        });
+        true
+    }
+
+    fn update_brush_face_extrude_new(&mut self, pointer: egui::Pos2) {
+        let Some(gesture) = self.brush_extrude_new.clone() else {
+            return;
+        };
+        let travel = (pointer - gesture.start_pointer).dot(gesture.screen_dir);
+        let step = f32::from(self.snap_units.max(1));
+        let units = (travel * gesture.units_per_px / step).round() * step;
+        let applied = (units as i32).max(0);
+        if applied == gesture.applied {
+            return;
+        }
+        if let Some(state) = self.brush_extrude_new.as_mut() {
+            state.applied = applied;
+        }
+        self.status = if applied > 0 {
+            format!("Extrude new brush: {applied} units (release to create)")
+        } else {
+            "Extrude new brush: drag outward".to_string()
+        };
+    }
+
+    /// Release: create and select the extruded brush (one undo step).
+    fn commit_brush_face_extrude_new(&mut self) -> bool {
+        let Some(gesture) = self.brush_extrude_new.take() else {
+            return false;
+        };
+        if gesture.applied <= 0 {
+            return true;
+        }
+        let Some(candidate) = self
+            .project
+            .active_scene()
+            .brushes
+            .get(gesture.source)
+            .and_then(|brush| brush.extruded_from_face(gesture.face, gesture.applied))
+        else {
+            self.status = "Extrusion produced no solid".to_string();
+            return true;
+        };
+        self.push_undo();
+        let scene = self.project.active_scene_mut();
+        scene.brushes.push(candidate);
+        let new_index = scene.brushes.len() - 1;
+        self.replace_brush_selection(new_index, None);
+        self.clear_node_selection_state();
+        self.mark_dirty();
+        self.status = format!(
+            "Extruded brush {} out {} units",
+            new_index + 1,
+            gesture.applied
+        );
+        true
     }
 
     /// End the rotate/scale gesture: one undo step when anything applied.
@@ -1325,6 +1443,7 @@ impl EditorWorkspace {
     /// their base).
     pub(crate) fn cancel_brush_gestures(&mut self) {
         self.brush_drag = None;
+        self.brush_extrude_new = None;
         self.brush_clip_points.clear();
         if let Some(transform) = self.brush_element_transform.take() {
             if let Some(slot) = self
@@ -3510,6 +3629,20 @@ impl EditorWorkspace {
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
             draw(&preview, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
+        // Live wireframe of the pending face extrusion.
+        if let Some(gesture) = &self.brush_extrude_new {
+            if gesture.applied > 0 {
+                if let Some(candidate) = self
+                    .project
+                    .active_scene()
+                    .brushes
+                    .get(gesture.source)
+                    .and_then(|brush| brush.extruded_from_face(gesture.face, gesture.applied))
+                {
+                    draw(&candidate, egui::Stroke::new(2.0, STUDIO_ACCENT));
+                }
+            }
+        }
         // Transform gizmo: the whole brush in Brush mode, the element
         // selection in Face/Edge/Vertex modes.
         if self.brush_gizmo_context().is_some() {
@@ -4076,6 +4209,10 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
+        if ws.brush_extrude_new.is_some() {
+            ws.update_brush_face_extrude_new(pointer);
+            return;
+        }
         if ws.brush_element_transform.is_some() {
             ws.update_brush_element_transform(pointer, frame.modifiers.shift);
             return;
@@ -4170,7 +4307,8 @@ impl ViewportTool3d for BrushTool {
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
         let synthesize_click = ws.brush_release_was_noop_click() && ws.brush_drag.is_none();
-        let committed = ws.commit_brush_element_transform()
+        let committed = ws.commit_brush_face_extrude_new()
+            || ws.commit_brush_element_transform()
             || ws.commit_brush_move_preview()
             || ws.commit_brush_vertex_drag_preview()
             || ws.commit_brush_extrude_preview();
