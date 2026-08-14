@@ -184,8 +184,15 @@ impl EditorWorkspace {
                 if modifiers.command {
                     let point = self.brush_snap_2d(world);
                     self.brush_clip_click(point);
+                } else if self.select_brush_elements_2d(world, modifiers) {
                 } else if let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world)
                 {
+                    if self.brush_edit_mode == BrushEditMode::Face
+                        && self.selected_brush == Some(brush)
+                    {
+                        self.apply_brush_element_selection(BrushElement::Face(face), modifiers);
+                        return;
+                    }
                     self.clear_node_selection_state();
                     self.clear_resource_selection_state();
                     self.clear_primitive_selection_state();
@@ -214,8 +221,15 @@ impl EditorWorkspace {
                         self.clear_primitive_selection_state();
                         self.clear_sector_selection();
                     }
+                } else if self.select_brush_elements_2d(world, modifiers) {
                 } else if let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world)
                 {
+                    if self.brush_edit_mode == BrushEditMode::Face
+                        && self.selected_brush == Some(brush)
+                    {
+                        self.apply_brush_element_selection(BrushElement::Face(face), modifiers);
+                        return;
+                    }
                     self.clear_node_selection_state();
                     self.clear_resource_selection_state();
                     self.clear_primitive_selection_state();

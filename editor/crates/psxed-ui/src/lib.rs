@@ -1817,6 +1817,9 @@ struct SelectionState {
     /// the pointer leaves or another tool takes over. The renderer outlines
     /// this lightly so the user sees what the next click will pick.
     hovered_primitive: Option<Selection>,
+    /// Brush sub-element handle under the cursor this frame (either
+    /// view). Drives the pre-click hover highlight in the overlays.
+    hovered_brush_handle: Option<BrushElement>,
     /// Primitive the user clicked with the Select tool last. Persists across
     /// frames until the user clicks a different one or switches tools. The
     /// renderer outlines it more boldly than `hovered_primitive`; the
@@ -2935,6 +2938,7 @@ impl EditorWorkspace {
                 selected_sectors: HashSet::new(),
                 sector_selection_anchor: None,
                 hovered_primitive: None,
+                hovered_brush_handle: None,
                 selected_primitive: None,
                 selected_primitives: Vec::new(),
                 hovered_entity_node: None,
