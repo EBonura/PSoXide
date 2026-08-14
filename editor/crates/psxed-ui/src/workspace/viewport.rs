@@ -384,7 +384,10 @@ impl EditorWorkspace {
             return;
         }
 
-        let (forward, right, vertical, speed) = ui.input(|input| {
+        // WASD only: Q/E are deliberately unbound here so E can be the
+        // face-extrude key everywhere (vertical flight comes from aiming
+        // the camera and flying forward).
+        let (forward, right, speed) = ui.input(|input| {
             let axis = |positive: egui::Key, negative: egui::Key| {
                 (input.key_down(positive) as i8 - input.key_down(negative) as i8) as f32
             };
@@ -392,19 +395,15 @@ impl EditorWorkspace {
             (
                 axis(egui::Key::W, egui::Key::S),
                 axis(egui::Key::D, egui::Key::A),
-                axis(egui::Key::Q, egui::Key::E),
                 speed,
             )
         });
-        if forward.abs() <= f32::EPSILON
-            && right.abs() <= f32::EPSILON
-            && vertical.abs() <= f32::EPSILON
-        {
+        if forward.abs() <= f32::EPSILON && right.abs() <= f32::EPSILON {
             return;
         }
 
         self.camera_rig
-            .move_free_local(forward * speed, right * speed, vertical * speed);
+            .move_free_local(forward * speed, right * speed, 0.0);
         self.persist_editor_camera_state();
         ui.ctx().request_repaint();
     }
