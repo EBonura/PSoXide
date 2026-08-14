@@ -427,6 +427,41 @@ fn solved_brush_front_sidedness_culls_a_camera_inside_the_solid() {
 }
 
 #[test]
+fn bsp_preview_lights_use_world_units_and_sector_scaled_radius() {
+    let mut project = ProjectDocument::new("bsp-light-samples");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [256, 256, 256]));
+    let scene = project.active_scene_mut();
+    scene.add_node(
+        psxed_project::NodeId::ROOT,
+        "Light",
+        psxed_project::NodeKind::PointLight {
+            color: [255, 240, 200],
+            intensity: 1.0,
+            radius: 4.0,
+        },
+    );
+    if let Some(node) = scene
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, psxed_project::NodeKind::PointLight { .. }))
+        .map(|node| node.id)
+        .and_then(|id| scene.node_mut(id))
+    {
+        node.transform.translation = [3840.0, 1280.0, 21120.0];
+    }
+    let hidden = std::collections::HashSet::new();
+    let samples = super::room_geometry::collect_bsp_preview_lights(&project, &hidden);
+    assert_eq!(samples.len(), 1);
+    // Position is the raw world translation; radius scales by the World
+    // sector size (1024), matching the bake and runtime records.
+    assert_eq!(samples[0].position, [3840, 1280, 21120]);
+    assert_eq!(samples[0].radius, 4096);
+}
+
+#[test]
 fn legacy_textured_scene_is_fully_replaced_by_bsp_only_and_empty_scenes() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let legacy_root = repo_root.join("editor/samples/cortex_v1");
