@@ -1535,6 +1535,14 @@ impl EditorWorkspace {
         if delete {
             self.delete_selected_brushes();
         }
+        // E extrudes the selected face by one grid step, except in Free
+        // camera mode where E is the fly-down key (WASD+QE).
+        if self.brush_edit_mode == BrushEditMode::Face
+            && self.camera_rig.mode != ViewportCameraMode::Free
+            && ui.input(|input| input.key_pressed(egui::Key::E))
+        {
+            self.extrude_selected_face_one_step();
+        }
         if self.brush_edit_mode == BrushEditMode::Clip {
             let (enter, cycle) = ui.input(|input| {
                 (
