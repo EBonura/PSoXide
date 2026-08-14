@@ -29,6 +29,7 @@
         preview_bounds: true,
         show_play_debug_overlays: true,
         show_play_debug_map: true,
+        show_brush_wireframes: false,
     ),
     editor_workspace: (
         active: Room,
