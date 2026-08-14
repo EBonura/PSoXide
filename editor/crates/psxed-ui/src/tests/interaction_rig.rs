@@ -136,12 +136,17 @@ impl MouseRig {
     }
 
     pub(crate) fn gizmo_axis_grab_point(&self, axis: usize) -> Pos2 {
-        let axes = self
+        let polylines = self
             .workspace
-            .brush_element_gizmo_axes_3d(RIG_VIEWPORT)
+            .brush_element_gizmo_polylines_3d(RIG_VIEWPORT)
             .expect("element gizmo visible");
-        let (origin, tip) = axes[axis];
-        origin + (tip - origin) * 0.6
+        let polyline = &polylines[axis];
+        if polyline.len() == 2 {
+            polyline[0] + (polyline[1] - polyline[0]) * 0.6
+        } else {
+            // Ring: grab a point partway around, away from the seam.
+            polyline[polyline.len() / 6]
+        }
     }
 
     /// Screen position of a brush handle for the current edit mode.
@@ -489,5 +494,60 @@ fn mouse_entity_click_and_drag() {
     assert!(
         delta > 32.0 && delta < 4096.0,
         "entity moved a sane world distance, got {delta}"
+    );
+}
+
+/// Regression: Move on a selected FACE must translate the plane even
+/// when its authored points do not sit at the solved corners (clips and
+/// rotations move them off). Matching by corner proximity alone missed
+/// authored points and TILTED the plane, which read as rotation.
+#[test]
+fn mouse_face_move_translates_off_corner_authored_planes() {
+    let mut rig = MouseRig::single_cube("rig-face-plane-move");
+    // Re-author the top plane (+Y, face 5) with points far outside the
+    // solved polygon, same plane.
+    rig.workspace.project.active_scene_mut().brushes[0].faces[5] =
+        psxed_project::brush::BrushFace::from_points([
+            [-4096, 256, 8192],
+            [8192, 256, 8192],
+            [8192, 256, -4096],
+        ]);
+    assert!(rig.workspace.project.active_scene().brushes[0].solve().is_valid());
+
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+    rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert!(matches!(
+        rig.workspace.selected_brush_elements.as_slice(),
+        [BrushElement::Face(5)]
+    ), "top face selected, got {:?}", rig.workspace.selected_brush_elements);
+
+    let normal_before = psxed_project::brush::Plane::from_points(
+        rig.workspace.project.active_scene().brushes[0].faces[5].points,
+    )
+    .unwrap()
+    .normal;
+    let grab = rig.gizmo_axis_grab_point(1);
+    rig.drag(grab, grab + Vec2::new(0.0, -60.0));
+
+    let face = rig.workspace.project.active_scene().brushes[0].faces[5];
+    let plane = psxed_project::brush::Plane::from_points(face.points).unwrap();
+    assert_eq!(
+        plane.normal, normal_before,
+        "Move must translate the plane, never tilt it"
+    );
+    // The whole top rose: every solved top corner shares one Y above 256.
+    let verts = crate::workspace::brush_elements::unique_vertices(
+        &rig.workspace.project.active_scene().brushes[0].solve(),
+    );
+    let top_ys: Vec<f64> = verts.iter().map(|v| v[1]).filter(|y| *y > 256.5).collect();
+    assert_eq!(top_ys.len(), 4, "all four top corners lifted, verts {verts:?}");
+    let spread = top_ys.iter().fold((f64::MAX, f64::MIN), |acc, y| {
+        (acc.0.min(*y), acc.1.max(*y))
+    });
+    assert!(
+        spread.1 - spread.0 <= 1.0,
+        "corners lifted EQUALLY (no tilt), ys {top_ys:?}"
     );
 }

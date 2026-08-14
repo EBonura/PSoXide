@@ -578,12 +578,33 @@ impl Brush {
         map: [[f64; 3]; 3],
         epsilon: f64,
     ) -> usize {
+        self.transform_selected(&[], targets, center, map, epsilon)
+    }
+
+    /// [`Self::transform_points_near`], plus EVERY authored point of the
+    /// listed faces regardless of proximity. Authored plane points need
+    /// not coincide with solved corners (clips and rotations move them
+    /// off), so transforming a selected FACE by corner proximity alone
+    /// misses points and tilts the plane; whole-plane inclusion keeps
+    /// face gestures rigid.
+    pub fn transform_selected(
+        &mut self,
+        selected_faces: &[usize],
+        targets: &[[f64; 3]],
+        center: [f64; 3],
+        map: [[f64; 3]; 3],
+        epsilon: f64,
+    ) -> usize {
         let mut moved = 0;
-        for face in &mut self.faces {
+        for (face_index, face) in self.faces.iter_mut().enumerate() {
+            let whole_face = selected_faces.contains(&face_index);
             for point in &mut face.points {
-                let hit = targets.iter().any(|target| {
-                    (0..3).all(|axis| (f64::from(point[axis]) - target[axis]).abs() <= epsilon)
-                });
+                let hit = whole_face
+                    || targets.iter().any(|target| {
+                        (0..3).all(|axis| {
+                            (f64::from(point[axis]) - target[axis]).abs() <= epsilon
+                        })
+                    });
                 if !hit {
                     continue;
                 }
@@ -611,12 +632,28 @@ impl Brush {
         delta: [i32; 3],
         epsilon: f64,
     ) -> usize {
+        self.translate_selected(&[], targets, delta, epsilon)
+    }
+
+    /// [`Self::translate_points_near`], plus every authored point of the
+    /// listed faces (see [`Self::transform_selected`] for why).
+    pub fn translate_selected(
+        &mut self,
+        selected_faces: &[usize],
+        targets: &[[f64; 3]],
+        delta: [i32; 3],
+        epsilon: f64,
+    ) -> usize {
         let mut moved = 0;
-        for face in &mut self.faces {
+        for (face_index, face) in self.faces.iter_mut().enumerate() {
+            let whole_face = selected_faces.contains(&face_index);
             for point in &mut face.points {
-                let hit = targets.iter().any(|target| {
-                    (0..3).all(|axis| (f64::from(point[axis]) - target[axis]).abs() <= epsilon)
-                });
+                let hit = whole_face
+                    || targets.iter().any(|target| {
+                        (0..3).all(|axis| {
+                            (f64::from(point[axis]) - target[axis]).abs() <= epsilon
+                        })
+                    });
                 if hit {
                     for axis in 0..3 {
                         point[axis] += delta[axis];

@@ -2,6 +2,16 @@ use super::*;
 use crate::workspace::tools::{tool_impl_3d, BrushHandle3d, ToolFrame3d, BRUSH_CREATE_HEIGHT};
 use psxed_project::brush::SolvedBrush;
 
+
+fn polyline_grab_point(polyline: &[Pos2]) -> Pos2 {
+    if polyline.len() == 2 {
+        polyline[0] + (polyline[1] - polyline[0]) * 0.6
+    } else {
+        // Ring: a point partway around, away from the seam.
+        polyline[polyline.len() / 6]
+    }
+}
+
 fn brush_frame(harness: &ViewportHarness, pointer: Pos2) -> ToolFrame3d {
     ToolFrame3d {
         rect: harness.viewport,
@@ -1236,11 +1246,10 @@ fn element_gizmo_drag_runs_through_real_egui_in_select_mode() {
         BrushElement::Vertex(crate::workspace::brush_elements::quantize_element_point(vertex)),
         egui::Modifiers::NONE,
     );
-    let axes = workspace
-        .brush_element_gizmo_axes_3d(viewport)
+    let polylines = workspace
+        .brush_element_gizmo_polylines_3d(viewport)
         .expect("gizmo axes project");
-    let (origin, tip) = axes[1];
-    let start = origin + (tip - origin) * 0.6;
+    let start = polyline_grab_point(&polylines[1]);
     assert_eq!(
         workspace.pick_brush_element_gizmo_axis_3d(viewport, start),
         Some(1),
@@ -1292,9 +1301,8 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
     // (128,256,384).
     let (mut workspace, rect) = build();
     workspace.set_transform_gizmo_mode(TransformGizmoMode::Rotate);
-    let axes = workspace.brush_element_gizmo_axes_3d(rect).unwrap();
-    let (origin, tip) = axes[1];
-    let grab = origin + (tip - origin) * 0.6;
+    let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
+    let grab = polyline_grab_point(&polylines[1]);
     tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
     assert!(workspace.brush_element_transform.is_some(), "rotate grab starts");
     let swept = grab + Vec2::new(180.0, 0.0);
@@ -1309,9 +1317,8 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
     // (-128,256,0) about the centroid; the floor stays put.
     let (mut workspace, rect) = build();
     workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
-    let axes = workspace.brush_element_gizmo_axes_3d(rect).unwrap();
-    let (origin, tip) = axes[0];
-    let grab = origin + (tip - origin) * 0.6;
+    let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
+    let grab = polyline_grab_point(&polylines[0]);
     tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
     assert!(workspace.brush_element_transform.is_some(), "scale grab starts");
     let swept = grab + Vec2::new(128.0, 0.0);
@@ -1330,11 +1337,10 @@ fn face_element_gizmo_drag_moves_the_face_via_real_egui() {
     workspace.set_brush_edit_mode(BrushEditMode::Face);
     let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
     workspace.apply_brush_element_selection(BrushElement::Face(5), egui::Modifiers::NONE);
-    let axes = workspace
-        .brush_element_gizmo_axes_3d(viewport)
+    let polylines = workspace
+        .brush_element_gizmo_polylines_3d(viewport)
         .expect("gizmo axes project");
-    let (origin, tip) = axes[1];
-    let start = origin + (tip - origin) * 0.6;
+    let start = polyline_grab_point(&polylines[1]);
     assert_eq!(
         workspace.pick_brush_element_gizmo_axis_3d(viewport, start),
         Some(1)
@@ -2521,11 +2527,10 @@ fn element_gizmo_drags_are_axis_constrained() {
 
     // Grab the Y axis of the gizmo (a point most of the way up the arrow)
     // and drag diagonally: only Y may change.
-    let axes = workspace
-        .brush_element_gizmo_axes_3d(rect)
+    let polylines = workspace
+        .brush_element_gizmo_polylines_3d(rect)
         .expect("gizmo axes project");
-    let (origin, tip) = axes[1];
-    let grab = origin + (tip - origin) * 0.6;
+    let grab = polyline_grab_point(&polylines[1]);
     assert_eq!(
         workspace.pick_brush_element_gizmo_axis_3d(rect, grab),
         Some(1),

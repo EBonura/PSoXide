@@ -826,6 +826,17 @@ impl EditorWorkspace {
         targets
     }
 
+    /// Selected Face element indices (whole planes ride face gestures).
+    pub(crate) fn selected_brush_element_faces(&self) -> Vec<usize> {
+        self.selected_brush_elements
+            .iter()
+            .filter_map(|element| match element {
+                BrushElement::Face(face) => Some(*face),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Centroid of the selected element targets: the element gizmo anchor.
     pub(crate) fn selected_brush_element_centroid(&self) -> Option<[f64; 3]> {
         let targets = self.selected_brush_element_targets();
@@ -842,20 +853,21 @@ impl EditorWorkspace {
         Some(centroid)
     }
 
-    /// Screen segments of the element gizmo's three axes, world-space
-    /// arrows from the selection centroid. `None` without a selection.
-    /// Each axis is scaled to a roughly constant on-screen length so the
-    /// gizmo stays grabbable at any camera distance (a fixed world length
-    /// projected to a few pixels at room scale was unusable).
-    pub(crate) fn brush_element_gizmo_axes_3d(
+    /// Screen polylines of the element gizmo, one per world axis, shaped
+    /// by the active Transform mode: straight arrows for Move and Scale
+    /// (Scale draws a box tip), rotation RINGS for Rotate (the ring
+    /// around axis N lies in the plane of the other two axes). Sizing is
+    /// screen-constant so the gizmo stays grabbable at any distance.
+    pub(crate) fn brush_element_gizmo_polylines_3d(
         &self,
         rect: egui::Rect,
-    ) -> Option<[(egui::Pos2, egui::Pos2); 3]> {
+    ) -> Option<[Vec<egui::Pos2>; 3]> {
         const TARGET_PX: f32 = 72.0;
         const PROBE_WORLD: f64 = 64.0;
+        const RING_SEGMENTS: usize = 24;
         let centroid = self.selected_brush_element_centroid()?;
         let origin = self.project_brush_point_3d(rect, centroid)?;
-        let mut axes = [(origin, origin); 3];
+        let mut world_len = [0.0f64; 3];
         for axis in 0..3 {
             let mut probe = centroid;
             probe[axis] += PROBE_WORLD;
@@ -863,13 +875,36 @@ impl EditorWorkspace {
             let px_per_probe = origin.distance(probe_screen).max(0.5);
             // Foreshortened axes (pointing at the camera) would solve to
             // enormous world lengths; the clamp keeps them finite.
-            let world_len =
+            world_len[axis] =
                 (PROBE_WORLD * f64::from(TARGET_PX / px_per_probe)).clamp(16.0, 16384.0);
-            let mut tip = centroid;
-            tip[axis] += world_len;
-            axes[axis] = (origin, self.project_brush_point_3d(rect, tip)?);
         }
-        Some(axes)
+        let mut polylines: [Vec<egui::Pos2>; 3] = Default::default();
+        for axis in 0..3 {
+            if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
+                let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                let radius = [world_len[u], world_len[v]];
+                let mut ring = Vec::with_capacity(RING_SEGMENTS + 1);
+                for segment in 0..=RING_SEGMENTS {
+                    let angle =
+                        segment as f64 / RING_SEGMENTS as f64 * core::f64::consts::TAU;
+                    let mut point = centroid;
+                    point[u] += angle.cos() * radius[0];
+                    point[v] += angle.sin() * radius[1];
+                    if let Some(screen) = self.project_brush_point_3d(rect, point) {
+                        ring.push(screen);
+                    }
+                }
+                if ring.len() < 2 {
+                    return None;
+                }
+                polylines[axis] = ring;
+            } else {
+                let mut tip = centroid;
+                tip[axis] += world_len[axis];
+                polylines[axis] = vec![origin, self.project_brush_point_3d(rect, tip)?];
+            }
+        }
+        Some(polylines)
     }
 
     /// The gizmo axis under the pointer, if any (9px pick radius).
@@ -886,16 +921,18 @@ impl EditorWorkspace {
         {
             return None;
         }
-        let axes = self.brush_element_gizmo_axes_3d(rect)?;
+        let polylines = self.brush_element_gizmo_polylines_3d(rect)?;
         let mut best: Option<(f32, usize)> = None;
-        for (axis, (a, b)) in axes.iter().enumerate() {
-            let d2 = point_segment_distance2(
-                [f64::from(pointer.x), f64::from(pointer.y)],
-                [f64::from(a.x), f64::from(a.y)],
-                [f64::from(b.x), f64::from(b.y)],
-            ) as f32;
-            if d2 <= 81.0 && best.is_none_or(|(best_d2, _)| d2 < best_d2) {
-                best = Some((d2, axis));
+        for (axis, polyline) in polylines.iter().enumerate() {
+            for pair in polyline.windows(2) {
+                let d2 = point_segment_distance2(
+                    [f64::from(pointer.x), f64::from(pointer.y)],
+                    [f64::from(pair[0].x), f64::from(pair[0].y)],
+                    [f64::from(pair[1].x), f64::from(pair[1].y)],
+                ) as f32;
+                if d2 <= 81.0 && best.is_none_or(|(best_d2, _)| d2 < best_d2) {
+                    best = Some((d2, axis));
+                }
             }
         }
         best.map(|(_, axis)| axis)
@@ -933,10 +970,12 @@ impl EditorWorkspace {
                 if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
                     return false;
                 }
+                let faces = self.selected_brush_element_faces();
                 if let Some(drag) = self.brush_vertex_drag.as_mut() {
                     let mut mask = [false; 3];
                     mask[axis] = true;
                     drag.axis_mask = mask;
+                    drag.faces = faces;
                 }
                 true
             }
@@ -944,10 +983,12 @@ impl EditorWorkspace {
                 let Some(base) = self.project.active_scene().brushes.get(index).cloned() else {
                     return false;
                 };
+                let faces = self.selected_brush_element_faces();
                 self.brush_element_transform = Some(BrushElementTransformDrag {
                     index,
                     base,
                     targets,
+                    faces,
                     center: anchor,
                     axis,
                     rotate: mode == TransformGizmoMode::Rotate,
@@ -998,7 +1039,7 @@ impl EditorWorkspace {
             map
         };
         let mut preview = drag.base.clone();
-        if preview.transform_points_near(&drag.targets, drag.center, map, 0.5) > 0
+        if preview.transform_selected(&drag.faces, &drag.targets, drag.center, map, 0.5) > 0
             && brush_preview_ok(&preview)
         {
             self.project.active_scene_mut().brushes[drag.index] = preview;
@@ -1070,17 +1111,18 @@ impl EditorWorkspace {
         &mut self,
         grabbed: BrushElement,
         fallback: Vec<[f64; 3]>,
-    ) -> Vec<[f64; 3]> {
+    ) -> (Vec<[f64; 3]>, Vec<usize>) {
         if self.selected_brush_elements.contains(&grabbed) {
             let targets = self.selected_brush_element_targets();
+            let faces = self.selected_brush_element_faces();
             if targets.is_empty() {
-                fallback
+                (fallback, faces)
             } else {
-                targets
+                (targets, faces)
             }
         } else {
             self.selected_brush_elements = vec![grabbed];
-            fallback
+            (fallback, Vec::new())
         }
     }
 
@@ -2768,6 +2810,7 @@ impl EditorWorkspace {
     }
 
     fn start_brush_vertex_drag(&mut self, index: usize, mut targets: Vec<[f64; 3]>, world: [f32; 2]) {
+        let mut faces: Vec<usize> = Vec::new();
         // Group drag: when any grabbed target is a selected element, the
         // whole selected set rides along (2D grabs depth columns, 3D
         // single corners; the union covers both semantics).
@@ -2790,6 +2833,7 @@ impl EditorWorkspace {
                         targets.push(extra);
                     }
                 }
+                faces = self.selected_brush_element_faces();
             }
         }
         let base = self.project.active_scene().brushes[index].clone();
@@ -2804,6 +2848,7 @@ impl EditorWorkspace {
             plane_3d: None,
             applied: [0; 3],
             axis_mask: [true; 3],
+            faces,
         });
     }
 
@@ -2827,7 +2872,7 @@ impl EditorWorkspace {
             return;
         }
         let mut preview = drag.base.clone();
-        let moved = preview.translate_points_near(&drag.targets, applied, 0.5);
+        let moved = preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5);
         if moved > 0 && brush_preview_ok(&preview) {
             self.project.active_scene_mut().brushes[drag.index] = preview;
             if let Some(state) = self.brush_vertex_drag.as_mut() {
@@ -3399,11 +3444,36 @@ impl EditorWorkspace {
                 BrushEditMode::Move | BrushEditMode::Clip
             )
         {
-            if let Some(axes) = self.brush_element_gizmo_axes_3d(rect) {
-                for (axis, (origin, tip)) in axes.into_iter().enumerate() {
+            if let Some(polylines) = self.brush_element_gizmo_polylines_3d(rect) {
+                for (axis, polyline) in polylines.into_iter().enumerate() {
                     let color = ELEMENT_GIZMO_AXIS_COLORS[axis];
-                    painter.line_segment([origin, tip], egui::Stroke::new(2.5, color));
-                    painter.circle_filled(tip, 4.5, color);
+                    for pair in polyline.windows(2) {
+                        painter.line_segment(
+                            [pair[0], pair[1]],
+                            egui::Stroke::new(2.5, color),
+                        );
+                    }
+                    // Mode-distinct tips: circle for Move, box for Scale;
+                    // rings are their own shape.
+                    if self.transform_gizmo_mode != TransformGizmoMode::Rotate {
+                        if let Some(tip) = polyline.last() {
+                            match self.transform_gizmo_mode {
+                                TransformGizmoMode::Scale => {
+                                    painter.rect_filled(
+                                        egui::Rect::from_center_size(
+                                            *tip,
+                                            egui::Vec2::splat(9.0),
+                                        ),
+                                        1.0,
+                                        color,
+                                    );
+                                }
+                                _ => {
+                                    painter.circle_filled(*tip, 4.5, color);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3715,6 +3785,7 @@ impl EditorWorkspace {
             plane_3d: Some(plane),
             applied: [0; 3],
             axis_mask: [true; 3],
+            faces: Vec::new(),
         });
         true
     }
@@ -3742,7 +3813,7 @@ impl EditorWorkspace {
             return;
         }
         let mut preview = drag.base.clone();
-        if preview.translate_points_near(&drag.targets, applied, 0.5) > 0
+        if preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5) > 0
             && brush_preview_ok(&preview)
         {
             self.project.active_scene_mut().brushes[drag.index] = preview;
@@ -3864,8 +3935,12 @@ impl ViewportTool3d for BrushTool {
         if let Some((index, handle)) = ws.pick_brush_handle_3d(frame.rect, pointer) {
             match handle {
                 BrushHandle3d::Vertex(vertex) => {
-                    let targets = ws.brush_drag_targets_for_grab(handle.element(), vec![vertex]);
+                    let (targets, faces) =
+                        ws.brush_drag_targets_for_grab(handle.element(), vec![vertex]);
                     if ws.begin_brush_vertex_drag_3d(frame.rect, pointer, index, targets, vertex) {
+                        if let Some(drag) = ws.brush_vertex_drag.as_mut() {
+                            drag.faces = faces;
+                        }
                         return;
                     }
                 }
@@ -3875,8 +3950,12 @@ impl ViewportTool3d for BrushTool {
                         (a[1] + b[1]) * 0.5,
                         (a[2] + b[2]) * 0.5,
                     ];
-                    let targets = ws.brush_drag_targets_for_grab(handle.element(), vec![a, b]);
+                    let (targets, faces) =
+                        ws.brush_drag_targets_for_grab(handle.element(), vec![a, b]);
                     if ws.begin_brush_vertex_drag_3d(frame.rect, pointer, index, targets, center) {
+                        if let Some(drag) = ws.brush_vertex_drag.as_mut() {
+                            drag.faces = faces;
+                        }
                         return;
                     }
                 }
