@@ -2467,6 +2467,16 @@ pub(crate) struct BrushElementTransformDrag {
     /// Selected Face elements: whole authored planes transform rigidly.
     pub(crate) faces: Vec<usize>,
     pub(crate) start_pointer: Pos2,
+    /// Normalized screen direction of the grabbed axis at press time:
+    /// scale travel is the pointer delta projected onto it, so dragging
+    /// along ANY axis works (horizontal-only travel made vertical axes
+    /// dead).
+    pub(crate) screen_axis: Vec2,
+    /// Projected selection centroid: rotate tracks the angular sweep of
+    /// the pointer around it, entity-gizmo style.
+    pub(crate) center_screen: Pos2,
+    /// Pointer angle around `center_screen` at press time, radians.
+    pub(crate) start_angle: f32,
     /// Last applied snapped amount: degrees for rotate, percent-delta
     /// steps for scale. Zero means the base brush is still in place.
     pub(crate) applied: i32,

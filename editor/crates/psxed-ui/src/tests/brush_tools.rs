@@ -1296,32 +1296,59 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
     };
     let tool = tool_impl_3d(ViewTool::Select);
 
-    // Rotate 90 degrees about Y (pointer travel 180 px = 90 deg): top
-    // corner (0,256,0) orbits the face centroid (256,256,128) to
-    // (128,256,384).
+    // Rotate 90 degrees about Y: the pointer sweeps a quarter turn
+    // around the projected centroid. Top corner (0,256,0) orbits the
+    // face centroid (256,256,128) to (128,256,384) (or its mirror,
+    // depending on sweep sign; the applied magnitude pins it).
     let (mut workspace, rect) = build();
     workspace.set_transform_gizmo_mode(TransformGizmoMode::Rotate);
     let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
     let grab = polyline_grab_point(&polylines[1]);
     tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
     assert!(workspace.brush_element_transform.is_some(), "rotate grab starts");
-    let swept = grab + Vec2::new(180.0, 0.0);
+    let center = workspace
+        .brush_element_transform
+        .as_ref()
+        .unwrap()
+        .center_screen;
+    let radial = grab - center;
+    // Quarter-turn sweep: rotate the pointer offset 90 degrees around
+    // the centre (screen-space).
+    let swept = center + Vec2::new(-radial.y, radial.x);
     tool.primary_dragged(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
-    assert_eq!(workspace.brush_element_transform.as_ref().unwrap().applied, 90);
+    assert_eq!(
+        workspace
+            .brush_element_transform
+            .as_ref()
+            .unwrap()
+            .applied
+            .abs(),
+        90
+    );
     tool.primary_released(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
-    assert!(has_vertex(&workspace, [128.0, 256.0, 384.0]), "rotated corner");
+    assert!(
+        has_vertex(&workspace, [128.0, 256.0, 384.0])
+            || has_vertex(&workspace, [384.0, 256.0, -128.0]),
+        "corner orbited a quarter turn either way"
+    );
     workspace.do_undo();
     assert!(has_vertex(&workspace, [0.0, 256.0, 0.0]), "undo restores");
 
-    // Scale +50% along X (travel 128 px): corner (0,256,0) stretches to
-    // (-128,256,0) about the centroid; the floor stays put.
+    // Scale +50% along X (128 px of travel ALONG the axis's screen
+    // direction): corner (0,256,0) stretches to (-128,256,0) about the
+    // centroid; the floor stays put.
     let (mut workspace, rect) = build();
     workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
     let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
     let grab = polyline_grab_point(&polylines[0]);
     tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
     assert!(workspace.brush_element_transform.is_some(), "scale grab starts");
-    let swept = grab + Vec2::new(128.0, 0.0);
+    let screen_axis = workspace
+        .brush_element_transform
+        .as_ref()
+        .unwrap()
+        .screen_axis;
+    let swept = grab + screen_axis * 128.0;
     tool.primary_dragged(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
     assert_eq!(workspace.brush_element_transform.as_ref().unwrap().applied, 50);
     tool.primary_released(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));

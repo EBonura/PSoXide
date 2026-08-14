@@ -2378,7 +2378,7 @@ fn ring_screen_winding(ring: &NodeRotationGizmoScreenRing) -> f32 {
 
 /// Wrap an angle difference into `(-PI, PI]` so per-frame pointer
 /// deltas accumulate across the atan2 seam without 2*PI jumps.
-fn wrap_angle_radians(delta: f32) -> f32 {
+pub(crate) fn wrap_angle_radians(delta: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
     let mut delta = delta;
     while delta > PI {
