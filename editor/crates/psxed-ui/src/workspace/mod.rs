@@ -1,5 +1,6 @@
 use super::*;
 
+pub(crate) mod brush_elements;
 mod dialogs;
 mod editing;
 mod geometry;
