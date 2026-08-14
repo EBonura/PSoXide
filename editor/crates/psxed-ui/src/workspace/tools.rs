@@ -1858,21 +1858,7 @@ impl EditorWorkspace {
         if !solved.is_valid() {
             return None;
         }
-        let mut verts: Vec<[f64; 3]> = Vec::new();
-        for vert in solved
-            .polygons
-            .iter()
-            .flatten()
-            .flat_map(|p| p.verts.iter())
-        {
-            if !verts
-                .iter()
-                .any(|seen| (0..3).all(|axis| (seen[axis] - vert[axis]).abs() <= 0.5))
-            {
-                verts.push(*vert);
-            }
-        }
-        Some((index, verts))
+        Some((index, brush_elements::unique_vertices(&solved)))
     }
 
     /// Every solved vertex whose projection sits on `projected` (the
@@ -2200,25 +2186,24 @@ impl EditorWorkspace {
                             }
                         }
                         BrushEditMode::Edge => {
+                            // Screen-space dedup on top of the canonical
+                            // enumeration: distinct 3D edges of one depth
+                            // column project onto the same 2D segment.
                             let mut seen = Vec::<Pos2>::new();
-                            for polygon in solved.polygons.iter().flatten() {
-                                for edge in 0..polygon.verts.len() {
-                                    let a = polygon.verts[edge];
-                                    let b = polygon.verts[(edge + 1) % polygon.verts.len()];
-                                    let center = to_screen(std::array::from_fn(|axis| {
-                                        (a[axis] + b[axis]) * 0.5
-                                    }));
-                                    if seen.iter().any(|point| point.distance(center) <= 1.0) {
-                                        continue;
-                                    }
-                                    seen.push(center);
-                                    painter.rect_stroke(
-                                        Rect::from_center_size(center, Vec2::splat(7.0)),
-                                        0.0,
-                                        egui::Stroke::new(1.5, STUDIO_ACCENT),
-                                        egui::StrokeKind::Inside,
-                                    );
+                            for (a, b) in brush_elements::unique_edges(&solved) {
+                                let center = to_screen(std::array::from_fn(|axis| {
+                                    (a[axis] + b[axis]) * 0.5
+                                }));
+                                if seen.iter().any(|point| point.distance(center) <= 1.0) {
+                                    continue;
                                 }
+                                seen.push(center);
+                                painter.rect_stroke(
+                                    Rect::from_center_size(center, Vec2::splat(7.0)),
+                                    0.0,
+                                    egui::Stroke::new(1.5, STUDIO_ACCENT),
+                                    egui::StrokeKind::Inside,
+                                );
                             }
                         }
                         BrushEditMode::Vertex => {
@@ -2323,19 +2308,7 @@ impl EditorWorkspace {
                             }
                         }
                         BrushEditMode::Vertex => {
-                            let mut vertices = Vec::new();
-                            for vertex in solved
-                                .polygons
-                                .iter()
-                                .flatten()
-                                .flat_map(|polygon| polygon.verts.iter().copied())
-                            {
-                                if vertices.iter().any(|seen: &[f64; 3]| {
-                                    (0..3).all(|axis| (seen[axis] - vertex[axis]).abs() <= 0.5)
-                                }) {
-                                    continue;
-                                }
-                                vertices.push(vertex);
+                            for vertex in brush_elements::unique_vertices(&solved) {
                                 if let Some(center) = project(vertex) {
                                     painter.rect_filled(
                                         egui::Rect::from_center_size(
@@ -2349,28 +2322,21 @@ impl EditorWorkspace {
                             }
                         }
                         BrushEditMode::Edge => {
-                            for polygon in solved.polygons.iter().flatten() {
-                                for edge in 0..polygon.verts.len() {
-                                    let a = polygon.verts[edge];
-                                    let b = polygon.verts[(edge + 1) % polygon.verts.len()];
-                                    let midpoint = [
-                                        (a[0] + b[0]) * 0.5,
-                                        (a[1] + b[1]) * 0.5,
-                                        (a[2] + b[2]) * 0.5,
-                                    ];
-                                    if let Some(center) = project(midpoint) {
-                                        painter.circle_filled(center, 4.0, STUDIO_ACCENT);
-                                    }
+                            for (a, b) in brush_elements::unique_edges(&solved) {
+                                let midpoint = [
+                                    (a[0] + b[0]) * 0.5,
+                                    (a[1] + b[1]) * 0.5,
+                                    (a[2] + b[2]) * 0.5,
+                                ];
+                                if let Some(center) = project(midpoint) {
+                                    painter.circle_filled(center, 4.0, STUDIO_ACCENT);
                                 }
                             }
                         }
                         BrushEditMode::Face => {
-                            for face in 0..brush.faces.len() {
-                                let Some((center, normal)) =
-                                    Self::face_center_and_normal(brush, face)
-                                else {
-                                    continue;
-                                };
+                            for (_, center, normal) in
+                                brush_elements::face_handles(brush, &solved)
+                            {
                                 if !self.brush_face_handle_visible(center, normal) {
                                     continue;
                                 }
@@ -2570,45 +2536,26 @@ impl EditorWorkspace {
         match self.brush_edit_mode {
             BrushEditMode::Move => return None,
             BrushEditMode::Vertex => {
-                let mut vertices = Vec::new();
-                for vertex in solved
-                    .polygons
-                    .iter()
-                    .flatten()
-                    .flat_map(|polygon| polygon.verts.iter().copied())
-                {
-                    if vertices.iter().any(|seen: &[f64; 3]| {
-                        (0..3).all(|axis| (seen[axis] - vertex[axis]).abs() <= 0.5)
-                    }) {
-                        continue;
-                    }
-                    vertices.push(vertex);
+                for vertex in brush_elements::unique_vertices(&solved) {
                     if let Some(screen) = self.project_brush_point_3d(rect, vertex) {
                         consider(screen, BrushHandle3d::Vertex(vertex));
                     }
                 }
             }
             BrushEditMode::Edge => {
-                for polygon in solved.polygons.iter().flatten() {
-                    for edge in 0..polygon.verts.len() {
-                        let a = polygon.verts[edge];
-                        let b = polygon.verts[(edge + 1) % polygon.verts.len()];
-                        let midpoint = [
-                            (a[0] + b[0]) * 0.5,
-                            (a[1] + b[1]) * 0.5,
-                            (a[2] + b[2]) * 0.5,
-                        ];
-                        if let Some(screen) = self.project_brush_point_3d(rect, midpoint) {
-                            consider(screen, BrushHandle3d::Edge(a, b));
-                        }
+                for (a, b) in brush_elements::unique_edges(&solved) {
+                    let midpoint = [
+                        (a[0] + b[0]) * 0.5,
+                        (a[1] + b[1]) * 0.5,
+                        (a[2] + b[2]) * 0.5,
+                    ];
+                    if let Some(screen) = self.project_brush_point_3d(rect, midpoint) {
+                        consider(screen, BrushHandle3d::Edge(a, b));
                     }
                 }
             }
             BrushEditMode::Face => {
-                for face in 0..brush.faces.len() {
-                    let Some((center, normal)) = Self::face_center_and_normal(brush, face) else {
-                        continue;
-                    };
+                for (face, center, normal) in brush_elements::face_handles(brush, &solved) {
                     if !self.brush_face_handle_visible(center, normal) {
                         continue;
                     }

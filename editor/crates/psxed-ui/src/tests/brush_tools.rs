@@ -2111,6 +2111,24 @@ fn multi_selection_delete_and_duplicate_are_grouped() {
 }
 
 #[test]
+fn brush_element_enumerators_dedup_and_canonicalize() {
+    use crate::workspace::brush_elements::{edge_element_key, unique_edges, unique_vertices};
+    let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 64, 256]);
+    let solved = brush.solve();
+    assert_eq!(unique_vertices(&solved).len(), 8, "cuboid corners");
+    let edges = unique_edges(&solved);
+    assert_eq!(edges.len(), 12, "shared edges enumerate once");
+    // Every enumerated edge is stored in canonical key order, and the key
+    // is winding-independent.
+    for (a, b) in &edges {
+        let key = edge_element_key(*a, *b);
+        let swapped = edge_element_key(*b, *a);
+        assert_eq!(key, swapped);
+        assert!(key.0 <= key.1);
+    }
+}
+
+#[test]
 fn selection_domains_are_exclusive_and_empty_click_clears_all() {
     let mut harness = ViewportHarness::floored_room("brush_sel_domains", 4);
     let scene = harness.workspace.project.active_scene_mut();
