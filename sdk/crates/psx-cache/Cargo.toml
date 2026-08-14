@@ -4,7 +4,7 @@ version      = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description  = "Generic no_std/no-heap slot cache: keyed residency pool with LRU eviction and pinning."
+description  = "Generation-safe no_std cache slots and fixed byte arenas for PS1 residency."
 
 [lints.rust]
 missing_docs = "warn"
