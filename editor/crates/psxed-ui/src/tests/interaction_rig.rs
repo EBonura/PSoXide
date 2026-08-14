@@ -33,8 +33,7 @@ impl MouseRig {
         workspace.camera_rig.mode = ViewportCameraMode::Free;
         workspace.camera_rig.free_initialized = true;
         workspace.camera_rig.free_position = [1400, 1200, -1400];
-        let (yaw, pitch) =
-            camera_angles_to_look_at([1400, 1200, -1400], [256, 128, 128]).unwrap();
+        let (yaw, pitch) = camera_angles_to_look_at([1400, 1200, -1400], [256, 128, 128]).unwrap();
         workspace.camera_rig.free_yaw = yaw;
         workspace.camera_rig.free_pitch = pitch;
 
@@ -77,10 +76,7 @@ impl MouseRig {
     fn pump_with(&mut self, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
         self.time += 1.0 / 60.0;
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                Pos2::ZERO,
-                Vec2::new(800.0, 600.0),
-            )),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
             time: Some(self.time),
             modifiers,
             events,
@@ -153,10 +149,7 @@ impl MouseRig {
         let steps = 6;
         for step in 1..=steps {
             let t = step as f32 / steps as f32;
-            self.pump_with(
-                vec![egui::Event::PointerMoved(from + (to - from) * t)],
-                cmd,
-            );
+            self.pump_with(vec![egui::Event::PointerMoved(from + (to - from) * t)], cmd);
         }
         self.pump_with(
             vec![egui::Event::PointerButton {
@@ -303,14 +296,13 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
     // Geometric no-ops the gestures must leave alone: scaling a flat
     // face along its own normal, scaling an edge across its direction,
     // and rotating an edge about an axis parallel to itself.
-    let expect_change = |mode: BrushEditMode, gizmo: TransformGizmoMode, axis: usize| match (
-        mode, gizmo, axis,
-    ) {
-        (BrushEditMode::Face, TransformGizmoMode::Scale, 1) => false,
-        (BrushEditMode::Edge, TransformGizmoMode::Scale, 1 | 2) => false,
-        (BrushEditMode::Edge, TransformGizmoMode::Rotate, 0) => false,
-        _ => true,
-    };
+    let expect_change =
+        |mode: BrushEditMode, gizmo: TransformGizmoMode, axis: usize| match (mode, gizmo, axis) {
+            (BrushEditMode::Face, TransformGizmoMode::Scale, 1) => false,
+            (BrushEditMode::Edge, TransformGizmoMode::Scale, 1 | 2) => false,
+            (BrushEditMode::Edge, TransformGizmoMode::Rotate, 0) => false,
+            _ => true,
+        };
     for (mode, anchor) in cases {
         for sloppy in [false, true] {
             for gizmo_mode in [
@@ -361,16 +353,13 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
                         let (solved_base, solved) = (base.solve(), after.solve());
                         assert!(
                             solved.is_valid()
-                                && solved.within_extent(
-                                    psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT
-                                ),
+                                && solved
+                                    .within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT),
                             "{label}: result stays valid and bounded"
                         );
                         // Face moves translate or shear, never tilt:
                         // the selected plane's normal is invariant.
-                        if mode == BrushEditMode::Face
-                            && gizmo_mode == TransformGizmoMode::Move
-                        {
+                        if mode == BrushEditMode::Face && gizmo_mode == TransformGizmoMode::Move {
                             let normal = |brush: &psxed_project::brush::Brush| {
                                 psxed_project::brush::Plane::from_points(brush.faces[5].points)
                                     .unwrap()
@@ -492,7 +481,11 @@ fn mouse_shift_click_multiselect_and_group_drag() {
         .copied()
         .filter(|vertex| vertex[1] > 300.0)
         .collect();
-    assert_eq!(lifted.len(), 2, "both selected corners lifted, verts {verts:?}");
+    assert_eq!(
+        lifted.len(),
+        2,
+        "both selected corners lifted, verts {verts:?}"
+    );
     // Selection survived; shift-click removes one member.
     assert_eq!(rig.workspace.selected_brush_elements.len(), 2);
     let corner_b_now = *lifted
@@ -525,7 +518,10 @@ fn mouse_empty_click_clears_and_marquee_selects() {
     rig.click(body);
     assert_eq!(rig.workspace.selected_brush, Some(0));
     rig.sloppy_click(empty);
-    assert_eq!(rig.workspace.selected_brush, None, "sloppy empty click clears");
+    assert_eq!(
+        rig.workspace.selected_brush, None,
+        "sloppy empty click clears"
+    );
 }
 
 /// The whole clip flow by mouse and keyboard: two points on the top
@@ -543,7 +539,10 @@ fn mouse_clip_flow_cuts_the_cube() {
     rig.click(rig.world_to_screen([128.0, 256.0, 32.0]));
     assert_eq!(rig.workspace.brush_clip_points.len(), 1);
     rig.key(body, egui::Key::Escape);
-    assert!(rig.workspace.brush_clip_points.is_empty(), "Esc clears points");
+    assert!(
+        rig.workspace.brush_clip_points.is_empty(),
+        "Esc clears points"
+    );
 
     // Two points across the top face, then Enter cuts into two brushes.
     rig.click(rig.world_to_screen([256.0, 256.0, 16.0]));
@@ -572,11 +571,11 @@ fn mouse_clip_flow_cuts_the_cube() {
 #[test]
 fn mouse_entity_click_and_drag() {
     let mut rig = MouseRig::single_cube("rig-entity");
-    let entity = rig
-        .workspace
-        .project
-        .active_scene_mut()
-        .add_node(NodeId::ROOT, "Entity", NodeKind::Entity);
+    let entity =
+        rig.workspace
+            .project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Entity", NodeKind::Entity);
     if let Some(node) = rig.workspace.project.active_scene_mut().node_mut(entity) {
         node.transform.translation = [900.0, 0.0, 128.0];
     }
@@ -599,19 +598,31 @@ fn mouse_entity_click_and_drag() {
     let screen = rig.world_to_screen(center);
     rig.click(screen);
     assert_eq!(
-        rig.workspace.selection.selected_node,
-        entity,
+        rig.workspace.selection.selected_node, entity,
         "entity click selects the node"
     );
     assert_eq!(
-        rig.workspace.selected_brush,
-        None,
+        rig.workspace.selected_brush, None,
         "entity click clears the brush selection"
     );
 
-    let before = rig.workspace.project.active_scene().node(entity).unwrap().transform.translation;
+    let before = rig
+        .workspace
+        .project
+        .active_scene()
+        .node(entity)
+        .unwrap()
+        .transform
+        .translation;
     rig.drag(screen, screen + Vec2::new(80.0, 0.0));
-    let after = rig.workspace.project.active_scene().node(entity).unwrap().transform.translation;
+    let after = rig
+        .workspace
+        .project
+        .active_scene()
+        .node(entity)
+        .unwrap()
+        .transform
+        .translation;
     assert_ne!(before, after, "entity body drag moves it");
     let delta = ((after[0] - before[0]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
     assert!(
@@ -635,16 +646,23 @@ fn mouse_face_move_translates_off_corner_authored_planes() {
             [8192, 256, 8192],
             [8192, 256, -4096],
         ]);
-    assert!(rig.workspace.project.active_scene().brushes[0].solve().is_valid());
+    assert!(rig.workspace.project.active_scene().brushes[0]
+        .solve()
+        .is_valid());
 
     rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
-    rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+    rig.workspace
+        .set_transform_gizmo_mode(TransformGizmoMode::Move);
     let body = rig.world_to_screen([256.0, 256.0, 128.0]);
     rig.click(body);
-    assert!(matches!(
-        rig.workspace.selected_brush_elements.as_slice(),
-        [BrushElement::Face(5)]
-    ), "top face selected, got {:?}", rig.workspace.selected_brush_elements);
+    assert!(
+        matches!(
+            rig.workspace.selected_brush_elements.as_slice(),
+            [BrushElement::Face(5)]
+        ),
+        "top face selected, got {:?}",
+        rig.workspace.selected_brush_elements
+    );
 
     let normal_before = psxed_project::brush::Plane::from_points(
         rig.workspace.project.active_scene().brushes[0].faces[5].points,
@@ -665,7 +683,11 @@ fn mouse_face_move_translates_off_corner_authored_planes() {
         &rig.workspace.project.active_scene().brushes[0].solve(),
     );
     let top_ys: Vec<f64> = verts.iter().map(|v| v[1]).filter(|y| *y > 256.5).collect();
-    assert_eq!(top_ys.len(), 4, "all four top corners lifted, verts {verts:?}");
+    assert_eq!(
+        top_ys.len(),
+        4,
+        "all four top corners lifted, verts {verts:?}"
+    );
     let spread = top_ys.iter().fold((f64::MAX, f64::MIN), |acc, y| {
         (acc.0.min(*y), acc.1.max(*y))
     });
@@ -693,8 +715,7 @@ fn mouse_wall_face_move_works_on_every_axis_at_sanctum_scale() {
         assert!(brush.solve().is_valid());
         let mut project = ProjectDocument::new("rig-wall-face");
         project.active_scene_mut().brushes.push(brush);
-        let mut workspace =
-            EditorWorkspace::with_project(test_temp_dir("rig-wall-face"), project);
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("rig-wall-face"), project);
         workspace.active_workspace = WorkspaceView::Room;
         workspace.active_tool = ViewTool::Select;
         workspace.view_2d = false;
@@ -702,8 +723,7 @@ fn mouse_wall_face_move_works_on_every_axis_at_sanctum_scale() {
         workspace.camera_rig.mode = ViewportCameraMode::Free;
         workspace.camera_rig.free_initialized = true;
         workspace.camera_rig.free_position = [700, 900, -2400];
-        let (yaw, pitch) =
-            camera_angles_to_look_at([700, 900, -2400], [1024, 500, 400]).unwrap();
+        let (yaw, pitch) = camera_angles_to_look_at([700, 900, -2400], [1024, 500, 400]).unwrap();
         workspace.camera_rig.free_yaw = yaw;
         workspace.camera_rig.free_pitch = pitch;
 
@@ -725,7 +745,8 @@ fn mouse_wall_face_move_works_on_every_axis_at_sanctum_scale() {
 
         let base = rig.brush();
         rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
-        rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+        rig.workspace
+            .set_transform_gizmo_mode(TransformGizmoMode::Move);
         // Click the front wall (z = 0 plane, its centre).
         let wall = rig.world_to_screen([1024.0, 500.0, 0.0]);
         rig.click(wall);
@@ -733,15 +754,12 @@ fn mouse_wall_face_move_works_on_every_axis_at_sanctum_scale() {
             rig.workspace.selected_brush_elements.as_slice(),
             [BrushElement::Face(0)]
         ) {
-            let target = rig.workspace.resolve_viewport_3d_pointer_target(
-                RIG_VIEWPORT,
-                wall,
-                None,
-                true,
-            );
-            let nearest =
+            let target =
                 rig.workspace
-                    .pick_brush_face_nearest_for_selection_3d(RIG_VIEWPORT, wall);
+                    .resolve_viewport_3d_pointer_target(RIG_VIEWPORT, wall, None, true);
+            let nearest = rig
+                .workspace
+                .pick_brush_face_nearest_for_selection_3d(RIG_VIEWPORT, wall);
             let handle = rig.workspace.pick_brush_handle_3d(RIG_VIEWPORT, wall);
             panic!(
                 "axis {axis}: wall face not selected. elements {:?}, brush {:?},                  pointer_target {:?}, nearest_face {:?}, handle {:?}",
@@ -798,8 +816,7 @@ fn projection_and_pick_ray_agree_at_sanctum_scale() {
     ]);
     let mut project = ProjectDocument::new("rig-ray-roundtrip");
     project.active_scene_mut().brushes.push(brush);
-    let mut workspace =
-        EditorWorkspace::with_project(test_temp_dir("rig-ray-roundtrip"), project);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("rig-ray-roundtrip"), project);
     workspace.active_tool = ViewTool::Select;
     workspace.view_2d = false;
     workspace.camera_rig.mode = ViewportCameraMode::Free;
@@ -834,8 +851,7 @@ fn projection_and_pick_ray_agree_at_sanctum_scale() {
             origin[1] + dir[1] * t - world[1] as f32,
             origin[2] + dir[2] * t - world[2] as f32,
         ];
-        let miss =
-            (closest[0].powi(2) + closest[1].powi(2) + closest[2].powi(2)).sqrt();
+        let miss = (closest[0].powi(2) + closest[1].powi(2) + closest[2].powi(2)).sqrt();
         assert!(
             miss <= 8.0,
             "pick ray misses the drawn point {world:?} by {miss:.1} world units \
@@ -843,7 +859,6 @@ fn projection_and_pick_ray_agree_at_sanctum_scale() {
         );
     }
 }
-
 
 /// A brush whose planes describe a different solid than its visible
 /// shell renders normally but eats every pick ray: clicks pass through.
@@ -861,7 +876,8 @@ fn unpickable_brushes_are_diagnosed_on_load() {
     assert!(bad.solve().is_valid(), "renders as a solid");
     assert!(!bad.is_pickable(), "diagnosed as unpickable");
     assert!(
-        bad.raycast([1024.0, 500.0, -2400.0], [0.0, 0.0, 1.0]).is_none(),
+        bad.raycast([1024.0, 500.0, -2400.0], [0.0, 0.0, 1.0])
+            .is_none(),
         "the live symptom: a ray straight at the front wall misses"
     );
     // A healthy brush passes.
@@ -888,7 +904,8 @@ fn mouse_whole_brush_gizmo_moves_rotates_and_scales() {
         let mut rig = MouseRig::single_cube("rig-whole-brush-move");
         let base = rig.brush();
         rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
-        rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+        rig.workspace
+            .set_transform_gizmo_mode(TransformGizmoMode::Move);
         let body = rig.world_to_screen([256.0, 256.0, 128.0]);
         rig.click(body);
         assert_eq!(rig.workspace.selected_brush, Some(0));
@@ -919,12 +936,11 @@ fn mouse_whole_brush_gizmo_moves_rotates_and_scales() {
     let mut rig = MouseRig::single_cube("rig-whole-brush-rotate");
     let base = rig.brush();
     rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
-    rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Rotate);
+    rig.workspace
+        .set_transform_gizmo_mode(TransformGizmoMode::Rotate);
     let body = rig.world_to_screen([256.0, 256.0, 128.0]);
     rig.click(body);
-    let center = rig.world_to_screen(
-        rig.workspace.brush_gizmo_context().expect("context").0,
-    );
+    let center = rig.world_to_screen(rig.workspace.brush_gizmo_context().expect("context").0);
     let (grab, _) = rig.gizmo_drag_vector(1);
     let radial = grab - center;
     let swept = center + Vec2::new(-radial.y, radial.x);
@@ -949,7 +965,8 @@ fn mouse_whole_brush_gizmo_moves_rotates_and_scales() {
     let mut rig = MouseRig::single_cube("rig-whole-brush-scale");
     let base = rig.brush();
     rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
-    rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
+    rig.workspace
+        .set_transform_gizmo_mode(TransformGizmoMode::Scale);
     let body = rig.world_to_screen([256.0, 256.0, 128.0]);
     rig.click(body);
     let (grab, to) = rig.gizmo_drag_vector(0);
@@ -987,7 +1004,8 @@ fn face_moves_keep_the_texture_riding_when_locked() {
             };
         rig.workspace.brush_texture_lock = lock;
         rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
-        rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+        rig.workspace
+            .set_transform_gizmo_mode(TransformGizmoMode::Move);
         let body = rig.world_to_screen([256.0, 256.0, 128.0]);
         rig.click(body);
         assert!(matches!(
@@ -1003,8 +1021,7 @@ fn face_moves_keep_the_texture_riding_when_locked() {
             MouseRig::single_cube("rig-uv-lock-base").brush(),
         );
         let after = applied_at_anchor(&rig.workspace);
-        let drift =
-            ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2)).sqrt();
+        let drift = ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2)).sqrt();
         if lock {
             assert!(
                 drift <= 1.5,
@@ -1073,8 +1090,7 @@ fn legacy_brushes_normalize_on_load_same_solid_same_textures() {
     // Load path: opening a project normalizes and marks it dirty once.
     let mut project = ProjectDocument::new("legacy-normalize");
     project.active_scene_mut().brushes.push(legacy);
-    let workspace =
-        EditorWorkspace::with_project(test_temp_dir("legacy-normalize"), project);
+    let workspace = EditorWorkspace::with_project(test_temp_dir("legacy-normalize"), project);
     assert!(workspace.is_dirty(), "normalization wants a save");
     assert!(
         workspace.status.contains("Normalized"),
@@ -1082,8 +1098,7 @@ fn legacy_brushes_normalize_on_load_same_solid_same_textures() {
         workspace.status
     );
     let reopened = workspace.project.clone();
-    let workspace =
-        EditorWorkspace::with_project(test_temp_dir("legacy-normalize-2"), reopened);
+    let workspace = EditorWorkspace::with_project(test_temp_dir("legacy-normalize-2"), reopened);
     assert!(!workspace.is_dirty(), "second open is a no-op");
 }
 
@@ -1141,8 +1156,7 @@ fn cmd_drag_on_a_face_handle_extrudes_a_new_brush() {
 /// face out by exactly one grid step per click; without a face
 /// selected it does nothing.
 #[test]
-fn extrude_button_grows_the_selected_face_one_grid_step()
-{
+fn extrude_button_grows_the_selected_face_one_grid_step() {
     let mut rig = MouseRig::single_cube("rig-extrude-button");
     rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
 
@@ -1162,8 +1176,7 @@ fn extrude_button_grows_the_selected_face_one_grid_step()
     assert_eq!(scene.brushes.len(), 2, "one click, one prism");
     let solved = scene.brushes[1].solve();
     assert!(
-        (solved.min[1] - 256.0).abs() <= 1.0
-            && (solved.max[1] - (256.0 + step)).abs() <= 1.0,
+        (solved.min[1] - 256.0).abs() <= 1.0 && (solved.max[1] - (256.0 + step)).abs() <= 1.0,
         "prism is exactly one grid step thick: {:?}..{:?}",
         solved.min,
         solved.max
@@ -1177,8 +1190,7 @@ fn extrude_button_grows_the_selected_face_one_grid_step()
 /// (the free camera no longer binds Q/E), and is a guarded no-op when
 /// the fresh selection has no face yet.
 #[test]
-fn e_key_extrudes_in_every_camera_mode()
-{
+fn e_key_extrudes_in_every_camera_mode() {
     let mut rig = MouseRig::single_cube("rig-extrude-key");
     rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
     let body = rig.world_to_screen([256.0, 256.0, 128.0]);
@@ -1202,12 +1214,66 @@ fn e_key_extrudes_in_every_camera_mode()
     assert_eq!(rig.workspace.project.active_scene().brushes.len(), 2);
 
     // Orbit mode works the same.
-    rig.workspace.set_viewport_3d_camera_mode(ViewportCameraMode::Orbit);
+    rig.workspace
+        .set_viewport_3d_camera_mode(ViewportCameraMode::Orbit);
     rig.workspace.replace_brush_selection(0, Some(5));
     rig.key(RIG_VIEWPORT.center(), egui::Key::E);
     assert_eq!(
         rig.workspace.project.active_scene().brushes.len(),
         3,
         "E extrudes under orbit"
+    );
+}
+
+/// Canvas scale gesture through the real UV transaction: a multi-frame
+/// corner drag must resize the mapping while the applied UV at the
+/// face's anchor stays put (the texture scales in place instead of
+/// sliding), and the transaction must close on release.
+#[test]
+fn uv_canvas_scale_drag_keeps_the_texture_anchored() {
+    use crate::workspace::uv_canvas::{
+        face_texel_polygon, polygon_centroid, scale_gesture, UvCanvasDragKind, UvCanvasDragState,
+    };
+    let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 256, 512]);
+    let mut project = ProjectDocument::new("uv-canvas-scale");
+    project.active_scene_mut().brushes.push(brush);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("uv-canvas-scale"), project);
+    let face = 0usize;
+    let current = workspace.project.active_scene().brushes[0].faces[face].uv;
+    let polygon = face_texel_polygon(&workspace.project.active_scene().brushes[0], face)
+        .expect("face polygon");
+    let center = polygon_centroid(&polygon);
+    let anchor = workspace.project.active_scene().brushes[0]
+        .face_uv_anchor(face)
+        .expect("anchor");
+    let target = current.apply(anchor);
+    let start_mouse = [center[0] + 12.0, center[1] + 12.0];
+    let drag = UvCanvasDragState {
+        brush: 0,
+        face,
+        kind: UvCanvasDragKind::Scale([true, true]),
+        start_uv: current,
+        start_mouse,
+        center,
+    };
+    // Ten live frames pulling the corner out to twice its arm, then a
+    // release frame, exactly the per-frame sequence the widget runs.
+    let mut live = current;
+    for step in 1..=10 {
+        let pull = 1.0 + 0.1 * f64::from(step);
+        let mouse = [center[0] + 12.0 * pull, center[1] + 12.0 * pull];
+        let edited = scale_gesture(&drag, live, mouse, [true, true]);
+        live = workspace.apply_face_uv_edit(0, face, live, edited, false, step != 10);
+        workspace.project.active_scene_mut().brushes[0].faces[face].uv = live;
+    }
+    assert_eq!(live.scale_q8, [128, 128], "doubled polygon = halved scale");
+    let after = live.apply(anchor);
+    assert!(
+        (after[0] - target[0]).abs() <= 1.5 && (after[1] - target[1]).abs() <= 1.5,
+        "anchor must not slide: {target:?} -> {after:?}"
+    );
+    assert!(
+        workspace.brush_uv_edit.is_none(),
+        "release frame must close the UV transaction"
     );
 }

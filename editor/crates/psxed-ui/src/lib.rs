@@ -685,6 +685,10 @@ pub struct EditorWorkspace {
     brush_move: Option<BrushMove>,
     /// In-flight face UV scale/rotation interaction. See [`UvEditTransaction`].
     brush_uv_edit: Option<UvEditTransaction>,
+    /// Pan/zoom of the face UV canvas, kept per selected face.
+    brush_uv_canvas_view: Option<workspace::uv_canvas::UvCanvasViewState>,
+    /// Live drag on the face UV canvas.
+    brush_uv_canvas_drag: Option<workspace::uv_canvas::UvCanvasDragState>,
     /// In-flight vertex/edge drag (Brush tool with Vertex or Edge
     /// selection mode in an orthographic view).
     brush_vertex_drag: Option<BrushVertexDrag>,
@@ -1111,13 +1115,7 @@ enum BrushEditMode {
 }
 
 impl BrushEditMode {
-    const ALL: [Self; 5] = [
-        Self::Move,
-        Self::Face,
-        Self::Edge,
-        Self::Vertex,
-        Self::Clip,
-    ];
+    const ALL: [Self; 5] = [Self::Move, Self::Face, Self::Edge, Self::Vertex, Self::Clip];
 
     const fn label(self) -> &'static str {
         match self {
@@ -3115,6 +3113,8 @@ impl EditorWorkspace {
             brush_texture_lock: true,
             brush_move: None,
             brush_uv_edit: None,
+            brush_uv_canvas_view: None,
+            brush_uv_canvas_drag: None,
             brush_vertex_drag: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
