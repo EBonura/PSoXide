@@ -1254,12 +1254,32 @@ fn walk_brushes(
     scratch: &mut PreviewScratch,
 ) {
     use psxed_project::brush::{paraxial_uv, Plane};
-    // Live light preview: per-face analytic point lighting against the
-    // scene's lights, using the Release bake's ambient contract
-    // (PXBSP_AMBIENT_RGB = [32; 3]). No occlusion; the true shadowed
-    // result comes from the Release cook. With zero lights the historic
-    // unlit shading is kept, so lightless maps don't go dark.
+    // Live light preview: per-VERTEX analytic point lighting with the
+    // exact Release-bake formula (lambert + linear falloff, shadow
+    // segments against solid brushes, tint-modulated) and its ambient
+    // contract (PXBSP_AMBIENT_RGB = [32; 3]). With zero lights the
+    // historic unlit shading is kept, so lightless maps don't go dark.
     let lights = collect_bsp_preview_bake_lights(project, hidden_scene_nodes);
+    // Shadow occluders mirror the cook's set (every solid brush), with
+    // one editor-only guard: mid-edit damaged/unbounded brushes are
+    // skipped, otherwise an infinite wedge occludes every segment and
+    // blacks out the room while you drag.
+    let light_spheres: Vec<([f64; 3], f64)> = lights
+        .iter()
+        .map(|light| (light.position, light.radius))
+        .collect();
+    let occluders = if lights.is_empty() {
+        Vec::new()
+    } else {
+        let solids: Vec<psxed_project::brush::Brush> = project
+            .active_scene()
+            .brushes
+            .iter()
+            .filter(|brush| brush.contents.is_solid() && brush.is_pickable())
+            .cloned()
+            .collect();
+        psxed_project::brush_light::brush_occluder_planes(&solids)
+    };
     for brush in &project.active_scene().brushes {
         if scratch.geometry_full() {
             break;
@@ -1278,71 +1298,90 @@ fn walk_brushes(
                 textures,
             );
             let (face_normal, _) = psxed_project::brush_compile::normalized_plane(plane);
-            let verts = &polygon.verts;
-            for i in 1..verts.len().saturating_sub(1) {
-                let tri = [verts[0], verts[i], verts[i + 1]];
-                // Light per VERTEX with the exact Draft-bake formula
-                // (lambert + linear falloff, tint-modulated), so the
-                // Gouraud packets below interpolate the same gradients
-                // the cooked game shows. No occlusion; shadows come
-                // from the Release cook.
-                let lit_colors = (!lights.is_empty()).then(|| {
+            // The cook subdivides lit faces into grid patches so vertex
+            // light resolves hotspots and shadow edges mid-face; the
+            // preview must render the SAME patches or those features
+            // fall between the authored corners and vanish.
+            let patches = if lights.is_empty() {
+                vec![polygon.verts.clone()]
+            } else {
+                psxed_project::brush_compile::subdivide_polygon_for_lighting(
+                    polygon.verts.clone(),
+                    psxed_project::brush_compile::LIGHT_SUBDIVISION_UNITS,
+                    &light_spheres,
+                )
+            };
+            for verts in &patches {
+                // Shadow rays make the bake the expensive part, so light
+                // each patch corner ONCE and let the triangle fan below
+                // index into the results.
+                let lit_polygon = (!lights.is_empty()).then(|| {
                     let tint = match shade {
                         FaceShade::Flat { rgb, .. } => [rgb.0, rgb.1, rgb.2],
                         FaceShade::Textured { tint, .. } => [tint.0, tint.1, tint.2],
                     };
-                    tri.map(|vertex| {
-                        let color = psxed_project::brush_light::lit_point_color(
-                            vertex,
-                            face_normal,
-                            tint,
-                            PXBSP_PREVIEW_AMBIENT,
-                            &lights,
-                        );
-                        (color[0], color[1], color[2])
-                    })
-                });
-                // Defense against unbounded/corrupt brushes (infinite
-                // wedges solve to base-winding coordinates): anything
-                // beyond the renderer's safe range would overflow the
-                // i32 camera rotate (|v - camera| * 4096 must fit i32).
-                const PREVIEW_COORD_LIMIT: f64 = 500_000.0;
-                if tri.iter().any(|vertex| {
-                    vertex
+                    verts
                         .iter()
-                        .any(|c| !c.is_finite() || c.abs() > PREVIEW_COORD_LIMIT)
-                }) {
-                    continue;
-                }
-                let world = tri.map(|v| {
-                    psx_engine::WorldVertex::new(
-                        v[0].round() as i32,
-                        v[1].round() as i32,
-                        v[2].round() as i32,
-                    )
+                        .map(|&vertex| {
+                            let color = psxed_project::brush_light::lit_point_color(
+                                vertex,
+                                face_normal,
+                                tint,
+                                PXBSP_PREVIEW_AMBIENT,
+                                &lights,
+                                &occluders,
+                            );
+                            (color[0], color[1], color[2])
+                        })
+                        .collect::<Vec<_>>()
                 });
-                let Some(projected) =
-                    camera.project_world_quad([world[0], world[1], world[2], world[2]])
-                else {
-                    continue;
-                };
-                let p =
-                    [projected[0], projected[1], projected[2]].map(preview_projected_from_engine);
-                let uvs = match shade {
-                    FaceShade::Textured { .. } => tri.map(|v| {
-                        let raw = paraxial_uv(&plane, v);
-                        let uv = face.uv.apply([
-                            raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
-                            raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
-                        ]);
-                        (uv[0].rem_euclid(256.0) as u8, uv[1].rem_euclid(256.0) as u8)
-                    }),
-                    FaceShade::Flat { .. } => [(0, 0); 3],
-                };
-                let _ = match lit_colors {
-                    Some(colors) => emit_face_tri_lit(scratch, p, uvs, shade, colors),
-                    None => emit_face_tri(scratch, p, uvs, shade),
-                };
+                for i in 1..verts.len().saturating_sub(1) {
+                    let tri = [verts[0], verts[i], verts[i + 1]];
+                    let lit_colors = lit_polygon
+                        .as_ref()
+                        .map(|colors| [colors[0], colors[i], colors[i + 1]]);
+                    // Defense against unbounded/corrupt brushes (infinite
+                    // wedges solve to base-winding coordinates): anything
+                    // beyond the renderer's safe range would overflow the
+                    // i32 camera rotate (|v - camera| * 4096 must fit i32).
+                    const PREVIEW_COORD_LIMIT: f64 = 500_000.0;
+                    if tri.iter().any(|vertex| {
+                        vertex
+                            .iter()
+                            .any(|c| !c.is_finite() || c.abs() > PREVIEW_COORD_LIMIT)
+                    }) {
+                        continue;
+                    }
+                    let world = tri.map(|v| {
+                        psx_engine::WorldVertex::new(
+                            v[0].round() as i32,
+                            v[1].round() as i32,
+                            v[2].round() as i32,
+                        )
+                    });
+                    let Some(projected) =
+                        camera.project_world_quad([world[0], world[1], world[2], world[2]])
+                    else {
+                        continue;
+                    };
+                    let p = [projected[0], projected[1], projected[2]]
+                        .map(preview_projected_from_engine);
+                    let uvs = match shade {
+                        FaceShade::Textured { .. } => tri.map(|v| {
+                            let raw = paraxial_uv(&plane, v);
+                            let uv = face.uv.apply([
+                                raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                                raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                            ]);
+                            (uv[0].rem_euclid(256.0) as u8, uv[1].rem_euclid(256.0) as u8)
+                        }),
+                        FaceShade::Flat { .. } => [(0, 0); 3],
+                    };
+                    let _ = match lit_colors {
+                        Some(colors) => emit_face_tri_lit(scratch, p, uvs, shade, colors),
+                        None => emit_face_tri(scratch, p, uvs, shade),
+                    };
+                }
             }
         }
     }

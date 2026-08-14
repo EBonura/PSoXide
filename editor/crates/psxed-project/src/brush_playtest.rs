@@ -37,10 +37,10 @@ mod tests {
         let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
             panic!("brush project selected the grid provider");
         };
-        // Shifted from 13_008 when lit worlds gained cook-time face
-        // subdivision (lighting patches around each light reorder the
-        // surface stream even where nothing splits).
-        assert_eq!(world.bytes.len(), 12_924);
+        // Lighting subdivision preserves surface order and this room's
+        // faces are all under one lighting patch, so the packed world
+        // is byte-identical to the pre-subdivision output.
+        assert_eq!(world.bytes.len(), 13_008);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);

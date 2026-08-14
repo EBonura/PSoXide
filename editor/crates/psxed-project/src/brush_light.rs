@@ -47,17 +47,7 @@ pub fn bake_brush_vertex_lighting(
             return Err(BrushLightError::InvalidLight(index));
         }
     }
-    let brush_planes: Vec<Vec<Plane>> = occluders
-        .iter()
-        .filter(|brush| brush.solve().is_valid())
-        .map(|brush| {
-            brush
-                .faces
-                .iter()
-                .filter_map(|face| Plane::from_points(face.points))
-                .collect()
-        })
-        .collect();
+    let brush_planes = brush_occluder_planes(occluders);
 
     Ok(surfaces
         .iter()
@@ -117,18 +107,36 @@ fn bake_vertex(
     u32::from(color[0]) | (u32::from(color[1]) << 8) | (u32::from(color[2]) << 16)
 }
 
-/// Occlusion-free single-point evaluation of the vertex bake, shared
-/// with the editor preview so the viewport shows exactly what Draft
-/// cooks: ambient plus lambert-weighted linear falloff, modulated by
-/// the material tint.
+/// Face-plane chains of the solid brushes that occlude baked light,
+/// exactly as the Release bake builds them.
+pub fn brush_occluder_planes(occluders: &[Brush]) -> Vec<Vec<Plane>> {
+    occluders
+        .iter()
+        .filter(|brush| brush.solve().is_valid())
+        .map(|brush| {
+            brush
+                .faces
+                .iter()
+                .filter_map(|face| Plane::from_points(face.points))
+                .collect()
+        })
+        .collect()
+}
+
+/// Single-point evaluation of the vertex bake, shared with the editor
+/// preview so the viewport shows exactly what the cook bakes: ambient
+/// plus lambert-weighted linear falloff, shadow-tested against
+/// `occluders` (pass `&[]` for the Draft look), modulated by the
+/// material tint.
 pub fn lit_point_color(
     point: [f64; 3],
     normal: [f64; 3],
     tint: [u8; 3],
     ambient: [u8; 3],
     lights: &[BrushPointLight],
+    occluders: &[Vec<Plane>],
 ) -> [u8; 3] {
-    let packed = bake_vertex(point, normal, tint, ambient, lights, &[]);
+    let packed = bake_vertex(point, normal, tint, ambient, lights, occluders);
     [
         (packed & 0xff) as u8,
         ((packed >> 8) & 0xff) as u8,

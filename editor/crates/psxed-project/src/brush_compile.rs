@@ -159,11 +159,33 @@ pub fn subdivide_surfaces_for_lighting(
     light_spheres: &[([f64; 3], f64)],
 ) -> Vec<CompiledSurface> {
     let mut out = Vec::with_capacity(surfaces.len());
-    let mut queue = surfaces;
-    while let Some(surface) = queue.pop() {
+    for surface in surfaces {
+        let pieces =
+            subdivide_polygon_for_lighting(surface.vertices.clone(), max_extent, light_spheres);
+        for vertices in pieces {
+            let mut piece = surface.clone();
+            piece.vertices = vertices;
+            out.push(piece);
+        }
+    }
+    out
+}
+
+/// Polygon core of [`subdivide_surfaces_for_lighting`], shared with
+/// the editor preview so viewport patches match the cook's exactly
+/// (same grid, same light-range gate): that is what lets per-vertex
+/// shadows and hotspots resolve mid-face in the editor too.
+pub fn subdivide_polygon_for_lighting(
+    vertices: Vec<[f64; 3]>,
+    max_extent: f64,
+    light_spheres: &[([f64; 3], f64)],
+) -> Vec<Vec<[f64; 3]>> {
+    let mut out = Vec::new();
+    let mut queue = vec![vertices];
+    while let Some(polygon) = queue.pop() {
         let mut min = [f64::MAX; 3];
         let mut max = [f64::MIN; 3];
-        for vertex in &surface.vertices {
+        for vertex in &polygon {
             for axis in 0..3 {
                 min[axis] = min[axis].min(vertex[axis]);
                 max[axis] = max[axis].max(vertex[axis]);
@@ -172,13 +194,15 @@ pub fn subdivide_surfaces_for_lighting(
         let in_light_range = light_spheres.iter().any(|(center, radius)| {
             let mut dist_sq = 0.0;
             for axis in 0..3 {
-                let d = (min[axis] - center[axis]).max(center[axis] - max[axis]).max(0.0);
+                let d = (min[axis] - center[axis])
+                    .max(center[axis] - max[axis])
+                    .max(0.0);
                 dist_sq += d * d;
             }
             dist_sq <= radius * radius
         });
         if !in_light_range {
-            out.push(surface);
+            out.push(polygon);
             continue;
         }
         // Widest axis exceeding the limit, if any.
@@ -192,7 +216,7 @@ pub fn subdivide_surfaces_for_lighting(
             }
         }
         let Some(axis) = split_axis else {
-            out.push(surface);
+            out.push(polygon);
             continue;
         };
         // Grid-aligned cut nearest the middle, strictly inside the span.
@@ -211,21 +235,17 @@ pub fn subdivide_surfaces_for_lighting(
         b[(axis + 1) % 3] = 1;
         c[(axis + 2) % 3] = 1;
         let Some(plane) = Plane::from_points([a, b, c]) else {
-            out.push(surface);
+            out.push(polygon);
             continue;
         };
-        match split_polygon(&surface.vertices, plane) {
+        match split_polygon(&polygon, plane) {
             PolygonSplit::Split { front, back } => {
-                let mut front_piece = surface.clone();
-                front_piece.vertices = front;
-                let mut back_piece = surface;
-                back_piece.vertices = back;
-                queue.push(front_piece);
-                queue.push(back_piece);
+                queue.push(front);
+                queue.push(back);
             }
-            // Degenerate cut (numerical edge): keep the surface whole
+            // Degenerate cut (numerical edge): keep the polygon whole
             // rather than looping.
-            _ => out.push(surface),
+            _ => out.push(polygon),
         }
     }
     out
