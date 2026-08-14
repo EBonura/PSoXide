@@ -2954,6 +2954,19 @@ impl EditorWorkspace {
     /// by `open_directory` and `create_and_open_project`; not part
     /// of the public API.
     fn with_project(project_dir: PathBuf, project: ProjectDocument) -> Self {
+        // Diagnose brushes whose planes describe a different solid than
+        // their visible shell: they render normally but eat every pick
+        // ray, so clicks pass straight through. There is no safe auto
+        // repair (the data is ambiguous); surface WHICH brushes are
+        // damaged instead of leaving dead clicks a mystery.
+        let unpickable: Vec<usize> = project
+            .active_scene()
+            .brushes
+            .iter()
+            .enumerate()
+            .filter(|(_, brush)| !brush.is_pickable())
+            .map(|(index, _)| index + 1)
+            .collect();
         let saved_project_name = project.name.clone();
         let editor_camera = project.editor_camera;
         let editor_visibility = project.editor_visibility;
@@ -3131,7 +3144,20 @@ impl EditorWorkspace {
             import_retired_textures: Vec::new(),
             dirty: false,
             project_watch,
-            status: "Editor ready".to_string(),
+            status: if unpickable.is_empty() {
+                "Editor ready".to_string()
+            } else {
+                format!(
+                    "WARNING: brush{} {} damaged (clicks pass through); delete and redraw {}",
+                    if unpickable.len() == 1 { "" } else { "es" },
+                    unpickable
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if unpickable.len() == 1 { "it" } else { "them" },
+                )
+            },
             last_playtest_budget: None,
             pending_playtest_request: None,
         }

@@ -61,6 +61,19 @@ impl MouseRig {
         self.pump_with(events, egui::Modifiers::NONE);
     }
 
+    /// Public pump for tests that build the rig by hand.
+    pub(crate) fn pump_events(&mut self, events: Vec<egui::Event>) {
+        self.pump(events);
+    }
+
+    pub(crate) fn press(&mut self, pos: Pos2) {
+        self.button(pos, true);
+    }
+
+    pub(crate) fn release(&mut self, pos: Pos2) {
+        self.button(pos, false);
+    }
+
     fn pump_with(&mut self, events: Vec<egui::Event>, modifiers: egui::Modifiers) {
         self.time += 1.0 / 60.0;
         let input = egui::RawInput {
@@ -622,5 +635,207 @@ fn mouse_face_move_translates_off_corner_authored_planes() {
     assert!(
         spread.1 - spread.0 <= 1.0,
         "corners lifted EQUALLY (no tilt), ys {top_ys:?}"
+    );
+}
+
+/// Diagnostic reproduction of the live report: a Sanctum-scale wedge
+/// (slanted roof), the front WALL face selected, camera facing the
+/// wall, Grid 64. Every Move axis must actually move the face. On
+/// failure the message says which stage died: the press never started
+/// a gesture, the input mapped to zero, or the preview was refused.
+#[test]
+fn mouse_wall_face_move_works_on_every_axis_at_sanctum_scale() {
+    for axis in 0..3 {
+        let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [2048, 1024, 2048]);
+        // Slant the roof like the Ashen Sanctum boundary wedges.
+        brush.faces[5] = psxed_project::brush::BrushFace::from_points([
+            [0, 512, 2048],
+            [2048, 512, 2048],
+            [2048, 1024, 0],
+        ]);
+        assert!(brush.solve().is_valid());
+        let mut project = ProjectDocument::new("rig-wall-face");
+        project.active_scene_mut().brushes.push(brush);
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("rig-wall-face"), project);
+        workspace.active_workspace = WorkspaceView::Room;
+        workspace.active_tool = ViewTool::Select;
+        workspace.view_2d = false;
+        workspace.snap_units = 64;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_initialized = true;
+        workspace.camera_rig.free_position = [700, 900, -2400];
+        let (yaw, pitch) =
+            camera_angles_to_look_at([700, 900, -2400], [1024, 500, 400]).unwrap();
+        workspace.camera_rig.free_yaw = yaw;
+        workspace.camera_rig.free_pitch = pitch;
+
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture(
+            "wall-face-rig",
+            egui::ColorImage::new([1, 1], egui::Color32::BLACK),
+            egui::TextureOptions::NEAREST,
+        );
+        let viewport = EditorViewport3dPresentation::edit(texture.id(), Vec::new());
+        let mut rig = MouseRig {
+            workspace,
+            ctx,
+            viewport,
+            time: 0.0,
+            _texture: texture,
+        };
+        rig.pump_events(vec![]);
+
+        let base = rig.brush();
+        rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+        rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+        // Click the front wall (z = 0 plane, its centre).
+        let wall = rig.world_to_screen([1024.0, 500.0, 0.0]);
+        rig.click(wall);
+        if !matches!(
+            rig.workspace.selected_brush_elements.as_slice(),
+            [BrushElement::Face(0)]
+        ) {
+            let target = rig.workspace.resolve_viewport_3d_pointer_target(
+                RIG_VIEWPORT,
+                wall,
+                None,
+                true,
+            );
+            let nearest =
+                rig.workspace
+                    .pick_brush_face_nearest_for_selection_3d(RIG_VIEWPORT, wall);
+            let handle = rig.workspace.pick_brush_handle_3d(RIG_VIEWPORT, wall);
+            panic!(
+                "axis {axis}: wall face not selected. elements {:?}, brush {:?},                  pointer_target {:?}, nearest_face {:?}, handle {:?}",
+                rig.workspace.selected_brush_elements,
+                rig.workspace.selected_brush,
+                target,
+                nearest.map(|(brush, face, _)| (brush, face)),
+                handle.map(|(brush, _)| brush),
+            );
+        }
+
+        let (grab, to) = rig.gizmo_drag_vector(axis);
+        // Press + first move: inspect the gesture state mid-drag.
+        rig.move_to(grab);
+        rig.press(grab);
+        rig.move_to(grab + (to - grab) * 0.5);
+        let gesture = rig.workspace.brush_vertex_drag.clone();
+        rig.move_to(to);
+        let mid_applied = rig
+            .workspace
+            .brush_vertex_drag
+            .as_ref()
+            .map(|drag| drag.applied);
+        rig.release(to);
+
+        let after = rig.brush();
+        assert!(
+            gesture.is_some(),
+            "axis {axis}: the press never started the gizmo drag (routing/pick died)"
+        );
+        assert!(
+            mid_applied.is_some_and(|applied| applied != [0; 3]),
+            "axis {axis}: drag ran but applied stayed zero (input mapping or preview refusal), \
+             gesture mask {:?}, targets {}, faces {:?}",
+            gesture.as_ref().map(|drag| drag.axis_mask),
+            gesture.as_ref().map(|drag| drag.targets.len()).unwrap_or(0),
+            gesture.as_ref().map(|drag| drag.faces.clone()),
+        );
+        assert_ne!(after, base, "axis {axis}: face did not move");
+    }
+}
+
+/// Project a world point to the screen, cast the editor's pick ray back
+/// through that pixel, and measure how far the ray passes from the
+/// original point. Draw/pick coherence is the foundation every click
+/// stands on; any real distance here breaks selection at scale.
+#[test]
+fn projection_and_pick_ray_agree_at_sanctum_scale() {
+    let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [2048, 1024, 2048]);
+    brush.faces[5] = psxed_project::brush::BrushFace::from_points([
+        [0, 512, 2048],
+        [2048, 512, 2048],
+        [2048, 1024, 0],
+    ]);
+    let mut project = ProjectDocument::new("rig-ray-roundtrip");
+    project.active_scene_mut().brushes.push(brush);
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("rig-ray-roundtrip"), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.view_2d = false;
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [700, 900, -2400];
+    let (yaw, pitch) = camera_angles_to_look_at([700, 900, -2400], [1024, 500, 400]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+
+    for world in [
+        [1024.0f64, 500.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [2048.0, 1024.0, 0.0],
+        [1024.0, 700.0, 1024.0],
+    ] {
+        let Some(screen) = workspace.project_brush_point_3d(RIG_VIEWPORT, world) else {
+            continue;
+        };
+        let (origin, dir) = workspace
+            .camera_ray_for_pointer(RIG_VIEWPORT, screen)
+            .expect("pick ray exists");
+        // Distance from `world` to the ray line.
+        let to_point = [
+            world[0] as f32 - origin[0],
+            world[1] as f32 - origin[1],
+            world[2] as f32 - origin[2],
+        ];
+        let t = (to_point[0] * dir[0] + to_point[1] * dir[1] + to_point[2] * dir[2])
+            / (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).max(f32::EPSILON);
+        let closest = [
+            origin[0] + dir[0] * t - world[0] as f32,
+            origin[1] + dir[1] * t - world[1] as f32,
+            origin[2] + dir[2] * t - world[2] as f32,
+        ];
+        let miss =
+            (closest[0].powi(2) + closest[1].powi(2) + closest[2].powi(2)).sqrt();
+        assert!(
+            miss <= 8.0,
+            "pick ray misses the drawn point {world:?} by {miss:.1} world units \
+             (screen {screen:?}); draw and pick disagree"
+        );
+    }
+}
+
+
+/// A brush whose planes describe a different solid than its visible
+/// shell renders normally but eats every pick ray: clicks pass through.
+/// The editor must diagnose it on load and warn WHICH brush is damaged.
+#[test]
+fn unpickable_brushes_are_diagnosed_on_load() {
+    // A wedge with one plane re-authored inside-out: still "valid",
+    // still renders a shell, but rays at its faces miss.
+    let mut bad = psxed_project::brush::Brush::cuboid([0, 0, 0], [2048, 1024, 2048]);
+    bad.faces[5] = psxed_project::brush::BrushFace::from_points([
+        [0, 1024, 0],
+        [2048, 1024, 0],
+        [2048, 512, 2048],
+    ]);
+    assert!(bad.solve().is_valid(), "renders as a solid");
+    assert!(!bad.is_pickable(), "diagnosed as unpickable");
+    assert!(
+        bad.raycast([1024.0, 500.0, -2400.0], [0.0, 0.0, 1.0]).is_none(),
+        "the live symptom: a ray straight at the front wall misses"
+    );
+    // A healthy brush passes.
+    assert!(psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]).is_pickable());
+
+    let mut project = ProjectDocument::new("winding-diagnosis");
+    project.active_scene_mut().brushes.push(bad);
+    let workspace = EditorWorkspace::with_project(test_temp_dir("winding-diagnosis"), project);
+    assert!(
+        workspace.status.contains("damaged"),
+        "load surfaces the damage, status: {}",
+        workspace.status
     );
 }
