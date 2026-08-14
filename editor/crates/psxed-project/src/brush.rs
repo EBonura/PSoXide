@@ -64,8 +64,8 @@ impl FaceUv {
     /// alone. Re-anchoring solves for the offset, so it needs the rest of
     /// the mapping separately.
     pub fn apply_linear(&self, uv: [f64; 2]) -> [f64; 2] {
-        let sx = f64::from(self.scale_q8[0].max(1)) / 256.0;
-        let sy = f64::from(self.scale_q8[1].max(1)) / 256.0;
+        let sx = axis_scale_q8(self.scale_q8[0]);
+        let sy = axis_scale_q8(self.scale_q8[1]);
         let scaled = [uv[0] / sx, uv[1] / sy];
         let radians = f64::from(self.rotation_deg).to_radians();
         let (sin, cos) = radians.sin_cos();
@@ -106,6 +106,12 @@ impl FaceUv {
             clamp_offset_texels(target[1] - linear[1] + slide_texels[1]),
         ];
     }
+}
+
+/// Q8 axis scale to a factor. Negative mirrors the axis (Flip H/V);
+/// zero is treated as identity so damaged data cannot divide by zero.
+fn axis_scale_q8(q8: i16) -> f64 {
+    if q8 == 0 { 1.0 } else { f64::from(q8) / 256.0 }
 }
 
 /// Offsets are stored in an `i16`; a re-anchor of a far-away face at a

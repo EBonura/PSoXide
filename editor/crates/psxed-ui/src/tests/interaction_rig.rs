@@ -270,6 +270,29 @@ impl MouseRig {
         );
     }
 
+    pub(crate) fn alt_click(&mut self, pos: Pos2) {
+        let alt = egui::Modifiers::ALT;
+        self.pump_with(vec![egui::Event::PointerMoved(pos)], alt);
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: alt,
+            }],
+            alt,
+        );
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos: pos + Vec2::new(1.0, 0.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: alt,
+            }],
+            alt,
+        );
+    }
+
     pub(crate) fn has_vertex(&self, expect: [f64; 3]) -> bool {
         crate::workspace::brush_elements::unique_vertices(&self.brush().solve())
             .iter()
@@ -1381,4 +1404,181 @@ fn subtract_on_a_disjoint_cutter_reports_and_keeps_everything() {
     rig.workspace.selected_brushes = vec![1];
     assert!(!rig.workspace.csg_subtract_selected());
     assert_eq!(rig.workspace.project.active_scene().brushes.len(), 2);
+}
+
+fn top_face_index(brush: &psxed_project::brush::Brush) -> usize {
+    brush
+        .faces
+        .iter()
+        .position(|face| {
+            let plane = psxed_project::brush::Plane::from_points(face.points).expect("plane");
+            let (normal, _) = psxed_project::brush_compile::normalized_plane(plane);
+            normal[1] > 0.9
+        })
+        .expect("top face")
+}
+
+fn applied_face_uvs(
+    brush: &psxed_project::brush::Brush,
+    face_index: usize,
+) -> Vec<[f64; 2]> {
+    use psxed_project::brush::{paraxial_uv, Plane, BRUSH_UV_UNITS_PER_TEXEL};
+    let solved = brush.solve();
+    let polygon = solved.polygons[face_index].as_ref().expect("polygon");
+    let plane = Plane::from_points(brush.faces[face_index].points).expect("plane");
+    let uv = brush.faces[face_index].uv;
+    polygon
+        .verts
+        .iter()
+        .map(|&vertex| {
+            let raw = paraxial_uv(&plane, vertex);
+            uv.apply([
+                raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+            ])
+        })
+        .collect()
+}
+
+#[test]
+fn uv_align_justifies_fits_and_flips_in_place() {
+    let mut rig = MouseRig::single_cube("uv-align");
+    let face = top_face_index(&rig.workspace.project.active_scene().brushes[0]);
+    rig.workspace.selected_brush = Some(0);
+    rig.workspace.selected_brushes = vec![0];
+    rig.workspace.selected_brush_face = Some(face);
+    rig.workspace.project.active_scene_mut().brushes[0].faces[face].uv.offset_texels = [37, -12];
+
+    rig.workspace.justify_selected_face_uv(crate::workspace::tools::UvAlign::Left);
+    let applied = applied_face_uvs(&rig.workspace.project.active_scene().brushes[0], face);
+    let min_u = applied.iter().map(|uv| uv[0]).fold(f64::MAX, f64::min);
+    assert!(min_u.abs() <= 0.51, "justify left pins the seam, got {min_u}");
+
+    rig.workspace.justify_selected_face_uv(crate::workspace::tools::UvAlign::Fit);
+    let applied = applied_face_uvs(&rig.workspace.project.active_scene().brushes[0], face);
+    for axis in 0..2 {
+        let min = applied.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
+        let max = applied.iter().map(|uv| uv[axis]).fold(f64::MIN, f64::max);
+        assert!(min.abs() <= 0.51, "fit pins the min corner, got {min}");
+        assert!(
+            (max - 64.0).abs() <= 2.0,
+            "fit spans one 64-texel repeat, got {max}"
+        );
+    }
+
+    let before = rig.workspace.project.active_scene().brushes[0].faces[face].uv;
+    let anchor = rig.workspace.project.active_scene().brushes[0]
+        .face_uv_anchor(face)
+        .expect("anchor");
+    let anchored_before = before.apply(anchor);
+    rig.workspace.flip_selected_face_uv(0);
+    let after = rig.workspace.project.active_scene().brushes[0].faces[face].uv;
+    assert_eq!(after.scale_q8[0], -before.scale_q8[0]);
+    let anchored_after = after.apply(anchor);
+    assert!(
+        (anchored_after[0] - anchored_before[0]).abs() <= 1.0,
+        "flip mirrors about the anchor"
+    );
+}
+
+#[test]
+fn alt_click_paints_the_selected_faces_attributes() {
+    let mut rig = MouseRig::single_cube("uv-eyedropper");
+    rig.workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [640, 0, 0],
+            [1152, 256, 256],
+        ));
+    let material = rig.workspace.project.add_resource(
+        "Probe Material",
+        psxed_project::ResourceData::Material(psxed_project::MaterialResource::opaque(None)),
+    );
+    let source_face = top_face_index(&rig.workspace.project.active_scene().brushes[0]);
+    {
+        let face = &mut rig.workspace.project.active_scene_mut().brushes[0].faces[source_face];
+        face.material = Some(material);
+        face.uv.offset_texels = [11, 7];
+    }
+    rig.workspace.set_brush_edit_mode(crate::BrushEditMode::Face);
+    rig.workspace.selected_brush = Some(0);
+    rig.workspace.selected_brushes = vec![0];
+    rig.workspace.selected_brush_face = Some(source_face);
+
+    // The second cube sits right of the first; probe for a screen point
+    // that picks it rather than guessing the projection.
+    let mut target = None;
+    'scan: for dy in (-260..260).step_by(20) {
+        for dx in (-380..380).step_by(20) {
+            let pos = RIG_VIEWPORT.center() + Vec2::new(dx as f32, dy as f32);
+            if rig
+                .workspace
+                .pick_brush_face_nearest_for_selection_3d(RIG_VIEWPORT, pos)
+                .is_some_and(|(brush, _, _)| brush == 1)
+            {
+                target = Some(pos);
+                break 'scan;
+            }
+        }
+    }
+    let target = target.expect("a screen point over the second cube");
+    rig.alt_click(target);
+    let painted = rig.workspace.project.active_scene().brushes[1]
+        .faces
+        .iter()
+        .any(|face| face.material == Some(material) && face.uv.offset_texels == [11, 7]);
+    assert!(painted, "alt-click paints material and UV onto the hit face");
+    assert_eq!(
+        rig.workspace.selected_brush,
+        Some(0),
+        "the eyedropper never moves the selection"
+    );
+    rig.workspace.do_undo();
+    let reverted = rig.workspace.project.active_scene().brushes[1]
+        .faces
+        .iter()
+        .all(|face| face.material.is_none());
+    assert!(reverted);
+}
+
+#[test]
+fn select_and_replace_material_uses() {
+    let mut rig = MouseRig::single_cube("material-uses");
+    rig.workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [640, 0, 0],
+            [896, 256, 256],
+        ));
+    let from = rig.workspace.project.add_resource(
+        "From Material",
+        psxed_project::ResourceData::Material(psxed_project::MaterialResource::opaque(None)),
+    );
+    let to = rig.workspace.project.add_resource(
+        "To Material",
+        psxed_project::ResourceData::Material(psxed_project::MaterialResource::opaque(None)),
+    );
+    rig.workspace.project.active_scene_mut().brushes[0].faces[0].material = Some(from);
+    rig.workspace.project.active_scene_mut().brushes[1].faces[2].material = Some(from);
+    rig.workspace.project.active_scene_mut().brushes[1].faces[3].material = Some(to);
+
+    assert_eq!(rig.workspace.select_brushes_using_material(from), 2);
+    assert_eq!(rig.workspace.selected_brushes.len(), 2);
+
+    assert_eq!(rig.workspace.replace_material_uses(from, to), 2);
+    let scene = rig.workspace.project.active_scene();
+    assert!(scene
+        .brushes
+        .iter()
+        .flat_map(|brush| brush.faces.iter())
+        .all(|face| face.material != Some(from)));
+    rig.workspace.do_undo();
+    assert_eq!(
+        rig.workspace.project.active_scene().brushes[0].faces[0].material,
+        Some(from)
+    );
 }
