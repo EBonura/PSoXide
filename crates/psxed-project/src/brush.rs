@@ -47,10 +47,8 @@ impl FaceUv {
             with_offset[0] - f64::from(self.offset_texels[0]),
             with_offset[1] - f64::from(self.offset_texels[1]),
         ];
-        self.offset_texels[0] =
-            (f64::from(self.offset_texels[0]) - linear[0]).round() as i16;
-        self.offset_texels[1] =
-            (f64::from(self.offset_texels[1]) - linear[1]).round() as i16;
+        self.offset_texels[0] = (f64::from(self.offset_texels[0]) - linear[0]).round() as i16;
+        self.offset_texels[1] = (f64::from(self.offset_texels[1]) - linear[1]).round() as i16;
     }
 
     /// Apply to a raw paraxial texel coordinate.
@@ -284,7 +282,6 @@ impl SolvedBrush {
     pub fn is_valid(&self) -> bool {
         self.polygons.iter().flatten().count() >= 4
     }
-
 
     /// Whether every solved coordinate stays within `limit` world units
     /// of the origin. The bounded-solid check `is_valid` cannot provide.
@@ -539,7 +536,9 @@ impl Brush {
     pub fn cuboid_from_corners(a: [i32; 3], b: [i32; 3]) -> Option<Self> {
         let min = [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])];
         let max = [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])];
-        (0..3).all(|axis| min[axis] < max[axis]).then(|| Self::cuboid(min, max))
+        (0..3)
+            .all(|axis| min[axis] < max[axis])
+            .then(|| Self::cuboid(min, max))
     }
 
     /// Snap every authored point to a grid step (kept positive; the
@@ -602,9 +601,7 @@ impl Brush {
             for point in &mut face.points {
                 let hit = whole_face
                     || targets.iter().any(|target| {
-                        (0..3).all(|axis| {
-                            (f64::from(point[axis]) - target[axis]).abs() <= epsilon
-                        })
+                        (0..3).all(|axis| (f64::from(point[axis]) - target[axis]).abs() <= epsilon)
                     });
                 if !hit {
                     continue;
@@ -662,9 +659,7 @@ impl Brush {
                 .is_some_and(|polygon| {
                     face.points.iter().all(|point| {
                         polygon.verts.iter().any(|vertex| {
-                            (0..3).all(|axis| {
-                                (vertex[axis] - f64::from(point[axis])).abs() <= 0.5
-                            })
+                            (0..3).all(|axis| (vertex[axis] - f64::from(point[axis])).abs() <= 0.5)
                         })
                     })
                 })
@@ -702,8 +697,7 @@ impl Brush {
                         u[0] * v[1] - u[1] * v[0],
                     ];
                     let area =
-                        (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2])
-                            .sqrt();
+                        (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
                     if area > best.2 {
                         best = (i, j, area);
                     }
@@ -717,7 +711,11 @@ impl Brush {
                 ]
             };
             let mut candidate = BrushFace {
-                points: [round(a), round(polygon.verts[best.0]), round(polygon.verts[best.1])],
+                points: [
+                    round(a),
+                    round(polygon.verts[best.0]),
+                    round(polygon.verts[best.1]),
+                ],
                 material: source.material,
                 uv: source.uv,
             };
@@ -916,9 +914,7 @@ impl Brush {
             for point in &mut face.points {
                 let hit = whole_face
                     || targets.iter().any(|target| {
-                        (0..3).all(|axis| {
-                            (f64::from(point[axis]) - target[axis]).abs() <= epsilon
-                        })
+                        (0..3).all(|axis| (f64::from(point[axis]) - target[axis]).abs() <= epsilon)
                     });
                 if hit {
                     for axis in 0..3 {
@@ -1060,6 +1056,29 @@ fn signed_dominant_axis(normal: [i64; 3]) -> (usize, bool) {
 /// (matches the grid default: 64 texels across a 1024-unit sector).
 pub const BRUSH_UV_UNITS_PER_TEXEL: f64 = 16.0;
 
+/// Shift a face's applied texel UVs by whole texture repeats so the
+/// whole set fits the GPU's u8 window without straddling a 256 wrap.
+/// A straddling polygon packs per-vertex wrapped coordinates and
+/// rasterizes a backwards texture gradient; power-of-two repeat sizes
+/// make the shift sampling-identical. Axes whose span cannot fit the
+/// window are left alone (the historic wrap behaviour).
+pub fn rebase_texel_uvs(uvs: &mut [[f64; 2]], repeat: [f64; 2]) {
+    for axis in 0..2 {
+        let repeat = repeat[axis].max(1.0);
+        let min = uvs.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
+        let max = uvs.iter().map(|uv| uv[axis]).fold(f64::MIN, f64::max);
+        if !min.is_finite() || !max.is_finite() {
+            continue;
+        }
+        let shift = (min / repeat).floor() * repeat;
+        if max - shift <= 255.0 {
+            for uv in uvs.iter_mut() {
+                uv[axis] -= shift;
+            }
+        }
+    }
+}
+
 /// Paraxial (dominant-axis) texture projection of a world position for a
 /// face with the given plane: the Quake-style default mapping. Returns
 /// texel-space (u, v) before per-face offset/rotation/scale.
@@ -1182,7 +1201,13 @@ mod tests {
             .iter()
             .flatten()
             .flat_map(|p| p.verts.iter())
-            .map(|v| [v[0].round() as i64, v[1].round() as i64, v[2].round() as i64])
+            .map(|v| {
+                [
+                    v[0].round() as i64,
+                    v[1].round() as i64,
+                    v[2].round() as i64,
+                ]
+            })
             .collect();
         verts.sort_unstable();
         verts.dedup();
@@ -1241,7 +1266,11 @@ mod tests {
     fn redundant_face_is_dropped_not_fatal() {
         let mut brush = Brush::cuboid([0, 0, 0], [64, 64, 64]);
         // A plane far outside the cube contributes no polygon.
-        brush.faces.push(BrushFace::from_points([[0, 200, 0], [0, 200, 64], [64, 200, 64]]));
+        brush.faces.push(BrushFace::from_points([
+            [0, 200, 0],
+            [0, 200, 64],
+            [64, 200, 64],
+        ]));
         let solved = brush.solve();
         assert!(solved.is_valid());
         assert!(solved.polygons[6].is_none());
@@ -1310,11 +1339,17 @@ mod tests {
         assert!((t - 0.5).abs() < 1e-9);
         assert_eq!(face, 2);
         // Pointing away misses.
-        assert!(brush.raycast([-36.0, 32.0, 32.0], [-72.0, 0.0, 0.0]).is_none());
+        assert!(brush
+            .raycast([-36.0, 32.0, 32.0], [-72.0, 0.0, 0.0])
+            .is_none());
         // Parallel ray outside a slab misses.
-        assert!(brush.raycast([-36.0, 200.0, 32.0], [72.0, 0.0, 0.0]).is_none());
+        assert!(brush
+            .raycast([-36.0, 200.0, 32.0], [72.0, 0.0, 0.0])
+            .is_none());
         // Origin inside: entry is behind the origin -> no hit (t >= 0 rule).
-        assert!(brush.raycast([32.0, 32.0, 32.0], [72.0, 0.0, 0.0]).is_none());
+        assert!(brush
+            .raycast([32.0, 32.0, 32.0], [72.0, 0.0, 0.0])
+            .is_none());
     }
 
     #[test]
@@ -1376,7 +1411,9 @@ mod tests {
             assert!(outside, "cavity centre must be outside every slab");
         }
         // Too-thin brushes refuse to hollow.
-        assert!(Brush::cuboid([0, 0, 0], [30, 128, 256]).hollow(16).is_none());
+        assert!(Brush::cuboid([0, 0, 0], [30, 128, 256])
+            .hollow(16)
+            .is_none());
     }
 
     #[test]
