@@ -4,12 +4,12 @@ use super::{
     material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
     preview_player_reference, preview_projected_triangle_hw_safe, preview_scratch,
     preview_shadow_radius, preview_static_model_reference, preview_vertices_in_front, push_clear,
-    push_tri, push_tri_colors, push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
-    shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
-    wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
-    GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
-    PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
-    PREVIEW_WALL_UVS,
+    push_tri, push_tri_colors, push_wall_face, room_depth_slot, rotate_image_prop_local,
+    setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline,
+    wall_material_sidedness_for_edge, wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot,
+    PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
+    PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
+    PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS,
 };
 use psx_engine::{Mat3I16, PointLightSample, WorldVertex};
 use psx_gpu::material::BlendMode;
@@ -198,6 +198,7 @@ fn brush_vertex_lighting_matches_the_draft_bake() {
         [128; 3],
         [32; 3],
         std::slice::from_ref(&light),
+        &[],
     );
     let far = psxed_project::brush_light::lit_point_color(
         [1150.0, 0.0, 0.0],
@@ -205,10 +206,31 @@ fn brush_vertex_lighting_matches_the_draft_bake() {
         [128; 3],
         [32; 3],
         std::slice::from_ref(&light),
+        &[],
     );
     assert!(
         near[0] > far[0] + 40,
         "lambert + falloff must grade across a face: near {near:?}, far {far:?}"
+    );
+    // A solid slab between the light and the point kills the light,
+    // leaving the vertex on pure ambient: the preview's shadows.
+    let blocker =
+        psxed_project::brush_light::brush_occluder_planes(&[psxed_project::brush::Brush::cuboid(
+            [-512, 180, -512],
+            [512, 240, 512],
+        )]);
+    let shadowed = psxed_project::brush_light::lit_point_color(
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [128; 3],
+        [32; 3],
+        std::slice::from_ref(&light),
+        &blocker,
+    );
+    assert_eq!(
+        shadowed,
+        [32, 32, 32],
+        "an occluded vertex must bake flat ambient"
     );
 
     let mut scratch = preview_scratch()
@@ -498,7 +520,10 @@ fn bsp_preview_lights_use_world_units_and_sector_scaled_radius() {
     project
         .active_scene_mut()
         .brushes
-        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [256, 256, 256]));
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [256, 256, 256],
+        ));
     let scene = project.active_scene_mut();
     scene.add_node(
         psxed_project::NodeId::ROOT,
