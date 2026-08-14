@@ -443,6 +443,33 @@ pub(super) fn collect_preview_lights(
 /// Scene-wide light samples for world-space (BSP) geometry: no room
 /// filter, positions are raw world units, and the radius scales by the
 /// World sector size, matching the brush bake's `scene_lights`.
+/// Scene lights in the cook's bake form (f64 world units), so the
+/// preview's per-vertex brush lighting runs the exact Draft-bake
+/// math instead of an integer approximation of it.
+pub(super) fn collect_bsp_preview_bake_lights(
+    project: &ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+) -> Vec<psxed_project::brush_light::BrushPointLight> {
+    let scene = project.active_scene();
+    let radius_units = scene
+        .world_sector_size_for_node(scene.root)
+        .unwrap_or(1024)
+        .max(1) as f64;
+    let mut out = Vec::new();
+    for light in preview_lights(scene, hidden_scene_nodes) {
+        if light.radius <= 0.0 || !light.intensity.is_finite() || light.intensity < 0.0 {
+            continue;
+        }
+        out.push(psxed_project::brush_light::BrushPointLight {
+            position: light.transform.translation.map(f64::from),
+            radius: f64::from(light.radius) * radius_units,
+            intensity_q8: (light.intensity * 256.0).clamp(0.0, f32::from(u16::MAX)) as u16,
+            color: light.color,
+        });
+    }
+    out
+}
+
 pub(super) fn collect_bsp_preview_lights(
     project: &ProjectDocument,
     hidden_scene_nodes: &HashSet<NodeId>,

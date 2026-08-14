@@ -117,6 +117,25 @@ fn bake_vertex(
     u32::from(color[0]) | (u32::from(color[1]) << 8) | (u32::from(color[2]) << 16)
 }
 
+/// Occlusion-free single-point evaluation of the vertex bake, shared
+/// with the editor preview so the viewport shows exactly what Draft
+/// cooks: ambient plus lambert-weighted linear falloff, modulated by
+/// the material tint.
+pub fn lit_point_color(
+    point: [f64; 3],
+    normal: [f64; 3],
+    tint: [u8; 3],
+    ambient: [u8; 3],
+    lights: &[BrushPointLight],
+) -> [u8; 3] {
+    let packed = bake_vertex(point, normal, tint, ambient, lights, &[]);
+    [
+        (packed & 0xff) as u8,
+        ((packed >> 8) & 0xff) as u8,
+        ((packed >> 16) & 0xff) as u8,
+    ]
+}
+
 fn modulated(tint: u8, light: f64) -> u8 {
     (f64::from(tint) * light.clamp(0.0, 255.0) / LIGHTING_NEUTRAL)
         .round()

@@ -234,10 +234,12 @@ pub(crate) fn push_far_vista_textured_quad(
         ),
         (0, texture_height.saturating_sub(1)),
     ];
+    let vista_colors = [(tint[0], tint[1], tint[2]); 3];
     let _ = push_textured_material_tri(
         scratch,
         [projected[0], projected[1], projected[2]],
         [uvs[0], uvs[1], uvs[2]],
+        vista_colors,
         material,
         PREVIEW_FAR_VISTA_SLOT,
     );
@@ -245,6 +247,7 @@ pub(crate) fn push_far_vista_textured_quad(
         scratch,
         [projected[0], projected[2], projected[3]],
         [uvs[0], uvs[2], uvs[3]],
+        vista_colors,
         material,
         PREVIEW_FAR_VISTA_SLOT,
     );
