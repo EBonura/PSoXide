@@ -1104,16 +1104,29 @@ fn arbitrary_plane_face_handle_drags_along_its_normal_and_undoes_once() {
     wedge.faces[5] =
         psxed_project::brush::BrushFace::from_points([[0, 128, 0], [0, 128, 128], [128, 0, 128]]);
     assert!(wedge.solve().is_valid());
-    let base = wedge.clone();
     let (mut workspace, rect) = handle_test_workspace(wedge);
     workspace.brush_edit_mode = BrushEditMode::Face;
     workspace.selection_mode = SelectionMode::Face;
-    let (center, _) = EditorWorkspace::face_center_and_normal(&base, 5).unwrap();
+    // Load-time normalization prunes the wedge's dead plane, shifting
+    // indices: find the slant (the one non-axis-aligned plane).
+    let base = workspace.project.active_scene().brushes[0].clone();
+    let slant = base
+        .faces
+        .iter()
+        .position(|face| {
+            let normal = psxed_project::brush::Plane::from_points(face.points)
+                .unwrap()
+                .normal;
+            (0..3).filter(|&axis| normal[axis] != 0).count() >= 2
+        })
+        .expect("wedge keeps its slanted plane");
+    let (center, _) = EditorWorkspace::face_center_and_normal(&base, slant).unwrap();
     let pointer = workspace.project_brush_point_3d(rect, center).unwrap();
-    assert!(matches!(
-        workspace.pick_brush_handle_3d(rect, pointer),
-        Some((0, BrushHandle3d::Face { face: 5, .. }))
-    ));
+    let picked = workspace.pick_brush_handle_3d(rect, pointer);
+    assert!(
+        matches!(picked, Some((0, BrushHandle3d::Face { face, .. })) if face == slant),
+        "picked {picked:?}, expected face {slant}"
+    );
 
     let mut frame = ToolFrame3d {
         rect,
@@ -1142,10 +1155,10 @@ fn arbitrary_plane_face_handle_drags_along_its_normal_and_undoes_once() {
     let moved = workspace.project.active_scene().brushes[0].clone();
     assert!(moved.solve().is_valid());
     assert_eq!(
-        psxed_project::brush::Plane::from_points(moved.faces[5].points)
+        psxed_project::brush::Plane::from_points(moved.faces[slant].points)
             .unwrap()
             .normal,
-        psxed_project::brush::Plane::from_points(base.faces[5].points)
+        psxed_project::brush::Plane::from_points(base.faces[slant].points)
             .unwrap()
             .normal
     );
@@ -3756,25 +3769,44 @@ fn off_corner_authored_plane_face_handle_drags_along_its_normal_and_undoes_once(
         [192, -64, 128],
     ]);
     assert!(wedge.solve().is_valid());
-    // Fixture precondition: no authored plane point coincides with a solved
-    // polygon corner.
-    let corners = solved_unique_verts(&wedge);
-    for point in wedge.faces[5].points {
+    let far_points: [[i32; 3]; 3] = [[-64, 192, 0], [-64, 192, 128], [192, -64, 128]];
+    let (mut workspace, rect) = handle_test_workspace(wedge);
+    workspace.brush_edit_mode = BrushEditMode::Face;
+    workspace.selection_mode = SelectionMode::Face;
+    // Load-time normalization prunes the wedge's dead plane, shifting
+    // indices: find the slant (the one non-axis-aligned plane).
+    let loaded = workspace.project.active_scene().brushes[0].clone();
+    let slant = loaded
+        .faces
+        .iter()
+        .position(|face| {
+            let normal = psxed_project::brush::Plane::from_points(face.points)
+                .unwrap()
+                .normal;
+            (0..3).filter(|&axis| normal[axis] != 0).count() >= 2
+        })
+        .expect("wedge keeps its slanted plane");
+    // Off-corner authored points can only exist mid-session now (load
+    // normalizes them away), which is exactly how gestures meet them:
+    // re-author the slant with the far triple in place.
+    workspace.project.active_scene_mut().brushes[0].faces[slant].points = far_points;
+    let base = workspace.project.active_scene().brushes[0].clone();
+    // Fixture precondition: no authored plane point coincides with a
+    // solved polygon corner.
+    let corners = solved_unique_verts(&base);
+    for point in base.faces[slant].points {
         assert!(
             !corners.contains(&point.map(i64::from)),
             "authored point {point:?} must sit off the solved polygon"
         );
     }
-    let base = wedge.clone();
-    let (mut workspace, rect) = handle_test_workspace(wedge);
-    workspace.brush_edit_mode = BrushEditMode::Face;
-    workspace.selection_mode = SelectionMode::Face;
-    let (center, _) = EditorWorkspace::face_center_and_normal(&base, 5).unwrap();
+    let (center, _) = EditorWorkspace::face_center_and_normal(&base, slant).unwrap();
     let pointer = workspace.project_brush_point_3d(rect, center).unwrap();
-    assert!(matches!(
-        workspace.pick_brush_handle_3d(rect, pointer),
-        Some((0, BrushHandle3d::Face { face: 5, .. }))
-    ));
+    let picked = workspace.pick_brush_handle_3d(rect, pointer);
+    assert!(
+        matches!(picked, Some((0, BrushHandle3d::Face { face, .. })) if face == slant),
+        "picked {picked:?}, expected face {slant}"
+    );
 
     let mut frame = ToolFrame3d {
         rect,
@@ -3799,10 +3831,10 @@ fn off_corner_authored_plane_face_handle_drags_along_its_normal_and_undoes_once(
     let moved = workspace.project.active_scene().brushes[0].clone();
     assert!(moved.solve().is_valid());
     assert_eq!(
-        psxed_project::brush::Plane::from_points(moved.faces[5].points)
+        psxed_project::brush::Plane::from_points(moved.faces[slant].points)
             .unwrap()
             .normal,
-        psxed_project::brush::Plane::from_points(base.faces[5].points)
+        psxed_project::brush::Plane::from_points(base.faces[slant].points)
             .unwrap()
             .normal,
         "drag along the normal must preserve the authored plane orientation"
