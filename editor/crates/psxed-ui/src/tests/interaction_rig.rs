@@ -1277,3 +1277,39 @@ fn uv_canvas_scale_drag_keeps_the_texture_anchored() {
         "release frame must close the UV transaction"
     );
 }
+
+/// `.` must frame the brush selected through the SELECT tool: framing
+/// only consulted the brush under the Brush tool, so the unified
+/// Select workflow framed the room instead.
+#[test]
+fn period_frames_the_brush_selected_through_select() {
+    let mut rig = MouseRig::single_cube("rig-frame-brush");
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    assert_eq!(rig.workspace.active_tool, ViewTool::Select);
+    // Send the camera somewhere unrelated so framing has work to do.
+    rig.workspace.camera_rig.target = [90_000, 0, 90_000];
+    // The `.` handler lives in the workspace-wide shortcut pass (the
+    // rig pumps only the viewport body), so drive it directly.
+    rig.workspace.frame_viewport();
+    assert_eq!(
+        rig.workspace.camera_rig.target,
+        [256, 128, 128],
+        "framing must target the selected brush's centre"
+    );
+
+    // A multi-selection frames the union of every selected brush.
+    rig.workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([1024, 0, 0], [1536, 256, 256]));
+    rig.workspace.selected_brushes = vec![0, 1];
+    let (center, half) = rig
+        .workspace
+        .selected_frame_bounds_3d()
+        .expect("union bounds");
+    assert_eq!(center, [768.0, 128.0, 128.0]);
+    assert_eq!(half, [768.0, 128.0, 128.0]);
+}
