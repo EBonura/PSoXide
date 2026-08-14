@@ -274,10 +274,32 @@ pub struct SolvedBrush {
 
 impl SolvedBrush {
     /// A brush encloses volume only if at least four faces survived.
+    ///
+    /// CAUTION: four surviving faces do NOT imply a bounded solid; an
+    /// infinite wedge (planes tilted parallel by an edge/vertex drag)
+    /// passes this test with polygons clipped only by the base winding
+    /// (coordinates at [`BASE_WINDING_EXTENT`]). Editing previews must
+    /// also check [`Self::within_extent`] or huge vertices reach the
+    /// renderer and overflow its i32 camera math.
     pub fn is_valid(&self) -> bool {
         self.polygons.iter().flatten().count() >= 4
     }
+
+    /// Whether every solved coordinate stays within `limit` world units
+    /// of the origin. The bounded-solid check `is_valid` cannot provide.
+    pub fn within_extent(&self, limit: f64) -> bool {
+        self.min
+            .iter()
+            .chain(self.max.iter())
+            .all(|value| value.is_finite() && value.abs() <= limit)
+    }
 }
+
+/// Extent cap for brush editing previews. Generous for any real map
+/// (the largest authored worlds span ~25k units) while safely below the
+/// renderer's i32 overflow threshold (|vertex - camera| * 4096 must fit
+/// in i32, i.e. ~524k combined).
+pub const BRUSH_EDIT_EXTENT_LIMIT: f64 = (1 << 17) as f64;
 
 /// Half the side length of the base winding a face polygon is clipped
 /// from; bounds the world size a single brush face can span.
@@ -1025,6 +1047,31 @@ mod tests {
         assert!(slabs
             .iter()
             .all(|slab| slab.contents == BrushContents::Slime));
+    }
+
+    #[test]
+    fn edge_drag_into_the_floor_makes_a_valid_but_unbounded_wedge() {
+        // Regression for the editor crash: dragging the top-front edge
+        // exactly onto the floor plane tilts the top plane parallel to a
+        // side, leaving an INFINITE wedge that still passes `is_valid`
+        // (4+ surviving faces) with solved coordinates at the base
+        // winding extent. `within_extent` is the check that catches it.
+        let mut brush = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        let edge = [[0.0, 128.0, 0.0], [128.0, 128.0, 0.0]];
+        brush.translate_points_near(&edge, [0, -128, 0], 0.5);
+        let solved = brush.solve();
+        assert!(solved.is_valid(), "the wedge still counts 4+ faces");
+        assert!(
+            !solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT),
+            "unbounded wedge must fail the extent check, bounds {:?}..{:?}",
+            solved.min,
+            solved.max
+        );
+        // A sane edit passes both.
+        let mut sane = Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        sane.translate_points_near(&edge, [0, 64, 0], 0.5);
+        let solved = sane.solve();
+        assert!(solved.is_valid() && solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT));
     }
 
     #[test]
