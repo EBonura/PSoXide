@@ -837,6 +837,45 @@ impl EditorWorkspace {
             .collect()
     }
 
+    /// What the transform gizmo acts on for the current edit mode:
+    /// `(anchor, targets, faces)`. Brush mode targets the whole primary
+    /// brush (every corner, every face plane: rigid moves/rotates/
+    /// scales); Face/Edge/Vertex modes target the element selection.
+    pub(crate) fn brush_gizmo_context(
+        &self,
+    ) -> Option<([f64; 3], Vec<[f64; 3]>, Vec<usize>)> {
+        match self.brush_edit_mode {
+            BrushEditMode::Clip => None,
+            BrushEditMode::Move => {
+                let index = self.selected_brush?;
+                let brush = self.project.active_scene().brushes.get(index)?;
+                let solved = brush.solve();
+                if !solved.is_valid() {
+                    return None;
+                }
+                let anchor = [
+                    (solved.min[0] + solved.max[0]) * 0.5,
+                    (solved.min[1] + solved.max[1]) * 0.5,
+                    (solved.min[2] + solved.max[2]) * 0.5,
+                ];
+                let targets = brush_elements::unique_vertices(&solved);
+                let faces = (0..brush.faces.len()).collect();
+                Some((anchor, targets, faces))
+            }
+            _ => {
+                if self.selected_brush_elements.is_empty() {
+                    return None;
+                }
+                let anchor = self.selected_brush_element_centroid()?;
+                let targets = self.selected_brush_element_targets();
+                if targets.is_empty() {
+                    return None;
+                }
+                Some((anchor, targets, self.selected_brush_element_faces()))
+            }
+        }
+    }
+
     /// Centroid of the selected element targets: the element gizmo anchor.
     pub(crate) fn selected_brush_element_centroid(&self) -> Option<[f64; 3]> {
         let targets = self.selected_brush_element_targets();
@@ -865,7 +904,7 @@ impl EditorWorkspace {
         const TARGET_PX: f32 = 72.0;
         const PROBE_WORLD: f64 = 64.0;
         const RING_SEGMENTS: usize = 24;
-        let centroid = self.selected_brush_element_centroid()?;
+        let (centroid, _, _) = self.brush_gizmo_context()?;
         let origin = self.project_brush_point_3d(rect, centroid)?;
         let mut world_len = [0.0f64; 3];
         for axis in 0..3 {
@@ -913,15 +952,15 @@ impl EditorWorkspace {
         rect: egui::Rect,
         pointer: egui::Pos2,
     ) -> Option<usize> {
-        if self.selected_brush_elements.is_empty()
-            || matches!(
-                self.brush_edit_mode,
-                BrushEditMode::Move | BrushEditMode::Clip
-            )
-        {
-            return None;
-        }
         let polylines = self.brush_element_gizmo_polylines_3d(rect)?;
+        // Dead zone at the shared origin: all axes meet there, so a grab
+        // is ambiguous and center clicks belong to body selection/move.
+        let (anchor, _, _) = self.brush_gizmo_context()?;
+        if let Some(origin) = self.project_brush_point_3d(rect, anchor) {
+            if origin.distance(pointer) <= 12.0 {
+                return None;
+            }
+        }
         let mut best: Option<(f32, usize)> = None;
         for (axis, polyline) in polylines.iter().enumerate() {
             for pair in polyline.windows(2) {
@@ -951,10 +990,9 @@ impl EditorWorkspace {
         let Some(index) = self.selected_brush else {
             return false;
         };
-        let Some(anchor) = self.selected_brush_element_centroid() else {
+        let Some((anchor, targets, faces)) = self.brush_gizmo_context() else {
             return false;
         };
-        let targets = self.selected_brush_element_targets();
         if targets.is_empty() {
             return false;
         }
@@ -970,7 +1008,6 @@ impl EditorWorkspace {
                 if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
                     return false;
                 }
-                let faces = self.selected_brush_element_faces();
                 if let Some(drag) = self.brush_vertex_drag.as_mut() {
                     let mut mask = [false; 3];
                     mask[axis] = true;
@@ -1001,7 +1038,6 @@ impl EditorWorkspace {
                         .unwrap_or(Vec2::RIGHT)
                 };
                 let offset = pointer - center_screen;
-                let faces = self.selected_brush_element_faces();
                 self.brush_element_transform = Some(BrushElementTransformDrag {
                     index,
                     base,
@@ -3467,14 +3503,9 @@ impl EditorWorkspace {
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
             draw(&preview, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
-        // Element move gizmo: three world-axis arrows at the selection
-        // centroid; dragging one is an axis-constrained group move.
-        if !self.selected_brush_elements.is_empty()
-            && !matches!(
-                self.brush_edit_mode,
-                BrushEditMode::Move | BrushEditMode::Clip
-            )
-        {
+        // Transform gizmo: the whole brush in Brush mode, the element
+        // selection in Face/Edge/Vertex modes.
+        if self.brush_gizmo_context().is_some() {
             if let Some(polylines) = self.brush_element_gizmo_polylines_3d(rect) {
                 for (axis, polyline) in polylines.into_iter().enumerate() {
                     let color = ELEMENT_GIZMO_AXIS_COLORS[axis];

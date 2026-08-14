@@ -1119,7 +1119,7 @@ impl BrushEditMode {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Move => "Move",
+            Self::Move => "Brush",
             Self::Face => "Face",
             Self::Edge => "Edge",
             Self::Vertex => "Vertex",
@@ -1129,7 +1129,7 @@ impl BrushEditMode {
 
     const fn gesture_hint(self) -> &'static str {
         match self {
-            Self::Move => "Drag the brush to move it",
+            Self::Move => "Whole brush: drag to move; the gizmo moves, rotates, and scales it",
             Self::Face => "Click a face to select it; drag its normal handle to extrude",
             Self::Edge => "Drag an edge handle to reshape",
             Self::Vertex => "Drag a vertex handle to reshape",
@@ -1139,7 +1139,7 @@ impl BrushEditMode {
 
     const fn toolbar_hint(self) -> &'static str {
         match self {
-            Self::Move => "Drag brush",
+            Self::Move => "Whole brush",
             Self::Face => "Select faces; drag normal to extrude",
             Self::Edge => "Drag edge",
             Self::Vertex => "Drag vertex",
