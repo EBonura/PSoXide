@@ -1136,3 +1136,39 @@ fn cmd_drag_on_a_face_handle_extrudes_a_new_brush() {
         "one undo removes the extrusion"
     );
 }
+
+/// The Extrude button appears with Face mode and pulls the selected
+/// face out by exactly one grid step per click; without a face
+/// selected it does nothing.
+#[test]
+fn extrude_button_grows_the_selected_face_one_grid_step()
+{
+    let mut rig = MouseRig::single_cube("rig-extrude-button");
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+
+    // No face selected: the action is a guarded no-op.
+    rig.workspace.extrude_selected_face_one_step();
+    assert_eq!(rig.workspace.project.active_scene().brushes.len(), 1);
+
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    assert!(matches!(
+        rig.workspace.selected_brush_elements.as_slice(),
+        [BrushElement::Face(5)]
+    ));
+    let step = f64::from(rig.workspace.snap_units.max(1));
+    rig.workspace.extrude_selected_face_one_step();
+    let scene = rig.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 2, "one click, one prism");
+    let solved = scene.brushes[1].solve();
+    assert!(
+        (solved.min[1] - 256.0).abs() <= 1.0
+            && (solved.max[1] - (256.0 + step)).abs() <= 1.0,
+        "prism is exactly one grid step thick: {:?}..{:?}",
+        solved.min,
+        solved.max
+    );
+    assert_eq!(rig.workspace.selected_brush, Some(1));
+    rig.workspace.do_undo();
+    assert_eq!(rig.workspace.project.active_scene().brushes.len(), 1);
+}
