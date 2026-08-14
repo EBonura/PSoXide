@@ -826,6 +826,22 @@ impl EditorWorkspace {
         targets
     }
 
+    /// When the element selection is non-empty and ALL faces, the
+    /// primary (last-selected) face and the face count.
+    pub(crate) fn brush_element_faces_only(&self) -> Option<(usize, usize)> {
+        if self.selected_brush_elements.is_empty() {
+            return None;
+        }
+        let mut primary = None;
+        for element in &self.selected_brush_elements {
+            match element {
+                BrushElement::Face(face) => primary = Some(*face),
+                _ => return None,
+            }
+        }
+        primary.map(|face| (face, self.selected_brush_elements.len()))
+    }
+
     /// Selected Face element indices (whole planes ride face gestures).
     pub(crate) fn selected_brush_element_faces(&self) -> Vec<usize> {
         self.selected_brush_elements
@@ -879,6 +895,35 @@ impl EditorWorkspace {
                 (PROBE_WORLD * f64::from(TARGET_PX / px_per_probe)).clamp(16.0, 16384.0);
         }
         let mut polylines: [Vec<egui::Pos2>; 3] = Default::default();
+        // A face's only meaningful translation is along its NORMAL
+        // (translating a plane inside itself is the identity), so a
+        // faces-only selection in Move mode shows a single normal arrow
+        // instead of three world axes that could not honestly work.
+        if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            if let Some((face, _)) = self.brush_element_faces_only() {
+                let brush = self
+                    .selected_brush
+                    .and_then(|index| self.project.active_scene().brushes.get(index))?;
+                let (center, normal) = Self::face_center_and_normal(brush, face)?;
+                let origin = self.project_brush_point_3d(rect, center)?;
+                let probe = [
+                    center[0] + normal[0] * PROBE_WORLD,
+                    center[1] + normal[1] * PROBE_WORLD,
+                    center[2] + normal[2] * PROBE_WORLD,
+                ];
+                let probe_screen = self.project_brush_point_3d(rect, probe)?;
+                let px_per_probe = origin.distance(probe_screen).max(0.5);
+                let len =
+                    (PROBE_WORLD * f64::from(TARGET_PX / px_per_probe)).clamp(16.0, 16384.0);
+                let tip = [
+                    center[0] + normal[0] * len,
+                    center[1] + normal[1] * len,
+                    center[2] + normal[2] * len,
+                ];
+                polylines[0] = vec![origin, self.project_brush_point_3d(rect, tip)?];
+                return Some(polylines);
+            }
+        }
         for axis in 0..3 {
             if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
                 let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
@@ -967,6 +1012,19 @@ impl EditorWorkspace {
         };
         match mode {
             TransformGizmoMode::Move => {
+                if let Some((face, _)) = self.brush_element_faces_only() {
+                    // Single-arrow face gizmo: translate the plane along
+                    // its normal via the existing extrude machinery.
+                    let Some(brush) = self.project.active_scene().brushes.get(index) else {
+                        return false;
+                    };
+                    let Some((center, normal)) = Self::face_center_and_normal(brush, face)
+                    else {
+                        return false;
+                    };
+                    self.begin_brush_face_drag_3d(rect, pointer, index, face, center, normal);
+                    return self.brush_extrude.is_some() || self.brush_vertex_drag.is_some();
+                }
                 if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
                     return false;
                 }

@@ -116,7 +116,12 @@ fn run_real_egui_viewport_drag(workspace: &mut EditorWorkspace, start: Pos2, end
         input(3.0 / 60.0, vec![egui::Event::PointerMoved(threshold)]),
         |ctx| draw(ctx, workspace),
     );
-    assert!(workspace.brush_vertex_drag.is_some());
+    assert!(
+        workspace.brush_vertex_drag.is_some()
+            || workspace.brush_extrude.is_some()
+            || workspace.brush_element_transform.is_some(),
+        "press started a brush gesture"
+    );
     let _ = ctx.run(
         input(4.0 / 60.0, vec![egui::Event::PointerMoved(end)]),
         |ctx| draw(ctx, workspace),
@@ -1364,13 +1369,15 @@ fn face_element_gizmo_drag_moves_the_face_via_real_egui() {
     workspace.set_brush_edit_mode(BrushEditMode::Face);
     let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
     workspace.apply_brush_element_selection(BrushElement::Face(5), egui::Modifiers::NONE);
+    // Face-only Move selections offer a single normal arrow at slot 0.
     let polylines = workspace
         .brush_element_gizmo_polylines_3d(viewport)
         .expect("gizmo axes project");
-    let start = polyline_grab_point(&polylines[1]);
+    assert!(polylines[1].is_empty() && polylines[2].is_empty());
+    let start = polyline_grab_point(&polylines[0]);
     assert_eq!(
         workspace.pick_brush_element_gizmo_axis_3d(viewport, start),
-        Some(1)
+        Some(0)
     );
 
     run_real_egui_viewport_drag(&mut workspace, start, start + Vec2::new(0.0, -48.0));
