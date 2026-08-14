@@ -282,6 +282,11 @@ impl ViewportTool3d for SelectTool {
                         })
                         .map(|(brush, face, _)| (brush, face))
                         .unwrap_or((brush, face));
+                    // Alt+click paints the clicked face with the selected
+                    // face's material and UV instead of selecting it.
+                    if frame.modifiers.alt && ws.apply_face_attributes_to(brush, face) {
+                        return;
+                    }
                     if ws.selected_brush != Some(brush) {
                         ws.clear_node_selection_state();
                         ws.clear_resource_selection_state();
@@ -351,6 +356,30 @@ impl PaintDispatchTool {
 /// Brush tool: drag a footprint on the ground plane to create a cuboid
 /// brush; click to select the nearest brush under the pointer.
 pub(crate) struct BrushTool;
+
+/// Justify targets for the face-UV align buttons.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UvAlign {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+    Fit,
+}
+
+impl UvAlign {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Left => "justified left",
+            Self::Right => "justified right",
+            Self::Top => "justified top",
+            Self::Bottom => "justified bottom",
+            Self::Center => "centred",
+            Self::Fit => "fitted to the face",
+        }
+    }
+}
 
 impl EditorWorkspace {
     /// Camera ray intersected with the world ground plane (y = 0),
@@ -2042,7 +2071,7 @@ impl EditorWorkspace {
                 &ui.add(
                     egui::DragValue::new(&mut scale_u)
                         .speed(1)
-                        .range(10..=1600)
+                        .range(-1600..=1600)
                         .suffix("% U"),
                 ),
             );
@@ -2050,7 +2079,7 @@ impl EditorWorkspace {
                 &ui.add(
                     egui::DragValue::new(&mut scale_v)
                         .speed(1)
-                        .range(10..=1600)
+                        .range(-1600..=1600)
                         .suffix("% V"),
                 ),
             );
@@ -2059,10 +2088,15 @@ impl EditorWorkspace {
                 off_v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
             ];
             edited.rotation_deg = rot as i16;
-            edited.scale_q8 = [
-                (scale_u * 256 / 100).clamp(1, i32::from(i16::MAX)) as i16,
-                (scale_v * 256 / 100).clamp(1, i32::from(i16::MAX)) as i16,
-            ];
+            // Negative percentages mirror the axis (Flip H/V); zero is
+            // nudged to the smallest positive step.
+            let percent_to_q8 = |percent: i32| -> i16 {
+                let q8 = (percent * 256 / 100)
+                    .clamp(i32::from(i16::MIN) + 1, i32::from(i16::MAX))
+                    as i16;
+                if q8 == 0 { 1 } else { q8 }
+            };
+            edited.scale_q8 = [percent_to_q8(scale_u), percent_to_q8(scale_v)];
             // Uniquely labelled: the Inspector shows several bare "Reset"
             // buttons, and this one only ever restores the face UV mapping.
             // Folded in after the DragValues so a Reset wins over them.
@@ -2087,6 +2121,286 @@ impl EditorWorkspace {
             self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
             self.mark_dirty();
         }
+        ui.horizontal(|ui| {
+            ui.label("UV align");
+            for (label, action, hint) in [
+                ("L", UvAlign::Left, "Tile seam at the face's left edge"),
+                ("R", UvAlign::Right, "Tile seam at the face's right edge"),
+                ("T", UvAlign::Top, "Tile seam at the face's top edge"),
+                ("B", UvAlign::Bottom, "Tile seam at the face's bottom edge"),
+                ("C", UvAlign::Center, "Texture centre on the face centre"),
+                ("Fit", UvAlign::Fit, "One texture repeat spans the face"),
+            ] {
+                if ui.small_button(label).on_hover_text(hint).clicked() {
+                    self.justify_selected_face_uv(action);
+                }
+            }
+            if ui
+                .small_button("Flip H")
+                .on_hover_text("Mirror the texture horizontally in place")
+                .clicked()
+            {
+                self.flip_selected_face_uv(0);
+            }
+            if ui
+                .small_button("Flip V")
+                .on_hover_text("Mirror the texture vertically in place")
+                .clicked()
+            {
+                self.flip_selected_face_uv(1);
+            }
+        });
+    }
+
+    /// TrenchBroom's copy-face-attributes: paint `target` with the
+    /// selected face's material and UV mapping (Alt+click in Face mode).
+    pub(crate) fn apply_face_attributes_to(
+        &mut self,
+        target_brush: usize,
+        target_face: usize,
+    ) -> bool {
+        let (Some(source_brush), Some(source_face)) =
+            (self.selected_brush, self.selected_brush_face)
+        else {
+            return false;
+        };
+        if (source_brush, source_face) == (target_brush, target_face) {
+            return false;
+        }
+        let scene = self.project.active_scene();
+        let Some((material, uv)) = scene
+            .brushes
+            .get(source_brush)
+            .and_then(|brush| brush.faces.get(source_face))
+            .map(|face| (face.material, face.uv))
+        else {
+            return false;
+        };
+        let Some(target) = scene
+            .brushes
+            .get(target_brush)
+            .and_then(|brush| brush.faces.get(target_face))
+        else {
+            return false;
+        };
+        if target.material == material && target.uv == uv {
+            self.status = "Face already has these attributes".to_string();
+            return true;
+        }
+        self.push_undo();
+        let face = &mut self.project.active_scene_mut().brushes[target_brush].faces[target_face];
+        face.material = material;
+        face.uv = uv;
+        self.clear_uv_edit_transaction();
+        self.mark_dirty();
+        self.status = "Applied the selected face's material and UV".to_string();
+        true
+    }
+
+    /// Select every brush with at least one face using `id`.
+    pub(crate) fn select_brushes_using_material(&mut self, id: psxed_project::ResourceId) -> usize {
+        let indices: Vec<usize> = self
+            .project
+            .active_scene()
+            .brushes
+            .iter()
+            .enumerate()
+            .filter(|(_, brush)| brush.faces.iter().any(|face| face.material == Some(id)))
+            .map(|(index, _)| index)
+            .collect();
+        if indices.is_empty() {
+            self.status = "No brush uses this material".to_string();
+            return 0;
+        }
+        self.clear_node_selection_state();
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.selected_brush = indices.first().copied();
+        self.selected_brushes = indices.clone();
+        self.selected_brush_face = None;
+        self.selected_brush_elements.clear();
+        self.status = format!(
+            "Selected {} brush{} using the material",
+            indices.len(),
+            if indices.len() == 1 { "" } else { "es" }
+        );
+        indices.len()
+    }
+
+    /// Replace every brush-face use of `from` with `to`, one undo step.
+    pub(crate) fn replace_material_uses(
+        &mut self,
+        from: psxed_project::ResourceId,
+        to: psxed_project::ResourceId,
+    ) -> usize {
+        if from == to {
+            return 0;
+        }
+        let count: usize = self
+            .project
+            .active_scene()
+            .brushes
+            .iter()
+            .flat_map(|brush| brush.faces.iter())
+            .filter(|face| face.material == Some(from))
+            .count();
+        if count == 0 {
+            self.status = "No brush face uses this material".to_string();
+            return 0;
+        }
+        self.push_undo();
+        for brush in &mut self.project.active_scene_mut().brushes {
+            for face in &mut brush.faces {
+                if face.material == Some(from) {
+                    face.material = Some(to);
+                }
+            }
+        }
+        self.clear_uv_edit_transaction();
+        self.mark_dirty();
+        self.status = format!(
+            "Replaced the material on {count} face{}",
+            if count == 1 { "" } else { "s" }
+        );
+        count
+    }
+
+    /// Raw paraxial texel coordinates of the selected face's polygon.
+    fn face_raw_uv_polygon(&self, index: usize, face: usize) -> Option<Vec<[f64; 2]>> {
+        use psxed_project::brush::{paraxial_uv, Plane, BRUSH_UV_UNITS_PER_TEXEL};
+        let brush = self.project.active_scene().brushes.get(index)?;
+        let solved = brush.solve();
+        let polygon = solved.polygons.get(face)?.as_ref()?;
+        let plane = Plane::from_points(brush.faces.get(face)?.points)?;
+        Some(
+            polygon
+                .verts
+                .iter()
+                .map(|&vertex| {
+                    let raw = paraxial_uv(&plane, vertex);
+                    [
+                        raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                        raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                    ]
+                })
+                .collect(),
+        )
+    }
+
+    /// Texture repeat size in texels for a face's material; 64x64 when
+    /// the material has no decoded thumbnail (matches the preview's
+    /// default window).
+    fn face_texture_dims(&self, index: usize, face: usize) -> [f64; 2] {
+        self.project
+            .active_scene()
+            .brushes
+            .get(index)
+            .and_then(|brush| brush.faces.get(face))
+            .and_then(|face| face.material)
+            .and_then(|id| self.texture_thumbs.get(&id))
+            .map(|entry| {
+                [
+                    f64::from(entry.stats.width.max(8)),
+                    f64::from(entry.stats.height.max(8)),
+                ]
+            })
+            .unwrap_or([64.0, 64.0])
+    }
+
+    /// Write a face UV directly (justify/fit/flip buttons): these solve
+    /// their own offsets, so the reanchoring transaction must not run.
+    fn set_selected_face_uv(
+        &mut self,
+        index: usize,
+        face: usize,
+        uv: psxed_project::brush::FaceUv,
+    ) {
+        self.clear_uv_edit_transaction();
+        self.project.active_scene_mut().brushes[index].faces[face].uv = uv;
+        self.mark_dirty();
+    }
+
+    /// TrenchBroom-style justify: align the texture's tile seam (or its
+    /// centre) with the face polygon's UV-space bounds.
+    pub(crate) fn justify_selected_face_uv(&mut self, action: UvAlign) {
+        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
+            return;
+        };
+        let Some(polygon) = self.face_raw_uv_polygon(index, face) else {
+            return;
+        };
+        let current = self.project.active_scene().brushes[index].faces[face].uv;
+        let dims = self.face_texture_dims(index, face);
+        let mut edited = current;
+        if action == UvAlign::Fit {
+            // One texture repeat spans the face: solve scale from the
+            // rotation-only span, then pin the min corner to the seam.
+            let rotation_only = psxed_project::brush::FaceUv {
+                offset_texels: [0, 0],
+                rotation_deg: current.rotation_deg,
+                scale_q8: [256, 256],
+            };
+            for axis in 0..2 {
+                let mapped = polygon
+                    .iter()
+                    .map(|&uv| rotation_only.apply_linear(uv)[axis]);
+                let min = mapped.clone().fold(f64::MAX, f64::min);
+                let max = mapped.fold(f64::MIN, f64::max);
+                let span = (max - min).max(1e-6);
+                edited.scale_q8[axis] = ((span / dims[axis]) * 256.0)
+                    .round()
+                    .clamp(1.0, f64::from(i16::MAX)) as i16;
+            }
+        }
+        let linear: Vec<[f64; 2]> = polygon.iter().map(|&uv| edited.apply_linear(uv)).collect();
+        for axis in 0..2 {
+            let min = linear.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
+            let max = linear.iter().map(|uv| uv[axis]).fold(f64::MIN, f64::max);
+            let target = match (action, axis) {
+                (UvAlign::Fit, _) => Some(-min),
+                (UvAlign::Left, 0) | (UvAlign::Top, 1) => Some(-min),
+                (UvAlign::Right, 0) | (UvAlign::Bottom, 1) => Some(-max),
+                (UvAlign::Center, _) => Some(dims[axis] * 0.5 - (min + max) * 0.5),
+                _ => None,
+            };
+            if let Some(offset) = target {
+                edited.offset_texels[axis] = offset
+                    .round()
+                    .clamp(f64::from(i16::MIN), f64::from(i16::MAX))
+                    as i16;
+            }
+        }
+        if edited != current {
+            self.set_selected_face_uv(index, face, edited);
+            self.status = format!("UV {}", action.label());
+        }
+    }
+
+    /// Mirror the texture along one UV axis about the face's anchor, so
+    /// it flips in place instead of sliding.
+    pub(crate) fn flip_selected_face_uv(&mut self, axis: usize) {
+        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
+            return;
+        };
+        let Some(anchor) = self
+            .project
+            .active_scene()
+            .brushes
+            .get(index)
+            .and_then(|brush| brush.face_uv_anchor(face))
+        else {
+            return;
+        };
+        let current = self.project.active_scene().brushes[index].faces[face].uv;
+        let mut edited = current;
+        edited.scale_q8[axis] = match edited.scale_q8[axis].checked_neg() {
+            Some(0) | None => -1,
+            Some(negated) => negated,
+        };
+        edited.reanchor(&current, anchor, [0.0, 0.0]);
+        self.set_selected_face_uv(index, face, edited);
+        self.status = format!("UV flipped {}", if axis == 0 { "H" } else { "V" });
     }
 
     /// Resolve one frame of face UV editing against the in-flight

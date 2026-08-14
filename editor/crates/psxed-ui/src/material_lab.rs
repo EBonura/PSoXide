@@ -88,6 +88,31 @@ impl EditorWorkspace {
                 self.material_lab.focused_material = None;
             }
         }
+        if let Some(focused) = self.material_lab.focused_material {
+            if ui
+                .button("Select uses")
+                .on_hover_text("Select every brush with a face using this material")
+                .clicked()
+            {
+                self.select_brushes_using_material(focused);
+            }
+            ui.menu_button("Replace uses", |ui| {
+                ui.set_min_width(220.0);
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for (id, name) in &material_options {
+                        if *id == focused {
+                            continue;
+                        }
+                        if ui.button(name).clicked() {
+                            self.replace_material_uses(focused, *id);
+                            ui.close_menu();
+                        }
+                    }
+                });
+            })
+            .response
+            .on_hover_text("Swap every brush-face use of this material for another");
+        }
 
         let version_state = self.material_lab.focused_material.and_then(|id| {
             let resource = self.project.resource(id)?;
