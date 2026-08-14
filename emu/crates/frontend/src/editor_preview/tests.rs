@@ -2135,3 +2135,48 @@ fn character_motion_preview_overrides_only_the_target_render_transform() {
     assert_eq!([other_origin.x, other_origin.y, other_origin.z], [7, 8, 9]);
     assert_eq!(yaw, 256);
 }
+
+#[test]
+fn lit_preview_key_tracks_exactly_its_inputs() {
+    let mut project = ProjectDocument::new("lit-key");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [512, 256, 512],
+        ));
+    let scene = project.active_scene_mut();
+    scene.add_node(
+        psxed_project::NodeId::ROOT,
+        "Light",
+        psxed_project::NodeKind::PointLight {
+            color: [255, 255, 255],
+            intensity: 1.0,
+            radius: 2.0,
+        },
+    );
+    let textures = crate::editor_textures::EditorTextures::new();
+    let hidden = std::collections::HashSet::new();
+    let lights = super::room_geometry::collect_bsp_preview_bake_lights(&project, &hidden);
+    let base = super::lit_preview_key(&project, &textures, &lights);
+    assert_eq!(
+        base,
+        super::lit_preview_key(&project, &textures, &lights),
+        "same inputs must reuse the cached bake"
+    );
+    // A moved light invalidates.
+    let mut moved = lights.clone();
+    moved[0].position[0] += 64.0;
+    assert_ne!(base, super::lit_preview_key(&project, &textures, &moved));
+    // A moved brush corner invalidates.
+    let mut edited = project.clone();
+    edited.active_scene_mut().brushes[0].faces[0].points[0][0] += 16;
+    assert_ne!(base, super::lit_preview_key(&edited, &textures, &lights));
+    // A face UV change does NOT: it never feeds the bake.
+    let mut uv_only = project.clone();
+    uv_only.active_scene_mut().brushes[0].faces[0]
+        .uv
+        .offset_texels = [7, 3];
+    assert_eq!(base, super::lit_preview_key(&uv_only, &textures, &lights));
+}
