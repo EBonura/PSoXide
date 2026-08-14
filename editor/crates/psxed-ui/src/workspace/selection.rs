@@ -310,6 +310,9 @@ impl EditorWorkspace {
         self.selection
             .apply_node_modifiers(id, modifiers.shift, toggle, visible_order);
         self.clear_sector_selection();
+        // One selection domain at a time: picking an entity drops any
+        // brush selection, mirroring the brush-click path.
+        self.clear_brush_selection();
 
         let count = self.selection.selected_nodes.len();
         let scene = self.project.active_scene();

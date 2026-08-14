@@ -5,7 +5,7 @@ fn dragging_selected_node_moves_it_in_xz_space() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let spawn = starter_player_entity(workspace.project.active_scene()).id;
-    let sector_size = node_enclosing_sector_size(workspace.project.active_scene(), spawn);
+    let sector_size = node_translation_sector_size(&workspace.project, spawn);
     let start = workspace
         .project
         .active_scene()

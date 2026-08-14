@@ -682,14 +682,36 @@ pub(crate) fn enclosing_room_id(scene: &psxed_project::Scene, node_id: NodeId) -
     None
 }
 
-pub(crate) fn node_enclosing_sector_size(scene: &psxed_project::Scene, node_id: NodeId) -> i32 {
-    enclosing_room_id(scene, node_id)
+/// Sector size a node's TRANSLATION is expressed in, the single source of
+/// truth for editor-unit <-> world-unit conversion. BSP scenes author node
+/// transforms in raw world units (1 editor unit = 1 world unit); grid scenes
+/// author in sectors of the enclosing Section grid, or the World default for
+/// nodes outside any room. Everything that moves, snaps, or displays a node
+/// translation must resolve units through here, or BSP entities drift at
+/// 1/1024 speed again.
+pub(crate) fn node_translation_sector_size(
+    project: &psxed_project::ProjectDocument,
+    node_id: NodeId,
+) -> i32 {
+    let scene = project.active_scene();
+    // A node under a Section room always authors in that grid's sectors,
+    // regardless of project format.
+    if let Some(sector_size) = enclosing_room_id(scene, node_id)
         .and_then(|room_id| scene.node(room_id))
         .and_then(|room| match &room.kind {
             NodeKind::Section { grid } => Some(grid.sector_size.max(1)),
             _ => None,
         })
-        .unwrap_or(DEFAULT_WORLD_SECTOR_SIZE)
+    {
+        return sector_size;
+    }
+    // Roomless nodes: raw world units in BSP scenes, World-default sectors
+    // in grid scenes.
+    if project.world_format().is_bsp() {
+        1
+    } else {
+        project.world_sector_size_for_node(node_id)
+    }
 }
 
 pub(crate) fn portal_seam_bounds_3d(
@@ -904,8 +926,7 @@ pub(crate) fn entity_bound_kind_and_size(
             ))
         }
         NodeKind::ArchProp { geometry, .. } => {
-            let sector =
-                node_enclosing_sector_size(workspace.project.active_scene(), node.id).max(1) as f32;
+            let sector = node_translation_sector_size(&workspace.project, node.id).max(1) as f32;
             let span = f32::from(geometry.span_tiles.clamp(
                 psxed_project::ARCH_PROP_MIN_TILES,
                 psxed_project::ARCH_PROP_MAX_TILES,

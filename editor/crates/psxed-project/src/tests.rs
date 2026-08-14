@@ -2468,6 +2468,7 @@ fn editor_visibility_roundtrips_through_ron_string() {
         preview_bounds: false,
         show_play_debug_overlays: false,
         show_play_debug_map: true,
+        show_brush_wireframes: true,
     };
     let ron = project.to_ron_string().unwrap();
 
