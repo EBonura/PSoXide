@@ -1239,23 +1239,18 @@ impl EditorWorkspace {
         };
     }
 
-    /// Release: create and select the extruded brush (one undo step).
-    fn commit_brush_face_extrude_new(&mut self) -> bool {
-        let Some(gesture) = self.brush_extrude_new.take() else {
-            return false;
-        };
-        if gesture.applied <= 0 {
-            return true;
-        }
+    /// Create and select the prism extruded out of `face` (one undo
+    /// step). Shared by the Cmd+drag gesture and the toolbar button.
+    fn apply_face_extrusion(&mut self, index: usize, face: usize, distance: i32) -> bool {
         let Some(candidate) = self
             .project
             .active_scene()
             .brushes
-            .get(gesture.source)
-            .and_then(|brush| brush.extruded_from_face(gesture.face, gesture.applied))
+            .get(index)
+            .and_then(|brush| brush.extruded_from_face(face, distance))
         else {
             self.status = "Extrusion produced no solid".to_string();
-            return true;
+            return false;
         };
         self.push_undo();
         let scene = self.project.active_scene_mut();
@@ -1264,11 +1259,29 @@ impl EditorWorkspace {
         self.replace_brush_selection(new_index, None);
         self.clear_node_selection_state();
         self.mark_dirty();
-        self.status = format!(
-            "Extruded brush {} out {} units",
-            new_index + 1,
-            gesture.applied
-        );
+        self.status = format!("Extruded brush {} out {distance} units", new_index + 1);
+        true
+    }
+
+    /// Toolbar button: extrude the selected face by one grid step.
+    pub(crate) fn extrude_selected_face_one_step(&mut self) {
+        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
+            self.status = "Select a face to extrude".to_string();
+            return;
+        };
+        let distance = i32::from(self.snap_units.max(1));
+        self.apply_face_extrusion(index, face, distance);
+    }
+
+    /// Release: create and select the extruded brush (one undo step).
+    fn commit_brush_face_extrude_new(&mut self) -> bool {
+        let Some(gesture) = self.brush_extrude_new.take() else {
+            return false;
+        };
+        if gesture.applied <= 0 {
+            return true;
+        }
+        self.apply_face_extrusion(gesture.source, gesture.face, gesture.applied);
         true
     }
 

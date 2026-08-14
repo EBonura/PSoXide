@@ -489,6 +489,14 @@ fn click_visible_brush_mode(workspace: &mut EditorWorkspace, mode: BrushEditMode
         |ctx| workspace.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
     );
     assert_eq!(workspace.brush_edit_mode, mode);
+    let after = ctx.run(input(3.0 / 60.0, vec![]), |ctx| {
+        workspace.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle)
+    });
+    assert_eq!(
+        text_shape_center(&after.shapes, "Extrude").is_some(),
+        mode == BrushEditMode::Face,
+        "the Extrude button shows exactly in Face mode"
+    );
 }
 
 fn run_real_egui_orthographic_brush_drag(

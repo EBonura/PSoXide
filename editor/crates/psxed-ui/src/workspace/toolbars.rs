@@ -854,6 +854,18 @@ impl EditorWorkspace {
                 self.set_brush_edit_mode(mode);
             }
         }
+        if self.brush_edit_mode == BrushEditMode::Face {
+            let enabled = self.selected_brush.is_some() && self.selected_brush_face.is_some();
+            if ui
+                .add_enabled(enabled, egui::Button::new("Extrude"))
+                .on_hover_text(
+                    "Pull a new brush out of the selected face by one grid step.                      Cmd-drag the face handle for a freeform distance.",
+                )
+                .clicked()
+            {
+                self.extrude_selected_face_one_step();
+            }
+        }
         ui.label(
             RichText::new(self.brush_edit_mode.toolbar_hint())
                 .small()
