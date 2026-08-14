@@ -933,3 +933,55 @@ fn mouse_whole_brush_gizmo_moves_rotates_and_scales() {
         "height untouched"
     );
 }
+
+/// Texture lock across gestures: a face moved in-plane by the gizmo
+/// keeps its applied texture (the same texel stays at the centroid);
+/// with the lock off the mapping stays world-anchored and slides.
+#[test]
+fn face_moves_keep_the_texture_riding_when_locked() {
+    let applied_at_anchor = |workspace: &EditorWorkspace| {
+        let brush = &workspace.project.active_scene().brushes[0];
+        let anchor = brush.face_uv_anchor(5).expect("anchor");
+        brush.faces[5].uv.apply(anchor)
+    };
+    for lock in [true, false] {
+        let mut rig = MouseRig::single_cube("rig-uv-lock");
+        rig.workspace.project.active_scene_mut().brushes[0].faces[5].uv =
+            psxed_project::brush::FaceUv {
+                offset_texels: [10, 5],
+                rotation_deg: 0,
+                scale_q8: [256, 256],
+            };
+        rig.workspace.brush_texture_lock = lock;
+        rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+        rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+        let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+        rig.click(body);
+        assert!(matches!(
+            rig.workspace.selected_brush_elements.as_slice(),
+            [BrushElement::Face(5)]
+        ));
+        let before = applied_at_anchor(&rig.workspace);
+        // In-plane X move via the gizmo.
+        let (grab, to) = rig.gizmo_drag_vector(0);
+        rig.drag(grab, to);
+        assert_ne!(
+            rig.workspace.project.active_scene().brushes[0],
+            MouseRig::single_cube("rig-uv-lock-base").brush(),
+        );
+        let after = applied_at_anchor(&rig.workspace);
+        let drift =
+            ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2)).sqrt();
+        if lock {
+            assert!(
+                drift <= 1.5,
+                "locked: texture rides the face, drifted {drift:.1} texels"
+            );
+        } else {
+            assert!(
+                drift > 1.5,
+                "unlocked: world-anchored mapping slides under the face, drift {drift:.1}"
+            );
+        }
+    }
+}

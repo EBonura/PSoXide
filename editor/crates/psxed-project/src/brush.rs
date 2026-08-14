@@ -633,7 +633,7 @@ impl Brush {
         delta: [i32; 3],
         epsilon: f64,
     ) -> usize {
-        self.translate_selected(&[], targets, delta, epsilon)
+        self.translate_selected(&[], targets, delta, epsilon, false)
     }
 
     /// Whether this brush is a sane, clickable solid: it solves to a
@@ -649,16 +649,30 @@ impl Brush {
 
     /// [`Self::translate_points_near`], plus every authored point of the
     /// listed faces (see [`Self::transform_selected`] for why).
+    ///
+    /// With `uv_lock`, any face whose plane translated RIGIDLY (all three
+    /// authored points moved) keeps its applied texture: the paraxial
+    /// shift the move causes is compensated out of its UV offset, exactly
+    /// like [`Self::translate_with_uv_lock`]. Faces that tilt or stretch
+    /// stay world-anchored: their surface deforms, so no rigid mapping
+    /// exists to preserve.
     pub fn translate_selected(
         &mut self,
         selected_faces: &[usize],
         targets: &[[f64; 3]],
         delta: [i32; 3],
         epsilon: f64,
+        uv_lock: bool,
     ) -> usize {
+        let delta_f = [
+            f64::from(delta[0]),
+            f64::from(delta[1]),
+            f64::from(delta[2]),
+        ];
         let mut moved = 0;
         for (face_index, face) in self.faces.iter_mut().enumerate() {
             let whole_face = selected_faces.contains(&face_index);
+            let mut moved_in_face = 0;
             for point in &mut face.points {
                 let hit = whole_face
                     || targets.iter().any(|target| {
@@ -671,10 +685,43 @@ impl Brush {
                         point[axis] += delta[axis];
                     }
                     moved += 1;
+                    moved_in_face += 1;
+                }
+            }
+            if uv_lock && moved_in_face == 3 {
+                if let Some(plane) = Plane::from_points(face.points) {
+                    let raw = paraxial_uv(&plane, delta_f);
+                    face.uv.compensate_shift([
+                        raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                        raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                    ]);
                 }
             }
         }
         moved
+    }
+
+    /// [`Self::translate_face`] with the texture riding along: the plane
+    /// translates rigidly, so the paraxial shift is compensated out of
+    /// the face's UV offset (extrude with texture lock).
+    pub fn translate_face_with_uv_lock(&mut self, face: usize, delta: [i32; 3]) {
+        self.translate_face(face, delta);
+        if let Some(face) = self.faces.get_mut(face) {
+            if let Some(plane) = Plane::from_points(face.points) {
+                let raw = paraxial_uv(
+                    &plane,
+                    [
+                        f64::from(delta[0]),
+                        f64::from(delta[1]),
+                        f64::from(delta[2]),
+                    ],
+                );
+                face.uv.compensate_shift([
+                    raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                    raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                ]);
+            }
+        }
     }
 }
 
