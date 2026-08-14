@@ -93,7 +93,10 @@ pub(super) fn walk_roomless_light_gizmos(
         if node_has_section_ancestor(scene, light.host_id) {
             continue;
         }
-        let center_world = light.transform.translation.map(|value| value.round() as i32);
+        let center_world = light
+            .transform
+            .translation
+            .map(|value| value.round() as i32);
         let center_world = [center_world[0], center_world[1], center_world[2]];
         let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
         let is_hovered = hovered

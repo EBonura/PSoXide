@@ -484,7 +484,10 @@ pub(super) fn collect_bsp_preview_lights(
         if light.radius <= 0.0 || !light.intensity.is_finite() || light.intensity < 0.0 {
             continue;
         }
-        let world = light.transform.translation.map(|value| value.round() as i32);
+        let world = light
+            .transform
+            .translation
+            .map(|value| value.round() as i32);
         let intensity_q8 = (light.intensity * 256.0).clamp(0.0, u16::MAX as f32) as u32;
         out.push(psx_engine::PointLightSample::from_rgb_intensity(
             [world[0], world[1], world[2]],
