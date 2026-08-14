@@ -176,6 +176,13 @@ impl ViewportTool3d for SelectTool {
     }
 
     fn primary_clicked(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
+        // Clip mode: clicks place clip points on brush faces.
+        if ws.brush_edit_mode == BrushEditMode::Clip && ws.selected_brush.is_some() {
+            if let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) {
+                ws.brush_clip_click_3d(frame.rect, pointer);
+            }
+            return;
+        }
         // Sub-element clicks come first: a click never fires the drag-start
         // event, so this is the ONLY path that can select the handle under
         // the cursor. Running it before the pointer_target match also stops
@@ -654,7 +661,7 @@ impl EditorWorkspace {
                     })
                     .collect()
             }
-            BrushEditMode::Move | BrushEditMode::Face => Vec::new(),
+            BrushEditMode::Move | BrushEditMode::Face | BrushEditMode::Clip => Vec::new(),
         }
     }
 
@@ -913,7 +920,7 @@ impl EditorWorkspace {
     /// their base).
     pub(crate) fn cancel_brush_gestures(&mut self) {
         self.brush_drag = None;
-        self.brush_clip_start = None;
+        self.brush_clip_points.clear();
         if let Some(extrude) = self.brush_extrude.take() {
             if let Some(slot) = self
                 .project
@@ -959,7 +966,11 @@ impl EditorWorkspace {
     /// Delete or Backspace removes the selected brush. Inert while a text
     /// field owns focus.
     pub(crate) fn brush_tool_keyboard(&mut self, ui: &egui::Ui) {
-        if self.active_tool != ViewTool::Brush {
+        // Select with a brush selected owns the same brush keys as the
+        // Draw tool: Esc/Delete, plus the Clip mode's Enter and Tab.
+        let select_brush_context =
+            self.active_tool == ViewTool::Select && self.selected_brush.is_some();
+        if self.active_tool != ViewTool::Brush && !select_brush_context {
             return;
         }
         if ui.ctx().memory(|memory| memory.focused().is_some()) {
@@ -976,6 +987,21 @@ impl EditorWorkspace {
         }
         if delete {
             self.delete_selected_brushes();
+        }
+        if self.brush_edit_mode == BrushEditMode::Clip {
+            let (enter, tab) = ui.input(|input| {
+                (
+                    input.key_pressed(egui::Key::Enter),
+                    input.key_pressed(egui::Key::Tab),
+                )
+            });
+            if enter {
+                self.apply_brush_clip();
+            }
+            if tab {
+                self.brush_clip_keep = self.brush_clip_keep.next();
+                self.status = format!("Clip keeps: {}", self.brush_clip_keep.label());
+            }
         }
     }
 
@@ -1831,45 +1857,204 @@ impl EditorWorkspace {
     }
 
     fn brush_clip_click_in_view(&mut self, point: [i32; 3], view: OrthographicView) {
-        let Some(selected) = self.selected_brush else {
+        if self.selected_brush.is_none() {
+            return;
+        }
+        let mut normal = [0.0; 3];
+        normal[view.depth_axis()] = 1.0;
+        self.push_brush_clip_point(BrushClipPoint { point, normal });
+    }
+
+    /// Append a clip point (max 3, duplicates ignored) and narrate.
+    fn push_brush_clip_point(&mut self, clip_point: BrushClipPoint) {
+        if self
+            .brush_clip_points
+            .iter()
+            .any(|existing| existing.point == clip_point.point)
+        {
+            return;
+        }
+        if self.brush_clip_points.len() >= 3 {
+            return;
+        }
+        self.brush_clip_points.push(clip_point);
+        self.status = format!(
+            "Clip point {}/3 placed; Enter cuts ({}), Tab flips, Esc clears",
+            self.brush_clip_points.len(),
+            self.brush_clip_keep.label(),
+        );
+    }
+
+    /// 3D clip point placement: grid-snapped hit on the brush face under
+    /// the pointer (its normal makes two-point cuts perpendicular to the
+    /// surface, so sloped cuts work), falling back to the ground plane.
+    fn brush_clip_click_3d(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
+        if let Some((brush, face, hit)) = self.pick_brush_face_with_hit(rect, pointer) {
+            let normal = self
+                .project
+                .active_scene()
+                .brushes
+                .get(brush)
+                .and_then(|brush| brush.faces.get(face))
+                .and_then(|face| psxed_project::brush::Plane::from_points(face.points))
+                .map(|plane| {
+                    let n = plane.normal.map(|v| v as f64);
+                    let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
+                    [n[0] / length, n[1] / length, n[2] / length]
+                })
+                .unwrap_or([0.0, 1.0, 0.0]);
+            let step = i32::from(self.snap_units.max(1));
+            let point = hit.map(|value| {
+                let snapped = (f64::from(value) / f64::from(step)).round() * f64::from(step);
+                snapped as i32
+            });
+            self.push_brush_clip_point(BrushClipPoint { point, normal });
+            return;
+        }
+        if let Some(point) = self.brush_ground_point(rect, pointer) {
+            self.push_brush_clip_point(BrushClipPoint {
+                point,
+                normal: [0.0, 1.0, 0.0],
+            });
+        }
+    }
+
+    /// The authored clip plane from the placed points: three points pass
+    /// through exactly; two synthesize the third along the first point's
+    /// surface normal (perpendicular cut); fewer define no plane yet.
+    pub(crate) fn brush_clip_plane_points(&self) -> Option<[[i32; 3]; 3]> {
+        match self.brush_clip_points.as_slice() {
+            [a, b, c] => Some([a.point, b.point, c.point]),
+            [a, b] => {
+                let scale = f64::from(BRUSH_CREATE_HEIGHT);
+                let third = [
+                    a.point[0].saturating_add((a.normal[0] * scale).round() as i32),
+                    a.point[1].saturating_add((a.normal[1] * scale).round() as i32),
+                    a.point[2].saturating_add((a.normal[2] * scale).round() as i32),
+                ];
+                if third == a.point {
+                    return None;
+                }
+                Some([a.point, b.point, third])
+            }
+            _ => None,
+        }
+    }
+
+    /// Wireframe preview of the pending clip over every selected brush:
+    /// kept side(s) in accent, dropped side dimmed red. Never mutates.
+    fn draw_brush_clip_preview<F: Fn([f64; 3]) -> Option<egui::Pos2>>(
+        &self,
+        painter: &egui::Painter,
+        project: F,
+    ) {
+        let Some(points) = self.brush_clip_plane_points() else {
             return;
         };
-        match self.brush_clip_start.take() {
-            None => self.brush_clip_start = Some(point),
-            Some(start) if start == point => {}
-            Some(start) => {
-                let mut up = start;
-                let depth_axis = view.depth_axis();
-                up[depth_axis] = up[depth_axis].saturating_add(BRUSH_CREATE_HEIGHT);
-                // `.get` rather than indexing: the selection can go stale
-                // across undo/redo before the second clip click lands.
-                let Some(brush) = self.project.active_scene().brushes.get(selected) else {
-                    return;
-                };
-                let clipped = brush.clip([start, point, up]);
-                match (self.brush_clip_keep, clipped.back, clipped.front) {
-                    (BrushClipKeep::Both, Some(back), Some(front)) => {
-                        self.push_undo();
-                        let scene = self.project.active_scene_mut();
-                        scene.brushes[selected] = back;
-                        scene.brushes.push(front);
-                        self.mark_dirty();
+        let draw_solved = |brush: &psxed_project::brush::Brush, stroke: egui::Stroke| {
+            for polygon in brush.solve().polygons.iter().flatten() {
+                let count = polygon.verts.len();
+                for i in 0..count {
+                    if let (Some(a), Some(b)) = (
+                        project(polygon.verts[i]),
+                        project(polygon.verts[(i + 1) % count]),
+                    ) {
+                        painter.line_segment([a, b], stroke);
                     }
-                    (BrushClipKeep::Back, Some(back), Some(_)) => {
-                        self.push_undo();
-                        self.project.active_scene_mut().brushes[selected] = back;
-                        self.mark_dirty();
-                    }
-                    (BrushClipKeep::Front, Some(_), Some(front)) => {
-                        self.push_undo();
-                        self.project.active_scene_mut().brushes[selected] = front;
-                        self.mark_dirty();
-                    }
-                    // Plane missed the brush: nothing to keep or drop.
-                    _ => {}
                 }
             }
+        };
+        let kept = egui::Stroke::new(2.0, STUDIO_ACCENT);
+        let dropped = egui::Stroke::new(1.0, CLIP_DROP_COLOR);
+        for index in self.selected_brush_set() {
+            let Some(brush) = self.project.active_scene().brushes.get(index) else {
+                continue;
+            };
+            let clipped = brush.clip(points);
+            let (back_stroke, front_stroke) = match self.brush_clip_keep {
+                BrushClipKeep::Both => (kept, kept),
+                BrushClipKeep::Back => (kept, dropped),
+                BrushClipKeep::Front => (dropped, kept),
+            };
+            if let Some(back) = &clipped.back {
+                draw_solved(back, back_stroke);
+            }
+            if let Some(front) = &clipped.front {
+                draw_solved(front, front_stroke);
+            }
         }
+    }
+
+    fn draw_brush_clip_preview_3d(
+        &self,
+        painter: &egui::Painter,
+        project: &dyn Fn([f64; 3]) -> Option<egui::Pos2>,
+    ) {
+        self.draw_brush_clip_preview(painter, |world| project(world));
+    }
+
+    fn draw_brush_clip_preview_2d(
+        &self,
+        painter: &egui::Painter,
+        transform: crate::viewport2d::ViewportTransform,
+        view: OrthographicView,
+    ) {
+        self.draw_brush_clip_preview(painter, |world| {
+            let projected = view.project_f64(world);
+            Some(transform.world_to_screen([projected[0] as f32, projected[1] as f32]))
+        });
+    }
+
+    /// Apply the pending clip to every selected brush (one undo step).
+    /// Kept sides follow `brush_clip_keep`; brushes the plane misses are
+    /// left alone. Returns true when anything was cut.
+    pub(crate) fn apply_brush_clip(&mut self) -> bool {
+        let Some(points) = self.brush_clip_plane_points() else {
+            self.status = "Clip needs two points first".to_string();
+            return false;
+        };
+        let targets = self.selected_brush_set();
+        if targets.is_empty() {
+            return false;
+        }
+        let mut replacements: Vec<(usize, psxed_project::brush::Brush)> = Vec::new();
+        let mut additions: Vec<psxed_project::brush::Brush> = Vec::new();
+        for &index in &targets {
+            let Some(brush) = self.project.active_scene().brushes.get(index) else {
+                continue;
+            };
+            let clipped = brush.clip(points);
+            match (self.brush_clip_keep, clipped.back, clipped.front) {
+                (BrushClipKeep::Both, Some(back), Some(front)) => {
+                    replacements.push((index, back));
+                    additions.push(front);
+                }
+                (BrushClipKeep::Back, Some(back), Some(_)) => replacements.push((index, back)),
+                (BrushClipKeep::Front, Some(_), Some(front)) => replacements.push((index, front)),
+                // Plane missed this brush: nothing to keep or drop.
+                _ => {}
+            }
+        }
+        if replacements.is_empty() && additions.is_empty() {
+            self.status = "Clip plane misses the selected brushes".to_string();
+            return false;
+        }
+        self.push_undo();
+        let cut = replacements.len();
+        let scene = self.project.active_scene_mut();
+        for (index, brush) in replacements {
+            scene.brushes[index] = brush;
+        }
+        scene.brushes.extend(additions);
+        self.brush_clip_points.clear();
+        self.reconcile_brush_selection();
+        self.mark_dirty();
+        self.status = format!(
+            "Clipped {cut} brush{} ({})",
+            if cut == 1 { "" } else { "es" },
+            self.brush_clip_keep.label(),
+        );
+        true
     }
 
     /// Select the visible brush face under the active orthographic point.
@@ -2511,11 +2696,19 @@ impl EditorWorkspace {
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
             draw(&preview, None, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
-        if let Some(start) = self.brush_clip_start {
-            let projected = view.project_f32(start.map(|value| value as f32));
+        for (number, clip_point) in self.brush_clip_points.iter().enumerate() {
+            let projected = view.project_f32(clip_point.point.map(|value| value as f32));
             let center = transform.world_to_screen(projected);
-            painter.circle_stroke(center, 4.0, egui::Stroke::new(1.5, STUDIO_ACCENT));
+            painter.circle_stroke(center, 5.0, egui::Stroke::new(1.5, STUDIO_ACCENT));
+            painter.text(
+                center + Vec2::new(7.0, -7.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{}", number + 1),
+                egui::FontId::proportional(11.0),
+                STUDIO_ACCENT,
+            );
         }
+        self.draw_brush_clip_preview_2d(painter, transform, view);
         let brush_edit_visible = matches!(self.active_tool, ViewTool::Brush | ViewTool::Select);
         if brush_edit_visible {
             if let Some(index) = self.selected_brush {
@@ -2526,6 +2719,9 @@ impl EditorWorkspace {
                         transform.world_to_screen([projected[0] as f32, projected[1] as f32])
                     };
                     match self.brush_edit_mode {
+                        // Clip markers + preview draw once, outside the
+                        // per-brush loop.
+                        BrushEditMode::Clip => {}
                         BrushEditMode::Move => {
                             let center = std::array::from_fn(|axis| {
                                 (solved.min[axis] + solved.max[axis]) * 0.5
@@ -2750,6 +2946,28 @@ impl EditorWorkspace {
                 if let Some(brush) = self.project.active_scene().brushes.get(index) {
                     let solved = brush.solve();
                     match self.brush_edit_mode {
+                        BrushEditMode::Clip => {
+                            for (number, clip_point) in
+                                self.brush_clip_points.iter().enumerate()
+                            {
+                                let world = clip_point.point.map(f64::from);
+                                if let Some(center) = project(world) {
+                                    painter.circle_stroke(
+                                        center,
+                                        5.0,
+                                        egui::Stroke::new(1.5, STUDIO_ACCENT),
+                                    );
+                                    painter.text(
+                                        center + egui::Vec2::new(7.0, -7.0),
+                                        egui::Align2::LEFT_BOTTOM,
+                                        format!("{}", number + 1),
+                                        egui::FontId::proportional(11.0),
+                                        STUDIO_ACCENT,
+                                    );
+                                }
+                            }
+                            self.draw_brush_clip_preview_3d(painter, &project);
+                        }
                         BrushEditMode::Move => {
                             let center = std::array::from_fn(|axis| {
                                 (solved.min[axis] + solved.max[axis]) * 0.5
@@ -2863,6 +3081,9 @@ const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
 /// Pre-click hover tint for brush sub-element handles (yellow, matching
 /// the entity-bounds hover convention; selected stays white).
 const HANDLE_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 240, 144);
+
+/// Dropped-side tint in the clip preview.
+const CLIP_DROP_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 96, 96);
 
 fn dominant_axis(normal: [i64; 3]) -> usize {
     let mut axis = 0;
@@ -3044,7 +3265,7 @@ impl EditorWorkspace {
             }
         };
         match self.brush_edit_mode {
-            BrushEditMode::Move => return None,
+            BrushEditMode::Move | BrushEditMode::Clip => return None,
             BrushEditMode::Vertex => {
                 for vertex in brush_elements::unique_vertices(&solved) {
                     if let Some(screen) = self.project_brush_point_3d(rect, vertex) {
@@ -3433,15 +3654,11 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
-        // Modifier-click places clip points: two ground points define a
-        // vertical clip plane that splits the selected brush in two.
-        if frame.modifiers.command {
-            if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
-                ws.brush_clip_click_in_view(point, OrthographicView::Top);
-            }
+        // Clip mode: clicks place clip points on brush faces.
+        if ws.brush_edit_mode == BrushEditMode::Clip && ws.selected_brush.is_some() {
+            ws.brush_clip_click_3d(frame.rect, pointer);
             return;
         }
-        ws.brush_clip_start = None;
         // Sub-element clicks first, mirroring SelectTool (a click never
         // fires drag-start, so this is the only handle-selection path).
         if ws.selected_brush.is_some() && ws.brush_edit_mode != BrushEditMode::Move {

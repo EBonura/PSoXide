@@ -181,7 +181,7 @@ impl EditorWorkspace {
         }
         match self.active_tool {
             ViewTool::Brush => {
-                if modifiers.command {
+                if self.brush_edit_mode == BrushEditMode::Clip && self.selected_brush.is_some() {
                     let point = self.brush_snap_2d(world);
                     self.brush_clip_click(point);
                 } else if self.select_brush_elements_2d(world, modifiers) {
@@ -221,6 +221,11 @@ impl EditorWorkspace {
                         self.clear_primitive_selection_state();
                         self.clear_sector_selection();
                     }
+                } else if self.brush_edit_mode == BrushEditMode::Clip
+                    && self.selected_brush.is_some()
+                {
+                    let point = self.brush_snap_2d(world);
+                    self.brush_clip_click(point);
                 } else if self.select_brush_elements_2d(world, modifiers) {
                 } else if let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world)
                 {

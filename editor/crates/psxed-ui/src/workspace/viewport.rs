@@ -170,7 +170,9 @@ impl EditorWorkspace {
                     ui.ctx().set_cursor_icon(match self.brush_edit_mode {
                         BrushEditMode::Move => egui::CursorIcon::Grab,
                         BrushEditMode::Face => egui::CursorIcon::ResizeVertical,
-                        BrushEditMode::Edge | BrushEditMode::Vertex => egui::CursorIcon::Crosshair,
+                        BrushEditMode::Edge | BrushEditMode::Vertex | BrushEditMode::Clip => {
+                            egui::CursorIcon::Crosshair
+                        }
                     });
                 }
             }

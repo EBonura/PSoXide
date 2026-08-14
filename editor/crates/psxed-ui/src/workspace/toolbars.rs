@@ -272,7 +272,9 @@ impl EditorWorkspace {
                                 ui.ctx().set_cursor_icon(match self.brush_edit_mode {
                                     BrushEditMode::Move => egui::CursorIcon::Grab,
                                     BrushEditMode::Face => egui::CursorIcon::ResizeHorizontal,
-                                    BrushEditMode::Edge | BrushEditMode::Vertex => {
+                                    BrushEditMode::Edge
+                                    | BrushEditMode::Vertex
+                                    | BrushEditMode::Clip => {
                                         egui::CursorIcon::Crosshair
                                     }
                                 });
@@ -301,6 +303,9 @@ impl EditorWorkspace {
                                         } else {
                                             match self.brush_edit_mode {
                                                 BrushEditMode::Move => unreachable!(),
+                                                // Clip is click-driven; a drag
+                                                // starts nothing.
+                                                BrushEditMode::Clip => false,
                                                 BrushEditMode::Face => {
                                                     self.begin_brush_resize_2d(world, tolerance)
                                                 }
@@ -588,6 +593,15 @@ impl EditorWorkspace {
                 self.draw_transform_gizmo_toolbar_controls(ui);
                 ui.separator();
                 self.draw_brush_edit_mode_controls(ui);
+                if self.brush_edit_mode == BrushEditMode::Clip {
+                    if ui
+                        .button(format!("Clip keeps: {}", self.brush_clip_keep.label()))
+                        .on_hover_text("Which side(s) the cut keeps (Tab cycles)")
+                        .clicked()
+                    {
+                        self.brush_clip_keep = self.brush_clip_keep.next();
+                    }
+                }
                 ui.label("Grid");
                 ui.add_sized(
                     [52.0, 22.0],
