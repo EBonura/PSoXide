@@ -285,6 +285,7 @@ impl SolvedBrush {
         self.polygons.iter().flatten().count() >= 4
     }
 
+
     /// Whether every solved coordinate stays within `limit` world units
     /// of the origin. The bounded-solid check `is_valid` cannot provide.
     pub fn within_extent(&self, limit: f64) -> bool {
@@ -633,6 +634,17 @@ impl Brush {
         epsilon: f64,
     ) -> usize {
         self.translate_selected(&[], targets, delta, epsilon)
+    }
+
+    /// Whether this brush is a sane, clickable solid: it solves to a
+    /// BOUNDED volume. A plane re-authored inside-out still yields a
+    /// "valid" solve, but one clipped only by the base winding
+    /// (coordinates at [`BASE_WINDING_EXTENT`]): the preview draws a
+    /// partial shell while pick rays in the visible area miss, so every
+    /// click passes through.
+    pub fn is_pickable(&self) -> bool {
+        let solved = self.solve();
+        solved.is_valid() && solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT)
     }
 
     /// [`Self::translate_points_near`], plus every authored point of the
