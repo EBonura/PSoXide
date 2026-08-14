@@ -89,7 +89,7 @@ pub fn game_image_hash_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> u
 }
 
 /// One emulated frame's port-1 DualShock state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PadSample {
     /// Digital button bitmask (see [`crate::pad::button`]).
     pub buttons: u16,
@@ -101,6 +101,12 @@ pub struct PadSample {
     pub left_x: u8,
     /// Left analog stick Y (0x00 up .. 0x80 center .. 0xFF down).
     pub left_y: u8,
+}
+
+impl Default for PadSample {
+    fn default() -> Self {
+        Self::from_buttons(0)
+    }
 }
 
 impl PadSample {
@@ -442,6 +448,16 @@ mod tests {
     #[test]
     fn from_buttons_centers_sticks() {
         let s = PadSample::from_buttons(0x00FF);
+        assert_eq!(
+            (s.right_x, s.right_y, s.left_x, s.left_y),
+            (0x80, 0x80, 0x80, 0x80)
+        );
+    }
+
+    #[test]
+    fn default_sample_is_a_neutral_dualshock() {
+        let s = PadSample::default();
+        assert_eq!(s, PadSample::from_buttons(0));
         assert_eq!(
             (s.right_x, s.right_y, s.left_x, s.left_y),
             (0x80, 0x80, 0x80, 0x80)
