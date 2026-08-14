@@ -2192,6 +2192,56 @@ fn clicks_select_vertices_and_edges_individually() {
 }
 
 #[test]
+fn top_view_click_selects_the_vertex_column() {
+    let mut harness = ViewportHarness::floored_room("brush_2d_element_click", 4);
+    harness.workspace.active_tool = ViewTool::Select;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.set_brush_edit_mode(BrushEditMode::Vertex);
+
+    // Clicking the (0,0) corner in Top view selects the whole depth
+    // column (two corners: y=0 and y=64), and the brush stays selected.
+    harness
+        .workspace
+        .handle_viewport_click([0.0, 0.0], &[], egui::Modifiers::default());
+    assert_eq!(
+        harness.workspace.selected_brush_elements.len(),
+        2,
+        "column selects both stacked corners, got {:?}",
+        harness.workspace.selected_brush_elements
+    );
+    assert_eq!(harness.workspace.selected_brush, Some(0));
+
+    // Shift-click another corner column adds; shift-clicking it again
+    // removes the whole column as one unit.
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    harness
+        .workspace
+        .handle_viewport_click([64.0, 0.0], &[], shift);
+    assert_eq!(harness.workspace.selected_brush_elements.len(), 4);
+    harness
+        .workspace
+        .handle_viewport_click([64.0, 0.0], &[], shift);
+    assert_eq!(harness.workspace.selected_brush_elements.len(), 2);
+
+    // A plain click far from any handle clears the brush selection as
+    // before (no handle in range), proving the handle-first path only
+    // consumes clicks that actually land on handles.
+    harness
+        .workspace
+        .handle_viewport_click([4000.0, 4000.0], &[], egui::Modifiers::default());
+    assert_eq!(harness.workspace.selected_brush, None);
+}
+
+#[test]
 fn group_drag_moves_every_selected_vertex() {
     let (mut workspace, rect) = element_click_workspace();
     workspace.replace_brush_selection(0, None);

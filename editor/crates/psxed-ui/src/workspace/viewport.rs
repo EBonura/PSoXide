@@ -152,16 +152,21 @@ impl EditorWorkspace {
                     )
                 })
         };
+        self.selection.hovered_brush_handle = None;
         if response.hovered()
             && (matches!(self.active_tool, ViewTool::Brush)
                 || (select_tool && self.selected_brush.is_some()))
         {
             if let Some(pointer) = response.hover_pos() {
-                let over_handle = self.pick_brush_handle_3d(rect, pointer).is_some();
+                let hovered_handle = self.pick_brush_handle_3d(rect, pointer);
+                self.selection.hovered_brush_handle =
+                    hovered_handle.map(|(_, handle)| handle.element());
                 let over_brush = self
                     .pick_brush_face_nearest_for_selection_3d(rect, pointer)
                     .is_some();
-                if over_handle || (self.brush_edit_mode == BrushEditMode::Move && over_brush) {
+                if hovered_handle.is_some()
+                    || (self.brush_edit_mode == BrushEditMode::Move && over_brush)
+                {
                     ui.ctx().set_cursor_icon(match self.brush_edit_mode {
                         BrushEditMode::Move => egui::CursorIcon::Grab,
                         BrushEditMode::Face => egui::CursorIcon::ResizeVertical,
