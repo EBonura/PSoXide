@@ -1313,3 +1313,72 @@ fn period_frames_the_brush_selected_through_select() {
     assert_eq!(center, [768.0, 128.0, 128.0]);
     assert_eq!(half, [768.0, 128.0, 128.0]);
 }
+
+#[test]
+fn hollow_turns_a_cube_into_walls_and_undo_restores_it() {
+    let mut rig = MouseRig::single_cube("hollow-op");
+    rig.click(RIG_VIEWPORT.center());
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    rig.workspace.snap_units = 64;
+    assert!(rig.workspace.csg_hollow_selected());
+    let walls = rig.workspace.project.active_scene().brushes.len();
+    assert!(walls >= 6, "hollow yields the box walls, got {walls}");
+    assert!(rig.workspace.selected_brush.is_none());
+    rig.workspace.do_undo();
+    assert_eq!(rig.workspace.project.active_scene().brushes.len(), 1);
+}
+
+#[test]
+fn subtract_carves_neighbours_and_deletes_the_cutter() {
+    let mut rig = MouseRig::single_cube("subtract-op");
+    rig.workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [128, 64, -64],
+            [384, 192, 128],
+        ));
+    rig.workspace.selected_brush = Some(1);
+    rig.workspace.selected_brushes = vec![1];
+    assert!(rig.workspace.csg_subtract_selected());
+    let brushes = &rig.workspace.project.active_scene().brushes;
+    assert!(
+        brushes.len() >= 3,
+        "the carved target splits into convex pieces, got {}",
+        brushes.len()
+    );
+    // The carved region is empty: no brush contains a point inside the
+    // old cutter volume.
+    let carved = [256.0, 128.0, 64.0];
+    for brush in brushes {
+        let solved = brush.solve();
+        assert!(solved.is_valid());
+        let inside = brush.faces.iter().all(|face| {
+            let plane = psxed_project::brush::Plane::from_points(face.points).expect("plane");
+            let (normal, distance) = psxed_project::brush_compile::normalized_plane(plane);
+            normal[0] * carved[0] + normal[1] * carved[1] + normal[2] * carved[2] - distance
+                <= 1e-6
+        });
+        assert!(!inside, "carved volume must be empty");
+    }
+    rig.workspace.do_undo();
+    assert_eq!(rig.workspace.project.active_scene().brushes.len(), 2);
+}
+
+#[test]
+fn subtract_on_a_disjoint_cutter_reports_and_keeps_everything() {
+    let mut rig = MouseRig::single_cube("subtract-miss");
+    rig.workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [2048, 0, 2048],
+            [2304, 256, 2304],
+        ));
+    rig.workspace.selected_brush = Some(1);
+    rig.workspace.selected_brushes = vec![1];
+    assert!(!rig.workspace.csg_subtract_selected());
+    assert_eq!(rig.workspace.project.active_scene().brushes.len(), 2);
+}
