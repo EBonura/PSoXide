@@ -165,8 +165,9 @@ impl MouseRig {
             let grab = polyline[polyline.len() / 6];
             let centroid = self
                 .workspace
-                .selected_brush_element_centroid()
-                .expect("selection centroid");
+                .brush_gizmo_context()
+                .expect("gizmo context")
+                .0;
             let center = self.world_to_screen(centroid);
             let radial = (grab - center).normalized();
             let tangent = Vec2::new(-radial.y, radial.x);
@@ -386,7 +387,10 @@ fn mouse_move_mode_body_drag_translates_the_brush() {
     let body = rig.world_to_screen([256.0, 256.0, 128.0]);
     rig.click(body);
     assert_eq!(rig.workspace.selected_brush, Some(0));
-    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    // A body point clear of the gizmo arrows (which radiate from the
+    // brush's bounds centre): free drags belong to the body, arrows to
+    // the axis-constrained gizmo.
+    let body = rig.world_to_screen([420.0, 256.0, 210.0]);
     rig.drag(body, body + Vec2::new(120.0, 0.0));
     assert_ne!(rig.brush(), base, "body drag moves the brush");
     let solved = rig.brush().solve();
@@ -837,5 +841,95 @@ fn unpickable_brushes_are_diagnosed_on_load() {
         workspace.status.contains("damaged"),
         "load surfaces the damage, status: {}",
         workspace.status
+    );
+}
+
+/// The hierarchy's top tier: in Brush mode the gizmo transforms the
+/// WHOLE brush. Move translates it rigidly along each axis, Rotate
+/// spins it (90 degrees about Y swaps the X/Z extents of the 512x256
+/// box), Scale stretches it along the grabbed axis.
+#[test]
+fn mouse_whole_brush_gizmo_moves_rotates_and_scales() {
+    // Move: each axis translates rigidly (size unchanged).
+    for axis in 0..3 {
+        let mut rig = MouseRig::single_cube("rig-whole-brush-move");
+        let base = rig.brush();
+        rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
+        rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Move);
+        let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+        rig.click(body);
+        assert_eq!(rig.workspace.selected_brush, Some(0));
+        let (grab, to) = rig.gizmo_drag_vector(axis);
+        rig.drag(grab, to);
+        let after = rig.brush();
+        assert_ne!(after, base, "move axis {axis}: brush translated");
+        let (sb, sa) = (base.solve(), after.solve());
+        for check in 0..3 {
+            let size_before = sb.max[check] - sb.min[check];
+            let size_after = sa.max[check] - sa.min[check];
+            assert!(
+                (size_before - size_after).abs() <= 1.0,
+                "move axis {axis}: rigid translate keeps size on {check}"
+            );
+            if check != axis {
+                assert!(
+                    (sb.min[check] - sa.min[check]).abs() <= 0.5,
+                    "move axis {axis}: axis {check} masked"
+                );
+            }
+        }
+        rig.workspace.do_undo();
+        assert_eq!(rig.brush(), base);
+    }
+
+    // Rotate 90 degrees about Y: X/Z extents swap (512x256 footprint).
+    let mut rig = MouseRig::single_cube("rig-whole-brush-rotate");
+    let base = rig.brush();
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
+    rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Rotate);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    let center = rig.world_to_screen(
+        rig.workspace.brush_gizmo_context().expect("context").0,
+    );
+    let (grab, _) = rig.gizmo_drag_vector(1);
+    let radial = grab - center;
+    let swept = center + Vec2::new(-radial.y, radial.x);
+    rig.move_to(grab);
+    rig.press(grab);
+    rig.move_to(center + (swept - center) * 0.7 + (grab - center) * 0.3);
+    rig.move_to(swept);
+    rig.release(swept);
+    let after = rig.brush();
+    assert_ne!(after, base, "rotate changed the brush");
+    let (sb, sa) = (base.solve(), after.solve());
+    let (bx, bz) = (sb.max[0] - sb.min[0], sb.max[2] - sb.min[2]);
+    let (ax, az) = (sa.max[0] - sa.min[0], sa.max[2] - sa.min[2]);
+    assert!(
+        (ax - bz).abs() <= 2.0 && (az - bx).abs() <= 2.0,
+        "quarter turn swaps footprint extents: before {bx}x{bz}, after {ax}x{az}"
+    );
+    rig.workspace.do_undo();
+    assert_eq!(rig.brush(), base);
+
+    // Scale along X: wider, same height/depth.
+    let mut rig = MouseRig::single_cube("rig-whole-brush-scale");
+    let base = rig.brush();
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
+    rig.workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
+    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+    rig.click(body);
+    let (grab, to) = rig.gizmo_drag_vector(0);
+    rig.drag(grab, to);
+    let after = rig.brush();
+    assert_ne!(after, base, "scale changed the brush");
+    let (sb, sa) = (base.solve(), after.solve());
+    assert!(
+        sa.max[0] - sa.min[0] > sb.max[0] - sb.min[0] + 16.0,
+        "wider along X"
+    );
+    assert!(
+        (sa.max[1] - sa.min[1] - (sb.max[1] - sb.min[1])).abs() <= 1.0,
+        "height untouched"
     );
 }
