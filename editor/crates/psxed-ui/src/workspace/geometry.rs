@@ -354,7 +354,12 @@ impl EditorWorkspace {
             self.status = "Place or cancel the duplicate preview first".to_string();
             return;
         }
-        if self.active_tool == ViewTool::Brush && self.selected_brush.is_some() {
+        // A brush selected through the general Select tool is directly
+        // editable (see the Select toolbar arm), so Cmd+D must route to the
+        // brush copy for both tools, not just ViewTool::Brush.
+        if self.selected_brush.is_some()
+            && matches!(self.active_tool, ViewTool::Brush | ViewTool::Select)
+        {
             self.duplicate_selected_brushes();
             return;
         }
@@ -2881,13 +2886,11 @@ impl EditorWorkspace {
             screen_delta.x / self.viewport_zoom,
             -screen_delta.y / self.viewport_zoom,
         ];
-        let targets = {
-            let scene = self.project.active_scene();
-            selected
-                .into_iter()
-                .map(|id| (id, node_enclosing_sector_size(scene, id)))
-                .collect::<Vec<_>>()
-        };
+        let targets = selected
+            .into_iter()
+            .map(|id| (id, node_translation_sector_size(&self.project, id)))
+            .collect::<Vec<_>>();
+        let snap_step = i32::from(self.snap_units.max(1));
         let mut moved = Vec::new();
         for (id, sector_size) in targets {
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
@@ -2901,14 +2904,22 @@ impl EditorWorkspace {
                         | NodeKind::BoxProp { .. }
                         | NodeKind::CylinderProp { .. }
                 ) {
-                    node.transform.translation[0] = snap_node_transform_component_to_world_step(
-                        node.transform.translation[0],
-                        sector_size,
-                    );
-                    node.transform.translation[2] = snap_node_transform_component_to_world_step(
-                        node.transform.translation[2],
-                        sector_size,
-                    );
+                    if sector_size == 1 {
+                        // World-unit nodes (BSP scenes) land on the brush grid.
+                        node.transform.translation[0] =
+                            snap_world_units_component(node.transform.translation[0], snap_step);
+                        node.transform.translation[2] =
+                            snap_world_units_component(node.transform.translation[2], snap_step);
+                    } else {
+                        node.transform.translation[0] = snap_node_transform_component_to_world_step(
+                            node.transform.translation[0],
+                            sector_size,
+                        );
+                        node.transform.translation[2] = snap_node_transform_component_to_world_step(
+                            node.transform.translation[2],
+                            sector_size,
+                        );
+                    }
                 }
                 moved.push(node.name.clone());
             }

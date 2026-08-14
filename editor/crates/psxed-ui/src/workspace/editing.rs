@@ -1546,7 +1546,7 @@ impl EditorWorkspace {
                         NodeKind::ArchProp { geometry, .. } => Some(*geometry),
                         _ => None,
                     },
-                    sector_size: node_enclosing_sector_size(scene, id),
+                    sector_size: node_translation_sector_size(&self.project, id),
                 })
             })
             .collect();
@@ -1566,11 +1566,15 @@ impl EditorWorkspace {
             targets,
             current_steps: 0,
             snapshot_pushed: false,
+            free: false,
         });
         true
     }
 
-    pub(crate) fn update_node_gizmo_drag(&mut self, rect: Rect, pointer: Pos2) {
+    pub(crate) fn update_node_gizmo_drag(&mut self, rect: Rect, pointer: Pos2, free: bool) {
+        if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
+            drag.free = free;
+        }
         let Some(drag) = self.interaction.node_gizmo_drag() else {
             return;
         };
@@ -1673,6 +1677,13 @@ impl EditorWorkspace {
         let handle = drag.handle;
         let steps = drag.current_steps;
         let plane_delta_world = drag.current_plane_delta_world;
+        // World-unit nodes (sector_size == 1, i.e. BSP scenes) move on the
+        // brush grid; Shift (free) drops to single-unit precision.
+        let world_quantum = if drag.free {
+            1
+        } else {
+            i32::from(self.snap_units.max(1))
+        };
         let move_axis_world = drag.move_axis_world;
         let rotation_space = drag
             .rotate
@@ -1694,6 +1705,7 @@ impl EditorWorkspace {
                             move_axis_world,
                             steps,
                             target.sector_size,
+                            world_quantum,
                         );
                     }
                     NodeGizmoHandle::Plane(plane) => {
@@ -1703,6 +1715,7 @@ impl EditorWorkspace {
                             plane,
                             plane_delta_world,
                             target.sector_size,
+                            world_quantum,
                         );
                     }
                     NodeGizmoHandle::BoxFace(_) => {}
@@ -1825,6 +1838,7 @@ impl EditorWorkspace {
         self.clear_primitive_selection_state();
         self.clear_resource_selection_state();
         self.clear_sector_selection();
+        self.clear_brush_selection();
         let scene = self.project.active_scene();
         if let Some(n) = scene.node(node) {
             self.status = format!("Selected {} '{}'", n.kind.label(), n.name);
@@ -1859,7 +1873,6 @@ impl EditorWorkspace {
             start_world_hit: hit.point,
             drag_plane_y,
             snapshot_pushed: false,
-            room: hit.bounds.room,
         });
     }
 
@@ -1869,7 +1882,7 @@ impl EditorWorkspace {
     /// (sectors), and write `start + delta` to the node's
     /// translation. Pushes undo lazily on the first
     /// non-zero-delta frame.
-    pub(crate) fn update_node_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
+    pub(crate) fn update_node_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2, free: bool) {
         let Some(drag) = self.interaction.node_drag() else {
             return;
         };
@@ -1877,7 +1890,6 @@ impl EditorWorkspace {
         let node_id = drag.node;
         let start_translation = drag.start_translation;
         let start_world_hit = drag.start_world_hit;
-        let room_id = drag.room;
         let already_snapshotted = drag.snapshot_pushed;
 
         let Some((origin, dir)) = self.camera_ray_for_pointer(rect, pointer) else {
@@ -1886,27 +1898,24 @@ impl EditorWorkspace {
         let Some(world_hit) = ray_intersects_horizontal_plane(origin, dir, plane_y) else {
             return;
         };
-        // Convert the world-space delta into editor-space
-        // (sectors) using the room's `sector_size`. Without an
-        // enclosing Room, fall back to a 1:1 conversion so
-        // global nodes still drag.
-        let scene = self.project.active_scene();
-        let sector_size = room_id
-            .and_then(|id| scene.node(id))
-            .and_then(|n| match &n.kind {
-                NodeKind::Section { grid } => Some(grid.sector_size as f32),
-                _ => None,
-            })
-            .unwrap_or(1.0);
+        // Convert the world-space delta into the node's translation units
+        // (sectors under a grid room, raw world units in BSP scenes).
+        let sector_size = node_translation_sector_size(&self.project, node_id).max(1) as f32;
         let delta_world = [
             world_hit[0] - start_world_hit[0],
             world_hit[2] - start_world_hit[2],
         ];
-        let new_translation = [
+        let mut new_translation = [
             start_translation[0] + delta_world[0] / sector_size,
             start_translation[1],
             start_translation[2] + delta_world[1] / sector_size,
         ];
+        // World-unit nodes land on the brush grid; Shift drags free.
+        if sector_size == 1.0 && !free {
+            let step = self.snap_units.max(1) as f32;
+            new_translation[0] = (new_translation[0] / step).round() * step;
+            new_translation[2] = (new_translation[2] / step).round() * step;
+        }
 
         // Lazy undo: first non-zero delta pushes one snapshot.
         if !already_snapshotted
@@ -1940,9 +1949,12 @@ impl EditorWorkspace {
                 self.apply_primitive_selection_modifiers(selection, modifiers);
             }
             None => {
+                // Clicked empty space: clear every selection domain.
                 self.clear_primitive_selection_state();
                 self.clear_resource_selection_state();
                 self.clear_sector_selection();
+                self.clear_brush_selection();
+                self.clear_node_selection_state();
                 self.status = "Cleared selection".to_string();
             }
         }

@@ -569,10 +569,13 @@ impl EditorWorkspace {
                 )
                 .on_hover_text("Grid snap step, world units. All brush drags snap to it.");
             }
-            ViewTool::Select if self.selected_brush.is_some() => {
-                // A brush selected through the general Select tool remains
-                // directly editable. Do not make the user discover that the
-                // separate Brush tool owns otherwise-identical gestures.
+            ViewTool::Select if self.bsp_authoring_root().is_some() => {
+                // BSP Select is the one context-sensitive tool: the entity
+                // transform gizmo plus the brush reshape modes, always
+                // visible. The legacy grid Selection/Surface/Vertex groups
+                // have nothing to address in a brush world and their names
+                // collide with the brush modes, so they are hidden here.
+                self.draw_transform_gizmo_toolbar_controls(ui);
                 ui.separator();
                 self.draw_brush_edit_mode_controls(ui);
                 ui.label("Grid");
@@ -582,7 +585,7 @@ impl EditorWorkspace {
                         .speed(1.0)
                         .range(1..=256),
                 )
-                .on_hover_text("Grid snap step, world units. All brush drags snap to it.");
+                .on_hover_text("Grid snap step, world units. All brush and entity drags snap to it.");
             }
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
@@ -811,14 +814,18 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_brush_edit_mode_controls(&mut self, ui: &mut egui::Ui) {
-        for mode in BrushEditMode::ALL {
+        for (index, mode) in BrushEditMode::ALL.into_iter().enumerate() {
             let response = ui
                 .add(
                     egui::Button::new(mode.label())
                         .selected(self.brush_edit_mode == mode)
                         .min_size(Vec2::new(48.0, 23.0)),
                 )
-                .on_hover_text(format!("{}; snaps to the active grid", mode.gesture_hint()));
+                .on_hover_text(format!(
+                    "{}; snaps to the active grid ({})",
+                    mode.gesture_hint(),
+                    index + 1
+                ));
             if response.clicked() {
                 self.set_brush_edit_mode(mode);
             }
@@ -830,7 +837,7 @@ impl EditorWorkspace {
         );
     }
 
-    fn set_brush_edit_mode(&mut self, mode: BrushEditMode) {
+    pub(crate) fn set_brush_edit_mode(&mut self, mode: BrushEditMode) {
         if self.brush_edit_mode == mode {
             return;
         }
@@ -847,7 +854,7 @@ impl EditorWorkspace {
         );
     }
 
-    fn draw_select_tool_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+    fn draw_transform_gizmo_toolbar_controls(&mut self, ui: &mut egui::Ui) {
         toolbar_group_menu(
             ui,
             3,
@@ -871,6 +878,10 @@ impl EditorWorkspace {
             self.gizmo_space = space.toggled();
             self.status = format!("Gizmo orientation: {}", self.gizmo_space.label());
         }
+    }
+
+    fn draw_select_tool_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+        self.draw_transform_gizmo_toolbar_controls(ui);
         toolbar_group_menu(
             ui,
             4,
@@ -1215,7 +1226,7 @@ impl EditorWorkspace {
 
         {
             let selected = self.active_tool_cycle_value() == (ViewTool::Brush, None);
-            if toolbar_menu_choice(ui, icons::label(ViewTool::Brush.icon(), "Brush"), selected) {
+            if toolbar_menu_choice(ui, icons::label(ViewTool::Brush.icon(), "Draw"), selected) {
                 self.set_active_tool_cycle_value((ViewTool::Brush, None));
             }
         }
@@ -1333,6 +1344,12 @@ impl EditorWorkspace {
                     &mut self.preview_backface_wireframe,
                 );
                 changed |= visibility_menu_row(ui, "bounds", "Bounds", &mut self.preview_bounds);
+                changed |= visibility_menu_row(
+                    ui,
+                    "brush-wireframes",
+                    "Brush wireframes",
+                    &mut self.show_brush_wireframes,
+                );
             });
         if changed {
             self.persist_editor_visibility_state();

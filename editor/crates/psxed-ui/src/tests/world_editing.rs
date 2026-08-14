@@ -596,7 +596,7 @@ fn node_gizmo_xy_plane_moves_entity_on_two_axes() {
         project_world_to_viewport_screen(workspace.viewport_3d_camera(), viewport, target_hit)
             .expect("target hit projects");
 
-    workspace.update_node_gizmo_drag(viewport, target_pointer);
+    workspace.update_node_gizmo_drag(viewport, target_pointer, false);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(entity).unwrap();
@@ -614,6 +614,57 @@ fn node_gizmo_xy_plane_moves_entity_on_two_axes() {
     workspace.do_undo();
     let node = workspace.project.active_scene().node(entity).unwrap();
     assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn node_gizmo_moves_bsp_entity_in_world_units() {
+    // BSP scenes hang entities off the root in raw world units; a gizmo
+    // step must move snap_units world units (the 1/1024-speed regression),
+    // and Shift (free) must drop to single-unit precision.
+    let mut project = ProjectDocument::new("entity-gizmo-bsp");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [256, 256, 256]));
+    let entity = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Entity", NodeKind::Entity);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("entity-gizmo-bsp"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(entity);
+    assert_eq!(
+        node_translation_sector_size(&workspace.project, entity),
+        1,
+        "roomless BSP node authors in world units"
+    );
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+    let unit = (x_axis.end - x_axis.start).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 4.0, false);
+    workspace.end_node_gizmo_drag();
+    let node = workspace.project.active_scene().node(entity).unwrap();
+    let step = f32::from(workspace.snap_units.max(1));
+    assert!(
+        (node.transform.translation[0] - step).abs() < 0.001,
+        "one gizmo step = one grid step in world units, got {}",
+        node.transform.translation[0]
+    );
+    workspace.do_undo();
+
+    // Shift: single-unit steps.
+    let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+    let unit = (x_axis.end - x_axis.start).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 4.0, true);
+    workspace.end_node_gizmo_drag();
+    let node = workspace.project.active_scene().node(entity).unwrap();
+    assert!(
+        (node.transform.translation[0] - 1.0).abs() < 0.001,
+        "free drag steps single world units, got {}",
+        node.transform.translation[0]
+    );
 }
 
 #[test]
@@ -637,7 +688,7 @@ fn node_gizmo_moves_entity_on_selected_axis() {
     let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
     let unit = (x_axis.end - x_axis.start).normalized();
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 4.0);
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 4.0, false);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(entity).unwrap();
@@ -685,7 +736,7 @@ fn node_gizmo_moves_point_light_on_y_axis() {
     let y_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
     let unit = (y_axis.end - y_axis.start).normalized();
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
-    workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 4.0);
+    workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 4.0, false);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(light).unwrap();
@@ -760,13 +811,13 @@ fn node_gizmo_rotates_image_prop_around_y() {
 
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
     let radial = (start - ring.center).normalized();
-    workspace.update_node_gizmo_drag(viewport, start + radial * 24.0);
+    workspace.update_node_gizmo_drag(viewport, start + radial * 24.0, false);
     let node = workspace.project.active_scene().node(prop).unwrap();
     assert_eq!(
         node.transform.rotation_degrees[1], 0.0,
         "radial motion must not rotate"
     );
-    workspace.update_node_gizmo_drag(viewport, target);
+    workspace.update_node_gizmo_drag(viewport, target, false);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(prop).unwrap();
@@ -833,7 +884,7 @@ fn node_gizmo_local_space_rotates_about_node_axis() {
     assert!(steps >= 10.0, "test sweep too small: {swept}");
 
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
-    workspace.update_node_gizmo_drag(viewport, target);
+    workspace.update_node_gizmo_drag(viewport, target, false);
     workspace.end_node_gizmo_drag();
 
     // A local-space drag must equal composing the delta in the node's
@@ -916,7 +967,7 @@ fn arch_prop_exposes_move_rotate_and_quantized_scale_gizmos() {
     let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
     let unit = (x_axis.end - x_axis.start).normalized();
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0, false);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(arch).unwrap();
@@ -960,7 +1011,7 @@ fn node_gizmo_scales_image_prop_width() {
     let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
     let unit = (x_axis.end - x_axis.start).normalized();
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0, false);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(prop).unwrap();
@@ -1012,7 +1063,7 @@ fn node_gizmo_scales_box_prop_width() {
     let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
     let unit = (x_axis.end - x_axis.start).normalized();
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0, false);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(prop).unwrap();

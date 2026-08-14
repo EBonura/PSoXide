@@ -754,6 +754,21 @@ impl EditorWorkspace {
                     WorkspaceView::Ui | WorkspaceView::Material => {}
                 }
             }
+            // 1-4 pick the brush edit mode (Move / Resize / Edge / Vertex),
+            // matching the toolbar button order. Active for the Brush tool and
+            // for a brush selected through Select, same as the toolbar.
+            if self.active_workspace == WorkspaceView::Room
+                && (self.active_tool == ViewTool::Brush
+                    || (self.active_tool == ViewTool::Select && self.selected_brush.is_some()))
+            {
+                const MODE_KEYS: [egui::Key; 4] =
+                    [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4];
+                for (key, mode) in MODE_KEYS.into_iter().zip(BrushEditMode::ALL) {
+                    if ctx.input_mut(|i| i.key_pressed(key)) {
+                        self.set_brush_edit_mode(mode);
+                    }
+                }
+            }
             if self.floating_geometry.is_some() {
                 return;
             }
@@ -835,14 +850,24 @@ impl EditorWorkspace {
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num3) {
             self.cycle_transform_group(reverse);
         }
+        // BSP scenes: the Selection slot cycles the brush edit mode (the
+        // grid Face/Edge/Vertex selection modes address nothing there), and
+        // the grid-only Surface / Vertex Edits groups go dormant.
+        let bsp_select = self.active_room_id().is_none() && self.bsp_authoring_root().is_some();
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num4) {
-            self.cycle_selection_group(reverse);
+            if bsp_select {
+                self.cycle_brush_edit_mode_group(reverse);
+            } else {
+                self.cycle_selection_group(reverse);
+            }
         }
-        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num5) {
-            self.cycle_horizontal_edit_group(reverse);
-        }
-        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num6) {
-            self.cycle_vertex_connectivity_group(reverse);
+        if !bsp_select {
+            if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num5) {
+                self.cycle_horizontal_edit_group(reverse);
+            }
+            if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num6) {
+                self.cycle_vertex_connectivity_group(reverse);
+            }
         }
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num7) {
             self.cycle_visibility_group(reverse);
@@ -1021,6 +1046,15 @@ impl EditorWorkspace {
             SelectionMode::Vertex,
         ];
         self.set_selection_mode(cycle_value(VALUES, self.selection_mode, reverse));
+    }
+
+    pub(crate) fn cycle_brush_edit_mode_group(&mut self, reverse: bool) {
+        self.set_brush_edit_mode(cycle_value(
+            &BrushEditMode::ALL,
+            self.brush_edit_mode,
+            reverse,
+        ));
+        self.mark_shortcut_group_changed(ShortcutGroup::Selection);
     }
 
     pub(crate) fn cycle_horizontal_edit_group(&mut self, reverse: bool) {
