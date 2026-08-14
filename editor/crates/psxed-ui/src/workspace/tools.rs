@@ -167,6 +167,9 @@ impl ViewportTool3d for SelectTool {
     }
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
+        // A wiggled human click crosses egui's drag threshold and arrives
+        // as a no-op drag; treat it as the click it was meant to be.
+        let synthesize_click = ws.brush_release_was_noop_click();
         if ws.brush_move.is_some()
             || ws.brush_vertex_drag.is_some()
             || ws.brush_extrude.is_some()
@@ -174,6 +177,13 @@ impl ViewportTool3d for SelectTool {
             || ws.brush_element_transform.is_some()
         {
             BrushTool.primary_released(ws, _frame);
+            if synthesize_click {
+                self.primary_clicked(ws, _frame);
+            }
+            return;
+        }
+        if synthesize_click {
+            self.primary_clicked(ws, _frame);
             return;
         }
         match ws.interaction {
@@ -901,7 +911,14 @@ impl EditorWorkspace {
         if targets.is_empty() {
             return false;
         }
-        match self.transform_gizmo_mode {
+        // Rotating or scaling a single point about itself is the
+        // identity; such selections always move instead.
+        let mode = if targets.len() < 2 {
+            TransformGizmoMode::Move
+        } else {
+            self.transform_gizmo_mode
+        };
+        match mode {
             TransformGizmoMode::Move => {
                 if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
                     return false;
@@ -923,7 +940,7 @@ impl EditorWorkspace {
                     targets,
                     center: anchor,
                     axis,
-                    rotate: self.transform_gizmo_mode == TransformGizmoMode::Rotate,
+                    rotate: mode == TransformGizmoMode::Rotate,
                     start_pointer: pointer,
                     applied: 0,
                 });
@@ -984,6 +1001,39 @@ impl EditorWorkspace {
                 format!("Scale {}% along {}", 100 + applied, ["X", "Y", "Z"][drag.axis])
             };
         }
+    }
+
+    /// True when a press-release ran through the drag machinery but
+    /// applied nothing: egui suppresses the click event once its 6 px
+    /// drag threshold is crossed, so a slightly-wiggled human click
+    /// arrives ONLY as drag-start/drag-stop. Release handlers use this
+    /// to synthesize the click the user actually meant.
+    pub(crate) fn brush_release_was_noop_click(&self) -> bool {
+        let gesture_active = self.brush_move.is_some()
+            || self.brush_vertex_drag.is_some()
+            || self.brush_extrude.is_some()
+            || self.brush_element_transform.is_some();
+        if gesture_active {
+            return self
+                .brush_move
+                .as_ref()
+                .is_none_or(|gesture| gesture.applied == [0; 3])
+                && self
+                    .brush_vertex_drag
+                    .as_ref()
+                    .is_none_or(|gesture| gesture.applied == [0; 3])
+                && self
+                    .brush_extrude
+                    .as_ref()
+                    .is_none_or(|gesture| gesture.applied == [0; 3])
+                && self
+                    .brush_element_transform
+                    .as_ref()
+                    .is_none_or(|gesture| gesture.applied == 0);
+        }
+        // No gesture and no interaction: the press landed on a brush
+        // body arm that consumes nothing (non-Move edit modes).
+        self.brush_drag.is_none() && matches!(self.interaction, Interaction::Idle)
     }
 
     /// End the rotate/scale gesture: one undo step when anything applied.
@@ -3941,19 +3991,17 @@ impl ViewportTool3d for BrushTool {
     }
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
-        if ws.commit_brush_element_transform() {
-            return;
+        let synthesize_click = ws.brush_release_was_noop_click() && ws.brush_drag.is_none();
+        let committed = ws.commit_brush_element_transform()
+            || ws.commit_brush_move_preview()
+            || ws.commit_brush_vertex_drag_preview()
+            || ws.commit_brush_extrude_preview();
+        if !committed {
+            ws.commit_brush_drag();
         }
-        if ws.commit_brush_move_preview() {
-            return;
+        if synthesize_click {
+            self.primary_clicked(ws, _frame);
         }
-        if ws.commit_brush_vertex_drag_preview() {
-            return;
-        }
-        if ws.commit_brush_extrude_preview() {
-            return;
-        }
-        ws.commit_brush_drag();
     }
 
     fn primary_clicked(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
