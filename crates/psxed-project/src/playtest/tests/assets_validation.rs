@@ -191,7 +191,7 @@ fn starter_residency_includes_world_and_textures() {
 
 #[test]
 fn empty_project_fails_validation() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     project.scenes[0] = crate::Scene::new("Empty");
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(package.is_none());
@@ -201,7 +201,7 @@ fn empty_project_fails_validation() {
 
 #[test]
 fn project_with_no_player_spawn_fails_validation() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     demote_player_spawns(&mut project);
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(package.is_none());
@@ -210,7 +210,7 @@ fn project_with_no_player_spawn_fails_validation() {
 
 #[test]
 fn project_with_multiple_player_spawns_fails_validation() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let scene = project.active_scene_mut();
     let room_id = scene
         .nodes()
@@ -267,7 +267,7 @@ fn rendered_manifest_imports_psx_level_and_static_blocks() {
 
 #[test]
 fn cook_to_dir_writes_manifest_rooms_and_textures() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let dir = std::env::temp_dir().join(format!(
         "psxed-playtest-cook-{}-{}",
         std::process::id(),
@@ -315,7 +315,7 @@ fn cook_to_dir_purges_stale_assets() {
     // Drop a fake stale file in textures/ before cooking;
     // the writer should remove it so the generated tree only
     // references files that survive this run.
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let dir = std::env::temp_dir().join(format!(
         "psxed-playtest-purge-{}-{}",
         std::process::id(),
@@ -365,7 +365,7 @@ fn repeated_brush_cook_replaces_generated_output_for_the_selected_mode() {
 
 #[test]
 fn failed_cook_removes_stale_cooked_manifest() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     demote_player_spawns(&mut project);
 
     let dir = std::env::temp_dir().join(format!(
@@ -536,7 +536,7 @@ fn missing_model_mesh_path_fails_with_clear_error() {
     // Bend the starter player's model resource at a bogus mesh
     // path; cook should refuse rather than silently
     // emitting a Model record without bytes.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let player_model = player_model_resource_id(&project);
     for resource in project.resources.iter_mut() {
         if resource.id == player_model {
@@ -564,7 +564,7 @@ fn animation_clip_override_out_of_range_fails() {
     // Author a per-instance clip override past the model's
     // clip count → cook refuses with an explicit error
     // mentioning the offending node.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     set_first_model_instance_clip(&mut project, 999);
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(package.is_none());
@@ -583,7 +583,7 @@ fn model_with_no_atlas_fails_when_placed() {
     // Strip the starter player's texture_path; cook must
     // refuse the placed instance instead of silently
     // dropping it at runtime.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let player_model = player_model_resource_id(&project);
     for resource in project.resources.iter_mut() {
         if resource.id == player_model {
@@ -605,7 +605,7 @@ fn model_with_no_atlas_fails_when_placed() {
 
 #[test]
 fn model_with_no_clips_fails_when_placed() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let player_model = player_model_resource_id(&project);
     for resource in project.resources.iter_mut() {
         if resource.id == player_model {
@@ -633,7 +633,7 @@ fn model_with_no_clips_fails_when_placed() {
 fn byte_identical_model_atlases_cook_into_one_shared_texture_asset() {
     // Two placed models sharing one atlas file must share one cooked
     // persistent texture asset (the sword-pair contract).
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let player_model = player_model_resource_id(&project);
     let ResourceData::Model(model) = &project
         .resource(player_model)
@@ -663,7 +663,7 @@ fn byte_identical_model_atlases_cook_into_one_shared_texture_asset() {
 fn model_atlases_differing_by_one_payload_byte_stay_distinct() {
     // Dedup is byte identity: ANY differing PSXT byte (metadata or
     // payload) must keep the cooked assets distinct.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let player_model = player_model_resource_id(&project);
     let ResourceData::Model(model) = &project
         .resource(player_model)
