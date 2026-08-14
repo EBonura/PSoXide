@@ -119,8 +119,11 @@ impl RoutingTable {
             RoutingEntry {
                 name,
                 port,
-                // Original digital pad is the safest default for early games.
-                analog: false,
+                // Modern host controllers should appear as a DualShock in
+                // analog mode. Guests such as Quake, VoXide, and HL-PSX use
+                // both sticks immediately; the routing panel still permits an
+                // explicit original-digital-pad profile for early games.
+                analog: true,
             },
         );
         self.bump();
@@ -830,7 +833,7 @@ mod tests {
         routes.connect("pad-a".to_string(), "Pad A".to_string());
         assert_eq!(routes.port_for(KEYBOARD_DEVICE_ID), PsxPort::Off);
         assert_eq!(routes.port_for("pad-a"), PsxPort::One);
-        assert_eq!(routes.profile_for(PsxPort::One), Some(false));
+        assert_eq!(routes.profile_for(PsxPort::One), Some(true));
 
         routes.connect("pad-b".to_string(), "Pad B".to_string());
         assert_eq!(routes.port_for("pad-b"), PsxPort::Two);
