@@ -585,6 +585,73 @@ impl EditorWorkspace {
         }
     }
 
+    /// Solved world positions of every selected vertex and edge endpoint,
+    /// deduped: the drag target set for a group move.
+    pub(crate) fn selected_brush_element_targets(&self) -> Vec<[f64; 3]> {
+        let Some(brush) = self
+            .selected_brush
+            .and_then(|index| self.project.active_scene().brushes.get(index))
+        else {
+            return Vec::new();
+        };
+        let solved = brush.solve();
+        let vertices = brush_elements::unique_vertices(&solved);
+        let edges = brush_elements::unique_edges(&solved);
+        let mut targets: Vec<[f64; 3]> = Vec::new();
+        let mut push = |point: [f64; 3], targets: &mut Vec<[f64; 3]>| {
+            if !targets.iter().any(|seen| {
+                (0..3).all(|axis| (seen[axis] - point[axis]).abs() <= 0.5)
+            }) {
+                targets.push(point);
+            }
+        };
+        for element in &self.selected_brush_elements {
+            match element {
+                BrushElement::Vertex(key) => {
+                    if let Some(vertex) = vertices
+                        .iter()
+                        .find(|vertex| brush_elements::quantize_element_point(**vertex) == *key)
+                    {
+                        push(*vertex, &mut targets);
+                    }
+                }
+                BrushElement::Edge(ka, kb) => {
+                    if let Some((a, b)) = edges
+                        .iter()
+                        .find(|(a, b)| brush_elements::edge_element_key(*a, *b) == (*ka, *kb))
+                    {
+                        push(*a, &mut targets);
+                        push(*b, &mut targets);
+                    }
+                }
+                BrushElement::Face(_) => {}
+            }
+        }
+        targets
+    }
+
+    /// Drag targets for a grabbed vertex/edge handle: the whole selected
+    /// element set when the grabbed element belongs to it, otherwise the
+    /// grab replaces the selection first (TrenchBroom behaviour) and
+    /// drags alone.
+    fn brush_drag_targets_for_grab(
+        &mut self,
+        grabbed: BrushElement,
+        fallback: Vec<[f64; 3]>,
+    ) -> Vec<[f64; 3]> {
+        if self.selected_brush_elements.contains(&grabbed) {
+            let targets = self.selected_brush_element_targets();
+            if targets.is_empty() {
+                fallback
+            } else {
+                targets
+            }
+        } else {
+            self.selected_brush_elements = vec![grabbed];
+            fallback
+        }
+    }
+
     /// Drop selected elements that no longer resolve against the primary
     /// brush's current solved geometry (after undo/redo, clips, drags).
     fn reconcile_brush_elements(&mut self) {
@@ -2078,7 +2145,31 @@ impl EditorWorkspace {
         true
     }
 
-    fn start_brush_vertex_drag(&mut self, index: usize, targets: Vec<[f64; 3]>, world: [f32; 2]) {
+    fn start_brush_vertex_drag(&mut self, index: usize, mut targets: Vec<[f64; 3]>, world: [f32; 2]) {
+        // Group drag: when any grabbed target is a selected element, the
+        // whole selected set rides along (2D grabs depth columns, 3D
+        // single corners; the union covers both semantics).
+        if self.selected_brush == Some(index) && !self.selected_brush_elements.is_empty() {
+            let element_matches = |key: [i64; 3]| {
+                self.selected_brush_elements.iter().any(|element| match element {
+                    BrushElement::Vertex(k) => *k == key,
+                    BrushElement::Edge(a, b) => *a == key || *b == key,
+                    BrushElement::Face(_) => false,
+                })
+            };
+            let grabbed_selected = targets
+                .iter()
+                .any(|target| element_matches(brush_elements::quantize_element_point(*target)));
+            if grabbed_selected {
+                for extra in self.selected_brush_element_targets() {
+                    if !targets.iter().any(|seen| {
+                        (0..3).all(|axis| (seen[axis] - extra[axis]).abs() <= 0.5)
+                    }) {
+                        targets.push(extra);
+                    }
+                }
+            }
+        }
         let base = self.project.active_scene().brushes[index].clone();
         self.selected_brush = Some(index);
         self.brush_vertex_drag = Some(BrushVertexDrag {
@@ -2132,6 +2223,32 @@ impl EditorWorkspace {
             self.push_undo();
             self.project.active_scene_mut().brushes[drag.index] = live;
             self.mark_dirty();
+            // Translate the selected element keys that rode this drag so
+            // the selection survives its own edit (adding one delta to
+            // both edge endpoints preserves canonical order).
+            let delta = drag.applied.map(i64::from);
+            let dragged = |key: [i64; 3]| {
+                drag.targets.iter().any(|target| {
+                    brush_elements::quantize_element_point(*target) == key
+                })
+            };
+            for element in &mut self.selected_brush_elements {
+                match element {
+                    BrushElement::Vertex(key) if dragged(*key) => {
+                        for axis in 0..3 {
+                            key[axis] += delta[axis];
+                        }
+                    }
+                    BrushElement::Edge(a, b) if dragged(*a) && dragged(*b) => {
+                        for axis in 0..3 {
+                            a[axis] += delta[axis];
+                            b[axis] += delta[axis];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.reconcile_brush_elements();
         }
         true
     }
@@ -2963,13 +3080,8 @@ impl ViewportTool3d for BrushTool {
         if let Some((index, handle)) = ws.pick_brush_handle_3d(frame.rect, pointer) {
             match handle {
                 BrushHandle3d::Vertex(vertex) => {
-                    if ws.begin_brush_vertex_drag_3d(
-                        frame.rect,
-                        pointer,
-                        index,
-                        vec![vertex],
-                        vertex,
-                    ) {
+                    let targets = ws.brush_drag_targets_for_grab(handle.element(), vec![vertex]);
+                    if ws.begin_brush_vertex_drag_3d(frame.rect, pointer, index, targets, vertex) {
                         return;
                     }
                 }
@@ -2979,8 +3091,8 @@ impl ViewportTool3d for BrushTool {
                         (a[1] + b[1]) * 0.5,
                         (a[2] + b[2]) * 0.5,
                     ];
-                    if ws.begin_brush_vertex_drag_3d(frame.rect, pointer, index, vec![a, b], center)
-                    {
+                    let targets = ws.brush_drag_targets_for_grab(handle.element(), vec![a, b]);
+                    if ws.begin_brush_vertex_drag_3d(frame.rect, pointer, index, targets, center) {
                         return;
                     }
                 }

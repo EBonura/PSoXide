@@ -2192,6 +2192,72 @@ fn clicks_select_vertices_and_edges_individually() {
 }
 
 #[test]
+fn group_drag_moves_every_selected_vertex() {
+    let (mut workspace, rect) = element_click_workspace();
+    workspace.replace_brush_selection(0, None);
+    workspace.set_brush_edit_mode(BrushEditMode::Vertex);
+    let tool = tool_impl_3d(ViewTool::Select);
+
+    // Select two top corners.
+    let corner_a = screen_for_world(&workspace, rect, [0.0, 512.0, 0.0]);
+    let corner_b = screen_for_world(&workspace, rect, [512.0, 512.0, 0.0]);
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, corner_a, egui::Modifiers::NONE),
+    );
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, corner_b, egui::Modifiers::SHIFT),
+    );
+    assert_eq!(workspace.selected_brush_elements.len(), 2);
+
+    // Drag corner A upward through the real press/update/commit chain;
+    // both corners must ride the drag.
+    tool.primary_pressed(
+        &mut workspace,
+        &element_click_frame(rect, corner_a, egui::Modifiers::NONE),
+    );
+    assert!(workspace.brush_vertex_drag.is_some(), "handle grab starts a drag");
+    assert_eq!(
+        workspace.brush_vertex_drag.as_ref().unwrap().targets.len(),
+        2,
+        "grabbing a selected handle drags the whole set"
+    );
+    let lift = screen_for_world(&workspace, rect, [0.0, 640.0, 0.0]);
+    tool.primary_dragged(
+        &mut workspace,
+        &element_click_frame(rect, lift, egui::Modifiers::NONE),
+    );
+    let applied = workspace.brush_vertex_drag.as_ref().unwrap().applied;
+    assert!(applied != [0; 3], "drag applied a delta, got {applied:?}");
+    tool.primary_released(
+        &mut workspace,
+        &element_click_frame(rect, lift, egui::Modifiers::NONE),
+    );
+
+    // Both authored top-front corners moved by the same delta.
+    let brush = &workspace.project.active_scene().brushes[0];
+    let solved = brush.solve();
+    let verts = crate::workspace::brush_elements::unique_vertices(&solved);
+    let moved = |target: [f64; 3]| {
+        verts.iter().any(|vertex| {
+            (0..3).all(|axis| {
+                (vertex[axis] - (target[axis] + f64::from(applied[axis]))).abs() <= 0.5
+            })
+        })
+    };
+    assert!(moved([0.0, 512.0, 0.0]), "corner A moved by the applied delta");
+    assert!(moved([512.0, 512.0, 0.0]), "corner B moved by the applied delta");
+
+    // The selection survived its own drag (keys remapped).
+    assert_eq!(
+        workspace.selected_brush_elements.len(),
+        2,
+        "selection survives the drag commit"
+    );
+}
+
+#[test]
 fn face_mode_click_selects_face_and_mirrors_uv_state() {
     let (mut workspace, rect) = element_click_workspace();
     workspace.replace_brush_selection(0, None);
