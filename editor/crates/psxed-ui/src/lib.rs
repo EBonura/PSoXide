@@ -1133,7 +1133,7 @@ impl BrushEditMode {
             Self::Face => "Click a face to select it; drag its normal handle to extrude",
             Self::Edge => "Drag an edge handle to reshape",
             Self::Vertex => "Drag a vertex handle to reshape",
-            Self::Clip => "Click 2-3 points; Enter cuts, Tab flips the kept side, Esc clears",
+            Self::Clip => "Click 2-3 points; Enter cuts, X flips the kept side, Esc clears",
         }
     }
 
