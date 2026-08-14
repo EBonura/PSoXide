@@ -439,7 +439,7 @@ fn click_visible_brush_mode(workspace: &mut EditorWorkspace, mode: BrushEditMode
         text_shape_center(&output.shapes, "Brush Transform").is_some(),
         "selected brush did not expose the Inspector transform section"
     );
-    for label in ["Move", "Resize", "Edge", "Vertex"] {
+    for label in ["Move", "Face", "Edge", "Vertex", "Clip"] {
         assert!(
             text_shape_center(&output.shapes, label).is_some(),
             "visible brush toolbar omitted {label:?}"
@@ -1222,6 +1222,62 @@ fn vertex_3d_handle_drag_runs_through_real_egui_raw_input_and_commits() {
         .is_valid());
     workspace.do_undo();
     assert_eq!(workspace.project.active_scene().brushes[0], brush);
+}
+
+#[test]
+fn element_gizmo_drag_runs_through_real_egui_in_select_mode() {
+    let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    let (mut workspace, _) = handle_test_workspace(brush.clone());
+    workspace.active_tool = ViewTool::Select;
+    workspace.set_brush_edit_mode(BrushEditMode::Vertex);
+    let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+    let vertex = crate::workspace::brush_elements::unique_vertices(&brush.solve())[0];
+    workspace.apply_brush_element_selection(
+        BrushElement::Vertex(crate::workspace::brush_elements::quantize_element_point(vertex)),
+        egui::Modifiers::NONE,
+    );
+    let axes = workspace
+        .brush_element_gizmo_axes_3d(viewport)
+        .expect("gizmo axes project");
+    let (origin, tip) = axes[1];
+    let start = origin + (tip - origin) * 0.6;
+    assert_eq!(
+        workspace.pick_brush_element_gizmo_axis_3d(viewport, start),
+        Some(1),
+        "grab point picks the Y axis"
+    );
+
+    run_real_egui_viewport_drag(&mut workspace, start, start + Vec2::new(0.0, -48.0));
+
+    assert!(workspace.is_dirty(), "gizmo drag must commit");
+    assert_ne!(workspace.project.active_scene().brushes[0], brush);
+}
+
+#[test]
+fn face_element_gizmo_drag_moves_the_face_via_real_egui() {
+    let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    let (mut workspace, _) = handle_test_workspace(brush.clone());
+    workspace.active_tool = ViewTool::Select;
+    workspace.set_brush_edit_mode(BrushEditMode::Face);
+    let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+    workspace.apply_brush_element_selection(BrushElement::Face(5), egui::Modifiers::NONE);
+    let axes = workspace
+        .brush_element_gizmo_axes_3d(viewport)
+        .expect("gizmo axes project");
+    let (origin, tip) = axes[1];
+    let start = origin + (tip - origin) * 0.6;
+    assert_eq!(
+        workspace.pick_brush_element_gizmo_axis_3d(viewport, start),
+        Some(1)
+    );
+
+    run_real_egui_viewport_drag(&mut workspace, start, start + Vec2::new(0.0, -48.0));
+
+    assert!(workspace.is_dirty(), "face gizmo drag must commit");
+    assert_ne!(workspace.project.active_scene().brushes[0], brush);
+    assert!(workspace.project.active_scene().brushes[0]
+        .solve()
+        .is_valid());
 }
 
 #[test]
@@ -2396,11 +2452,11 @@ fn element_gizmo_drags_are_axis_constrained() {
 
     // Grab the Y axis of the gizmo (a point most of the way up the arrow)
     // and drag diagonally: only Y may change.
-    let centroid = workspace
-        .selected_brush_element_centroid()
-        .expect("selection has a centroid");
-    let grab_world = [centroid[0], centroid[1] + 96.0, centroid[2]];
-    let grab = screen_for_world(&workspace, rect, grab_world);
+    let axes = workspace
+        .brush_element_gizmo_axes_3d(rect)
+        .expect("gizmo axes project");
+    let (origin, tip) = axes[1];
+    let grab = origin + (tip - origin) * 0.6;
     assert_eq!(
         workspace.pick_brush_element_gizmo_axis_3d(rect, grab),
         Some(1),
@@ -2409,11 +2465,8 @@ fn element_gizmo_drags_are_axis_constrained() {
     tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
     let drag = workspace.brush_vertex_drag.as_ref().expect("gizmo grab starts a drag");
     assert_eq!(drag.axis_mask, [false, true, false]);
-    let lift = screen_for_world(
-        &workspace,
-        rect,
-        [grab_world[0] + 128.0, grab_world[1] + 128.0, grab_world[2]],
-    );
+    // Diagonal screen movement: only the masked-in Y axis may apply.
+    let lift = grab + Vec2::new(48.0, -48.0);
     tool.primary_dragged(&mut workspace, &element_click_frame(rect, lift, egui::Modifiers::NONE));
     let applied = workspace.brush_vertex_drag.as_ref().unwrap().applied;
     assert_eq!(applied[0], 0, "X is masked");
