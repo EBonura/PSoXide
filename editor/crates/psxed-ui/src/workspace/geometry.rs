@@ -2650,6 +2650,25 @@ impl EditorWorkspace {
     /// backward along its own look vector. In both cases `.` therefore frames
     /// the selection instead of merely repointing at it from an arbitrary
     /// distance.
+    /// Camera-relative ground axes snapped to world axes: `forward` is
+    /// the dominant XZ direction the camera faces, `right` its clockwise
+    /// perpendicular. Arrow-key nudges use these so Up always moves the
+    /// selection away from the camera.
+    pub(crate) fn camera_ground_axes(&self) -> ([i32; 3], [i32; 3]) {
+        let yaw = match self.camera_rig.mode {
+            ViewportCameraMode::Free => self.camera_rig.free_yaw,
+            ViewportCameraMode::Orbit => self.camera_rig.yaw,
+        };
+        let forward3 = camera_forward_from_angles(yaw, 0);
+        let forward = if forward3[0].abs() >= forward3[2].abs() {
+            [forward3[0].signum() as i32, 0, 0]
+        } else {
+            [0, 0, forward3[2].signum() as i32]
+        };
+        let right = [-forward[2], 0, forward[0]];
+        (forward, right)
+    }
+
     pub(crate) fn frame_3d_bounds(&mut self, center: [f32; 3], half: [f32; 3]) {
         let target = center.map(round_to_i32);
         let radius = frame_radius_for_3d_bounds(half);
