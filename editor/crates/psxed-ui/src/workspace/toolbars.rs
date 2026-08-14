@@ -859,7 +859,7 @@ impl EditorWorkspace {
             if ui
                 .add_enabled(enabled, egui::Button::new("Extrude"))
                 .on_hover_text(
-                    "Pull a new brush out of the selected face by one grid step.                      Cmd-drag the face handle for a freeform distance.",
+                    "Pull a new brush out of the selected face by one grid step (E).                      Cmd-drag the face handle for a freeform distance.",
                 )
                 .clicked()
             {
