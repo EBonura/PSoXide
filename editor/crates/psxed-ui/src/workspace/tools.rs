@@ -131,6 +131,7 @@ impl ViewportTool3d for SelectTool {
             || ws.brush_vertex_drag.is_some()
             || ws.brush_extrude.is_some()
             || ws.brush_drag.is_some()
+            || ws.brush_element_transform.is_some()
         {
             BrushTool.primary_dragged(ws, frame);
             return;
@@ -170,6 +171,7 @@ impl ViewportTool3d for SelectTool {
             || ws.brush_vertex_drag.is_some()
             || ws.brush_extrude.is_some()
             || ws.brush_drag.is_some()
+            || ws.brush_element_transform.is_some()
         {
             BrushTool.primary_released(ws, _frame);
             return;
@@ -879,8 +881,10 @@ impl EditorWorkspace {
         best.map(|(_, axis)| axis)
     }
 
-    /// Begin an axis-constrained group drag of the selected elements from
-    /// the element gizmo. Returns false when nothing is selected.
+    /// Begin a gesture on the element gizmo: what the grab does follows
+    /// the Transform group (Move = axis-constrained translate, Rotate =
+    /// spin about the axis, Scale = stretch along it, both about the
+    /// selection centroid). Returns false when nothing is selected.
     fn begin_brush_element_gizmo_drag(
         &mut self,
         rect: egui::Rect,
@@ -897,13 +901,103 @@ impl EditorWorkspace {
         if targets.is_empty() {
             return false;
         }
-        if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
-            return false;
+        match self.transform_gizmo_mode {
+            TransformGizmoMode::Move => {
+                if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
+                    return false;
+                }
+                if let Some(drag) = self.brush_vertex_drag.as_mut() {
+                    let mut mask = [false; 3];
+                    mask[axis] = true;
+                    drag.axis_mask = mask;
+                }
+                true
+            }
+            TransformGizmoMode::Rotate | TransformGizmoMode::Scale => {
+                let Some(base) = self.project.active_scene().brushes.get(index).cloned() else {
+                    return false;
+                };
+                self.brush_element_transform = Some(BrushElementTransformDrag {
+                    index,
+                    base,
+                    targets,
+                    center: anchor,
+                    axis,
+                    rotate: self.transform_gizmo_mode == TransformGizmoMode::Rotate,
+                    start_pointer: pointer,
+                    applied: 0,
+                });
+                true
+            }
         }
-        if let Some(drag) = self.brush_vertex_drag.as_mut() {
-            let mut mask = [false; 3];
-            mask[axis] = true;
-            drag.axis_mask = mask;
+    }
+
+    /// Advance the rotate/scale gesture: horizontal pointer travel maps
+    /// to snapped degrees (5, Shift 1) or percent steps (5). Previews
+    /// rebuild from base and must stay bounded and valid.
+    pub(crate) fn update_brush_element_transform(&mut self, pointer: egui::Pos2, fine: bool) {
+        let Some(drag) = self.brush_element_transform.clone() else {
+            return;
+        };
+        let travel = pointer.x - drag.start_pointer.x;
+        let applied = if drag.rotate {
+            let step = if fine { 1.0 } else { 5.0 };
+            ((f64::from(travel) * 0.5 / step).round() * step) as i32
+        } else {
+            let step = 5.0;
+            ((f64::from(travel) / 2.56 / step).round() * step) as i32
+        };
+        if applied == drag.applied {
+            return;
+        }
+        let map = if drag.rotate {
+            let radians = f64::from(applied).to_radians();
+            let (sin, cos) = radians.sin_cos();
+            let mut map = [[0.0; 3]; 3];
+            let a = drag.axis;
+            let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+            map[a][a] = 1.0;
+            map[u][u] = cos;
+            map[u][v] = -sin;
+            map[v][u] = sin;
+            map[v][v] = cos;
+            map
+        } else {
+            let factor = (1.0 + f64::from(applied) / 100.0).clamp(0.05, 16.0);
+            let mut map = [[0.0; 3]; 3];
+            for axis in 0..3 {
+                map[axis][axis] = if axis == drag.axis { factor } else { 1.0 };
+            }
+            map
+        };
+        let mut preview = drag.base.clone();
+        if preview.transform_points_near(&drag.targets, drag.center, map, 0.5) > 0
+            && brush_preview_ok(&preview)
+        {
+            self.project.active_scene_mut().brushes[drag.index] = preview;
+            if let Some(state) = self.brush_element_transform.as_mut() {
+                state.applied = applied;
+            }
+            self.status = if drag.rotate {
+                format!("Rotate {} deg about {}", applied, ["X", "Y", "Z"][drag.axis])
+            } else {
+                format!("Scale {}% along {}", 100 + applied, ["X", "Y", "Z"][drag.axis])
+            };
+        }
+    }
+
+    /// End the rotate/scale gesture: one undo step when anything applied.
+    pub(crate) fn commit_brush_element_transform(&mut self) -> bool {
+        let Some(drag) = self.brush_element_transform.take() else {
+            return false;
+        };
+        let live = self.project.active_scene().brushes[drag.index].clone();
+        self.project.active_scene_mut().brushes[drag.index] = drag.base;
+        if drag.applied != 0 {
+            self.push_undo();
+            self.project.active_scene_mut().brushes[drag.index] = live;
+            self.mark_dirty();
+            self.reconcile_brush_elements();
         }
         true
     }
@@ -1063,6 +1157,16 @@ impl EditorWorkspace {
     pub(crate) fn cancel_brush_gestures(&mut self) {
         self.brush_drag = None;
         self.brush_clip_points.clear();
+        if let Some(transform) = self.brush_element_transform.take() {
+            if let Some(slot) = self
+                .project
+                .active_scene_mut()
+                .brushes
+                .get_mut(transform.index)
+            {
+                *slot = transform.base;
+            }
+        }
         if let Some(extrude) = self.brush_extrude.take() {
             if let Some(slot) = self
                 .project
@@ -3744,6 +3848,10 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
+        if ws.brush_element_transform.is_some() {
+            ws.update_brush_element_transform(pointer, frame.modifiers.shift);
+            return;
+        }
         if ws
             .brush_vertex_drag
             .as_ref()
@@ -3833,6 +3941,9 @@ impl ViewportTool3d for BrushTool {
     }
 
     fn primary_released(&self, ws: &mut EditorWorkspace, _frame: &ToolFrame3d) {
+        if ws.commit_brush_element_transform() {
+            return;
+        }
         if ws.commit_brush_move_preview() {
             return;
         }

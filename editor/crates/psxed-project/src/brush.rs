@@ -566,6 +566,45 @@ impl Brush {
     /// re-tilts exactly the planes anchored there. A face with no
     /// coincident authored point keeps its plane, and the corner slides
     /// along it as the neighbouring planes move.
+    /// Apply an affine map about `center` to every authored point within
+    /// `epsilon` of a target: `p' = round(map * (p - center) + center)`.
+    /// The element gizmo's rotate/scale core; planes stay planar because
+    /// each face's three points transform rigidly (up to i32 rounding).
+    /// Returns how many authored points moved.
+    pub fn transform_points_near(
+        &mut self,
+        targets: &[[f64; 3]],
+        center: [f64; 3],
+        map: [[f64; 3]; 3],
+        epsilon: f64,
+    ) -> usize {
+        let mut moved = 0;
+        for face in &mut self.faces {
+            for point in &mut face.points {
+                let hit = targets.iter().any(|target| {
+                    (0..3).all(|axis| (f64::from(point[axis]) - target[axis]).abs() <= epsilon)
+                });
+                if !hit {
+                    continue;
+                }
+                let local = [
+                    f64::from(point[0]) - center[0],
+                    f64::from(point[1]) - center[1],
+                    f64::from(point[2]) - center[2],
+                ];
+                for axis in 0..3 {
+                    let value = map[axis][0] * local[0]
+                        + map[axis][1] * local[1]
+                        + map[axis][2] * local[2]
+                        + center[axis];
+                    point[axis] = value.round() as i32;
+                }
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     pub fn translate_points_near(
         &mut self,
         targets: &[[f64; 3]],
