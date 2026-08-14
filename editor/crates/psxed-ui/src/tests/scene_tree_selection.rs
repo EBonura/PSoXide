@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn dragging_selected_node_moves_it_in_xz_space() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let spawn = starter_player_entity(workspace.project.active_scene()).id;
     let sector_size = node_translation_sector_size(&workspace.project, spawn);
     let start = workspace
@@ -181,7 +181,7 @@ fn tree_drag_autoscroll_delta_tracks_edge_bands() {
 #[test]
 fn scene_tree_select_clears_inspector_shadow_selection() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let scene = workspace.project.active_scene();
     let room = scene
         .nodes()
@@ -222,7 +222,7 @@ fn scene_tree_select_clears_inspector_shadow_selection() {
 #[test]
 fn scene_tree_ctrl_toggles_node_multi_selection() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let order = workspace.scene_node_order();
     let ids: Vec<NodeId> = order
         .iter()
@@ -268,7 +268,7 @@ fn scene_tree_ctrl_toggles_node_multi_selection() {
 #[test]
 fn scene_tree_shift_selects_visible_node_range() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let order = workspace.scene_node_order();
     let ids: Vec<NodeId> = order
         .iter()
@@ -562,7 +562,7 @@ fn ui_node_clipboard_pastes_subtree_into_another_ui_scene() {
 #[test]
 fn resource_browser_supports_ctrl_and_shift_multi_selection() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let order: Vec<ResourceId> = workspace
         .project
         .resources
@@ -837,7 +837,7 @@ fn autotile_selected_sector_walls_updates_all_selected_tiles() {
 #[test]
 fn shift_selects_sector_rectangle_from_anchor() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let room = workspace.active_room_id().expect("starter has room");
 
     let mut shift = egui::Modifiers::NONE;

@@ -62,6 +62,16 @@ pub use document_types::*;
 /// of truth -- edits to the on-disk file propagate to `starter()` on
 /// the next build.
 const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/default/project.ron");
+/// The pre-BSP grid mega-project (the old default): kept as a tracked
+/// fixture because a large share of the cook/playtest suites exercise
+/// the grid pipeline through its scenes and resources.
+const LEGACY_GRID_STARTER_RON: &str =
+    include_str!("../../../projects/legacy-grid-starter/project.ron");
+
+/// On-disk root of the legacy grid fixture (asset-backed tests).
+pub fn legacy_grid_starter_dir() -> PathBuf {
+    projects_dir().join("legacy-grid-starter")
+}
 
 /// Where user projects live, resolved for both the dev tree and a shipped
 /// binary.

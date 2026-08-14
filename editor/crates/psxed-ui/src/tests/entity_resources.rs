@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn collect_entity_bounds_covers_starter_scene_entities() {
-    let workspace = EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let workspace = EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let bounds = workspace.collect_entity_bounds(workspace.active_room_id());
     assert!(
         !bounds.is_empty(),
@@ -29,7 +29,7 @@ fn collect_entity_bounds_covers_starter_scene_entities() {
 #[test]
 fn selecting_character_component_uses_parent_entity_bounds() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let scene = workspace.project.active_scene();
     let entity = starter_player_entity(scene);
     let controller = entity
@@ -54,7 +54,7 @@ fn selecting_character_component_uses_parent_entity_bounds() {
 #[test]
 fn dropping_model_resource_creates_component_entity() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let room = workspace.active_room_id().expect("starter has a room");
     let model_id = workspace
         .project
@@ -93,7 +93,7 @@ fn dropping_model_resource_creates_component_entity() {
 #[test]
 fn dropping_character_resource_creates_entity_components() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let room = workspace.active_room_id().expect("starter has a room");
     let character_id = workspace
         .project
@@ -633,7 +633,7 @@ fn entity_add_child_menu_includes_camera_component() {
 #[test]
 fn add_component_to_host_creates_child_and_selects_it() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let room = workspace.active_room_id().expect("starter has room");
     let entity = workspace
         .project
@@ -665,7 +665,7 @@ fn add_component_to_host_creates_child_and_selects_it() {
 #[test]
 fn add_camera_component_to_entity_selects_new_child() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let room = workspace.active_room_id().expect("starter has room");
     let entity = workspace
         .project
@@ -1144,7 +1144,7 @@ fn character_controller_player_toggle_demotes_existing_player_source() {
 
 #[test]
 fn pick_entity_bound_returns_node_when_ray_hits_centre() {
-    let workspace = EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let workspace = EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let bounds = workspace.collect_entity_bounds(workspace.active_room_id());
     let target = bounds
         .iter()
@@ -1210,7 +1210,7 @@ fn pick_entity_bound_includes_box_prop_bounds() {
 
 #[test]
 fn project_filesystem_rows_are_generated_from_resources() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let prefab_library = load_prefab_library().expect("prefab library loads");
     let rows = project_filesystem_rows(&project, &prefab_library);
     let material_name = project
@@ -1236,7 +1236,7 @@ fn project_filesystem_rows_are_generated_from_resources() {
 
 #[test]
 fn collapsed_project_filesystem_folder_hides_children() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let prefab_library = load_prefab_library().expect("prefab library loads");
     let rows = project_filesystem_rows(&project, &prefab_library);
     let material_name = project
@@ -1267,7 +1267,7 @@ fn compact_middle_keeps_long_asset_names_dock_sized() {
 
 #[test]
 fn resource_filter_and_search_match_expected_resources() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     // Legacy Texture resources fold into materials at load.
     assert!(!project
         .resources

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn playtest_packages_the_runtime_bound_player_clips() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let player_model = player_model_resource_id(&project);
     let authored_clip_count = project.resolved_model_animation_clips(player_model).len();
     assert!(
@@ -40,7 +40,7 @@ fn playtest_packages_the_runtime_bound_player_clips() {
 
 #[test]
 fn playtest_folds_pose_corrections_into_packaged_animation_bytes() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let project_root = starter_project_root();
     let player_model = player_model_resource_id(&project);
     let resolved = project.resolved_model_animation_clips(player_model);
@@ -121,7 +121,7 @@ fn room_material_must_be_4bpp() {
 fn model_atlas_accepts_4bpp() {
     // A normal 4bpp PSXT is also a valid model atlas: the runtime selects a
     // 4bpp tpage and allocates the corresponding 16-entry CLUT.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let player_model = player_model_resource_id(&project);
     for resource in project.resources.iter_mut() {
         if resource.id == player_model {
@@ -139,7 +139,7 @@ fn model_atlas_accepts_4bpp() {
 
 #[test]
 fn model_atlas_preserves_source_texture_flags() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let root = starter_project_root();
     let player_model = player_model_resource_id(&project);
     let source_texture_path = project
@@ -181,7 +181,7 @@ fn two_instances_of_one_model_dedup_to_one_record() {
     // model resource as the starter's player. The cook
     // emits two `model_instances` but only one `models[]`
     // entry.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let model_id = player_model_resource_id(&project);
     let scene = project.active_scene_mut();
     let room_id = scene
@@ -214,7 +214,7 @@ fn two_instances_of_one_model_dedup_to_one_record() {
 
 #[test]
 fn entity_model_instance_preserves_authored_yaw() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let model_id = player_model_resource_id(&project);
     let scene = project.active_scene_mut();
     let room_id = scene
@@ -264,7 +264,7 @@ fn entity_model_instance_preserves_authored_yaw() {
 
 #[test]
 fn image_prop_preserves_authored_pitch_yaw_roll() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -312,7 +312,7 @@ fn image_prop_preserves_authored_pitch_yaw_roll() {
 
 #[test]
 fn image_prop_cooks_preview_matching_collision_bounds() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -415,7 +415,7 @@ fn image_prop_cooks_preview_matching_collision_bounds() {
 
 #[test]
 fn image_prop_collision_participates_in_shared_aabb_budget() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -458,7 +458,7 @@ fn image_prop_collision_participates_in_shared_aabb_budget() {
 
 #[test]
 fn box_prop_cooks_faces_vertices_and_collision() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -544,7 +544,7 @@ fn resized_box_prop_cooks_rotated_world_collision_bounds() {
 
 #[test]
 fn degenerate_collidable_box_prop_fails_the_cook() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -585,7 +585,7 @@ fn degenerate_collidable_box_prop_fails_the_cook() {
 
 #[test]
 fn eroded_box_prop_cooks_shared_runtime_surfaces() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -631,7 +631,7 @@ fn eroded_box_prop_cooks_shared_runtime_surfaces() {
 
 #[test]
 fn cylinder_prop_cooks_shared_triangle_and_quad_surfaces() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -691,7 +691,7 @@ fn box_prop_cooks_authored_y_instead_of_snapping_to_floor() {
     // preview (which uses the raw, un-anchored origin). Floor-anchoring
     // would collapse it onto the room floor underneath, which samples
     // the floor grid and ignores any box stacked there.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -805,7 +805,7 @@ fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
 
 #[test]
 fn entity_model_instance_y_snaps_to_floor_under_authored_xz() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let model_id = player_model_resource_id(&project);
     let floor_material = project
         .resources
@@ -851,7 +851,7 @@ fn entity_model_instance_y_snaps_to_floor_under_authored_xz() {
 
 #[test]
 fn rendered_manifest_emits_model_records() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let (package, _) = build_package(&project, &starter_project_root());
     let package = package.expect("cooks");
     for model in &package.models {
@@ -1073,7 +1073,7 @@ fn empty_package_renders_a_valid_skeleton() {
 
 #[test]
 fn model_renderer_material_override_cooks_onto_instance() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let model_id = player_model_resource_id(&project);
     let material_id = project
         .resources

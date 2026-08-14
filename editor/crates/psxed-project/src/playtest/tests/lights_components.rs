@@ -143,7 +143,7 @@ fn floor_transition_wall_stays_in_single_manual_room() {
 
 #[test]
 fn starter_project_bakes_static_surface_lights() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let package = package.expect("starter cooks");
@@ -174,7 +174,7 @@ fn diagonal_walls_bake_static_surface_lights() {
         }
     }
 
-    let source = ProjectDocument::starter().resources[0].id;
+    let source = ProjectDocument::legacy_grid_starter().resources[0].id;
     let mut room = CookedRoomBakeInput {
         room_index: 0,
         world_asset_index: 0,
@@ -297,7 +297,7 @@ fn billboard_image_props_bake_vertical_static_lighting() {
 
 #[test]
 fn light_with_zero_radius_fails() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     insert_preview_light(&mut project);
     let ids = starter_light_ids(&project);
     let scene = project.active_scene_mut();
@@ -319,7 +319,7 @@ fn light_with_zero_radius_fails() {
 
 #[test]
 fn light_with_negative_intensity_fails() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     insert_preview_light(&mut project);
     let ids = starter_light_ids(&project);
     let scene = project.active_scene_mut();
@@ -343,7 +343,7 @@ fn light_with_negative_intensity_fails() {
 fn light_radius_converts_sectors_to_world_units() {
     // Author a 4-sector radius; cook stores world units using
     // the room's current sector size.
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     insert_preview_light(&mut project);
     let sector_size = project
         .active_scene()
@@ -371,7 +371,7 @@ fn light_radius_converts_sectors_to_world_units() {
 
 #[test]
 fn rendered_manifest_emits_lights_block() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     insert_preview_light(&mut project);
     let (package, _) = build_package(&project, &starter_project_root());
     let package = package.expect("cooks");
@@ -390,7 +390,7 @@ fn rendered_manifest_emits_lights_block() {
 
 #[test]
 fn interactable_component_emits_prompt_and_message_records() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let scene = project.active_scene_mut();
     let room = scene
         .nodes()
@@ -434,7 +434,7 @@ fn interactable_component_emits_prompt_and_message_records() {
 /// tests: returns the document plus the Weapon resource id so tests
 /// can author combat fields before cooking.
 fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
-    let starter = ProjectDocument::starter();
+    let starter = ProjectDocument::legacy_grid_starter();
     let mut starter_model = starter
         .resources
         .iter()

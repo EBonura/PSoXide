@@ -539,7 +539,7 @@ fn add_texture_material(
     source_name: &str,
     target_name: &str,
 ) -> ResourceId {
-    let source = psxed_project::default_project_dir()
+    let source = psxed_project::legacy_grid_starter_dir()
         .join("assets/textures")
         .join(source_name);
     assert!(
