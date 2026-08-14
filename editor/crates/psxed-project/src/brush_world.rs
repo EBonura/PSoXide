@@ -65,8 +65,8 @@ impl BrushWorldCookMode {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Draft => "Fast fullbright BSP compile for blockout iteration.",
-            Self::Release => "Bake authored point lighting into BSP vertices.",
+            Self::Draft => "Fast compile: lights bake without shadows.",
+            Self::Release => "Full bake: lights cast shadows (occlusion tested).",
         }
     }
 }
@@ -671,26 +671,34 @@ fn compile_model(
     let mut bsp = build_surface_bsp(&surfaces);
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);
-    let geometry = match mode {
-        BrushWorldCookMode::Draft => pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright)?,
-        BrushWorldCookMode::Release => {
-            let lighting = bake_brush_vertex_lighting(
-                &bsp.surfaces,
-                light_occluders,
-                ambient,
-                lights,
-                material_tints,
-            )
-            .map_err(|error| BrushWorldCookError::Light {
-                // `translate_lights` preserves scene order, so the reported
-                // light index indexes the same list `scene_lights` built.
-                node: match error {
-                    BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
-                },
-                error,
-            })?;
-            pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&lighting))?
-        }
+    // Lighting bakes in BOTH modes so lights always interact with
+    // brushes out of the box: Draft skips only the occlusion (shadow)
+    // tests, the expensive part; Release adds shadows. A scene with no
+    // lights at all keeps the historic fullbright look instead of
+    // dropping to bare ambient.
+    let geometry = if lights.is_empty() {
+        pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright)?
+    } else {
+        let occluders: &[Brush] = match mode {
+            BrushWorldCookMode::Draft => &[],
+            BrushWorldCookMode::Release => light_occluders,
+        };
+        let lighting = bake_brush_vertex_lighting(
+            &bsp.surfaces,
+            occluders,
+            ambient,
+            lights,
+            material_tints,
+        )
+        .map_err(|error| BrushWorldCookError::Light {
+            // `translate_lights` preserves scene order, so the reported
+            // light index indexes the same list `scene_lights` built.
+            node: match error {
+                BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
+            },
+            error,
+        })?;
+        pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&lighting))?
     };
     let collision = compile_collision_hulls(brushes, collision_hulls)?;
     Ok((geometry, collision))
@@ -1145,6 +1153,42 @@ mod tests {
         };
 
         project
+    }
+
+    #[test]
+    fn draft_mode_bakes_lighting_when_lights_exist() {
+        // A light inside the hollow room: Draft must bake it (without
+        // shadows) instead of packing fullbright, so lights interact
+        // with brushes out of the box. Vertex colors near the light are
+        // brighter than far ones and none stay at the fullbright
+        // sentinel; a lightless scene keeps fullbright.
+        let mut project = authored_project();
+        let scene = project.active_scene_mut();
+        let light = scene.add_node(
+            NodeId::ROOT,
+            "Light",
+            NodeKind::PointLight {
+                color: [255, 255, 255],
+                intensity: 1.0,
+                radius: 2.0,
+            },
+        );
+        scene.node_mut(light).expect("light").transform.translation = [512.0, 256.0, 512.0];
+        let lit = compile_brush_world(
+            &project,
+            BrushWorldCookOptions {
+                project_root: Path::new("."),
+                mode: BrushWorldCookMode::Draft,
+                ambient: [24; 3],
+                texture_asset_base: 40,
+            },
+        )
+        .expect("draft cook with a light");
+        let unlit = authored_world(BrushWorldCookMode::Draft);
+        assert_ne!(
+            lit.pxbsp.bytes, unlit.pxbsp.bytes,
+            "the light must change the packed vertex stream"
+        );
     }
 
     fn authored_world(mode: BrushWorldCookMode) -> CompiledBrushWorld {
