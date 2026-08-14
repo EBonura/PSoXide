@@ -4,33 +4,49 @@
 use super::*;
 
 /// Two preview triangles produced by splitting one: each is a vertex
-/// triple plus its UV triple.
+/// triple plus its UV triple and per-vertex colour triple.
 type SplitPreviewTri = (
     [psx_gte::scene::Projected; 3],
     [(u8, u8); 3],
+    [(u8, u8, u8); 3],
     [psx_gte::scene::Projected; 3],
     [(u8, u8); 3],
+    [(u8, u8, u8); 3],
 );
 
-/// Per-face emit: routes to the flat or textured pool based on
-/// `shade`, packing UVs only when textured.
+/// Per-face emit with one uniform colour: routes to the Gouraud or
+/// textured pool based on `shade`, packing UVs only when textured.
 pub(crate) fn emit_face_tri(
     scratch: &mut PreviewScratch,
     p: [psx_gte::scene::Projected; 3],
     uvs: [(u8, u8); 3],
     shade: FaceShade,
 ) -> bool {
+    let colors = match shade {
+        FaceShade::Flat { rgb, .. } => [rgb; 3],
+        FaceShade::Textured { tint, .. } => [tint; 3],
+    };
+    emit_face_tri_lit(scratch, p, uvs, shade, colors)
+}
+
+/// Per-face emit with per-vertex colours (the baked-lighting path):
+/// the packets are Gouraud, so lit brush faces interpolate exactly
+/// like the cooked game instead of showing flat triangle plates.
+pub(crate) fn emit_face_tri_lit(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    uvs: [(u8, u8); 3],
+    shade: FaceShade,
+    colors: [(u8, u8, u8); 3],
+) -> bool {
     if !face_side_visible(shade.sidedness(), p) {
         return false;
     }
     match shade {
-        FaceShade::Flat { rgb, .. } => push_tri(scratch, p, rgb),
+        FaceShade::Flat { .. } => push_tri_colors(scratch, p, colors),
         FaceShade::Textured {
-            slot,
-            tint,
-            blend_mode,
-            ..
-        } => push_tex_tri(scratch, p, uvs, slot, tint, blend_mode),
+            slot, blend_mode, ..
+        } => push_tex_tri_colors(scratch, p, uvs, slot, colors, blend_mode),
     }
 }
 
@@ -88,36 +104,46 @@ pub(crate) fn clamp_preview_projected(p: psx_gte::scene::Projected) -> psx_gte::
 pub(crate) fn split_preview_projected_triangle(
     p: [psx_gte::scene::Projected; 3],
     uvs: [(u8, u8); 3],
+    colors: [(u8, u8, u8); 3],
 ) -> SplitPreviewTri {
     match largest_preview_projected_edge(p) {
         0 => {
             let mid = midpoint_projected(p[0], p[1]);
             let uv = midpoint_uv(uvs[0], uvs[1]);
+            let color = midpoint_color(colors[0], colors[1]);
             (
                 [p[0], mid, p[2]],
                 [uvs[0], uv, uvs[2]],
+                [colors[0], color, colors[2]],
                 [mid, p[1], p[2]],
                 [uv, uvs[1], uvs[2]],
+                [color, colors[1], colors[2]],
             )
         }
         1 => {
             let mid = midpoint_projected(p[1], p[2]);
             let uv = midpoint_uv(uvs[1], uvs[2]);
+            let color = midpoint_color(colors[1], colors[2]);
             (
                 [p[0], p[1], mid],
                 [uvs[0], uvs[1], uv],
+                [colors[0], colors[1], color],
                 [p[0], mid, p[2]],
                 [uvs[0], uv, uvs[2]],
+                [colors[0], color, colors[2]],
             )
         }
         _ => {
             let mid = midpoint_projected(p[2], p[0]);
             let uv = midpoint_uv(uvs[2], uvs[0]);
+            let color = midpoint_color(colors[2], colors[0]);
             (
                 [p[0], p[1], mid],
                 [uvs[0], uvs[1], uv],
+                [colors[0], colors[1], color],
                 [mid, p[1], p[2]],
                 [uv, uvs[1], uvs[2]],
+                [color, colors[1], colors[2]],
             )
         }
     }
@@ -169,11 +195,19 @@ pub(crate) fn midpoint_uv(a: (u8, u8), b: (u8, u8)) -> (u8, u8) {
     )
 }
 
-/// Compose a [`TriTextured`] sampling `slot`'s tpage / CLUT, stash
-/// it in the static `tex_tris` arena, and chain it into the OT.
+pub(crate) fn midpoint_color(a: (u8, u8, u8), b: (u8, u8, u8)) -> (u8, u8, u8) {
+    (
+        (((a.0 as u16) + (b.0 as u16)) / 2) as u8,
+        (((a.1 as u16) + (b.1 as u16)) / 2) as u8,
+        (((a.2 as u16) + (b.2 as u16)) / 2) as u8,
+    )
+}
+
+/// Compose a [`TriTexturedGouraud`] sampling `slot`'s tpage / CLUT,
+/// stash it in the static `tex_tris` arena, and chain it into the OT.
 ///
-/// `tint` modulates the texel: PSX hardware computes
-/// `output = texel * tint / 0x80`, so `(0x80, 0x80, 0x80)` is a
+/// The per-vertex colour modulates the texel: PSX hardware computes
+/// `output = texel * color / 0x80`, so `(0x80, 0x80, 0x80)` is a
 /// pass-through and `(0xFF, 0x60, 0x40)` saturates a grey texel
 /// toward terracotta. Textured preview uses the authored material
 /// tint so it matches the cooked runtime path; flat fallback still
@@ -186,12 +220,24 @@ pub(crate) fn push_tex_tri(
     tint: (u8, u8, u8),
     blend_mode: BlendMode,
 ) -> bool {
+    push_tex_tri_colors(scratch, p, uvs, slot, [tint; 3], blend_mode)
+}
+
+pub(crate) fn push_tex_tri_colors(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    uvs: [(u8, u8); 3],
+    slot: MaterialSlot,
+    colors: [(u8, u8, u8); 3],
+    blend_mode: BlendMode,
+) -> bool {
     let avg_sz = projected_avg_sz(p);
     push_textured_material_tri(
         scratch,
         p,
         uvs,
-        preview_texture_material(slot, tint, blend_mode),
+        colors,
+        preview_texture_material(slot, colors[0], blend_mode),
         room_depth_slot(avg_sz),
     )
 }
@@ -219,6 +265,7 @@ pub(crate) fn push_shadow_tex_tri(
         scratch,
         p,
         uvs,
+        [(0x80, 0x80, 0x80); 3],
         TextureMaterial::blended(
             slot.clut_word,
             slot.tpage_word,
@@ -234,16 +281,18 @@ pub(crate) fn push_textured_material_tri(
     scratch: &mut PreviewScratch,
     p: [psx_gte::scene::Projected; 3],
     uvs: [(u8, u8); 3],
+    colors: [(u8, u8, u8); 3],
     material: TextureMaterial,
     slot_idx: usize,
 ) -> bool {
-    push_textured_material_tri_split(scratch, p, uvs, material, slot_idx, 0)
+    push_textured_material_tri_split(scratch, p, uvs, colors, material, slot_idx, 0)
 }
 
 pub(crate) fn push_textured_material_tri_split(
     scratch: &mut PreviewScratch,
     p: [psx_gte::scene::Projected; 3],
     uvs: [(u8, u8); 3],
+    colors: [(u8, u8, u8); 3],
     material: TextureMaterial,
     slot_idx: usize,
     depth: u8,
@@ -253,47 +302,71 @@ pub(crate) fn push_textured_material_tri_split(
         if depth >= MAX_PREVIEW_HW_SPLIT_DEPTH {
             return false;
         }
-        let (a, a_uvs, b, b_uvs) = split_preview_projected_triangle(p, uvs);
-        let left =
-            push_textured_material_tri_split(scratch, a, a_uvs, material, slot_idx, depth + 1);
-        let right =
-            push_textured_material_tri_split(scratch, b, b_uvs, material, slot_idx, depth + 1);
+        let (a, a_uvs, a_colors, b, b_uvs, b_colors) =
+            split_preview_projected_triangle(p, uvs, colors);
+        let left = push_textured_material_tri_split(
+            scratch,
+            a,
+            a_uvs,
+            a_colors,
+            material,
+            slot_idx,
+            depth + 1,
+        );
+        let right = push_textured_material_tri_split(
+            scratch,
+            b,
+            b_uvs,
+            b_colors,
+            material,
+            slot_idx,
+            depth + 1,
+        );
         return left || right;
     }
     if scratch.tex_used >= TRI_CAP {
         return false;
     }
     let idx = scratch.tex_used;
-    scratch.tex_tris[idx] = TriTextured::with_material(
+    scratch.tex_tris[idx] = TriTexturedGouraud::with_material(
         [(p[0].sx, p[0].sy), (p[1].sx, p[1].sy), (p[2].sx, p[2].sy)],
         uvs,
+        colors,
         material,
     );
-    let packet_ptr: *mut TriTextured = &mut scratch.tex_tris[idx];
+    let packet_ptr: *mut TriTexturedGouraud = &mut scratch.tex_tris[idx];
     unsafe {
         scratch
             .ot
-            .insert(slot_idx, packet_ptr.cast::<u32>(), TriTextured::WORDS);
+            .insert(slot_idx, packet_ptr.cast::<u32>(), TriTexturedGouraud::WORDS);
     }
     scratch.tex_used = idx + 1;
     true
 }
 
-/// Compose a [`TriFlat`] from three projected vertices, store it in
-/// the next slot of the static `tris` array, and link it into the
+/// Compose a [`TriGouraud`] from three projected vertices, store it
+/// in the next slot of the static `tris` array, and link it into the
 /// OT keyed on average screen-space depth.
 pub(crate) fn push_tri(
     scratch: &mut PreviewScratch,
     p: [psx_gte::scene::Projected; 3],
     rgb: (u8, u8, u8),
 ) -> bool {
-    push_tri_split(scratch, p, rgb, 0)
+    push_tri_colors(scratch, p, [rgb; 3])
+}
+
+pub(crate) fn push_tri_colors(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    colors: [(u8, u8, u8); 3],
+) -> bool {
+    push_tri_split(scratch, p, colors, 0)
 }
 
 pub(crate) fn push_tri_split(
     scratch: &mut PreviewScratch,
     p: [psx_gte::scene::Projected; 3],
-    rgb: (u8, u8, u8),
+    colors: [(u8, u8, u8); 3],
     depth: u8,
 ) -> bool {
     let p = clamp_preview_projected_triangle(p);
@@ -301,20 +374,19 @@ pub(crate) fn push_tri_split(
         if depth >= MAX_PREVIEW_HW_SPLIT_DEPTH {
             return false;
         }
-        let (a, _, b, _) = split_preview_projected_triangle(p, [(0, 0); 3]);
-        let left = push_tri_split(scratch, a, rgb, depth + 1);
-        let right = push_tri_split(scratch, b, rgb, depth + 1);
+        let (a, _, a_colors, b, _, b_colors) =
+            split_preview_projected_triangle(p, [(0, 0); 3], colors);
+        let left = push_tri_split(scratch, a, a_colors, depth + 1);
+        let right = push_tri_split(scratch, b, b_colors, depth + 1);
         return left || right;
     }
     if scratch.used >= TRI_CAP {
         return false;
     }
     let idx = scratch.used;
-    scratch.tris[idx] = TriFlat::new(
+    scratch.tris[idx] = TriGouraud::new(
         [(p[0].sx, p[0].sy), (p[1].sx, p[1].sy), (p[2].sx, p[2].sy)],
-        rgb.0,
-        rgb.1,
-        rgb.2,
+        colors,
     );
     scratch.used = idx + 1;
     // Map sz (Q0, range up to ~32K for our scenes) into the OT
@@ -324,11 +396,11 @@ pub(crate) fn push_tri_split(
     // (drawn last so it tops everything), so geometry rides the
     // 1..OT_DEPTH-1 band exclusively.
     let slot = room_depth_slot(projected_avg_sz(p));
-    let packet_ptr: *mut TriFlat = &mut scratch.tris[idx];
+    let packet_ptr: *mut TriGouraud = &mut scratch.tris[idx];
     unsafe {
         scratch
             .ot
-            .insert(slot, packet_ptr.cast::<u32>(), TriFlat::WORDS);
+            .insert(slot, packet_ptr.cast::<u32>(), TriGouraud::WORDS);
     }
     true
 }

@@ -29,8 +29,9 @@ use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::QuadFlat;
 use psx_gpu::prim::QuadGouraud;
 use psx_gpu::prim::QuadTexturedMaterial;
-use psx_gpu::prim::TriFlat;
+use psx_gpu::prim::TriGouraud;
 use psx_gpu::prim::TriTextured;
+use psx_gpu::prim::TriTexturedGouraud;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene as gte_scene;
 
@@ -186,8 +187,13 @@ struct PreviewScratch {
     ot: OrderingTable<OT_DEPTH>,
     sky_quads: [QuadGouraud; SKY_QUAD_CAP],
     far_vista_quads: [QuadFlat; FAR_VISTA_QUAD_CAP],
-    tris: [TriFlat; TRI_CAP],
-    tex_tris: [TriTextured; TRI_CAP],
+    tris: [TriGouraud; TRI_CAP],
+    tex_tris: [TriTexturedGouraud; TRI_CAP],
+    /// Engine-side model instances render through
+    /// `psx_engine::PrimitiveArena<TriTextured>` (the runtime model
+    /// path emits flat-textured packets), so they keep their own
+    /// pool now that world geometry rides Gouraud packets.
+    model_tex_tris: [TriTextured; TRI_CAP],
     particle_quads: [QuadTexturedMaterial; PREVIEW_PARTICLE_DRAW_CAP],
     model_vertices: [psx_engine::ProjectedVertex; PREVIEW_MODEL_VERTEX_CAP],
     model_faces: [psx_engine::TexturedModelRenderFace; PREVIEW_MODEL_FACE_CAP],
@@ -200,6 +206,7 @@ struct PreviewScratch {
     sky_used: usize,
     far_vista_used: usize,
     tex_used: usize,
+    model_tex_used: usize,
     particle_used: usize,
     /// Host-drawn overlay lines for editor affordances. These stay
     /// outside the GP0 command log so the UI can draw fractional,
@@ -219,18 +226,25 @@ const _: () = assert!(
     "editor preview scratch must fit in one 24-bit OT address window"
 );
 
-const EMPTY_TRI: TriFlat = TriFlat::new([(0, 0), (0, 0), (0, 0)], 0, 0, 0);
+const EMPTY_TRI: TriGouraud =
+    TriGouraud::new([(0, 0), (0, 0), (0, 0)], [(0, 0, 0), (0, 0, 0), (0, 0, 0)]);
 const EMPTY_FAR_VISTA_QUAD: QuadFlat = QuadFlat::new([(0, 0), (0, 0), (0, 0), (0, 0)], 0, 0, 0);
 const EMPTY_SKY_QUAD: QuadGouraud = QuadGouraud::new(
     [(0, 0), (0, 0), (0, 0), (0, 0)],
     [(0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
 );
-const EMPTY_TEX_TRI: TriTextured = TriTextured::new(
+const EMPTY_MODEL_TEX_TRI: TriTextured = TriTextured::new(
     [(0, 0), (0, 0), (0, 0)],
     [(0, 0), (0, 0), (0, 0)],
     0,
     0,
     (0x80, 0x80, 0x80),
+);
+const EMPTY_TEX_TRI: TriTexturedGouraud = TriTexturedGouraud::with_material(
+    [(0, 0), (0, 0), (0, 0)],
+    [(0, 0), (0, 0), (0, 0)],
+    [(0x80, 0x80, 0x80); 3],
+    TextureMaterial::opaque(0, 0, (0x80, 0x80, 0x80)),
 );
 const EMPTY_PARTICLE_QUAD: QuadTexturedMaterial = QuadTexturedMaterial::with_material(
     [(0, 0), (0, 0), (0, 0), (0, 0)],
@@ -259,6 +273,7 @@ fn new_preview_scratch() -> Box<PreviewScratch> {
             .write([EMPTY_FAR_VISTA_QUAD; FAR_VISTA_QUAD_CAP]);
         std::ptr::addr_of_mut!((*ptr).tris).write([EMPTY_TRI; TRI_CAP]);
         std::ptr::addr_of_mut!((*ptr).tex_tris).write([EMPTY_TEX_TRI; TRI_CAP]);
+        std::ptr::addr_of_mut!((*ptr).model_tex_tris).write([EMPTY_MODEL_TEX_TRI; TRI_CAP]);
         std::ptr::addr_of_mut!((*ptr).particle_quads)
             .write([EMPTY_PARTICLE_QUAD; PREVIEW_PARTICLE_DRAW_CAP]);
         std::ptr::addr_of_mut!((*ptr).model_vertices)
@@ -354,6 +369,7 @@ pub fn build_phase1_frame(
     scratch.sky_used = 0;
     scratch.far_vista_used = 0;
     scratch.tex_used = 0;
+    scratch.model_tex_used = 0;
     scratch.particle_used = 0;
     scratch.overlay_lines.clear();
     scratch.ot.clear();
@@ -1155,6 +1171,7 @@ fn walk_image_props(
             scratch,
             [p[0], p[1], p[2]],
             [uvs[0], uvs[1], uvs[2]],
+            [lit_tint; 3],
             material,
             room_depth_slot(projected_avg_sz([p[0], p[1], p[2]])),
         );
@@ -1162,6 +1179,7 @@ fn walk_image_props(
             scratch,
             [p[0], p[2], p[3]],
             [uvs[0], uvs[2], uvs[3]],
+            [lit_tint; 3],
             material,
             room_depth_slot(projected_avg_sz([p[0], p[2], p[3]])),
         );
@@ -1241,7 +1259,7 @@ fn walk_brushes(
     // (PXBSP_AMBIENT_RGB = [32; 3]). No occlusion; the true shadowed
     // result comes from the Release cook. With zero lights the historic
     // unlit shading is kept, so lightless maps don't go dark.
-    let lights = collect_bsp_preview_lights(project, hidden_scene_nodes);
+    let lights = collect_bsp_preview_bake_lights(project, hidden_scene_nodes);
     for brush in &project.active_scene().brushes {
         if scratch.geometry_full() {
             break;
@@ -1259,22 +1277,31 @@ fn walk_brushes(
                 brush_fallback_color(face_index),
                 textures,
             );
+            let (face_normal, _) = psxed_project::brush_compile::normalized_plane(plane);
             let verts = &polygon.verts;
             for i in 1..verts.len().saturating_sub(1) {
                 let tri = [verts[0], verts[i], verts[i + 1]];
-                // Light per TRIANGLE so big faces show a gradient toward
-                // the light instead of one flat value at the face centre
-                // (approximates the per-vertex bake the game runs).
-                let shade = if lights.is_empty() {
-                    shade
-                } else {
-                    let centroid = [
-                        ((tri[0][0] + tri[1][0] + tri[2][0]) / 3.0).round() as i32,
-                        ((tri[0][1] + tri[1][1] + tri[2][1]) / 3.0).round() as i32,
-                        ((tri[0][2] + tri[1][2] + tri[2][2]) / 3.0).round() as i32,
-                    ];
-                    light_face(shade, centroid, &lights, PXBSP_PREVIEW_AMBIENT)
-                };
+                // Light per VERTEX with the exact Draft-bake formula
+                // (lambert + linear falloff, tint-modulated), so the
+                // Gouraud packets below interpolate the same gradients
+                // the cooked game shows. No occlusion; shadows come
+                // from the Release cook.
+                let lit_colors = (!lights.is_empty()).then(|| {
+                    let tint = match shade {
+                        FaceShade::Flat { rgb, .. } => [rgb.0, rgb.1, rgb.2],
+                        FaceShade::Textured { tint, .. } => [tint.0, tint.1, tint.2],
+                    };
+                    tri.map(|vertex| {
+                        let color = psxed_project::brush_light::lit_point_color(
+                            vertex,
+                            face_normal,
+                            tint,
+                            PXBSP_PREVIEW_AMBIENT,
+                            &lights,
+                        );
+                        (color[0], color[1], color[2])
+                    })
+                });
                 // Defense against unbounded/corrupt brushes (infinite
                 // wedges solve to base-winding coordinates): anything
                 // beyond the renderer's safe range would overflow the
@@ -1312,7 +1339,10 @@ fn walk_brushes(
                     }),
                     FaceShade::Flat { .. } => [(0, 0); 3],
                 };
-                let _ = emit_face_tri(scratch, p, uvs, shade);
+                let _ = match lit_colors {
+                    Some(colors) => emit_face_tri_lit(scratch, p, uvs, shade, colors),
+                    None => emit_face_tri(scratch, p, uvs, shade),
+                };
             }
         }
     }
@@ -2965,8 +2995,8 @@ fn draw_preview_model_instances(
         return;
     }
 
-    let tex_start = scratch.tex_used;
-    let mut triangles = psx_engine::PrimitiveArena::new(&mut scratch.tex_tris[tex_start..]);
+    let tex_start = scratch.model_tex_used;
+    let mut triangles = psx_engine::PrimitiveArena::new(&mut scratch.model_tex_tris[tex_start..]);
     let mut model_commands = [psx_engine::WorldTriCommand::EMPTY; PREVIEW_MODEL_COMMAND_CAP];
     let mut ot = psx_engine::OtFrame::resume(&mut scratch.ot);
     let mut world = psx_engine::WorldRenderPass::new_deferred_sorted(&mut ot, &mut model_commands);
@@ -2989,7 +3019,7 @@ fn draw_preview_model_instances(
     }
 
     world.flush();
-    scratch.tex_used = tex_start.saturating_add(triangles.len()).min(TRI_CAP);
+    scratch.model_tex_used = tex_start.saturating_add(triangles.len()).min(TRI_CAP);
 }
 
 fn submit_preview_model_instance(
