@@ -16,6 +16,8 @@
 !brush-open-courtyard/assets/textures/courtyard_cobbles.psxt
 !brush-combat-fixture/
 !brush-combat-fixture/**
+!legacy-grid-starter/
+!legacy-grid-starter/**
 !souls-bsp-vertical-slice/
 !souls-bsp-vertical-slice/**
 !_legacy-grid/

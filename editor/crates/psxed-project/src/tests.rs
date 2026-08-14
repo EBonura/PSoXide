@@ -429,7 +429,7 @@ fn sky_cyclorama_sun_uses_faceted_polar_geometry() {
 
 #[test]
 fn normalize_loaded_snaps_room_heights_to_quantum() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let room_id = project
         .active_scene()
         .nodes()
@@ -479,7 +479,7 @@ fn snap_world_sector_size_quantizes_to_128_units() {
 
 #[test]
 fn world_camera_settings_default_normalize_and_inherit() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let scene = project.active_scene();
     let world_id = scene
         .nodes()
@@ -721,7 +721,7 @@ fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
 
 #[test]
 fn saving_normalizes_room_sector_size_to_world() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let scene = project.active_scene_mut();
     let room_id = scene
         .nodes()
@@ -1537,11 +1537,11 @@ fn embedded_default_project_ron_deserializes() {
     assert!(project
         .resources
         .iter()
-        .any(|r| material_path(r).is_some_and(|p| p.ends_with("block_1a.psxt"))));
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("courtyard_cobbles.psxt"))));
     assert!(project
         .resources
         .iter()
-        .any(|r| material_path(r).is_some_and(|p| p.ends_with("fence_1a.psxt"))));
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("sanctum_masonry.psxt"))));
     assert!(!project.resources.iter().any(|r| material_path(r)
         .is_some_and(|p| p.ends_with("floor.psxt") || p.ends_with("brick-wall.psxt"))));
     // The legacy Texture resource kind is fully folded at load.
@@ -1574,14 +1574,13 @@ fn embedded_default_project_ron_deserializes() {
         .nodes()
         .iter()
         .find_map(|node| match &node.kind {
-            NodeKind::CharacterController {
+            NodeKind::SpawnPoint {
                 player: true,
                 character,
-                ..
             } => *character,
             _ => None,
         })
-        .expect("starter scene wires a player character controller");
+        .expect("starter scene wires a player spawn to a character");
     let character = project
         .resource(character_id)
         .and_then(|resource| match &resource.data {
@@ -1687,7 +1686,7 @@ fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
         panic!("unterminated World payload");
     }
 
-    let starter = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    let starter = ProjectDocument::from_ron_str(crate::LEGACY_GRID_STARTER_RON).unwrap();
     assert!(starter
         .active_scene()
         .nodes()
@@ -1703,7 +1702,7 @@ fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
         .find(|node| matches!(node.kind, NodeKind::Entity))
         .map(|node| node.name.clone())
         .expect("starter has an entity node");
-    let legacy = replace_first_world_payload(DEFAULT_PROJECT_RON).replacen(
+    let legacy = replace_first_world_payload(crate::LEGACY_GRID_STARTER_RON).replacen(
         "kind: Entity,",
         "kind: Actor,",
         1,
@@ -1734,7 +1733,7 @@ fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
 
 #[test]
 fn starter_model_files_present_on_disk() {
-    let root = default_project_dir();
+    let root = legacy_grid_starter_dir();
     assert!(root
         .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
         .is_file());
@@ -1763,20 +1762,14 @@ fn projects_dir_resolves_to_real_directory() {
     assert!(projects_dir().is_dir(), "{}", projects_dir().display());
     assert!(default_project_dir().join("project.ron").is_file());
     assert!(default_project_dir()
-        .join("assets/textures/block_1a.psxt")
+        .join("assets/textures/courtyard_cobbles.psxt")
         .is_file());
     assert!(default_project_dir()
-        .join("assets/textures/fence_1a.psxt")
+        .join("assets/models/rust_mantis/rust_mantis.psxmdl")
         .is_file());
-    assert!(default_project_dir()
+    assert!(legacy_grid_starter_dir()
         .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
         .is_file());
-    assert!(!default_project_dir()
-        .join("assets/textures/floor.psxt")
-        .exists());
-    assert!(!default_project_dir()
-        .join("assets/textures/brick-wall.psxt")
-        .exists());
 }
 
 #[test]
@@ -1791,7 +1784,7 @@ fn project_file_stem_is_filesystem_safe() {
 
 #[test]
 fn starter_project_has_scene_tree_and_resources() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
 
     assert_eq!(project.scenes.len(), 1);
     // Starter includes a room texture/material set plus gameplay resources for
@@ -2016,7 +2009,7 @@ fn move_node_rejects_cycles_and_root() {
 
 #[test]
 fn project_roundtrips_through_ron_string() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let ron = project.to_ron_string().unwrap();
 
     assert!(ron.contains("Crimson Cross Knight Player"));
@@ -2768,7 +2761,7 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
 
 #[test]
 fn mesh_instance_with_animation_clip_roundtrips() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let scene = project.active_scene_mut();
     let room_id = scene
         .nodes()
@@ -2861,7 +2854,7 @@ fn legacy_mesh_instance_without_animation_clip_loads() {
 
 #[test]
 fn project_saves_and_loads_from_disk() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     project.name = "Disk Test".to_string();
 
     let dir = std::env::temp_dir().join(format!(
@@ -3862,7 +3855,7 @@ fn section_nodes_load_under_every_historical_name() {
 /// however it looked in the editor. This is the gate for that.
 #[test]
 fn two_sections_with_a_paired_portal_cook_into_connected_runtime_rooms() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material = project
         .resources
         .iter()
@@ -3943,7 +3936,7 @@ fn two_sections_with_a_paired_portal_cook_into_connected_runtime_rooms() {
         },
     );
 
-    let (package, report) = playtest::build_package(&project, &projects_dir().join("default"));
+    let (package, report) = playtest::build_package(&project, &legacy_grid_starter_dir());
     assert!(
         report.is_ok(),
         "a paired cross-section portal must cook: {:?}",
@@ -3994,7 +3987,7 @@ fn two_sections_with_a_paired_portal_cook_into_connected_runtime_rooms() {
 #[test]
 fn adjacent_sections_with_facing_openings_connect_without_an_authored_portal() {
     fn cook(seal_east: bool) -> usize {
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         let material = project
             .resources
             .iter()
@@ -4057,7 +4050,7 @@ fn adjacent_sections_with_facing_openings_connect_without_an_authored_portal() {
             },
         );
 
-        let (package, report) = playtest::build_package(&project, &projects_dir().join("default"));
+        let (package, report) = playtest::build_package(&project, &legacy_grid_starter_dir());
         assert!(report.is_ok(), "cooks: {:?}", report.errors);
         let package = package.expect("package built");
         let owner = |index: u16| -> String {
@@ -4100,7 +4093,7 @@ fn adjacent_sections_with_facing_openings_connect_without_an_authored_portal() {
 /// must not happen is the same room pair being linked twice.
 #[test]
 fn an_authored_cross_section_portal_suppresses_the_automatic_one() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material = project
         .resources
         .iter()
@@ -4178,7 +4171,7 @@ fn an_authored_cross_section_portal_suppresses_the_automatic_one() {
         },
     );
 
-    let (package, report) = playtest::build_package(&project, &projects_dir().join("default"));
+    let (package, report) = playtest::build_package(&project, &legacy_grid_starter_dir());
     assert!(report.is_ok(), "cooks: {:?}", report.errors);
     let package = package.expect("package built");
     let owner = |index: u16| -> String {
@@ -4294,7 +4287,7 @@ fn legacy_prefab_resources_load_but_do_not_reserialize() {
 #[test]
 fn legacy_grid_projects_without_the_field_load_as_grid() {
     for relative in [
-        "../../projects/default/project.ron",
+        "../../projects/legacy-grid-starter/project.ron",
         "../../samples/cortex_v1/project.ron",
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);

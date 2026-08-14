@@ -10,8 +10,8 @@ use psxed_project::{
     NEW_PROJECT_COURTYARD_OUTER_SIZE, NEW_PROJECT_COURTYARD_WALL_THICKNESS,
 };
 
-const FLOOR_SOURCE: &str = "cobbles_1a.psxt";
-const WALL_SOURCE: &str = "brick_1a.psxt";
+const FLOOR_SOURCE: &str = "courtyard_cobbles.psxt";
+const WALL_SOURCE: &str = "courtyard_brick.psxt";
 const FLOOR_RELATIVE: &str = "assets/textures/courtyard_cobbles.psxt";
 const WALL_RELATIVE: &str = "assets/textures/courtyard_brick.psxt";
 

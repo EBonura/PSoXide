@@ -1239,7 +1239,7 @@ fn runtime_vram_budget_counts_compact_room_texture_and_model_atlas() {
 
     let budget = runtime_vram_budget(
         &project,
-        &psxed_project::default_project_dir(),
+        &psxed_project::legacy_grid_starter_dir(),
         &resource_use,
     );
 
@@ -2584,7 +2584,7 @@ fn refreshing_the_prefab_library_does_not_mutate_project_resources() {
 
 #[test]
 fn selecting_a_prefab_preserves_the_stamp_room_and_cell() {
-    let project = ProjectDocument::starter();
+    let project = ProjectDocument::legacy_grid_starter();
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("prefab-target"), project);
     let room = workspace.active_room_id().expect("starter room");
     workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);

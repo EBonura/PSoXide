@@ -5,7 +5,7 @@ use crate::{
 };
 
 fn starter_project_root() -> PathBuf {
-    crate::default_project_dir()
+    crate::legacy_grid_starter_dir()
 }
 
 fn test_wav_mono_44k() -> Vec<u8> {
@@ -122,7 +122,7 @@ raised by a helper that only knows a name; knows better"
 
 #[test]
 fn tile_arch_cooks_surfaces_materials_and_segmented_collision() {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let room_id = project
         .active_scene()
         .nodes()
@@ -317,7 +317,7 @@ fn visibility_test_cell(x: u16, z: u16, blocker_mask: u8) -> PlaytestVisibilityC
 }
 
 fn project_with_one_room() -> ProjectDocument {
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let room_material = project
         .resources
         .iter()

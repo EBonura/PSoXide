@@ -1236,7 +1236,7 @@ fn selected_room_bounds_follow_authored_tiles() {
 #[test]
 fn ctrl_selected_vertices_drag_together() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let room = workspace.active_room_id().expect("starter has room");
     let (sx, sz) = first_floor_sector(&workspace, room);
     let nw = Selection::Vertex(VertexRef {
@@ -1347,7 +1347,7 @@ fn detached_vertex_drag_moves_only_seed_corner() {
 #[test]
 fn ctrl_selected_edges_drag_together() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let room = workspace.active_room_id().expect("starter has room");
     let (sx, sz) = first_floor_sector(&workspace, room);
     let north = Selection::Edge(EdgeRef {

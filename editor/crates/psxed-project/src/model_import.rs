@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn registers_obsidian_wraith_bundle() {
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         let dir = obsidian_wraith_dir();
         let id = register_cooked_model_bundle(&mut project, &dir, "Obsidian Wraith", None)
             .expect("bundle registers");
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn no_model_file_fails() {
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         let dir = make_bundle("no-model", None, 0, &[], &[]);
         match register_cooked_model_bundle(&mut project, &dir, "Empty", None) {
             Err(ModelImportError::NoModelFile(_)) => {}
@@ -1197,7 +1197,7 @@ mod tests {
 
     #[test]
     fn multiple_models_fail() {
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         // Two models -- content doesn't matter because the
         // duplicate detection happens before parsing.
         let bogus = b"PSMDbogus";
@@ -1213,7 +1213,7 @@ mod tests {
 
     #[test]
     fn invalid_model_bytes_fail() {
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         let dir = make_bundle("bad-model", Some(b"NOTAPSXMDL"), 1, &[], &[]);
         match register_cooked_model_bundle(&mut project, &dir, "Bad", None) {
             Err(ModelImportError::InvalidModel { .. }) => {}
