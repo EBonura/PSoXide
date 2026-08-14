@@ -2115,7 +2115,8 @@ impl AppState {
                 let mut first = Some(first_pcm);
                 let result = psoxide_settings::library::disc_from_cue_pieces(&cue, |n| {
                     if n == 1 {
-                        data.take().ok_or_else(|| "data piece taken twice".to_string())
+                        data.take()
+                            .ok_or_else(|| "data piece taken twice".to_string())
                     } else if n == first_number {
                         first
                             .take()
@@ -4624,11 +4625,12 @@ mod claxon_parity {
                 }
             }
         }
-        eprintln!("PROBE: claxon {} bytes, reference {}", out.len(), reference.len());
-        let diff = out
-            .iter()
-            .zip(reference.iter())
-            .position(|(a, b)| a != b);
+        eprintln!(
+            "PROBE: claxon {} bytes, reference {}",
+            out.len(),
+            reference.len()
+        );
+        let diff = out.iter().zip(reference.iter()).position(|(a, b)| a != b);
         eprintln!("PROBE: first differing byte {diff:?}");
         assert_eq!(out.len(), reference.len());
         assert_eq!(diff, None);
