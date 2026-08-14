@@ -3525,7 +3525,8 @@ const HANDLE_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 240, 144)
 /// extent and overflow the preview renderer's i32 camera math.
 fn brush_preview_ok(brush: &psxed_project::brush::Brush) -> bool {
     let solved = brush.solve();
-    solved.is_valid() && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT)
+    solved.is_valid()
+        && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT)
 }
 
 /// Dropped-side tint in the clip preview.
