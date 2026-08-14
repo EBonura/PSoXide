@@ -662,6 +662,8 @@ pub struct EditorWorkspace {
     /// Visible, mode-driven BSP transform grammar. Move is the default so a
     /// plain drag performs the most common operation without a modifier.
     brush_edit_mode: BrushEditMode,
+    /// In-flight element gizmo rotate/scale gesture.
+    brush_element_transform: Option<BrushElementTransformDrag>,
     /// In-flight brush-create drag (Brush tool primary held).
     brush_drag: Option<BrushDrag>,
     /// In-flight brush face-extrude drag (Brush tool primary held on a
@@ -2447,6 +2449,24 @@ pub(crate) struct BrushVertexDrag {
     pub(crate) axis_mask: [bool; 3],
 }
 
+/// In-flight rotate/scale gesture from the element gizmo: the selected
+/// element corner set transforms about its centroid around/along the
+/// grabbed world axis. Previews rebuild from `base` each frame.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushElementTransformDrag {
+    pub(crate) index: usize,
+    pub(crate) base: psxed_project::brush::Brush,
+    pub(crate) targets: Vec<[f64; 3]>,
+    pub(crate) center: [f64; 3],
+    pub(crate) axis: usize,
+    /// true = rotate (5 degree steps, Shift 1), false = scale (5% steps).
+    pub(crate) rotate: bool,
+    pub(crate) start_pointer: Pos2,
+    /// Last applied snapped amount: degrees for rotate, percent-delta
+    /// steps for scale. Zero means the base brush is still in place.
+    pub(crate) applied: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaterToolMode {
     Add,
@@ -3025,6 +3045,7 @@ impl EditorWorkspace {
             selected_brush_face: None,
             selected_brush_elements: Vec::new(),
             brush_edit_mode: BrushEditMode::Move,
+            brush_element_transform: None,
             brush_drag: None,
             brush_extrude: None,
             brush_clip_points: Vec::new(),

@@ -1254,6 +1254,75 @@ fn element_gizmo_drag_runs_through_real_egui_in_select_mode() {
 }
 
 #[test]
+fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
+    let build = || {
+        let mut project = ProjectDocument::new("element-rotate-scale");
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 256, 256]));
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("element-rotate-scale"), project);
+        workspace.active_tool = ViewTool::Select;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_initialized = true;
+        workspace.camera_rig.free_position = [1400, 1200, -1400];
+        let (yaw, pitch) =
+            camera_angles_to_look_at([1400, 1200, -1400], [256, 128, 128]).unwrap();
+        workspace.camera_rig.free_yaw = yaw;
+        workspace.camera_rig.free_pitch = pitch;
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        workspace.replace_brush_selection(0, None);
+        workspace.set_brush_edit_mode(BrushEditMode::Face);
+        // Top face of the cuboid (+Y is authored face 5).
+        workspace.apply_brush_element_selection(BrushElement::Face(5), egui::Modifiers::NONE);
+        (workspace, rect)
+    };
+    let has_vertex = |workspace: &EditorWorkspace, expect: [f64; 3]| {
+        crate::workspace::brush_elements::unique_vertices(
+            &workspace.project.active_scene().brushes[0].solve(),
+        )
+        .iter()
+        .any(|vertex| (0..3).all(|axis| (vertex[axis] - expect[axis]).abs() <= 1.0))
+    };
+    let tool = tool_impl_3d(ViewTool::Select);
+
+    // Rotate 90 degrees about Y (pointer travel 180 px = 90 deg): top
+    // corner (0,256,0) orbits the face centroid (256,256,128) to
+    // (128,256,384).
+    let (mut workspace, rect) = build();
+    workspace.set_transform_gizmo_mode(TransformGizmoMode::Rotate);
+    let axes = workspace.brush_element_gizmo_axes_3d(rect).unwrap();
+    let (origin, tip) = axes[1];
+    let grab = origin + (tip - origin) * 0.6;
+    tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
+    assert!(workspace.brush_element_transform.is_some(), "rotate grab starts");
+    let swept = grab + Vec2::new(180.0, 0.0);
+    tool.primary_dragged(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
+    assert_eq!(workspace.brush_element_transform.as_ref().unwrap().applied, 90);
+    tool.primary_released(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
+    assert!(has_vertex(&workspace, [128.0, 256.0, 384.0]), "rotated corner");
+    workspace.do_undo();
+    assert!(has_vertex(&workspace, [0.0, 256.0, 0.0]), "undo restores");
+
+    // Scale +50% along X (travel 128 px): corner (0,256,0) stretches to
+    // (-128,256,0) about the centroid; the floor stays put.
+    let (mut workspace, rect) = build();
+    workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
+    let axes = workspace.brush_element_gizmo_axes_3d(rect).unwrap();
+    let (origin, tip) = axes[0];
+    let grab = origin + (tip - origin) * 0.6;
+    tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
+    assert!(workspace.brush_element_transform.is_some(), "scale grab starts");
+    let swept = grab + Vec2::new(128.0, 0.0);
+    tool.primary_dragged(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
+    assert_eq!(workspace.brush_element_transform.as_ref().unwrap().applied, 50);
+    tool.primary_released(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
+    assert!(has_vertex(&workspace, [-128.0, 256.0, 0.0]), "scaled corner");
+    assert!(has_vertex(&workspace, [0.0, 0.0, 0.0]), "floor untouched");
+}
+
+#[test]
 fn face_element_gizmo_drag_moves_the_face_via_real_egui() {
     let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
     let (mut workspace, _) = handle_test_workspace(brush.clone());
