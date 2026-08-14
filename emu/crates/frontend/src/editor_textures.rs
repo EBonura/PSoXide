@@ -705,6 +705,18 @@ impl EditorTextures {
         }
         let tpage_x = aligned_tpage_x;
         let tpage_y: u16 = 256;
+        // The atlas band ends where the CLUT bands begin (shadow and
+        // room CLUTs at rows 479/480, model CLUTs from 481): a taller
+        // atlas writes its bottom rows straight through every palette.
+        // A 256-tall sword atlas did exactly that, and because the
+        // column depends on upload order it corrupted room materials
+        // only in SOME projects. Reject it; the model renders
+        // atlas-less rather than poisoning VRAM.
+        // ponytail: a dedicated tall-atlas column with capped room-CLUT
+        // growth is the upgrade if tall atlases must preview textured.
+        if u32::from(tpage_y) + u32::from(height_px) > u32::from(SHADOW_CLUT_Y) {
+            return None;
+        }
         let clut_y = self.next_model_clut_y;
 
         // Pixels.
@@ -2026,4 +2038,58 @@ mod tests {
         assert_eq!(plan.first().map(|item| item.id), Some(used));
         assert!(panel_index < first_unused_index);
     }
+
+    /// A model atlas taller than the space above the CLUT rows must be
+    /// rejected, not uploaded: the 256-tall sword atlas used to write
+    /// its bottom rows through the room-CLUT band at y 480, replacing
+    /// texture palettes with pixel data whenever its column happened to
+    /// overlap them (upload-order dependent, so only some projects
+    /// showed it).
+    #[test]
+    fn tall_model_atlas_cannot_stomp_the_clut_rows() {
+        let legacy = ProjectDocument::legacy_grid_starter();
+        let root = psxed_project::legacy_grid_starter_dir();
+        let mut project = ProjectDocument::new("tall-atlas-guard");
+        let floor_id = project.add_resource(
+            "Floor",
+            ResourceData::Material(MaterialResource::opaque(Some(
+                "assets/textures/floor_1a.psxt".to_string(),
+            ))),
+        );
+        let sword_id = {
+            let sword = legacy
+                .resources
+                .iter()
+                .find(|r| r.name == "Sword1 Light" && matches!(r.data, ResourceData::Model(_)))
+                .expect("legacy sword model");
+            project.add_resource(sword.name.clone(), sword.data.clone())
+        };
+        let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 256, 512]);
+        for face in &mut brush.faces {
+            face.material = Some(floor_id);
+        }
+        project.active_scene_mut().brushes.push(brush);
+
+        let mut textures = EditorTextures::new();
+        textures.refresh(&project, &root);
+        textures.refresh_models(&project, &root);
+
+        assert!(
+            textures.model_atlas_slot(sword_id).is_none(),
+            "a 256-tall atlas cannot fit above the CLUT rows"
+        );
+        let bytes = std::fs::read(root.join("assets/textures/floor_1a.psxt")).expect("floor psxt");
+        let texture = psx_asset::Texture::from_bytes(&bytes).expect("parse floor");
+        let expected =
+            u16::from_le_bytes([texture.clut_bytes()[0], texture.clut_bytes()[1]]) | 0x8000;
+        let slot = textures.slot(floor_id).expect("floor material slot");
+        let clut_x = usize::from(slot.clut_word & 0x3f) * 16;
+        let clut_y = usize::from(slot.clut_word >> 6);
+        assert_eq!(
+            textures.vram_words()[clut_y * VRAM_WIDTH as usize + clut_x],
+            expected,
+            "room CLUT must survive the model refresh"
+        );
+    }
+
 }
