@@ -129,6 +129,108 @@ pub struct CompiledSurfaceBsp {
     pub surfaces: Vec<CompiledSurface>,
 }
 
+/// Lighting patch size, world units: surfaces subdivide so no patch
+/// spans more than this along any world axis before the vertex bake.
+/// Mirrors Quake's ~240-unit lightmap face subdivision, which is what
+/// lets per-vertex light resolve hotspots and shadow edges mid-face
+/// instead of only at original corners. Our worlds run ~4x Quake's
+/// unit scale (1024-unit sectors, 2048-span walls), so 1024 here is
+/// Quake's proportional detail; finer grids blow the packer's 64k
+/// mark-surface limit on real levels. Applied only when the scene has
+/// lights, so lightless maps pay no extra geometry.
+pub const LIGHT_SUBDIVISION_UNITS: f64 = 1024.0;
+
+/// Split every surface into patches no wider than `max_extent` along
+/// any world axis, cutting on grid-aligned world planes so adjacent
+/// patches share exact edges (no cracks between sibling patches).
+/// Piece metadata (plane, material, UV, contents, provenance) carries
+/// over untouched; the cuts never move the surface's plane, so texture
+/// mappings are unaffected.
+///
+/// `light_spheres` are `(position, radius)` in world units. A piece is
+/// only split while it is within range of at least one light: past every
+/// radius the attenuation is zero and every vertex bakes flat ambient,
+/// so extra vertices there change nothing. Detail therefore concentrates
+/// around lights instead of exploding the whole map past the packer's
+/// mark-surface limits.
+pub fn subdivide_surfaces_for_lighting(
+    surfaces: Vec<CompiledSurface>,
+    max_extent: f64,
+    light_spheres: &[([f64; 3], f64)],
+) -> Vec<CompiledSurface> {
+    let mut out = Vec::with_capacity(surfaces.len());
+    let mut queue = surfaces;
+    while let Some(surface) = queue.pop() {
+        let mut min = [f64::MAX; 3];
+        let mut max = [f64::MIN; 3];
+        for vertex in &surface.vertices {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(vertex[axis]);
+                max[axis] = max[axis].max(vertex[axis]);
+            }
+        }
+        let in_light_range = light_spheres.iter().any(|(center, radius)| {
+            let mut dist_sq = 0.0;
+            for axis in 0..3 {
+                let d = (min[axis] - center[axis]).max(center[axis] - max[axis]).max(0.0);
+                dist_sq += d * d;
+            }
+            dist_sq <= radius * radius
+        });
+        if !in_light_range {
+            out.push(surface);
+            continue;
+        }
+        // Widest axis exceeding the limit, if any.
+        let mut split_axis = None;
+        let mut widest = max_extent;
+        for axis in 0..3 {
+            let extent = max[axis] - min[axis];
+            if extent > widest {
+                widest = extent;
+                split_axis = Some(axis);
+            }
+        }
+        let Some(axis) = split_axis else {
+            out.push(surface);
+            continue;
+        };
+        // Grid-aligned cut nearest the middle, strictly inside the span.
+        let mid = (min[axis] + max[axis]) * 0.5;
+        let mut cut = (mid / max_extent).round() * max_extent;
+        if cut <= min[axis] + 1.0 || cut >= max[axis] - 1.0 {
+            cut = mid.round();
+        }
+        let cut = cut.round() as i32;
+        let mut a = [0i32; 3];
+        let mut b = [0i32; 3];
+        let mut c = [0i32; 3];
+        a[axis] = cut;
+        b[axis] = cut;
+        c[axis] = cut;
+        b[(axis + 1) % 3] = 1;
+        c[(axis + 2) % 3] = 1;
+        let Some(plane) = Plane::from_points([a, b, c]) else {
+            out.push(surface);
+            continue;
+        };
+        match split_polygon(&surface.vertices, plane) {
+            PolygonSplit::Split { front, back } => {
+                let mut front_piece = surface.clone();
+                front_piece.vertices = front;
+                let mut back_piece = surface;
+                back_piece.vertices = back;
+                queue.push(front_piece);
+                queue.push(back_piece);
+            }
+            // Degenerate cut (numerical edge): keep the surface whole
+            // rather than looping.
+            _ => out.push(surface),
+        }
+    }
+    out
+}
+
 /// Compile the exterior boundary of the union of every valid brush.
 ///
 /// Each solved face polygon is subtracted by every other convex brush.
@@ -564,6 +666,60 @@ pub(crate) fn pack_normalized_plane(unit: [f64; 3], dist_world: f64) -> Option<(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn lighting_subdivision_bounds_patches_and_preserves_area() {
+        use crate::brush::Brush;
+        let surfaces = compile_csg_surfaces(&[Brush::cuboid([0, 0, 0], [2048, 256, 1024])]);
+        let area = |vertices: &[[f64; 3]]| -> f64 {
+            let mut total = [0.0f64; 3];
+            for i in 1..vertices.len().saturating_sub(1) {
+                let u = [
+                    vertices[i][0] - vertices[0][0],
+                    vertices[i][1] - vertices[0][1],
+                    vertices[i][2] - vertices[0][2],
+                ];
+                let v = [
+                    vertices[i + 1][0] - vertices[0][0],
+                    vertices[i + 1][1] - vertices[0][1],
+                    vertices[i + 1][2] - vertices[0][2],
+                ];
+                total[0] += u[1] * v[2] - u[2] * v[1];
+                total[1] += u[2] * v[0] - u[0] * v[2];
+                total[2] += u[0] * v[1] - u[1] * v[0];
+            }
+            (total[0].powi(2) + total[1].powi(2) + total[2].powi(2)).sqrt() * 0.5
+        };
+        let before: f64 = surfaces.iter().map(|s| area(&s.vertices)).sum();
+        let everywhere = [([1024.0, 128.0, 512.0], 1_000_000.0)];
+        let pieces =
+            subdivide_surfaces_for_lighting(surfaces.clone(), LIGHT_SUBDIVISION_UNITS, &everywhere);
+        assert!(pieces.len() > surfaces.len(), "big faces were subdivided");
+        let after: f64 = pieces.iter().map(|s| area(&s.vertices)).sum();
+        assert!(
+            (before - after).abs() <= before * 1e-6,
+            "area preserved: {before} vs {after}"
+        );
+        for piece in &pieces {
+            let mut min = [f64::MAX; 3];
+            let mut max = [f64::MIN; 3];
+            for vertex in &piece.vertices {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(vertex[axis]);
+                    max[axis] = max[axis].max(vertex[axis]);
+                }
+            }
+            for axis in 0..3 {
+                assert!(
+                    max[axis] - min[axis] <= LIGHT_SUBDIVISION_UNITS + 2.0,
+                    "patch exceeds the lighting grid: {:?}..{:?}",
+                    min,
+                    max
+                );
+            }
+            assert!(piece.vertices.len() >= 3);
+        }
+    }
     use super::*;
     use psx_bsp::collision::{
         CollisionHull, Trace, TraceScratch, CONTENTS_EMPTY, CONTENTS_LAVA, CONTENTS_SLIME,
