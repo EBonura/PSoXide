@@ -1253,27 +1253,28 @@ fn walk_brushes(
             let Some(plane) = Plane::from_points(face.points) else {
                 continue;
             };
-            let mut shade = face_shade(
+            let shade = face_shade(
                 project,
                 face.material,
                 brush_fallback_color(face_index),
                 textures,
             );
-            if !lights.is_empty() {
-                let count = polygon.verts.len().max(1) as f64;
-                let mut center = [0.0f64; 3];
-                for vert in &polygon.verts {
-                    for axis in 0..3 {
-                        center[axis] += vert[axis];
-                    }
-                }
-                let center =
-                    center.map(|sum| (sum / count).round() as i32);
-                shade = light_face(shade, center, &lights, PXBSP_PREVIEW_AMBIENT);
-            }
             let verts = &polygon.verts;
             for i in 1..verts.len().saturating_sub(1) {
                 let tri = [verts[0], verts[i], verts[i + 1]];
+                // Light per TRIANGLE so big faces show a gradient toward
+                // the light instead of one flat value at the face centre
+                // (approximates the per-vertex bake the game runs).
+                let shade = if lights.is_empty() {
+                    shade
+                } else {
+                    let centroid = [
+                        ((tri[0][0] + tri[1][0] + tri[2][0]) / 3.0).round() as i32,
+                        ((tri[0][1] + tri[1][1] + tri[2][1]) / 3.0).round() as i32,
+                        ((tri[0][2] + tri[1][2] + tri[2][2]) / 3.0).round() as i32,
+                    ];
+                    light_face(shade, centroid, &lights, PXBSP_PREVIEW_AMBIENT)
+                };
                 // Defense against unbounded/corrupt brushes (infinite
                 // wedges solve to base-winding coordinates): anything
                 // beyond the renderer's safe range would overflow the
