@@ -357,6 +357,15 @@ impl PaintDispatchTool {
 /// brush; click to select the nearest brush under the pointer.
 pub(crate) struct BrushTool;
 
+/// One repeatable brush action for the Cmd+R chain.
+#[derive(Clone, Copy)]
+pub(crate) enum BrushRepeatAction {
+    /// Duplicate the selection and move the copies.
+    Duplicate([i32; 3]),
+    /// Move the selection.
+    Nudge([i32; 3]),
+}
+
 /// Justify targets for the face-UV align buttons.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UvAlign {
@@ -647,8 +656,11 @@ impl EditorWorkspace {
 
     /// Any deliberate selection change invalidates the drill anchor,
     /// so the next Shift+scroll re-anchors from the fresh selection.
+    /// It also ends the Cmd+R repeat chain: repeating is always
+    /// relative to one continuously-edited selection.
     pub(crate) fn reset_brush_drill(&mut self) {
         self.brush_drill = None;
+        self.brush_repeat_chain.clear();
     }
 
     pub(crate) fn clear_brush_selection(&mut self) {
@@ -1605,6 +1617,54 @@ impl EditorWorkspace {
         if ui.ctx().memory(|memory| memory.focused().is_some()) {
             return;
         }
+        // Arrow nudges, Shift+arrow duplicate-and-move, Cmd+R repeat:
+        // the brush stamping loop. Arrows move on the ground plane
+        // relative to the camera (Up is away from the camera),
+        // PageUp/PageDown move vertically, all by one grid step.
+        if self.selected_brush.is_some() && self.floating_geometry.is_none() {
+            let step = i32::from(self.snap_units.max(1));
+            let (forward, right) = self.camera_ground_axes();
+            let (delta, shift) = ui.input(|input| {
+                let mut delta = [0i32; 3];
+                let mut add = |axis: [i32; 3], sign: i32| {
+                    for component in 0..3 {
+                        delta[component] += axis[component] * sign * step;
+                    }
+                };
+                if input.key_pressed(egui::Key::ArrowUp) {
+                    add(forward, 1);
+                }
+                if input.key_pressed(egui::Key::ArrowDown) {
+                    add(forward, -1);
+                }
+                if input.key_pressed(egui::Key::ArrowRight) {
+                    add(right, 1);
+                }
+                if input.key_pressed(egui::Key::ArrowLeft) {
+                    add(right, -1);
+                }
+                if input.key_pressed(egui::Key::PageUp) {
+                    add([0, 1, 0], 1);
+                }
+                if input.key_pressed(egui::Key::PageDown) {
+                    add([0, 1, 0], -1);
+                }
+                (delta, input.modifiers.shift)
+            });
+            if delta != [0, 0, 0] {
+                if shift {
+                    self.duplicate_move_selected_brushes(delta);
+                } else {
+                    self.nudge_selected_brushes(delta);
+                }
+            }
+            let repeat = ui.input(|input| {
+                input.modifiers.command && input.key_pressed(egui::Key::R)
+            });
+            if repeat {
+                self.repeat_brush_actions();
+            }
+        }
         let (escape, delete) = ui.input(|input| {
             (
                 input.key_pressed(egui::Key::Escape),
@@ -2009,13 +2069,20 @@ impl EditorWorkspace {
     /// texture lock) and select the copies. One undo step; the primary
     /// selection follows its own copy.
     pub(crate) fn duplicate_selected_brushes(&mut self) {
+        let step = (self.snap_units.max(1)) as i32;
+        self.push_undo();
+        if self.duplicate_selected_brushes_offset([step, 0, step]) {
+            self.record_brush_repeat(BrushRepeatAction::Duplicate([step, 0, step]));
+        }
+    }
+
+    /// Core duplicate-with-offset; no undo push, no repeat recording.
+    fn duplicate_selected_brushes_offset(&mut self, offset: [i32; 3]) -> bool {
         let targets = self.selected_brush_set();
         if targets.is_empty() {
-            return;
+            return false;
         }
         let primary = self.selected_brush;
-        self.push_undo();
-        let step = (self.snap_units.max(1)) as i32;
         let texture_lock = self.brush_texture_lock;
         let mut new_primary = None;
         let mut new_selection = Vec::new();
@@ -2023,11 +2090,11 @@ impl EditorWorkspace {
             let mut copy = self.project.active_scene().brushes[index].clone();
             if texture_lock {
                 copy.translate_with_uv_lock(
-                    [step, 0, step],
+                    offset,
                     psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
                 );
             } else {
-                copy.translate([step, 0, step]);
+                copy.translate(offset);
             }
             let scene = self.project.active_scene_mut();
             scene.brushes.push(copy);
@@ -2041,6 +2108,94 @@ impl EditorWorkspace {
         self.selected_brushes = new_selection;
         self.selected_brush_face = None;
         self.mark_dirty();
+        true
+    }
+
+    /// Nudge every selected brush by `delta` world units, honouring
+    /// texture lock. One undo step; records for Cmd+R.
+    pub(crate) fn nudge_selected_brushes(&mut self, delta: [i32; 3]) -> bool {
+        if self.selected_brush_set().is_empty() {
+            return false;
+        }
+        self.push_undo();
+        if !self.nudge_selected_brushes_impl(delta) {
+            return false;
+        }
+        self.record_brush_repeat(BrushRepeatAction::Nudge(delta));
+        self.status = format!("Nudged by [{} {} {}]", delta[0], delta[1], delta[2]);
+        true
+    }
+
+    fn nudge_selected_brushes_impl(&mut self, delta: [i32; 3]) -> bool {
+        let targets = self.selected_brush_set();
+        if targets.is_empty() {
+            return false;
+        }
+        let texture_lock = self.brush_texture_lock;
+        let scene = self.project.active_scene_mut();
+        for &index in &targets {
+            let Some(brush) = scene.brushes.get_mut(index) else {
+                continue;
+            };
+            if texture_lock {
+                brush.translate_with_uv_lock(
+                    delta,
+                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                );
+            } else {
+                brush.translate(delta);
+            }
+        }
+        self.mark_dirty();
+        true
+    }
+
+    /// Shift+arrow: duplicate the selection and move the copies by
+    /// `delta` in one gesture. One undo step; records for Cmd+R.
+    pub(crate) fn duplicate_move_selected_brushes(&mut self, delta: [i32; 3]) -> bool {
+        if self.selected_brush_set().is_empty() {
+            return false;
+        }
+        self.push_undo();
+        if !self.duplicate_selected_brushes_offset(delta) {
+            return false;
+        }
+        self.record_brush_repeat(BrushRepeatAction::Duplicate(delta));
+        self.status = "Duplicated and moved; Cmd+R repeats".to_string();
+        true
+    }
+
+    fn record_brush_repeat(&mut self, action: BrushRepeatAction) {
+        self.brush_repeat_chain.push(action);
+    }
+
+    /// Cmd+R: replay every recorded duplicate/nudge since the chain was
+    /// last reset, as one undo step. Stairs are Shift+arrow, PageUp,
+    /// then Cmd+R held down.
+    pub(crate) fn repeat_brush_actions(&mut self) -> bool {
+        let chain = self.brush_repeat_chain.clone();
+        if chain.is_empty() || self.selected_brush_set().is_empty() {
+            self.status = "Nothing to repeat".to_string();
+            return false;
+        }
+        self.push_undo();
+        let mut applied = false;
+        for action in &chain {
+            applied |= match *action {
+                BrushRepeatAction::Duplicate(delta) => {
+                    self.duplicate_selected_brushes_offset(delta)
+                }
+                BrushRepeatAction::Nudge(delta) => self.nudge_selected_brushes_impl(delta),
+            };
+        }
+        if applied {
+            self.status = format!(
+                "Repeated {} action{}",
+                chain.len(),
+                if chain.len() == 1 { "" } else { "s" }
+            );
+        }
+        applied
     }
 
     /// Numeric UV controls for the selected brush face: offset, rotation,
