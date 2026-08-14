@@ -7,7 +7,10 @@ use crate::brush::{Brush, BrushContents, BRUSH_UV_UNITS_PER_TEXEL};
 use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
-use crate::brush_compile::{build_surface_bsp, compile_csg_surfaces};
+use crate::brush_compile::{
+    build_surface_bsp, compile_csg_surfaces, subdivide_surfaces_for_lighting,
+    LIGHT_SUBDIVISION_UNITS,
+};
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
 };
@@ -668,6 +671,19 @@ fn compile_model(
     collision_hulls: &[CollisionHullBounds; 3],
 ) -> Result<(PackedBspGeometry, CompiledCollisionHulls), BrushWorldCookError> {
     let surfaces = compile_csg_surfaces(brushes);
+    // Quake-style lighting detail: with lights in the scene, subdivide
+    // big faces into grid patches BEFORE the BSP build so the vertex
+    // bake resolves hotspots and shadow edges mid-face. Lightless
+    // scenes skip it and pay no extra geometry.
+    let surfaces = if lights.is_empty() {
+        surfaces
+    } else {
+        let light_spheres: Vec<([f64; 3], f64)> = lights
+            .iter()
+            .map(|light| (light.position, light.radius))
+            .collect();
+        subdivide_surfaces_for_lighting(surfaces, LIGHT_SUBDIVISION_UNITS, &light_spheres)
+    };
     let mut bsp = build_surface_bsp(&surfaces);
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);

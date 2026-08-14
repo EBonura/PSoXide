@@ -174,6 +174,42 @@ fn scale(value: [f64; 3], amount: f64) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn subdivided_bake_resolves_a_mid_face_hotspot() {
+        use crate::brush_compile::{
+            compile_csg_surfaces, subdivide_surfaces_for_lighting, LIGHT_SUBDIVISION_UNITS,
+        };
+        // A big slab with a light hovering over its centre: without
+        // subdivision the corners are ~1500 units away and dim; with it,
+        // interior vertices near the light bake far brighter, the
+        // Quake-style detail this exists for.
+        let slab = crate::brush::Brush::cuboid([0, 0, 0], [2048, 64, 2048]);
+        let light = BrushPointLight {
+            position: [1024.0, 400.0, 1024.0],
+            radius: 1200.0,
+            intensity_q8: 256,
+            color: [255, 255, 255],
+        };
+        let bake = |surfaces: &[crate::brush_compile::CompiledSurface]| -> u32 {
+            let lit = bake_brush_vertex_lighting(surfaces, &[], [24; 3], &[light], &[])
+                .expect("bake");
+            lit.iter()
+                .flatten()
+                .map(|packed| packed & 0xff)
+                .max()
+                .unwrap_or(0)
+        };
+        let flat = compile_csg_surfaces(std::slice::from_ref(&slab));
+        let coarse = bake(&flat);
+        let spheres = [(light.position, light.radius)];
+        let subdivided = subdivide_surfaces_for_lighting(flat, LIGHT_SUBDIVISION_UNITS, &spheres);
+        let fine = bake(&subdivided);
+        assert!(
+            fine > coarse + 40,
+            "subdivision must expose the hotspot: coarse {coarse}, fine {fine}"
+        );
+    }
     use super::*;
     use crate::brush::{BrushContents, BrushFace, FaceUv};
 
