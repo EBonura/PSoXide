@@ -2317,6 +2317,46 @@ fn group_drag_moves_every_selected_vertex() {
 }
 
 #[test]
+fn edge_drag_through_the_degenerate_zone_never_leaves_bounded_geometry() {
+    // Regression for the live crash: dragging an edge onto the opposite
+    // plane made an infinite wedge that passed is_valid and overflowed
+    // the preview renderer. Previews must refuse unbounded solids and
+    // hold the last valid state instead.
+    let (mut workspace, rect) = element_click_workspace();
+    workspace.replace_brush_selection(0, None);
+    workspace.set_brush_edit_mode(BrushEditMode::Edge);
+    let tool = tool_impl_3d(ViewTool::Select);
+
+    // Select and grab the top-front edge, then drag it down past the
+    // floor plane in steps, crossing the degenerate configuration.
+    let midpoint = screen_for_world(&workspace, rect, [256.0, 512.0, 0.0]);
+    tool.primary_clicked(&mut workspace, &element_click_frame(rect, midpoint, egui::Modifiers::NONE));
+    assert_eq!(workspace.selected_brush_elements.len(), 1);
+    tool.primary_pressed(&mut workspace, &element_click_frame(rect, midpoint, egui::Modifiers::NONE));
+    assert!(workspace.brush_vertex_drag.is_some());
+    for step in 1..=12 {
+        let y = 512.0 - f64::from(step) * 96.0;
+        let pointer = screen_for_world(&workspace, rect, [256.0, y, 0.0]);
+        tool.primary_dragged(&mut workspace, &element_click_frame(rect, pointer, egui::Modifiers::NONE));
+        let solved = workspace.project.active_scene().brushes[0].solve();
+        assert!(
+            solved.is_valid()
+                && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT),
+            "unbounded preview reached the scene at step {step}: {:?}..{:?}",
+            solved.min,
+            solved.max
+        );
+    }
+    let release = screen_for_world(&workspace, rect, [256.0, -640.0, 0.0]);
+    tool.primary_released(&mut workspace, &element_click_frame(rect, release, egui::Modifiers::NONE));
+    let solved = workspace.project.active_scene().brushes[0].solve();
+    assert!(
+        solved.is_valid() && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT),
+        "committed brush must stay bounded"
+    );
+}
+
+#[test]
 fn face_mode_click_selects_face_and_mirrors_uv_state() {
     let (mut workspace, rect) = element_click_workspace();
     workspace.replace_brush_selection(0, None);

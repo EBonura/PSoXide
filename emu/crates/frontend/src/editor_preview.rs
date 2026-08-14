@@ -1274,6 +1274,18 @@ fn walk_brushes(
             let verts = &polygon.verts;
             for i in 1..verts.len().saturating_sub(1) {
                 let tri = [verts[0], verts[i], verts[i + 1]];
+                // Defense against unbounded/corrupt brushes (infinite
+                // wedges solve to base-winding coordinates): anything
+                // beyond the renderer's safe range would overflow the
+                // i32 camera rotate (|v - camera| * 4096 must fit i32).
+                const PREVIEW_COORD_LIMIT: f64 = 500_000.0;
+                if tri.iter().any(|vertex| {
+                    vertex
+                        .iter()
+                        .any(|c| !c.is_finite() || c.abs() > PREVIEW_COORD_LIMIT)
+                }) {
+                    continue;
+                }
                 let world = tri.map(|v| {
                     psx_engine::WorldVertex::new(
                         v[0].round() as i32,

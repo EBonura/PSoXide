@@ -907,7 +907,7 @@ impl EditorWorkspace {
         };
         let mut snapped = current.clone();
         snapped.snap_to_grid(step);
-        if snapped == current || !snapped.solve().is_valid() {
+        if snapped == current || !brush_preview_ok(&snapped) {
             return;
         }
         self.push_undo();
@@ -1703,7 +1703,7 @@ impl EditorWorkspace {
             delta[axis] = size[axis] - current[axis];
             edited.translate_face(positive_faces[axis].unwrap(), delta);
         }
-        if !edited.solve().is_valid() {
+        if !brush_preview_ok(&edited) {
             return false;
         }
         self.project.active_scene_mut().brushes[index] = edited;
@@ -1752,7 +1752,7 @@ impl EditorWorkspace {
             return false;
         };
         edited.translate_face(face, delta);
-        if !edited.solve().is_valid() {
+        if !brush_preview_ok(&edited) {
             return false;
         }
         self.project.active_scene_mut().brushes[index] = edited;
@@ -2358,7 +2358,7 @@ impl EditorWorkspace {
         }
         let mut preview = extrude.base.clone();
         preview.translate_face(extrude.face, delta);
-        if preview.solve().is_valid() {
+        if brush_preview_ok(&preview) {
             self.project.active_scene_mut().brushes[extrude.index] = preview;
             if let Some(state) = self.brush_extrude.as_mut() {
                 state.applied = delta;
@@ -2519,7 +2519,7 @@ impl EditorWorkspace {
         }
         let mut preview = drag.base.clone();
         let moved = preview.translate_points_near(&drag.targets, applied, 0.5);
-        if moved > 0 && preview.solve().is_valid() {
+        if moved > 0 && brush_preview_ok(&preview) {
             self.project.active_scene_mut().brushes[drag.index] = preview;
             if let Some(state) = self.brush_vertex_drag.as_mut() {
                 state.applied = applied;
@@ -3082,6 +3082,15 @@ const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
 /// the entity-bounds hover convention; selected stays white).
 const HANDLE_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 240, 144);
 
+/// A reshape preview may be applied only when it still encloses a
+/// BOUNDED volume: `is_valid` alone accepts infinite wedges (planes
+/// dragged parallel) whose solved vertices sit at the base-winding
+/// extent and overflow the preview renderer's i32 camera math.
+fn brush_preview_ok(brush: &psxed_project::brush::Brush) -> bool {
+    let solved = brush.solve();
+    solved.is_valid() && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT)
+}
+
 /// Dropped-side tint in the clip preview.
 const CLIP_DROP_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 96, 96);
 
@@ -3387,7 +3396,7 @@ impl EditorWorkspace {
         }
         let mut preview = drag.base.clone();
         if preview.translate_points_near(&drag.targets, applied, 0.5) > 0
-            && preview.solve().is_valid()
+            && brush_preview_ok(&preview)
         {
             self.project.active_scene_mut().brushes[drag.index] = preview;
             if let Some(state) = self.brush_vertex_drag.as_mut() {
@@ -3590,7 +3599,7 @@ impl ViewportTool3d for BrushTool {
                 }
                 let mut preview = extrude.base.clone();
                 preview.translate_face(extrude.face, applied);
-                if preview.solve().is_valid() {
+                if brush_preview_ok(&preview) {
                     ws.project.active_scene_mut().brushes[extrude.index] = preview;
                     if let Some(state) = ws.brush_extrude.as_mut() {
                         state.applied = applied;
@@ -3621,7 +3630,7 @@ impl ViewportTool3d for BrushTool {
             }
             let mut preview = extrude.base.clone();
             preview.translate_face(extrude.face, delta);
-            if preview.solve().is_valid() {
+            if brush_preview_ok(&preview) {
                 ws.project.active_scene_mut().brushes[extrude.index] = preview;
                 if let Some(state) = ws.brush_extrude.as_mut() {
                     state.applied = delta;
