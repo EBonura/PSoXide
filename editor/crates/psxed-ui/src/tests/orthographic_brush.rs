@@ -239,6 +239,7 @@ fn front_view_clip_uses_the_hidden_z_axis_for_its_plane() {
     let second = workspace.brush_snap_2d([64.0, 192.0]);
     workspace.brush_clip_click(first);
     workspace.brush_clip_click(second);
+    assert!(workspace.apply_brush_clip());
 
     let scene = workspace.project.active_scene();
     assert_eq!(scene.brushes.len(), 2);

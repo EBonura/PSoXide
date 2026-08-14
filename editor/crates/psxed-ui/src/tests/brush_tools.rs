@@ -567,6 +567,10 @@ fn visible_brush_modes_drive_plain_drag_move_and_resize_in_every_2d_view() {
         OrthographicView::Side,
     ] {
         for mode in BrushEditMode::ALL {
+            if mode == BrushEditMode::Clip {
+                // Clip is click-driven; it has no drag gesture to test here.
+                continue;
+            }
             let base = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
             let mut project = ProjectDocument::new("visible brush transform controls");
             project.active_scene_mut().brushes.push(base.clone());
@@ -585,6 +589,7 @@ fn visible_brush_modes_drive_plain_drag_move_and_resize_in_every_2d_view() {
                 BrushEditMode::Move => ([64.0, 64.0], [96.0, 64.0]),
                 BrushEditMode::Face | BrushEditMode::Edge => ([128.0, 64.0], [160.0, 64.0]),
                 BrushEditMode::Vertex => ([128.0, 128.0], [160.0, 160.0]),
+                BrushEditMode::Clip => unreachable!("skipped above"),
             };
             run_real_egui_orthographic_brush_drag(&mut workspace, start, end);
 
@@ -1612,15 +1617,16 @@ fn brush_tool_modifier_clicks_clip_selected_brush() {
     assert_eq!(harness.workspace.selected_brush, Some(0));
     let whole = harness.workspace.project.active_scene().brushes[0].solve();
 
-    // Two cmd-clicks across the middle: one above, one below the
-    // footprint on screen, defining a vertical plane through it.
-    let mut clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
-    let mut clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
-    clip_a.modifiers.command = true;
-    clip_b.modifiers.command = true;
+    // Clip mode: two clicks across the middle, one above, one below the
+    // footprint on screen, then Enter (apply) cuts along the plane.
+    harness.workspace.set_brush_edit_mode(BrushEditMode::Clip);
+    let clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
+    let clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
     tool.primary_clicked(&mut harness.workspace, &clip_a);
-    assert!(harness.workspace.brush_clip_start.is_some());
+    assert_eq!(harness.workspace.brush_clip_points.len(), 1);
     tool.primary_clicked(&mut harness.workspace, &clip_b);
+    assert_eq!(harness.workspace.brush_clip_points.len(), 2);
+    assert!(harness.workspace.apply_brush_clip());
 
     let scene = harness.workspace.project.active_scene();
     assert_eq!(scene.brushes.len(), 2, "clip split the brush in two");
@@ -1657,12 +1663,12 @@ fn brush_tool_clip_keep_back_replaces_in_place() {
     let whole = harness.workspace.project.active_scene().brushes[0].solve();
 
     harness.workspace.brush_clip_keep = BrushClipKeep::Back;
-    let mut clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
-    let mut clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
-    clip_a.modifiers.command = true;
-    clip_b.modifiers.command = true;
+    harness.workspace.set_brush_edit_mode(BrushEditMode::Clip);
+    let clip_a = brush_frame(&harness, Pos2::new(400.0, 280.0));
+    let clip_b = brush_frame(&harness, Pos2::new(400.0, 430.0));
     tool.primary_clicked(&mut harness.workspace, &clip_a);
     tool.primary_clicked(&mut harness.workspace, &clip_b);
+    assert!(harness.workspace.apply_brush_clip());
 
     let scene = harness.workspace.project.active_scene();
     assert_eq!(scene.brushes.len(), 1, "keep-back discards the front half");
@@ -1761,10 +1767,11 @@ fn brush_2d_clip_clicks_split_selected() {
     harness.workspace.commit_brush_drag();
     assert!(harness.workspace.select_brush_at_2d([128.0, 64.0]));
 
-    // Two clip clicks along a vertical world line at x=128.
+    // Two clip points along a vertical world line at x=128, then apply.
     harness.workspace.brush_clip_click([128, 0, -64]);
-    assert!(harness.workspace.brush_clip_start.is_some());
+    assert_eq!(harness.workspace.brush_clip_points.len(), 1);
     harness.workspace.brush_clip_click([128, 0, 192]);
+    assert!(harness.workspace.apply_brush_clip());
 
     let scene = harness.workspace.project.active_scene();
     assert_eq!(scene.brushes.len(), 2, "axis clip splits in two");
@@ -1795,6 +1802,7 @@ fn brush_clip_keep_front_replaces_with_the_far_half() {
 
     harness.workspace.brush_clip_click([128, 0, -64]);
     harness.workspace.brush_clip_click([128, 0, 192]);
+    assert!(harness.workspace.apply_brush_clip());
 
     let scene = harness.workspace.project.active_scene();
     assert_eq!(scene.brushes.len(), 1, "keep Front replaces in place");
@@ -1844,8 +1852,9 @@ fn clipped_brush_saves_reopens_and_still_cooks() {
     let min_z = solved.min[2].round() as i32;
     let max_z = solved.max[2].round() as i32;
     workspace.brush_clip_click([mid_x, 0, min_z - 64]);
-    assert!(workspace.brush_clip_start.is_some(), "first click armed");
+    assert_eq!(workspace.brush_clip_points.len(), 1, "first click armed");
     workspace.brush_clip_click([mid_x, 0, max_z + 64]);
+    assert!(workspace.apply_brush_clip());
     assert_eq!(
         workspace.project().active_scene().brushes.len(),
         before + 1,
@@ -2331,6 +2340,74 @@ fn face_mode_click_selects_face_and_mirrors_uv_state() {
 }
 
 #[test]
+fn clip_mode_cuts_the_whole_multi_selection_in_one_undo_step() {
+    let mut harness = ViewportHarness::floored_room("clip_multi", 4);
+    harness.workspace.active_tool = ViewTool::Select;
+    let scene = harness.workspace.project.active_scene_mut();
+    scene
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 64, 64]));
+    scene.brushes.push(psxed_project::brush::Brush::cuboid(
+        [256, 0, 0],
+        [384, 64, 64],
+    ));
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.toggle_brush_selection(1);
+    harness.workspace.set_brush_edit_mode(BrushEditMode::Clip);
+
+    // A vertical plane at z=32 crosses both brushes (Top view points).
+    harness.workspace.brush_clip_click([-64, 0, 32]);
+    harness.workspace.brush_clip_click([512, 0, 32]);
+    assert!(harness.workspace.apply_brush_clip());
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes.len(),
+        4,
+        "both selected brushes split"
+    );
+    assert!(
+        harness.workspace.brush_clip_points.is_empty(),
+        "points consumed by the cut"
+    );
+    harness.workspace.do_undo();
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes.len(),
+        2,
+        "one undo restores the whole cut"
+    );
+}
+
+#[test]
+fn clip_three_points_cut_a_sloped_plane_and_escape_clears() {
+    let mut harness = ViewportHarness::floored_room("clip_sloped", 4);
+    harness.workspace.active_tool = ViewTool::Select;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]));
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.set_brush_edit_mode(BrushEditMode::Clip);
+
+    // Escape (cancel_brush_gestures) clears pending points.
+    harness.workspace.brush_clip_click([0, 0, 0]);
+    assert_eq!(harness.workspace.brush_clip_points.len(), 1);
+    harness.workspace.cancel_brush_gestures();
+    assert!(harness.workspace.brush_clip_points.is_empty());
+
+    // Three points define an exact sloped (Y-Z diagonal) plane.
+    harness.workspace.brush_clip_click([0, 0, 0]);
+    harness.workspace.brush_clip_click([128, 0, 0]);
+    harness.workspace.brush_clip_click([0, 128, 128]);
+    assert!(harness.workspace.apply_brush_clip());
+    let scene = harness.workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 2, "sloped cut split the cuboid");
+    let a = scene.brushes[0].solve();
+    let b = scene.brushes[1].solve();
+    assert!(a.is_valid() && b.is_valid());
+}
+
+#[test]
 fn brush_element_enumerators_dedup_and_canonicalize() {
     use crate::workspace::brush_elements::{edge_element_key, unique_edges, unique_vertices};
     let brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 64, 256]);
@@ -2426,6 +2503,7 @@ fn undo_reconciles_stale_brush_selection_and_clip_never_panics() {
     harness.workspace.selected_brush = Some(7);
     harness.workspace.brush_clip_click([0, 0, 0]);
     harness.workspace.brush_clip_click([0, 0, 128]);
+    let _ = harness.workspace.apply_brush_clip();
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 1);
 }
 
