@@ -822,16 +822,29 @@ impl EditorWorkspace {
 
     /// Screen segments of the element gizmo's three axes, world-space
     /// arrows from the selection centroid. `None` without a selection.
-    fn brush_element_gizmo_axes_3d(
+    /// Each axis is scaled to a roughly constant on-screen length so the
+    /// gizmo stays grabbable at any camera distance (a fixed world length
+    /// projected to a few pixels at room scale was unusable).
+    pub(crate) fn brush_element_gizmo_axes_3d(
         &self,
         rect: egui::Rect,
     ) -> Option<[(egui::Pos2, egui::Pos2); 3]> {
+        const TARGET_PX: f32 = 72.0;
+        const PROBE_WORLD: f64 = 64.0;
         let centroid = self.selected_brush_element_centroid()?;
         let origin = self.project_brush_point_3d(rect, centroid)?;
         let mut axes = [(origin, origin); 3];
         for axis in 0..3 {
+            let mut probe = centroid;
+            probe[axis] += PROBE_WORLD;
+            let probe_screen = self.project_brush_point_3d(rect, probe)?;
+            let px_per_probe = origin.distance(probe_screen).max(0.5);
+            // Foreshortened axes (pointing at the camera) would solve to
+            // enormous world lengths; the clamp keeps them finite.
+            let world_len =
+                (PROBE_WORLD * f64::from(TARGET_PX / px_per_probe)).clamp(16.0, 16384.0);
             let mut tip = centroid;
-            tip[axis] += BRUSH_ELEMENT_GIZMO_LENGTH;
+            tip[axis] += world_len;
             axes[axis] = (origin, self.project_brush_point_3d(rect, tip)?);
         }
         Some(axes)
@@ -3250,9 +3263,6 @@ fn brush_preview_ok(brush: &psxed_project::brush::Brush) -> bool {
 
 /// Dropped-side tint in the clip preview.
 const CLIP_DROP_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 96, 96);
-
-/// World length of the element gizmo axes.
-const BRUSH_ELEMENT_GIZMO_LENGTH: f64 = 128.0;
 
 /// Element gizmo axis colors (X red, Y green, Z blue).
 const ELEMENT_GIZMO_AXIS_COLORS: [egui::Color32; 3] = [
