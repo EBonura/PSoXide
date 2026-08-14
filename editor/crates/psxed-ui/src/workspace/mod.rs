@@ -11,4 +11,5 @@ mod selection;
 mod toolbars;
 pub(crate) mod tools;
 mod ui_scene;
+pub(crate) mod uv_canvas;
 mod viewport;

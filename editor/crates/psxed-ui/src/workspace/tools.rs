@@ -92,7 +92,9 @@ impl ViewportTool3d for SelectTool {
         // toggle the click performs on release).
         if additive
             && ws.selected_brush.is_some()
-            && (ws.pick_brush_element_gizmo_axis_3d(frame.rect, pointer).is_some()
+            && (ws
+                .pick_brush_element_gizmo_axis_3d(frame.rect, pointer)
+                .is_some()
                 || ws.pick_brush_handle_3d(frame.rect, pointer).is_some())
         {
             return;
@@ -231,7 +233,10 @@ impl ViewportTool3d for SelectTool {
         // A click on the element gizmo is a no-op (the gizmo is for
         // dragging); without this it would fall through to face picking.
         if let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) {
-            if ws.pick_brush_element_gizmo_axis_3d(frame.rect, pointer).is_some() {
+            if ws
+                .pick_brush_element_gizmo_axis_3d(frame.rect, pointer)
+                .is_some()
+            {
                 return;
             }
         }
@@ -680,8 +685,7 @@ impl EditorWorkspace {
                 let mut best: Option<(f64, [f64; 2])> = None;
                 for vert in &verts {
                     let projected = view.project_f64(*vert);
-                    let d2 =
-                        (projected[0] - point[0]).powi(2) + (projected[1] - point[1]).powi(2);
+                    let d2 = (projected[0] - point[0]).powi(2) + (projected[1] - point[1]).powi(2);
                     if d2 <= tolerance2 && best.is_none_or(|(best_d2, _)| d2 < best_d2) {
                         best = Some((d2, projected));
                     }
@@ -713,9 +717,8 @@ impl EditorWorkspace {
                 };
                 // Every 3D edge whose projection coincides with the found
                 // segment (either endpoint order): the edge depth column.
-                let near = |a: [f64; 2], b: [f64; 2]| {
-                    (0..2).all(|axis| (a[axis] - b[axis]).abs() <= 0.5)
-                };
+                let near =
+                    |a: [f64; 2], b: [f64; 2]| (0..2).all(|axis| (a[axis] - b[axis]).abs() <= 0.5);
                 edges
                     .iter()
                     .filter(|(a, b)| {
@@ -803,9 +806,10 @@ impl EditorWorkspace {
         let edges = brush_elements::unique_edges(&solved);
         let mut targets: Vec<[f64; 3]> = Vec::new();
         let mut push = |point: [f64; 3], targets: &mut Vec<[f64; 3]>| {
-            if !targets.iter().any(|seen| {
-                (0..3).all(|axis| (seen[axis] - point[axis]).abs() <= 0.5)
-            }) {
+            if !targets
+                .iter()
+                .any(|seen| (0..3).all(|axis| (seen[axis] - point[axis]).abs() <= 0.5))
+            {
                 targets.push(point);
             }
         };
@@ -855,9 +859,7 @@ impl EditorWorkspace {
     /// `(anchor, targets, faces)`. Brush mode targets the whole primary
     /// brush (every corner, every face plane: rigid moves/rotates/
     /// scales); Face/Edge/Vertex modes target the element selection.
-    pub(crate) fn brush_gizmo_context(
-        &self,
-    ) -> Option<([f64; 3], Vec<[f64; 3]>, Vec<usize>)> {
+    pub(crate) fn brush_gizmo_context(&self) -> Option<([f64; 3], Vec<[f64; 3]>, Vec<usize>)> {
         match self.brush_edit_mode {
             BrushEditMode::Clip => None,
             BrushEditMode::Move => {
@@ -938,8 +940,7 @@ impl EditorWorkspace {
                 let radius = [world_len[u], world_len[v]];
                 let mut ring = Vec::with_capacity(RING_SEGMENTS + 1);
                 for segment in 0..=RING_SEGMENTS {
-                    let angle =
-                        segment as f64 / RING_SEGMENTS as f64 * core::f64::consts::TAU;
+                    let angle = segment as f64 / RING_SEGMENTS as f64 * core::f64::consts::TAU;
                     let mut point = centroid;
                     point[u] += angle.cos() * radius[0];
                     point[v] += angle.sin() * radius[1];
@@ -1085,7 +1086,9 @@ impl EditorWorkspace {
             if offset.length_sq() < 16.0 {
                 return;
             }
-            let sweep = crate::workspace::editing::wrap_angle_radians(offset.y.atan2(offset.x) - drag.start_angle);
+            let sweep = crate::workspace::editing::wrap_angle_radians(
+                offset.y.atan2(offset.x) - drag.start_angle,
+            );
             let degrees = f64::from(sweep).to_degrees();
             let step = if fine { 1.0 } else { 5.0 };
             ((degrees / step).round() * step) as i32
@@ -1128,9 +1131,17 @@ impl EditorWorkspace {
                 state.applied = applied;
             }
             self.status = if drag.rotate {
-                format!("Rotate {} deg about {}", applied, ["X", "Y", "Z"][drag.axis])
+                format!(
+                    "Rotate {} deg about {}",
+                    applied,
+                    ["X", "Y", "Z"][drag.axis]
+                )
             } else {
-                format!("Scale {}% along {}", 100 + applied, ["X", "Y", "Z"][drag.axis])
+                format!(
+                    "Scale {}% along {}",
+                    100 + applied,
+                    ["X", "Y", "Z"][drag.axis]
+                )
             };
         }
     }
@@ -1347,13 +1358,14 @@ impl EditorWorkspace {
             .map(|(a, b)| brush_elements::edge_element_key(a, b))
             .collect();
         let face_count = brush.faces.len();
-        self.selected_brush_elements.retain(|element| match element {
-            BrushElement::Face(face) => {
-                *face < face_count && solved.polygons.get(*face).is_some_and(Option::is_some)
-            }
-            BrushElement::Edge(a, b) => edge_keys.contains(&(*a, *b)),
-            BrushElement::Vertex(key) => vertex_keys.contains(key),
-        });
+        self.selected_brush_elements
+            .retain(|element| match element {
+                BrushElement::Face(face) => {
+                    *face < face_count && solved.polygons.get(*face).is_some_and(Option::is_some)
+                }
+                BrushElement::Edge(a, b) => edge_keys.contains(&(*a, *b)),
+                BrushElement::Vertex(key) => vertex_keys.contains(key),
+            });
     }
 
     /// Shift-click selection: toggle membership. The primary follows the
@@ -2060,7 +2072,16 @@ impl EditorWorkspace {
             }
             scale_live
         });
-        let interacting = rot_live || scale_live.inner;
+        // TrenchBroom-style canvas below the numeric rows: the face
+        // projected into repeating texture space. While one of its
+        // gestures is live it owns the mapping for the frame.
+        let canvas_edit = self.draw_face_uv_canvas(ui, index, face, current);
+        let mut interacting = rot_live || scale_live.inner;
+        if let Some((canvas_uv, canvas_live)) = canvas_edit {
+            edited = canvas_uv;
+            reset = false;
+            interacting = canvas_live;
+        }
         let edited = self.apply_face_uv_edit(index, face, current, edited, reset, interacting);
         if edited != current {
             self.project.active_scene_mut().brushes[index].faces[face].uv = edited;
@@ -2150,6 +2171,7 @@ impl EditorWorkspace {
     /// redo and project loads all invalidate the mapping it captured.
     pub(crate) fn clear_uv_edit_transaction(&mut self) {
         self.brush_uv_edit = None;
+        self.brush_uv_canvas_drag = None;
     }
 
     /// Solved axis-aligned min corner of the selected brush, rounded to
@@ -3020,27 +3042,35 @@ impl EditorWorkspace {
         true
     }
 
-    fn start_brush_vertex_drag(&mut self, index: usize, mut targets: Vec<[f64; 3]>, world: [f32; 2]) {
+    fn start_brush_vertex_drag(
+        &mut self,
+        index: usize,
+        mut targets: Vec<[f64; 3]>,
+        world: [f32; 2],
+    ) {
         let mut faces: Vec<usize> = Vec::new();
         // Group drag: when any grabbed target is a selected element, the
         // whole selected set rides along (2D grabs depth columns, 3D
         // single corners; the union covers both semantics).
         if self.selected_brush == Some(index) && !self.selected_brush_elements.is_empty() {
             let element_matches = |key: [i64; 3]| {
-                self.selected_brush_elements.iter().any(|element| match element {
-                    BrushElement::Vertex(k) => *k == key,
-                    BrushElement::Edge(a, b) => *a == key || *b == key,
-                    BrushElement::Face(_) => false,
-                })
+                self.selected_brush_elements
+                    .iter()
+                    .any(|element| match element {
+                        BrushElement::Vertex(k) => *k == key,
+                        BrushElement::Edge(a, b) => *a == key || *b == key,
+                        BrushElement::Face(_) => false,
+                    })
             };
             let grabbed_selected = targets
                 .iter()
                 .any(|target| element_matches(brush_elements::quantize_element_point(*target)));
             if grabbed_selected {
                 for extra in self.selected_brush_element_targets() {
-                    if !targets.iter().any(|seen| {
-                        (0..3).all(|axis| (seen[axis] - extra[axis]).abs() <= 0.5)
-                    }) {
+                    if !targets
+                        .iter()
+                        .any(|seen| (0..3).all(|axis| (seen[axis] - extra[axis]).abs() <= 0.5))
+                    {
                         targets.push(extra);
                     }
                 }
@@ -3084,8 +3114,7 @@ impl EditorWorkspace {
         }
         let uv_lock = self.brush_texture_lock;
         let mut preview = drag.base.clone();
-        let moved =
-            preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock);
+        let moved = preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock);
         if moved > 0 && brush_preview_ok(&preview) {
             self.project.active_scene_mut().brushes[drag.index] = preview;
             if let Some(state) = self.brush_vertex_drag.as_mut() {
@@ -3109,9 +3138,9 @@ impl EditorWorkspace {
             // both edge endpoints preserves canonical order).
             let delta = drag.applied.map(i64::from);
             let dragged = |key: [i64; 3]| {
-                drag.targets.iter().any(|target| {
-                    brush_elements::quantize_element_point(*target) == key
-                })
+                drag.targets
+                    .iter()
+                    .any(|target| brush_elements::quantize_element_point(*target) == key)
             };
             for element in &mut self.selected_brush_elements {
                 match element {
@@ -3334,16 +3363,15 @@ impl EditorWorkspace {
                             // Screen-space dedup on top of the canonical
                             // enumeration: distinct 3D edges of one depth
                             // column project onto the same 2D segment.
-                            let midpoint_matches =
-                                |element: &BrushElement, center: Pos2| {
-                                    let BrushElement::Edge(ka, kb) = element else {
-                                        return false;
-                                    };
-                                    let mid = to_screen(std::array::from_fn(|axis| {
-                                        (ka[axis] as f64 + kb[axis] as f64) * 0.5
-                                    }));
-                                    mid.distance(center) <= 1.0
+                            let midpoint_matches = |element: &BrushElement, center: Pos2| {
+                                let BrushElement::Edge(ka, kb) = element else {
+                                    return false;
                                 };
+                                let mid = to_screen(std::array::from_fn(|axis| {
+                                    (ka[axis] as f64 + kb[axis] as f64) * 0.5
+                                }));
+                                mid.distance(center) <= 1.0
+                            };
                             let mut seen = Vec::<Pos2>::new();
                             for (a, b) in brush_elements::unique_edges(&solved) {
                                 let center = to_screen(std::array::from_fn(|axis| {
@@ -3382,19 +3410,19 @@ impl EditorWorkspace {
                                 // A 2D square represents a whole depth
                                 // column, so highlight by projected
                                 // position rather than exact key.
-                                let projected_matches = |element: &BrushElement,
-                                                         projected: [f64; 2]| {
-                                    let BrushElement::Vertex(key) = element else {
-                                        return false;
+                                let projected_matches =
+                                    |element: &BrushElement, projected: [f64; 2]| {
+                                        let BrushElement::Vertex(key) = element else {
+                                            return false;
+                                        };
+                                        let p = view.project_f64([
+                                            key[0] as f64,
+                                            key[1] as f64,
+                                            key[2] as f64,
+                                        ]);
+                                        (p[0] - projected[0]).abs() <= 0.5
+                                            && (p[1] - projected[1]).abs() <= 0.5
                                     };
-                                    let p = view.project_f64([
-                                        key[0] as f64,
-                                        key[1] as f64,
-                                        key[2] as f64,
-                                    ]);
-                                    (p[0] - projected[0]).abs() <= 0.5
-                                        && (p[1] - projected[1]).abs() <= 0.5
-                                };
                                 let mut seen: Vec<[f64; 2]> = Vec::new();
                                 for vert in verts {
                                     let projected = view.project_f64(vert);
@@ -3409,13 +3437,10 @@ impl EditorWorkspace {
                                         .selected_brush_elements
                                         .iter()
                                         .any(|element| projected_matches(element, projected));
-                                    let hovered = self
-                                        .selection
-                                        .hovered_brush_handle
-                                        .as_ref()
-                                        .is_some_and(|element| {
-                                            projected_matches(element, projected)
-                                        });
+                                    let hovered =
+                                        self.selection.hovered_brush_handle.as_ref().is_some_and(
+                                            |element| projected_matches(element, projected),
+                                        );
                                     let (size, color) = if selected {
                                         (9.0, egui::Color32::WHITE)
                                     } else if hovered {
@@ -3487,8 +3512,11 @@ impl EditorWorkspace {
                         let count = polygon.verts.len();
                         // Translucent fill so a selected face reads as
                         // SELECTED at a glance (matches the 2D views).
-                        let screen: Vec<egui::Pos2> =
-                            polygon.verts.iter().filter_map(|vert| project(*vert)).collect();
+                        let screen: Vec<egui::Pos2> = polygon
+                            .verts
+                            .iter()
+                            .filter_map(|vert| project(*vert))
+                            .collect();
                         if screen.len() == count {
                             painter.add(egui::Shape::convex_polygon(
                                 screen,
@@ -3525,9 +3553,7 @@ impl EditorWorkspace {
                     let solved = brush.solve();
                     match self.brush_edit_mode {
                         BrushEditMode::Clip => {
-                            for (number, clip_point) in
-                                self.brush_clip_points.iter().enumerate()
-                            {
+                            for (number, clip_point) in self.brush_clip_points.iter().enumerate() {
                                 let world = clip_point.point.map(f64::from);
                                 if let Some(center) = project(world) {
                                     painter.circle_stroke(
@@ -3565,8 +3591,7 @@ impl EditorWorkspace {
                                     brush_elements::quantize_element_point(vertex),
                                 );
                                 let selected = self.selected_brush_elements.contains(&key);
-                                let hovered =
-                                    self.selection.hovered_brush_handle == Some(key);
+                                let hovered = self.selection.hovered_brush_handle == Some(key);
                                 if let Some(center) = project(vertex) {
                                     let (size, color) = if selected {
                                         (9.0, egui::Color32::WHITE)
@@ -3591,8 +3616,7 @@ impl EditorWorkspace {
                                 let (ka, kb) = brush_elements::edge_element_key(a, b);
                                 let key = BrushElement::Edge(ka, kb);
                                 let selected = self.selected_brush_elements.contains(&key);
-                                let hovered =
-                                    self.selection.hovered_brush_handle == Some(key);
+                                let hovered = self.selection.hovered_brush_handle == Some(key);
                                 let midpoint = [
                                     (a[0] + b[0]) * 0.5,
                                     (a[1] + b[1]) * 0.5,
@@ -3620,8 +3644,7 @@ impl EditorWorkspace {
                             }
                         }
                         BrushEditMode::Face => {
-                            for (_, center, normal) in
-                                brush_elements::face_handles(brush, &solved)
+                            for (_, center, normal) in brush_elements::face_handles(brush, &solved)
                             {
                                 if !self.brush_face_handle_visible(center, normal) {
                                     continue;
@@ -3670,10 +3693,7 @@ impl EditorWorkspace {
                 for (axis, polyline) in polylines.into_iter().enumerate() {
                     let color = ELEMENT_GIZMO_AXIS_COLORS[axis];
                     for pair in polyline.windows(2) {
-                        painter.line_segment(
-                            [pair[0], pair[1]],
-                            egui::Stroke::new(2.5, color),
-                        );
+                        painter.line_segment([pair[0], pair[1]], egui::Stroke::new(2.5, color));
                     }
                     // Mode-distinct tips: circle for Move, box for Scale;
                     // rings are their own shape.
@@ -3682,10 +3702,7 @@ impl EditorWorkspace {
                             match self.transform_gizmo_mode {
                                 TransformGizmoMode::Scale => {
                                     painter.rect_filled(
-                                        egui::Rect::from_center_size(
-                                            *tip,
-                                            egui::Vec2::splat(9.0),
-                                        ),
+                                        egui::Rect::from_center_size(*tip, egui::Vec2::splat(9.0)),
                                         1.0,
                                         color,
                                     );
@@ -3710,7 +3727,6 @@ const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
 /// the entity-bounds hover convention; selected stays white).
 const HANDLE_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 240, 144);
 
-
 /// Plane translate honoring the texture lock: the face keeps its
 /// applied texture when the lock is on.
 fn translate_face_locked(
@@ -3732,8 +3748,7 @@ fn translate_face_locked(
 /// extent and overflow the preview renderer's i32 camera math.
 fn brush_preview_ok(brush: &psxed_project::brush::Brush) -> bool {
     let solved = brush.solve();
-    solved.is_valid()
-        && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT)
+    solved.is_valid() && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT)
 }
 
 /// Dropped-side tint in the clip preview.
