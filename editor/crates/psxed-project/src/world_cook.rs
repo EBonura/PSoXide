@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn cooks_starter_grid_to_material_slots() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let grid = starter_grid(&project);
 
         let cooked = cook_world_grid(&project, &grid).unwrap();
@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     fn cook_flips_horizontal_faces_to_runtime_z_convention() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, Some(material));
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn cook_bakes_horizontal_uv_transform_to_runtime_uvs() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, Some(material));
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn cook_flips_cardinal_walls_to_runtime_convention() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.add_wall(
@@ -1077,7 +1077,7 @@ mod tests {
 
     #[test]
     fn cook_bakes_wall_uv_transform_to_runtime_uvs() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.add_wall(
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[test]
     fn cook_keeps_default_tall_wall_uvs_matching_editor_preview() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.add_wall(
@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn cook_splits_explicit_autotiled_wall_only_when_uv_exceeds_packet_range() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.add_wall(
@@ -1188,7 +1188,7 @@ mod tests {
 
     #[test]
     fn cooks_quantized_non_default_sector_size() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = starter_grid(&project);
         grid.rescale_sector_size(1536);
 
@@ -1199,7 +1199,7 @@ mod tests {
 
     #[test]
     fn rejects_non_quantized_sector_size() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = starter_grid(&project);
         grid.sector_size = 513;
 
@@ -1214,7 +1214,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_sector_storage_len() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = WorldGrid::empty(2, 2, world::SECTOR_SIZE);
         grid.sectors.pop();
 
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn rejects_unassigned_surface_material() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, None);
 
@@ -1245,7 +1245,7 @@ mod tests {
 
     #[test]
     fn rejects_non_material_resources() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let model = project
             .resources
             .iter()
@@ -1265,7 +1265,7 @@ mod tests {
 
     #[test]
     fn strips_empty_authored_sectors() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
 
         let cooked = cook_world_grid(&project, &grid).unwrap();
@@ -1281,7 +1281,7 @@ mod tests {
         // decodes the same dimensions / sector / wall counts the
         // cooker reported. Regresses the v1 byte layout against
         // both producer and consumer in one assertion.
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         let floor_texture = texture_named(&project, "block_1a.psxt");
         let wall_texture = texture_named(&project, "brick_1a.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
@@ -1323,7 +1323,7 @@ mod tests {
         // The cooker assigns slots in first-use order while iterating
         // sectors `[x * depth + z]`. If a future reshape flips that
         // order, the runtime package contract changes.
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         let floor_texture = texture_named(&project, "block_1a.psxt");
         let wall_texture = texture_named(&project, "brick_1a.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
@@ -1382,7 +1382,7 @@ mod tests {
     #[test]
     fn rejects_oversized_room_dimensions() {
         use crate::max_room_cells_for_sector_size;
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let span = max_room_cells_for_sector_size(world::SECTOR_SIZE);
         let grid = WorldGrid::empty(span + 1, 4, world::SECTOR_SIZE);
         match cook_world_grid(&project, &grid) {
@@ -1423,7 +1423,7 @@ mod tests {
 
     #[test]
     fn rejects_excessive_wall_stacks() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         for _ in 0..(MAX_WALL_STACK + 1) {
             grid.add_wall(0, 0, GridDirection::North, 0, world::SECTOR_SIZE, None);
@@ -1449,7 +1449,7 @@ mod tests {
     fn rejects_duplicate_physical_walls() {
         // East(0, 0) and West(1, 0) describe the same physical
         // wall. Authoring both must surface a clear cook error.
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = WorldGrid::empty(2, 1, world::SECTOR_SIZE);
         grid.add_wall(0, 0, GridDirection::East, 0, world::SECTOR_SIZE, None);
         grid.add_wall(1, 0, GridDirection::West, 0, world::SECTOR_SIZE, None);
@@ -1478,7 +1478,7 @@ mod tests {
     fn rejects_duplicate_physical_walls_on_editor_north_south_edges() {
         // Editor convention is North=+Z and South=-Z. These two
         // authored records both claim the edge between rows 0 and 1.
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = WorldGrid::empty(1, 2, world::SECTOR_SIZE);
         grid.add_wall(0, 0, GridDirection::North, 0, world::SECTOR_SIZE, None);
         grid.add_wall(0, 1, GridDirection::South, 0, world::SECTOR_SIZE, None);
@@ -1509,7 +1509,7 @@ mod tests {
         // a single corner directly so the test bypasses the
         // editor's drag snap (which is the runtime path the
         // cooker validator catches).
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let mut grid = WorldGrid::stone_room(1, 1, world::SECTOR_SIZE, None, None);
         if let Some(sector) = grid.sector_mut(0, 0) {
             if let Some(floor) = sector.floor.as_mut() {
@@ -1538,7 +1538,7 @@ mod tests {
         // Dropped floor corners cook through the v4 horizontal
         // override table: the sector still has a floor, but only
         // the surviving split triangle is visible at runtime.
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, Some(material));
@@ -1570,7 +1570,7 @@ mod tests {
 
     #[test]
     fn cooks_horizontal_triangle_material_uv_and_walkable_overrides() {
-        let mut project = ProjectDocument::starter();
+        let mut project = ProjectDocument::legacy_grid_starter();
         let base = first_floor_material(&starter_grid(&project));
         let floor_texture = texture_named(&project, "block_1a.psxt");
         let override_material = material_for_texture(&mut project, "Triangle Slot", floor_texture);
@@ -1637,7 +1637,7 @@ mod tests {
 
     #[test]
     fn cooks_triangle_wall_shape() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.add_wall(
@@ -1672,7 +1672,7 @@ mod tests {
 
     #[test]
     fn cooks_floor_height_transition_wall_between_mismatched_neighbours() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(2, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, Some(material));
@@ -1689,7 +1689,7 @@ mod tests {
 
     #[test]
     fn cook_flips_diagonal_walls_to_runtime_convention() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.add_wall(
@@ -1723,7 +1723,7 @@ mod tests {
 
     #[test]
     fn encodes_starter_grid_as_psxw_blob() {
-        let project = ProjectDocument::starter();
+        let project = ProjectDocument::legacy_grid_starter();
         let grid = starter_grid(&project);
         let cooked = cook_world_grid(&project, &grid).unwrap();
 

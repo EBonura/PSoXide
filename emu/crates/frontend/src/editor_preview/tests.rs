@@ -691,7 +691,7 @@ fn eroded_box_prop_preview_uses_generated_surface_mesh() {
         .canonicalize()
         .expect("repo root");
     let project_root = repo_root.join("editor/projects/default");
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()
@@ -803,7 +803,7 @@ fn cylinder_prop_preview_renders_shared_generated_profile_headlessly() {
         .canonicalize()
         .expect("repo root");
     let project_root = repo_root.join("editor/projects/default");
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let material_id = project
         .resources
         .iter()

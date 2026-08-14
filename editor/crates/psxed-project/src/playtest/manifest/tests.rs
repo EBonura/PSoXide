@@ -65,7 +65,7 @@ fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
 #[test]
 fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
     let bytes = std::fs::read(
-        crate::default_project_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
+        crate::legacy_grid_starter_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
     )
     .expect("starter Delven texture exists");
     let asset = PlaytestAsset {
@@ -82,7 +82,7 @@ fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
 #[test]
 fn model_atlas_vram_bytes_match_runtime_atlas_upload() {
     let bytes = std::fs::read(
-        crate::default_project_dir()
+        crate::legacy_grid_starter_dir()
             .join("assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt"),
     )
     .expect("starter wraith atlas exists");

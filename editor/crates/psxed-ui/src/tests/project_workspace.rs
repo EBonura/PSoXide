@@ -1460,7 +1460,7 @@ fn open_directory_syncs_legacy_starter_character_catalogue() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let starter = ProjectDocument::starter();
+    let starter = ProjectDocument::legacy_grid_starter();
     let mut legacy = ProjectDocument::new("legacy-starter");
     let mut wraith_model = starter
         .resources
@@ -1498,11 +1498,11 @@ fn open_directory_syncs_legacy_starter_character_catalogue() {
     ));
     assert!(project_has_resource_name(
         workspace.project(),
-        "Crimson Cross Knight",
+        "Aletha",
         |data| { matches!(data, ResourceData::Model(_)) }
     ));
     assert!(dir
-        .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
+        .join("assets/models/ci_player/ci_player.psxmdl")
         .is_file());
 
     let _ = std::fs::remove_dir_all(dir);
@@ -1514,7 +1514,7 @@ fn open_directory_purges_legacy_obsidian_warden_catalogue() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let skeleton = project
         .resources
         .iter()
@@ -1564,12 +1564,12 @@ fn open_directory_purges_legacy_obsidian_warden_catalogue() {
     }));
     assert!(project_has_resource_name(
         workspace.project(),
-        "Crowned Wraith Enemy",
+        "Rust Mantis Enemy",
         |data| matches!(data, ResourceData::Character(_))
     ));
     assert!(!legacy_asset_dir.exists());
     assert!(dir
-        .join("assets/animations/standalone_fbx/neutral_idle.psxanim")
+        .join("assets/animations/ci_player_complete/idle.psxanim")
         .is_file());
 
     let _ = std::fs::remove_dir_all(dir);

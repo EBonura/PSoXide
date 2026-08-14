@@ -566,6 +566,13 @@ impl ProjectDocument {
             .expect("editor/projects/default/project.ron is malformed")
     }
 
+    /// The pre-BSP grid mega-project: the historic default, retained
+    /// verbatim as the fixture behind the grid cook/playtest suites.
+    pub fn legacy_grid_starter() -> Self {
+        Self::from_ron_str(crate::LEGACY_GRID_STARTER_RON)
+            .expect("editor/projects/legacy-grid-starter/project.ron is malformed")
+    }
+
     /// Which spatial authority this project uses.
     ///
     /// Every document built through [`ProjectDocument::new`] or loaded

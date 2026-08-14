@@ -288,7 +288,7 @@ pub(crate) fn find_starter_catalogue_target(
         return Some(id);
     }
 
-    if starter_resource.name == "Obsidian Wraith Enemy"
+    if starter_resource.name == "Rust Mantis Enemy"
         && matches!(starter_resource.data, ResourceData::Character(_))
     {
         return project

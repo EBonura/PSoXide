@@ -288,17 +288,10 @@ const PLAY_PORTAL_DEBUG_FAR_Z: i32 = 16_384;
 const PLAY_PORTAL_DEBUG_MAX_DEPTH: u8 = 8;
 const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
-    "assets/models/obsidian_wraith",
-    "assets/models/crimson_cross_knight",
-    "assets/models/hooded_wretch",
-    "assets/models/crowned_wraith",
-    "assets/animations/standalone_fbx",
     "assets/models/ci_player",
     "assets/models/rust_mantis",
     "assets/animations/ci_player_complete",
     "assets/animations/rust_mantis_starter",
-    "assets/models/aletha_delivered",
-    "assets/animations/aletha_delivered",
     "assets/models/sword1_light",
     "assets/models/sword1_heavy",
 ];
@@ -337,14 +330,7 @@ const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Aletha Delivered Animation Set",
     "Rust Mantis Starter Animation Set",
 ];
-const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &[
-    "Crimson Cross Knight Player",
-    "Obsidian Wraith Enemy",
-    "Hooded Wretch Enemy",
-    "Crowned Wraith Enemy",
-    "Aletha",
-    "Rust Mantis Enemy",
-];
+const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &["Aletha", "Rust Mantis Enemy"];
 const LEGACY_WRAITH_HERO_PROFILE_NAME: &str = "Wraith Hero";
 const LEGACY_OBSIDIAN_WARDEN_ASSET_DIR: &str = "assets/models/obsidian_warden";
 const LEGACY_OBSIDIAN_WARDEN_RESOURCE_NAMES: &[&str] = &[

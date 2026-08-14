@@ -683,7 +683,7 @@ fn legacy_spawn_without_character_field_still_loads() {
 #[test]
 fn character_resource_roundtrips_through_ron() {
     use crate::CharacterResource;
-    let mut project = ProjectDocument::starter();
+    let mut project = ProjectDocument::legacy_grid_starter();
     let id = project.add_resource(
         "Test Character",
         crate::ResourceData::Character(CharacterResource {

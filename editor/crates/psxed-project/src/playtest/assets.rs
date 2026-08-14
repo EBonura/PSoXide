@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn room_material_rejects_non_texture_window_dimensions() {
         let mut bytes = std::fs::read(
-            crate::default_project_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
+            crate::legacy_grid_starter_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
         )
         .expect("starter Delven texture exists");
         // AssetHeader is 12 bytes; TextureHeader width/height live at
