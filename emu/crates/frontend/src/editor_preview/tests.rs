@@ -4,7 +4,7 @@ use super::{
     material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
     preview_player_reference, preview_projected_triangle_hw_safe, preview_scratch,
     preview_shadow_radius, preview_static_model_reference, preview_vertices_in_front, push_clear,
-    push_tri, push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
+    push_tri, push_tri_colors, push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
     shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
     wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
     GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
@@ -177,7 +177,73 @@ fn preview_scratch_command_log_walk_terminates() {
     let log = unsafe { psx_gpu_render::build_cmd_log(&scratch.ot) };
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].opcode, 0x02);
-    assert_eq!(log[1].opcode, 0x20);
+    // World triangles are Gouraud packets now (per-vertex baked light).
+    assert_eq!(log[1].opcode, 0x30);
+}
+
+/// The preview must light brush vertices with the exact Draft-bake
+/// formula: a vertex under the light bakes brighter than one at the
+/// rim, and the emitted packet carries those distinct colours.
+#[test]
+fn brush_vertex_lighting_matches_the_draft_bake() {
+    let light = psxed_project::brush_light::BrushPointLight {
+        position: [0.0, 400.0, 0.0],
+        radius: 1200.0,
+        intensity_q8: 256,
+        color: [255, 255, 255],
+    };
+    let near = psxed_project::brush_light::lit_point_color(
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [128; 3],
+        [32; 3],
+        std::slice::from_ref(&light),
+    );
+    let far = psxed_project::brush_light::lit_point_color(
+        [1150.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [128; 3],
+        [32; 3],
+        std::slice::from_ref(&light),
+    );
+    assert!(
+        near[0] > far[0] + 40,
+        "lambert + falloff must grade across a face: near {near:?}, far {far:?}"
+    );
+
+    let mut scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
+    scratch.used = 0;
+    scratch.tex_used = 0;
+    scratch.overlay_lines.clear();
+    scratch.ot.clear();
+    let tri = [
+        Projected {
+            sx: 0,
+            sy: 0,
+            sz: 256,
+        },
+        Projected {
+            sx: 32,
+            sy: 0,
+            sz: 256,
+        },
+        Projected {
+            sx: 0,
+            sy: 32,
+            sz: 256,
+        },
+    ];
+    let colors = [
+        (near[0], near[1], near[2]),
+        (far[0], far[1], far[2]),
+        (far[0], far[1], far[2]),
+    ];
+    assert!(push_tri_colors(&mut scratch, tri, colors));
+    let packet = &scratch.tris[0];
+    assert_eq!(packet.color0_cmd & 0xff, u32::from(near[0]));
+    assert_eq!(packet.color1 & 0xff, u32::from(far[0]));
 }
 
 #[test]

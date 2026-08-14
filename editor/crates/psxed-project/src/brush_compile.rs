@@ -509,7 +509,7 @@ fn same_facing_plane(left: Plane, right: Plane) -> bool {
         && (left_distance - right_distance).abs() <= CSG_EPSILON
 }
 
-pub(crate) fn normalized_plane(plane: Plane) -> ([f64; 3], f64) {
+pub fn normalized_plane(plane: Plane) -> ([f64; 3], f64) {
     let normal = plane.normal.map(|component| component as f64);
     let length = dot(normal, normal).sqrt();
     (
