@@ -813,12 +813,7 @@ mod tests {
 
     fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
         let mut output = Trace::default();
-        assert!(hull.trace_into(
-            &start,
-            &end,
-            &mut TraceScratch::new(),
-            &mut output,
-        ));
+        assert!(hull.trace_into(&start, &end, &mut TraceScratch::new(), &mut output,));
         output
     }
 
@@ -831,7 +826,8 @@ mod tests {
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, &brushes);
         let geometry =
-            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright).expect("geometry");
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &Default::default())
+                .expect("geometry");
         let collision =
             compile_collision_hulls(&brushes, &[CollisionHullBounds::POINT, PLAYER, BIG])
                 .expect("collision");
@@ -877,7 +873,8 @@ mod tests {
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, brushes);
         let geometry =
-            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright).expect("geometry");
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &Default::default())
+                .expect("geometry");
         let collision =
             compile_collision_hulls(brushes, &[CollisionHullBounds::POINT, PLAYER, BIG])
                 .expect("collision");
@@ -1061,7 +1058,8 @@ mod tests {
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, &brushes);
         let geometry =
-            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright).expect("geometry");
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &Default::default())
+                .expect("geometry");
         let collision =
             compile_collision_hulls(&brushes, &[CollisionHullBounds::POINT, PLAYER, BIG])
                 .expect("collision");

@@ -155,7 +155,9 @@ pub enum BrushWorldCookError {
     ModelIndexOverflow(NodeId),
     /// Texture asset table overflowed while interning this material's texture.
     /// `None` is the built-in default brush texture, which has no resource.
-    TextureAssetOverflow { material: Option<ResourceId> },
+    TextureAssetOverflow {
+        material: Option<ResourceId>,
+    },
     Pack(BrushPackError),
     Collision(CollisionHullCompileError),
     /// Lighting bake failure, with the PointLight node responsible when the
@@ -461,12 +463,14 @@ pub fn compile_brush_world(
         .collect();
     let (lights, light_nodes) = scene_lights(scene);
     let material_tints = material_tints(project);
+    let texture_dims = brush_texture_dims(project, scene, &options);
     let (world_geometry, world_collision) = compile_model(
         &static_brushes,
         &all_brushes,
         &lights,
         &light_nodes,
         &material_tints,
+        &texture_dims,
         options.mode,
         options.ambient,
         &collision_hulls,
@@ -518,6 +522,7 @@ pub fn compile_brush_world(
             &local_lights,
             &light_nodes,
             &material_tints,
+            &texture_dims,
             options.mode,
             options.ambient,
             &collision_hulls,
@@ -666,6 +671,7 @@ fn compile_model(
     lights: &[BrushPointLight],
     light_nodes: &[NodeId],
     material_tints: &[BrushMaterialTint],
+    texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
@@ -693,28 +699,23 @@ fn compile_model(
     // lights at all keeps the historic fullbright look instead of
     // dropping to bare ambient.
     let geometry = if lights.is_empty() {
-        pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright)?
+        pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, texture_dims)?
     } else {
         let occluders: &[Brush] = match mode {
             BrushWorldCookMode::Draft => &[],
             BrushWorldCookMode::Release => light_occluders,
         };
-        let lighting = bake_brush_vertex_lighting(
-            &bsp.surfaces,
-            occluders,
-            ambient,
-            lights,
-            material_tints,
-        )
-        .map_err(|error| BrushWorldCookError::Light {
-            // `translate_lights` preserves scene order, so the reported
-            // light index indexes the same list `scene_lights` built.
-            node: match error {
-                BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
-            },
-            error,
-        })?;
-        pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&lighting))?
+        let lighting =
+            bake_brush_vertex_lighting(&bsp.surfaces, occluders, ambient, lights, material_tints)
+                .map_err(|error| BrushWorldCookError::Light {
+                // `translate_lights` preserves scene order, so the reported
+                // light index indexes the same list `scene_lights` built.
+                node: match error {
+                    BrushLightError::InvalidLight(index) => light_nodes.get(index).copied(),
+                },
+                error,
+            })?;
+        pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&lighting), texture_dims)?
     };
     let collision = compile_collision_hulls(brushes, collision_hulls)?;
     Ok((geometry, collision))
@@ -906,6 +907,39 @@ fn material_tints(project: &ProjectDocument) -> Vec<BrushMaterialTint> {
     tints
 }
 
+/// Texture repeat sizes per face material, parsed ahead of geometry
+/// packing so surface UVs can rebase onto the u8 window (see
+/// `brush::rebase_texel_uvs`). Unresolvable textures are simply
+/// absent (the pack keeps the historic wrap for them); the real error
+/// surfaces later in `resolve_materials`.
+fn brush_texture_dims(
+    project: &ProjectDocument,
+    scene: &Scene,
+    options: &BrushWorldCookOptions<'_>,
+) -> std::collections::HashMap<Option<ResourceId>, [u16; 2]> {
+    let mut dims = std::collections::HashMap::new();
+    // The material-less fallback is the built-in 8x8 flat white.
+    dims.insert(None, [8, 8]);
+    for brush in &scene.brushes {
+        for face in &brush.faces {
+            let Some(id) = face.material else { continue };
+            if dims.contains_key(&Some(id)) {
+                continue;
+            }
+            let Ok(Some((_, bytes))) =
+                resolve_material_texture_psxt(project, id, options.project_root)
+            else {
+                continue;
+            };
+            let Ok(parsed) = psx_asset::Texture::from_bytes(&bytes) else {
+                continue;
+            };
+            dims.insert(Some(id), [parsed.width(), parsed.height()]);
+        }
+    }
+    dims
+}
+
 fn resolve_materials(
     project: &ProjectDocument,
     slots: &[Option<ResourceId>],
@@ -997,8 +1031,8 @@ fn intern_texture(
             error: format!("brush texture must be 4bpp power-of-two 8..128, got {width}x{height}"),
         });
     }
-    let index =
-        u16::try_from(textures.len()).map_err(|_| BrushWorldCookError::TextureAssetOverflow { material })?;
+    let index = u16::try_from(textures.len())
+        .map_err(|_| BrushWorldCookError::TextureAssetOverflow { material })?;
     let asset_id = base
         .checked_add(index)
         .ok_or(BrushWorldCookError::TextureAssetOverflow { material })?;
