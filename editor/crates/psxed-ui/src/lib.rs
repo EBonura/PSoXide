@@ -654,6 +654,11 @@ pub struct EditorWorkspace {
     selected_brushes: Vec<usize>,
     /// Selected face index within the selected brush.
     selected_brush_face: Option<usize>,
+    /// Selected sub-elements of the primary brush (faces by index,
+    /// edges/vertices by quantized key, see `workspace::brush_elements`).
+    /// Last entry is the primary element. Cleared whenever the primary
+    /// brush changes; stale keys drop in `reconcile_brush_selection`.
+    selected_brush_elements: Vec<BrushElement>,
     /// Visible, mode-driven BSP transform grammar. Move is the default so a
     /// plain drag performs the most common operation without a modifier.
     brush_edit_mode: BrushEditMode,
@@ -1069,6 +1074,18 @@ impl SelectionMode {
             Self::Vertex => icons::CIRCLE_DOT,
         }
     }
+}
+
+/// One selectable sub-element of a brush. Faces are stable authored
+/// indices; edges and vertices are quantized solved positions (canonical
+/// endpoint order for edges), re-resolved each frame against
+/// `workspace::brush_elements` because solved corners have no persistent
+/// identity in the data model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BrushElement {
+    Face(usize),
+    Edge([i64; 3], [i64; 3]),
+    Vertex([i64; 3]),
 }
 
 /// Direct BSP transform grammar. This is deliberately separate from the
@@ -2975,6 +2992,7 @@ impl EditorWorkspace {
             selected_brush: None,
             selected_brushes: Vec::new(),
             selected_brush_face: None,
+            selected_brush_elements: Vec::new(),
             brush_edit_mode: BrushEditMode::Move,
             brush_drag: None,
             brush_extrude: None,

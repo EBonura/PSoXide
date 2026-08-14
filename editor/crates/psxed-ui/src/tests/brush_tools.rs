@@ -2110,6 +2110,110 @@ fn multi_selection_delete_and_duplicate_are_grouped() {
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 3);
 }
 
+fn element_click_workspace() -> (EditorWorkspace, Rect) {
+    let mut project = ProjectDocument::new("brush-element-clicks");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 512, 512]));
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [1200, 1000, -1200];
+    let (yaw, pitch) = camera_angles_to_look_at([1200, 1000, -1200], [256, 256, 256]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    (workspace, rect)
+}
+
+fn screen_for_world(workspace: &EditorWorkspace, rect: Rect, world: [f64; 3]) -> Pos2 {
+    let camera = workspace.viewport_3d_camera();
+    let (nx, ny) = camera
+        .normalized_panel_point_for_world([world[0] as f32, world[1] as f32, world[2] as f32])
+        .expect("point projects");
+    Pos2::new(
+        rect.center().x + nx * rect.width() * 0.5,
+        rect.center().y + ny * rect.height() * 0.5,
+    )
+}
+
+fn element_click_frame(rect: Rect, pointer: Pos2, modifiers: egui::Modifiers) -> ToolFrame3d {
+    // pointer_target: None reproduces the silhouette case: corner handles
+    // sit on the outline where the pick ray misses the solid.
+    ToolFrame3d {
+        rect,
+        pointer_interact: Some(pointer),
+        pointer_hover: Some(pointer),
+        modifiers,
+        pointer_target: None,
+        hover_room: None,
+        drag_delta_y: 0.0,
+    }
+}
+
+#[test]
+fn clicks_select_vertices_and_edges_individually() {
+    let (mut workspace, rect) = element_click_workspace();
+    workspace.replace_brush_selection(0, None);
+    workspace.set_brush_edit_mode(BrushEditMode::Vertex);
+
+    // Plain click on a corner handle selects that vertex, and the brush
+    // selection survives even though the pointer target is None (the
+    // silhouette regression).
+    let corner = screen_for_world(&workspace, rect, [0.0, 512.0, 0.0]);
+    let tool = tool_impl_3d(ViewTool::Select);
+    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner, egui::Modifiers::NONE));
+    assert_eq!(
+        workspace.selected_brush_elements,
+        vec![BrushElement::Vertex([0, 512, 0])]
+    );
+    assert_eq!(workspace.selected_brush, Some(0), "brush selection intact");
+
+    // Shift-click adds a second vertex; shift-clicking it again removes it.
+    let corner2 = screen_for_world(&workspace, rect, [512.0, 512.0, 0.0]);
+    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner2, egui::Modifiers::SHIFT));
+    assert_eq!(workspace.selected_brush_elements.len(), 2);
+    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner2, egui::Modifiers::SHIFT));
+    assert_eq!(
+        workspace.selected_brush_elements,
+        vec![BrushElement::Vertex([0, 512, 0])]
+    );
+
+    // Edge mode: click the top-front edge midpoint; canonical key.
+    workspace.set_brush_edit_mode(BrushEditMode::Edge);
+    let midpoint = screen_for_world(&workspace, rect, [256.0, 512.0, 0.0]);
+    tool.primary_clicked(&mut workspace, &element_click_frame(rect, midpoint, egui::Modifiers::NONE));
+    assert_eq!(
+        workspace.selected_brush_elements,
+        vec![BrushElement::Edge([0, 512, 0], [512, 512, 0])]
+    );
+}
+
+#[test]
+fn face_mode_click_selects_face_and_mirrors_uv_state() {
+    let (mut workspace, rect) = element_click_workspace();
+    workspace.replace_brush_selection(0, None);
+    workspace.set_brush_edit_mode(BrushEditMode::Face);
+    // Click the brush body (a visible face centre): resolves the real
+    // pointer target and routes through the face element path.
+    let pointer = screen_for_world(&workspace, rect, [256.0, 512.0, 256.0]);
+    let target = workspace.resolve_viewport_3d_pointer_target(rect, pointer, None, true);
+    let mut frame = element_click_frame(rect, pointer, egui::Modifiers::NONE);
+    frame.pointer_target = target;
+    tool_impl_3d(ViewTool::Select).primary_clicked(&mut workspace, &frame);
+    let face = match workspace.selected_brush_elements.as_slice() {
+        [BrushElement::Face(face)] => *face,
+        other => panic!("expected one face element, got {other:?}"),
+    };
+    assert_eq!(
+        workspace.selected_brush_face,
+        Some(face),
+        "face element mirrors into the UV/inspector state"
+    );
+}
+
 #[test]
 fn brush_element_enumerators_dedup_and_canonicalize() {
     use crate::workspace::brush_elements::{edge_element_key, unique_edges, unique_vertices};
