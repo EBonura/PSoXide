@@ -983,6 +983,24 @@ impl EditorWorkspace {
                 let Some(base) = self.project.active_scene().brushes.get(index).cloned() else {
                     return false;
                 };
+                let Some(center_screen) = self.project_brush_point_3d(rect, anchor) else {
+                    return false;
+                };
+                let screen_axis = {
+                    let mut probe = anchor;
+                    probe[axis] += 64.0;
+                    self.project_brush_point_3d(rect, probe)
+                        .map(|tip| {
+                            let direction = tip - center_screen;
+                            if direction.length_sq() > f32::EPSILON {
+                                direction.normalized()
+                            } else {
+                                Vec2::RIGHT
+                            }
+                        })
+                        .unwrap_or(Vec2::RIGHT)
+                };
+                let offset = pointer - center_screen;
                 let faces = self.selected_brush_element_faces();
                 self.brush_element_transform = Some(BrushElementTransformDrag {
                     index,
@@ -993,6 +1011,9 @@ impl EditorWorkspace {
                     axis,
                     rotate: mode == TransformGizmoMode::Rotate,
                     start_pointer: pointer,
+                    screen_axis,
+                    center_screen,
+                    start_angle: offset.y.atan2(offset.x),
                     applied: 0,
                 });
                 true
@@ -1007,11 +1028,21 @@ impl EditorWorkspace {
         let Some(drag) = self.brush_element_transform.clone() else {
             return;
         };
-        let travel = pointer.x - drag.start_pointer.x;
         let applied = if drag.rotate {
+            // Angular tracking around the projected centroid: the pointer
+            // sweeps the ring, whatever the screen direction.
+            let offset = pointer - drag.center_screen;
+            if offset.length_sq() < 16.0 {
+                return;
+            }
+            let sweep = crate::workspace::editing::wrap_angle_radians(offset.y.atan2(offset.x) - drag.start_angle);
+            let degrees = f64::from(sweep).to_degrees();
             let step = if fine { 1.0 } else { 5.0 };
-            ((f64::from(travel) * 0.5 / step).round() * step) as i32
+            ((degrees / step).round() * step) as i32
         } else {
+            // Pointer travel projected onto the grabbed axis's screen
+            // direction: along the arrow grows, against it shrinks.
+            let travel = (pointer - drag.start_pointer).dot(drag.screen_axis);
             let step = 5.0;
             ((f64::from(travel) / 2.56 / step).round() * step) as i32
         };

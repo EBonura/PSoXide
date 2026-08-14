@@ -135,6 +135,32 @@ impl MouseRig {
         self.button(to, false);
     }
 
+    /// Grab point plus a natural drag destination for a gizmo axis:
+    /// along the arrow for Move/Scale, tangential around the projected
+    /// centroid for rotation rings.
+    pub(crate) fn gizmo_drag_vector(&self, axis: usize) -> (Pos2, Pos2) {
+        let polylines = self
+            .workspace
+            .brush_element_gizmo_polylines_3d(RIG_VIEWPORT)
+            .expect("element gizmo visible");
+        let polyline = &polylines[axis];
+        if polyline.len() == 2 {
+            let grab = polyline[0] + (polyline[1] - polyline[0]) * 0.6;
+            let direction = (polyline[1] - polyline[0]).normalized();
+            (grab, grab + direction * 80.0)
+        } else {
+            let grab = polyline[polyline.len() / 6];
+            let centroid = self
+                .workspace
+                .selected_brush_element_centroid()
+                .expect("selection centroid");
+            let center = self.world_to_screen(centroid);
+            let radial = (grab - center).normalized();
+            let tangent = Vec2::new(-radial.y, radial.x);
+            (grab, grab + tangent * 80.0)
+        }
+    }
+
     pub(crate) fn gizmo_axis_grab_point(&self, axis: usize) -> Pos2 {
         let polylines = self
             .workspace
@@ -227,6 +253,17 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
         // Top-front-left corner.
         (BrushEditMode::Vertex, [0.0, 256.0, 0.0]),
     ];
+    // Geometric no-ops the gestures must leave alone: scaling a flat
+    // face along its own normal, scaling an edge across its direction,
+    // and rotating an edge about an axis parallel to itself.
+    let expect_change = |mode: BrushEditMode, gizmo: TransformGizmoMode, axis: usize| match (
+        mode, gizmo, axis,
+    ) {
+        (BrushEditMode::Face, TransformGizmoMode::Scale, 1) => false,
+        (BrushEditMode::Edge, TransformGizmoMode::Scale, 1 | 2) => false,
+        (BrushEditMode::Edge, TransformGizmoMode::Rotate, 0) => false,
+        _ => true,
+    };
     for (mode, anchor) in cases {
         for sloppy in [false, true] {
             for gizmo_mode in [
@@ -234,58 +271,78 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
                 TransformGizmoMode::Rotate,
                 TransformGizmoMode::Scale,
             ] {
-                let label = format!("{mode:?}/{gizmo_mode:?}/sloppy={sloppy}");
-                let mut rig = MouseRig::single_cube("mouse-matrix");
-                let base = rig.brush();
-                rig.workspace.set_brush_edit_mode(mode);
-                rig.workspace.set_transform_gizmo_mode(gizmo_mode);
+                for axis in 0..3 {
+                    let label = format!("{mode:?}/{gizmo_mode:?}/axis{axis}/sloppy={sloppy}");
+                    let mut rig = MouseRig::single_cube("mouse-matrix");
+                    let base = rig.brush();
+                    rig.workspace.set_brush_edit_mode(mode);
+                    rig.workspace.set_transform_gizmo_mode(gizmo_mode);
 
-                // 1. Click the cube body to select the brush.
-                let body = rig.world_to_screen([256.0, 256.0, 128.0]);
-                if sloppy {
-                    rig.sloppy_click(body);
-                } else {
-                    rig.click(body);
+                    // 1. Click the cube body to select the brush.
+                    let body = rig.world_to_screen([256.0, 256.0, 128.0]);
+                    if sloppy {
+                        rig.sloppy_click(body);
+                    } else {
+                        rig.click(body);
+                    }
+                    assert_eq!(
+                        rig.workspace.selected_brush,
+                        Some(0),
+                        "{label}: body click selects the brush"
+                    );
+
+                    // 2. Click the element handle.
+                    let handle = rig.handle_screen(anchor);
+                    if sloppy {
+                        rig.sloppy_click(handle);
+                    } else {
+                        rig.click(handle);
+                    }
+                    assert!(
+                        !rig.workspace.selected_brush_elements.is_empty(),
+                        "{label}: element click selects the element"
+                    );
+
+                    // 3. Grab THIS axis and drag along its natural screen
+                    // direction (tangential for rings).
+                    let (grab, to) = rig.gizmo_drag_vector(axis);
+                    rig.drag(grab, to);
+
+                    let after = rig.brush();
+                    if expect_change(mode, gizmo_mode, axis) {
+                        assert_ne!(after, base, "{label}: gizmo drag changes the brush");
+                        let (solved_base, solved) = (base.solve(), after.solve());
+                        assert!(
+                            solved.is_valid()
+                                && solved.within_extent(
+                                    psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT
+                                ),
+                            "{label}: result stays valid and bounded"
+                        );
+                        // Move is axis-constrained: bounds on the two
+                        // masked axes must not change.
+                        if gizmo_mode == TransformGizmoMode::Move {
+                            for other in 0..3 {
+                                if other == axis {
+                                    continue;
+                                }
+                                assert!(
+                                    (solved_base.min[other] - solved.min[other]).abs() <= 0.5
+                                        && (solved_base.max[other] - solved.max[other]).abs()
+                                            <= 0.5,
+                                    "{label}: axis {other} must stay masked"
+                                );
+                            }
+                        }
+                        rig.workspace.do_undo();
+                        assert_eq!(rig.brush(), base, "{label}: one undo restores");
+                    } else {
+                        assert_eq!(
+                            after, base,
+                            "{label}: geometric no-op must leave the brush alone"
+                        );
+                    }
                 }
-                assert_eq!(
-                    rig.workspace.selected_brush,
-                    Some(0),
-                    "{label}: body click selects the brush"
-                );
-
-                // 2. Click the element handle.
-                let handle = rig.handle_screen(anchor);
-                if sloppy {
-                    rig.sloppy_click(handle);
-                } else {
-                    rig.click(handle);
-                }
-                assert!(
-                    !rig.workspace.selected_brush_elements.is_empty(),
-                    "{label}: element click selects the element"
-                );
-
-                // 3. Grab the gizmo Y axis (X for scale so the change is
-                // visible on the long axis) and drag.
-                let axis = if gizmo_mode == TransformGizmoMode::Scale {
-                    0
-                } else {
-                    1
-                };
-                let grab = rig.gizmo_axis_grab_point(axis);
-                rig.drag(grab, grab + Vec2::new(90.0, -60.0));
-
-                let after = rig.brush();
-                assert_ne!(after, base, "{label}: gizmo drag changes the brush");
-                let solved = after.solve();
-                assert!(
-                    solved.is_valid()
-                        && solved
-                            .within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT),
-                    "{label}: result stays valid and bounded"
-                );
-                rig.workspace.do_undo();
-                assert_eq!(rig.brush(), base, "{label}: one undo restores");
             }
         }
     }
