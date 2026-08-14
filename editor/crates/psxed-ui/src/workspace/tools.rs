@@ -75,14 +75,18 @@ impl ViewportTool3d for SelectTool {
             return;
         };
         let additive = frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl;
+        // Reshape handles (Resize/Edge/Vertex) stick out past the brush
+        // silhouette, so a handle hit forwards to the Brush gestures even
+        // when the pick ray misses the solid itself; whole-brush Move still
+        // requires pressing on the brush body.
         if !additive
             && ws.selected_brush.is_some()
-            && (ws.brush_edit_mode == BrushEditMode::Move
-                || ws.pick_brush_handle_3d(frame.rect, pointer).is_some())
-            && matches!(
-                frame.pointer_target,
-                Some(Viewport3dPointerTarget::Brush { .. })
-            )
+            && (ws.pick_brush_handle_3d(frame.rect, pointer).is_some()
+                || (ws.brush_edit_mode == BrushEditMode::Move
+                    && matches!(
+                        frame.pointer_target,
+                        Some(Viewport3dPointerTarget::Brush { .. })
+                    )))
         {
             BrushTool.primary_pressed(ws, frame);
             return;
@@ -130,12 +134,12 @@ impl ViewportTool3d for SelectTool {
             }
             Interaction::NodeGizmo(_) => {
                 if let Some(p) = frame.pointer_interact {
-                    ws.update_node_gizmo_drag(frame.rect, p);
+                    ws.update_node_gizmo_drag(frame.rect, p, frame.modifiers.shift);
                 }
             }
             Interaction::Node(_) => {
                 if let Some(p) = frame.pointer_interact {
-                    ws.update_node_drag(frame.rect, p);
+                    ws.update_node_drag(frame.rect, p, frame.modifiers.shift);
                 }
             }
             Interaction::PrimitiveGrid(_) => {
@@ -2273,6 +2277,11 @@ impl EditorWorkspace {
         };
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
             let selected = self.brush_is_selected(index);
+            // Unselected brushes render as plain shaded geometry; the full
+            // wireframe cage is the opt-in "Brush wireframes" View toggle.
+            if !selected && !self.show_brush_wireframes {
+                continue;
+            }
             let stroke = if selected {
                 egui::Stroke::new(2.0, STUDIO_ACCENT)
             } else {

@@ -125,6 +125,10 @@ pub struct EditorVisibilityState {
     pub show_play_debug_overlays: bool,
     #[serde(default = "default_true")]
     pub show_play_debug_map: bool,
+    /// Wireframe outlines for UNSELECTED brushes. Off by default: selected
+    /// brushes always outline, the full cage is an opt-in alignment view.
+    #[serde(default)]
+    pub show_brush_wireframes: bool,
 }
 
 impl Default for EditorVisibilityState {
@@ -138,6 +142,7 @@ impl Default for EditorVisibilityState {
             preview_bounds: true,
             show_play_debug_overlays: true,
             show_play_debug_map: true,
+            show_brush_wireframes: false,
         }
     }
 }

@@ -626,6 +626,70 @@ impl EditorWorkspace {
         self.run_paint_action(tool, room_id, sx, sz, face_hit.map(|(f, _)| f), hit_world)
     }
 
+    /// Drop a resource into a BSP scene: models/characters/weapons land on
+    /// the upward brush face under the pointer (like the Place tool);
+    /// materials assign to whichever brush face is hit.
+    pub(crate) fn drop_resource_bsp_3d(
+        &mut self,
+        resource_id: ResourceId,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) {
+        let Some(root) = self.bsp_authoring_root() else {
+            self.status = "Drop needs a BSP brush world".to_string();
+            return;
+        };
+        let Some(resource) = self.project.resource(resource_id) else {
+            self.status = format!("Resource #{} no longer exists", resource_id.raw());
+            return;
+        };
+        if matches!(resource.data, psxed_project::ResourceData::Material(_)) {
+            let name = resource.name.clone();
+            let Some((brush, face, _)) = self.pick_brush_face_with_hit(rect, pointer) else {
+                self.status = "Drop the material onto a brush face".to_string();
+                return;
+            };
+            self.push_undo();
+            if let Some(face_data) = self
+                .project
+                .active_scene_mut()
+                .brushes
+                .get_mut(brush)
+                .and_then(|brush| brush.faces.get_mut(face))
+            {
+                face_data.material = Some(resource_id);
+                self.replace_brush_selection(brush, Some(face));
+                self.clear_node_selection_state();
+                self.status = format!("Assigned {} to brush {} face {}", name, brush + 1, face);
+                self.mark_dirty();
+            }
+            return;
+        }
+        let Some((brush, face, mut hit)) = self.pick_brush_face_with_hit(rect, pointer) else {
+            self.status = "Drop onto an upward-facing BSP brush surface".to_string();
+            return;
+        };
+        let upward = self
+            .project
+            .active_scene()
+            .brushes
+            .get(brush)
+            .and_then(|brush| brush.faces.get(face))
+            .and_then(|face| psxed_project::brush::Plane::from_points(face.points))
+            .is_some_and(|plane| {
+                plane.normal[1] > 0
+                    && plane.normal[1].abs() >= plane.normal[0].abs()
+                    && plane.normal[1].abs() >= plane.normal[2].abs()
+            });
+        if !upward {
+            self.status = "Drop onto an upward-facing BSP brush surface".to_string();
+            return;
+        }
+        // Same one-unit floor clearance the Place tool applies.
+        hit[1] += 1.0;
+        self.drop_resource_at_room_hit(resource_id, root, hit, None);
+    }
+
     pub(crate) fn drop_resource_3d(
         &mut self,
         resource_id: ResourceId,

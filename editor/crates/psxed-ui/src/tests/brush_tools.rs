@@ -2111,6 +2111,59 @@ fn multi_selection_delete_and_duplicate_are_grouped() {
 }
 
 #[test]
+fn selection_domains_are_exclusive_and_empty_click_clears_all() {
+    let mut harness = ViewportHarness::floored_room("brush_sel_domains", 4);
+    let scene = harness.workspace.project.active_scene_mut();
+    scene
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
+    let entity = scene.add_node(NodeId::ROOT, "Entity", psxed_project::NodeKind::Entity);
+
+    // Brush selected, then picking an entity must drop the brush selection.
+    harness.workspace.replace_brush_selection(0, None);
+    let order = harness.workspace.scene_node_order();
+    harness
+        .workspace
+        .apply_node_selection_modifiers(entity, egui::Modifiers::default(), &order);
+    assert_eq!(harness.workspace.selected_brush, None, "entity pick clears brush");
+    assert_eq!(harness.workspace.selection.selected_node, entity);
+
+    // Reverse direction is covered by the click handler; the promote-on-drag
+    // path must clear too.
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.commit_node_selection(entity);
+    assert_eq!(harness.workspace.selected_brush, None, "drag promote clears brush");
+
+    // Empty click clears every domain.
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.selection.hovered_primitive = None;
+    harness
+        .workspace
+        .commit_face_selection(egui::Modifiers::default());
+    assert_eq!(harness.workspace.selected_brush, None);
+    assert_eq!(harness.workspace.selection.selected_node, NodeId::ROOT);
+    assert!(harness.workspace.selection.selected_nodes.is_empty());
+}
+
+#[test]
+fn duplicate_routes_to_brushes_from_the_select_tool() {
+    // A brush selected through the general Select tool is directly editable,
+    // so Cmd+D must copy the brush there too, not only under ViewTool::Brush.
+    let mut harness = ViewportHarness::floored_room("brush_dup_select_tool", 4);
+    harness.workspace.active_tool = ViewTool::Select;
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]));
+    harness.workspace.replace_brush_selection(0, None);
+    harness.workspace.duplicate_current_selection();
+    assert_eq!(harness.workspace.project.active_scene().brushes.len(), 2);
+    assert_eq!(harness.workspace.selected_brush, Some(1));
+}
+
+#[test]
 fn undo_reconciles_stale_brush_selection_and_clip_never_panics() {
     let mut harness = ViewportHarness::floored_room("brush_stale_sel", 4);
     harness.workspace.active_tool = ViewTool::Brush;

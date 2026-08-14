@@ -214,7 +214,16 @@ impl EditorWorkspace {
             .map(|payload| payload.path.clone());
         if self.floating_geometry.is_none() {
             if let Some(resource_id) = dropped_resource {
-                self.drop_resource_3d(resource_id, face_hit, hover_world);
+                let bsp_drop = self.active_room_id().is_none()
+                    && self.bsp_authoring_root().is_some()
+                    && response.hover_pos().is_some();
+                if bsp_drop {
+                    if let Some(pointer) = response.hover_pos() {
+                        self.drop_resource_bsp_3d(resource_id, rect, pointer);
+                    }
+                } else {
+                    self.drop_resource_3d(resource_id, face_hit, hover_world);
+                }
             } else if let Some(path) = dropped_prefab {
                 self.drop_prefab_3d(&path, face_hit, hover_world);
             }

@@ -691,6 +691,8 @@ pub struct EditorWorkspace {
     show_grid: bool,
     show_portals: bool,
     show_lights: bool,
+    /// Wireframe outlines for unselected brushes (View menu toggle).
+    show_brush_wireframes: bool,
     preview_fog: bool,
     preview_backface_wireframe: bool,
     preview_bounds: bool,
@@ -1397,6 +1399,9 @@ struct NodeGizmoDrag {
     targets: Vec<NodeGizmoTarget>,
     current_steps: i32,
     snapshot_pushed: bool,
+    /// Shift held: world-unit nodes skip the brush-grid snap and move at
+    /// single-unit precision. Refreshed every update from the live modifiers.
+    free: bool,
 }
 
 /// Angular state for a rotation-ring drag. Steps come from the angle
@@ -1569,9 +1574,6 @@ struct NodeDrag {
     /// Pure clicks (press without movement) leave the undo
     /// stack untouched.
     snapshot_pushed: bool,
-    /// Cached enclosing room id so per-frame updates don't
-    /// re-walk the scene tree.
-    room: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2530,7 +2532,9 @@ impl ViewTool {
             Self::Water => "Water",
             Self::Erase => "Erase",
             Self::Place => "Place",
-            Self::Brush => "Brush",
+            // "Draw": creates and clips brushes. Selecting/reshaping them
+            // lives in Select, so the two tools stop reading as duplicates.
+            Self::Brush => "Draw",
         }
     }
 
@@ -2993,6 +2997,7 @@ impl EditorWorkspace {
             preview_bounds: editor_visibility.preview_bounds,
             show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
             show_play_debug_map: editor_visibility.show_play_debug_map,
+            show_brush_wireframes: editor_visibility.show_brush_wireframes,
             play_debug_map_view: PlayDebugMapView::default(),
             play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
             play_frame_last_sample_serial: None,
@@ -3116,6 +3121,7 @@ impl EditorWorkspace {
             preview_bounds: self.preview_bounds,
             show_play_debug_overlays: self.show_play_debug_overlays,
             show_play_debug_map: self.show_play_debug_map,
+            show_brush_wireframes: self.show_brush_wireframes,
         }
     }
 
@@ -3137,6 +3143,7 @@ impl EditorWorkspace {
         self.preview_bounds = editor_visibility.preview_bounds;
         self.show_play_debug_overlays = editor_visibility.show_play_debug_overlays;
         self.show_play_debug_map = editor_visibility.show_play_debug_map;
+        self.show_brush_wireframes = editor_visibility.show_brush_wireframes;
     }
 
     fn current_editor_workspace_state(&self) -> EditorWorkspaceState {

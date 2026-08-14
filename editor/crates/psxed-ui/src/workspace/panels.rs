@@ -1779,7 +1779,7 @@ impl EditorWorkspace {
                                 let mut room_grid_resize: Option<(u16, u16)> = None;
                                 let mut character_preview_action = None;
                                 let inherited_sector_size =
-                                    self.project.world_sector_size_for_node(selected);
+                                    node_translation_sector_size(&self.project, selected);
                                 let selected_kind_before = self
                                     .project
                                     .active_scene()

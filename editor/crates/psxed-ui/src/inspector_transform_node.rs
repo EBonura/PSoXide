@@ -1127,11 +1127,17 @@ pub(crate) fn entity_transform_editor(
                 )
                 .changed();
             if pos_changed {
-                transform.translation = [
-                    node_transform_component_from_world_units(snap_height(x), sector_size),
-                    node_transform_component_from_world_units(snap_height(y), sector_size),
-                    node_transform_component_from_world_units(snap_height(z), sector_size),
-                ];
+                // World-unit nodes (BSP scenes) keep typed coordinates exact;
+                // grid nodes snap to the height quantum as before.
+                transform.translation = if sector_size == 1 {
+                    [x as f32, y as f32, z as f32]
+                } else {
+                    [
+                        node_transform_component_from_world_units(snap_height(x), sector_size),
+                        node_transform_component_from_world_units(snap_height(y), sector_size),
+                        node_transform_component_from_world_units(snap_height(z), sector_size),
+                    ]
+                };
                 changed = true;
             }
         });
@@ -1352,11 +1358,17 @@ pub(crate) fn light_transform_editor(
                 )
                 .changed();
             if pos_changed {
-                transform.translation = [
-                    node_transform_component_from_world_units(snap_height(x), sector_size),
-                    node_transform_component_from_world_units(snap_height(y), sector_size),
-                    node_transform_component_from_world_units(snap_height(z), sector_size),
-                ];
+                // Same exact-typing rule as the entity editor for world-unit
+                // (BSP) lights.
+                transform.translation = if sector_size == 1 {
+                    [x as f32, y as f32, z as f32]
+                } else {
+                    [
+                        node_transform_component_from_world_units(snap_height(x), sector_size),
+                        node_transform_component_from_world_units(snap_height(y), sector_size),
+                        node_transform_component_from_world_units(snap_height(z), sector_size),
+                    ]
+                };
                 changed = true;
             }
         });
@@ -1376,21 +1388,27 @@ pub(crate) fn node_gizmo_translation(
     direction: [f32; 3],
     steps: i32,
     sector_size: i32,
+    world_quantum: i32,
 ) -> [f32; 3] {
     let mut translation = start;
     let sector_size = sector_size.max(1);
+    // World-unit nodes (BSP scenes, sector_size == 1) step and snap on the
+    // caller's quantum (the brush grid, or 1 when dragging free); grid nodes
+    // keep the legacy HEIGHT_QUANTUM step in sector units.
+    let world_units = sector_size == 1;
+    let entity_step = if world_units {
+        world_quantum.max(1) as f32
+    } else {
+        node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
+    };
     let step = match &node.kind {
         NodeKind::Entity
         | NodeKind::PointLight { .. }
         | NodeKind::ParticleEmitter { .. }
         | NodeKind::ImageProp { .. }
         | NodeKind::BoxProp { .. }
-        | NodeKind::CylinderProp { .. } => {
-            node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
-        }
-        NodeKind::ArchProp { .. } if direction[1].abs() > 0.5 => {
-            node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
-        }
+        | NodeKind::CylinderProp { .. } => entity_step,
+        NodeKind::ArchProp { .. } if direction[1].abs() > 0.5 => entity_step,
         _ => 1.0,
     };
     let axis_aligned = direction.iter().filter(|c| c.abs() > 1e-4).count() <= 1;
@@ -1410,10 +1428,14 @@ pub(crate) fn node_gizmo_translation(
                 | NodeKind::BoxProp { .. }
                 | NodeKind::CylinderProp { .. }
                 | NodeKind::ArchProp { .. } => {
-                    translation[index] = snap_node_transform_component_to_world_step(
-                        translation[index],
-                        sector_size,
-                    );
+                    translation[index] = if world_units {
+                        snap_world_units_component(translation[index], world_quantum)
+                    } else {
+                        snap_node_transform_component_to_world_step(
+                            translation[index],
+                            sector_size,
+                        )
+                    };
                 }
                 _ => {}
             }
@@ -1428,9 +1450,11 @@ pub(crate) fn node_gizmo_plane_translation(
     plane: NodeGizmoPlane,
     delta_world: [f32; 3],
     sector_size: i32,
+    world_quantum: i32,
 ) -> [f32; 3] {
     let mut translation = start;
     let sector_size = sector_size.max(1);
+    let world_units = sector_size == 1;
     for axis in plane.axes() {
         let index = axis.index();
         translation[index] = start[index] + delta_world[index] / sector_size as f32;
@@ -1446,10 +1470,14 @@ pub(crate) fn node_gizmo_plane_translation(
             for axis in plane.axes() {
                 let index = axis.index();
                 if delta_world[index].abs() > f32::EPSILON {
-                    translation[index] = snap_node_transform_component_to_world_step(
-                        translation[index],
-                        sector_size,
-                    );
+                    translation[index] = if world_units {
+                        snap_world_units_component(translation[index], world_quantum)
+                    } else {
+                        snap_node_transform_component_to_world_step(
+                            translation[index],
+                            sector_size,
+                        )
+                    };
                 }
             }
             translation
@@ -1802,10 +1830,14 @@ pub(crate) fn normalise_light_transform(
     sector_size: i32,
 ) -> bool {
     let mut changed = false;
-    let snapped_y = snap_light_transform_y(transform.translation[1], sector_size);
-    if transform.translation[1] != snapped_y {
-        transform.translation[1] = snapped_y;
-        changed = true;
+    // Grid lights snap their Y to the height quantum; world-unit lights
+    // (BSP scenes, sector_size == 1) keep authored Y exact.
+    if sector_size > 1 {
+        let snapped_y = snap_light_transform_y(transform.translation[1], sector_size);
+        if transform.translation[1] != snapped_y {
+            transform.translation[1] = snapped_y;
+            changed = true;
+        }
     }
     if transform.rotation_degrees != [0.0, 0.0, 0.0] {
         transform.rotation_degrees = [0.0, 0.0, 0.0];
@@ -1829,6 +1861,13 @@ pub(crate) fn node_transform_component_from_world_units(value: i32, sector_size:
 pub(crate) fn snap_node_transform_component_to_world_step(value: f32, sector_size: i32) -> f32 {
     let world = node_transform_component_to_world_units(value, sector_size);
     node_transform_component_from_world_units(snap_height(world), sector_size)
+}
+
+/// Snap a raw world-unit component to a caller-chosen grid (the brush
+/// `snap_units` in BSP scenes). Quantum 1 rounds to whole units.
+pub(crate) fn snap_world_units_component(value: f32, quantum: i32) -> f32 {
+    let q = quantum.max(1) as f32;
+    (value / q).round() * q
 }
 
 pub(crate) fn snap_light_transform_y(value: f32, sector_size: i32) -> f32 {
