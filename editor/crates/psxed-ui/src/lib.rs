@@ -664,6 +664,8 @@ pub struct EditorWorkspace {
     brush_edit_mode: BrushEditMode,
     /// In-flight element gizmo rotate/scale gesture.
     brush_element_transform: Option<BrushElementTransformDrag>,
+    /// In-flight new-brush face extrusion (Cmd+drag a face handle).
+    brush_extrude_new: Option<BrushFaceExtrudeNew>,
     /// In-flight brush-create drag (Brush tool primary held).
     brush_drag: Option<BrushDrag>,
     /// In-flight brush face-extrude drag (Brush tool primary held on a
@@ -1130,7 +1132,7 @@ impl BrushEditMode {
     const fn gesture_hint(self) -> &'static str {
         match self {
             Self::Move => "Whole brush: drag to move; the gizmo moves, rotates, and scales it",
-            Self::Face => "Click a face to select it; drag its normal handle to extrude",
+            Self::Face => "Click a face to select it; drag its handle to resize, Cmd-drag to extrude a new brush",
             Self::Edge => "Drag an edge handle to reshape",
             Self::Vertex => "Drag a vertex handle to reshape",
             Self::Clip => "Click 2-3 points; Enter cuts, X flips the kept side, Esc clears",
@@ -2482,6 +2484,23 @@ pub(crate) struct BrushElementTransformDrag {
     pub(crate) applied: i32,
 }
 
+/// In-flight face extrusion: Cmd+drag on a face handle grows a NEW
+/// prism brush along the face's outward normal (TrenchBroom-style).
+/// The scene is untouched until commit; the candidate previews as a
+/// wireframe.
+#[derive(Debug, Clone)]
+pub(crate) struct BrushFaceExtrudeNew {
+    pub(crate) source: usize,
+    pub(crate) face: usize,
+    /// Screen direction of the outward normal at press time.
+    pub(crate) screen_dir: Vec2,
+    /// World units per pixel of travel along `screen_dir`.
+    pub(crate) units_per_px: f32,
+    pub(crate) start_pointer: Pos2,
+    /// Snapped extrusion distance, world units (0 = nothing yet).
+    pub(crate) applied: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaterToolMode {
     Add,
@@ -3088,6 +3107,7 @@ impl EditorWorkspace {
             selected_brush_elements: Vec::new(),
             brush_edit_mode: BrushEditMode::Move,
             brush_element_transform: None,
+            brush_extrude_new: None,
             brush_drag: None,
             brush_extrude: None,
             brush_clip_points: Vec::new(),
