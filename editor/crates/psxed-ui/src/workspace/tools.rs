@@ -418,6 +418,40 @@ impl EditorWorkspace {
             .next()
     }
 
+    /// Shift+scroll drill: cycle the selection through every brush the
+    /// cursor ray passes through, nearest first. Scrolling down goes
+    /// deeper, up comes back; the cycle wraps. Moving the pointer
+    /// re-anchors from wherever the current selection sits in the list.
+    pub(crate) fn drill_selection_3d(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        direction: i32,
+    ) {
+        let hits = self.brush_face_hits_with_hit(rect, pointer);
+        if hits.is_empty() {
+            return;
+        }
+        let anchored = self
+            .brush_drill
+            .filter(|(anchor, _)| (*anchor - pointer).length() <= 6.0)
+            .map(|(_, depth)| depth as i32);
+        let start = anchored.unwrap_or_else(|| {
+            hits.iter()
+                .position(|(brush, _, _)| Some(*brush) == self.selected_brush)
+                .map_or(-direction.signum(), |position| position as i32)
+        });
+        let depth = (start + direction).rem_euclid(hits.len() as i32) as usize;
+        let (brush, face, _) = hits[depth];
+        self.clear_node_selection_state();
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.replace_brush_selection(brush, Some(face));
+        self.brush_drill = Some((pointer, depth));
+        self.status = format!("Drill {}/{}", depth + 1, hits.len());
+    }
+
     fn brush_face_hits_with_hit(
         &self,
         rect: egui::Rect,
@@ -599,6 +633,7 @@ impl EditorWorkspace {
     /// Plain-click selection: exactly one brush (and optional face),
     /// dropping any multi-selection.
     pub(crate) fn replace_brush_selection(&mut self, index: usize, face: Option<usize>) {
+        self.reset_brush_drill();
         if self.selected_brush != Some(index) || self.selected_brush_face != face {
             self.clear_uv_edit_transaction();
         }
@@ -608,6 +643,12 @@ impl EditorWorkspace {
         self.selected_brush = Some(index);
         self.selected_brushes = vec![index];
         self.selected_brush_face = face;
+    }
+
+    /// Any deliberate selection change invalidates the drill anchor,
+    /// so the next Shift+scroll re-anchors from the fresh selection.
+    pub(crate) fn reset_brush_drill(&mut self) {
+        self.brush_drill = None;
     }
 
     pub(crate) fn clear_brush_selection(&mut self) {
