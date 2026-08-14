@@ -667,6 +667,9 @@ pub struct EditorWorkspace {
     /// hit list under it. Shift+scroll cycles the depth; moving the
     /// pointer re-anchors from the current selection.
     brush_drill: Option<(egui::Pos2, usize)>,
+    /// Repeatable duplicate/nudge actions since the last selection
+    /// change; Cmd+R replays the whole chain (stairs, pillar rows).
+    brush_repeat_chain: Vec<workspace::tools::BrushRepeatAction>,
     /// Which side(s) the next brush clip keeps.
     brush_clip_keep: BrushClipKeep,
     /// Keep face textures anchored to the brush when it moves.
@@ -3100,6 +3103,7 @@ impl EditorWorkspace {
             brush_extrude: None,
             brush_clip_points: Vec::new(),
             brush_drill: None,
+            brush_repeat_chain: Vec::new(),
             brush_clip_keep: BrushClipKeep::Both,
             brush_texture_lock: true,
             brush_move: None,

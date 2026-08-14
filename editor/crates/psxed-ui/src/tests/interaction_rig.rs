@@ -1625,3 +1625,85 @@ fn drill_scroll_cycles_through_stacked_brushes() {
         "shift+scroll drills through the front brush"
     );
 }
+
+#[test]
+fn arrows_nudge_duplicate_and_repeat_build_a_staircase() {
+    let mut rig = MouseRig::single_cube("stamping-loop");
+    let center = RIG_VIEWPORT.center();
+    rig.click(center);
+    assert_eq!(rig.workspace.selected_brush, Some(0));
+    rig.workspace.snap_units = 64;
+
+    // Camera at (1400,1200,-1400) faces +z dominantly: Up nudges +z.
+    rig.key(center, egui::Key::ArrowUp);
+    let solved = rig.workspace.project.active_scene().brushes[0].solve();
+    assert_eq!(solved.min[2].round() as i32, 64, "arrow nudges one grid step");
+
+    // Re-click to reset the repeat chain: the staircase should replay
+    // only the duplicate-and-lift sequence, not the probe nudge above.
+    rig.click(center);
+    // Shift+ArrowUp duplicates and moves the copy.
+    let shift = egui::Modifiers::SHIFT;
+    rig.pump_with(vec![egui::Event::PointerMoved(center)], shift);
+    rig.pump_with(
+        vec![egui::Event::Key {
+            key: egui::Key::ArrowUp,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: shift,
+        }],
+        shift,
+    );
+    rig.pump_with(
+        vec![egui::Event::Key {
+            key: egui::Key::ArrowUp,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: shift,
+        }],
+        shift,
+    );
+    assert_eq!(
+        rig.workspace.project.active_scene().brushes.len(),
+        2,
+        "shift+arrow duplicates"
+    );
+    assert_eq!(rig.workspace.selected_brush, Some(1), "the copy is selected");
+    let copy = rig.workspace.project.active_scene().brushes[1].solve();
+    assert_eq!(copy.min[2].round() as i32, 128, "the copy moved one step");
+
+    // PageUp lifts the copy, then Cmd+R repeats the whole chain twice:
+    // each repeat duplicates, moves forward, and lifts. A staircase.
+    rig.key(center, egui::Key::PageUp);
+    let cmd = egui::Modifiers::COMMAND;
+    for _ in 0..2 {
+        rig.pump_with(vec![egui::Event::PointerMoved(center)], cmd);
+        rig.pump_with(
+            vec![egui::Event::Key {
+                key: egui::Key::R,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: cmd,
+            }],
+            cmd,
+        );
+        rig.pump_with(
+            vec![egui::Event::Key {
+                key: egui::Key::R,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: cmd,
+            }],
+            cmd,
+        );
+    }
+    let brushes = &rig.workspace.project.active_scene().brushes;
+    assert_eq!(brushes.len(), 4, "two repeats add two steps");
+    let step3 = brushes[3].solve();
+    assert_eq!(step3.min[2].round() as i32, 256, "each step advances");
+    assert_eq!(step3.min[1].round() as i32, 192, "each step rises");
+}
