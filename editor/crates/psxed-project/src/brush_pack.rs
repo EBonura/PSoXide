@@ -78,6 +78,7 @@ pub fn pack_bsp_geometry(
     bsp: &CompiledSurfaceBsp,
     portals: &[CompiledPortal],
     lighting: BspLighting<'_>,
+    texture_dims: &std::collections::HashMap<Option<crate::ResourceId>, [u16; 2]>,
 ) -> Result<PackedBspGeometry, BrushPackError> {
     validate_limits(bsp)?;
     validate_lighting(bsp, &lighting)?;
@@ -101,13 +102,35 @@ pub fn pack_bsp_geometry(
             pack_plane(&surface.plane).ok_or(BrushPackError::InvalidPlane(surface_index))?;
         let plane_index = intern_plane(&mut plane_records, plane_record)?;
         let texture_index = intern_material(&mut material_slots, surface.material)?;
+        // Whole-surface texel UVs, rebased by whole texture repeats so
+        // no polygon straddles the u8 wrap (a straddling surface
+        // rasterizes a backwards texture gradient in-game). Surfaces
+        // whose material has no known dimensions keep the historic
+        // per-vertex wrap.
+        let mut surface_uvs: Vec<[f64; 2]> = surface
+            .vertices
+            .iter()
+            .map(|&vertex| {
+                let raw_uv = paraxial_uv(&surface.plane, vertex);
+                surface.uv.apply([
+                    raw_uv[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                    raw_uv[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                ])
+            })
+            .collect();
+        if let Some(dims) = texture_dims.get(&surface.material) {
+            crate::brush::rebase_texel_uvs(
+                &mut surface_uvs,
+                [f64::from(dims[0].max(1)), f64::from(dims[1].max(1))],
+            );
+        }
         for (vertex_index, vertex) in surface.vertices.iter().copied().enumerate() {
             pack_vertex(
                 &mut vertices,
-                surface,
                 surface_index,
                 vertex_index,
                 vertex,
+                surface_uvs[vertex_index],
                 vertex_light(&lighting, surface_index, vertex_index),
             )?;
         }
@@ -307,10 +330,10 @@ fn intern_material(
 
 fn pack_vertex(
     output: &mut Vec<u8>,
-    surface: &CompiledSurface,
     surface_index: usize,
     vertex_index: usize,
     vertex: [f64; 3],
+    uv: [f64; 2],
     light: u32,
 ) -> Result<(), BrushPackError> {
     if !vertex.into_iter().all(f64::is_finite) {
@@ -331,11 +354,6 @@ fn pack_vertex(
         }
         push_i16(output, rounded as i16);
     }
-    let raw_uv = paraxial_uv(&surface.plane, vertex);
-    let uv = surface.uv.apply([
-        raw_uv[0] / BRUSH_UV_UNITS_PER_TEXEL,
-        raw_uv[1] / BRUSH_UV_UNITS_PER_TEXEL,
-    ]);
     if !uv.into_iter().all(f64::is_finite) {
         return Err(BrushPackError::NonFiniteVertex {
             surface: surface_index,
@@ -614,8 +632,68 @@ mod tests {
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, brushes);
-        let packed = pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright).expect("pack");
+        let packed =
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &Default::default())
+                .expect("pack");
         (bsp, packed)
+    }
+
+    #[test]
+    fn straddling_surface_uvs_rebase_onto_the_u8_window() {
+        // World x/z 3968..4224 = texels 248..264: every big face
+        // straddles the 256 wrap. Packed without texture dimensions the
+        // wrap survives (some face spans nearly the whole u8 range);
+        // with 64x64 dims each face's UVs rebase into one contiguous
+        // window so the GPU never rasterizes a backwards gradient.
+        let brushes = [Brush::cuboid([3968, 0, 3968], [4224, 128, 4224])];
+        let surfaces = compile_csg_surfaces(&brushes);
+        let mut bsp = build_surface_bsp(&surfaces);
+        let portals = portalize_surface_bsp(&bsp);
+        classify_bsp_leaves(&mut bsp, &portals, &brushes);
+
+        let face_uv_spans = |packed: &PackedBspGeometry| -> Vec<[i32; 2]> {
+            let vertices = RecordSlice::<Vertex>::new(&packed.vertices).expect("vertices");
+            let faces = RecordSlice::<Face>::new(&packed.faces).expect("faces");
+            (0..faces.len())
+                .map(|index| {
+                    let face = faces.get(index).expect("face");
+                    let mut min = [i32::MAX; 2];
+                    let mut max = [i32::MIN; 2];
+                    for offset in 0..face.vertex_count {
+                        let vertex = vertices
+                            .get((face.first_vertex + i32::from(offset)) as usize)
+                            .expect("vertex");
+                        let uv = [i32::from(vertex.texture.x), i32::from(vertex.texture.y)];
+                        for axis in 0..2 {
+                            min[axis] = min[axis].min(uv[axis]);
+                            max[axis] = max[axis].max(uv[axis]);
+                        }
+                    }
+                    [max[0] - min[0], max[1] - min[1]]
+                })
+                .collect()
+        };
+
+        let wrapped =
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &Default::default())
+                .expect("pack");
+        assert!(
+            face_uv_spans(&wrapped)
+                .iter()
+                .any(|span| span[0] > 128 || span[1] > 128),
+            "control: without dims the straddle wraps"
+        );
+
+        let mut dims = std::collections::HashMap::new();
+        dims.insert(None, [64u16, 64u16]);
+        let rebased =
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &dims).expect("pack");
+        for span in face_uv_spans(&rebased) {
+            assert!(
+                span[0] <= 64 && span[1] <= 64,
+                "rebased face UVs must stay contiguous: span {span:?}"
+            );
+        }
     }
 
     #[test]
@@ -681,9 +759,7 @@ mod tests {
             assert_eq!(leaf.contents, expected);
             assert!(leaf.visibility_offset >= 0);
             let faces = RecordSlice::<Face>::new(&packed.faces).expect("faces");
-            assert!(faces
-                .iter()
-                .all(|face| face.flags & FACE_TWO_SIDED != 0));
+            assert!(faces.iter().all(|face| face.flags & FACE_TWO_SIDED != 0));
         }
     }
 
@@ -901,7 +977,13 @@ mod tests {
             .iter()
             .map(|surface| vec![0x0012_3456; surface.vertices.len()])
             .collect();
-        let packed = pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&colors)).expect("pack");
+        let packed = pack_bsp_geometry(
+            &bsp,
+            &portals,
+            BspLighting::Baked(&colors),
+            &Default::default(),
+        )
+        .expect("pack");
         let vertices = RecordSlice::<Vertex>::new(&packed.vertices).expect("vertices");
         assert!(vertices.iter().all(|vertex| vertex.light == 0x0012_3456));
         let authored = bsp
@@ -961,7 +1043,9 @@ mod tests {
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, &[brush]);
-        let packed = pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright).expect("pack");
+        let packed =
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &Default::default())
+                .expect("pack");
         let faces = RecordSlice::<Face>::new(&packed.faces).expect("faces");
         let planes = RecordSlice::<Plane>::new(&packed.planes).expect("planes");
         for (index, surface) in bsp.surfaces.iter().enumerate() {

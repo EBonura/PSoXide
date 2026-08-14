@@ -1312,6 +1312,43 @@ fn walk_brushes(
                 )
             };
             for verts in &patches {
+                // Texel UVs for the whole patch, rebased by whole texture
+                // repeats so no triangle straddles the u8 wrap: a
+                // straddling triangle samples a wrapped (backwards)
+                // gradient, and with light-driven subdivision the straddle
+                // set changed whenever a light moved, which read as the
+                // texture changing. Power-of-two repeat sizes make the
+                // rebase sampling-identical; spans too wide for the u8
+                // window keep the historic wrap.
+                let patch_uvs: Option<Vec<(u8, u8)>> = match shade {
+                    FaceShade::Textured { slot, .. } => {
+                        let mut raw: Vec<[f64; 2]> = verts
+                            .iter()
+                            .map(|&vertex| {
+                                let raw = paraxial_uv(&plane, vertex);
+                                face.uv.apply([
+                                    raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
+                                    raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
+                                ])
+                            })
+                            .collect();
+                        psxed_project::brush::rebase_texel_uvs(
+                            &mut raw,
+                            [
+                                f64::from(slot.texture_width.max(8)),
+                                f64::from(slot.texture_height.max(8)),
+                            ],
+                        );
+                        Some(
+                            raw.into_iter()
+                                .map(|uv| {
+                                    (uv[0].rem_euclid(256.0) as u8, uv[1].rem_euclid(256.0) as u8)
+                                })
+                                .collect(),
+                        )
+                    }
+                    FaceShade::Flat { .. } => None,
+                };
                 // Shadow rays make the bake the expensive part, so light
                 // each patch corner ONCE and let the triangle fan below
                 // index into the results.
@@ -1366,16 +1403,9 @@ fn walk_brushes(
                     };
                     let p = [projected[0], projected[1], projected[2]]
                         .map(preview_projected_from_engine);
-                    let uvs = match shade {
-                        FaceShade::Textured { .. } => tri.map(|v| {
-                            let raw = paraxial_uv(&plane, v);
-                            let uv = face.uv.apply([
-                                raw[0] / BRUSH_UV_UNITS_PER_TEXEL,
-                                raw[1] / BRUSH_UV_UNITS_PER_TEXEL,
-                            ]);
-                            (uv[0].rem_euclid(256.0) as u8, uv[1].rem_euclid(256.0) as u8)
-                        }),
-                        FaceShade::Flat { .. } => [(0, 0); 3],
+                    let uvs = match &patch_uvs {
+                        Some(patch_uvs) => [patch_uvs[0], patch_uvs[i], patch_uvs[i + 1]],
+                        None => [(0, 0); 3],
                     };
                     let _ = match lit_colors {
                         Some(colors) => emit_face_tri_lit(scratch, p, uvs, shade, colors),
