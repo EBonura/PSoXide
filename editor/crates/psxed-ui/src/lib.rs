@@ -669,7 +669,10 @@ pub struct EditorWorkspace {
     brush_extrude: Option<BrushExtrude>,
     /// First ground point of a pending two-point brush clip
     /// (Brush tool, modifier-click).
-    brush_clip_start: Option<[i32; 3]>,
+    /// Placed clip points (max 3): position plus the surface normal it
+    /// was placed on, which synthesizes the third point for two-point
+    /// cuts so sloped surfaces cut perpendicular to themselves.
+    brush_clip_points: Vec<BrushClipPoint>,
     /// Which side(s) the next brush clip keeps.
     brush_clip_keep: BrushClipKeep,
     /// Keep face textures anchored to the brush when it moves.
@@ -1098,10 +1101,19 @@ enum BrushEditMode {
     Face,
     Edge,
     Vertex,
+    /// TrenchBroom-style cut: click 2-3 points to define the plane,
+    /// Enter applies, Tab cycles the kept side, Esc clears.
+    Clip,
 }
 
 impl BrushEditMode {
-    const ALL: [Self; 4] = [Self::Move, Self::Face, Self::Edge, Self::Vertex];
+    const ALL: [Self; 5] = [
+        Self::Move,
+        Self::Face,
+        Self::Edge,
+        Self::Vertex,
+        Self::Clip,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -1109,6 +1121,7 @@ impl BrushEditMode {
             Self::Face => "Resize",
             Self::Edge => "Edge",
             Self::Vertex => "Vertex",
+            Self::Clip => "Clip",
         }
     }
 
@@ -1118,6 +1131,7 @@ impl BrushEditMode {
             Self::Face => "Drag a face handle to resize",
             Self::Edge => "Drag an edge handle to reshape",
             Self::Vertex => "Drag a vertex handle to reshape",
+            Self::Clip => "Click 2-3 points; Enter cuts, Tab flips the kept side, Esc clears",
         }
     }
 
@@ -1127,6 +1141,7 @@ impl BrushEditMode {
             Self::Face => "Drag face to resize",
             Self::Edge => "Drag edge",
             Self::Vertex => "Drag vertex",
+            Self::Clip => "Click points, Enter cuts",
         }
     }
 
@@ -1136,6 +1151,7 @@ impl BrushEditMode {
             Self::Face => Some(SelectionMode::Face),
             Self::Edge => Some(SelectionMode::Edge),
             Self::Vertex => Some(SelectionMode::Vertex),
+            Self::Clip => None,
         }
     }
 }
@@ -2306,6 +2322,14 @@ pub(crate) struct BrushDrag {
     pub(crate) view: OrthographicView,
 }
 
+/// One placed clip point: grid-snapped position plus the unit normal of
+/// the surface it was placed on (view depth axis in 2D).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BrushClipPoint {
+    pub(crate) point: [i32; 3],
+    pub(crate) normal: [f64; 3],
+}
+
 /// Which side(s) a two-point brush clip keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrushClipKeep {
@@ -3000,7 +3024,7 @@ impl EditorWorkspace {
             brush_edit_mode: BrushEditMode::Move,
             brush_drag: None,
             brush_extrude: None,
-            brush_clip_start: None,
+            brush_clip_points: Vec::new(),
             brush_clip_keep: BrushClipKeep::Both,
             brush_texture_lock: true,
             brush_move: None,

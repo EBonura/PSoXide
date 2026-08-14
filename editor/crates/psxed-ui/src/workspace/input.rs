@@ -761,8 +761,13 @@ impl EditorWorkspace {
                 && (self.active_tool == ViewTool::Brush
                     || (self.active_tool == ViewTool::Select && self.selected_brush.is_some()))
             {
-                const MODE_KEYS: [egui::Key; 4] =
-                    [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4];
+                const MODE_KEYS: [egui::Key; 5] = [
+                    egui::Key::Num1,
+                    egui::Key::Num2,
+                    egui::Key::Num3,
+                    egui::Key::Num4,
+                    egui::Key::Num5,
+                ];
                 for (key, mode) in MODE_KEYS.into_iter().zip(BrushEditMode::ALL) {
                     if ctx.input_mut(|i| i.key_pressed(key)) {
                         self.set_brush_edit_mode(mode);
