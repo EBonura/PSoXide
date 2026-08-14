@@ -2357,6 +2357,72 @@ fn edge_drag_through_the_degenerate_zone_never_leaves_bounded_geometry() {
 }
 
 #[test]
+fn face_mode_first_click_selects_brush_and_face_together() {
+    let (mut workspace, rect) = element_click_workspace();
+    workspace.set_brush_edit_mode(BrushEditMode::Face);
+    assert_eq!(workspace.selected_brush, None);
+    // One click on the top face: brush selected AND the face element
+    // recorded, no second click needed, nearest face (no cycling).
+    let pointer = screen_for_world(&workspace, rect, [256.0, 512.0, 256.0]);
+    let target = workspace.resolve_viewport_3d_pointer_target(rect, pointer, None, true);
+    let mut frame = element_click_frame(rect, pointer, egui::Modifiers::NONE);
+    frame.pointer_target = target;
+    tool_impl_3d(ViewTool::Select).primary_clicked(&mut workspace, &frame);
+    assert_eq!(workspace.selected_brush, Some(0));
+    let face = match workspace.selected_brush_elements.as_slice() {
+        [BrushElement::Face(face)] => *face,
+        other => panic!("expected one face element, got {other:?}"),
+    };
+    assert_eq!(workspace.selected_brush_face, Some(face));
+    // A second click at the same spot keeps the SAME face (nearest, not
+    // the old click-through cycle).
+    tool_impl_3d(ViewTool::Select).primary_clicked(&mut workspace, &frame);
+    assert_eq!(
+        workspace.selected_brush_elements,
+        vec![BrushElement::Face(face)],
+        "repeat clicks must not cycle to another face"
+    );
+}
+
+#[test]
+fn element_gizmo_drags_are_axis_constrained() {
+    let (mut workspace, rect) = element_click_workspace();
+    workspace.replace_brush_selection(0, None);
+    workspace.set_brush_edit_mode(BrushEditMode::Vertex);
+    let tool = tool_impl_3d(ViewTool::Select);
+    let corner = screen_for_world(&workspace, rect, [0.0, 512.0, 0.0]);
+    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner, egui::Modifiers::NONE));
+    assert_eq!(workspace.selected_brush_elements.len(), 1);
+
+    // Grab the Y axis of the gizmo (a point most of the way up the arrow)
+    // and drag diagonally: only Y may change.
+    let centroid = workspace
+        .selected_brush_element_centroid()
+        .expect("selection has a centroid");
+    let grab_world = [centroid[0], centroid[1] + 96.0, centroid[2]];
+    let grab = screen_for_world(&workspace, rect, grab_world);
+    assert_eq!(
+        workspace.pick_brush_element_gizmo_axis_3d(rect, grab),
+        Some(1),
+        "grab point picks the Y axis"
+    );
+    tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
+    let drag = workspace.brush_vertex_drag.as_ref().expect("gizmo grab starts a drag");
+    assert_eq!(drag.axis_mask, [false, true, false]);
+    let lift = screen_for_world(
+        &workspace,
+        rect,
+        [grab_world[0] + 128.0, grab_world[1] + 128.0, grab_world[2]],
+    );
+    tool.primary_dragged(&mut workspace, &element_click_frame(rect, lift, egui::Modifiers::NONE));
+    let applied = workspace.brush_vertex_drag.as_ref().unwrap().applied;
+    assert_eq!(applied[0], 0, "X is masked");
+    assert_eq!(applied[2], 0, "Z is masked");
+    assert!(applied[1] != 0, "Y follows the drag, got {applied:?}");
+    tool.primary_released(&mut workspace, &element_click_frame(rect, lift, egui::Modifiers::NONE));
+}
+
+#[test]
 fn face_mode_click_selects_face_and_mirrors_uv_state() {
     let (mut workspace, rect) = element_click_workspace();
     workspace.replace_brush_selection(0, None);
