@@ -2640,6 +2640,126 @@ impl EditorWorkspace {
         true
     }
 
+    /// CSG Subtract: carve every selected brush out of every unselected
+    /// brush it intersects, then delete the cutters. One undo step. New
+    /// faces take each cutter face's material and UV, so a textured
+    /// cutter paints its own reveal.
+    pub(crate) fn csg_subtract_selected(&mut self) -> bool {
+        let cutter_indices = self.selected_brush_set();
+        if cutter_indices.is_empty() {
+            self.status = "Subtract needs a selected brush to cut with".to_string();
+            return false;
+        }
+        let cutter_set: std::collections::HashSet<usize> =
+            cutter_indices.iter().copied().collect();
+        let scene = self.project.active_scene();
+        let cutters: Vec<psxed_project::brush::Brush> = cutter_indices
+            .iter()
+            .filter_map(|&index| scene.brushes.get(index).cloned())
+            .filter(|brush| brush.is_pickable())
+            .collect();
+        if cutters.is_empty() {
+            self.status = "Subtract: the selected brushes are damaged".to_string();
+            return false;
+        }
+        let mut rebuilt: Vec<psxed_project::brush::Brush> = Vec::new();
+        let mut carved = 0usize;
+        for (index, brush) in scene.brushes.iter().enumerate() {
+            if cutter_set.contains(&index) {
+                continue;
+            }
+            let mut pieces = vec![brush.clone()];
+            let mut touched = false;
+            for cutter in &cutters {
+                let mut next = Vec::new();
+                for piece in pieces {
+                    match piece.subtracted_by(cutter) {
+                        Some(parts) => {
+                            touched = true;
+                            next.extend(parts);
+                        }
+                        None => next.push(piece),
+                    }
+                }
+                pieces = next;
+            }
+            if touched {
+                carved += 1;
+            }
+            rebuilt.extend(pieces);
+        }
+        if carved == 0 {
+            self.status = "Subtract: the selected brushes touch nothing".to_string();
+            return false;
+        }
+        self.push_undo();
+        self.project.active_scene_mut().brushes = rebuilt;
+        self.clear_brush_selection();
+        self.reconcile_brush_selection();
+        self.mark_dirty();
+        self.status = format!(
+            "Subtracted {} brush{} from {carved} neighbour{}",
+            cutters.len(),
+            if cutters.len() == 1 { "" } else { "es" },
+            if carved == 1 { "" } else { "s" },
+        );
+        true
+    }
+
+    /// CSG Hollow: replace each selected brush with the walls around an
+    /// empty interior, one grid step thick. One undo step.
+    pub(crate) fn csg_hollow_selected(&mut self) -> bool {
+        let targets = self.selected_brush_set();
+        if targets.is_empty() {
+            self.status = "Hollow needs a selected brush".to_string();
+            return false;
+        }
+        let thickness = i32::from(self.snap_units.max(1));
+        let target_set: std::collections::HashSet<usize> = targets.iter().copied().collect();
+        let scene = self.project.active_scene();
+        let mut rebuilt: Vec<psxed_project::brush::Brush> = Vec::new();
+        let mut hollowed = 0usize;
+        let mut refused = 0usize;
+        for (index, brush) in scene.brushes.iter().enumerate() {
+            if !target_set.contains(&index) {
+                rebuilt.push(brush.clone());
+                continue;
+            }
+            match brush.hollowed(thickness) {
+                Some(walls) => {
+                    hollowed += 1;
+                    rebuilt.extend(walls);
+                }
+                None => {
+                    refused += 1;
+                    rebuilt.push(brush.clone());
+                }
+            }
+        }
+        if hollowed == 0 {
+            self.status = format!(
+                "Hollow: too thin for {thickness}-unit walls (shrink the grid step)"
+            );
+            return false;
+        }
+        self.push_undo();
+        self.project.active_scene_mut().brushes = rebuilt;
+        self.clear_brush_selection();
+        self.reconcile_brush_selection();
+        self.mark_dirty();
+        self.status = if refused == 0 {
+            format!(
+                "Hollowed {hollowed} brush{} with {thickness}-unit walls",
+                if hollowed == 1 { "" } else { "es" }
+            )
+        } else {
+            format!(
+                "Hollowed {hollowed}, left {refused} too thin for {thickness}-unit walls"
+            )
+        };
+        true
+    }
+
     /// Select the visible brush face under the active orthographic point.
     /// Smaller projected brushes retain the old Top-view priority; exact
     /// overlaps then prefer the face nearest the positive-axis viewer.

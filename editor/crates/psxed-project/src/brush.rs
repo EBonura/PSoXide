@@ -478,19 +478,91 @@ impl Brush {
     /// Split by the plane of `points` (wound as usual: outward normal).
     /// The clip-tool core: keep back, front, or both.
     pub fn clip(&self, points: [[i32; 3]; 3]) -> ClippedBrush {
-        let make = |cap: BrushFace| {
-            let mut half = self.clone();
-            half.faces.push(cap);
-            let half = half.pruned();
-            // A side survives when it still encloses volume. A redundant
-            // cap (plane misses the brush) prunes away and leaves the
-            // whole brush on that side; an all-consuming cap leaves
-            // nothing valid and the side is dropped.
-            half.solve().is_valid().then_some(half)
-        };
-        let back = make(BrushFace::from_points(points));
-        let front = make(BrushFace::from_points([points[0], points[2], points[1]]));
+        let back = self.with_cap(BrushFace::from_points(points));
+        let front = self.with_cap(BrushFace::from_points([points[0], points[2], points[1]]));
         ClippedBrush { back, front }
+    }
+
+    /// Half of `self` behind `cap`'s plane, or `None` when nothing
+    /// survives there. A side survives when it still encloses volume: a
+    /// redundant cap (plane misses the brush) prunes away and leaves
+    /// the whole brush on that side; an all-consuming cap leaves
+    /// nothing valid and the side is dropped.
+    fn with_cap(&self, cap: BrushFace) -> Option<Brush> {
+        let mut half = self.clone();
+        half.faces.push(cap);
+        let half = half.pruned();
+        half.solve().is_valid().then_some(half)
+    }
+
+    /// Pieces of `self` outside `cutter`, or `None` when the solids do
+    /// not intersect (subtract is then the identity). Classic per-plane
+    /// carve: each cutter plane splits the running remainder, the part
+    /// outside becomes a kept piece, the part inside keeps carving, and
+    /// whatever survives every plane is the intersection, which is
+    /// discarded. A target fully inside the cutter returns `Some([])`
+    /// (swallowed whole). New faces take the cutter face's material and
+    /// UV, so a textured cutter paints its own reveal.
+    pub fn subtracted_by(&self, cutter: &Brush) -> Option<Vec<Brush>> {
+        let mut remainder = self.clone();
+        let mut pieces = Vec::new();
+        for cutter_face in &cutter.faces {
+            let outside_cap = BrushFace {
+                points: [
+                    cutter_face.points[0],
+                    cutter_face.points[2],
+                    cutter_face.points[1],
+                ],
+                material: cutter_face.material,
+                uv: cutter_face.uv,
+            };
+            let inside_cap = BrushFace {
+                points: cutter_face.points,
+                material: cutter_face.material,
+                uv: cutter_face.uv,
+            };
+            let outside = remainder.with_cap(outside_cap);
+            match (remainder.with_cap(inside_cap), outside) {
+                (Some(inside), Some(piece)) => {
+                    pieces.push(piece);
+                    remainder = inside;
+                }
+                (Some(inside), None) => remainder = inside,
+                // The remainder lies fully outside this cutter plane:
+                // the solids never intersect, so nothing was cut.
+                (None, _) => return None,
+            }
+        }
+        Some(pieces)
+    }
+
+    /// Copy with every face plane moved inward along its outward unit
+    /// normal by `thickness` world units (rounded to integer points).
+    /// `None` when the inset collapses the solid.
+    pub fn inset(&self, thickness: i32) -> Option<Brush> {
+        if thickness <= 0 {
+            return None;
+        }
+        let mut inner = self.clone();
+        for face in &mut inner.faces {
+            let plane = Plane::from_points(face.points)?;
+            let (normal, _) = plane.normalized();
+            let shift =
+                normal.map(|component| (-component * f64::from(thickness)).round() as i32);
+            for point in &mut face.points {
+                for axis in 0..3 {
+                    point[axis] += shift[axis];
+                }
+            }
+        }
+        inner.is_pickable().then_some(inner)
+    }
+
+    /// Wall shell of `self`: the solid minus an inward inset copy, the
+    /// one-keystroke room. `None` when the brush is too thin to hollow
+    /// at `thickness`.
+    pub fn hollowed(&self, thickness: i32) -> Option<Vec<Brush>> {
+        self.subtracted_by(&self.inset(thickness)?)
     }
 
     /// Nearest ray hit against the convex solid: `Some((t, face_index))`
@@ -1306,6 +1378,99 @@ mod tests {
         // Pull it past -X: the brush inverts and stops enclosing volume.
         brush.translate_face(3, [-256, 0, 0]);
         assert!(!brush.solve().is_valid());
+    }
+
+    fn contains_point(brush: &Brush, point: [f64; 3]) -> bool {
+        brush.faces.iter().all(|face| {
+            let plane = Plane::from_points(face.points).expect("face plane");
+            let (normal, distance) = plane.normalized();
+            normal[0] * point[0] + normal[1] * point[1] + normal[2] * point[2] - distance
+                <= 1e-6
+        })
+    }
+
+    #[test]
+    fn subtract_carves_an_overlapping_corner() {
+        let target = Brush::cuboid([0, 0, 0], [256, 256, 256]);
+        let cutter = Brush::cuboid([128, 0, 128], [384, 256, 384]);
+        let pieces = target.subtracted_by(&cutter).expect("solids intersect");
+        assert!(!pieces.is_empty());
+        for piece in &pieces {
+            assert!(piece.is_pickable());
+        }
+        // The carved corner is gone from every piece; the far corner
+        // survives in exactly one.
+        let carved = [192.0, 128.0, 192.0];
+        let kept = [64.0, 128.0, 64.0];
+        assert!(pieces.iter().all(|piece| !contains_point(piece, carved)));
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|piece| contains_point(piece, kept))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn subtract_misses_a_disjoint_brush() {
+        let target = Brush::cuboid([0, 0, 0], [256, 256, 256]);
+        let cutter = Brush::cuboid([512, 0, 512], [768, 256, 768]);
+        assert!(target.subtracted_by(&cutter).is_none());
+    }
+
+    #[test]
+    fn subtract_swallows_a_contained_brush() {
+        let target = Brush::cuboid([64, 64, 64], [128, 128, 128]);
+        let cutter = Brush::cuboid([0, 0, 0], [256, 256, 256]);
+        let pieces = target.subtracted_by(&cutter).expect("contained");
+        assert!(pieces.is_empty());
+    }
+
+    #[test]
+    fn subtract_paints_new_faces_with_the_cutter_material() {
+        let material = crate::ResourceId(77);
+        let target = Brush::cuboid([0, 0, 0], [256, 256, 256]);
+        let mut cutter = Brush::cuboid([128, 0, 0], [384, 256, 256]);
+        for face in &mut cutter.faces {
+            face.material = Some(material);
+        }
+        let pieces = target.subtracted_by(&cutter).expect("solids intersect");
+        let cut_faces: Vec<_> = pieces
+            .iter()
+            .flat_map(|piece| piece.faces.iter())
+            .filter(|face| face.material == Some(material))
+            .collect();
+        assert!(
+            !cut_faces.is_empty(),
+            "the reveal must take the cutter's material"
+        );
+    }
+
+    #[test]
+    fn hollow_leaves_walls_around_an_empty_interior() {
+        let brush = Brush::cuboid([0, 0, 0], [512, 512, 512]);
+        let walls = brush.hollowed(64).expect("hollow succeeds");
+        assert!(walls.len() >= 6, "a box hollows into its six walls");
+        let interior = [256.0, 256.0, 256.0];
+        assert!(walls.iter().all(|wall| !contains_point(wall, interior)));
+        let inside_wall = [32.0, 256.0, 256.0];
+        assert_eq!(
+            walls
+                .iter()
+                .filter(|wall| contains_point(wall, inside_wall))
+                .count(),
+            1
+        );
+        for wall in &walls {
+            assert!(wall.is_pickable());
+        }
+    }
+
+    #[test]
+    fn hollow_refuses_a_brush_too_thin_for_the_shell() {
+        let brush = Brush::cuboid([0, 0, 0], [256, 64, 256]);
+        assert!(brush.hollowed(64).is_none());
     }
 
     #[test]

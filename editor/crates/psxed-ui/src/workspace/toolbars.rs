@@ -866,6 +866,27 @@ impl EditorWorkspace {
                 self.extrude_selected_face_one_step();
             }
         }
+        let any_brush = self.selected_brush.is_some();
+        if ui
+            .add_enabled(any_brush, egui::Button::new("Hollow"))
+            .on_hover_text(
+                "Replace each selected brush with walls around an empty interior, \
+                 one grid step thick. The one-keystroke room.",
+            )
+            .clicked()
+        {
+            self.csg_hollow_selected();
+        }
+        if ui
+            .add_enabled(any_brush, egui::Button::new("Subtract"))
+            .on_hover_text(
+                "Carve the selected brushes out of every brush they touch, then \
+                 delete them. New faces take the cutter's material.",
+            )
+            .clicked()
+        {
+            self.csg_subtract_selected();
+        }
         ui.label(
             RichText::new(self.brush_edit_mode.toolbar_hint())
                 .small()
