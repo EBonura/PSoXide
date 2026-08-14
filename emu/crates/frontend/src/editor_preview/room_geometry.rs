@@ -440,6 +440,35 @@ pub(super) fn collect_preview_lights(
     out
 }
 
+/// Scene-wide light samples for world-space (BSP) geometry: no room
+/// filter, positions are raw world units, and the radius scales by the
+/// World sector size, matching the brush bake's `scene_lights`.
+pub(super) fn collect_bsp_preview_lights(
+    project: &ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+) -> Vec<psx_engine::PointLightSample> {
+    let scene = project.active_scene();
+    let radius_units = scene
+        .world_sector_size_for_node(scene.root)
+        .unwrap_or(1024)
+        .max(1) as f32;
+    let mut out = Vec::new();
+    for light in preview_lights(scene, hidden_scene_nodes) {
+        if light.radius <= 0.0 || !light.intensity.is_finite() || light.intensity < 0.0 {
+            continue;
+        }
+        let world = light.transform.translation.map(|value| value.round() as i32);
+        let intensity_q8 = (light.intensity * 256.0).clamp(0.0, u16::MAX as f32) as u32;
+        out.push(psx_engine::PointLightSample::from_rgb_intensity(
+            [world[0], world[1], world[2]],
+            (light.radius * radius_units) as i32,
+            psx_engine::Rgb8::from_array(light.color),
+            psx_engine::Q8::from_raw(intensity_q8),
+        ));
+    }
+    out
+}
+
 pub(super) fn push_preview_light_sample(
     out: &mut Vec<psx_engine::PointLightSample>,
     grid: &WorldGrid,
