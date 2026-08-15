@@ -507,7 +507,13 @@ pub(crate) fn cook_player_character(
     characters: &mut Vec<PlaytestCharacter>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
-    let default_character = crate::CharacterResource::defaults();
+    let mut default_character = crate::CharacterResource::defaults();
+    if project.world_format() == crate::ProjectWorldFormat::Bsp {
+        // Real Character resources arrive pre-scaled on the cook's
+        // project clone; the built-in fallback is constructed here,
+        // after scaling, so it divides through the same path.
+        crate::units::scale_default_character_to_engine_units(&mut default_character);
+    }
     let (character, character_name) = match character_id {
         Some(character_id) => {
             let resource = match project.resource(character_id) {
@@ -953,7 +959,7 @@ pub(crate) fn register_model_for_instance(
 
     // Mesh asset.
     let mesh_path = resolve_path(&model.model_path, project_root);
-    let mesh_bytes = match std::fs::read(&mesh_path) {
+    let mut mesh_bytes = match std::fs::read(&mesh_path) {
         Ok(b) => b,
         Err(e) => {
             report.error_at(
@@ -967,6 +973,12 @@ pub(crate) fn register_model_for_instance(
             return None;
         }
     };
+    if project.world_format() == crate::ProjectWorldFormat::Bsp {
+        // Engine-unit rescale: authored model space stays intact; only
+        // the cooked local-to-world transform divides, which rescales
+        // vertices, sockets, and every animation frame exactly.
+        crate::units::scale_model_blob_to_engine_units(&mut mesh_bytes);
+    }
     let parsed_model = match psx_asset::Model::from_bytes(&mesh_bytes) {
         Ok(m) => m,
         Err(e) => {

@@ -20,7 +20,7 @@ use crate::model_rendering::{model_render_uv_max, sphere_visible_to_camera};
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::VramSlot;
 
-const IMAGE_PROP_DEPTH_BIAS: i32 = 256;
+const IMAGE_PROP_DEPTH_BIAS: i32 = 16;
 
 /// Append one cooker-enclosed AABB for each collidable ImageProp in `room`.
 ///
