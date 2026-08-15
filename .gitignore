@@ -74,3 +74,6 @@ emu/crates/frontend/dist/
 # Python bytecode from the hwtest tooling
 __pycache__/
 *.pyc
+
+# Local headless/console capture dirs (hwtest inputs, screenshot sweeps).
+/captures/
