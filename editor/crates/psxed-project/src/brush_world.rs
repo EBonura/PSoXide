@@ -945,7 +945,7 @@ fn resolve_materials(
     let mut textures = Vec::new();
     let mut materials = Vec::with_capacity(slots.len());
     for &slot in slots {
-        let (key, bytes, tint, blend, sidedness, animation) = match slot {
+        let (key, bytes, tint, blend, sidedness, animation, layered_sky) = match slot {
             None => (
                 "@brush-flat-white".to_string(),
                 flat_white_psxt(),
@@ -953,6 +953,7 @@ fn resolve_materials(
                 PsxBlendMode::Opaque,
                 MaterialFaceSidedness::Front,
                 crate::MaterialAnimation::default(),
+                false,
             ),
             Some(id) => {
                 let resource = project
@@ -975,6 +976,7 @@ fn resolve_materials(
                     material.blend_mode,
                     material.sidedness(),
                     material.animation,
+                    material.layered_sky,
                 )
             }
         };
@@ -987,6 +989,7 @@ fn resolve_materials(
             blend,
             sidedness,
             animation,
+            layered_sky,
             slot,
         )?);
     }
@@ -1050,12 +1053,17 @@ fn pack_material(
     blend: PsxBlendMode,
     sidedness: MaterialFaceSidedness,
     animation: crate::MaterialAnimation,
+    layered_sky: bool,
     material: Option<ResourceId>,
 ) -> Result<PxbspMaterial, BrushWorldCookError> {
     let flags = match sidedness {
         MaterialFaceSidedness::Front => material_flags::FACE_FRONT,
         MaterialFaceSidedness::Back => material_flags::FACE_BACK,
         MaterialFaceSidedness::Both => material_flags::FACE_BOTH,
+    } | if layered_sky {
+        material_flags::LAYERED_SKY
+    } else {
+        0
     };
     let blend_mode = match blend {
         PsxBlendMode::Opaque => material_blend::OPAQUE,
