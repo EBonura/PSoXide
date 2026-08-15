@@ -289,8 +289,10 @@ const PLAY_PORTAL_DEBUG_MAX_DEPTH: u8 = 8;
 const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/ci_player",
+    "assets/models/aletha_delivered",
     "assets/models/rust_mantis",
     "assets/animations/ci_player_complete",
+    "assets/animations/aletha_delivered",
     "assets/animations/rust_mantis_starter",
     "assets/models/sword1_light",
     "assets/models/sword1_heavy",
