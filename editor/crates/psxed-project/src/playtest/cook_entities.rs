@@ -973,10 +973,17 @@ pub(crate) fn register_model_for_instance(
             return None;
         }
     };
-    if project.world_format() == crate::ProjectWorldFormat::Bsp {
-        // Engine-unit rescale: authored model space stays intact; only
-        // the cooked local-to-world transform divides, which rescales
-        // vertices, sockets, and every animation frame exactly.
+    let engine_units = project.world_format() == crate::ProjectWorldFormat::Bsp;
+    let frame_bounds_pad = if engine_units {
+        MODEL_FRAME_BOUNDS_PAD_UNITS / crate::units::WORLD_UNIT_DIVISOR
+    } else {
+        MODEL_FRAME_BOUNDS_PAD_UNITS
+    };
+    if engine_units {
+        // Engine-unit rescale of the model-local space (vertex table);
+        // local_to_world_q12 stays so the runtime's i16 pose-matrix
+        // fold keeps its precision. Clips, sockets, and capsules that
+        // live in the same local space scale alongside (see units.rs).
         crate::units::scale_model_blob_to_engine_units(&mut mesh_bytes);
     }
     let parsed_model = match psx_asset::Model::from_bytes(&mesh_bytes) {
@@ -1078,7 +1085,7 @@ pub(crate) fn register_model_for_instance(
             continue;
         };
         let abs = resolve_path(&clip.psxanim_path, project_root);
-        let bytes = match std::fs::read(&abs) {
+        let mut bytes = match std::fs::read(&abs) {
             Ok(b) => b,
             Err(e) => {
                 report.error_at(
@@ -1093,6 +1100,9 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
+        if engine_units {
+            crate::units::scale_animation_blob_to_engine_units(&mut bytes);
+        }
         let parsed_anim = match psx_asset::Animation::from_bytes(&bytes) {
             Ok(a) => a,
             Err(e) => {
@@ -1162,7 +1172,8 @@ pub(crate) fn register_model_for_instance(
         };
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
-        let baked_bounds = bake_model_clip_frame_bounds(&parsed_model, &corrected_anim);
+        let baked_bounds =
+            bake_model_clip_frame_bounds(&parsed_model, &corrected_anim, frame_bounds_pad);
         let frame_count = match u16::try_from(baked_bounds.len()) {
             Ok(count) => count,
             Err(_) => {
@@ -1314,7 +1325,9 @@ pub(crate) fn register_model_for_instance(
     Some(model_index)
 }
 
-pub(crate) const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
+/// Culling-radius pad added to baked model frame bounds, in AUTHORED
+/// world units; the cook divides it for engine-unit (BSP) projects.
+pub const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
 
 pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> Vec<u8> {
     let joint_count = animation.joint_count();
@@ -1453,6 +1466,7 @@ pub(crate) struct ModelBoundsJointTransform {
 pub fn bake_model_clip_frame_bounds(
     model: &psx_asset::Model<'_>,
     animation: &psx_asset::Animation<'_>,
+    pad_units: i32,
 ) -> Vec<PlaytestModelFrameBounds> {
     let frame_count = animation.frame_count();
     let cycle_frames = frame_count.saturating_sub(1).max(1);
@@ -1464,7 +1478,9 @@ pub fn bake_model_clip_frame_bounds(
         } else {
             frame + 1
         };
-        out.push(bake_model_frame_pair_bounds(model, animation, frame, next));
+        out.push(bake_model_frame_pair_bounds(
+            model, animation, frame, next, pad_units,
+        ));
         frame += 1;
     }
     out
@@ -1475,6 +1491,7 @@ pub(crate) fn bake_model_frame_pair_bounds(
     animation: &psx_asset::Animation<'_>,
     a: u16,
     b: u16,
+    pad_units: i32,
 ) -> PlaytestModelFrameBounds {
     let mut min = [i32::MAX; 3];
     let mut max = [i32::MIN; 3];
@@ -1487,7 +1504,7 @@ pub(crate) fn bake_model_frame_pair_bounds(
     if min[0] == i32::MAX {
         return PlaytestModelFrameBounds {
             center: [0, 0, 0],
-            radius: MODEL_FRAME_BOUNDS_PAD_UNITS,
+            radius: pad_units,
             floor_y: 0,
         };
     }
@@ -1497,7 +1514,7 @@ pub(crate) fn bake_model_frame_pair_bounds(
         average_i32(min[1], max[1]),
         average_i32(min[2], max[2]),
     ];
-    let radius = aabb_radius(min, max).saturating_add(MODEL_FRAME_BOUNDS_PAD_UNITS);
+    let radius = aabb_radius(min, max).saturating_add(pad_units);
     PlaytestModelFrameBounds {
         center,
         radius,

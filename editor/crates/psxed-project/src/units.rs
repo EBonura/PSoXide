@@ -10,11 +10,16 @@
 //! keeps authoring at the historical scale and the scaling happens on
 //! an in-memory clone at cook entry ([`scale_project_to_engine_units`]).
 //!
-//! Model meshes and animations scale losslessly through the cooked
-//! `.psxmdl` header's `local_to_world_q12` field
-//! ([`scale_model_blob_to_engine_units`]): quantized vertex and pose
-//! data is stored relative to that transform, so dividing the one u16
-//! rescales every vertex, socket, and animation frame bit-exactly.
+//! Model meshes scale by dividing the cooked `.psxmdl` VERTEX table
+//! ([`scale_model_blob_to_engine_units`]) and every model-local
+//! quantity that rides on it (animation translations, sockets, grips,
+//! combat capsules), NOT the header's `local_to_world_q12`. The
+//! runtime folds that q12 into i16 Q12 pose matrices before the GTE
+//! (`scaled_pose_matrix`), so a 16x smaller q12 would leave rotation
+//! entries with ~2 bits of precision and visibly deform skinned
+//! meshes. Shrinking the local space instead keeps the fold at its
+//! pre-migration precision, the same trade quake-psx makes with its
+//! u8 alias vertices and ~10-bit Q12 scale.
 //!
 //! Speeds quantize to integers per tick at the new scale (walk 44 ->
 //! 3), which nudges movement feel by a few percent; that is the
@@ -264,12 +269,26 @@ fn scale_resource(data: &mut ResourceData) {
                     *axis = div_i32(*axis);
                 }
             }
-            // Combat capsules are joint-local model space: they scale
-            // through the model blob's local_to_world_q12, not here.
+            // Joint-local endpoints ride on the (÷16) model-local space;
+            // the radius is engine units. Both divide.
+            for volume in &mut character.combat_capsules {
+                div_point(&mut volume.capsule.start);
+                div_point(&mut volume.capsule.end);
+                volume.capsule.radius = div_u16_min1(volume.capsule.radius);
+            }
         }
         ResourceData::Model(model) => {
             model.world_height = div_u16_min1(model.world_height);
             model.collision_radius = div_u16_min1(model.collision_radius);
+            for socket in &mut model.attachments {
+                div_point(&mut socket.translation);
+            }
+        }
+        ResourceData::AnimationClip(clip) => {
+            div_point(&mut clip.calibration.offset);
+            for key in &mut clip.pose_corrections {
+                div_point(&mut key.translation);
+            }
         }
         ResourceData::AnimationSet(set) => {
             for binding in &mut set.action_clips {
@@ -280,10 +299,34 @@ fn scale_resource(data: &mut ResourceData) {
         }
         ResourceData::Weapon(weapon) => {
             weapon.arc_reach = div_u16_min1(weapon.arc_reach);
-            // Grip translation and hitboxes are weapon-model-local:
-            // scaled through the weapon model blob.
+            div_point(&mut weapon.grip.translation);
+            for hitbox in &mut weapon.hitboxes {
+                match &mut hitbox.shape {
+                    crate::WeaponHitShape::Box {
+                        center,
+                        half_extents,
+                    } => {
+                        div_point(center);
+                        for axis in half_extents.iter_mut() {
+                            *axis = div_u16_min1(*axis);
+                        }
+                    }
+                    crate::WeaponHitShape::Capsule { start, end, radius } => {
+                        div_point(start);
+                        div_point(end);
+                        *radius = div_u16_min1(*radius);
+                    }
+                }
+            }
         }
         _ => {}
+    }
+}
+
+#[inline]
+fn div_point(point: &mut [i32; 3]) {
+    for axis in point.iter_mut() {
+        *axis = div_i32(*axis);
     }
 }
 
@@ -302,32 +345,116 @@ pub fn scale_default_character_to_engine_units(character: &mut crate::CharacterR
 /// entry, for BSP-format projects only.
 pub fn scale_project_to_engine_units(project: &mut ProjectDocument) {
     for scene in &mut project.scenes {
-        for brush in &mut scene.brushes {
-            scale_brush(brush);
-        }
-        for node in &mut scene.nodes {
-            scale_node(node);
-        }
+        scale_scene(scene);
     }
     for resource in &mut project.resources {
         scale_resource(&mut resource.data);
     }
 }
 
-/// Rescale a cooked `.psxmdl` blob to engine units by dividing its
-/// `local_to_world_q12` header field (absolute offset 26: 12-byte
-/// asset header + offset 14 in the model header). Vertex, socket, and
-/// pose data are stored relative to that transform, so this is exact.
+#[inline]
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+#[inline]
+fn div_i16_in_place(bytes: &mut [u8], offset: usize) {
+    let value = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+    bytes[offset..offset + 2].copy_from_slice(&div_i16(value).to_le_bytes());
+}
+
+/// Rescale a cooked `.psxmdl` blob to engine units by dividing every
+/// vertex position (model-local i16) by [`WORLD_UNIT_DIVISOR`]. The
+/// header's `local_to_world_q12` is deliberately left alone (see the
+/// module docs). Blobs that do not lay out as a v4 model are left
+/// untouched; the cook's parse step reports them.
 pub fn scale_model_blob_to_engine_units(bytes: &mut [u8]) {
-    const OFFSET: usize = 12 + 14;
-    if bytes.len() < OFFSET + 2 {
+    use psxed_format::model::{
+        JointRecord, MaterialRecord, ModelHeader, PartRecord, MAGIC, VERSION, VERTEX_RECORD_SIZE,
+    };
+    let payload = psxed_format::AssetHeader::SIZE;
+    if bytes.len() < payload + ModelHeader::SIZE
+        || bytes[..4] != MAGIC
+        || read_u16(bytes, 4) != VERSION
+    {
         return;
     }
-    let raw = u16::from_le_bytes([bytes[OFFSET], bytes[OFFSET + 1]]);
-    // 0 encodes the 4096 (1.0) default in the format.
-    let current = if raw == 0 { 4096 } else { raw };
-    let scaled = (current / WORLD_UNIT_DIVISOR as u16).max(1);
-    bytes[OFFSET..OFFSET + 2].copy_from_slice(&scaled.to_le_bytes());
+    let header = &bytes[payload..payload + ModelHeader::SIZE];
+    let joint_count = read_u16(header, 0) as usize;
+    let part_count = read_u16(header, 2) as usize;
+    let vertex_count = read_u16(header, 4) as usize;
+    let material_count = read_u16(header, 8) as usize;
+    let first_vertex = payload
+        + ModelHeader::SIZE
+        + joint_count * JointRecord::SIZE
+        + material_count * MaterialRecord::SIZE
+        + part_count * PartRecord::SIZE;
+    let end = first_vertex + vertex_count * VERTEX_RECORD_SIZE;
+    if bytes.len() < end {
+        return;
+    }
+    for record in (first_vertex..end).step_by(VERTEX_RECORD_SIZE) {
+        for axis in 0..3 {
+            div_i16_in_place(bytes, record + axis * 2);
+        }
+    }
+}
+
+/// Rescale a cooked `.psxanim` blob to engine units: pose translations
+/// are model-local (`stored << translation_shift` in v2/v3, raw i32 in
+/// v1) and must shrink with the model's vertex table. Rotations are
+/// unitless and untouched. Malformed blobs are left for the parse step.
+pub fn scale_animation_blob_to_engine_units(bytes: &mut [u8]) {
+    use psxed_format::animation::{
+        AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3,
+        VERSION, VERSION_V1, VERSION_V3,
+    };
+    let payload = psxed_format::AssetHeader::SIZE;
+    if bytes.len() < payload + AnimationHeader::SIZE || bytes[..4] != MAGIC {
+        return;
+    }
+    let version = read_u16(bytes, 4);
+    let (record_size, translation_offset) = match version {
+        VERSION_V1 => (POSE_RECORD_SIZE_V1, 18),
+        VERSION => (POSE_RECORD_SIZE, 18),
+        VERSION_V3 => (POSE_RECORD_SIZE_V3, 14),
+        _ => return,
+    };
+    let pose_count = read_u16(bytes, payload) as usize * read_u16(bytes, payload + 2) as usize;
+    let first_pose = payload + AnimationHeader::SIZE;
+    let end = first_pose + pose_count * record_size;
+    if bytes.len() < end {
+        return;
+    }
+    if version == VERSION_V1 {
+        for record in (first_pose..end).step_by(record_size) {
+            for axis in 0..3 {
+                let at = record + translation_offset + axis * 4;
+                let value = i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+                bytes[at..at + 4].copy_from_slice(&div_i32(value).to_le_bytes());
+            }
+        }
+        return;
+    }
+    // WORLD_UNIT_DIVISOR is 2^4: with enough shared shift the divide is
+    // a free header edit; otherwise divide the stored values (rounded)
+    // and drop the shift.
+    const _: () = assert!(WORLD_UNIT_DIVISOR & (WORLD_UNIT_DIVISOR - 1) == 0);
+    const SHIFT_BITS: u16 = WORLD_UNIT_DIVISOR.trailing_zeros() as u16;
+    let shift = read_u16(bytes, payload + 6);
+    if shift >= SHIFT_BITS {
+        bytes[payload + 6..payload + 8].copy_from_slice(&(shift - SHIFT_BITS).to_le_bytes());
+        return;
+    }
+    bytes[payload + 6..payload + 8].copy_from_slice(&0u16.to_le_bytes());
+    for record in (first_pose..end).step_by(record_size) {
+        for axis in 0..3 {
+            let at = record + translation_offset + axis * 2;
+            let stored = i16::from_le_bytes([bytes[at], bytes[at + 1]]) as i32;
+            let scaled = div_i32(stored << shift) as i16;
+            bytes[at..at + 2].copy_from_slice(&scaled.to_le_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -343,15 +470,95 @@ mod tests {
         assert_eq!(div_i32(8), 1);
     }
 
+    fn asset(magic: &[u8; 4], version: u16, payload: &[u8]) -> Vec<u8> {
+        let mut out = magic.to_vec();
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
     #[test]
-    fn model_blob_scale_divides_the_q12_header_field() {
-        let mut blob = vec![0u8; 32];
-        blob[26..28].copy_from_slice(&4096u16.to_le_bytes());
+    fn model_blob_scale_divides_vertices_and_keeps_q12() {
+        // One joint, one material, one part, two vertices, no faces.
+        let mut payload = Vec::new();
+        for value in [1u16, 1, 2, 0, 1, 64, 64, 64] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        payload.extend_from_slice(&[0xFF, 0xFF, 0, 0]); // joint: root
+        payload.extend_from_slice(&[0; 8]); // material
+        payload.extend_from_slice(&[0; 16]); // part
+        for vertex in [[-32000i16, 65, 8], [4096, -4096, 0]] {
+            for axis in vertex {
+                payload.extend_from_slice(&axis.to_le_bytes());
+            }
+            payload.extend_from_slice(&[0xFF, 0]);
+        }
+        let mut blob = asset(b"PSMD", 4, &payload);
         scale_model_blob_to_engine_units(&mut blob);
-        assert_eq!(u16::from_le_bytes([blob[26], blob[27]]), 256);
-        // The zero default means 4096 and must scale the same way.
-        let mut blob = vec![0u8; 32];
-        scale_model_blob_to_engine_units(&mut blob);
-        assert_eq!(u16::from_le_bytes([blob[26], blob[27]]), 256);
+        let model = psx_asset::Model::from_bytes(&blob).expect("still parses");
+        assert_eq!(model.local_to_world_q12(), 64);
+        let v0 = model.vertex(0).unwrap().position;
+        let v1 = model.vertex(1).unwrap().position;
+        assert_eq!((v0.x, v0.y, v0.z), (-2000, 4, 1));
+        assert_eq!((v1.x, v1.y, v1.z), (256, -256, 0));
+    }
+
+    fn animation_poses(version: u16, shift: u16, translations: &[[i32; 3]]) -> Vec<u8> {
+        use psxed_format::animation::{POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, POSE_RECORD_SIZE_V3};
+        let mut payload = Vec::new();
+        for value in [translations.len() as u16, 1, 30, shift] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        for translation in translations {
+            match version {
+                1 => {
+                    payload.extend_from_slice(&[0; POSE_RECORD_SIZE_V1 - 12]);
+                    for axis in translation {
+                        payload.extend_from_slice(&axis.to_le_bytes());
+                    }
+                }
+                2 | 3 => {
+                    let rotation = if version == 2 {
+                        POSE_RECORD_SIZE - 6
+                    } else {
+                        POSE_RECORD_SIZE_V3 - 6
+                    };
+                    payload.extend_from_slice(&vec![0; rotation]);
+                    for axis in translation {
+                        payload.extend_from_slice(&(*axis as i16).to_le_bytes());
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        asset(b"PSXA", version, &payload)
+    }
+
+    fn decoded_translations(blob: &[u8]) -> Vec<[i32; 3]> {
+        let animation = psx_asset::Animation::from_bytes(blob).expect("still parses");
+        (0..animation.joint_count())
+            .map(|joint| {
+                let t = animation.pose(0, joint).unwrap().translation;
+                [t.x, t.y, t.z]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn animation_blob_scale_divides_model_local_translations() {
+        // v3 with a shared shift >= 4: exact via the header.
+        let mut blob = animation_poses(3, 6, &[[100, -100, 7]]);
+        scale_animation_blob_to_engine_units(&mut blob);
+        assert_eq!(decoded_translations(&blob), vec![[400, -400, 28]]);
+        // v2 with a small shift: stored values divide, shift drops to 0.
+        let mut blob = animation_poses(2, 1, &[[1000, -1000, 9]]);
+        scale_animation_blob_to_engine_units(&mut blob);
+        assert_eq!(decoded_translations(&blob), vec![[125, -125, 1]]);
+        // v1 raw i32 translations.
+        let mut blob = animation_poses(1, 0, &[[65536, -65536, 24]]);
+        scale_animation_blob_to_engine_units(&mut blob);
+        assert_eq!(decoded_translations(&blob), vec![[4096, -4096, 2]]);
     }
 }

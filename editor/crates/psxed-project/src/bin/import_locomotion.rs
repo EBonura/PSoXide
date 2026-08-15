@@ -575,8 +575,12 @@ fn build_native_model(
         .and_then(|index| {
             let model = psx_asset::Model::from_bytes(&package.model).ok()?;
             let anim = psx_asset::Animation::from_bytes(&staged[index].0).ok()?;
-            psxed_project::playtest::bake_model_clip_frame_bounds(&model, &anim)
-                .first()
+            psxed_project::playtest::bake_model_clip_frame_bounds(
+                &model,
+                &anim,
+                psxed_project::playtest::MODEL_FRAME_BOUNDS_PAD_UNITS,
+            )
+            .first()
                 .map(|b| b.floor_y)
         });
     for (index, (stem, action, _looping, _path)) in jobs.iter().enumerate() {
@@ -601,8 +605,12 @@ fn build_native_model(
         // change and without touching any other clip.
         let anchor = psx_asset::Model::from_bytes(&package.model).ok().and_then(|model| {
             let anim = psx_asset::Animation::from_bytes(&staged[index].0).ok()?;
-            psxed_project::playtest::bake_model_clip_frame_bounds(&model, &anim)
-                .first()
+            psxed_project::playtest::bake_model_clip_frame_bounds(
+                &model,
+                &anim,
+                psxed_project::playtest::MODEL_FRAME_BOUNDS_PAD_UNITS,
+            )
+            .first()
                 .map(|f| f.floor_y)
         });
         if let Some(anchor) = anchor {
