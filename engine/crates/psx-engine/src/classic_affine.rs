@@ -1127,10 +1127,15 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
         let otz = scene::classic_otz3_from_sum(
             root_depth + previous_ref.depth as u16 as u32 + current_ref.depth as u16 as u32,
         );
-        if otz > 0
-            && otz < profile.ot_depth
-            && near_plane_safe3(root.depth, previous_ref.depth, current_ref.depth)
-        {
+        if otz > 0 && otz < profile.ot_depth {
+            if !near_plane_safe3(root.depth, previous_ref.depth, current_ref.depth) {
+                unsafe {
+                    clip_near_fan_triangle(writer, [root, previous_ref, current_ref], generated)
+                };
+                previous = current;
+                current = unsafe { current.add(1) };
+                continue;
+            }
             let next = unsafe { current.add(1) };
             if otz >= profile.subdivide_once_at && next != end {
                 let next_ref = unsafe { &*next };
@@ -1505,10 +1510,28 @@ pub unsafe fn submit_classic_affine_packed_fan(
             root[1].depth as u16,
             root[2].depth as u16,
         ]);
-        if otz > 0
-            && otz < profile.ot_depth
-            && near_plane_safe3(root[0].depth, root[1].depth, root[2].depth)
-        {
+        if otz > 0 && otz < profile.ot_depth {
+            if !near_plane_safe3(root[0].depth, root[1].depth, root[2].depth) {
+                let source = [
+                    unsafe { ptr::read_unaligned(vertices) },
+                    unsafe { ptr::read_unaligned(vertices.add(fan - 1)) },
+                    unsafe { ptr::read_unaligned(vertices.add(fan)) },
+                ];
+                let expanded = [
+                    expand_source(source[0], root[0]),
+                    expand_source(source[1], root[1]),
+                    expand_source(source[2], root[2]),
+                ];
+                unsafe {
+                    clip_near_fan_triangle(
+                        &mut writer,
+                        [&expanded[0], &expanded[1], &expanded[2]],
+                        generated_ptr,
+                    )
+                };
+                fan += 1;
+                continue;
+            }
             if otz < profile.subdivide_once_at {
                 let source = [
                     unsafe { ptr::read_unaligned(vertices) },
@@ -1561,15 +1584,248 @@ fn source_vec3(vertex: ClassicAffineSourceVertex) -> Vec3I16 {
 /// GTE screen coordinates saturate rather than clip: a vertex at or
 /// behind the eye plane projects with `sz` pinned near zero and sx/sy
 /// slammed to the hardware rails, which rasterizes as a screen-wide
-/// "exploded" triangle. Any triangle touching that band is dropped
-/// before emission; the camera's collision spring keeps ordinary play
-/// views out of this range, so the drop replaces a full-screen wrap,
-/// not a visible wall.
+/// "exploded" triangle. Triangles touching that band leave the fast
+/// path and go through [`clip_near_fan_triangle`], which clips them
+/// against the near plane and a screen-space guard band before
+/// emission, so room-scale faces stay visible from inside the room.
 const NEAR_VERTEX_DEPTH_MIN: i32 = 4;
 
 #[inline]
 fn near_plane_safe3(a: i32, b: i32, c: i32) -> bool {
     a >= NEAR_VERTEX_DEPTH_MIN && b >= NEAR_VERTEX_DEPTH_MIN && c >= NEAR_VERTEX_DEPTH_MIN
+}
+
+/// Half-extents of the near-clip guard band in screen pixels from the
+/// projection centre. The GPU silently skips primitives wider than
+/// 1023 or taller than 511, so clipped output must stay inside a
+/// 1000x500 box while still leaving generous off-screen margin around
+/// the visible 320x240 viewport.
+const NEAR_CLIP_GUARD_HALF_WIDTH: i32 = 500;
+const NEAR_CLIP_GUARD_HALF_HEIGHT: i32 = 250;
+
+/// Clip-space working vertex for the near-plane path.
+///
+/// `view` is the signed camera-space position from MVMVA (the value SZ
+/// saturates away), `position` the source-space position the GTE
+/// re-projects, and `source` the fan slot of an unclipped original
+/// vertex (or -1 for a generated intersection). Originals keep their
+/// already-projected screen/depth verbatim so shared edges with
+/// neighbouring unclipped triangles stay crack-free.
+#[derive(Copy, Clone, Default)]
+struct NearClipVertex {
+    view: [i32; 3],
+    position: [i32; 3],
+    uv: [i32; 2],
+    color: [i32; 3],
+    source: i8,
+}
+
+/// Clipped polygon capacity: 3 vertices plus one added per plane.
+const NEAR_CLIP_MAX_VERTICES: usize = 8;
+
+#[inline]
+fn near_clip_lerp_t_q12(mut inside: i32, mut span: i32) -> i32 {
+    // t = inside / span in [0, 1]. Both operands can carry view-space
+    // magnitudes near 2^28; shift them down together until the Q12
+    // scale-up cannot overflow.
+    while span >= 1 << 18 {
+        inside >>= 1;
+        span >>= 1;
+    }
+    (inside << 12) / span.max(1)
+}
+
+#[inline]
+fn near_clip_lerp(a: i32, b: i32, t_q12: i32) -> i32 {
+    a + (((b - a) * t_q12) >> 12)
+}
+
+/// Clip `polygon` against one plane `eval(v) >= 0`, writing the result
+/// into `output`. Returns the output vertex count.
+fn near_clip_against_plane(
+    polygon: &[NearClipVertex],
+    output: &mut [NearClipVertex; NEAR_CLIP_MAX_VERTICES],
+    eval: impl Fn(&NearClipVertex) -> i32,
+) -> usize {
+    let mut count = 0usize;
+    let mut emit = |vertex: NearClipVertex| {
+        if count < NEAR_CLIP_MAX_VERTICES {
+            output[count] = vertex;
+            count += 1;
+        }
+    };
+    let mut previous = polygon[polygon.len() - 1];
+    let mut previous_e = eval(&previous);
+    for &current in polygon {
+        let current_e = eval(&current);
+        if (previous_e >= 0) != (current_e >= 0) {
+            let (inside, outside, inside_e, span) = if previous_e >= 0 {
+                (previous, current, previous_e, previous_e - current_e)
+            } else {
+                (current, previous, current_e, current_e - previous_e)
+            };
+            let t = near_clip_lerp_t_q12(inside_e, span);
+            emit(NearClipVertex {
+                view: [
+                    near_clip_lerp(inside.view[0], outside.view[0], t),
+                    near_clip_lerp(inside.view[1], outside.view[1], t),
+                    near_clip_lerp(inside.view[2], outside.view[2], t),
+                ],
+                position: [
+                    near_clip_lerp(inside.position[0], outside.position[0], t),
+                    near_clip_lerp(inside.position[1], outside.position[1], t),
+                    near_clip_lerp(inside.position[2], outside.position[2], t),
+                ],
+                uv: [
+                    near_clip_lerp(inside.uv[0], outside.uv[0], t),
+                    near_clip_lerp(inside.uv[1], outside.uv[1], t),
+                ],
+                color: [
+                    near_clip_lerp(inside.color[0], outside.color[0], t),
+                    near_clip_lerp(inside.color[1], outside.color[1], t),
+                    near_clip_lerp(inside.color[2], outside.color[2], t),
+                ],
+                source: -1,
+            });
+        }
+        if current_e >= 0 {
+            emit(current);
+        }
+        previous = current;
+        previous_e = current_e;
+    }
+    count
+}
+
+/// Emit one triangle through the same subdivision bands as the fast
+/// fan walk (minus quad pairing, which needs fan adjacency).
+unsafe fn emit_near_clipped_tri<W: AffinePacketWriter>(
+    writer: &mut W,
+    tri: [&ClassicAffineVertex; 3],
+    scratch: *mut ClassicAffineVertex,
+) {
+    let profile = writer.profile();
+    let otz = average3(tri).clamp(1, profile.ot_depth - 1);
+    if otz < profile.subdivide_twice_at {
+        unsafe { subdivide_twice(writer, tri[0], tri[1], tri[2], scratch, otz) };
+    } else if otz < profile.subdivide_once_at {
+        unsafe { subdivide_once(writer, tri[0], tri[1], tri[2], scratch, otz) };
+    } else {
+        unsafe { writer.emit_tri(tri, tri, otz) };
+    }
+}
+
+/// Near-plane path for a fan triangle with at least one vertex inside
+/// the [`NEAR_VERTEX_DEPTH_MIN`] band.
+///
+/// The cached SZ of a behind-eye vertex saturates to zero, so the
+/// triangle is re-transformed with MVMVA (same loaded RT/TR as the
+/// projection that produced the cached values) to recover signed view
+/// coordinates, clipped against the near plane and the screen guard
+/// band, and the surviving polygon re-emitted. Generated vertices are
+/// re-projected through the GTE exactly like subdivision midpoints;
+/// surviving originals keep their cached projection so shared edges
+/// with unclipped neighbours cannot crack.
+#[cold]
+#[inline(never)]
+unsafe fn clip_near_fan_triangle<W: AffinePacketWriter>(
+    writer: &mut W,
+    tri: [&ClassicAffineVertex; 3],
+    scratch: *mut ClassicAffineVertex,
+) {
+    let mut ping = [NearClipVertex::default(); NEAR_CLIP_MAX_VERTICES];
+    let mut pong = [NearClipVertex::default(); NEAR_CLIP_MAX_VERTICES];
+    for (slot, vertex) in tri.iter().enumerate() {
+        let view = scene::transform_vertex_scheduled(Vec3I16::new(
+            vertex.position[0],
+            vertex.position[1],
+            vertex.position[2],
+        ));
+        ping[slot] = NearClipVertex {
+            view: [view.x, view.y, view.z],
+            position: [
+                vertex.position[0] as i32,
+                vertex.position[1] as i32,
+                vertex.position[2] as i32,
+            ],
+            uv: [vertex.uv[0] as i32, vertex.uv[1] as i32],
+            color: [
+                (vertex.color & 0xff) as i32,
+                ((vertex.color >> 8) & 0xff) as i32,
+                ((vertex.color >> 16) & 0xff) as i32,
+            ],
+            source: slot as i8,
+        };
+    }
+
+    let h = psx_gte::cfc2!(26) as u16 as i32;
+    let mut count = near_clip_against_plane(&ping[..3], &mut pong, |v| {
+        v.view[2] - NEAR_VERTEX_DEPTH_MIN
+    });
+    if count >= 3 && h > 0 {
+        // Screen guard band: |x| * H <= HALF_WIDTH * z (and the Y
+        // counterpart) bounds projected extent below the GPU's skip
+        // limits without touching anything near the visible viewport.
+        count = near_clip_against_plane(&pong[..count], &mut ping, |v| {
+            NEAR_CLIP_GUARD_HALF_WIDTH * v.view[2] - h * v.view[0]
+        });
+        if count >= 3 {
+            count = near_clip_against_plane(&ping[..count], &mut pong, |v| {
+                NEAR_CLIP_GUARD_HALF_WIDTH * v.view[2] + h * v.view[0]
+            });
+        }
+        if count >= 3 {
+            count = near_clip_against_plane(&pong[..count], &mut ping, |v| {
+                NEAR_CLIP_GUARD_HALF_HEIGHT * v.view[2] - h * v.view[1]
+            });
+            core::mem::swap(&mut ping, &mut pong);
+        }
+        if count >= 3 {
+            count = near_clip_against_plane(&pong[..count], &mut ping, |v| {
+                NEAR_CLIP_GUARD_HALF_HEIGHT * v.view[2] + h * v.view[1]
+            });
+            core::mem::swap(&mut ping, &mut pong);
+        }
+    }
+    if count < 3 {
+        return;
+    }
+
+    let mut emitted = [ClassicAffineVertex::default(); NEAR_CLIP_MAX_VERTICES];
+    for (slot, clip) in pong[..count].iter().enumerate() {
+        if clip.source >= 0 {
+            emitted[slot] = *tri[clip.source as usize];
+            continue;
+        }
+        emitted[slot] = ClassicAffineVertex {
+            position: [
+                clip.position[0].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                clip.position[1].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                clip.position[2].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            ],
+            uv: [
+                clip.uv[0].clamp(0, 255) as u8,
+                clip.uv[1].clamp(0, 255) as u8,
+            ],
+            color: (clip.color[0].clamp(0, 255) as u32)
+                | ((clip.color[1].clamp(0, 255) as u32) << 8)
+                | ((clip.color[2].clamp(0, 255) as u32) << 16),
+            screen: [0; 2],
+            depth: 0,
+        };
+        unsafe { project_one(&mut emitted[slot]) };
+    }
+    let mut fan = 2usize;
+    while fan < count {
+        unsafe {
+            emit_near_clipped_tri(
+                writer,
+                [&emitted[0], &emitted[fan - 1], &emitted[fan]],
+                scratch,
+            )
+        };
+        fan += 1;
+    }
 }
 
 #[inline(always)]
@@ -1878,6 +2134,174 @@ fn classic_tri_screen_clipped(screens: [[i16; 2]; 3], profile: ClassicAffineProf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn install_test_camera() {
+        psx_gte::host::reset();
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::ZERO);
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(200);
+        scene::set_avsz_weights(0x155, 0x100);
+    }
+
+    /// A floor-style quad fan plus the 12 scratch records the windowed
+    /// fan contract requires, ready for `submit_classic_affine_windowed_fan`.
+    fn floor_fan(z_near: i16, z_far: i16) -> [ClassicAffineVertex; 4 + EXTRA_VERTICES] {
+        let corner = |x: i16, z: i16, uv: [u8; 2]| ClassicAffineVertex {
+            position: [x, 100, z],
+            uv,
+            color: 0x0080_8080,
+            screen: [0; 2],
+            depth: 0,
+        };
+        let mut fan = [ClassicAffineVertex::default(); 4 + EXTRA_VERTICES];
+        fan[0] = corner(-2000, z_near, [0, 0]);
+        fan[1] = corner(2000, z_near, [255, 0]);
+        fan[2] = corner(2000, z_far, [255, 255]);
+        fan[3] = corner(-2000, z_far, [0, 255]);
+        fan
+    }
+
+    fn submit_floor_fan(fan: &mut [ClassicAffineVertex; 4 + EXTRA_VERTICES]) -> u32 {
+        let mut storage = [0u32; 8192];
+        let submit = unsafe {
+            submit_classic_affine_windowed_fan(
+                fan.as_mut_ptr(),
+                4,
+                storage.as_mut_ptr(),
+                0x0567,
+                0x1234,
+                0xe200_0000,
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        };
+        submit.packets
+    }
+
+    #[test]
+    fn near_clip_keeps_a_floor_quad_crossing_the_eye_plane_visible() {
+        install_test_camera();
+        // Two corners 1000 units behind the eye: the pre-clip drop
+        // erased this fan entirely (the invisible-floor regression).
+        let mut fan = floor_fan(-1000, 2000);
+        assert!(
+            submit_floor_fan(&mut fan) > 0,
+            "eye-plane-crossing floor must still emit packets"
+        );
+    }
+
+    #[test]
+    fn near_clip_still_drops_a_fully_behind_fan() {
+        install_test_camera();
+        let mut fan = floor_fan(-2000, -100);
+        assert_eq!(submit_floor_fan(&mut fan), 0);
+    }
+
+    #[test]
+    fn near_clip_leaves_fully_in_front_fans_on_the_fast_path() {
+        install_test_camera();
+        let mut fan = floor_fan(200, 2000);
+        assert!(submit_floor_fan(&mut fan) > 0);
+    }
+
+    #[test]
+    fn near_clip_covers_the_packed_retained_fan_path() {
+        install_test_camera();
+        let corner = |x: i16, z: i16| ClassicAffineSourceVertex {
+            position: [x, 100, z],
+            uv: [0, 0],
+            light: [255, 0],
+        };
+        let vertices = [
+            corner(-2000, -1000),
+            corner(2000, -1000),
+            corner(2000, 2000),
+            corner(-2000, 2000),
+        ];
+        // Four projected records plus the 12-record subdivision tail,
+        // u32-backed for the path's four-byte alignment contract.
+        let mut scratch = [0u32; 128];
+        let mut storage = [0u32; 8192];
+        let submit = unsafe {
+            submit_classic_affine_packed_fan(
+                vertices.as_ptr(),
+                4,
+                scratch.as_mut_ptr().cast(),
+                storage.as_mut_ptr(),
+                [0; 2],
+                [256, 0],
+                0x0567,
+                0x1234,
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        };
+        assert!(
+            submit.packets > 0,
+            "eye-plane-crossing packed fan must still emit packets"
+        );
+    }
+
+    #[test]
+    fn near_clip_plane_interpolates_view_depth_and_attributes() {
+        let vertex = |z: i32, u: i32, r: i32| NearClipVertex {
+            view: [0, 0, z],
+            position: [0, 0, z],
+            uv: [u, 0],
+            color: [r, 0, 0],
+            source: 0,
+        };
+        // Edge from z=-96 to z=104 crosses z=4 at t=0.5.
+        let triangle = [vertex(-96, 0, 0), vertex(104, 200, 200), vertex(104, 0, 0)];
+        let mut output = [NearClipVertex::default(); NEAR_CLIP_MAX_VERTICES];
+        let count = near_clip_against_plane(&triangle, &mut output, |v| {
+            v.view[2] - NEAR_VERTEX_DEPTH_MIN
+        });
+        assert_eq!(count, 4, "one clipped corner must yield a quad");
+        for clip in &output[..count] {
+            assert!(clip.view[2] >= NEAR_VERTEX_DEPTH_MIN);
+        }
+        assert_eq!(output[..count].iter().filter(|v| v.source < 0).count(), 2);
+        let mid = output[..count]
+            .iter()
+            .find(|v| v.source < 0 && v.uv[0] != 0)
+            .expect("the interpolated edge midpoint carries attributes");
+        assert_eq!(mid.view[2], NEAR_VERTEX_DEPTH_MIN);
+        assert_eq!(mid.uv[0], 100);
+        assert_eq!(mid.color[0], 100);
+    }
+
+    #[test]
+    fn near_clip_guard_band_bounds_projected_extent() {
+        // A vertex far to the side at shallow depth projects onto the
+        // GTE rails; the guard band must clip it to |x| * H <= 500 * z.
+        let h = 200;
+        let vertex = |x: i32, z: i32| NearClipVertex {
+            view: [x, 0, z],
+            position: [x, 0, z],
+            uv: [0, 0],
+            color: [0, 0, 0],
+            source: 0,
+        };
+        let triangle = [vertex(-4000, 8), vertex(4000, 8), vertex(0, 2000)];
+        let mut output = [NearClipVertex::default(); NEAR_CLIP_MAX_VERTICES];
+        let mut scratch = [NearClipVertex::default(); NEAR_CLIP_MAX_VERTICES];
+        let mut count = near_clip_against_plane(&triangle, &mut output, |v| {
+            NEAR_CLIP_GUARD_HALF_WIDTH * v.view[2] - h * v.view[0]
+        });
+        count = near_clip_against_plane(&output[..count], &mut scratch, |v| {
+            NEAR_CLIP_GUARD_HALF_WIDTH * v.view[2] + h * v.view[0]
+        });
+        assert!(count >= 3);
+        for clip in &scratch[..count] {
+            // Projected |x| = view_x * H / view_z stays within the
+            // guard half-width (one unit of integer-division slack).
+            let projected = (clip.view[0].abs() * h) / clip.view[2].max(1);
+            assert!(
+                projected <= NEAR_CLIP_GUARD_HALF_WIDTH + 1,
+                "guard band leaked a vertex to projected x {projected}"
+            );
+        }
+    }
 
     #[test]
     fn shared_vertex_layout_matches_retained_c_record() {
