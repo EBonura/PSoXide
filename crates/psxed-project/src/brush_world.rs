@@ -1403,6 +1403,61 @@ mod tests {
         );
     }
 
+    /// Hull 0 is served from the render BSP at runtime (Quake's hull 0);
+    /// the cooked per-brush clipnode chain stays the reference. Point
+    /// contents must agree everywhere inside the world, for the world
+    /// model and for a mover model.
+    #[test]
+    fn render_bsp_point_hull_matches_the_cooked_clipnode_chain() {
+        let compiled = authored_world(BrushWorldCookMode::Draft);
+        let mut map = PxbspResidentMap::with_capacity(compiled.pxbsp.bytes.len());
+        map.load(9, &mut SliceReader::new(&compiled.pxbsp.bytes))
+            .expect("resident PXBSP");
+        for model_index in 0..map.brush_models().len() {
+            let model = map.brush_models().get(model_index).expect("model");
+            let render = map
+                .model_collision_hull(model_index, 0)
+                .expect("render-served point hull");
+            let chain = psx_bsp::collision::CollisionHull::new(
+                map.planes(),
+                map.clip_nodes(),
+                model.head_nodes[1],
+            );
+            let (mut checked, mut solid) = (0usize, 0usize);
+            let mut y = model.mins.y as i32 + 1;
+            while y < model.maxs.y as i32 {
+                let mut z = model.mins.z as i32 + 1;
+                while z < model.maxs.z as i32 {
+                    let mut x = model.mins.x as i32 + 1;
+                    while x < model.maxs.x as i32 {
+                        let point = Vec3I32 {
+                            x: x * 4096,
+                            y: y * 4096,
+                            z: z * 4096,
+                        };
+                        let expected = chain.point_contents(point);
+                        assert_eq!(
+                            render.point_contents(point),
+                            expected,
+                            "model {model_index} contents at ({x}, {y}, {z})"
+                        );
+                        checked += 1;
+                        if expected == Some(psx_bsp::collision::CONTENTS_SOLID) {
+                            solid += 1;
+                        }
+                        x += 8;
+                    }
+                    z += 8;
+                }
+                y += 8;
+            }
+            assert!(
+                checked > 100 && solid > 0,
+                "model {model_index}: {checked} points, {solid} solid"
+            );
+        }
+    }
+
     #[test]
     fn cooked_world_point_hull_preserves_water_slime_and_lava_codes() {
         for (contents, expected) in [
