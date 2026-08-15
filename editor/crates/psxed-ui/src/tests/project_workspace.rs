@@ -2019,7 +2019,10 @@ fn placed_trigger_volume_contains_a_player_standing_on_the_placement_surface() {
         .find(|record| record.kind == psx_level::logic_kind::TRIGGER_VOLUME)
         .expect("cooked trigger volume");
     assert_eq!(trigger.wait_ticks, -1);
-    let feet = surface_y.round() as i32;
+    // BSP projects cook to engine (Quake) units; the editor stays authored
+    // scale, so authored heights divide before they meet cooked records.
+    let engine = |authored: f32| authored / psxed_project::units::WORLD_UNIT_DIVISOR as f32;
+    let feet = engine(surface_y).round() as i32;
     assert!(
         feet >= trigger.min[1] && feet <= trigger.max[1],
         "player feet at y={feet} must be inside the trigger's y span {}..={}",
@@ -2041,12 +2044,12 @@ fn placed_trigger_volume_contains_a_player_standing_on_the_placement_surface() {
     );
     let (_, half) = crate::editor_helpers::entity_bound_kind_and_size(&workspace, node)
         .expect("trigger volumes have a preview bound");
-    let drawn_min = node.transform.translation[1];
-    let drawn_max = drawn_min + half[1] * 2.0;
+    let drawn_min = engine(node.transform.translation[1]);
+    let drawn_max = drawn_min + engine(half[1] * 2.0);
     assert!(
         (drawn_min - trigger.min[1] as f32).abs() <= 1.0
             && (drawn_max - trigger.max[1] as f32).abs() <= 1.0,
-        "gizmo y span {drawn_min}..={drawn_max} must match the cooked {}..={}",
+        "gizmo y span {drawn_min}..={drawn_max} (engine units) must match the cooked {}..={}",
         trigger.min[1],
         trigger.max[1]
     );
@@ -3075,8 +3078,9 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
         }
     }
 
-    // The verified Aletha loadout: measured capsules, ci_player model with
-    // the joint-13 grip socket, the complete action set, and the crystal
+    // The verified Aletha loadout: rig-native capsules on the Aletha
+    // Delivered skeleton (hurtbox on the chest joint 8, sword hitboxes on
+    // the right hand joint 13), the artist moveset, and the crystal
     // covering material.
     let aletha = resource_by_name("Aletha", |data| matches!(data, ResourceData::Character(_)));
     let ResourceData::Character(aletha) = &aletha.data else {
@@ -3085,28 +3089,28 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
     assert_eq!(aletha.combat_capsules.len(), 4);
     let capsule = |index: usize| &aletha.combat_capsules[index];
     assert_eq!(capsule(0).name, "Torso Hurtbox");
-    assert_eq!(capsule(0).joint, 3);
+    assert_eq!(capsule(0).joint, 8);
     assert_eq!(capsule(0).capsule.radius, 180);
     assert_eq!(capsule(0).role, psxed_project::CombatCapsuleRole::Hurtbox);
     for (index, action, window, damage, poise) in [
         (
             1,
             psxed_project::CharacterAnimationAction::LightAttack,
-            (12, 15),
+            (3, 6),
             25,
             25,
         ),
         (
             2,
             psxed_project::CharacterAnimationAction::HeavyAttack,
-            (11, 14),
+            (6, 10),
             38,
             50,
         ),
         (
             3,
             psxed_project::CharacterAnimationAction::ComboAttack,
-            (12, 25),
+            (2, 6),
             30,
             30,
         ),
@@ -3130,7 +3134,7 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
     };
     assert_eq!(
         aletha_model_data.model_path,
-        "assets/models/ci_player/ci_player.psxmdl"
+        "assets/models/aletha_delivered/aletha_delivered.psxmdl"
     );
     let socket = aletha_model_data
         .attachments
@@ -3139,7 +3143,7 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
         .expect("Aletha model carries the right_hand_grip socket");
     assert_eq!(socket.joint, 13);
     let aletha_set = project.resource(aletha.animation_set.unwrap()).unwrap();
-    assert_eq!(aletha_set.name, "Aletha Complete Animation Set");
+    assert_eq!(aletha_set.name, "Aletha Delivered Animation Set");
     let aletha_material = project.resource(aletha.material.unwrap()).unwrap();
     assert_eq!(aletha_material.name, "Aletha Crystal");
 
@@ -4070,14 +4074,15 @@ fn souls_slice_project_is_authored_through_production_commands() {
     };
     assert_eq!(world.movers.len(), 1, "one lift-door mover");
     // Hulls must derive from the two authored character envelopes: hull one
-    // for the Aletha body, hull two for the Mantis body, never the 16/56
-    // characterless debug fallback.
+    // for the Aletha body, hull two for the Mantis body (authored 188/192 x
+    // 1024, cooked to engine units), never the 16/56 characterless debug
+    // fallback.
     let hulls: Vec<(usize, i32, i32)> = world
         .body_hulls
         .iter()
         .map(|hull| (hull.hull_index, hull.radius, hull.height))
         .collect();
-    assert_eq!(hulls, vec![(1, 188, 1024), (2, 192, 1024)]);
+    assert_eq!(hulls, vec![(1, 12, 64), (2, 12, 64)]);
     assert_eq!(
         package.game_entities.len(),
         2,
