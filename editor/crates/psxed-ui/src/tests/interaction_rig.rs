@@ -1,5 +1,4 @@
 use super::*;
-use crate::workspace::tools::BrushHandle3d;
 
 /// End-to-end mouse rig: every interaction goes through real egui raw
 /// input and the real `draw_viewport_3d_body`, so egui's click-vs-drag
@@ -201,20 +200,6 @@ impl MouseRig {
         }
     }
 
-    pub(crate) fn gizmo_axis_grab_point(&self, axis: usize) -> Pos2 {
-        let polylines = self
-            .workspace
-            .brush_element_gizmo_polylines_3d(RIG_VIEWPORT)
-            .expect("element gizmo visible");
-        let polyline = &polylines[axis];
-        if polyline.len() == 2 {
-            polyline[0] + (polyline[1] - polyline[0]) * 0.6
-        } else {
-            // Ring: grab a point partway around, away from the seam.
-            polyline[polyline.len() / 6]
-        }
-    }
-
     /// Screen position of a brush handle for the current edit mode.
     pub(crate) fn handle_screen(&self, handle_world: [f64; 3]) -> Pos2 {
         self.world_to_screen(handle_world)
@@ -293,11 +278,6 @@ impl MouseRig {
         );
     }
 
-    pub(crate) fn has_vertex(&self, expect: [f64; 3]) -> bool {
-        crate::workspace::brush_elements::unique_vertices(&self.brush().solve())
-            .iter()
-            .any(|vertex| (0..3).all(|axis| (vertex[axis] - expect[axis]).abs() <= 1.0))
-    }
 }
 
 /// The full interaction matrix on one cube: select each element kind
