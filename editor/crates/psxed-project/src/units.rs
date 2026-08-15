@@ -302,7 +302,12 @@ pub fn scale_default_character_to_engine_units(character: &mut crate::CharacterR
 /// entry, for BSP-format projects only.
 pub fn scale_project_to_engine_units(project: &mut ProjectDocument) {
     for scene in &mut project.scenes {
-        scale_scene(scene);
+        for brush in &mut scene.brushes {
+            scale_brush(brush);
+        }
+        for node in &mut scene.nodes {
+            scale_node(node);
+        }
     }
     for resource in &mut project.resources {
         scale_resource(&mut resource.data);
