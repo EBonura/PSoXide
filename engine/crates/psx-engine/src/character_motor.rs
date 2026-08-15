@@ -18,30 +18,30 @@ use crate::{
 use psx_math::int32::{abs_i32, isqrt_i32, square_i32_saturating};
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
-const DEFAULT_BODY_HEIGHT: i32 = 768;
+const DEFAULT_BODY_HEIGHT: i32 = 48;
 /// Max height (engine units) of a wall the character steps over instead
 /// of being blocked by. A riser whose top is within this of the feet is
 /// treated as a step (the floor probe already found walkable floor on the
 /// far side, so the body simply rises onto it); taller walls still block.
 /// Sits in the gap between demo-scale steps (<=~576) and real walls
 /// (>=~1152).
-const STEP_UP_HEIGHT: i32 = 640;
+const STEP_UP_HEIGHT: i32 = 40;
 /// Largest drop the feet snap straight down to (the descent counterpart of
 /// [`STEP_UP_HEIGHT`]): walking down demo-scale steps stays glued to the
 /// floor. A larger drop -- a ledge, or a hole over a lower floor -- leaves
 /// the body airborne instead, and [`CharacterMotorState::apply_vertical`]
 /// lets it fall.
-const STEP_DOWN_HEIGHT: i32 = 640;
+const STEP_DOWN_HEIGHT: i32 = 40;
 /// Downward acceleration applied to an airborne body each fixed tick, in
 /// engine units per tick^2. Integer fixed-point (the PS1 has no FPU).
-const GRAVITY_PER_TICK: i32 = 96;
+const GRAVITY_PER_TICK: i32 = 6;
 /// Q8 gravity multiplier representing 1.0x body weight.
 const DEFAULT_WEIGHT_Q8: u16 = 256;
 const MIN_WEIGHT_Q8: u16 = 1;
 const MAX_WEIGHT_Q8: u16 = 4096;
 /// Terminal downward speed in engine units per tick, so a long fall stays
 /// bounded and deterministic.
-const MAX_FALL_SPEED: i32 = 768;
+const MAX_FALL_SPEED: i32 = 48;
 const MAX_MOTOR_CATCHUP_VBLANKS: u16 = 4;
 /// Maximum downward BSP/provider probe in engine world units.
 const TRACE_FLOOR_PROBE_DOWN: i32 = 32_767;
@@ -529,12 +529,12 @@ impl CharacterMotorConfig {
             sprint_drain_q12: 40,
             stamina_recover_q12: 36,
             roll_cost_q12: 768,
-            roll_speed: 96,
+            roll_speed: 6,
             roll_active_frames: 14,
             roll_recovery_frames: 12,
             roll_invulnerable_frames: 10,
             backstep_cost_q12: 512,
-            backstep_speed: 72,
+            backstep_speed: 5,
             backstep_active_frames: 8,
             backstep_recovery_frames: 10,
             backstep_invulnerable_frames: 6,
@@ -3850,10 +3850,10 @@ mod tests {
         // Feet on the lower floor at y=0, body 768 tall. A short riser
         // (top 320, a demo-scale step) overlaps the body but is within a
         // step of the feet, so it must NOT block: the character steps up.
-        let step = [0, 0, 320, 320];
-        assert!(vertical_ranges_overlap(0, 768, step), "step overlaps body");
+        let step = [0, 0, 20, 20];
+        assert!(vertical_ranges_overlap(0, 48, step), "step overlaps body");
         assert!(
-            !wall_blocks_body(0, 768, step),
+            !wall_blocks_body(0, 48, step),
             "a low riser within STEP_UP_HEIGHT must be steppable"
         );
     }
@@ -4217,7 +4217,7 @@ mod tests {
         assert_eq!(frame.action, CharacterMotorAction::Roll);
         assert_eq!(frame.anim, CharacterMotorAnim::Roll);
         assert_eq!(frame.yaw, Angle::ZERO);
-        assert_eq!(frame.position, RoomPoint::new(0, 0, 96));
+        assert_eq!(frame.position, RoomPoint::new(0, 0, 6));
     }
 
     #[test]
@@ -4451,7 +4451,7 @@ mod tests {
         let lower = RuntimeRoom::from_bytes(&lower_bytes).expect("lower parses");
         let rooms = [
             CharacterCollisionRoom::new(upper, 0, 0),
-            CharacterCollisionRoom::new(lower, 1024, 0).with_offset_y(-3584),
+            CharacterCollisionRoom::new(lower, 1024, 0).with_offset_y(-224),
         ];
         // x in [1024, 2048) is the hole cell.
         let mut motor = CharacterMotorState::new(RoomPoint::new(1536, 0, 512), Angle::ZERO);
@@ -4468,8 +4468,8 @@ mod tests {
             rest_y = f.position.y;
             min_y = min_y.min(f.position.y);
         }
-        assert_eq!(rest_y, -3584, "falls through the hole onto the lower floor");
-        assert!(min_y >= -3584, "never falls through the lower floor");
+        assert_eq!(rest_y, -224, "falls through the hole onto the lower floor");
+        assert!(min_y >= -224, "never falls through the lower floor");
     }
 
     #[test]
@@ -4533,7 +4533,7 @@ mod tests {
         let bytes = flat_floor_world();
         let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
         let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
-        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 320, 512), Angle::ZERO);
+        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 20, 512), Angle::ZERO);
         let cfg = config();
         for i in 0..20 {
             let f = motor.update_vblanks_with_collision(
@@ -4829,7 +4829,7 @@ mod tests {
         assert_eq!(frame.action, CharacterMotorAction::Roll);
         assert_eq!(frame.anim, CharacterMotorAnim::Roll);
         assert!(frame.invulnerable);
-        assert_eq!(frame.position, RoomPoint::new(0, 0, 96));
+        assert_eq!(frame.position, RoomPoint::new(0, 0, 6));
     }
 
     #[test]
@@ -4878,7 +4878,7 @@ mod tests {
         assert_eq!(frame.action, CharacterMotorAction::Roll);
         assert_eq!(frame.anim, CharacterMotorAnim::Roll);
         assert_eq!(frame.yaw, Angle::HALF);
-        assert_eq!(frame.position, RoomPoint::new(0, 0, -96));
+        assert_eq!(frame.position, RoomPoint::new(0, 0, -6));
     }
 
     #[test]

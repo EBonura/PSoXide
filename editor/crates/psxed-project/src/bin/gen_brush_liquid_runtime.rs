@@ -151,7 +151,7 @@ mod tests {
                 .as_nanos()
         ));
         generate(&generated);
-        let project = ProjectDocument::load_from_path(&generated.join("project.ron")).unwrap();
+        let mut project = ProjectDocument::load_from_path(&generated.join("project.ron")).unwrap();
         let scene = project.active_scene();
         assert_eq!(scene.brushes.len(), 6);
         assert_eq!(
@@ -171,6 +171,7 @@ mod tests {
             5
         );
 
+        psxed_project::units::scale_project_to_engine_units(&mut project);
         let compiled = compile_brush_world(
             &project,
             BrushWorldCookOptions {
@@ -185,12 +186,12 @@ mod tests {
         map.load(0, &mut SliceReader::new(&compiled.pxbsp.bytes))
             .expect("load generated PXBSP");
         let hull = map.model_collision_hull(0, 0).expect("point hull");
-        for y in [66, 93, 120] {
+        for y in [5, 6, 7] {
             assert_eq!(
                 hull.point_contents(Vec3I32 {
-                    x: 512 * 4096,
+                    x: 32 * 4096,
                     y: y * 4096,
-                    z: 512 * 4096,
+                    z: 32 * 4096,
                 }),
                 Some(psx_bsp::collision::CONTENTS_LAVA),
                 "spawn sample y={y}"

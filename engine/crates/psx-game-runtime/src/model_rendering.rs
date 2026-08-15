@@ -1833,7 +1833,7 @@ fn model_origin_floor_lift(world_height: u16) -> i32 {
 }
 
 const MODEL_BOUNDS_SCREEN_MARGIN: i32 = 192;
-const MODEL_BOUNDS_RUNTIME_RADIUS_PAD: i32 = 128;
+const MODEL_BOUNDS_RUNTIME_RADIUS_PAD: i32 = 8;
 
 #[derive(Clone, Copy, Default)]
 struct ModelClipAnchor {

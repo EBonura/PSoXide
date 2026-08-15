@@ -33,6 +33,7 @@ pub mod resolve;
 pub mod room_connections;
 pub mod spatial;
 pub mod streaming;
+pub mod units;
 pub mod texture_import;
 mod ui_types;
 pub mod world_cook;
