@@ -17,6 +17,19 @@ const PLAYER_RADIUS: i32 = 188;
 const PLAYER_HEIGHT: i32 = 1024;
 const ROUTE_STEP: i32 = 64;
 
+/// The route proof drives the COOKED map, which the cook divides by
+/// `WORLD_UNIT_DIVISOR`; authored route numbers cross into engine units
+/// here with the cook's rounding.
+const fn engine(authored: i32) -> i32 {
+    let d = psxed_project::units::WORLD_UNIT_DIVISOR;
+    (authored + d / 2) / d
+}
+
+/// A cooked-space point one engine unit above an authored floor height.
+fn point(x: i32, floor: i32, z: i32) -> RoomPoint {
+    RoomPoint::new(engine(x), engine(floor) + 1, engine(z))
+}
+
 fn collision_models(doors: &BrushDoorSet<3>) -> Vec<PxbspCollisionModel> {
     doors
         .iter()
@@ -43,15 +56,15 @@ fn body_trace(
         hull_index,
         &models,
         CollisionTraceShape::Body {
-            radius: PLAYER_RADIUS,
-            height: PLAYER_HEIGHT,
+            radius: engine(PLAYER_RADIUS),
+            height: engine(PLAYER_HEIGHT),
         },
         &mut scratch,
     )
     .expect("resident Ashen Sanctum player-body provider");
     trace_collision(
         &mut provider,
-        CollisionTraceQuery::body(start, end, PLAYER_RADIUS, PLAYER_HEIGHT),
+        CollisionTraceQuery::body(start, end, engine(PLAYER_RADIUS), engine(PLAYER_HEIGHT)),
     )
     .expect("Ashen Sanctum body trace")
 }
@@ -71,14 +84,21 @@ fn body_step(
         hull_index,
         &models,
         CollisionTraceShape::Body {
-            radius: PLAYER_RADIUS,
-            height: PLAYER_HEIGHT,
+            radius: engine(PLAYER_RADIUS),
+            height: engine(PLAYER_HEIGHT),
         },
         &mut scratch,
     )
     .expect("resident Ashen Sanctum player-body provider");
-    commit_body_step_with_trace_provider(&mut provider, start, dx, dz, PLAYER_RADIUS, PLAYER_HEIGHT)
-        .expect("Ashen Sanctum body step")
+    commit_body_step_with_trace_provider(
+        &mut provider,
+        start,
+        dx,
+        dz,
+        engine(PLAYER_RADIUS),
+        engine(PLAYER_HEIGHT),
+    )
+    .expect("Ashen Sanctum body step")
 }
 
 fn walk_axis_aligned(
@@ -90,13 +110,14 @@ fn walk_axis_aligned(
     target_x: i32,
     target_z: i32,
 ) -> RoomPoint {
+    let (target_x, target_z) = (engine(target_x), engine(target_z));
     assert!(
         position.x == target_x || position.z == target_z,
         "{label}: route segment must be axis aligned: {position:?} -> ({target_x}, {target_z})"
     );
     for _ in 0..512 {
-        let dx = (target_x - position.x).clamp(-ROUTE_STEP, ROUTE_STEP);
-        let dz = (target_z - position.z).clamp(-ROUTE_STEP, ROUTE_STEP);
+        let dx = (target_x - position.x).clamp(-engine(ROUTE_STEP), engine(ROUTE_STEP));
+        let dz = (target_z - position.z).clamp(-engine(ROUTE_STEP), engine(ROUTE_STEP));
         if dx == 0 && dz == 0 {
             return position;
         }
@@ -104,7 +125,7 @@ fn walk_axis_aligned(
         if !step.moved {
             let target = RoomPoint::new(position.x + dx, position.y, position.z + dz);
             let direct = body_trace(map, hull_index, doors, position, target);
-            let raised = position.with_y(position.y + 640);
+            let raised = position.with_y(position.y + engine(640));
             let lift = body_trace(map, hull_index, doors, position, raised);
             let raised_across = body_trace(map, hull_index, doors, raised, target.with_y(raised.y));
             panic!(
@@ -164,7 +185,11 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
     let mut map = PxbspResidentMap::with_capacity(world.bytes.len());
     map.load(0, &mut SliceReader::new(&world.bytes))
         .expect("load cooked Ashen Sanctum PXBSP");
-    let hull_index = select_body_hull(&world.body_hulls, PLAYER_RADIUS, PLAYER_HEIGHT)
+    let hull_index = select_body_hull(
+        &world.body_hulls,
+        engine(PLAYER_RADIUS),
+        engine(PLAYER_HEIGHT),
+    )
         .expect("cooked player body hull");
     assert_eq!(
         hull_index, 1,
@@ -190,7 +215,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         "door runtime order must match the cooked mover contract"
     );
 
-    let mut position = RoomPoint::new(3840, LOWER_FLOOR + 1, 21376);
+    let mut position = point(3840, LOWER_FLOOR, 21376);
     let spawn = body_trace(&map, hull_index, &doors, position, position);
     assert!(
         !spawn.start_solid && !spawn.all_solid,
@@ -225,7 +250,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         5248,
         9280,
     );
-    assert_eq!(position.y, COURT_FLOOR, "lower ascent reaches court height");
+    assert_eq!(position.y, engine(COURT_FLOOR), "lower ascent reaches court height");
     // Visit the first checkpoint landmark, then prove the first gate blocks
     // in its closed state and clears at its translated open endpoint.
     position = walk_axis_aligned(
@@ -297,8 +322,8 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         &mut doors,
         0,
         "First Warden Gate",
-        RoomPoint::new(7800, COURT_FLOOR + 1, 10880),
-        RoomPoint::new(8700, COURT_FLOOR + 1, 10880),
+        point(7800, COURT_FLOOR, 10880),
+        point(8700, COURT_FLOOR, 10880),
     );
     position = walk_axis_aligned(
         &map,
@@ -331,7 +356,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         11200,
         7040,
     );
-    assert_eq!(position.y, RELAY_FLOOR, "side escape reaches relay height");
+    assert_eq!(position.y, engine(RELAY_FLOOR), "side escape reaches relay height");
     position = walk_axis_aligned(
         &map,
         hull_index,
@@ -374,8 +399,8 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         &mut doors,
         1,
         "Sanctum Shortcut",
-        RoomPoint::new(7168, COURT_FLOOR + 1, 8400),
-        RoomPoint::new(7168, COURT_FLOOR + 1, 9100),
+        point(7168, COURT_FLOOR, 8400),
+        point(7168, COURT_FLOOR, 9100),
     );
     position = walk_axis_aligned(
         &map,
@@ -386,7 +411,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         7168,
         9200,
     );
-    assert_eq!(position.y, COURT_FLOOR, "shortcut climbs to arrival court");
+    assert_eq!(position.y, engine(COURT_FLOOR), "shortcut climbs to arrival court");
     position = walk_axis_aligned(
         &map,
         hull_index,
@@ -396,7 +421,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         7168,
         8400,
     );
-    assert_eq!(position.y, RELAY_FLOOR, "shortcut returns to relay height");
+    assert_eq!(position.y, engine(RELAY_FLOOR), "shortcut returns to relay height");
 
     // Equipment hall, all five upper risers, the aligned rail opening and the
     // four supported 512-unit drops back into the same physical arena.
@@ -436,7 +461,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         19000,
         6912,
     );
-    assert_eq!(position.y, 4096, "upper ascent reaches rampart height");
+    assert_eq!(position.y, engine(4096), "upper ascent reaches rampart height");
     position = walk_axis_aligned(
         &map,
         hull_index,
@@ -465,7 +490,8 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         11000,
     );
     assert_eq!(
-        position.y, COURT_FLOOR,
+        position.y,
+        engine(COURT_FLOOR),
         "upper route returns to same arena floor"
     );
 
@@ -495,8 +521,8 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         &mut doors,
         2,
         "Far Warden Gate",
-        RoomPoint::new(14800, COURT_FLOOR + 1, 11904),
-        RoomPoint::new(15800, COURT_FLOOR + 1, 11904),
+        point(14800, COURT_FLOOR, 11904),
+        point(15800, COURT_FLOOR, 11904),
     );
     position = walk_axis_aligned(
         &map,
@@ -516,7 +542,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         21000,
         11904,
     );
-    assert_eq!(position.y, 2816, "cliff route reaches its fourth stage");
+    assert_eq!(position.y, engine(2816), "cliff route reaches its fourth stage");
 }
 
 fn resource_id(
