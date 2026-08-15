@@ -887,7 +887,7 @@ impl EditorWorkspace {
         let vertices = brush_elements::unique_vertices(&solved);
         let edges = brush_elements::unique_edges(&solved);
         let mut targets: Vec<[f64; 3]> = Vec::new();
-        let mut push = |point: [f64; 3], targets: &mut Vec<[f64; 3]>| {
+        let push = |point: [f64; 3], targets: &mut Vec<[f64; 3]>| {
             if !targets
                 .iter()
                 .any(|seen| (0..3).all(|axis| (seen[axis] - point[axis]).abs() <= 0.5))
@@ -4137,7 +4137,7 @@ impl EditorWorkspace {
             // (the element set, plus the mirrored single-face state).
             if self.selected_brush == Some(index) {
                 let solved = brush.solve();
-                let mut emphasize = |face: usize| {
+                let emphasize = |face: usize| {
                     if let Some(Some(polygon)) = solved.polygons.get(face) {
                         let count = polygon.verts.len();
                         // Translucent fill so a selected face reads as
