@@ -204,9 +204,7 @@ mod tests {
 
     #[test]
     fn subdivided_bake_resolves_a_mid_face_hotspot() {
-        use crate::brush_compile::{
-            compile_csg_surfaces, subdivide_surfaces_for_lighting, LIGHT_SUBDIVISION_UNITS,
-        };
+        use crate::brush_compile::{compile_csg_surfaces, subdivide_surfaces_for_lighting};
         // A big slab with a light hovering over its centre: without
         // subdivision the corners are ~1500 units away and dim; with it,
         // interior vertices near the light bake far brighter, the
