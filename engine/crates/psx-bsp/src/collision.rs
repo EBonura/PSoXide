@@ -4,7 +4,7 @@
 //! authorship). This is PSoXide's canonical allocation-free implementation.
 //! PXBSP positions are Y-up Q20.12 and plane normals are Q3.12.
 
-use crate::{ClipNode, Plane, RecordSlice, Vec3I16, Vec3I32};
+use crate::{ClipNode, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32};
 use psx_engine::div_q12_i32;
 use psx_gte::math::Mat3I16;
 use psx_math::int32::mul_q12_i32;
@@ -211,10 +211,69 @@ impl Trace {
     }
 }
 
+/// Where a hull's split nodes live.
+///
+/// Quake serves hull 0 (point traces) from the render BSP itself: the same
+/// balanced tree the renderer walks, with leaf records carrying contents.
+/// The cooked clipnode chains are a per-brush plane list, so a point
+/// location there costs O(brushes) and a long trace pays that at every
+/// straddle; on a 460-brush map that was ~1.4M cycles per camera solve.
+#[derive(Copy, Clone)]
+enum HullNodes<'a> {
+    Clip(RecordSlice<'a, ClipNode>),
+    Render {
+        nodes: RecordSlice<'a, Node>,
+        leaves: RecordSlice<'a, Leaf>,
+    },
+}
+
+impl<'a> HullNodes<'a> {
+    #[inline(always)]
+    fn len(&self) -> usize {
+        match self {
+            Self::Clip(nodes) => nodes.len(),
+            Self::Render { nodes, .. } => nodes.len(),
+        }
+    }
+
+    /// Splitter plane and children of one node. Render nodes share the
+    /// clipnode head layout (plane u16, children i16 x2), so only those six
+    /// bytes are decoded on the hot path.
+    #[inline(always)]
+    fn get(&self, index: usize) -> Option<ClipNode> {
+        match self {
+            Self::Clip(nodes) => nodes.get(index),
+            Self::Render { nodes, .. } => {
+                let bytes = nodes.record_bytes(index)?;
+                Some(ClipNode {
+                    plane: i16::from_le_bytes([bytes[0], bytes[1]]),
+                    children: [
+                        i16::from_le_bytes([bytes[2], bytes[3]]),
+                        i16::from_le_bytes([bytes[4], bytes[5]]),
+                    ],
+                })
+            }
+        }
+    }
+
+    /// Resolve a negative child to contents: clipnodes store contents
+    /// directly, render nodes store `-(leaf + 1)`.
+    #[inline(always)]
+    fn contents(&self, child: i16) -> Option<i16> {
+        match self {
+            Self::Clip(_) => Some(child),
+            Self::Render { leaves, .. } => {
+                let leaf = (-1i32 - child as i32) as usize;
+                leaves.get(leaf).map(|leaf| leaf.contents)
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct CollisionHull<'a> {
     planes: RecordSlice<'a, Plane>,
-    nodes: RecordSlice<'a, ClipNode>,
+    nodes: HullNodes<'a>,
     head_node: i16,
 }
 
@@ -226,7 +285,22 @@ impl<'a> CollisionHull<'a> {
     ) -> Self {
         Self {
             planes,
-            nodes,
+            nodes: HullNodes::Clip(nodes),
+            head_node,
+        }
+    }
+
+    /// A point hull served by the render BSP (Quake's hull 0): balanced
+    /// tree, leaf contents from the leaf records.
+    pub const fn from_render_bsp(
+        planes: RecordSlice<'a, Plane>,
+        nodes: RecordSlice<'a, Node>,
+        leaves: RecordSlice<'a, Leaf>,
+        head_node: i16,
+    ) -> Self {
+        Self {
+            planes,
+            nodes: HullNodes::Render { nodes, leaves },
             head_node,
         }
     }
@@ -339,9 +413,12 @@ impl<'a> CollisionHull<'a> {
                 segment_end = middle;
             }
 
-            if node_index != CONTENTS_SOLID {
+            let Some(contents) = self.nodes.contents(node_index) else {
+                return false;
+            };
+            if contents != CONTENTS_SOLID {
                 trace.all_solid = TraceFlag::CLEAR;
-                if node_index == CONTENTS_EMPTY {
+                if contents == CONTENTS_EMPTY {
                     trace.in_open = TraceFlag::SET;
                 } else {
                     trace.in_water = TraceFlag::SET;
@@ -414,7 +491,7 @@ impl<'a> CollisionHull<'a> {
             let plane = self.planes.get(node.plane as usize)?;
             node_index = node.children[(plane_distance(plane, *point) < 0) as usize];
         }
-        Some(node_index)
+        self.nodes.contents(node_index)
     }
 }
 
