@@ -2924,11 +2924,11 @@ pub const WORLD_SECTOR_SIZE_QUANTUM: i32 = 128;
 /// Default sector size used by starter/legacy projects.
 pub const DEFAULT_WORLD_SECTOR_SIZE: i32 = 1024;
 /// Default third-person camera distance inherited by rooms.
-pub const DEFAULT_WORLD_CAMERA_DISTANCE: i32 = 2700;
+pub const DEFAULT_WORLD_CAMERA_DISTANCE: i32 = 2000;
 /// Default camera origin height above the player origin.
-pub const DEFAULT_WORLD_CAMERA_HEIGHT: i32 = 1280;
+pub const DEFAULT_WORLD_CAMERA_HEIGHT: i32 = 1000;
 /// Default look-at height above the player origin.
-pub const DEFAULT_WORLD_CAMERA_TARGET_HEIGHT: i32 = 640;
+pub const DEFAULT_WORLD_CAMERA_TARGET_HEIGHT: i32 = 850;
 /// Default additional lock-on camera elevation as a percentage of Height.
 pub const DEFAULT_WORLD_CAMERA_LOCK_RISE_PERCENT: u8 = 25;
 /// Default minimum camera origin height above the sampled floor.
@@ -2942,7 +2942,11 @@ pub const DEFAULT_WORLD_CAMERA_FOCUS_LAG_SHIFT: u8 = 2;
 /// Default camera boom-distance recovery lag shift. Lower values move faster.
 pub const DEFAULT_WORLD_CAMERA_DISTANCE_LAG_SHIFT: u8 = 3;
 /// Minimum authored third-person camera distance.
-pub const MIN_WORLD_CAMERA_DISTANCE: i32 = 384;
+// Degenerate-distance floor only. The cook normalizes AFTER the 16x
+// engine-unit divide, so this must be harmless at BOTH scales; 384
+// silently clamped every engine-scale (Quake-unit) camera up to a
+// far view.
+pub const MIN_WORLD_CAMERA_DISTANCE: i32 = 16;
 /// Maximum authored third-person camera distance.
 pub const MAX_WORLD_CAMERA_DISTANCE: i32 = 16_384;
 /// Maximum authored camera vertical offset.
