@@ -8,7 +8,6 @@ use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
 use crate::brush_compile::{build_surface_bsp, compile_csg_surfaces, subdivide_surfaces_to_extent};
-use crate::units::ENGINE_SURFACE_EXTENT_UNITS;
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
 };
@@ -18,6 +17,7 @@ use crate::brush_pxbsp::{
     build_pxbsp_with_submodels, pxbsp_material_slots, CompiledPxbsp, PxbspBuildError,
     PxbspEntityInput, PxbspMapPayloads, PxbspSubmodel,
 };
+use crate::units::ENGINE_SURFACE_EXTENT_UNITS;
 use crate::{
     resolve_material_texture_psxt, LogicNodeKind, MaterialAnimationMode, MaterialFaceSidedness,
     NodeId, NodeKind, ProjectDocument, PsxBlendMode, ResourceData, ResourceId, Scene,

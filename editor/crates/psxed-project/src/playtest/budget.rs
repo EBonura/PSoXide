@@ -344,9 +344,9 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
     }
     let faces = map.faces();
     let triangles_of = |surface: usize| -> usize {
-        faces
-            .get(surface)
-            .map_or(0, |face| (face.vertex_count.max(0) as usize).saturating_sub(2))
+        faces.get(surface).map_or(0, |face| {
+            (face.vertex_count.max(0) as usize).saturating_sub(2)
+        })
     };
     let total: usize = (0..faces.len()).map(triangles_of).sum();
     // The packet arena only ever holds ONE frame's draw, and a frame
@@ -388,7 +388,11 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
         }
         worst = worst.max(frame_triangles);
     }
-    if worst == 0 { total } else { worst }
+    if worst == 0 {
+        total
+    } else {
+        worst
+    }
 }
 
 fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {

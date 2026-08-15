@@ -19,10 +19,7 @@ fn main() {
             .nth(1)
             .expect("usage: backfill_joint_names <project.ron>"),
     );
-    let root = project_path
-        .parent()
-        .expect("project root")
-        .to_path_buf();
+    let root = project_path.parent().expect("project root").to_path_buf();
     let mut project = ProjectDocument::load_from_path(&project_path).expect("load project.ron");
 
     let backup = root.join("logs").join("project.ron.pre-jointnames.bak");
@@ -64,8 +61,7 @@ fn main() {
         }
         // Default config: names only depend on the collapse patterns,
         // which every import so far used at their defaults.
-        let package = match preview_model_with_animation_sources(&source, &[], Default::default())
-        {
+        let package = match preview_model_with_animation_sources(&source, &[], Default::default()) {
             Ok(package) => package,
             Err(error) => {
                 println!("{name}: cook failed ({error}), skipped");
@@ -91,7 +87,9 @@ fn main() {
         updated += 1;
     }
     if updated > 0 {
-        project.save_to_path(&project_path).expect("save project.ron");
+        project
+            .save_to_path(&project_path)
+            .expect("save project.ron");
         println!("saved {}", project_path.display());
     } else {
         println!("nothing to update");

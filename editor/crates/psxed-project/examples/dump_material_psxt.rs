@@ -25,10 +25,13 @@ fn main() {
             resource.name == name && matches!(resource.data, ResourceData::Material(_))
         })
         .unwrap_or_else(|| panic!("no Material resource named {name:?}"));
-    let (key, bytes) =
-        psxed_project::resolve_material_texture_psxt(&project, material.id, root)
-            .expect("resolve material texture")
-            .expect("material resolves to no texture");
+    let (key, bytes) = psxed_project::resolve_material_texture_psxt(&project, material.id, root)
+        .expect("resolve material texture")
+        .expect("material resolves to no texture");
     std::fs::write(&out, &bytes).expect("write psxt");
-    println!("{name} -> {} ({} bytes, key {key})", out.display(), bytes.len());
+    println!(
+        "{name} -> {} ({} bytes, key {key})",
+        out.display(),
+        bytes.len()
+    );
 }
