@@ -129,18 +129,30 @@ pub struct CompiledSurfaceBsp {
     pub surfaces: Vec<CompiledSurface>,
 }
 
-/// Lighting patch size, world units: surfaces subdivide so no patch
-/// spans more than this along any world axis before the vertex bake.
-/// Mirrors Quake's ~240-unit lightmap face subdivision, which is what
-/// lets per-vertex light resolve hotspots and shadow edges mid-face
-/// instead of only at original corners. Our worlds run ~4x Quake's
-/// unit scale (1024-unit sectors, 2048-span walls), so 1024 here is
-/// Quake's proportional detail; finer grids blow the packer's 64k
-/// mark-surface limit, the guest's packet arena, and the 2MB RAM
-/// budget on real levels (the sanctum's worst PVS leaf saw 3.6k
-/// surfaces at 1024). Applied only when the scene has lights, so
-/// lightless maps pay no extra geometry.
-pub const LIGHT_SUBDIVISION_UNITS: f64 = 2048.0;
+/// qbsp-parity hard cap on face extent, world units: every cooked
+/// surface subdivides so no piece spans more than this along any axis,
+/// with or without lights (Quake's qbsp splits every face to its
+/// lightmap extents the same way; small faces are also its near-plane
+/// safety, since an eye-plane-crossing sliver saturates past the GPU's
+/// 1023x511 draw limit and skips instead of wrapping). 2048 here is
+/// measured, not aesthetic: PSoXide content runs ~18x Quake's unit
+/// scale, so this is already finer than Quake's ~272 units scaled
+/// proportionally, and the sanctum's worst PVS leaf sits at 2097
+/// surfaces / 4198 packets against the 4096-packet arena. 1024 cooks
+/// but overflows the arena (7472); 256 cooks only thanks to exact
+/// leaf marks and then wants 37918 packets, which no runtime budget
+/// survives. Tighten only together with a packet/RAM plan.
+pub const SURFACE_EXTENT_UNITS: f64 = 2048.0;
+
+/// Split every surface into patches no wider than `max_extent` on any
+/// world axis, unconditionally: [`subdivide_surfaces_for_lighting`]
+/// with a light gate that always passes.
+pub fn subdivide_surfaces_to_extent(
+    surfaces: Vec<CompiledSurface>,
+    max_extent: f64,
+) -> Vec<CompiledSurface> {
+    subdivide_surfaces_for_lighting(surfaces, max_extent, &[([0.0; 3], f64::INFINITY)])
+}
 
 /// Split every surface into patches no wider than `max_extent` along
 /// any world axis, cutting on grid-aligned world planes so adjacent
@@ -350,20 +362,77 @@ pub fn build_surface_bsp(surfaces: &[CompiledSurface]) -> CompiledSurfaceBsp {
         leaves: Vec::new(),
         surfaces: Vec::new(),
     };
-    bsp.root = build_surface_bsp_branch(surfaces.to_vec(), &[], &mut bsp);
+    bsp.root = build_surface_bsp_branch(surfaces.to_vec(), &mut bsp);
+    rebuild_exact_leaf_marks(&mut bsp);
     bsp
 }
 
-fn build_surface_bsp_branch(
-    surfaces: Vec<CompiledSurface>,
-    boundary_surfaces: &[usize],
-    bsp: &mut CompiledSurfaceBsp,
-) -> BspChild {
+/// qbsp-parity leaf marking: each node surface is pushed down both
+/// subtrees of its owning node, split by every deeper plane, and marks
+/// exactly the leaves its fragments reach. Mark totals therefore scale
+/// with surface count instead of combinatorially with tree depth, which
+/// is what keeps heavily subdivided maps inside the packer's 64k
+/// mark-surface budget. Back-side descents mostly land in solid leaves
+/// (dropped at pack time) and keep two-sided liquid faces exact.
+fn rebuild_exact_leaf_marks(bsp: &mut CompiledSurfaceBsp) {
+    for leaf in &mut bsp.leaves {
+        leaf.mark_surfaces.clear();
+    }
+    for node_index in 0..bsp.nodes.len() {
+        let (front, back, first, count) = {
+            let node = &bsp.nodes[node_index];
+            (
+                node.front,
+                node.back,
+                node.first_surface,
+                node.surface_count,
+            )
+        };
+        for surface_index in first..first + count {
+            let polygon = bsp.surfaces[surface_index].vertices.clone();
+            let mut stack = vec![(front, polygon.clone()), (back, polygon)];
+            while let Some((child, polygon)) = stack.pop() {
+                match child {
+                    BspChild::Leaf(leaf) => {
+                        let marks = &mut bsp.leaves[leaf].mark_surfaces;
+                        if !marks.contains(&surface_index) {
+                            marks.push(surface_index);
+                        }
+                    }
+                    BspChild::Node(index) => {
+                        let node_front = bsp.nodes[index].front;
+                        let node_back = bsp.nodes[index].back;
+                        match split_polygon(&polygon, bsp.nodes[index].plane) {
+                            PolygonSplit::Front(vertices) => stack.push((node_front, vertices)),
+                            PolygonSplit::Back(vertices) => stack.push((node_back, vertices)),
+                            // In a deeper node's plane: fragments of both
+                            // facing directions border both sides.
+                            PolygonSplit::Coplanar => {
+                                stack.push((node_front, polygon.clone()));
+                                stack.push((node_back, polygon));
+                            }
+                            PolygonSplit::Split {
+                                front: front_vertices,
+                                back: back_vertices,
+                            } => {
+                                stack.push((node_front, front_vertices));
+                                stack.push((node_back, back_vertices));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn build_surface_bsp_branch(surfaces: Vec<CompiledSurface>, bsp: &mut CompiledSurfaceBsp) -> BspChild {
     if surfaces.is_empty() {
         let index = bsp.leaves.len();
         bsp.leaves.push(CompiledBspLeaf {
             contents: BspLeafContents::Unclassified,
-            mark_surfaces: boundary_surfaces.to_vec(),
+            // Filled by rebuild_exact_leaf_marks after the tree exists.
+            mark_surfaces: Vec::new(),
         });
         return BspChild::Leaf(index);
     }
@@ -401,12 +470,8 @@ fn build_surface_bsp_branch(
         back: BspChild::Leaf(0),
     });
 
-    // ponytail: ancestor split surfaces conservatively over-mark each
-    // terminal cell until portal clipping supplies exact leaf windings.
-    let mut child_boundaries = boundary_surfaces.to_vec();
-    child_boundaries.extend(first_surface..first_surface + surface_count);
-    let front_child = build_surface_bsp_branch(front, &child_boundaries, bsp);
-    let back_child = build_surface_bsp_branch(back, &child_boundaries, bsp);
+    let front_child = build_surface_bsp_branch(front, bsp);
+    let back_child = build_surface_bsp_branch(back, bsp);
     bsp.nodes[node_index].front = front_child;
     bsp.nodes[node_index].back = back_child;
     BspChild::Node(node_index)
