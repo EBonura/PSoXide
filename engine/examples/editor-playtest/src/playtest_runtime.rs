@@ -720,7 +720,7 @@ impl Playtest {
             .height
             .saturating_mul(i32::from(camera.lock_rise_percent))
             / 100;
-        config.height = config.height.max(256);
+        config.height = config.height.max(16);
         config.min_floor_clearance = camera.min_floor_clearance;
         config.position_lag_shift = camera.position_lag_shift;
         config.focus_lag_shift = camera.focus_lag_shift;

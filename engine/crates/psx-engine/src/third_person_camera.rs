@@ -94,7 +94,7 @@ impl ThirdPersonCameraConfig {
     pub const fn character(distance: i32, height: i32, target_height: i32) -> Self {
         Self {
             distance,
-            min_distance: 384,
+            min_distance: 24,
             max_distance: distance,
             height,
             target_height,
@@ -104,7 +104,7 @@ impl ThirdPersonCameraConfig {
                 0
             },
             min_floor_clearance: 0,
-            collision_margin: 160,
+            collision_margin: 10,
             pitch_min_q12: -192,
             pitch_max_q12: 704,
             manual_cooldown_frames: 42,
@@ -732,7 +732,7 @@ impl CheckedCameraCells {
 }
 
 fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraConfig {
-    config.min_distance = config.min_distance.max(128);
+    config.min_distance = config.min_distance.max(8);
     config.max_distance = config.max_distance.max(config.min_distance);
     config.distance = config
         .distance
@@ -1671,7 +1671,7 @@ mod tests {
             )
             .expect("trace camera update");
         assert!(frame.collision_pull_in);
-        assert_eq!(frame.distance, 540);
+        assert_eq!(frame.distance, 690);
         assert_eq!(provider.calls, 1);
     }
 
