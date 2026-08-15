@@ -392,6 +392,12 @@ impl<'a, T: CookedRecord> RecordSlice<'a, T> {
         Some(unsafe { self.get_unchecked(index) })
     }
 
+    /// Raw bytes of one record, bounds-checked.
+    pub fn record_bytes(self, index: usize) -> Option<&'a [u8]> {
+        let start = index.checked_mul(T::SIZE)?;
+        self.bytes.get(start..start + T::SIZE)
+    }
+
     /// Decode one record after its index has been validated by the caller.
     ///
     /// # Safety
