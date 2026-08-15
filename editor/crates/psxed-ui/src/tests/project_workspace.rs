@@ -3043,7 +3043,7 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
     // catalogue deliberately does not carry authoring sources, and the cook
     // never reads them.
     for resource in &project.resources {
-        let mut check = |label: &str, reference: Option<psxed_project::ResourceId>| {
+        let check = |label: &str, reference: Option<psxed_project::ResourceId>| {
             if let Some(id) = reference {
                 assert!(
                     project.resource(id).is_some(),
@@ -3681,7 +3681,7 @@ fn souls_slice_project_is_authored_through_production_commands() {
     // carries the lift-door brush; a lava pool sits in the far room.
     workspace.set_orthographic_view(OrthographicView::Top);
     workspace.set_active_tool_cycle_value((ViewTool::Brush, None));
-    let mut author_box = |workspace: &mut EditorWorkspace,
+    let author_box = |workspace: &mut EditorWorkspace,
                           material: ResourceId,
                           mins: [i32; 3],
                           maxs: [i32; 3]|
