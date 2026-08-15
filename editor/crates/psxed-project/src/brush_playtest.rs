@@ -37,10 +37,12 @@ mod tests {
         let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
             panic!("brush project selected the grid provider");
         };
-        // Lighting subdivision preserves surface order and this room's
-        // faces are all under one lighting patch, so the packed world
-        // is byte-identical to the pre-subdivision output.
-        assert_eq!(world.bytes.len(), 13_008);
+        // Extent subdivision preserves surface order and this room's
+        // faces are all under one 2048-unit patch, so the packed world
+        // matches the pre-subdivision geometry; the byte pin moved when
+        // exact per-leaf marks replaced the conservative split-path
+        // lists (fewer mark entries, same surfaces).
+        assert_eq!(world.bytes.len(), 12_260);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);
