@@ -856,7 +856,13 @@ pub(crate) fn push_arch_prop(
         return true;
     }
 
-    let generated = crate::generate_arch_prop_surfaces(geometry, sector_size);
+    let height_quantum = if project.world_format() == crate::ProjectWorldFormat::Bsp {
+        crate::HEIGHT_QUANTUM / crate::units::WORLD_UNIT_DIVISOR
+    } else {
+        crate::HEIGHT_QUANTUM
+    };
+    let generated =
+        crate::generate_arch_prop_surfaces_with_quantum(geometry, sector_size, height_quantum);
     let surface_first = arch_prop_surfaces.len();
     if surface_first.saturating_add(generated.len()) > u16::MAX as usize {
         report.error(format!(
@@ -904,7 +910,9 @@ pub(crate) fn push_arch_prop(
 
     let collision_first = arch_prop_collisions.len();
     if collision_enabled {
-        for collision in crate::generate_arch_prop_collision_boxes(geometry, sector_size) {
+        for collision in
+            crate::generate_arch_prop_collision_boxes_with_quantum(geometry, sector_size, height_quantum)
+        {
             let mut world_min = [i32::MAX; 3];
             let mut world_max = [i32::MIN; 3];
             for x in [collision.min[0], collision.max[0]] {
