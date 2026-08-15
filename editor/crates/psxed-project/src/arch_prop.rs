@@ -11,6 +11,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::{GridUvTransform, ResourceId, HEIGHT_QUANTUM};
 
+/// Authored-scale wrappers: the editor preview and inspector expand at
+/// the historical 64-unit quantum; the scaled BSP cook passes its own.
+pub fn generate_arch_prop_surfaces(
+    geometry: ArchPropGeometry,
+    sector_size: i32,
+) -> Vec<GeneratedArchPropSurface> {
+    generate_arch_prop_surfaces_with_quantum(geometry, sector_size, HEIGHT_QUANTUM)
+}
+
+pub fn generate_arch_prop_collision_boxes(
+    geometry: ArchPropGeometry,
+    sector_size: i32,
+) -> Vec<GeneratedArchPropCollisionBox> {
+    generate_arch_prop_collision_boxes_with_quantum(geometry, sector_size, HEIGHT_QUANTUM)
+}
+
 pub const ARCH_PROP_MATERIAL_COUNT: usize = 4;
 pub const ARCH_PROP_MATERIAL_NAMES: [&str; ARCH_PROP_MATERIAL_COUNT] =
     ["Fascia", "Soffit", "Extrados", "End caps"];
@@ -178,9 +194,10 @@ struct ProfilePoint {
 /// `sector_size` is inherited from the enclosing room. The public recipe keeps
 /// horizontal dimensions as tile counts so changing a world's sector size
 /// preserves alignment rather than leaving stale absolute-width props behind.
-pub fn generate_arch_prop_surfaces(
+pub fn generate_arch_prop_surfaces_with_quantum(
     geometry: ArchPropGeometry,
     sector_size: i32,
+    height_quantum: i32,
 ) -> Vec<GeneratedArchPropSurface> {
     let sector_size = sector_size.max(1);
     let span_tiles = i32::from(
@@ -196,18 +213,18 @@ pub fn generate_arch_prop_surfaces(
     let half_span = span_tiles.saturating_mul(sector_size) / 2;
     let half_depth = depth_tiles.saturating_mul(sector_size) / 2;
     let rise = i32::from(geometry.rise_quanta.clamp(1, ARCH_PROP_MAX_HEIGHT_QUANTA))
-        .saturating_mul(HEIGHT_QUANTUM);
+        .saturating_mul(height_quantum);
     let leg_height = i32::from(geometry.leg_height_quanta.min(ARCH_PROP_MAX_HEIGHT_QUANTA))
-        .saturating_mul(HEIGHT_QUANTUM);
+        .saturating_mul(height_quantum);
     let requested_thickness = i32::from(
         geometry
             .band_thickness_quanta
             .clamp(1, ARCH_PROP_MAX_HEIGHT_QUANTA),
     )
-    .saturating_mul(HEIGHT_QUANTUM);
+    .saturating_mul(height_quantum);
     let thickness = requested_thickness
-        .min(half_span.saturating_sub(HEIGHT_QUANTUM).max(1))
-        .min(rise.saturating_sub(HEIGHT_QUANTUM).max(1));
+        .min(half_span.saturating_sub(height_quantum).max(1))
+        .min(rise.saturating_sub(height_quantum).max(1));
     let inner_half_span = (half_span - thickness).max(1);
     let inner_rise = (rise - thickness).max(1);
     let segments_per_quadrant = usize::from(geometry.segments_per_quadrant.clamp(
@@ -356,9 +373,10 @@ pub fn generate_arch_prop_surfaces(
 /// This intentionally follows the same sampled profile as rendering; increasing
 /// visual curve detail therefore makes collision more accurate but remains
 /// explicitly bounded.
-pub fn generate_arch_prop_collision_boxes(
+pub fn generate_arch_prop_collision_boxes_with_quantum(
     geometry: ArchPropGeometry,
     sector_size: i32,
+    height_quantum: i32,
 ) -> Vec<GeneratedArchPropCollisionBox> {
     let sector_size = sector_size.max(1);
     let half_span = i32::from(
@@ -376,18 +394,18 @@ pub fn generate_arch_prop_collision_boxes(
     .saturating_mul(sector_size)
         / 2;
     let rise = i32::from(geometry.rise_quanta.clamp(1, ARCH_PROP_MAX_HEIGHT_QUANTA))
-        .saturating_mul(HEIGHT_QUANTUM);
+        .saturating_mul(height_quantum);
     let leg_height = i32::from(geometry.leg_height_quanta.min(ARCH_PROP_MAX_HEIGHT_QUANTA))
-        .saturating_mul(HEIGHT_QUANTUM);
+        .saturating_mul(height_quantum);
     let requested_thickness = i32::from(
         geometry
             .band_thickness_quanta
             .clamp(1, ARCH_PROP_MAX_HEIGHT_QUANTA),
     )
-    .saturating_mul(HEIGHT_QUANTUM);
+    .saturating_mul(height_quantum);
     let thickness = requested_thickness
-        .min(half_span.saturating_sub(HEIGHT_QUANTUM).max(1))
-        .min(rise.saturating_sub(HEIGHT_QUANTUM).max(1));
+        .min(half_span.saturating_sub(height_quantum).max(1))
+        .min(rise.saturating_sub(height_quantum).max(1));
     let inner_half_span = (half_span - thickness).max(1);
     let inner_rise = (rise - thickness).max(1);
     let segments_per_quadrant = usize::from(geometry.segments_per_quadrant.clamp(

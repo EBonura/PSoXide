@@ -7,9 +7,8 @@ use crate::brush::{Brush, BrushContents, BRUSH_UV_UNITS_PER_TEXEL};
 use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
-use crate::brush_compile::{
-    build_surface_bsp, compile_csg_surfaces, subdivide_surfaces_to_extent, SURFACE_EXTENT_UNITS,
-};
+use crate::brush_compile::{build_surface_bsp, compile_csg_surfaces, subdivide_surfaces_to_extent};
+use crate::units::ENGINE_SURFACE_EXTENT_UNITS;
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
 };
@@ -40,10 +39,10 @@ use psxed_format::texture::Depth;
 // The cook has no fixture-name knowledge; a project with real placed
 // characters derives both hulls fully from its authored data and never sees
 // these numbers.
-const DEBUG_BODY_RADIUS: i32 = 16;
-const DEBUG_BODY_HEIGHT: i32 = 56;
-const LEGACY_BIG_HULL_RADIUS: i32 = 32;
-const LEGACY_BIG_HULL_HEIGHT: i32 = 96;
+const DEBUG_BODY_RADIUS: i32 = 1;
+const DEBUG_BODY_HEIGHT: i32 = 4;
+const LEGACY_BIG_HULL_RADIUS: i32 = 2;
+const LEGACY_BIG_HULL_HEIGHT: i32 = 6;
 const DEFAULT_LIGHT_RADIUS_UNITS: f64 = 1024.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -687,7 +686,7 @@ fn compile_model(
     // light-gated LIGHT_SUBDIVISION_UNITS pass: the cap is finer than
     // the light grid was, so lit and lightless scenes now share one
     // subdivision rule.
-    let surfaces = subdivide_surfaces_to_extent(surfaces, SURFACE_EXTENT_UNITS);
+    let surfaces = subdivide_surfaces_to_extent(surfaces, ENGINE_SURFACE_EXTENT_UNITS);
     let mut bsp = build_surface_bsp(&surfaces);
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);
@@ -1285,9 +1284,10 @@ mod tests {
             cooked_body_hulls_for(&[(20, 72), (20, 72), (20, 72)]),
             [
                 CookedBodyHull::new(1, 20, 72),
-                CookedBodyHull::new(2, 32, 96),
+                CookedBodyHull::new(2, 20, 72),
             ],
-            "an all-identical cluster retains an exact tight hull"
+            "an all-identical cluster retains an exact tight hull (the
+             legacy floor is a probe-sized 2x6 at engine scale)"
         );
     }
 
@@ -1466,6 +1466,7 @@ mod tests {
             .expect("player spawn")
             .transform
             .translation = [65.0, 65.0, 128.0];
+        crate::units::scale_project_to_engine_units(&mut project);
 
         assert_eq!(
             compile_brush_world(

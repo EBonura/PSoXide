@@ -39,8 +39,8 @@ const BOX_PROP_FALL_MAX_VEL: i32 = 384;
 /// room units. Boxes are ~900+ units tall, so this only absorbs rounding
 /// and small authored gaps.
 const BOX_PROP_SUPPORT_TOLERANCE: i32 = 64;
-const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
-const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
+const BOX_PROP_BREAK_ATTACK_REACH: i32 = 48;
+const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 20;
 const BOX_PROP_FACE_NORMAL_SHIFT: u32 = 10;
 
 /// One live break burst for a newly broken box prop.

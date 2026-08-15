@@ -104,7 +104,9 @@ fn main() {
         },
     );
     scene.node_mut(spawn).expect("spawn node").transform = Transform3 {
-        translation: [256.0, 65.0, 384.0],
+        // 384 keeps a full engine-scale (Quake) player radius of
+        // clearance from the west wall after the cook's 16x divide.
+        translation: [384.0, 65.0, 384.0],
         // The normal playtest maps forward input through its camera yaw. Use
         // the quarter-turn that makes the canonical UP route advance toward
         // +X, without a BSP-only input convention.
@@ -171,6 +173,11 @@ fn copy_starter_stone(output_dir: &Path) {
     let destination = output_dir.join(STARTER_STONE_RELATIVE);
     std::fs::create_dir_all(destination.parent().expect("starter texture parent"))
         .expect("create starter texture directory");
+    // The historical source texture left the default project's curated
+    // set; a fixture that already carries its copy keeps it.
+    if destination.exists() {
+        return;
+    }
     std::fs::copy(&source, &destination).unwrap_or_else(|error| {
         panic!(
             "copy starter texture {} -> {}: {error}",

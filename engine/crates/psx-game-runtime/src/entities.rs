@@ -115,7 +115,7 @@ impl GameEntityIntent {
 /// one runtime tuning knob (roughly half a demo-scale step) standing
 /// in for per-weapon reach until the combat slice cooks real melee
 /// arcs.
-pub const GAME_ENTITY_ATTACK_REACH_MARGIN: i32 = 128;
+pub const GAME_ENTITY_ATTACK_REACH_MARGIN: i32 = 8;
 
 /// Ticks the attack active window lasts.
 pub const GAME_ENTITY_ATTACK_ACTIVE_TICKS: u16 = 6;
