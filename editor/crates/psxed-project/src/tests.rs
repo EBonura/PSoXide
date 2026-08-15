@@ -1596,11 +1596,13 @@ fn embedded_default_project_ron_deserializes() {
             _ => None,
         })
         .expect("starter player model resource missing");
-    assert!(model.model_path.ends_with("ci_player/ci_player.psxmdl"));
+    assert!(model
+        .model_path
+        .ends_with("aletha_delivered/aletha_delivered.psxmdl"));
     assert!(model
         .texture_path
         .as_deref()
-        .is_some_and(|path| path.ends_with("ci_player.psxt")));
+        .is_some_and(|path| path.ends_with("aletha_delivered.psxt")));
     assert!(model.skeleton.is_some());
     assert_eq!(
         model.collision_radius,
@@ -1626,22 +1628,32 @@ fn embedded_default_project_ron_deserializes() {
     let animation_set_resource = project
         .resource(animation_set_id)
         .expect("starter animation set resource missing");
-    assert_eq!(animation_set_resource.name, "Aletha Complete Animation Set");
+    assert_eq!(animation_set_resource.name, "Aletha Delivered Animation Set");
     let ResourceData::AnimationSet(animation_set) = &animation_set_resource.data else {
         panic!("starter animation set has the wrong resource kind");
     };
+    // The artist moveset's native clip stems, bound role by role.
     for (action, stem) in [
-        (CharacterAnimationAction::Idle, "idle"),
-        (CharacterAnimationAction::Walk, "walk"),
-        (CharacterAnimationAction::Run, "run"),
-        (CharacterAnimationAction::Roll, "roll"),
-        (CharacterAnimationAction::LightAttack, "light_attack"),
-        (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
-        (CharacterAnimationAction::ComboAttack, "combo_attack"),
-        (CharacterAnimationAction::HitReact, "hit_react"),
-        (CharacterAnimationAction::Death, "death"),
-        (CharacterAnimationAction::StrafeLeft, "strafe_left"),
-        (CharacterAnimationAction::StrafeRight, "strafe_right"),
+        (CharacterAnimationAction::Idle, "aletha_idle"),
+        (CharacterAnimationAction::Walk, "aletha_walk_fwd"),
+        (CharacterAnimationAction::Run, "aletha_run_fwd"),
+        (CharacterAnimationAction::Roll, "aletha_dash_fwd"),
+        (
+            CharacterAnimationAction::LightAttack,
+            "aletha_light_wpn_light_atk_a",
+        ),
+        (
+            CharacterAnimationAction::HeavyAttack,
+            "aletha_light_wpn_heavy_atk",
+        ),
+        (
+            CharacterAnimationAction::ComboAttack,
+            "aletha_light_wpn_light_atk_b",
+        ),
+        (CharacterAnimationAction::HitReact, "aletha_hurt_a"),
+        (CharacterAnimationAction::Death, "aletha_death"),
+        (CharacterAnimationAction::StrafeLeft, "aletha_walk_lft"),
+        (CharacterAnimationAction::StrafeRight, "aletha_walk_rgt"),
     ] {
         let clip_id = animation_set
             .action_clip(action)
@@ -1655,9 +1667,11 @@ fn embedded_default_project_ron_deserializes() {
             .unwrap_or_else(|| panic!("starter {action:?} clip resource missing"));
         assert_eq!(
             clip.psxanim_path,
-            format!("assets/animations/ci_player_complete/{stem}.psxanim")
+            format!("assets/animations/aletha_delivered/{stem}.psxanim")
         );
-        assert_eq!(clip.target_model, Some(model_id));
+        // Native clips may pin their model or stay skeleton-shared (None);
+        // either resolves to the starter model on this skeleton.
+        assert!(clip.target_model.is_none_or(|model| model == model_id));
         assert_eq!(clip.skeleton, model.skeleton);
     }
 }
