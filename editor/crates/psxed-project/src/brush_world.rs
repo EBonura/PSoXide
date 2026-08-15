@@ -8,8 +8,7 @@ use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
 use crate::brush_compile::{
-    build_surface_bsp, compile_csg_surfaces, subdivide_surfaces_for_lighting,
-    LIGHT_SUBDIVISION_UNITS,
+    build_surface_bsp, compile_csg_surfaces, subdivide_surfaces_to_extent, SURFACE_EXTENT_UNITS,
 };
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
@@ -677,19 +676,18 @@ fn compile_model(
     collision_hulls: &[CollisionHullBounds; 3],
 ) -> Result<(PackedBspGeometry, CompiledCollisionHulls), BrushWorldCookError> {
     let surfaces = compile_csg_surfaces(brushes);
-    // Quake-style lighting detail: with lights in the scene, subdivide
-    // big faces into grid patches BEFORE the BSP build so the vertex
-    // bake resolves hotspots and shadow edges mid-face. Lightless
-    // scenes skip it and pay no extra geometry.
-    let surfaces = if lights.is_empty() {
-        surfaces
-    } else {
-        let light_spheres: Vec<([f64; 3], f64)> = lights
-            .iter()
-            .map(|light| (light.position, light.radius))
-            .collect();
-        subdivide_surfaces_for_lighting(surfaces, LIGHT_SUBDIVISION_UNITS, &light_spheres)
-    };
+    // qbsp parity: EVERY face is capped to SURFACE_EXTENT_UNITS before
+    // the BSP build, lights or not, exactly like id's qbsp splits faces
+    // to its lightmap surface extents. Small faces are what make the
+    // runtime's GTE emitter safe at the eye plane (a crossing triangle
+    // saturates wider than the GPU's 1023px draw limit and is skipped
+    // as a sub-face-sized hole instead of rasterizing as a screen-wide
+    // wrap), and they are also what lets the vertex bake resolve
+    // hotspots and shadow edges mid-face. This supersedes the old
+    // light-gated LIGHT_SUBDIVISION_UNITS pass: the cap is finer than
+    // the light grid was, so lit and lightless scenes now share one
+    // subdivision rule.
+    let surfaces = subdivide_surfaces_to_extent(surfaces, SURFACE_EXTENT_UNITS);
     let mut bsp = build_surface_bsp(&surfaces);
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);

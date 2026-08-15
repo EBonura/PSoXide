@@ -1311,10 +1311,6 @@ fn rebuild_lit_brushes(
     lights: &[psxed_project::brush_light::BrushPointLight],
 ) -> Vec<Vec<PreviewLitFace>> {
     use psxed_project::brush::Plane;
-    let light_spheres: Vec<([f64; 3], f64)> = lights
-        .iter()
-        .map(|light| (light.position, light.radius))
-        .collect();
     // Shadow occluders mirror the cook's set (every solid brush), with
     // one editor-only guard: mid-edit damaged/unbounded brushes are
     // skipped, otherwise an infinite wedge occludes every segment and
@@ -1352,15 +1348,15 @@ fn rebuild_lit_brushes(
                         FaceShade::Flat { rgb, .. } => [rgb.0, rgb.1, rgb.2],
                         FaceShade::Textured { tint, .. } => [tint.0, tint.1, tint.2],
                     };
-                    // The cook subdivides lit faces into grid patches so
-                    // vertex light resolves hotspots and shadow edges
-                    // mid-face; the preview must render the SAME patches
-                    // or those features fall between the authored
-                    // corners and vanish.
+                    // The cook subdivides EVERY face to the qbsp-parity
+                    // extent cap (lights or not); the preview must render
+                    // the SAME patches or mid-face light features fall
+                    // between the authored corners and vanish, and the
+                    // preview==cook invariant breaks.
                     let patches = psxed_project::brush_compile::subdivide_polygon_for_lighting(
                         polygon.verts.clone(),
-                        psxed_project::brush_compile::LIGHT_SUBDIVISION_UNITS,
-                        &light_spheres,
+                        psxed_project::brush_compile::SURFACE_EXTENT_UNITS,
+                        &[([0.0; 3], f64::INFINITY)],
                     )
                     .into_iter()
                     .map(|verts| {
