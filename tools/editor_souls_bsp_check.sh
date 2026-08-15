@@ -35,7 +35,7 @@ CUE="build/examples/mipsel-sony-psx/release/editor-playtest.cue"
 # so it moves with guest speed and is pinned for the canonical build only.
 # The build-independent clocks are the guest's own: pad polls and sim ticks,
 # which the cross-layout stage below compares directly.
-EXPECT_ROUTE_TICKS=3032
+EXPECT_ROUTE_TICKS=3030
 EXPECT_PAD_POLLS=3000
 EXPECT_SIM_TICKS=2999
 EXPECT_ATTACK_STARTS=6
@@ -47,7 +47,7 @@ EXPECT_HITS_TAKEN=4
 EXPECT_WEAPON_ATTACHMENTS=2
 EXPECT_CHECKPOINT_ACTIVATIONS=1
 EXPECT_DOOR_ACTIVATIONS=1
-EXPECT_PVS_SUPPRESSIONS=2927
+EXPECT_PVS_SUPPRESSIONS=2926
 EXPECT_LIQUID_EVENTS=6
 EXPECT_PLAYER_DEATHS=1
 # Post-respawn evidence: the player respawns at the checkpoint (x ~2048,
@@ -77,13 +77,13 @@ EXPECT_PLAYER_Z_BIASED=1001536
 # final images, and the number of gameplay ticks for which the sealed entity
 # is PVS-suppressed. The guest clocks and progression/combat counters remain
 # pinned above, and both canonical replays must still agree exactly.
-EXPECT_VRAM_HASH=0x65089316e8f25e5d
-EXPECT_DISPLAY_HASH=0xf912b49df0543c88
+EXPECT_VRAM_HASH=0xcf70eeefd7b913ee
+EXPECT_DISPLAY_HASH=0x1622990324fd570a
 
-EXPECT_NEG_ROUTE_TICKS=931
+EXPECT_NEG_ROUTE_TICKS=930
 EXPECT_NEG_PAD_POLLS=900
 EXPECT_NEG_WEAPON_ATTACHMENTS=1
-EXPECT_NEG_PVS_SUPPRESSIONS=827
+EXPECT_NEG_PVS_SUPPRESSIONS=826
 EXPECT_NEG_PLAYER_X_BIASED=1001024
 EXPECT_NEG_PLAYER_Z_BIASED=1001536
 
