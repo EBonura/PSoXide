@@ -1,5 +1,5 @@
 (
-    name: "Untitled PS1 Project",
+    name: "Quake Units Arena",
     editor_camera: (
         mode: Orbit,
         orbit_yaw_q12: 256,
