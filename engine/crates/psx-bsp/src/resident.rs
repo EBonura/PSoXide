@@ -10,9 +10,10 @@ use core::fmt;
 use psx_math::int32::mul_q12_i32;
 
 use crate::{
-    AliasModelTable, BrushModel, ClipNode, CookedRecord, Face, Leaf, LumpKind, LumpRange,
-    MapEntity, Node, Plane, PsbError, PsbIndex, PsbVersion, ReadAt, RecordSlice, TextureInfo,
-    Vec3I32, Vertex, LUMP_COUNT,
+    AliasModelTable, BrushModel, ClipNode, CookedRecord, Face, IndexedVertexCorner,
+    IndexedVertexPosition, Leaf, LumpKind, LumpRange, MapEntity, Node, Plane, PsbError, PsbIndex,
+    PsbVersion, ReadAt, RecordSlice, TextureInfo, Vec3I32, Vertex, INDEXED_VERTEX_HEADER_BYTES,
+    INDEXED_VERTEX_MAGIC, LUMP_COUNT,
 };
 
 /// Texture atlas location used by the original XBSP cooker.
@@ -44,6 +45,65 @@ const RESIDENT_LUMPS: [LumpKind; 13] = [
     LumpKind::Strings,
     LumpKind::Entities,
 ];
+
+/// Borrowed, validated PSB4 corner and shared-position arrays.
+#[derive(Copy, Clone, Debug)]
+pub struct IndexedVertices<'a> {
+    /// Per-face-corner material attributes and shared-position indices.
+    pub corners: &'a [IndexedVertexCorner],
+    /// Exact deduplicated quantized positions.
+    pub positions: &'a [IndexedVertexPosition],
+}
+
+fn indexed_vertex_layout(bytes: &[u8]) -> Option<(usize, usize, usize)> {
+    if bytes.len() < INDEXED_VERTEX_HEADER_BYTES
+        || bytes.as_ptr() as usize & 3 != 0
+        || u32::from_le_bytes(bytes[0..4].try_into().ok()?) != INDEXED_VERTEX_MAGIC
+    {
+        return None;
+    }
+    let corner_count = u16::from_le_bytes(bytes[4..6].try_into().ok()?) as usize;
+    let position_count = u16::from_le_bytes(bytes[6..8].try_into().ok()?) as usize;
+    let corner_bytes = corner_count.checked_mul(core::mem::size_of::<IndexedVertexCorner>())?;
+    let position_bytes =
+        position_count.checked_mul(core::mem::size_of::<IndexedVertexPosition>())?;
+    let position_offset = INDEXED_VERTEX_HEADER_BYTES.checked_add(corner_bytes)?;
+    if position_offset.checked_add(position_bytes)? != bytes.len() {
+        return None;
+    }
+    Some((corner_count, position_count, position_offset))
+}
+
+fn indexed_vertices_with_layout(
+    bytes: &[u8],
+    corner_count: usize,
+    position_count: usize,
+    position_offset: usize,
+) -> IndexedVertices<'_> {
+    let corners: &[IndexedVertexCorner] = unsafe {
+        core::slice::from_raw_parts(
+            bytes.as_ptr().add(INDEXED_VERTEX_HEADER_BYTES).cast(),
+            corner_count,
+        )
+    };
+    let positions: &[IndexedVertexPosition] = unsafe {
+        core::slice::from_raw_parts(bytes.as_ptr().add(position_offset).cast(), position_count)
+    };
+    IndexedVertices { corners, positions }
+}
+
+fn validate_indexed_vertices(bytes: &[u8]) -> Option<(u16, u16)> {
+    let (corner_count, position_count, position_offset) = indexed_vertex_layout(bytes)?;
+    let indexed = indexed_vertices_with_layout(bytes, corner_count, position_count, position_offset);
+    if indexed
+        .corners
+        .iter()
+        .any(|corner| corner.position_index as usize >= indexed.positions.len())
+    {
+        return None;
+    }
+    Some((corner_count as u16, position_count as u16))
+}
 
 /// Failure while reading or validating a resident map.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +164,9 @@ impl<E: fmt::Display> fmt::Display for MapLoadError<E> {
 pub struct ResidentMap {
     map_id: Option<u32>,
     generation: u32,
+    version: Option<PsbVersion>,
+    indexed_corner_count: u16,
+    indexed_position_count: u16,
     bytes: Vec<u8>,
     ranges: [LumpRange; LUMP_COUNT],
     source_ranges: [LumpRange; LUMP_COUNT],
@@ -121,6 +184,9 @@ impl ResidentMap {
         Self {
             map_id: None,
             generation: 0,
+            version: None,
+            indexed_corner_count: 0,
+            indexed_position_count: 0,
             bytes: Vec::with_capacity(capacity),
             ranges: [LumpRange::EMPTY; LUMP_COUNT],
             source_ranges: [LumpRange::EMPTY; LUMP_COUNT],
@@ -207,6 +273,17 @@ impl ResidentMap {
         for kind in LumpKind::ALL {
             self.source_ranges[kind as usize] = index.lump(kind);
         }
+        self.version = Some(index.version());
+        if index.version() == PsbVersion::IndexedV4 {
+            let Some((corner_count, position_count)) =
+                validate_indexed_vertices(self.vertex_data())
+            else {
+                self.clear_loaded_state();
+                return Err(MapLoadError::BadVertexData);
+            };
+            self.indexed_corner_count = corner_count;
+            self.indexed_position_count = position_count;
+        }
         self.source_file_len = index.file_len();
         if let Err(error) = self.validate_references() {
             self.clear_loaded_state();
@@ -243,7 +320,24 @@ impl ResidentMap {
     }
 
     pub fn vertices(&self) -> RecordSlice<'_, Vertex> {
+        debug_assert_ne!(self.version, Some(PsbVersion::IndexedV4));
         self.records(LumpKind::Vertices)
+    }
+
+    /// Validated PSB4 indexed-corner and shared-position arrays.
+    pub fn indexed_vertices(&self) -> Option<IndexedVertices<'_>> {
+        if self.version != Some(PsbVersion::IndexedV4) {
+            return None;
+        }
+        let bytes = self.vertex_data();
+        let position_offset = INDEXED_VERTEX_HEADER_BYTES
+            + self.indexed_corner_count as usize * core::mem::size_of::<IndexedVertexCorner>();
+        Some(indexed_vertices_with_layout(
+            bytes,
+            self.indexed_corner_count as usize,
+            self.indexed_position_count as usize,
+            position_offset,
+        ))
     }
 
     pub fn vertex_data(&self) -> &[u8] {
@@ -355,6 +449,9 @@ impl ResidentMap {
 
     fn clear_loaded_state(&mut self) {
         self.map_id = None;
+        self.version = None;
+        self.indexed_corner_count = 0;
+        self.indexed_position_count = 0;
         self.bytes.clear();
         self.ranges = [LumpRange::EMPTY; LUMP_COUNT];
         self.source_ranges = [LumpRange::EMPTY; LUMP_COUNT];
@@ -378,7 +475,11 @@ impl ResidentMap {
         if self.vertex_data().as_ptr() as usize & 3 != 0 {
             return Err(MapLoadError::BadVertexData);
         }
-        let vertices = self.vertices();
+        let vertex_count = if let Some(indexed) = self.indexed_vertices() {
+            indexed.corners.len()
+        } else {
+            self.vertices().len()
+        };
         let planes = self.planes();
         let textures = self.textures();
         let faces = self.faces();
@@ -396,7 +497,7 @@ impl ResidentMap {
                 || face.texture as usize >= textures.len()
                 || face.vertex_count < 3
                 || first.is_none()
-                || first.unwrap().saturating_add(face.vertex_count as usize) > vertices.len()
+                || first.unwrap().saturating_add(face.vertex_count as usize) > vertex_count
                 || face
                     .light_styles
                     .into_iter()
