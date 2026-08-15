@@ -18,17 +18,17 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> 
     Ok(())
 }
 
-#[derive(Default)]
-pub(crate) struct StarterCharacterSyncReport {
-    pub(crate) resources_added: usize,
-    pub(crate) resources_updated: usize,
-    pub(crate) resources_removed: usize,
-    pub(crate) files_copied: usize,
-    pub(crate) files_removed: usize,
+#[derive(Debug, Default)]
+pub struct StarterCharacterSyncReport {
+    pub resources_added: usize,
+    pub resources_updated: usize,
+    pub resources_removed: usize,
+    pub files_copied: usize,
+    pub files_removed: usize,
 }
 
 impl StarterCharacterSyncReport {
-    pub(crate) const fn changed(&self) -> bool {
+    pub const fn changed(&self) -> bool {
         self.resources_added > 0
             || self.resources_updated > 0
             || self.resources_removed > 0
@@ -107,7 +107,12 @@ pub(crate) fn should_auto_sync_starter_character_catalogue(project: &ProjectDocu
     has_legacy_obsidian_warden || has_legacy_starter_character
 }
 
-pub(crate) fn sync_starter_character_catalogue(
+/// The resources-panel "Starter Characters" action: bring a project's copy
+/// of the verified starter catalogue (skeletons, materials, models, weapons,
+/// clips, sets, character profiles) up to date with the embedded default
+/// project, matching by name and remapping ids. Also callable headlessly
+/// (`cargo run -p psxed-ui --example sync_starter -- <project_dir>`).
+pub fn sync_starter_character_catalogue(
     project: &mut ProjectDocument,
     project_root: &Path,
 ) -> Result<StarterCharacterSyncReport, String> {
