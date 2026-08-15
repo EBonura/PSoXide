@@ -1016,6 +1016,34 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
     }
 }
 
+/// Upload an already packed little-endian stream of two 16-bit VRAM pixels
+/// per word.
+///
+/// This is the aligned counterpart to [`upload_bytes`]. Runtime-generated
+/// textures commonly live in a `u32` staging arena already, so accepting the
+/// packed words directly avoids reconstructing every word from four byte
+/// loads while retaining the silicon-safe FIFO transfer path.
+pub fn upload_words(rect: VramRect, words: &[u32]) {
+    let expected_words = rect.pixel_count() as usize / 2;
+    assert!(
+        rect.pixel_count().is_multiple_of(2),
+        "upload_words: odd pixel count is not supported"
+    );
+    assert_eq!(
+        words.len(),
+        expected_words,
+        "upload_words: words.len() ({}) != rect.w*rect.h/2 ({})",
+        words.len(),
+        expected_words,
+    );
+    assert!(!words.is_empty(), "upload_words: empty upload");
+
+    copy_to_vram_header(rect);
+    for &word in words {
+        write_gp0(word);
+    }
+}
+
 /// Emit the GP0(0xA0) "copy CPU→VRAM" command header: destination
 /// top-left and halfword extent. Pixel payload words follow, pushed
 /// either by the FIFO or by block DMA.
