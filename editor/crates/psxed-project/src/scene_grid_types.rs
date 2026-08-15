@@ -750,6 +750,12 @@ pub struct MaterialResource {
     /// Which side(s) of faces using this material should render.
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
+    /// Quake-style layered sky material: the atlas holds foreground
+    /// (masked, left) and background (right) tiles side by side and
+    /// the runtime renders sky-flagged brush faces as two scrolling
+    /// layers, quake-psx style.
+    #[serde(default)]
+    pub layered_sky: bool,
     /// Stable identity of the recipe currently exposed to preview and cooking.
     /// Legacy project files become version 1 (`Original`).
     #[serde(
@@ -976,6 +982,7 @@ impl MaterialResource {
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Front,
+            layered_sky: false,
             active_version_id: MaterialVersionId::ORIGINAL,
             active_version_name: default_material_version_name(),
             versions: Vec::new(),
@@ -1034,6 +1041,7 @@ impl MaterialResource {
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Front,
+            layered_sky: false,
             active_version_id: MaterialVersionId::ORIGINAL,
             active_version_name: default_material_version_name(),
             versions: Vec::new(),

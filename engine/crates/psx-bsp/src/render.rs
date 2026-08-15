@@ -600,6 +600,59 @@ impl Renderer {
             }
 
             let state = pxbsp_material_state(material, binding, material_tick);
+            if material.flags & crate::pxbsp::material_flags::LAYERED_SKY != 0 {
+                // quake-psx layered sky: the atlas holds a masked
+                // foreground tile (left) and a solid background tile
+                // (right); the same fan is emitted twice with per-layer
+                // texture windows and scroll speeds. Background is
+                // staged second so the tagged-stream prepend draws it
+                // first; foreground black texels stay transparent.
+                if batch_surface_count + 2 > BATCH_MAX_SURFACES
+                    || !packet_capacity(next, end, batch_worst_words + face_worst_words * 2)
+                {
+                    if batch_surface_count != 0 {
+                        stats.surface_batches = stats.surface_batches.saturating_add(1);
+                    }
+                    let submitted = unsafe {
+                        flush_windowed_batch(
+                            &mut batch_vertices,
+                            batch_vertex_count,
+                            &batch_surfaces,
+                            batch_surface_count,
+                            next,
+                        )
+                    };
+                    next = submitted.next_packet;
+                    stats.packets = stats.packets.wrapping_add(submitted.packets);
+                    stats.hardware_triangles = stats
+                        .hardware_triangles
+                        .wrapping_add(submitted.hardware_triangles);
+                    batch_vertex_count = 0;
+                    batch_surface_count = 0;
+                    batch_worst_words = 0;
+                }
+                let layers = layered_sky_batch_surfaces(
+                    binding,
+                    state,
+                    batch_vertex_count as u16,
+                    vertex_count as u16,
+                    material_tick,
+                );
+                batch_surfaces[batch_surface_count] = layers[0];
+                batch_surfaces[batch_surface_count + 1] = layers[1];
+                self.materialize_pxbsp_face(
+                    map,
+                    face,
+                    state.uv_offset,
+                    &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
+                );
+                batch_vertex_count += vertex_count;
+                batch_surface_count += 2;
+                batch_worst_words += face_worst_words * 2;
+                stats.visible_faces = stats.visible_faces.saturating_add(1);
+                previous_advance_marker(&mut stats);
+                continue;
+            }
             batch_surfaces[batch_surface_count] = ClassicAffineWindowedBatchSurface {
                 first_vertex: batch_vertex_count as u16,
                 vertex_count: vertex_count as u16,
@@ -1110,6 +1163,62 @@ struct PxbspMaterialState {
     color_command_word: u32,
     uv_offset: [u8; 2],
 }
+/// Placeholder for loop-position bookkeeping in the sky branch; the
+/// per-face loop advances `face_index` in the `for` header, so nothing
+/// extra is needed. Kept as a named no-op for readability.
+#[inline(always)]
+fn previous_advance_marker(_stats: &mut RenderStats) {}
+
+/// quake-psx layered sky layers for one fan: masked foreground (left
+/// half of the atlas) and solid background (right half), each a
+/// power-of-two texture window with its own scroll offset. Scroll
+/// rates mirror quake-psx (foreground 8s, background 16s full cycles
+/// at 60 material ticks per second).
+fn layered_sky_batch_surfaces(
+    binding: PxbspTextureBinding,
+    state: PxbspMaterialState,
+    first_vertex: u16,
+    vertex_count: u16,
+    material_tick: u32,
+) -> [ClassicAffineWindowedBatchSurface; 2] {
+    const SKY_FOREGROUND_CYCLE_SECONDS: u32 = 8;
+    const SKY_BACKGROUND_CYCLE_SECONDS: u32 = 16;
+    const MATERIAL_TICKS_PER_SECOND: u32 = 60;
+    let width = (binding.texture_size[0] / 2).clamp(8, 128);
+    let height = binding.texture_size[1].clamp(8, 128);
+    let foreground_window =
+        TextureWindow::power_of_two_tile(binding.uv_origin[0], binding.uv_origin[1], width, height)
+            .word();
+    let background_window = TextureWindow::power_of_two_tile(
+        binding.uv_origin[0].wrapping_add(width),
+        binding.uv_origin[1],
+        width,
+        height,
+    )
+    .word();
+    let scroll = |cycle_seconds: u32| {
+        ((u64::from(material_tick) * u64::from(width)
+            / u64::from(MATERIAL_TICKS_PER_SECOND * cycle_seconds))
+            & 0xff) as u8
+    };
+    let layer = |window: u32, scroll: u8| ClassicAffineWindowedBatchSurface {
+        first_vertex,
+        vertex_count,
+        tpage: state.texture_page,
+        clut: binding.clut,
+        uv_offset: [scroll, scroll],
+        texture_window_word: window,
+        color_command_word: state.color_command_word,
+    };
+    // Foreground staged first: tagged packets prepend at equal OT
+    // depth, so the background executes first and the masked
+    // foreground draws over it.
+    [
+        layer(foreground_window, scroll(SKY_FOREGROUND_CYCLE_SECONDS)),
+        layer(background_window, scroll(SKY_BACKGROUND_CYCLE_SECONDS)),
+    ]
+}
+
 
 fn pxbsp_material_state(
     material: PxbspMaterial,
