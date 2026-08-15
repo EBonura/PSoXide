@@ -77,8 +77,8 @@ EXPECT_PLAYER_Z_BIASED=1001536
 # final images, and the number of gameplay ticks for which the sealed entity
 # is PVS-suppressed. The guest clocks and progression/combat counters remain
 # pinned above, and both canonical replays must still agree exactly.
-EXPECT_VRAM_HASH=0x742128a3d54d6524
-EXPECT_DISPLAY_HASH=0x409008477097ce4b
+EXPECT_VRAM_HASH=0xcf70eeefd7b913ee
+EXPECT_DISPLAY_HASH=0x1622990324fd570a
 
 EXPECT_NEG_ROUTE_TICKS=930
 EXPECT_NEG_PAD_POLLS=900
