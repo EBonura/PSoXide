@@ -230,7 +230,7 @@ mod tests {
         let flat = compile_csg_surfaces(std::slice::from_ref(&slab));
         let coarse = bake(&flat);
         let spheres = [(light.position, light.radius)];
-        let subdivided = subdivide_surfaces_for_lighting(flat, LIGHT_SUBDIVISION_UNITS, &spheres);
+        let subdivided = subdivide_surfaces_for_lighting(flat, 1024.0, &spheres);
         let fine = bake(&subdivided);
         assert!(
             fine > coarse + 40,

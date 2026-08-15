@@ -136,9 +136,11 @@ pub struct CompiledSurfaceBsp {
 /// instead of only at original corners. Our worlds run ~4x Quake's
 /// unit scale (1024-unit sectors, 2048-span walls), so 1024 here is
 /// Quake's proportional detail; finer grids blow the packer's 64k
-/// mark-surface limit on real levels. Applied only when the scene has
-/// lights, so lightless maps pay no extra geometry.
-pub const LIGHT_SUBDIVISION_UNITS: f64 = 1024.0;
+/// mark-surface limit, the guest's packet arena, and the 2MB RAM
+/// budget on real levels (the sanctum's worst PVS leaf saw 3.6k
+/// surfaces at 1024). Applied only when the scene has lights, so
+/// lightless maps pay no extra geometry.
+pub const LIGHT_SUBDIVISION_UNITS: f64 = 2048.0;
 
 /// Split every surface into patches no wider than `max_extent` along
 /// any world axis, cutting on grid-aligned world planes so adjacent
@@ -712,8 +714,7 @@ mod tests {
         };
         let before: f64 = surfaces.iter().map(|s| area(&s.vertices)).sum();
         let everywhere = [([1024.0, 128.0, 512.0], 1_000_000.0)];
-        let pieces =
-            subdivide_surfaces_for_lighting(surfaces.clone(), LIGHT_SUBDIVISION_UNITS, &everywhere);
+        let pieces = subdivide_surfaces_for_lighting(surfaces.clone(), 1024.0, &everywhere);
         assert!(pieces.len() > surfaces.len(), "big faces were subdivided");
         let after: f64 = pieces.iter().map(|s| area(&s.vertices)).sum();
         assert!(
@@ -731,7 +732,7 @@ mod tests {
             }
             for axis in 0..3 {
                 assert!(
-                    max[axis] - min[axis] <= LIGHT_SUBDIVISION_UNITS + 2.0,
+                    max[axis] - min[axis] <= 1024.0 + 2.0,
                     "patch exceeds the lighting grid: {:?}..{:?}",
                     min,
                     max

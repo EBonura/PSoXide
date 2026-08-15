@@ -338,19 +338,57 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
     let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
         return 0;
     };
-    let Ok(index) = PxbspIndex::read(&mut SliceReader::new(&world.bytes)) else {
+    let mut map = psx_bsp::pxbsp_resident::PxbspResidentMap::with_capacity(world.bytes.len());
+    if map.load(0, &mut SliceReader::new(&world.bytes)).is_err() {
         return 0;
+    }
+    let faces = map.faces();
+    let triangles_of = |surface: usize| -> usize {
+        faces
+            .get(surface)
+            .map_or(0, |face| (face.vertex_count.max(0) as usize).saturating_sub(2))
     };
-    let faces = index.lump(PxbspLumpKind::Faces);
-    let face_start = faces.offset as usize;
-    let face_end = faces.end() as usize;
-    let Some(face_bytes) = world.bytes.get(face_start..face_end) else {
-        return 0;
-    };
-    face_bytes
-        .chunks_exact(14)
-        .map(|face| usize::from(u16::from_le_bytes([face[8], face[9]])).saturating_sub(2))
-        .sum()
+    let total: usize = (0..faces.len()).map(triangles_of).sum();
+    // The packet arena only ever holds ONE frame's draw, and a frame
+    // draws the PVS of one leaf, not the whole map. Size from the worst
+    // leaf's deduped visible-surface triangles; the map total (which
+    // light subdivision inflates freely) only measures content, and
+    // deriving the arena from it is what pushed lit worlds out of RAM.
+    let leaves = map.leaves();
+    let marks = map.mark_surfaces();
+    let leaf_count = leaves.len();
+    let mut row = vec![0u8; leaf_count / 8 + 16];
+    let mut seen = vec![false; faces.len()];
+    let mut worst = 0usize;
+    for leaf_index in 1..leaf_count {
+        let Some(visible_leaves) = map.leaf_visibility_into(leaf_index, &mut row) else {
+            continue;
+        };
+        for flag in seen.iter_mut() {
+            *flag = false;
+        }
+        let mut frame_triangles = 0usize;
+        for bit in 0..visible_leaves {
+            if row[bit / 8] & (1 << (bit % 8)) == 0 {
+                continue;
+            }
+            let Some(visible) = leaves.get(bit + 1) else {
+                continue;
+            };
+            let first = usize::from(visible.first_mark_surface);
+            for mark in first..first.saturating_add(usize::from(visible.mark_surface_count)) {
+                let Some(surface) = marks.get(mark).map(usize::from) else {
+                    continue;
+                };
+                if surface < seen.len() && !seen[surface] {
+                    seen[surface] = true;
+                    frame_triangles = frame_triangles.saturating_add(triangles_of(surface));
+                }
+            }
+        }
+        worst = worst.max(frame_triangles);
+    }
+    if worst == 0 { total } else { worst }
 }
 
 fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
