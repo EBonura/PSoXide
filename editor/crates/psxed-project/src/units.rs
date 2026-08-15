@@ -267,6 +267,10 @@ fn scale_resource(data: &mut ResourceData) {
             // Combat capsules are joint-local model space: they scale
             // through the model blob's local_to_world_q12, not here.
         }
+        ResourceData::Model(model) => {
+            model.world_height = div_u16_min1(model.world_height);
+            model.collision_radius = div_u16_min1(model.collision_radius);
+        }
         ResourceData::AnimationSet(set) => {
             for binding in &mut set.action_clips {
                 if let Some(options) = &mut binding.options {

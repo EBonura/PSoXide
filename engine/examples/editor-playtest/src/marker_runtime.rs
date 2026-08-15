@@ -9,7 +9,7 @@ const TARGET_LOCK_ROTATION_FRAMES: u32 = 360;
 /// Marker visualization tuning. Markers are debug stubs -- keep
 /// them visible at orbit-camera scales without dominating the
 /// scene.
-const MARKER_HALF: i32 = 96;
+const MARKER_HALF: i32 = 6;
 const MARKER_LIFT: i32 = MARKER_HALF;
 const MARKER_TINT: (u8, u8, u8) = (0xff, 0xa8, 0x40);
 
