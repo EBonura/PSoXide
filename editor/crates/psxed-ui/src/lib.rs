@@ -14,6 +14,7 @@ mod play_mode;
 mod selection;
 pub use selection::*;
 mod starter_catalogue;
+pub use starter_catalogue::{sync_starter_character_catalogue, StarterCharacterSyncReport};
 mod style;
 mod ui_preview;
 mod viewport2d;
