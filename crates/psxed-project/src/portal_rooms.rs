@@ -954,6 +954,7 @@ mod tests {
                 animation: crate::MaterialAnimation::default(),
                 secondary_layer: None,
                 face_sidedness: crate::MaterialFaceSidedness::Both,
+                layered_sky: false,
                 active_version_id: crate::MaterialVersionId::ORIGINAL,
                 active_version_name: "Original".to_string(),
                 versions: Vec::new(),
