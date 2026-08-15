@@ -212,9 +212,49 @@ impl Trace {
 }
 
 #[derive(Copy, Clone)]
+enum PlaneRecords<'a> {
+    Packed(RecordSlice<'a, Plane>),
+    Decoded(&'a [Plane]),
+}
+
+impl PlaneRecords<'_> {
+    #[inline(always)]
+    fn get(self, index: usize) -> Option<Plane> {
+        match self {
+            Self::Packed(records) => records.get(index),
+            Self::Decoded(records) => records.get(index).copied(),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum ClipNodeRecords<'a> {
+    Packed(RecordSlice<'a, ClipNode>),
+    Decoded(&'a [ClipNode]),
+}
+
+impl ClipNodeRecords<'_> {
+    #[inline(always)]
+    fn len(self) -> usize {
+        match self {
+            Self::Packed(records) => records.len(),
+            Self::Decoded(records) => records.len(),
+        }
+    }
+
+    #[inline(always)]
+    fn get(self, index: usize) -> Option<ClipNode> {
+        match self {
+            Self::Packed(records) => records.get(index),
+            Self::Decoded(records) => records.get(index).copied(),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
 pub struct CollisionHull<'a> {
-    planes: RecordSlice<'a, Plane>,
-    nodes: RecordSlice<'a, ClipNode>,
+    planes: PlaneRecords<'a>,
+    nodes: ClipNodeRecords<'a>,
     head_node: i16,
 }
 
@@ -225,8 +265,19 @@ impl<'a> CollisionHull<'a> {
         head_node: i16,
     ) -> Self {
         Self {
-            planes,
-            nodes,
+            planes: PlaneRecords::Packed(planes),
+            nodes: ClipNodeRecords::Packed(nodes),
+            head_node,
+        }
+    }
+
+    /// Construct a collision hull over records decoded once by the map owner.
+    /// This removes packed-record decoding from every traversal step while
+    /// retaining the same validated collision implementation.
+    pub const fn new_decoded(planes: &'a [Plane], nodes: &'a [ClipNode], head_node: i16) -> Self {
+        Self {
+            planes: PlaneRecords::Decoded(planes),
+            nodes: ClipNodeRecords::Decoded(nodes),
             head_node,
         }
     }
@@ -685,6 +736,32 @@ mod tests {
                 z: 0
             }),
             Some(CONTENTS_SOLID)
+        );
+    }
+
+    #[test]
+    fn decoded_working_set_matches_packed_collision() {
+        let plane_bytes = axial_x_plane();
+        let node_bytes = one_node();
+        let packed = hull(&plane_bytes, &node_bytes);
+        let decoded_planes = [Plane::decode(&plane_bytes)];
+        let decoded_nodes = [ClipNode::decode(&node_bytes)];
+        let decoded = CollisionHull::new_decoded(&decoded_planes, &decoded_nodes, 0);
+        let start = Vec3I32 {
+            x: Q12_ONE,
+            y: 0,
+            z: 0,
+        };
+        let end = Vec3I32 {
+            x: -Q12_ONE,
+            y: 0,
+            z: 0,
+        };
+
+        assert_eq!(packed.point_contents(start), decoded.point_contents(start));
+        assert_eq!(
+            trace(&packed, start, end, &mut TraceScratch::new()),
+            trace(&decoded, start, end, &mut TraceScratch::new())
         );
     }
 

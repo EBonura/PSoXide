@@ -67,6 +67,21 @@ pub struct ClassicAffineWordSourceVertex {
     pub light: u32,
 }
 
+/// Indexed retained-world corner with material attributes separated from its
+/// shared position.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassicAffineIndexedCorner {
+    /// Index into the caller-owned shared-position array.
+    pub position_index: u16,
+    /// Material-relative or baked atlas UV.
+    pub uv: [u8; 2],
+    /// Two light contributions in the low bytes or baked RGB.
+    pub light: u32,
+}
+
+const _: [(); 8] = [(); size_of::<ClassicAffineIndexedCorner>()];
+
 /// Compact projected vertex used by the packed world-fan path.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -128,6 +143,106 @@ pub unsafe fn materialize_classic_affine_word_vertices(
             ptr::write(destination_words, position_xy);
             ptr::write(destination_words.add(1), position_z_uv);
             ptr::write(destination_words.add(2), color);
+        }
+        index += 1;
+    }
+}
+
+/// Expand indexed corners and shared positions into projection scratch.
+///
+/// # Safety
+/// `corners` and `destination` must contain `vertex_count` records, every
+/// corner index must address `positions`, and all ranges must be aligned and
+/// non-overlapping.
+pub unsafe fn materialize_classic_affine_indexed_vertices(
+    corners: *const ClassicAffineIndexedCorner,
+    positions: *const ClassicAffinePosition,
+    position_count: usize,
+    vertex_count: usize,
+    destination: *mut ClassicAffineVertex,
+    uv_offset: [u8; 2],
+    light_weights: [u16; 2],
+    baked_uv: bool,
+    baked_light: bool,
+) {
+    let mut index = 0usize;
+    while index < vertex_count {
+        let corner = unsafe { ptr::read(corners.add(index)) };
+        let position_index = corner.position_index as usize;
+        debug_assert!(position_index < position_count);
+        let position = unsafe { ptr::read(positions.add(position_index)) };
+        let uv = if baked_uv {
+            corner.uv
+        } else {
+            [
+                corner.uv[0].wrapping_add(uv_offset[0]),
+                corner.uv[1].wrapping_add(uv_offset[1]),
+            ]
+        };
+        let color = if baked_light {
+            corner.light
+        } else {
+            light_color(
+                [corner.light as u8, (corner.light >> 8) as u8],
+                light_weights,
+            )
+        };
+        // Projection overwrites screen/depth before either field is read. As
+        // with the retained word-source path, initialize only the first three
+        // words and avoid eight bytes of dead stores per visible corner.
+        let destination_words = unsafe { destination.add(index).cast::<u32>() };
+        let position_xy = u32::from(position.position[0] as u16)
+            | (u32::from(position.position[1] as u16) << 16);
+        let position_z_uv = u32::from(position.position[2] as u16)
+            | (u32::from(uv[0]) << 16)
+            | (u32::from(uv[1]) << 24);
+        unsafe {
+            ptr::write(destination_words, position_xy);
+            ptr::write(destination_words.add(1), position_z_uv);
+            ptr::write(destination_words.add(2), color);
+        }
+        index += 1;
+    }
+}
+
+/// Expand indexed corners while reusing already projected shared positions.
+///
+/// # Safety
+/// The requirements of [`materialize_classic_affine_indexed_vertices`] apply,
+/// and `projected` must contain `position_count` records produced for the
+/// active camera.
+pub unsafe fn materialize_classic_affine_indexed_projected_vertices(
+    corners: *const ClassicAffineIndexedCorner,
+    positions: *const ClassicAffinePosition,
+    projected: *const ClassicAliasProjectedVertex,
+    position_count: usize,
+    vertex_count: usize,
+    destination: *mut ClassicAffineVertex,
+    uv_offset: [u8; 2],
+    light_weights: [u16; 2],
+    baked_uv: bool,
+    baked_light: bool,
+) {
+    unsafe {
+        materialize_classic_affine_indexed_vertices(
+            corners,
+            positions,
+            position_count,
+            vertex_count,
+            destination,
+            uv_offset,
+            light_weights,
+            baked_uv,
+            baked_light,
+        );
+    }
+    let mut index = 0usize;
+    while index < vertex_count {
+        let corner = unsafe { ptr::read(corners.add(index)) };
+        let cached = unsafe { ptr::read(projected.add(corner.position_index as usize)) };
+        unsafe {
+            (*destination.add(index)).screen = cached.screen;
+            (*destination.add(index)).depth = cached.depth as i32;
         }
         index += 1;
     }
@@ -381,39 +496,31 @@ pub unsafe fn project_classic_affine_indexed_vertices(
 
     let mut index = 0usize;
     while index + 2 < index_count {
-        let a_index = unsafe { *indices.add(index) } as usize;
-        let b_index = unsafe { *indices.add(index + 1) } as usize;
-        let c_index = unsafe { *indices.add(index + 2) } as usize;
-        debug_assert!(a_index < position_count);
-        debug_assert!(b_index < position_count);
-        debug_assert!(c_index < position_count);
+        let position_indices = [
+            unsafe { *indices.add(index) } as usize,
+            unsafe { *indices.add(index + 1) } as usize,
+            unsafe { *indices.add(index + 2) } as usize,
+        ];
+        debug_assert!(position_indices
+            .iter()
+            .all(|&position_index| position_index < position_count));
         let output = scene::project_triangle_scheduled(
-            classic_position_vec3(unsafe { *positions.add(a_index) }),
-            classic_position_vec3(unsafe { *positions.add(b_index) }),
-            classic_position_vec3(unsafe { *positions.add(c_index) }),
+            classic_position_vec3(unsafe { *positions.add(position_indices[0]) }),
+            classic_position_vec3(unsafe { *positions.add(position_indices[1]) }),
+            classic_position_vec3(unsafe { *positions.add(position_indices[2]) }),
         );
-        unsafe {
-            ptr::write(
-                projected.add(a_index),
-                ClassicAliasProjectedVertex {
-                    screen: [output[0].sx, output[0].sy],
-                    depth: output[0].sz,
-                },
-            );
-            ptr::write(
-                projected.add(b_index),
-                ClassicAliasProjectedVertex {
-                    screen: [output[1].sx, output[1].sy],
-                    depth: output[1].sz,
-                },
-            );
-            ptr::write(
-                projected.add(c_index),
-                ClassicAliasProjectedVertex {
-                    screen: [output[2].sx, output[2].sy],
-                    depth: output[2].sz,
-                },
-            );
+        let mut lane = 0usize;
+        while lane < 3 {
+            unsafe {
+                ptr::write(
+                    projected.add(position_indices[lane]),
+                    ClassicAliasProjectedVertex {
+                        screen: [output[lane].sx, output[lane].sy],
+                        depth: output[lane].sz,
+                    },
+                );
+            }
+            lane += 1;
         }
         index += 3;
     }

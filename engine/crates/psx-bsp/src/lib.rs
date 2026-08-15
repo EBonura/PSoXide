@@ -33,6 +33,8 @@ pub const PSB_MAGIC: u32 = 0x2558_5350;
 pub const PSB2_MAGIC: u32 = 0x3258_5350;
 /// `PSX3` in little-endian byte order: compact structural BSP records.
 pub const PSB3_MAGIC: u32 = 0x3358_5350;
+/// `PSX4` in little-endian byte order: compact records with indexed corners.
+pub const PSB4_MAGIC: u32 = 0x3458_5350;
 pub const PSB_HEADER_BYTES: u32 = 4;
 pub const LUMP_HEADER_BYTES: u32 = 8;
 pub const LUMP_COUNT: usize = 15;
@@ -41,6 +43,7 @@ pub const LUMP_COUNT: usize = 15;
 pub enum PsbVersion {
     LegacyV1,
     CompactV3,
+    IndexedV4,
 }
 
 impl PsbVersion {
@@ -48,6 +51,7 @@ impl PsbVersion {
         match self {
             Self::LegacyV1 => PSB_MAGIC,
             Self::CompactV3 => PSB3_MAGIC,
+            Self::IndexedV4 => PSB4_MAGIC,
         }
     }
 
@@ -55,6 +59,7 @@ impl PsbVersion {
         match magic {
             PSB_MAGIC => Some(Self::LegacyV1),
             PSB3_MAGIC => Some(Self::CompactV3),
+            PSB4_MAGIC => Some(Self::IndexedV4),
             _ => None,
         }
     }
@@ -102,29 +107,32 @@ impl LumpKind {
     pub const fn record_size(self, version: PsbVersion) -> Option<u32> {
         match self {
             Self::TextureData | Self::SoundData | Self::ModelData | Self::Visibility => None,
-            Self::Vertices => Some(12),
+            Self::Vertices => match version {
+                PsbVersion::IndexedV4 => None,
+                _ => Some(12),
+            },
             Self::Planes => Some(match version {
                 PsbVersion::LegacyV1 => 14,
-                PsbVersion::CompactV3 => Plane::SIZE as u32,
+                PsbVersion::CompactV3 | PsbVersion::IndexedV4 => Plane::SIZE as u32,
             }),
             Self::TextureInfo => Some(14),
             Self::Faces => Some(match version {
                 PsbVersion::LegacyV1 => 14,
-                PsbVersion::CompactV3 => Face::SIZE as u32,
+                PsbVersion::CompactV3 | PsbVersion::IndexedV4 => Face::SIZE as u32,
             }),
             Self::MarkSurfaces => Some(2),
             Self::Leaves => Some(match version {
                 PsbVersion::LegacyV1 => 26,
-                PsbVersion::CompactV3 => Leaf::SIZE as u32,
+                PsbVersion::CompactV3 | PsbVersion::IndexedV4 => Leaf::SIZE as u32,
             }),
             Self::Nodes => Some(match version {
                 PsbVersion::LegacyV1 => 34,
-                PsbVersion::CompactV3 => Node::SIZE as u32,
+                PsbVersion::CompactV3 | PsbVersion::IndexedV4 => Node::SIZE as u32,
             }),
             Self::ClipNodes => Some(6),
             Self::Models => Some(match version {
                 PsbVersion::LegacyV1 => 32,
-                PsbVersion::CompactV3 => BrushModel::SIZE as u32,
+                PsbVersion::CompactV3 | PsbVersion::IndexedV4 => BrushModel::SIZE as u32,
             }),
             Self::Strings => Some(1),
             Self::Entities => Some(50),
@@ -442,6 +450,15 @@ impl<'a, T: CookedRecord> RecordSlice<'a, T> {
         self.bytes.is_empty()
     }
 
+    /// Return the validated wire bytes backing this record view.
+    ///
+    /// This does not imply that every cooked record is native-layout. Callers
+    /// may only cast records whose type explicitly pins its endian-independent
+    /// wire layout and alignment.
+    pub const fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
     pub fn get(self, index: usize) -> Option<T> {
         let start = index.checked_mul(T::SIZE)?;
         self.bytes.get(start..start + T::SIZE)?;
@@ -517,6 +534,34 @@ impl CookedRecord for Vertex {
         }
     }
 }
+
+/// `IVX1` header stored at the front of a PSB4 vertex lump.
+pub const INDEXED_VERTEX_MAGIC: u32 = 0x3158_5649;
+/// Bytes in the fixed PSB4 indexed-vertex header.
+pub const INDEXED_VERTEX_HEADER_BYTES: usize = 8;
+
+/// One face corner referencing a shared position in a PSB4 vertex lump.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexedVertexCorner {
+    /// Index into the position array following all corner records.
+    pub position_index: u16,
+    /// Material-relative or baked atlas UV.
+    pub texture: [u8; 2],
+    /// Two light contributions in the low bytes or baked RGB.
+    pub light: u32,
+}
+
+/// One exact quantized position shared by PSB4 corners.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexedVertexPosition {
+    /// Signed world/model coordinates in cooked Quake units.
+    pub position: [i16; 3],
+}
+
+const _: [(); 8] = [(); core::mem::size_of::<IndexedVertexCorner>()];
+const _: [(); 6] = [(); core::mem::size_of::<IndexedVertexPosition>()];
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Plane {
@@ -675,10 +720,65 @@ impl CookedRecord for Node {
     }
 }
 
+/// Native view of the compact six-byte render-tree node wire record.
+///
+/// The public [`Node`] retains its proven legacy aggregate layout for MIPS
+/// callers. Traversal-only consumers can borrow this narrow representation
+/// directly after resident-map validation.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompactNode {
+    pub plane: u16,
+    pub children: [i16; 2],
+}
+
+const _: [(); 6] = [(); core::mem::size_of::<CompactNode>()];
+const _: [(); 2] = [(); core::mem::align_of::<CompactNode>()];
+
+impl<'a> RecordSlice<'a, Node> {
+    /// Borrow validated compact node records without reconstructing the
+    /// legacy semantic aggregate on every tree step.
+    #[cfg(target_endian = "little")]
+    pub fn as_native_compact_nodes(self) -> Option<&'a [CompactNode]> {
+        let bytes = self.as_bytes();
+        if bytes
+            .as_ptr()
+            .align_offset(core::mem::align_of::<CompactNode>())
+            != 0
+        {
+            return None;
+        }
+        Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<CompactNode>(), self.len()) })
+    }
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ClipNode {
     pub plane: i16,
     pub children: [i16; 2],
+}
+
+const _: [(); 6] = [(); core::mem::size_of::<ClipNode>()];
+const _: [(); 2] = [(); core::mem::align_of::<ClipNode>()];
+
+impl<'a> RecordSlice<'a, ClipNode> {
+    /// Borrow little-endian clip-node wire records as their identical native
+    /// representation. Resident BSP lump packing guarantees at least 4-byte
+    /// alignment; this method still checks alignment so independent callers
+    /// fail closed rather than creating a misaligned slice.
+    #[cfg(target_endian = "little")]
+    pub fn as_native_clip_nodes(self) -> Option<&'a [ClipNode]> {
+        let bytes = self.as_bytes();
+        if bytes
+            .as_ptr()
+            .align_offset(core::mem::align_of::<ClipNode>())
+            != 0
+        {
+            return None;
+        }
+        Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<ClipNode>(), self.len()) })
+    }
 }
 
 impl CookedRecord for ClipNode {
@@ -1453,6 +1553,8 @@ mod tests {
         assert_eq!(core::mem::align_of::<Leaf>(), 4);
         assert_eq!(core::mem::size_of::<Node>(), 34);
         assert_eq!(core::mem::align_of::<Node>(), 2);
+        assert_eq!(core::mem::size_of::<ClipNode>(), 6);
+        assert_eq!(core::mem::align_of::<ClipNode>(), 2);
         assert_eq!(core::mem::size_of::<BrushModel>(), 32);
         assert_eq!(core::mem::align_of::<BrushModel>(), 2);
 
@@ -1532,6 +1634,27 @@ mod tests {
         let node = RecordSlice::<Node>::new(&bytes).unwrap().get(0).unwrap();
         assert_eq!(node.plane, 7);
         assert_eq!(node.children, [3, -5]);
+    }
+
+    #[test]
+    fn borrows_aligned_clip_nodes_without_decoding_or_copying() {
+        #[repr(align(2))]
+        struct Aligned([u8; ClipNode::SIZE]);
+
+        let mut bytes = Aligned([0; ClipNode::SIZE]);
+        bytes.0[0..2].copy_from_slice(&7i16.to_le_bytes());
+        bytes.0[2..4].copy_from_slice(&3i16.to_le_bytes());
+        bytes.0[4..6].copy_from_slice(&(-5i16).to_le_bytes());
+        let packed = RecordSlice::<ClipNode>::new(&bytes.0).unwrap();
+        let native = packed.as_native_clip_nodes().unwrap();
+        assert_eq!(
+            native,
+            &[ClipNode {
+                plane: 7,
+                children: [3, -5]
+            }]
+        );
+        assert_eq!(native.as_ptr().cast::<u8>(), bytes.0.as_ptr());
     }
 
     #[test]

@@ -88,17 +88,19 @@ pub use character_motor::{
     CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
 };
 pub use classic_affine::{
-    compose_classic_alias_transform, materialize_classic_affine_word_vertices,
+    compose_classic_alias_transform,
+    materialize_classic_affine_indexed_projected_vertices,
+    materialize_classic_affine_indexed_vertices, materialize_classic_affine_word_vertices,
     project_classic_affine_indexed_vertices, submit_classic_affine_batch,
     submit_classic_affine_fan, submit_classic_affine_packed_fan,
     submit_classic_affine_projected_batch, submit_classic_affine_projected_fan,
     submit_classic_affine_scoped_windowed_batch, submit_classic_affine_scoped_windowed_fan,
     submit_classic_affine_windowed_batch, submit_classic_affine_windowed_fan,
     submit_classic_alias_model, submit_classic_alias_view_model, ClassicAffineBatchSurface,
-    ClassicAffinePosition, ClassicAffineProfile, ClassicAffineProjectedVertex,
-    ClassicAffineSourceVertex, ClassicAffineSubmit, ClassicAffineVertex,
-    ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
-    ClassicAliasProjectedVertex, ClassicAliasVertex,
+    ClassicAffineIndexedCorner, ClassicAffinePosition, ClassicAffineProfile,
+    ClassicAffineProjectedVertex, ClassicAffineSourceVertex, ClassicAffineSubmit,
+    ClassicAffineVertex, ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex,
+    ClassicAliasFace, ClassicAliasProjectedVertex, ClassicAliasVertex,
 };
 pub use collision_query::{
     trace_collision, CollisionQueryError, CollisionTrace, CollisionTraceProvider,
@@ -125,14 +127,13 @@ pub use render::{
 pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_basis,
     compute_joint_world_transform, project_model_vertex_with_joint_transforms,
-    AdaptiveSubdivisionKindMask,
-    AdaptiveSubdivisionProfile, CullMode, DepthPolicy, GouraudMeshOptions, GouraudRenderPass,
-    GouraudTriCommand, JointViewTransform, JointWorldTransform, LoadedWorldCameraGte,
-    LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,
-    ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
-    TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex,
-    ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
-    WorldSurfaceOptions, WorldTriCommand,
+    AdaptiveSubdivisionKindMask, AdaptiveSubdivisionProfile, CullMode, DepthPolicy,
+    GouraudMeshOptions, GouraudRenderPass, GouraudTriCommand, JointViewTransform,
+    JointWorldTransform, LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats,
+    ModelPoseTranslation, ModelUvMapping, ModelUvOffset, ProjectedTexturedVertex, ProjectedVertex,
+    SkyDirectionProjector, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
+    TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection,
+    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
