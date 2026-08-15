@@ -1628,7 +1628,10 @@ fn embedded_default_project_ron_deserializes() {
     let animation_set_resource = project
         .resource(animation_set_id)
         .expect("starter animation set resource missing");
-    assert_eq!(animation_set_resource.name, "Aletha Delivered Animation Set");
+    assert_eq!(
+        animation_set_resource.name,
+        "Aletha Delivered Animation Set"
+    );
     let ResourceData::AnimationSet(animation_set) = &animation_set_resource.data else {
         panic!("starter animation set has the wrong resource kind");
     };

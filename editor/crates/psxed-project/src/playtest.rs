@@ -72,8 +72,8 @@ mod performance;
 mod schema;
 pub(crate) use cook_ui::*;
 mod cook_entities;
-pub use cook_entities::{bake_model_clip_frame_bounds, MODEL_FRAME_BOUNDS_PAD_UNITS};
 pub(crate) use cook_entities::*;
+pub use cook_entities::{bake_model_clip_frame_bounds, MODEL_FRAME_BOUNDS_PAD_UNITS};
 mod cook_props_lights;
 pub(crate) use cook_props_lights::*;
 mod cook_visibility;
@@ -1393,40 +1393,41 @@ pub fn build_package(
                                 &mut report,
                             )
                         });
-                        let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
-                            push_model_instance_for_resource(
-                                project,
-                                project_root,
-                                node.name.as_str(),
-                                model_resource_id,
-                                ModelInstancePlacement {
-                                    clip_override: clip,
-                                    pose_frame,
-                                    room_index,
-                                    pos,
-                                    yaw,
-                                    visual_yaw: renderer.visual_yaw,
-                                    pitch,
-                                    roll,
-                                    visual_offset: renderer.visual_offset,
-                                    visual_scale_q8: renderer.visual_scale_q8,
-                                    material_override,
-                                },
-                                ModelCookTables {
-                                    assets: &mut assets,
-                                    models: &mut models,
-                                    model_clips: &mut model_clips,
-                                    model_clip_bounds: &mut model_clip_bounds,
-                                    model_frame_bounds: &mut model_frame_bounds,
-                                    model_sockets: &mut model_sockets,
-                                    model_instances: &mut model_instances,
-                                    model_for_resource: &mut model_for_resource,
-                                    runtime_model_clips: &runtime_model_clips,
-                                    model_clip_remaps: &mut model_clip_remaps,
-                                    report,
-                                },
-                            )
-                        });
+                        let ok =
+                            report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                                push_model_instance_for_resource(
+                                    project,
+                                    project_root,
+                                    node.name.as_str(),
+                                    model_resource_id,
+                                    ModelInstancePlacement {
+                                        clip_override: clip,
+                                        pose_frame,
+                                        room_index,
+                                        pos,
+                                        yaw,
+                                        visual_yaw: renderer.visual_yaw,
+                                        pitch,
+                                        roll,
+                                        visual_offset: renderer.visual_offset,
+                                        visual_scale_q8: renderer.visual_scale_q8,
+                                        material_override,
+                                    },
+                                    ModelCookTables {
+                                        assets: &mut assets,
+                                        models: &mut models,
+                                        model_clips: &mut model_clips,
+                                        model_clip_bounds: &mut model_clip_bounds,
+                                        model_frame_bounds: &mut model_frame_bounds,
+                                        model_sockets: &mut model_sockets,
+                                        model_instances: &mut model_instances,
+                                        model_for_resource: &mut model_for_resource,
+                                        runtime_model_clips: &runtime_model_clips,
+                                        model_clip_remaps: &mut model_clip_remaps,
+                                        report,
+                                    },
+                                )
+                            });
                         if !ok {
                             return (None, report);
                         }
@@ -1462,29 +1463,30 @@ pub fn build_package(
                             ));
                             continue;
                         };
-                        let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
-                            push_character_controller_idle_instance(
-                                project,
-                                project_root,
-                                node.name.as_str(),
-                                character_id,
-                                room_index,
-                                pos,
-                                yaw,
-                                &mut texture_asset_for_path,
-                                &mut assets,
-                                &mut models,
-                                &mut model_clips,
-                                &mut model_clip_bounds,
-                                &mut model_frame_bounds,
-                                &mut model_sockets,
-                                &mut model_instances,
-                                &mut model_for_resource,
-                                &runtime_model_clips,
-                                &mut model_clip_remaps,
-                                report,
-                            )
-                        });
+                        let ok =
+                            report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                                push_character_controller_idle_instance(
+                                    project,
+                                    project_root,
+                                    node.name.as_str(),
+                                    character_id,
+                                    room_index,
+                                    pos,
+                                    yaw,
+                                    &mut texture_asset_for_path,
+                                    &mut assets,
+                                    &mut models,
+                                    &mut model_clips,
+                                    &mut model_clip_bounds,
+                                    &mut model_frame_bounds,
+                                    &mut model_sockets,
+                                    &mut model_instances,
+                                    &mut model_for_resource,
+                                    &runtime_model_clips,
+                                    &mut model_clip_remaps,
+                                    report,
+                                )
+                            });
                         if !ok {
                             return (None, report);
                         }
@@ -1562,24 +1564,25 @@ pub fn build_package(
                             else {
                                 return (None, report);
                             };
-                            let ok = report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
-                                push_game_entity(
-                                    node.name.as_str(),
-                                    archetype.as_str(),
-                                    room_index,
-                                    pos,
-                                    yaw,
-                                    &controller.settings,
-                                    enemy,
-                                    node_model_instance,
-                                    state_clips,
-                                    combat_capsule_first,
-                                    combat_capsule_count,
-                                    &mut names,
-                                    &mut game_entities,
-                                    report,
-                                )
-                            });
+                            let ok =
+                                report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
+                                    push_game_entity(
+                                        node.name.as_str(),
+                                        archetype.as_str(),
+                                        room_index,
+                                        pos,
+                                        yaw,
+                                        &controller.settings,
+                                        enemy,
+                                        node_model_instance,
+                                        state_clips,
+                                        combat_capsule_first,
+                                        combat_capsule_count,
+                                        &mut names,
+                                        &mut game_entities,
+                                        report,
+                                    )
+                                });
                             if !ok {
                                 return (None, report);
                             }

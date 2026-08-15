@@ -201,14 +201,7 @@ mod tests {
                 z: -16,
             }
         );
-        assert_eq!(
-            door.maxs,
-            psx_bsp::Vec3I16 {
-                x: 2,
-                y: 48,
-                z: 16,
-            }
-        );
+        assert_eq!(door.maxs, psx_bsp::Vec3I16 { x: 2, y: 48, z: 16 });
     }
 
     #[test]
