@@ -1127,7 +1127,10 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
         let otz = scene::classic_otz3_from_sum(
             root_depth + previous_ref.depth as u16 as u32 + current_ref.depth as u16 as u32,
         );
-        if otz > 0 && otz < profile.ot_depth {
+        if otz > 0
+            && otz < profile.ot_depth
+            && near_plane_safe3(root.depth, previous_ref.depth, current_ref.depth)
+        {
             let next = unsafe { current.add(1) };
             if otz >= profile.subdivide_once_at && next != end {
                 let next_ref = unsafe { &*next };
@@ -1502,7 +1505,10 @@ pub unsafe fn submit_classic_affine_packed_fan(
             root[1].depth as u16,
             root[2].depth as u16,
         ]);
-        if otz > 0 && otz < profile.ot_depth {
+        if otz > 0
+            && otz < profile.ot_depth
+            && near_plane_safe3(root[0].depth, root[1].depth, root[2].depth)
+        {
             if otz < profile.subdivide_once_at {
                 let source = [
                     unsafe { ptr::read_unaligned(vertices) },
@@ -1550,6 +1556,20 @@ pub unsafe fn submit_classic_affine_packed_fan(
 #[inline(always)]
 fn source_vec3(vertex: ClassicAffineSourceVertex) -> Vec3I16 {
     Vec3I16::new(vertex.position[0], vertex.position[1], vertex.position[2])
+}
+
+/// GTE screen coordinates saturate rather than clip: a vertex at or
+/// behind the eye plane projects with `sz` pinned near zero and sx/sy
+/// slammed to the hardware rails, which rasterizes as a screen-wide
+/// "exploded" triangle. Any triangle touching that band is dropped
+/// before emission; the camera's collision spring keeps ordinary play
+/// views out of this range, so the drop replaces a full-screen wrap,
+/// not a visible wall.
+const NEAR_VERTEX_DEPTH_MIN: i32 = 4;
+
+#[inline]
+fn near_plane_safe3(a: i32, b: i32, c: i32) -> bool {
+    a >= NEAR_VERTEX_DEPTH_MIN && b >= NEAR_VERTEX_DEPTH_MIN && c >= NEAR_VERTEX_DEPTH_MIN
 }
 
 #[inline(always)]
