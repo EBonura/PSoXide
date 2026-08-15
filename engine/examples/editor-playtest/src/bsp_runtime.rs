@@ -35,9 +35,9 @@ use crate::{ensure_room_texture_uploaded, find_room_texture_vram_slot, PROJECTIO
 pub(super) const MAX_BSP_DOORS: usize = 16;
 pub(super) const BSP_POINT_HULL_INDEX: usize = 0;
 /// Body baked by `compile_brush_world` into hull one.
-pub(super) const BSP_PLAYER_RADIUS: i32 = 16;
+pub(super) const BSP_PLAYER_RADIUS: i32 = 1;
 /// Body baked by `compile_brush_world` into hull one.
-pub(super) const BSP_PLAYER_HEIGHT: i32 = 56;
+pub(super) const BSP_PLAYER_HEIGHT: i32 = 4;
 /// Preserve the first-playable fixture's authored walking cadence when it has
 /// no Character resource. Character-backed projects keep their authored speed.
 pub(super) const BSP_FALLBACK_PLAYER_SPEED: i32 = 4;
