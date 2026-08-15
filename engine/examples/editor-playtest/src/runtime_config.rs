@@ -75,32 +75,32 @@ pub(super) const SCREEN_H: i16 = 240;
 pub(super) const SCREEN_CX: i16 = 160;
 pub(super) const SCREEN_CY: i16 = 120;
 pub(super) const FOCAL: i32 = 320;
-pub(super) const NEAR_Z: i32 = 64;
-pub(super) const FAR_Z: i32 = 16384;
+pub(super) const NEAR_Z: i32 = 4;
+pub(super) const FAR_Z: i32 = 1024;
 pub(super) const PROJECTION: WorldProjection =
     WorldProjection::new(SCREEN_CX, SCREEN_CY, FOCAL, NEAR_Z);
 pub(super) const SHADOW_DEPTH_BIAS: i32 = FAR_Z;
-pub(super) const SHADOW_FLOOR_LIFT: i32 = 4;
+pub(super) const SHADOW_FLOOR_LIFT: i32 = 1;
 pub(super) const SHADOW_RADIUS_SCALE_NUM: i32 = 5;
 pub(super) const SHADOW_RADIUS_SCALE_DEN: i32 = 4;
-pub(super) const SHADOW_RADIUS_MIN: i32 = 160;
-pub(super) const SHADOW_RADIUS_MAX: i32 = 320;
+pub(super) const SHADOW_RADIUS_MIN: i32 = 10;
+pub(super) const SHADOW_RADIUS_MAX: i32 = 20;
 pub(super) const COLLISION_DEBUG_BUTTON: u16 = button::L3;
-pub(super) const FLOOR_LINK_CROSS_EPSILON: i32 = 32;
+pub(super) const FLOOR_LINK_CROSS_EPSILON: i32 = 2;
 /// Dead-band (engine units) below a floor boundary before a downward room
 /// switch fires. Climbing up lands the player AT the boundary; without a
 /// margin the down-switch would immediately fire and the player would
 /// thrash between floors. Must exceed `FLOOR_LINK_CROSS_EPSILON` (the
 /// up-switch slack) so the up and down conditions can't both hold at the
 /// seam; well under a floor's height so a real fall still registers.
-pub(super) const FLOOR_LINK_SWITCH_HYSTERESIS: i32 = 256;
+pub(super) const FLOOR_LINK_SWITCH_HYSTERESIS: i32 = 16;
 pub(super) const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
 
-pub(super) const CAMERA_Y_OFFSET: i32 = 1100;
-pub(super) const CAMERA_START_RADIUS: i32 = 2400;
-pub(super) const CAMERA_RADIUS_MIN: i32 = 800;
-pub(super) const CAMERA_RADIUS_MAX: i32 = 5200;
-pub(super) const CAMERA_RADIUS_STEP: i32 = 64;
+pub(super) const CAMERA_Y_OFFSET: i32 = 69;
+pub(super) const CAMERA_START_RADIUS: i32 = 150;
+pub(super) const CAMERA_RADIUS_MIN: i32 = 50;
+pub(super) const CAMERA_RADIUS_MAX: i32 = 325;
+pub(super) const CAMERA_RADIUS_STEP: i32 = 4;
 pub(super) const CAMERA_START_YAW: Angle = Angle::from_q12(220);
 pub(super) const CAMERA_YAW_STEP: Angle = Angle::from_q12(12);
 pub(super) const CAMERA_SWEEP_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP").is_some();
@@ -131,14 +131,14 @@ pub(super) const MAX_CAMERA_ORBIT_SPEED_LEVEL: u8 = 7;
 pub(super) const CAMERA_SOFT_LOCK_BREAK_STICK: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_THRESHOLD: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_RELEASE: i16 = 36;
-pub(super) const LOCK_RANGE: i32 = 4096;
-pub(super) const LOCK_BREAK_RANGE: i32 = 5120;
+pub(super) const LOCK_RANGE: i32 = 256;
+pub(super) const LOCK_BREAK_RANGE: i32 = 320;
 /// Horizontal acquisition cone in signed Q8 screen-space (`256 = 45°`).
 pub(super) const LOCK_ACQUIRE_HALF_CONE_Q8: i32 = 288;
 /// Frames a still-live target may remain beyond break range before unlock.
 pub(super) const LOCK_BREAK_GRACE_VBLANKS: u8 = 8;
-pub(super) const SOFT_LOCK_RANGE: i32 = 3072;
-pub(super) const SOFT_LOCK_BREAK_RANGE: i32 = 3840;
+pub(super) const SOFT_LOCK_RANGE: i32 = 192;
+pub(super) const SOFT_LOCK_BREAK_RANGE: i32 = 240;
 pub(super) const CAMERA_COLLISION_ENABLED: bool = true;
 pub(super) const SOFT_LOCK_ENABLED: bool = false;
 
@@ -146,7 +146,7 @@ pub(super) const SOFT_LOCK_ENABLED: bool = false;
 /// Character (no PLAYER_CONTROLLER). Mirrors the pre-character
 /// debug value.
 pub(super) const FALLBACK_PLAYER_YAW_STEP: Angle = Angle::from_q12(32);
-pub(super) const FALLBACK_PLAYER_SPEED: i32 = 32;
+pub(super) const FALLBACK_PLAYER_SPEED: i32 = 2;
 pub(super) const PLAYER_SPEED_SCALE_NUM: i32 = 3;
 pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
@@ -184,7 +184,7 @@ pub(super) const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-pub(super) const ROOM_VISIBLE_CELL_CAMERA_MARGIN: i32 = 96;
+pub(super) const ROOM_VISIBLE_CELL_CAMERA_MARGIN: i32 = 6;
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
