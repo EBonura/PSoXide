@@ -75,7 +75,9 @@ fn main() {
         );
     }
 
-    let backup = project_root.join("logs").join("project.ron.pre-weapons.bak");
+    let backup = project_root
+        .join("logs")
+        .join("project.ron.pre-weapons.bak");
     if !backup.exists() {
         std::fs::create_dir_all(backup.parent().unwrap()).expect("logs dir");
         std::fs::copy(&project_path, &backup).expect("backup project.ron");
@@ -120,9 +122,15 @@ fn main() {
             .expect("static cook emits a bind_pose clip");
         clip_bytes.push(bind.bytes.clone());
 
-        let model_id =
-            import_model_with_animation_sources(&mut project, &dst, &[], name, &project_root, config)
-                .expect("model import");
+        let model_id = import_model_with_animation_sources(
+            &mut project,
+            &dst,
+            &[],
+            name,
+            &project_root,
+            config,
+        )
+        .expect("model import");
         model_ids.push(model_id);
     }
 
@@ -247,7 +255,10 @@ fn main() {
         let Some(joint) = right_hand_joint(&project, id) else {
             println!(
                 "{}: no named RightHand joint; socket intentionally not guessed",
-                project.resource(id).map(|r| r.name.as_str()).unwrap_or("model")
+                project
+                    .resource(id)
+                    .map(|r| r.name.as_str())
+                    .unwrap_or("model")
             );
             continue;
         };
@@ -258,7 +269,11 @@ fn main() {
         let ResourceData::Model(model) = &mut resource.data else {
             continue;
         };
-        if model.attachments.iter().any(|s| s.name == "right_hand_grip") {
+        if model
+            .attachments
+            .iter()
+            .any(|s| s.name == "right_hand_grip")
+        {
             continue;
         }
         model.attachments.push(AttachmentSocket {
@@ -308,11 +323,17 @@ fn main() {
             println!(
                 "scene '{}': equipped {} on entity {entity:?}",
                 scene.name,
-                if player { "Sword1 Light (player)" } else { "Sword1 Heavy" },
+                if player {
+                    "Sword1 Light (player)"
+                } else {
+                    "Sword1 Heavy"
+                },
             );
         }
     }
 
-    project.save_to_path(&project_path).expect("save project.ron");
+    project
+        .save_to_path(&project_path)
+        .expect("save project.ron");
     println!("saved {}", project_path.display());
 }

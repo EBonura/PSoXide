@@ -44,11 +44,11 @@
 
 use std::path::{Path, PathBuf};
 
+use psxed_project::model_import::register_cooked_model_bundle;
 use psxed_project::model_import::{
     animation_stats_from_bytes, model_stats_from_bytes, preview_model_with_animation_sources,
     resolve_path,
 };
-use psxed_project::model_import::register_cooked_model_bundle;
 use psxed_project::{
     AnimationActionBinding, AnimationClipBakeKind, AnimationClipResource, AnimationRole,
     AnimationSetResource, CharacterAnimationAction, CharacterSpawnRole, ProjectDocument,
@@ -179,7 +179,10 @@ fn main() {
                 pack_name = args.next().unwrap_or_else(|| fail("--pack needs a name"));
             }
             "--new-model" => {
-                new_model = Some(args.next().unwrap_or_else(|| fail("--new-model needs a name")));
+                new_model = Some(
+                    args.next()
+                        .unwrap_or_else(|| fail("--new-model needs a name")),
+                );
             }
             "--extra" => {
                 extras.push(args.next().unwrap_or_else(|| fail("--extra needs a stem")));
@@ -217,7 +220,12 @@ fn main() {
         .ok()
         .and_then(|bytes| model_stats_from_bytes(&bytes).ok())
         .map(|stats| stats.joint_count)
-        .unwrap_or_else(|| fail(format!("unreadable cooked model {}", cooked_model_path.display())));
+        .unwrap_or_else(|| {
+            fail(format!(
+                "unreadable cooked model {}",
+                cooked_model_path.display()
+            ))
+        });
 
     println!(
         "player {character_name} -> model {model_name} ({model_joints} joints)\n\
@@ -254,17 +262,23 @@ fn main() {
         ..Default::default()
     };
 
-    let out_dir = project_root.join("assets").join("animations").join(&pack_name);
+    let out_dir = project_root
+        .join("assets")
+        .join("animations")
+        .join(&pack_name);
     std::fs::create_dir_all(&out_dir)
         .unwrap_or_else(|e| fail(format!("{}: {e}", out_dir.display())));
 
     // Pack entries bind a gameplay action; extras are cooked and registered
     // but left unbound, for clips the runtime has no action slot for yet.
-    let jobs: Vec<(String, Option<CharacterAnimationAction>, AnimationRole, bool)> = PACK
+    let jobs: Vec<(
+        String,
+        Option<CharacterAnimationAction>,
+        AnimationRole,
+        bool,
+    )> = PACK
         .iter()
-        .map(|(stem, action, role, looping)| {
-            ((*stem).to_string(), Some(*action), *role, *looping)
-        })
+        .map(|(stem, action, role, looping)| ((*stem).to_string(), Some(*action), *role, *looping))
         .chain(
             extras
                 .iter()
@@ -358,7 +372,10 @@ fn main() {
 
     println!("bound {bound}/{} actions", PACK.len());
     if !skipped.is_empty() {
-        println!("missing (left on their existing clips): {}", skipped.join(", "));
+        println!(
+            "missing (left on their existing clips): {}",
+            skipped.join(", ")
+        );
     }
 }
 
@@ -369,7 +386,9 @@ fn find_player(project: &ProjectDocument) -> (String, ResourceId, ResourceId) {
         let ResourceData::Character(character) = &resource.data else {
             continue;
         };
-        let Some(model) = character.model else { continue };
+        let Some(model) = character.model else {
+            continue;
+        };
         let Some(set) = character.animation_set else {
             continue;
         };
@@ -414,7 +433,6 @@ fn model_details(
         resolve_path(&model.model_path, Some(project_root)),
     )
 }
-
 
 /// Cook a model and its clips from the generated takes in ONE pass, then point
 /// the player at them.
@@ -484,7 +502,11 @@ fn build_native_model(
     let bundle_dir = project_root.join("assets").join("models").join(&safe);
     std::fs::create_dir_all(&bundle_dir)
         .unwrap_or_else(|e| fail(format!("{}: {e}", bundle_dir.display())));
-    for entry in std::fs::read_dir(&bundle_dir).into_iter().flatten().flatten() {
+    for entry in std::fs::read_dir(&bundle_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let path = entry.path();
         if matches!(
             path.extension().and_then(|e| e.to_str()),
@@ -510,8 +532,9 @@ fn build_native_model(
         .iter()
         .find(|r| r.name == model_name && matches!(r.data, ResourceData::Model(_)))
         .map(|r| r.id);
-    let fresh_id = register_cooked_model_bundle(project, &bundle_dir, model_name, Some(project_root))
-        .unwrap_or_else(|e| fail(format!("register {model_name}: {e:?}")));
+    let fresh_id =
+        register_cooked_model_bundle(project, &bundle_dir, model_name, Some(project_root))
+            .unwrap_or_else(|e| fail(format!("register {model_name}: {e:?}")));
     let model_id = match existing_model {
         Some(existing) if existing != fresh_id => {
             let fresh = project
@@ -547,8 +570,12 @@ fn build_native_model(
         jobs.len()
     );
 
-    let out_dir = project_root.join("assets").join("animations").join(pack_name);
-    std::fs::create_dir_all(&out_dir).unwrap_or_else(|e| fail(format!("{}: {e}", out_dir.display())));
+    let out_dir = project_root
+        .join("assets")
+        .join("animations")
+        .join(pack_name);
+    std::fs::create_dir_all(&out_dir)
+        .unwrap_or_else(|e| fail(format!("{}: {e}", out_dir.display())));
 
     // Cook and trim everything first: the foot-joint vote needs every gait clip
     // before any of them can be aligned.
@@ -567,7 +594,8 @@ fn build_native_model(
     }
     // Ground-contact one-shots (the spawn intro) are levelled so the cook's
     // frame-0 anchor holds for every frame, not just the first.
-    let mut ground_offsets: std::collections::BTreeMap<usize, i32> = std::collections::BTreeMap::new();
+    let mut ground_offsets: std::collections::BTreeMap<usize, i32> =
+        std::collections::BTreeMap::new();
     // The clip an intro hands control to; its floor is the height to match.
     let idle_floor = jobs
         .iter()
@@ -581,7 +609,7 @@ fn build_native_model(
                 psxed_project::playtest::MODEL_FRAME_BOUNDS_PAD_UNITS,
             )
             .first()
-                .map(|b| b.floor_y)
+            .map(|b| b.floor_y)
         });
     for (index, (stem, action, _looping, _path)) in jobs.iter().enumerate() {
         if *action != Some(CharacterAnimationAction::Intro) {
@@ -603,20 +631,24 @@ fn build_native_model(
         // is not. `pose_offset` is added AFTER the anchor, so writing the
         // negated difference here nets the term to zero without an engine
         // change and without touching any other clip.
-        let anchor = psx_asset::Model::from_bytes(&package.model).ok().and_then(|model| {
-            let anim = psx_asset::Animation::from_bytes(&staged[index].0).ok()?;
-            psxed_project::playtest::bake_model_clip_frame_bounds(
-                &model,
-                &anim,
-                psxed_project::playtest::MODEL_FRAME_BOUNDS_PAD_UNITS,
-            )
-            .first()
+        let anchor = psx_asset::Model::from_bytes(&package.model)
+            .ok()
+            .and_then(|model| {
+                let anim = psx_asset::Animation::from_bytes(&staged[index].0).ok()?;
+                psxed_project::playtest::bake_model_clip_frame_bounds(
+                    &model,
+                    &anim,
+                    psxed_project::playtest::MODEL_FRAME_BOUNDS_PAD_UNITS,
+                )
+                .first()
                 .map(|f| f.floor_y)
-        });
+            });
         if let Some(anchor) = anchor {
             let cancel = anchor - target;
             ground_offsets.insert(index, cancel);
-            staged[index].1.push_str(&format!("  anchor cancelled ({cancel})"));
+            staged[index]
+                .1
+                .push_str(&format!("  anchor cancelled ({cancel})"));
             println!("  {stem}: cancelling spurious clip anchor, pose_offset y={cancel}");
         }
     }
@@ -702,9 +734,11 @@ fn build_native_model(
         clips: clip_ids,
         ..Default::default()
     };
-    let set_id = match project.resources.iter().find(|r| {
-        r.name == set_name && matches!(r.data, ResourceData::AnimationSet(_))
-    }) {
+    let set_id = match project
+        .resources
+        .iter()
+        .find(|r| r.name == set_name && matches!(r.data, ResourceData::AnimationSet(_)))
+    {
         Some(existing) => {
             let id = existing.id;
             if let Some(slot) = project.resource_mut(id) {
@@ -725,12 +759,12 @@ fn build_native_model(
         .find(|r| r.name == player_name && matches!(r.data, ResourceData::Character(_)))
         .map(|r| r.id)
         .unwrap_or_else(|| fail("player character vanished"));
-    let previous_model = project.resource(player_id).and_then(|resource| {
-        match &resource.data {
+    let previous_model = project
+        .resource(player_id)
+        .and_then(|resource| match &resource.data {
             ResourceData::Character(character) => character.model,
             _ => None,
-        }
-    });
+        });
     if let Some(resource) = project.resource_mut(player_id) {
         if let ResourceData::Character(character) = &mut resource.data {
             character.model = Some(model_id);
@@ -842,7 +876,10 @@ fn foot_joint_vote(clips: &[&[u8]]) -> Option<u16> {
             }
         }
     }
-    votes.into_iter().max_by_key(|(_, count)| *count).map(|(joint, _)| joint)
+    votes
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(joint, _)| joint)
 }
 
 /// Rotate a single-cycle looping clip so frame 0 is `foot`'s lowest point.
@@ -1014,15 +1051,20 @@ fn bind_action(
         fail(format!("animation set {set_id:?} is missing"));
     };
     let ResourceData::AnimationSet(set) = &mut resource.data else {
-        fail(format!("resource {} is not an animation set", resource.name));
+        fail(format!(
+            "resource {} is not an animation set",
+            resource.name
+        ));
     };
     match set.action_clips.iter_mut().find(|b| b.action == action) {
         Some(binding) => binding.clip = clip,
-        None => set.action_clips.push(psxed_project::AnimationActionBinding {
-            action,
-            clip,
-            options: None,
-        }),
+        None => set
+            .action_clips
+            .push(psxed_project::AnimationActionBinding {
+                action,
+                clip,
+                options: None,
+            }),
     }
 }
 
@@ -1091,7 +1133,6 @@ mod tests {
         assert!(trim_to_single_cycle(&bytes).is_none());
     }
 
-
     /// One-joint v3 clip whose Y dips to its minimum at `low_frame`.
     fn synthetic_gait(frames: u16, low_frame: u16) -> Vec<u8> {
         let identity: [i16; 9] = [4096, 0, 0, 0, 4096, 0, 0, 0, 4096];
@@ -1110,8 +1151,8 @@ mod tests {
         out.extend_from_slice(&0u16.to_le_bytes());
         for frame in 0..frames {
             // Cosine trough at low_frame, and the last frame duplicates the first.
-            let phase = f64::from((frame % cycle + cycle - low_frame % cycle) % cycle)
-                / f64::from(cycle);
+            let phase =
+                f64::from((frame % cycle + cycle - low_frame % cycle) % cycle) / f64::from(cycle);
             let y = (-1000.0 * (phase * std::f64::consts::TAU).cos()) as i16;
             out.extend_from_slice(&block);
             out.extend_from_slice(&0i16.to_le_bytes());

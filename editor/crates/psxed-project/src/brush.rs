@@ -111,7 +111,11 @@ impl FaceUv {
 /// Q8 axis scale to a factor. Negative mirrors the axis (Flip H/V);
 /// zero is treated as identity so damaged data cannot divide by zero.
 fn axis_scale_q8(q8: i16) -> f64 {
-    if q8 == 0 { 1.0 } else { f64::from(q8) / 256.0 }
+    if q8 == 0 {
+        1.0
+    } else {
+        f64::from(q8) / 256.0
+    }
 }
 
 /// Offsets are stored in an `i16`; a re-anchor of a far-away face at a
@@ -553,8 +557,7 @@ impl Brush {
         for face in &mut inner.faces {
             let plane = Plane::from_points(face.points)?;
             let (normal, _) = plane.normalized();
-            let shift =
-                normal.map(|component| (-component * f64::from(thickness)).round() as i32);
+            let shift = normal.map(|component| (-component * f64::from(thickness)).round() as i32);
             for point in &mut face.points {
                 for axis in 0..3 {
                     point[axis] += shift[axis];
@@ -1390,8 +1393,7 @@ mod tests {
         brush.faces.iter().all(|face| {
             let plane = Plane::from_points(face.points).expect("face plane");
             let (normal, distance) = plane.normalized();
-            normal[0] * point[0] + normal[1] * point[1] + normal[2] * point[2] - distance
-                <= 1e-6
+            normal[0] * point[0] + normal[1] * point[1] + normal[2] * point[2] - distance <= 1e-6
         })
     }
 

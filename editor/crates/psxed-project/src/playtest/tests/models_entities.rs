@@ -371,10 +371,7 @@ fn image_prop_cooks_preview_matching_collision_bounds() {
         .iter()
         .find(|prop| prop.width == 301)
         .expect("static card cooks");
-    assert_ne!(
-        static_prop.flags & image_prop_flags::COLLISION_ENABLED,
-        0
-    );
+    assert_ne!(static_prop.flags & image_prop_flags::COLLISION_ENABLED, 0);
     assert_eq!(
         static_prop.collision_min,
         [static_prop.x - 30, static_prop.y + 100, static_prop.z - 100]
@@ -389,14 +386,8 @@ fn image_prop_cooks_preview_matching_collision_bounds() {
         .iter()
         .find(|prop| prop.width == 302)
         .expect("billboard cooks");
-    assert_ne!(
-        billboard.flags & image_prop_flags::COLLISION_ENABLED,
-        0
-    );
-    assert_ne!(
-        billboard.flags & image_prop_flags::CYLINDRICAL_BILLBOARD,
-        0
-    );
+    assert_ne!(billboard.flags & image_prop_flags::COLLISION_ENABLED, 0);
+    assert_ne!(billboard.flags & image_prop_flags::CYLINDRICAL_BILLBOARD, 0);
     assert_eq!(
         billboard.collision_min,
         [billboard.x - 100, billboard.y + 100, billboard.z - 30]

@@ -340,11 +340,7 @@ pub(crate) fn image_prop_collision_aabb(
     let half = collision_size.map(|component| ((component as i32) / 2).max(1));
     let center_y = (visual_height as i32) / 2;
     if cylindrical_billboard {
-        let center = [
-            origin[0],
-            origin[1].saturating_add(center_y),
-            origin[2],
-        ];
+        let center = [origin[0], origin[1].saturating_add(center_y), origin[2]];
         return (
             [
                 center[0].saturating_sub(half[0]),
@@ -362,7 +358,10 @@ pub(crate) fn image_prop_collision_aabb(
     let mut min = [i32::MAX; 3];
     let mut max = [i32::MIN; 3];
     for z in [-half[2], half[2]] {
-        for y in [center_y.saturating_sub(half[1]), center_y.saturating_add(half[1])] {
+        for y in [
+            center_y.saturating_sub(half[1]),
+            center_y.saturating_add(half[1]),
+        ] {
             for x in [-half[0], half[0]] {
                 let rotated = crate::spatial::rotate_euler_local_q12(
                     [x, y, z],
@@ -472,9 +471,7 @@ pub(crate) fn push_box_prop(
     }
 
     let (collision_min, collision_max) = box_prop_collision_aabb(pos, pitch, yaw, roll, vertices);
-    if collision_enabled
-        && (0..3).any(|axis| collision_min[axis] >= collision_max[axis])
-    {
+    if collision_enabled && (0..3).any(|axis| collision_min[axis] >= collision_max[axis]) {
         report.error(format!(
             "Box Prop '{node_name}' has degenerate collision bounds"
         ));
@@ -910,9 +907,11 @@ pub(crate) fn push_arch_prop(
 
     let collision_first = arch_prop_collisions.len();
     if collision_enabled {
-        for collision in
-            crate::generate_arch_prop_collision_boxes_with_quantum(geometry, sector_size, height_quantum)
-        {
+        for collision in crate::generate_arch_prop_collision_boxes_with_quantum(
+            geometry,
+            sector_size,
+            height_quantum,
+        ) {
             let mut world_min = [i32::MAX; 3];
             let mut world_max = [i32::MIN; 3];
             for x in [collision.min[0], collision.max[0]] {
