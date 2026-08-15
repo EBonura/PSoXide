@@ -1,8 +1,8 @@
 //! Occluded vertex-light baking for compiled brush surfaces.
 
-use crate::ResourceId;
 use crate::brush::{Brush, Plane};
-use crate::brush_compile::{CompiledSurface, normalized_plane};
+use crate::brush_compile::{normalized_plane, CompiledSurface};
+use crate::ResourceId;
 
 const SHADOW_NUDGE: f64 = 0.25;
 const SHADOW_EPSILON: f64 = 1.0 / 1024.0;
@@ -217,8 +217,8 @@ mod tests {
             color: [255, 255, 255],
         };
         let bake = |surfaces: &[crate::brush_compile::CompiledSurface]| -> u32 {
-            let lit = bake_brush_vertex_lighting(surfaces, &[], [24; 3], &[light], &[])
-                .expect("bake");
+            let lit =
+                bake_brush_vertex_lighting(surfaces, &[], [24; 3], &[light], &[]).expect("bake");
             lit.iter()
                 .flatten()
                 .map(|packed| packed & 0xff)

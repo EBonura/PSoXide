@@ -43,7 +43,8 @@ fn main() {
             continue;
         };
         let t = pose.translation;
-        let joint_world = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
+        let joint_world =
+            compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
         println!(
             "frame {frame}: pose.t=({}, {}, {}) applied=({}, {}, {}) world=({}, {}, {}) rot00={}",
             t.x,

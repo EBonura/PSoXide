@@ -382,12 +382,7 @@ mod tests {
 
     fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
         let mut output = Trace::default();
-        assert!(hull.trace_into(
-            &start,
-            &end,
-            &mut TraceScratch::new(),
-            &mut output,
-        ));
+        assert!(hull.trace_into(&start, &end, &mut TraceScratch::new(), &mut output,));
         output
     }
 
@@ -401,16 +396,8 @@ mod tests {
         let wall = Brush::cuboid([128, 0, 0], [192, 256, 256]);
         let compiled =
             compile_collision_hulls(&[wall], &[CollisionHullBounds::POINT, PLAYER]).expect("cook");
-        let point = trace(
-            &hull(&compiled, 0),
-            at(0, 64, 64),
-            at(200, 64, 64),
-        );
-        let player = trace(
-            &hull(&compiled, 1),
-            at(0, 64, 64),
-            at(200, 64, 64),
-        );
+        let point = trace(&hull(&compiled, 0), at(0, 64, 64), at(200, 64, 64));
+        let player = trace(&hull(&compiled, 1), at(0, 64, 64), at(200, 64, 64));
         let point_x = point.end.x as f64 / Q12_ONE as f64;
         let player_x = player.end.x as f64 / Q12_ONE as f64;
         assert!((127.0..128.1).contains(&point_x));
@@ -463,14 +450,15 @@ mod tests {
         let mut lava = Brush::cuboid([64, 0, 64], [448, 256, 448]);
         lava.contents = BrushContents::Lava;
         let solid = Brush::cuboid([192, 0, 192], [320, 256, 320]);
-        let compiled = compile_collision_hulls(
-            &[water, lava, solid],
-            &[CollisionHullBounds::POINT, PLAYER],
-        )
-        .expect("cook");
+        let compiled =
+            compile_collision_hulls(&[water, lava, solid], &[CollisionHullBounds::POINT, PLAYER])
+                .expect("cook");
         for hull_index in 0..2 {
             let hull = hull(&compiled, hull_index);
-            assert_eq!(hull.point_contents(at(-128, 128, -128)), Some(CONTENTS_EMPTY));
+            assert_eq!(
+                hull.point_contents(at(-128, 128, -128)),
+                Some(CONTENTS_EMPTY)
+            );
             assert_eq!(hull.point_contents(at(32, 128, 32)), Some(CONTENTS_WATER));
             assert_eq!(hull.point_contents(at(128, 128, 128)), Some(CONTENTS_LAVA));
             assert_eq!(hull.point_contents(at(256, 128, 256)), Some(CONTENTS_SOLID));

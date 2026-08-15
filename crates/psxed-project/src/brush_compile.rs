@@ -426,7 +426,10 @@ fn rebuild_exact_leaf_marks(bsp: &mut CompiledSurfaceBsp) {
     }
 }
 
-fn build_surface_bsp_branch(surfaces: Vec<CompiledSurface>, bsp: &mut CompiledSurfaceBsp) -> BspChild {
+fn build_surface_bsp_branch(
+    surfaces: Vec<CompiledSurface>,
+    bsp: &mut CompiledSurfaceBsp,
+) -> BspChild {
     if surfaces.is_empty() {
         let index = bsp.leaves.len();
         bsp.leaves.push(CompiledBspLeaf {
@@ -835,12 +838,7 @@ mod tests {
 
     fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
         let mut output = Trace::default();
-        assert!(hull.trace_into(
-            &start,
-            &end,
-            &mut TraceScratch::new(),
-            &mut output,
-        ));
+        assert!(hull.trace_into(&start, &end, &mut TraceScratch::new(), &mut output,));
         output
     }
 
@@ -932,11 +930,10 @@ mod tests {
         assert_eq!(bsp.leaves.len(), 7);
         assert_eq!(bsp.surfaces.len(), 6);
         assert!(bsp.nodes.iter().all(|node| node.surface_count == 1));
-        assert!(
-            bsp.surfaces
-                .iter()
-                .all(|surface| surface.vertices.len() >= 3)
-        );
+        assert!(bsp
+            .surfaces
+            .iter()
+            .all(|surface| surface.vertices.len() >= 3));
     }
 
     #[test]
@@ -951,14 +948,12 @@ mod tests {
         for node in &bsp.nodes {
             let end = node.first_surface + node.surface_count;
             assert!(end <= bsp.surfaces.len());
-            assert!(
-                bsp.surfaces[node.first_surface..end]
-                    .iter()
-                    .all(|surface| matches!(
-                        split_polygon(&surface.vertices, node.plane),
-                        PolygonSplit::Coplanar
-                    ))
-            );
+            assert!(bsp.surfaces[node.first_surface..end]
+                .iter()
+                .all(|surface| matches!(
+                    split_polygon(&surface.vertices, node.plane),
+                    PolygonSplit::Coplanar
+                )));
         }
     }
 
@@ -1014,11 +1009,10 @@ mod tests {
                 .count(),
             2
         );
-        assert!(
-            bsp.surfaces
-                .iter()
-                .all(|surface| surface.vertices.len() >= 3)
-        );
+        assert!(bsp
+            .surfaces
+            .iter()
+            .all(|surface| surface.vertices.len() >= 3));
     }
 
     #[test]
