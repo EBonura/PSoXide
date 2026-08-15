@@ -336,6 +336,17 @@ impl PxbspResidentMap {
         hull_index: usize,
     ) -> Option<CollisionHull<'_>> {
         let model = self.brush_models().get(model_index)?;
+        if hull_index == 0 {
+            // Quake hull 0: point traces walk the render BSP (balanced,
+            // leaf contents from the leaf records) instead of the cooked
+            // per-brush clipnode chain.
+            return Some(CollisionHull::from_render_bsp(
+                self.planes(),
+                self.nodes(),
+                self.leaves(),
+                model.head_nodes[0],
+            ));
+        }
         let head_node = *model.head_nodes.get(hull_index.checked_add(1)?)?;
         Some(CollisionHull::new(
             self.planes(),
