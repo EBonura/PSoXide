@@ -146,7 +146,7 @@ pub(super) const SOFT_LOCK_ENABLED: bool = false;
 /// Character (no PLAYER_CONTROLLER). Mirrors the pre-character
 /// debug value.
 pub(super) const FALLBACK_PLAYER_YAW_STEP: Angle = Angle::from_q12(32);
-pub(super) const FALLBACK_PLAYER_SPEED: i32 = 2;
+pub(super) const FALLBACK_PLAYER_SPEED: i32 = 2 << 8;
 pub(super) const PLAYER_SPEED_SCALE_NUM: i32 = 3;
 pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
