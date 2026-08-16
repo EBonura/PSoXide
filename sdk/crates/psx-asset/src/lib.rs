@@ -484,14 +484,14 @@ impl<'a> Model<'a> {
     }
 
     /// Distance from the model origin down to the lowest bind-pose vertex,
-    /// in the units [`Self::local_to_world_q12`] produces (world units before
-    /// any per-instance visual scale). Placing the origin this far above a
-    /// floor point puts the mesh's feet on that floor. Zero when the lowest
-    /// vertex is at or above the origin (a model authored feet-at-origin).
+    /// in MODEL units (the vertex table's own units). Scale it with the same
+    /// local-to-world scale the mesh is drawn with and the feet land exactly
+    /// on the floor point; scaling it separately (or pre-scaling here) loses
+    /// up to a unit per rounding and leaves the feet hovering.
     ///
     /// Model space is Y-up; the origin is wherever the importer normalised it
     /// (usually near, but not exactly at, mid-height), so this replaces the
-    /// "half of the authored height" guess that left feet hovering.
+    /// "half of the authored height" guess.
     pub fn bind_pose_floor_lift(&self) -> i32 {
         let mut lowest = i32::MAX;
         let mut i = 0u16;
@@ -507,7 +507,7 @@ impl<'a> Model<'a> {
         if lowest == i32::MAX || lowest >= 0 {
             return 0;
         }
-        (((-lowest) as i64 * self.local_to_world_q12() as i64) >> 12) as i32
+        -lowest
     }
 
     /// Suggested uniform scale from model-local units to engine world units.
