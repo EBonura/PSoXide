@@ -103,9 +103,73 @@ pub fn mul_q12_i32(value: i32, q12: i32) -> i32 {
     whole.saturating_add(frac)
 }
 
+/// `floor(value * q12 / 4096)` through the full 64-bit product.
+///
+/// Identical to [`mul_q12_i32`] wherever that function does not saturate,
+/// which is every product that fits in `i32` (both are exactly the floored
+/// true product there; `mul_q12_i32_matches_wide_where_exact` pins it). It
+/// wraps instead of saturating beyond that range, so it is for hot paths whose
+/// inputs are bounded by construction: BSP plane distances (Q20.12 world
+/// points against Q3.12 unit normals) and segment interpolation. On MIPS this
+/// is one `mult` and a two-word shift instead of two saturating multiplies.
+#[inline(always)]
+pub fn mul_q12_i32_wide(value: i32, q12: i32) -> i32 {
+    ((i64::from(value) * i64::from(q12)) >> 12) as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mul_q12_i32_matches_wide_where_exact() {
+        // Random pairs across the whole tracer domain (Q20.12 points up to
+        // +-2^24 against Q3.12 normals up to +-4096) plus the classic edges;
+        // wherever the exact product fits in i32 both forms agree bit for bit.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut checked = 0u32;
+        for _ in 0..200_000 {
+            let r = next();
+            let value = ((r as i32) >> 7).clamp(-(1 << 24), 1 << 24);
+            let q12 = (((r >> 32) as i32) >> 19).clamp(-4096, 4096);
+            let exact = (i64::from(value) * i64::from(q12)) >> 12;
+            if exact > i64::from(i32::MAX) || exact < i64::from(i32::MIN) {
+                continue;
+            }
+            assert_eq!(
+                mul_q12_i32(value, q12),
+                mul_q12_i32_wide(value, q12),
+                "{value} {q12}"
+            );
+            assert_eq!(mul_q12_i32_wide(value, q12), exact as i32);
+            checked += 1;
+        }
+        assert!(checked > 190_000, "{checked}");
+        for &(value, q12) in &[
+            (0, 0),
+            (-1, 4096),
+            (-4095, 4096),
+            (4095, -4096),
+            (1 << 24, 4096),
+            (-(1 << 24), 4096),
+            (i32::MAX >> 12, 4096),
+            (i32::MIN >> 12, 4096),
+            (7, -1),
+            (-7, 1),
+        ] {
+            assert_eq!(
+                mul_q12_i32(value, q12),
+                mul_q12_i32_wide(value, q12),
+                "{value} {q12}"
+            );
+        }
+    }
 
     #[test]
     fn abs_saturates_at_min() {

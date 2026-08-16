@@ -1031,7 +1031,11 @@ pub fn classify_aabb_clip4(
 
 /// Return whether a signed-integer AABB is outside any selected plane loaded
 /// by [`load_aabb_clip4`].
-#[inline]
+///
+/// Always inlined: renderers call this once per candidate face inside their
+/// selection loop, and as an out-of-line call it spent a third of its cycles
+/// on the call itself (two arrays by value plus the plane pointer).
+#[inline(always)]
 pub fn aabb_outside_clip4(
     mins: [i16; 3],
     maxs: [i16; 3],
