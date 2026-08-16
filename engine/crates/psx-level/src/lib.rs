@@ -3117,7 +3117,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 27;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 29;
 
 /// Runtime animation action slot.
 ///
@@ -3182,6 +3182,10 @@ pub enum CharacterAnimationAction {
     /// First-spawn intro: played once when gameplay begins, with player
     /// control locked out for the clip's duration.
     Intro = 26,
+    /// Idle-to-walk transition (one shot); the walk cruise starts where it ends.
+    WalkWindup = 27,
+    /// Walk-to-idle transition (one shot), played while the motor decelerates.
+    WalkWinddown = 28,
 }
 
 impl CharacterAnimationAction {
@@ -3214,6 +3218,8 @@ impl CharacterAnimationAction {
         Self::AltHeavyAttack,
         Self::AltComboAttack,
         Self::Intro,
+        Self::WalkWindup,
+        Self::WalkWinddown,
     ];
 
     /// Convert to the cooked action slot index.

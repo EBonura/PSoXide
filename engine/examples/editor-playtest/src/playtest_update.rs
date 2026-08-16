@@ -166,10 +166,7 @@ impl Playtest {
                 }
             }
             if suppressed > 0 {
-                telemetry::counter(
-                    telemetry::counter::GAME_ENTITY_PVS_SUPPRESSIONS,
-                    suppressed,
-                );
+                telemetry::counter(telemetry::counter::GAME_ENTITY_PVS_SUPPRESSIONS, suppressed);
             }
         }
         let entity_stats = if npc_tick_due {
@@ -311,6 +308,7 @@ impl Playtest {
         self.anim_start_tick = SimTick::ZERO;
         self.anim_blend_from = None;
         self.anim_lock_until_tick = SimTick::ZERO;
+        self.loco = LocoPhase::Idle;
         self.active_interactable = None;
         self.checkpoint = None;
         self.message_overlay = None;
@@ -533,6 +531,13 @@ impl Playtest {
                 input = CharacterMotorInput::default();
             }
         }
+        // Three-part walk: ramp the stick during the windup, glide on the
+        // held vector during the winddown (the clips are in place; the
+        // motor's speed envelope has to match their foot speed).
+        let stick_active = input.move_x.raw() != 0 || input.move_z.raw() != 0;
+        if !action_locked {
+            input = self.walk_transition_input(input, stick_active, now, ctx.video_hz);
+        }
         let mut config = self.motor_config();
         let bsp_contents = self
             .bsp
@@ -583,8 +588,7 @@ impl Playtest {
         let blocker_count = self.collect_collision_blockers(&mut blockers);
         let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
         let aabb_blocker_count = if self.bsp.is_some() {
-            let Some(count) =
-                self.collect_static_prop_aabb_blockers_checked(&mut aabb_blockers)
+            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut aabb_blockers)
             else {
                 // Cooked BSP collision state is authoritative. A malformed or
                 // overflowing prop table freezes this frame instead of
@@ -717,10 +721,17 @@ impl Playtest {
         }
 
         let new_state = if self.anim_lock_until_tick > now {
+            // Any locked action (attack, evade, hit) cancels the walk phases.
+            self.loco = LocoPhase::Idle;
             self.anim_state
         } else {
-            player_anim_from_motor(motor_frame.anim)
+            let motor_anim = player_anim_from_motor(motor_frame.anim);
+            self.walk_transition_state(motor_anim, stick_active, now, ctx.video_hz)
         };
+        telemetry::counter(
+            telemetry::counter::PLAYER_ANIM_ACTION,
+            new_state.action().to_index() as u32,
+        );
         if new_state != self.anim_state {
             self.switch_player_anim(new_state, now, ctx.video_hz);
             if new_state == PlayerAnim::Roll {
@@ -773,5 +784,171 @@ impl Playtest {
             not(feature = "vis-full-active-chunks")
         ))]
         self.prewarm_visible_cell_caches();
+    }
+}
+
+/// Phase of the three-part walk (idle -> windup -> cruise -> winddown -> idle).
+/// `Idle` is the all-zero boot value.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum LocoPhase {
+    Idle = 0,
+    Windup,
+    Cruise,
+    Winddown,
+}
+
+/// Q12 smoothstep of `elapsed / duration`, clamped to 0..=1.
+fn smoothstep_q12(elapsed: u32, duration: u32) -> Q12 {
+    let t = if duration == 0 {
+        Q12::SCALE
+    } else {
+        ((elapsed.min(duration) as u64 * Q12::SCALE as u64) / duration as u64) as i32
+    };
+    // t*t*(3 - 2t)
+    let tt = (t * t) >> 12;
+    Q12::from_raw((tt * (3 * Q12::SCALE - 2 * t)) >> 12)
+}
+
+impl Playtest {
+    /// Duration in ticks of a bound one-shot walk transition, `None` when
+    /// the action has no clip (the transition is then skipped).
+    fn walk_transition_ticks(&self, anim: PlayerAnim, video_hz: VideoHz) -> Option<u32> {
+        let character = self.character?;
+        if character.action_clip(anim.action()).is_none() {
+            return None;
+        }
+        let clip = character.clip_for(anim);
+        Some(
+            self.player_clip_duration_vblanks(
+                character,
+                clip,
+                video_hz,
+                character.action_speed(anim.action()),
+                character.action_frame_range(anim.action()),
+            )
+            .unwrap_or(30)
+            .max(1),
+        )
+    }
+
+    /// Shape the motor input for the current walk phase: windup ramps the
+    /// stick from zero, winddown keeps moving along the last stick vector
+    /// while its clip fades out. Also records the glide vector.
+    fn walk_transition_input(
+        &mut self,
+        mut input: CharacterMotorInput,
+        stick_active: bool,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> CharacterMotorInput {
+        if stick_active {
+            self.loco_glide = (input.move_x, input.move_z);
+        }
+        let elapsed = now.as_u32().saturating_sub(self.loco_start_tick.as_u32());
+        match self.loco {
+            LocoPhase::Windup => {
+                if let Some(duration) = self.walk_transition_ticks(PlayerAnim::WalkWindup, video_hz)
+                {
+                    let ramp = smoothstep_q12(elapsed, duration);
+                    input.move_x = input.move_x.mul_q12(ramp);
+                    input.move_z = input.move_z.mul_q12(ramp);
+                }
+            }
+            LocoPhase::Winddown if !stick_active => {
+                if let Some(duration) =
+                    self.walk_transition_ticks(PlayerAnim::WalkWinddown, video_hz)
+                {
+                    let fade = Q12::from_raw(Q12::SCALE - smoothstep_q12(elapsed, duration).raw());
+                    input.move_x = self.loco_glide.0.mul_q12(fade);
+                    input.move_z = self.loco_glide.1.mul_q12(fade);
+                    input.walk = 0;
+                    input.sprint = false;
+                }
+            }
+            _ => {}
+        }
+        input
+    }
+
+    /// Advance the walk phase from the motor's animation intent and the raw
+    /// stick, returning the player animation state to show. Windup and
+    /// winddown only happen when their clips are bound; otherwise this is
+    /// exactly the old motor-driven state.
+    fn walk_transition_state(
+        &mut self,
+        motor_anim: PlayerAnim,
+        stick_active: bool,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> PlayerAnim {
+        let elapsed = now.as_u32().saturating_sub(self.loco_start_tick.as_u32());
+        let windup = self.walk_transition_ticks(PlayerAnim::WalkWindup, video_hz);
+        let winddown = self.walk_transition_ticks(PlayerAnim::WalkWinddown, video_hz);
+        // Blocked against a wall the motor reports Idle with the stick held;
+        // keep the phase and show what the motor says, as before.
+        let walking = motor_anim == PlayerAnim::Walk;
+        let released = !stick_active;
+        match self.loco {
+            LocoPhase::Idle => {
+                if walking {
+                    self.loco_start_tick = now;
+                    if windup.is_some() {
+                        self.loco = LocoPhase::Windup;
+                        PlayerAnim::WalkWindup
+                    } else {
+                        self.loco = LocoPhase::Cruise;
+                        PlayerAnim::Walk
+                    }
+                } else {
+                    motor_anim
+                }
+            }
+            LocoPhase::Windup => {
+                if released && winddown.is_some() {
+                    self.loco = LocoPhase::Winddown;
+                    self.loco_start_tick = now;
+                    PlayerAnim::WalkWinddown
+                } else if released || !(walking || motor_anim == PlayerAnim::Idle) {
+                    self.loco = LocoPhase::Idle;
+                    motor_anim
+                } else if windup.is_some_and(|d| elapsed >= d) {
+                    self.loco = LocoPhase::Cruise;
+                    PlayerAnim::Walk
+                } else {
+                    PlayerAnim::WalkWindup
+                }
+            }
+            LocoPhase::Cruise => {
+                if walking {
+                    PlayerAnim::Walk
+                } else if released && winddown.is_some() {
+                    self.loco = LocoPhase::Winddown;
+                    self.loco_start_tick = now;
+                    PlayerAnim::WalkWinddown
+                } else if motor_anim == PlayerAnim::Idle && !released {
+                    // blocked while holding the stick
+                    PlayerAnim::Idle
+                } else {
+                    self.loco = LocoPhase::Idle;
+                    motor_anim
+                }
+            }
+            LocoPhase::Winddown => {
+                if stick_active && walking {
+                    // Stick back before the stop finished: straight into cruise.
+                    self.loco = LocoPhase::Cruise;
+                    PlayerAnim::Walk
+                } else if !(walking || motor_anim == PlayerAnim::Idle) {
+                    self.loco = LocoPhase::Idle;
+                    motor_anim
+                } else if winddown.is_none_or(|d| elapsed >= d) {
+                    self.loco = LocoPhase::Idle;
+                    PlayerAnim::Idle
+                } else {
+                    PlayerAnim::WalkWinddown
+                }
+            }
+        }
     }
 }

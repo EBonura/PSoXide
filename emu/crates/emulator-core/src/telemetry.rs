@@ -738,6 +738,7 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::PLAYER_FACING_YAW_Q12 => "player facing yaw q12",
         counter::PLAYER_RENDER_FORWARD_X_Q12_BIASED => "player render forward x q12 biased",
         counter::PLAYER_RENDER_FORWARD_Z_Q12_BIASED => "player render forward z q12 biased",
+        counter::PLAYER_ANIM_ACTION => "player anim action",
         _ => "unknown",
     }
 }

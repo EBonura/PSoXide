@@ -805,12 +805,15 @@ id_table! {
     /// World-space Z of the player model's rendered forward axis (Q12,
     /// biased by 4096).
     pub const PLAYER_RENDER_FORWARD_Z_Q12_BIASED: u16 = 263;
+    /// Player animation state as its cooked action index
+    /// (`CharacterAnimationAction::to_index`), sampled every sim tick.
+    pub const PLAYER_ANIM_ACTION: u16 = 264;
     }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 264;
+pub const COUNTER_COUNT: usize = 265;
 
-const _: () = assert!(counter::PLAYER_RENDER_FORWARD_Z_Q12_BIASED as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PLAYER_ANIM_ACTION as usize == COUNTER_COUNT - 1);
