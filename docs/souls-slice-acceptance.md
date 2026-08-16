@@ -1,7 +1,7 @@
 # Souls vertical slice: owner acceptance script
 
 A short native-editor checklist for the tracked project at
-`editor/projects/souls-bsp-vertical-slice`. Everything below is a
+`editor/archive/fixtures/souls-bsp-vertical-slice`. Everything below is a
 hands-on look; the automated gate already covers the deterministic
 loop (see the last section), so this session is about feel, not
 correctness.
@@ -13,7 +13,7 @@ make run-release
 ```
 
 Then File > Open Project > `souls-bsp-vertical-slice` (or open the
-directory `editor/projects/souls-bsp-vertical-slice`).
+directory `editor/archive/fixtures/souls-bsp-vertical-slice`).
 
 ## What to try
 

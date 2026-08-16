@@ -335,7 +335,7 @@ REDUX_CORTEX_IGNITION_V1_STEPS ?= 240000000
 # comparisons; the tracked demo-disc fallback lives at editor/samples/cortex_v1.
 CORTEX_IGNITION_V1_NAME ?= cortex_v1
 CORTEX_IGNITION_V1_VOLUME ?= CORTEX_V1
-CORTEX_IGNITION_V1_PROJECT ?= editor/projects/_legacy-grid/archive/cortex/$(CORTEX_IGNITION_V1_NAME)
+CORTEX_IGNITION_V1_PROJECT ?= editor/archive/legacy-grid/archive/cortex/$(CORTEX_IGNITION_V1_NAME)
 CORTEX_IGNITION_V1_CUE ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/$(CORTEX_IGNITION_V1_NAME).cue
 CORTEX_IGNITION_V1_BIN ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/$(CORTEX_IGNITION_V1_NAME).bin
 CORTEX_IGNITION_V1_PREBURN_OUT ?= build/preburn/$(CORTEX_IGNITION_V1_NAME)
@@ -390,7 +390,7 @@ PROFILE_DEMO3_DISC_STREAM_FORWARD_HW ?= /tmp/psoxide-demo3-disc-stream-forward-h
 # Warp probe: read-only measurement of predicted affine texture error against
 # what the depth-band subdivision rule actually decided, on real content.
 # See docs/texture-warping-2026-07-27.md.
-WARP_PROBE_PROJECT ?= projects/_legacy-grid/archive/cortex/cortex_v3/project.ron
+WARP_PROBE_PROJECT ?= archive/legacy-grid/archive/cortex/cortex_v3/project.ron
 # Drop room-surface-profile for a clean A/B of stage timings: its per-stage
 # cycle counters are themselves ~30% of room_surface_draw.
 WARP_PROBE_FEATURES ?= cd-stream-bench room-surface-profile emulator-telemetry
@@ -783,7 +783,7 @@ editor-blank-playtest-check:
 	project_dir="$$check_tmp/project"; \
 	project_file="$$project_dir/project.ron"; \
 	generated_fixture="$$check_tmp/generated-fixture"; \
-	tracked_fixture="editor/projects/brush-open-courtyard"; \
+	tracked_fixture="editor/archive/fixtures/brush-open-courtyard"; \
 	cue="$$project_dir/baked/editor_blank_playtest_acceptance.cue"; \
 	disc="$$project_dir/baked/editor_blank_playtest_acceptance.bin"; \
 	log_a="$$check_tmp/headless-a.log"; \
@@ -883,7 +883,7 @@ profile-demo3-paced20-forward:
 	$(MAKE) profile-demo3-disc-stream-forward PROFILE_DEMO3_DISC_STREAM_FORWARD_HW=$(PROFILE_DEMO3_PACED20_FORWARD_HW)
 
 profile-demo3-disc-stream:
-	$(MAKE) cook-playtest PROJECT=projects/_legacy-grid/archive/demos/demo_03/project.ron
+	$(MAKE) cook-playtest PROJECT=archive/legacy-grid/archive/demos/demo_03/project.ron
 	$(MAKE) build-editor-playtest
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
@@ -906,7 +906,7 @@ profile-demo3-disc-stream:
 		--dump-guest-profile
 
 profile-demo3-disc-stream-forward:
-	$(MAKE) cook-playtest PROJECT=projects/_legacy-grid/archive/demos/demo_03/project.ron
+	$(MAKE) cook-playtest PROJECT=archive/legacy-grid/archive/demos/demo_03/project.ron
 	$(MAKE) build-editor-playtest
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
@@ -930,7 +930,7 @@ profile-demo3-disc-stream-forward:
 		--dump-guest-profile
 
 profile-demo7-camera-sweep:
-	$(MAKE) cook-playtest PROJECT=projects/_legacy-grid/archive/demos/demo_07/project.ron
+	$(MAKE) cook-playtest PROJECT=archive/legacy-grid/archive/demos/demo_07/project.ron
 	PSXO_CAMERA_SWEEP=1 PSXO_PROFILE_MODELS=1 $(MAKE) build-editor-playtest EDITOR_PLAYTEST_FEATURES="cd-stream-bench room-surface-profile"
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
@@ -1318,7 +1318,7 @@ run-hello-engine: hello-engine-disc
 # `cortex-anim-shots` drives the disc headlessly through the menu and fires the
 # whole moveset, writing one PNG-able PPM per CORTEX_ANIM_SHOT_INTERVAL ticks.
 # Gameplay starts at route tick ~480; the press script is keyed to that.
-CORTEX_ANIM_PROJECT ?= projects/_legacy-grid/archive/cortex/cortex_anim/project.ron
+CORTEX_ANIM_PROJECT ?= archive/legacy-grid/archive/cortex/cortex_anim/project.ron
 CORTEX_ANIM_SHOT_DIR ?= /tmp/cortex-anim-shots
 CORTEX_ANIM_SHOT_INTERVAL ?= 3
 CORTEX_ANIM_STEPS ?= 450000000

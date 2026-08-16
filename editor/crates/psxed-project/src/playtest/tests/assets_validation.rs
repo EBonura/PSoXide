@@ -339,7 +339,7 @@ fn cook_to_dir_purges_stale_assets() {
 #[test]
 fn repeated_brush_cook_replaces_generated_output_for_the_selected_mode() {
     let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
     let mut project = ProjectDocument::load_from_path(root.join("project.ron"))
         .expect("brush first-playable project");
     let dir = unique_temp_dir("psxed-playtest-repeat-brush");

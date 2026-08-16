@@ -22,7 +22,8 @@ fn main() {
     let default_output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("projects")
+        .join("archive")
+        .join("fixtures")
         .join("brush-first-playable");
     let output_dir = match parse_generator_args(std::env::args_os().skip(1), default_output)
         .unwrap_or_else(|error| panic!("{error}"))
