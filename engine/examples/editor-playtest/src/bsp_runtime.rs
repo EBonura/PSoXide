@@ -613,11 +613,11 @@ impl BspRuntime {
 fn pxbsp_camera(camera: WorldCamera) -> Camera {
     let orbit_yaw = angle_q12_from_basis(camera.sin_yaw.raw(), camera.cos_yaw.raw());
     // WorldCamera stores the target-to-camera orbit angle with the engine's
-    // `x = sin(yaw), z = cos(yaw)` convention. PXBSP stores the actual view
-    // direction with `x = cos(yaw), z = sin(yaw)`, so the axes and handedness
-    // both change here. The previous quarter-turn-only conversion happened to
-    // work on the Z cardinals while reversing every X-facing camera.
-    let yaw = 3072u16.wrapping_sub(orbit_yaw) & 0x0fff;
+    // `x = sin(yaw), z = cos(yaw)` convention; the view direction is the
+    // opposite. PXBSP zero yaw looks along +X and its yaw turns the same way
+    // as the engine's now that `load_pxbsp_view` is a proper rotation (the
+    // old `3072 - yaw` compensated its mirrored remap).
+    let yaw = orbit_yaw.wrapping_add(1024) & 0x0fff;
     let look_pitch = signed_quarter_angle_q12(camera.sin_pitch.raw(), camera.cos_pitch.raw());
     let pitch = (-look_pitch) as u16 & 0x0fff;
     Camera {
@@ -678,11 +678,13 @@ mod tests {
     #[test]
     fn engine_view_cardinals_map_to_pxbsp_yaw() {
         let projection = WorldProjection::new(160, 120, 320, 64);
+        // Camera at -X (looks +X) -> pxbsp 0; at -Z (looks +Z) -> 3072;
+        // at +X (looks -X) -> 2048; at +Z (looks -Z) -> 1024.
         for (sin_yaw, cos_yaw, expected) in [
             (Q12::NEG_ONE, Q12::ZERO, 0),
-            (Q12::ZERO, Q12::NEG_ONE, 1024),
+            (Q12::ZERO, Q12::NEG_ONE, 3072),
             (Q12::ONE, Q12::ZERO, 2048),
-            (Q12::ZERO, Q12::ONE, 3072),
+            (Q12::ZERO, Q12::ONE, 1024),
         ] {
             let camera = WorldCamera::from_basis(
                 projection,

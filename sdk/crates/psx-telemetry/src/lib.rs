@@ -799,12 +799,18 @@ id_table! {
     /// player-map position counters. Lets headless runs check facing
     /// against travel direction.
     pub const PLAYER_FACING_YAW_Q12: u16 = 261;
+    /// World-space X of the player model's rendered forward axis (Q12,
+    /// biased by 4096): column 2 of the rotation the draw consumes.
+    pub const PLAYER_RENDER_FORWARD_X_Q12_BIASED: u16 = 262;
+    /// World-space Z of the player model's rendered forward axis (Q12,
+    /// biased by 4096).
+    pub const PLAYER_RENDER_FORWARD_Z_Q12_BIASED: u16 = 263;
     }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 262;
+pub const COUNTER_COUNT: usize = 264;
 
-const _: () = assert!(counter::PLAYER_FACING_YAW_Q12 as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PLAYER_RENDER_FORWARD_Z_Q12_BIASED as usize == COUNTER_COUNT - 1);
