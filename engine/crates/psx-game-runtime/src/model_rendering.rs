@@ -864,7 +864,7 @@ pub fn resolve_player_actor_pose<
         reference_anchor,
         character.action_in_place_override(anim_action),
     );
-    let rotation = character_yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
+    let rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let origin = visual_model_origin(
         x,
         y,
@@ -1592,15 +1592,6 @@ fn accumulate_model_stats(total: &mut TexturedModelRenderStats, next: TexturedMo
 }
 
 /// Rotation matrix around the world Y axis.
-/// Character (motor-driven) yaw to a model rotation. The motor's yaw and
-/// the presented world are of opposite handedness to `yaw_rotation_matrix`
-/// (verified in game: with the plain matrix a character walking +X faces
-/// -X, and left/right strafes read as walking backwards), so characters
-/// take the negated yaw. Authored instances keep `yaw_rotation_matrix`.
-fn character_yaw_rotation_matrix(yaw: Angle) -> Mat3I16 {
-    yaw_rotation_matrix(Angle::ZERO.sub(yaw))
-}
-
 fn yaw_rotation_matrix(yaw: Angle) -> Mat3I16 {
     let s = clamp_i16(yaw.sin().raw());
     let c = clamp_i16(yaw.cos().raw());
@@ -1704,7 +1695,7 @@ pub fn player_joint_world_transform(
         reference_anchor,
         character.action_in_place_override(action),
     );
-    let model_rotation = character_yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
+    let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let origin = visual_model_origin(
         x,
         y,
