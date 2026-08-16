@@ -73,7 +73,10 @@ mod schema;
 pub(crate) use cook_ui::*;
 mod cook_entities;
 pub(crate) use cook_entities::*;
-pub use cook_entities::{bake_model_clip_frame_bounds, MODEL_FRAME_BOUNDS_PAD_UNITS};
+pub use cook_entities::{
+    bake_model_clip_frame_bounds, bake_model_frame_pair_bounds, model_bounds_joint_transform,
+    transform_model_bounds_vertex, ModelBoundsJointTransform, MODEL_FRAME_BOUNDS_PAD_UNITS,
+};
 mod cook_props_lights;
 pub(crate) use cook_props_lights::*;
 mod cook_visibility;

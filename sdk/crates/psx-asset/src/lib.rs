@@ -483,6 +483,33 @@ impl<'a> Model<'a> {
         self.texture_height
     }
 
+    /// Distance from the model origin down to the lowest bind-pose vertex,
+    /// in the units [`Self::local_to_world_q12`] produces (world units before
+    /// any per-instance visual scale). Placing the origin this far above a
+    /// floor point puts the mesh's feet on that floor. Zero when the lowest
+    /// vertex is at or above the origin (a model authored feet-at-origin).
+    ///
+    /// Model space is Y-up; the origin is wherever the importer normalised it
+    /// (usually near, but not exactly at, mid-height), so this replaces the
+    /// "half of the authored height" guess that left feet hovering.
+    pub fn bind_pose_floor_lift(&self) -> i32 {
+        let mut lowest = i32::MAX;
+        let mut i = 0u16;
+        while i < self.vertex_count() {
+            if let Some(vertex) = self.vertex(i) {
+                lowest = lowest.min(vertex.position.y as i32);
+            }
+            i = i.wrapping_add(1);
+            if i == 0 {
+                break;
+            }
+        }
+        if lowest == i32::MAX || lowest >= 0 {
+            return 0;
+        }
+        (((-lowest) as i64 * self.local_to_world_q12() as i64) >> 12) as i32
+    }
+
     /// Suggested uniform scale from model-local units to engine world units.
     ///
     /// `0x1000` is identity. Older blobs may store zero in the reserved

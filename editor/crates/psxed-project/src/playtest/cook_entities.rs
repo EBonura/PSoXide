@@ -1457,7 +1457,7 @@ pub(crate) fn abs_i32_saturating(value: i32) -> i32 {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ModelBoundsJointTransform {
+pub struct ModelBoundsJointTransform {
     pub(crate) matrix: [[i16; 3]; 3],
     pub(crate) translation: [i32; 3],
 }
@@ -1488,7 +1488,7 @@ pub fn bake_model_clip_frame_bounds(
     out
 }
 
-pub(crate) fn bake_model_frame_pair_bounds(
+pub fn bake_model_frame_pair_bounds(
     model: &psx_asset::Model<'_>,
     animation: &psx_asset::Animation<'_>,
     a: u16,
@@ -1497,7 +1497,7 @@ pub(crate) fn bake_model_frame_pair_bounds(
 ) -> PlaytestModelFrameBounds {
     let mut min = [i32::MAX; 3];
     let mut max = [i32::MIN; 3];
-    let mut floor_y = i32::MIN;
+    let mut floor_y = i32::MAX;
     accumulate_model_frame_bounds(model, animation, a, &mut min, &mut max, &mut floor_y);
     if b != a {
         accumulate_model_frame_bounds(model, animation, b, &mut min, &mut max, &mut floor_y);
@@ -1583,7 +1583,8 @@ pub(crate) fn accumulate_model_frame_bounds(
                     }
                 }
                 include_bounds_point(point, min, max);
-                *floor_y = (*floor_y).max(raw_point[1]);
+                // Model space is Y-up: the floor is the LOWEST posed vertex.
+                *floor_y = (*floor_y).min(raw_point[1]);
             }
             vertex_index += 1;
         }
@@ -1591,7 +1592,7 @@ pub(crate) fn accumulate_model_frame_bounds(
     }
 }
 
-pub(crate) fn model_bounds_joint_transform(
+pub fn model_bounds_joint_transform(
     pose: psx_asset::JointPose,
     local_to_world_q12: u16,
 ) -> ModelBoundsJointTransform {
@@ -1616,7 +1617,7 @@ pub(crate) fn model_bounds_joint_transform(
     }
 }
 
-pub(crate) fn transform_model_bounds_vertex(
+pub fn transform_model_bounds_vertex(
     transform: ModelBoundsJointTransform,
     vertex: psx_asset::ModelVertex,
 ) -> [i32; 3] {

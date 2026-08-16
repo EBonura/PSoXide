@@ -2722,7 +2722,7 @@ fn resolve_and_draw_model_instances(
         };
         let origin = visual_model_origin(
             meta.origin,
-            meta.world_height,
+            model.bind_pose_floor_lift(),
             meta.visual_offset,
             meta.visual_scale_q8,
             meta.model_rotation,
@@ -3116,46 +3116,27 @@ struct InstanceMeta {
     autoplay: bool,
 }
 
-fn floor_anchored_model_origin(
-    origin: psx_engine::WorldVertex,
-    world_height: i32,
-) -> psx_engine::WorldVertex {
-    psx_engine::WorldVertex::new(
-        origin.x,
-        origin
-            .y
-            .saturating_add(model_origin_floor_lift(world_height)),
-        origin.z,
-    )
-}
-
 fn visual_model_origin(
     origin: psx_engine::WorldVertex,
-    world_height: i32,
+    floor_lift: i32,
     visual_offset: [i16; 3],
     visual_scale_q8: u16,
     instance_rotation: Mat3I16,
 ) -> psx_engine::WorldVertex {
-    // Same rule as the runtime: the mesh scales about its mid-height
-    // origin, so the floor lift is the scaled half height.
-    let scaled_height = (world_height.max(0) as i64 * visual_scale_q8.max(1) as i64
+    // Same rule as the runtime: the origin sits the bind pose's
+    // origin-to-feet distance above the floor point, scaled with the mesh
+    // (`Model::bind_pose_floor_lift`).
+    let lift = (floor_lift.max(0) as i64 * visual_scale_q8.max(1) as i64
         + (psxed_project::MODEL_SCALE_ONE_Q8 as i64 / 2))
         / psxed_project::MODEL_SCALE_ONE_Q8 as i64;
-    let origin = floor_anchored_model_origin(origin, scaled_height as i32);
+    let origin =
+        psx_engine::WorldVertex::new(origin.x, origin.y.saturating_add(lift as i32), origin.z);
     let offset = rotate_visual_offset(instance_rotation, visual_offset);
     psx_engine::WorldVertex::new(
         origin.x.saturating_add(offset[0]),
         origin.y.saturating_add(offset[1]),
         origin.z.saturating_add(offset[2]),
     )
-}
-
-fn model_origin_floor_lift(world_height: i32) -> i32 {
-    // Imported model vertices are normalized around their bounds
-    // centre, while editor placements describe the floor contact
-    // point. The model path's projected Y convention needs the
-    // render origin offset by +half height for that floor anchor.
-    world_height.max(0) / 2
 }
 
 fn rotate_visual_offset(rotation: Mat3I16, offset: [i16; 3]) -> [i32; 3] {
