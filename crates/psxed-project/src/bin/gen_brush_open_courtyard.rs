@@ -25,7 +25,8 @@ fn main() {
     let default_output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("projects")
+        .join("archive")
+        .join("fixtures")
         .join("brush-open-courtyard");
     let output_dir = match parse_generator_args(std::env::args_os().skip(1), default_output)
         .unwrap_or_else(|error| panic!("{error}"))
@@ -207,7 +208,8 @@ mod tests {
         let tracked = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
-            .join("projects")
+            .join("archive")
+            .join("fixtures")
             .join("brush-open-courtyard");
         for relative in [FLOOR_RELATIVE, WALL_RELATIVE, "project.ron"] {
             assert_eq!(
