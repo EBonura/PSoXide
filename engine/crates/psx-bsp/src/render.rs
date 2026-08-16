@@ -1366,7 +1366,7 @@ unsafe fn flush_windowed_batch(
             surfaces.as_ptr(),
             surface_count,
             output,
-            ClassicAffineProfile::QUAKE_REFERENCE,
+            ClassicAffineProfile::PXBSP_THIRD_PERSON,
         )
     }
 }
