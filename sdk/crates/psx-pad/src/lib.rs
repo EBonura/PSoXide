@@ -764,17 +764,39 @@ unsafe fn poll_once_diag(port2: bool, setup_spins: u32, interbyte_spins: u32) ->
     }
 }
 
+/// Spins between the configuration commands of [`enable_analog`], a few
+/// milliseconds each. Sony's libpad spaces configuration commands one per
+/// video frame; issuing the three back to back left an SCPH-110 (PS one
+/// DualShock) parked in configuration mode on a console, answering ID 0xF3
+/// with buttons and sticks intact but never analog (controller-test capture,
+/// 2026-08-16), while an SCPH-1200 took the same burst fine. Not yet
+/// re-measured on silicon.
+const CONFIG_COMMAND_GAP_SPINS: u32 = 8 * DEFAULT_SETUP_SPINS;
+
 fn enable_analog(port2: bool) -> bool {
     unsafe {
         // Enter config mode.
         transaction(port2, [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        delay_reads(CONFIG_COMMAND_GAP_SPINS);
         // Request analog mode and lock it so the pad cannot toggle
         // back underneath analog-only game controls.
         transaction(port2, [0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00]);
+        delay_reads(CONFIG_COMMAND_GAP_SPINS);
         // Exit config mode, restoring the requested analog mode.
         transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        delay_reads(CONFIG_COMMAND_GAP_SPINS);
     }
-    poll_state(port2).is_analog()
+    let mut state = poll_state(port2);
+    if state.mode == PadMode::Config {
+        // The exit did not take: leave the pad in a playable mode rather
+        // than parked in configuration, then re-read what it settled on.
+        unsafe {
+            transaction(port2, [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            delay_reads(CONFIG_COMMAND_GAP_SPINS);
+        }
+        state = poll_state(port2);
+    }
+    state.is_analog()
 }
 
 #[inline]
