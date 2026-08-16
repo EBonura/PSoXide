@@ -92,9 +92,7 @@
             ),
             next_node_id: 4,
             nodes: [
-                /*[0]*/ (id: (1), parent: None, children: [(2), (3)], name: "HUD", kind: Canvas(width: 320, height: 240), visible_when: Always),
-                /*[1]*/ (id: (2), parent: Some((1)), children: [], name: "Health Bar", kind: Bar(rect: (x: 18, y: 16, width: 120, height: 8, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), value: PlayerHealth, max: PlayerHealthMax, fill: (94, 16, 24), fill_gradient: None, background: (30, 26, 28), background_gradient: None), visible_when: Always),
-                /*[2]*/ (id: (3), parent: Some((1)), children: [], name: "Stamina Bar", kind: Bar(rect: (x: 18, y: 29, width: 96, height: 5, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), value: PlayerStamina, max: PlayerStaminaMax, fill: (44, 98, 48), fill_gradient: None, background: (30, 26, 28), background_gradient: None), visible_when: Always),
+                /*[0]*/ (id: (1), parent: None, children: [], name: "HUD", kind: Canvas(width: 320, height: 240), visible_when: Always),
             ],
         ),
     ],
