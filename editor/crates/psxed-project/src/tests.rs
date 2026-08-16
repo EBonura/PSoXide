@@ -1569,18 +1569,22 @@ fn embedded_default_project_ron_deserializes() {
     // catalogue-synced content or it dangles in freshly synced projects.
     // Resolve the character through the wired player controller rather than
     // assuming a particular resource id.
+    // The starter player is an Entity with a player-controlled
+    // CharacterController (the same form the tech demo uses), so the
+    // renderer component can set the presentation scale.
     let character_id = project
         .active_scene()
         .nodes()
         .iter()
         .find_map(|node| match &node.kind {
-            NodeKind::SpawnPoint {
+            NodeKind::CharacterController {
                 player: true,
                 character,
+                ..
             } => *character,
             _ => None,
         })
-        .expect("starter scene wires a player spawn to a character");
+        .expect("starter scene wires a player controller to a character");
     let character = project
         .resource(character_id)
         .and_then(|resource| match &resource.data {
