@@ -20,6 +20,7 @@ fn main() {
         model.bind_pose_floor_lift(),
         lift
     );
+    let blend = a.get(4).map(|s| s == "blend").unwrap_or(false);
     let frames: u16 = a
         .get(3)
         .and_then(|s| s.parse().ok())
@@ -33,7 +34,18 @@ fn main() {
             };
             let t = model_bounds_joint_transform(pose, 0x1000);
             for v in part.first_vertex()..part.first_vertex() + part.vertex_count() {
-                let p = transform_model_bounds_vertex(t, model.vertex(v).unwrap());
+                let vertex = model.vertex(v).unwrap();
+                let mut p = transform_model_bounds_vertex(t, vertex);
+                if blend && vertex.is_blend() {
+                    if let Some(second) = clip.pose(frame, vertex.joint1 as u16) {
+                        let t2 = model_bounds_joint_transform(second, 0x1000);
+                        let q = transform_model_bounds_vertex(t2, vertex);
+                        let w = vertex.blend as i64;
+                        for k in 0..3 {
+                            p[k] = (((p[k] as i64) * (256 - w) + (q[k] as i64) * w) >> 8) as i32;
+                        }
+                    }
+                }
                 lowest = lowest.min(p[1]);
             }
         }
