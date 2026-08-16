@@ -386,6 +386,11 @@ pub struct LaunchArgs {
     /// a window or screen-capture permission.
     #[arg(long)]
     pub dump_hw: Option<PathBuf>,
+    /// Write every GP0 draw packet of the dumped frame as CSV
+    /// (`index,opcode,words...`). Screen coordinates come out of the
+    /// vertex words, so a dump can be measured instead of eyeballed.
+    #[arg(long)]
+    pub dump_draws: Option<PathBuf>,
     /// Optional path to dump the CPU rasterizer's DISPLAY image (the
     /// `display_rgba8` view: the display sub-rect of software VRAM,
     /// 24bpp-aware) as a PPM. Pair with `--dump-hw` at the same step
@@ -1769,6 +1774,28 @@ fn run_headless_launch(
             // Display + cmd_log state at dump time: the first thing to read
             // when a dump comes out black (wrong display area? bpp24? did
             // any draw/upload reach the GPU at all?).
+            if let Some(path) = args.dump_draws.as_ref() {
+                use std::io::Write as _;
+                let mut out = std::fs::File::create(path)
+                    .map_err(|e| format!("create {}: {e}", path.display()))?;
+                for entry in bus.gpu.cmd_log.iter() {
+                    // Everything, so frame boundaries (fills, draw-area sets)
+                    // are visible to the analysis.
+                    if matches!(entry.opcode, 0xA0..=0xBF) {
+                        continue;
+                    }
+                    let words: Vec<String> =
+                        entry.fifo.iter().map(|w| format!("{w:08X}")).collect();
+                    writeln!(
+                        out,
+                        "{},{:02X},{}",
+                        entry.index,
+                        entry.opcode,
+                        words.join(",")
+                    )
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                }
+            }
             let da = bus.gpu.display_area();
             let (mut draws, mut fills, mut uploads) = (0u64, 0u64, 0u64);
             for e in bus.gpu.cmd_log.iter() {
@@ -2442,6 +2469,7 @@ fn validation_launch_args(
         dump_ram: None,
         dump_spu_ram: None,
         dump_hw: None,
+        dump_draws: None,
         dump_display: None,
         dump_audio: None,
         cd_command_log: None,

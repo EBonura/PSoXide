@@ -2723,8 +2723,8 @@ fn resolve_and_draw_model_instances(
         let origin = visual_model_origin(
             meta.origin,
             model.bind_pose_floor_lift(),
+            preview_local_to_world(&model, meta.visual_scale_q8),
             meta.visual_offset,
-            meta.visual_scale_q8,
             meta.model_rotation,
         );
         let material_override =
@@ -3116,21 +3116,35 @@ struct InstanceMeta {
     autoplay: bool,
 }
 
+/// The mesh's composed local-to-world scale, matching the runtime's
+/// `visual_model_local_to_world`.
+fn preview_local_to_world(
+    model: &psx_asset::Model<'_>,
+    visual_scale_q8: u16,
+) -> psx_engine::LocalToWorldScale {
+    let q12 = (model.local_to_world_q12() as u32 * visual_scale_q8.max(1) as u32
+        + (psxed_project::MODEL_SCALE_ONE_Q8 as u32 / 2))
+        / psxed_project::MODEL_SCALE_ONE_Q8 as u32;
+    psx_engine::LocalToWorldScale::from_q12(q12.clamp(1, u16::MAX as u32) as u16)
+}
+
 fn visual_model_origin(
     origin: psx_engine::WorldVertex,
     floor_lift: i32,
+    local_to_world: psx_engine::LocalToWorldScale,
     visual_offset: [i16; 3],
-    visual_scale_q8: u16,
     instance_rotation: Mat3I16,
 ) -> psx_engine::WorldVertex {
     // Same rule as the runtime: the origin sits the bind pose's
-    // origin-to-feet distance above the floor point, scaled with the mesh
-    // (`Model::bind_pose_floor_lift`).
-    let lift = (floor_lift.max(0) as i64 * visual_scale_q8.max(1) as i64
-        + (psxed_project::MODEL_SCALE_ONE_Q8 as i64 / 2))
-        / psxed_project::MODEL_SCALE_ONE_Q8 as i64;
-    let origin =
-        psx_engine::WorldVertex::new(origin.x, origin.y.saturating_add(lift as i32), origin.z);
+    // origin-to-feet distance (model units) above the floor point, scaled
+    // with the SAME local-to-world the mesh is drawn with.
+    let origin = psx_engine::WorldVertex::new(
+        origin.x,
+        origin
+            .y
+            .saturating_add(local_to_world.apply(floor_lift.max(0))),
+        origin.z,
+    );
     let offset = rotate_visual_offset(instance_rotation, visual_offset);
     psx_engine::WorldVertex::new(
         origin.x.saturating_add(offset[0]),
