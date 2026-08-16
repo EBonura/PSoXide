@@ -1,6 +1,12 @@
-//! Scan (and with --apply, prune) resources in the default project that
-//! nothing reachable from its scenes/UI references. Run from editor/:
-//!   cargo run -p psxed-project --bin prune_starter_resources [-- --apply]
+//! Scan (and with --apply, prune) resources in a project that nothing
+//! reachable from its scenes/UI references. Run from editor/:
+//!   cargo run -p psxed-project --bin prune_starter_resources -- [--project <dir>] [--list] [--apply]
+//!
+//! Targeted mode (no reachability pass, for catalogue projects like default
+//! whose resources are meant to be unplaced): delete by cooked asset path
+//! prefix and/or by exact resource name, plus the files they own.
+//!   cargo run -p psxed-project --bin prune_starter_resources -- --project <dir> \
+//!       --delete-asset-prefix assets/models/old_model/ --delete-name "Old Set" [--apply]
 
 use psxed_project::{ProjectDocument, ResourceData, ResourceId};
 use std::collections::HashSet;
@@ -83,6 +89,27 @@ fn main() {
         ProjectDocument::load_from_path(std::path::Path::new(&project_dir).join("project.ron"))
             .expect("load project");
     project.normalize_loaded();
+
+    let flag_values = |flag: &str| -> Vec<String> {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == flag)
+            .filter_map(|(i, _)| args.get(i + 1).cloned())
+            .collect()
+    };
+    let delete_prefixes = flag_values("--delete-asset-prefix");
+    let delete_names = flag_values("--delete-name");
+    if !delete_prefixes.is_empty() || !delete_names.is_empty() {
+        delete_targeted(
+            &mut project,
+            &PathBuf::from(&project_dir),
+            &delete_prefixes,
+            &delete_names,
+            apply,
+        );
+        return;
+    }
 
     let mut keep: HashSet<u64> = HashSet::new();
     for scene in &project.scenes {
@@ -282,6 +309,92 @@ fn main() {
             let _ = std::fs::remove_file(p);
         }
         println!("applied: resources pruned, orphan files deleted");
+    }
+}
+
+/// Delete resources whose cooked asset path starts with one of `prefixes`
+/// or whose name is in `names`, then delete files under those prefixes that
+/// no surviving resource references. Prints what it would do; writes only
+/// with `apply`.
+fn delete_targeted(
+    project: &mut ProjectDocument,
+    project_dir: &Path,
+    prefixes: &[String],
+    names: &[String],
+    apply: bool,
+) {
+    let path_hits = |data: &ResourceData| -> bool {
+        let paths: Vec<&str> = match data {
+            ResourceData::Model(m) => vec![m.model_path.as_str()],
+            ResourceData::AnimationClip(c) => vec![c.psxanim_path.as_str()],
+            _ => Vec::new(),
+        };
+        paths
+            .iter()
+            .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix.as_str())))
+    };
+    let doomed: Vec<ResourceId> = project
+        .resources
+        .iter()
+        .filter(|r| path_hits(&r.data) || names.iter().any(|n| n == &r.name))
+        .map(|r| r.id)
+        .collect();
+    for id in &doomed {
+        if let Some(r) = project.resources.iter().find(|r| r.id == *id) {
+            println!("delete {:>5} {}", r.id.raw(), r.name);
+        }
+    }
+    project.resources.retain(|r| !doomed.contains(&r.id));
+    // Files under the prefixes not referenced by any surviving resource.
+    let mut referenced: HashSet<PathBuf> = HashSet::new();
+    for r in &project.resources {
+        let mut push = |raw: &str| {
+            referenced.insert(project_dir.join(raw));
+        };
+        match &r.data {
+            ResourceData::Model(m) => {
+                push(&m.model_path);
+                if let Some(t) = &m.texture_path {
+                    push(t);
+                }
+            }
+            ResourceData::AnimationClip(c) => push(&c.psxanim_path),
+            _ => {}
+        }
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    for prefix in prefixes {
+        let root = project_dir.join(prefix.trim_end_matches('/'));
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if !referenced.contains(&p) {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    println!(
+        "targeted: {} resources, {} files under {:?}",
+        doomed.len(),
+        files.len(),
+        prefixes
+    );
+    if apply {
+        project
+            .save_to_path(project_dir.join("project.ron"))
+            .expect("save project");
+        for p in &files {
+            let _ = std::fs::remove_file(p);
+        }
+        for prefix in prefixes {
+            let _ = std::fs::remove_dir(project_dir.join(prefix.trim_end_matches('/')));
+        }
+        println!("applied");
     }
 }
 

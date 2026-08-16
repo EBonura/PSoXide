@@ -1498,11 +1498,11 @@ fn open_directory_syncs_legacy_starter_character_catalogue() {
     ));
     assert!(project_has_resource_name(
         workspace.project(),
-        "Aletha",
+        "Aletha Delivered",
         |data| { matches!(data, ResourceData::Model(_)) }
     ));
     assert!(dir
-        .join("assets/models/ci_player/ci_player.psxmdl")
+        .join("assets/models/aletha_delivered/aletha_delivered.psxmdl")
         .is_file());
 
     let _ = std::fs::remove_dir_all(dir);
@@ -1569,7 +1569,7 @@ fn open_directory_purges_legacy_obsidian_warden_catalogue() {
     ));
     assert!(!legacy_asset_dir.exists());
     assert!(dir
-        .join("assets/animations/ci_player_complete/idle.psxanim")
+        .join("assets/animations/aletha_delivered/aletha_idle.psxanim")
         .is_file());
 
     let _ = std::fs::remove_dir_all(dir);
@@ -3016,9 +3016,9 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
         "assets/models/sword1_light/sword1_light.psxt",
         "assets/models/sword1_light/prop_bind_pose.psxanim",
         "assets/models/sword1_heavy/sword1_heavy.psxmdl",
-        "assets/models/ci_player/ci_player.psxmdl",
+        "assets/models/aletha_delivered/aletha_delivered.psxmdl",
         "assets/models/rust_mantis/rust_mantis.psxmdl",
-        "assets/animations/ci_player_complete/light_attack.psxanim",
+        "assets/animations/aletha_delivered/aletha_light_wpn_light_atk_a.psxanim",
         "assets/animations/rust_mantis_starter/idle.psxanim",
     ] {
         assert_eq!(

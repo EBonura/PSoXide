@@ -226,12 +226,7 @@ pub(crate) fn starter_catalogue_resource_matches_phase(
 ) -> bool {
     match (&resource.data, phase) {
         (ResourceData::Skeleton(_), StarterCataloguePhase::Skeleton) => {
-            resource.name == "Meshy Biped Skeleton"
-                || resource.name == "Cortex Humanoid 22-Bone Skeleton"
-                // Same parent signature as Meshy Biped but referenced by the
-                // Meshy Gold knight model; the claimed-target pass keeps the
-                // two from collapsing onto one synced skeleton.
-                || resource.name == "Crimson Cross Knight Skeleton"
+            resource.name == "Cortex Humanoid 22-Bone Skeleton"
                 || resource.name == "Aletha Delivered Skeleton"
                 || resource.name == "Sword1 Light Skeleton"
         }

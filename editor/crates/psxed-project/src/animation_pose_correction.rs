@@ -328,28 +328,28 @@ mod tests {
         let project =
             ProjectDocument::load_from_path(&project_path).expect("default project parses");
         let project_root = project_path.parent().expect("project directory");
-        let (model_id, model_path) = project
+        let (skeleton, model_path) = project
             .resources
             .iter()
             .find_map(|resource| match &resource.data {
-                ResourceData::Model(model) if resource.name == "Aletha" => {
-                    Some((resource.id, model.model_path.as_str()))
+                ResourceData::Model(model) if resource.name == "Aletha Delivered" => {
+                    Some((model.skeleton, model.model_path.as_str()))
                 }
                 _ => None,
             })
-            .expect("Aletha model exists");
+            .expect("Aletha Delivered model exists");
         let clip_path = project
             .resources
             .iter()
             .find_map(|resource| match &resource.data {
                 ResourceData::AnimationClip(clip)
-                    if clip.target_model == Some(model_id) && resource.name == "Aletha / Idle" =>
+                    if clip.skeleton == skeleton && resource.name == "aletha_idle" =>
                 {
                     Some(clip.psxanim_path.as_str())
                 }
                 _ => None,
             })
-            .expect("Aletha idle clip exists");
+            .expect("Aletha Delivered idle clip exists");
         let model_bytes =
             std::fs::read(resolve_path(model_path, Some(project_root))).expect("model bytes exist");
         let animation_bytes = std::fs::read(resolve_path(clip_path, Some(project_root)))
