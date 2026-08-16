@@ -223,6 +223,66 @@ def export_phase_glbs(
             raise RuntimeError(f"GLB export failed: {path}")
         print(f"[study] phase {name}: frames 1..{len(poses)} -> {path}")
 
+    # Mirrored winddown: the same stop from the other foot, for the half-stride
+    # phase. Mirrored in WORLD space across the sagittal plane (x = 0, the rig
+    # is centred and the gait is in place) and left/right bones swapped, so it
+    # does not depend on Blender's bone-roll mirror convention.
+    first, last = splits["winddown"]
+    poses = [sample_pose(rig, assembled, frame) for frame in range(first, last + 1)]
+    mirror = Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0))
+    partner = {}
+    for bone in rig.data.bones:
+        if bone.name.startswith("Left"):
+            partner[bone.name] = "Right" + bone.name[4:]
+        elif bone.name.startswith("Right"):
+            partner[bone.name] = "Left" + bone.name[5:]
+        else:
+            partner[bone.name] = bone.name
+    ordered = sorted(rig.pose.bones, key=lambda b: len(b.parent_recursive))
+    name = f"{stem}_winddown_mirror"
+    action = bpy.data.actions.new(name)
+    world_inv = rig.matrix_world.inverted()
+    for index, pose in enumerate(poses):
+        # Pose the rig with the original frame and read every bone's world matrix.
+        rig.animation_data.action = assembled
+        set_frame(first + index)
+        world = {b.name: (rig.matrix_world @ b.matrix).copy() for b in rig.pose.bones}
+        rig.animation_data.action = action
+        for bone in ordered:
+            target = mirror @ world[partner[bone.name]] @ mirror
+            bone.matrix = world_inv @ target
+            bpy.context.view_layer.update()
+        for bone in rig.pose.bones:
+            bone.keyframe_insert("location", frame=index + 1, group=bone.name)
+            bone.keyframe_insert("rotation_quaternion", frame=index + 1, group=bone.name)
+            bone.keyframe_insert("scale", frame=index + 1, group=bone.name)
+    for fcurve in action.fcurves:
+        for key in fcurve.keyframe_points:
+            key.interpolation = "LINEAR"
+    scene.frame_start, scene.frame_end = 1, len(poses)
+    rig.animation_data.action = action
+    bpy.ops.object.select_all(action="DESELECT")
+    rig.select_set(True)
+    for child in rig.children_recursive:
+        child.select_set(True)
+    bpy.context.view_layer.objects.active = rig
+    path = out_dir / f"{name}.glb"
+    result = bpy.ops.export_scene.gltf(
+        filepath=str(path),
+        export_format="GLB",
+        use_selection=True,
+        export_animations=True,
+        export_animation_mode="ACTIVE_ACTIONS",
+        export_frame_range=True,
+        export_force_sampling=True,
+        export_anim_single_armature=True,
+        export_reset_pose_bones=True,
+        export_optimize_animation_size=False,
+    )
+    if "FINISHED" not in result:
+        raise RuntimeError(f"GLB export failed: {path}")
+    print(f"[study] phase {name}: frames 1..{len(poses)} -> {path}")
+
 
 def main() -> None:
     args = parse_args()

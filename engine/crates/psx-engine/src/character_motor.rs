@@ -887,11 +887,19 @@ impl CharacterMotorState {
 
         if let Some((move_x, move_z, move_mag)) = analog_move_vector(input) {
             let move_yaw = yaw_from_vector(move_x, move_z);
-            let directional_anim = if let Some(facing_yaw) = input.facing_yaw {
-                locked_locomotion_anim(facing_yaw, move_yaw)
+            let (move_x, move_z, directional_anim) = if let Some(facing_yaw) = input.facing_yaw {
+                (move_x, move_z, locked_locomotion_anim(facing_yaw, move_yaw))
             } else {
-                self.yaw = move_yaw;
-                CharacterMotorAnim::Walk
+                // Free movement turns at the character's turn rate and
+                // travels along the facing, so a stick reversal is a tight
+                // U-turn instead of a snap; the feet always point along
+                // the path.
+                self.yaw = self.yaw.approach_q12(move_yaw, config.yaw_step.as_q12());
+                (
+                    self.yaw.sin().mul_q12(move_mag),
+                    self.yaw.cos().mul_q12(move_mag),
+                    CharacterMotorAnim::Walk,
+                )
             };
             // Lock-on holds the combat stance and, following Dark Souls,
             // allows sprint ONLY toward the target: you fast-walk sideways
@@ -918,11 +926,9 @@ impl CharacterMotorState {
                 // Locked sprinting only happens toward the target, so the
                 // forward run clip is the only one it can select.
                 (true, Some(_)) => CharacterMotorAnim::Run,
-                // Unlocked sprinting turns to face travel.
-                (true, None) => {
-                    self.yaw = move_yaw;
-                    CharacterMotorAnim::Run
-                }
+                // Unlocked sprinting: the yaw already turned toward the
+                // stick above; run along it.
+                (true, None) => CharacterMotorAnim::Run,
                 (false, _) => directional_anim,
             };
             let (moved, blocked) = self.try_move_vector(
@@ -3182,6 +3188,13 @@ mod tests {
         CharacterMotorConfig::character(64, 32 << 8, 64 << 8, Angle::from_q12(16))
     }
 
+    /// Free movement turns toward the stick at `yaw_step` and travels along
+    /// the facing; tests that only care about travel use a quarter-turn step
+    /// so the first tick already faces the stick.
+    fn config_instant_turn() -> CharacterMotorConfig {
+        CharacterMotorConfig::character(64, 32 << 8, 64 << 8, Angle::from_q12(1024))
+    }
+
     #[test]
     fn trace_provider_advances_motor_on_flat_floor() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
@@ -4023,7 +4036,7 @@ mod tests {
                 walk: 1,
                 ..CharacterMotorInput::default()
             },
-            config(),
+            config_instant_turn(),
         );
         assert_eq!(frame.position, RoomPoint::new(32, 0, 0));
         assert_eq!(frame.yaw, Angle::QUARTER);
@@ -4242,6 +4255,29 @@ mod tests {
     }
 
     #[test]
+    fn free_movement_turns_at_yaw_step_and_travels_along_facing() {
+        // Facing +Z, stick full +X: the first tick turns 16 q12 toward +X and
+        // moves along the new facing (mostly +Z), not along the stick.
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let frame = motor.update(
+            None,
+            CharacterMotorInput {
+                move_x: Q12::ONE,
+                move_z: Q12::ZERO,
+                walk: 1,
+                ..CharacterMotorInput::default()
+            },
+            config(),
+        );
+        assert_eq!(frame.yaw, Angle::from_q12(16));
+        assert!(
+            frame.position.z > frame.position.x,
+            "travel follows the facing"
+        );
+        assert_eq!(frame.anim, CharacterMotorAnim::Walk);
+    }
+
+    #[test]
     fn analog_vector_scales_speed_by_magnitude() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
@@ -4252,7 +4288,7 @@ mod tests {
                 walk: 1,
                 ..CharacterMotorInput::default()
             },
-            config(),
+            config_instant_turn(),
         );
         assert_eq!(frame.position, RoomPoint::new(8, 0, 0));
         assert_eq!(frame.yaw, Angle::QUARTER);
@@ -4684,7 +4720,7 @@ mod tests {
                 sprint: true,
                 ..CharacterMotorInput::default()
             },
-            config(),
+            config_instant_turn(),
         );
         assert_eq!(frame.position, RoomPoint::new(64, 0, 0));
         assert_eq!(frame.anim, CharacterMotorAnim::Run);

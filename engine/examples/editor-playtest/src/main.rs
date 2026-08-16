@@ -350,6 +350,9 @@ struct Playtest {
     /// Last analog move vector while the stick was active; the winddown
     /// glides along it while the clip settles.
     loco_glide: (Q12, Q12),
+    /// Winddown variant chosen for the current stop (`WalkWinddown` from the
+    /// stride start, `WalkWinddownAlt` from the half stride).
+    loco_stop_anim: PlayerAnim,
     /// Active-window reconcile needed: set by visibility refreshes,
     /// crossings, and stream progress; cleared when a pass converges.
     /// Keeps the steady-state reconcile at a two-branch early-out.

@@ -36,6 +36,8 @@ pub enum PlayerAnim {
     WalkWindup,
     /// Walk-to-idle transition, one shot, over the motor's deceleration.
     WalkWinddown,
+    /// Mirrored walk-to-idle transition (other foot), for the half-stride phase.
+    WalkWinddownAlt,
 }
 
 impl PlayerAnim {
@@ -60,6 +62,7 @@ impl PlayerAnim {
             Self::Death => CharacterAnimationAction::Death,
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
             Self::WalkWinddown => CharacterAnimationAction::WalkWinddown,
+            Self::WalkWinddownAlt => CharacterAnimationAction::WalkWinddownAlt,
         }
     }
 
@@ -288,6 +291,12 @@ impl RuntimeCharacter {
             CharacterAnimationAction::WalkWinddown => self
                 .action_clip(CharacterAnimationAction::WalkWinddown)
                 .unwrap_or(walk),
+            CharacterAnimationAction::WalkWinddownAlt => self
+                .action_clip(CharacterAnimationAction::WalkWinddownAlt)
+                .unwrap_or(
+                    self.action_clip(CharacterAnimationAction::WalkWinddown)
+                        .unwrap_or(walk),
+                ),
             CharacterAnimationAction::WalkBackward => self
                 .action_clip(CharacterAnimationAction::WalkBackward)
                 .unwrap_or(walk),
