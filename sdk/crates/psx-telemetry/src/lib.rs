@@ -795,12 +795,16 @@ id_table! {
     /// BSP liquid hazard damage applications to the player (each lava or
     /// slime cadence hit that subtracted health).
     pub const PLAYER_LIQUID_DAMAGE_EVENTS: u16 = 260;
+    /// Player body facing (motor yaw) in Q12 angle units, sampled with the
+    /// player-map position counters. Lets headless runs check facing
+    /// against travel direction.
+    pub const PLAYER_FACING_YAW_Q12: u16 = 261;
     }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 261;
+pub const COUNTER_COUNT: usize = 262;
 
-const _: () = assert!(counter::PLAYER_LIQUID_DAMAGE_EVENTS as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PLAYER_FACING_YAW_Q12 as usize == COUNTER_COUNT - 1);

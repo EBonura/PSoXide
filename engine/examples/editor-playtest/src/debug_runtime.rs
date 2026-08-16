@@ -822,6 +822,7 @@ fn encode_debug_q12_basis(value: i32) -> u32 {
 pub(super) fn emit_player_map_debug(
     room: RoomIndex,
     position: RoomPoint,
+    facing_yaw_q12: u16,
     camera_position: RoomPoint,
     camera_global: RoomPoint,
     view_yaw_q12: u16,
@@ -845,6 +846,10 @@ pub(super) fn emit_player_map_debug(
     telemetry::counter(
         telemetry::counter::ROOM_PLAYER_VIEW_YAW_Q12,
         view_yaw_q12 as u32,
+    );
+    telemetry::counter(
+        telemetry::counter::PLAYER_FACING_YAW_Q12,
+        facing_yaw_q12 as u32,
     );
     telemetry::counter(
         telemetry::counter::ROOM_CAMERA_LOCAL_X_BIASED,
