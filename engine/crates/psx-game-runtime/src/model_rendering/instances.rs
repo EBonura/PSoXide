@@ -893,7 +893,7 @@ mod tests {
         assert_eq!(snapshot.pose().local_to_world().q12(), 8_192);
         assert_eq!(
             snapshot.pose().origin(),
-            WorldVertex::new(998, 2_054, 2_992)
+            WorldVertex::new(998, 2_104, 2_992)
         );
 
         let body_joint = snapshot
@@ -902,7 +902,7 @@ mod tests {
             .expect("body joint");
         assert_eq!(
             body_joint.translation,
-            WorldVertex::new(1_010, 2_024, 2_784)
+            WorldVertex::new(1_010, 2_074, 2_784)
         );
         let legacy_joint = super::super::model_instance_joint_world_transform(
             tables,
@@ -931,7 +931,7 @@ mod tests {
         };
         let socket_pose = super::super::equipment::attachment_socket_pose(snapshot.pose(), &socket)
             .expect("socket pose");
-        assert_eq!(socket_pose.origin, WorldVertex::new(1_030, 2_024, 2_784));
+        assert_eq!(socket_pose.origin, WorldVertex::new(1_030, 2_074, 2_784));
         assert_eq!(
             socket_pose.rotation,
             snapshot.pose().joint_world_basis(0).unwrap()
@@ -954,8 +954,8 @@ mod tests {
             snapshot.pose(),
         )
         .expect("combat capsule");
-        assert_eq!(combat.start, [1_010, 2_024, 2_764]);
-        assert_eq!(combat.end, [1_010, 2_024, 2_724]);
+        assert_eq!(combat.start, [1_010, 2_074, 2_764]);
+        assert_eq!(combat.end, [1_010, 2_074, 2_724]);
     }
 
     #[test]
@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(snapshot.pose().phase_q12(), 1 << 12);
         assert_eq!(
             snapshot.pose().origin(),
-            WorldVertex::new(998, 2_054, 2_992)
+            WorldVertex::new(998, 2_104, 2_992)
         );
     }
 }
