@@ -289,10 +289,8 @@ const PLAY_PORTAL_DEBUG_FAR_Z: i32 = 16_384;
 const PLAY_PORTAL_DEBUG_MAX_DEPTH: u8 = 8;
 const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
-    "assets/models/ci_player",
     "assets/models/aletha_delivered",
     "assets/models/rust_mantis",
-    "assets/animations/ci_player_complete",
     "assets/animations/aletha_delivered",
     "assets/animations/rust_mantis_starter",
     "assets/models/sword1_light",
@@ -307,11 +305,6 @@ fn action_bar_height_for_status(status: &str) -> f32 {
     }
 }
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
-    "Obsidian Wraith",
-    "Crimson Cross Knight",
-    "Hooded Wretch",
-    "Crowned Wraith",
-    "Aletha",
     "Aletha Delivered",
     "Rust Mantis",
     "Sword1 Light",
@@ -321,15 +314,6 @@ const STARTER_CHARACTER_MATERIAL_NAMES: &[&str] = &["Aletha Crystal"];
 /// Verified combat loadout weapons synced beside the character profiles.
 const STARTER_WEAPON_NAMES: &[&str] = &["Sword1 Light", "Sword1 Heavy"];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
-    "Obsidian Wraith Enemy Set",
-    "Crimson Cross Knight Player Set",
-    // The set the shipped Crimson Cross Knight Player profile actually
-    // references; without it the synced profile's animation_set dangled in
-    // fresh projects.
-    "Crimson Cross Knight / Meshy Gold Standard",
-    "Hooded Wretch Enemy Set",
-    "Crowned Wraith Enemy Set",
-    "Aletha Complete Animation Set",
     "Aletha Delivered Animation Set",
     "Rust Mantis Starter Animation Set",
 ];
