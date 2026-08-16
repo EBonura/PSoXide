@@ -1075,6 +1075,7 @@ impl Scene for Playtest {
             emit_player_map_debug(
                 self.room_index,
                 self.motor.position(),
+                self.motor.yaw().as_q12(),
                 RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
                 self.visibility.camera_global,
                 yaw_q12_from_basis(debug_view.sin_yaw, debug_view.cos_yaw),

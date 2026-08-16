@@ -735,6 +735,7 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::PLAYER_WEAPON_ATTACHMENTS => "player weapon attachments",
         counter::GAME_ENTITY_PVS_SUPPRESSIONS => "game entity pvs suppressions",
         counter::PLAYER_LIQUID_DAMAGE_EVENTS => "player liquid damage events",
+        counter::PLAYER_FACING_YAW_Q12 => "player facing yaw q12",
         _ => "unknown",
     }
 }

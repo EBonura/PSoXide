@@ -108,7 +108,7 @@ impl CounterLog {
         let mut writer = BufWriter::new(file);
         writeln!(
             writer,
-            "guest_frame,cpu_tick,bus_cycles,resident_mask,active_mask,drawn_mask,visible_mask,cam_x_biased,cam_y_biased,cam_z_biased,current_room"
+            "guest_frame,cpu_tick,bus_cycles,resident_mask,active_mask,drawn_mask,visible_mask,cam_x_biased,cam_y_biased,cam_z_biased,current_room,player_x_biased,player_z_biased,player_facing_yaw_q12,view_yaw_q12,cam_local_x_biased,cam_local_z_biased"
         )
         .map_err(|e| format!("write {}: {e}", path.display()))?;
         Ok(Self {
@@ -130,7 +130,7 @@ impl CounterLog {
         let g = |id| bus.telemetry.counter_latest_value(id);
         writeln!(
             writer,
-            "{guest_frame},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{},{}",
+            "{guest_frame},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             g(c::ROOM_STREAM_RESIDENT_MASK_LO),
             g(c::ROOM_ACTIVE_CHUNK_MASK_LO),
             g(c::ROOM_DRAWN_CHUNK_MASK_LO),
@@ -139,6 +139,12 @@ impl CounterLog {
             g(c::ROOM_CAMERA_GLOBAL_Y_BIASED),
             g(c::ROOM_CAMERA_GLOBAL_Z_BIASED),
             g(c::PORTAL_VIS_CURRENT_ROOM),
+            g(c::ROOM_PLAYER_LOCAL_X_BIASED),
+            g(c::ROOM_PLAYER_LOCAL_Z_BIASED),
+            g(c::PLAYER_FACING_YAW_Q12),
+            g(c::ROOM_PLAYER_VIEW_YAW_Q12),
+            g(c::ROOM_CAMERA_LOCAL_X_BIASED),
+            g(c::ROOM_CAMERA_LOCAL_Z_BIASED),
         )
         .map_err(|e| format!("write counter log: {e}"))
     }
