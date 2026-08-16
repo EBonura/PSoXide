@@ -114,6 +114,19 @@ fn main() {
                     keep_id(&mut keep, c.target_model);
                     keep_id(&mut keep, c.source);
                 }
+                // Skeleton-scoped clips are how a model finds its clips at
+                // cook time (Model has no clip list), so a clip on a kept
+                // skeleton is reachable even when no set binds it.
+                ResourceData::Skeleton(_) => {
+                    let skeleton = r.id;
+                    for other in &project.resources {
+                        if let ResourceData::AnimationClip(clip) = &other.data {
+                            if clip.skeleton == Some(skeleton) {
+                                keep.insert(other.id.raw());
+                            }
+                        }
+                    }
+                }
                 ResourceData::AnimationSet(s) => {
                     keep_id(&mut keep, s.skeleton);
                     for clip in [
@@ -136,7 +149,9 @@ fn main() {
                 ResourceData::Character(c) => {
                     keep_id(&mut keep, c.model);
                     keep_id(&mut keep, c.animation_set);
+                    keep_id(&mut keep, c.material);
                 }
+                ResourceData::Weapon(w) => keep_id(&mut keep, w.model),
                 _ => {}
             }
         }
@@ -169,6 +184,13 @@ fn main() {
                 }
             }
             None => rows.push((k, kept as usize, !kept as usize)),
+        }
+    }
+    if std::env::args().any(|a| a == "--list") {
+        for r in &project.resources {
+            if !keep.contains(&r.id.raw()) {
+                println!("orphan {:>5} {:<14} {}", r.id.raw(), kind(&r.data), r.name);
+            }
         }
     }
     println!("{:<16} {:>5} {:>7}", "kind", "kept", "orphan");

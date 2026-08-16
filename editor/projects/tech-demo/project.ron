@@ -1,5 +1,5 @@
 (
-    name: "Ashen Sanctum Tech Demo",
+    name: "Tech Demo: Ashen Sanctum",
     editor_camera: (
         mode: Orbit,
         orbit_yaw_q12: 11724,
@@ -228,60 +228,6 @@
     boot: Gameplay,
     resources: [
         /*[0]*/ (
-            id: (1),
-            name: "Courtyard Cobbles",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/courtyard_cobbles.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
-                face_sidedness: Front,
-                layered_sky: false,
-                double_sided: false,
-            )),
-        ),
-        /*[1]*/ (
-            id: (2),
-            name: "Courtyard Brick",
-            data: Material((
-                texture_mode: SimpleImage,
-                psxt_path: Some("assets/textures/courtyard_brick.psxt"),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                generated: (size: 64, base_color: (72, 84, 96), noise_enabled: true, noise_color: (188, 208, 224), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
-                transition: (size: 64, coverage: 128, shape: Straight, rotation_quarters: 0, flip_x: false, flip_y: false, edge_breakup: 20, seed: 1),
-                reflection: (strength: 255, roughness: 8),
-                animation: (mode: Static, uv_scroll: (enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
-                face_sidedness: Front,
-                layered_sky: false,
-                double_sided: false,
-            )),
-        ),
-        /*[2]*/ (
-            id: (3),
-            name: "Meshy Biped Skeleton",
-            data: Skeleton((
-                joint_count: 24,
-                parents: [None, Some(0), Some(1), Some(2), Some(3), Some(0), Some(5), Some(6), Some(7), Some(0), Some(9), Some(10), Some(11), Some(12), Some(13), Some(14), Some(11), Some(16), Some(17), Some(18), Some(11), Some(20), Some(21), Some(21)],
-                signature: "psx-parent-v1:24:root,0,1,2,3,0,5,6,7,0,9,10,11,12,13,14,11,16,17,18,11,20,21,21",
-                note: "Shared by the Meshy biped player and enemy characters",
-            )),
-        ),
-        /*[3]*/ (
-            id: (4),
-            name: "Crimson Cross Knight Skeleton",
-            data: Skeleton((
-                joint_count: 24,
-                parents: [None, Some(0), Some(1), Some(2), Some(3), Some(0), Some(5), Some(6), Some(7), Some(0), Some(9), Some(10), Some(11), Some(12), Some(13), Some(14), Some(11), Some(16), Some(17), Some(18), Some(11), Some(20), Some(21), Some(21)],
-                signature: "psx-parent-v1:24:root,0,1,2,3,0,5,6,7,0,9,10,11,12,13,14,11,16,17,18,11,20,21,21",
-                note: "Imported from Crimson Cross Knight",
-            )),
-        ),
-        /*[4]*/ (
             id: (5),
             name: "Cortex Humanoid 22-Bone Skeleton",
             data: Skeleton((
@@ -291,7 +237,7 @@
                 note: "Shared by the Aletha and Rust Mantis starter profiles",
             )),
         ),
-        /*[5]*/ (
+        /*[1]*/ (
             id: (6),
             name: "Aletha Delivered Skeleton",
             data: Skeleton((
@@ -302,7 +248,7 @@
                 joint_names: ["Hips", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot", "Spine", "Chest", "Neck", "RightShoulder", "RightUpperArm", "RightLowerArm", "RightHand", "RightThumbMetacarpal", "RightThumbProximal", "RightIndexProximal", "RightIndexIntermediate", "LeftShoulder", "LeftUpperArm", "LeftLowerArm", "LeftHand", "LeftThumbMetacarpal", "LeftThumbProximal", "LeftIndexProximal", "LeftIndexIntermediate"],
             )),
         ),
-        /*[6]*/ (
+        /*[2]*/ (
             id: (7),
             name: "Sword1 Light Skeleton",
             data: Skeleton((
@@ -313,7 +259,7 @@
                 joint_names: ["root"],
             )),
         ),
-        /*[7]*/ (
+        /*[3]*/ (
             id: (8),
             name: "Aletha Crystal",
             data: Material((
@@ -329,82 +275,7 @@
                 double_sided: false,
             )),
         ),
-        /*[8]*/ (
-            id: (9),
-            name: "Obsidian Wraith",
-            data: Model((
-                model_path: "assets/models/obsidian_wraith/obsidian_wraith.psxmdl",
-                source_path: None,
-                texture_path: Some("assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt"),
-                skeleton: Some((3)),
-                world_height: 1024,
-                collision_radius: 192,
-                scale_q8: (256, 256, 256),
-                default_visual_yaw_q12: 0,
-                attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
-            )),
-        ),
-        /*[9]*/ (
-            id: (10),
-            name: "Crimson Cross Knight",
-            data: Model((
-                model_path: "assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl",
-                source_path: None,
-                texture_path: Some("assets/models/crimson_cross_knight/crimson_cross_knight_128x128_8bpp.psxt"),
-                skeleton: Some((3)),
-                world_height: 1024,
-                collision_radius: 192,
-                scale_q8: (256, 256, 256),
-                default_visual_yaw_q12: 0,
-                attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
-            )),
-        ),
-        /*[10]*/ (
-            id: (11),
-            name: "Hooded Wretch",
-            data: Model((
-                model_path: "assets/models/hooded_wretch/hooded_wretch.psxmdl",
-                source_path: None,
-                texture_path: Some("assets/models/hooded_wretch/hooded_wretch_128x128_8bpp.psxt"),
-                skeleton: Some((3)),
-                world_height: 1024,
-                collision_radius: 192,
-                scale_q8: (256, 256, 256),
-                default_visual_yaw_q12: 0,
-                attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
-            )),
-        ),
-        /*[11]*/ (
-            id: (12),
-            name: "Crowned Wraith",
-            data: Model((
-                model_path: "assets/models/crowned_wraith/crowned_wraith.psxmdl",
-                source_path: None,
-                texture_path: Some("assets/models/crowned_wraith/crowned_wraith.psxt"),
-                skeleton: Some((3)),
-                world_height: 1024,
-                collision_radius: 192,
-                scale_q8: (256, 256, 256),
-                default_visual_yaw_q12: 0,
-                attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
-            )),
-        ),
-        /*[12]*/ (
-            id: (13),
-            name: "Crimson Cross Knight",
-            data: Model((
-                model_path: "assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl",
-                source_path: Some("local-assets/models/crimson_cross_knight_meshy_gold.glb"),
-                texture_path: Some("assets/models/crimson_cross_knight/crimson_cross_knight.psxt"),
-                skeleton: Some((4)),
-                world_height: 1024,
-                collision_radius: 192,
-                scale_q8: (256, 256, 256),
-                default_visual_yaw_q12: 0,
-                attachments: [],
-            )),
-        ),
-        /*[13]*/ (
+        /*[4]*/ (
             id: (14),
             name: "Aletha",
             data: Model((
@@ -419,7 +290,7 @@
                 attachments: [(name: "right_hand_grip", joint: 13, translation: (0, 0, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[14]*/ (
+        /*[5]*/ (
             id: (15),
             name: "Rust Mantis",
             data: Model((
@@ -434,7 +305,7 @@
                 attachments: [(name: "right_hand_grip", joint: 13, translation: (0, 0, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[15]*/ (
+        /*[6]*/ (
             id: (16),
             name: "Aletha Delivered",
             data: Model((
@@ -449,7 +320,7 @@
                 attachments: [(name: "right_hand_grip", joint: 13, translation: (0, 0, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[16]*/ (
+        /*[7]*/ (
             id: (17),
             name: "Sword1 Light",
             data: Model((
@@ -464,7 +335,7 @@
                 attachments: [],
             )),
         ),
-        /*[17]*/ (
+        /*[8]*/ (
             id: (18),
             name: "Sword1 Heavy",
             data: Model((
@@ -479,7 +350,7 @@
                 attachments: [],
             )),
         ),
-        /*[18]*/ (
+        /*[9]*/ (
             id: (19),
             name: "Sword1 Light",
             data: Weapon((
@@ -493,7 +364,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[19]*/ (
+        /*[10]*/ (
             id: (20),
             name: "Sword1 Heavy",
             data: Weapon((
@@ -507,852 +378,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[20]*/ (
-            id: (21),
-            name: "Standalone FBX / neutral idle",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/neutral_idle.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Idle,
-                looping: true,
-                tags: ["standalone", "idle"],
-            )),
-        ),
-        /*[21]*/ (
-            id: (22),
-            name: "Standalone FBX / walking",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/walking.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Walk,
-                looping: true,
-                tags: ["standalone", "walk"],
-            )),
-        ),
-        /*[22]*/ (
-            id: (23),
-            name: "Standalone FBX / walk backwards",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/walk_backwards.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Walk,
-                looping: true,
-                tags: ["standalone", "walk"],
-            )),
-        ),
-        /*[23]*/ (
-            id: (24),
-            name: "Standalone FBX / zombie reaction hit",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/zombie_reaction_hit.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Hit,
-                looping: false,
-                tags: ["standalone", "hit"],
-            )),
-        ),
-        /*[24]*/ (
-            id: (25),
-            name: "Standalone FBX / stand to roll",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/stand_to_roll.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Generic,
-                looping: false,
-                tags: ["standalone", "roll"],
-            )),
-        ),
-        /*[25]*/ (
-            id: (26),
-            name: "Standalone FBX / standing react death backward",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/standing_react_death_backward.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Death,
-                looping: false,
-                tags: ["standalone", "death"],
-            )),
-        ),
-        /*[26]*/ (
-            id: (27),
-            name: "Standalone FBX / standing melee combo attack ver 3",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/standing_melee_combo_attack_ver_3.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Attack,
-                looping: false,
-                tags: ["standalone", "attack"],
-            )),
-        ),
-        /*[27]*/ (
-            id: (28),
-            name: "Standalone FBX / standing melee attack downward",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/standing_melee_attack_downward.psxanim",
-                skeleton: Some((3)),
-                source: None,
-                bake: LegacyShared,
-                role: Attack,
-                looping: false,
-                tags: ["standalone", "attack"],
-            )),
-        ),
-        /*[28]*/ (
-            id: (29),
-            name: "Meshy Gold / agree gesture",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_agree_gesture_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((868)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[29]*/ (
-            id: (30),
-            name: "Meshy Gold / arise",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_arise_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((870)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[30]*/ (
-            id: (31),
-            name: "Meshy Gold / attack",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_attack_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((872)),
-                bake: ModelNative,
-                role: Attack,
-                looping: false,
-                tags: ["attack"],
-            )),
-        ),
-        /*[31]*/ (
-            id: (32),
-            name: "Meshy Gold / axe spin attack",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_axe_spin_attack_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((874)),
-                bake: ModelNative,
-                role: Attack,
-                looping: false,
-                tags: ["attack"],
-            )),
-        ),
-        /*[32]*/ (
-            id: (33),
-            name: "Meshy Gold / basic jump",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_basic_jump_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((876)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[33]*/ (
-            id: (34),
-            name: "Meshy Gold / casual walk",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_casual_walk_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((878)),
-                bake: ModelNative,
-                role: Walk,
-                looping: true,
-                tags: ["walk"],
-            )),
-        ),
-        /*[34]*/ (
-            id: (35),
-            name: "Meshy Gold / charged ground slam",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_charged_ground_slam_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((880)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[35]*/ (
-            id: (36),
-            name: "Meshy Gold / charged slash",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_charged_slash_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((882)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[36]*/ (
-            id: (37),
-            name: "Meshy Gold / charged upward slash",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_charged_upward_slash_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((884)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[37]*/ (
-            id: (38),
-            name: "Meshy Gold / climb stairs",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_climb_stairs_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((886)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[38]*/ (
-            id: (39),
-            name: "Meshy Gold / combat stance",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_combat_stance_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((888)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[39]*/ (
-            id: (40),
-            name: "Meshy Gold / dead",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_dead_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((890)),
-                bake: ModelNative,
-                role: Death,
-                looping: false,
-                tags: ["death"],
-            )),
-        ),
-        /*[40]*/ (
-            id: (41),
-            name: "Meshy Gold / double blade spin",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_double_blade_spin_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((892)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[41]*/ (
-            id: (42),
-            name: "Meshy Gold / double combo attack",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_double_combo_attack_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((894)),
-                bake: ModelNative,
-                role: Attack,
-                looping: false,
-                tags: ["attack"],
-            )),
-        ),
-        /*[42]*/ (
-            id: (43),
-            name: "Meshy Gold / falling down",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_falling_down_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((896)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[43]*/ (
-            id: (44),
-            name: "Meshy Gold / female bow charge left hand",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_female_bow_charge_left_hand_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((898)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[44]*/ (
-            id: (45),
-            name: "Meshy Gold / female throwing stance charge",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_female_throwing_stance_charge_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((900)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[45]*/ (
-            id: (46),
-            name: "Meshy Gold / forwardleft run fight",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_forwardleft_run_fight_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((902)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[46]*/ (
-            id: (47),
-            name: "Meshy Gold / forwardright run fight",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_forwardright_run_fight_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((904)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[47]*/ (
-            id: (48),
-            name: "Meshy Gold / hit reaction 1",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_hit_reaction_1_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((906)),
-                bake: ModelNative,
-                role: Hit,
-                looping: false,
-                tags: ["hit"],
-            )),
-        ),
-        /*[48]*/ (
-            id: (49),
-            name: "Meshy Gold / hit reaction",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_hit_reaction_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((908)),
-                bake: ModelNative,
-                role: Hit,
-                looping: false,
-                tags: ["hit"],
-            )),
-        ),
-        /*[49]*/ (
-            id: (50),
-            name: "Meshy Gold / hit reaction to waist",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_hit_reaction_to_waist_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((910)),
-                bake: ModelNative,
-                role: Hit,
-                looping: false,
-                tags: ["hit"],
-            )),
-        ),
-        /*[50]*/ (
-            id: (51),
-            name: "Meshy Gold / idle 03",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_03_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((912)),
-                bake: ModelNative,
-                role: Idle,
-                looping: true,
-                tags: ["idle"],
-            )),
-        ),
-        /*[51]*/ (
-            id: (52),
-            name: "Meshy Gold / ladder climb finish",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_ladder_climb_finish_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((914)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[52]*/ (
-            id: (53),
-            name: "Meshy Gold / lean forward sprint inplace",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_lean_forward_sprint_inplace_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((916)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[53]*/ (
-            id: (54),
-            name: "Meshy Gold / left slash",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_left_slash_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((918)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[54]*/ (
-            id: (55),
-            name: "Meshy Gold / lower weapon look raise",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_lower_weapon_look_raise_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((920)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[55]*/ (
-            id: (56),
-            name: "Meshy Gold / open door 2",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_open_door_2_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((922)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[56]*/ (
-            id: (57),
-            name: "Meshy Gold / open door",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_open_door_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((924)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[57]*/ (
-            id: (58),
-            name: "Meshy Gold / roll dodge 1",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_roll_dodge_1_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((926)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[58]*/ (
-            id: (59),
-            name: "Meshy Gold / roll dodge 2",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_roll_dodge_2_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((928)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[59]*/ (
-            id: (60),
-            name: "Meshy Gold / roll dodge 3",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_roll_dodge_3_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((930)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[60]*/ (
-            id: (61),
-            name: "Meshy Gold / roll dodge 4",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_roll_dodge_4_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((932)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[61]*/ (
-            id: (62),
-            name: "Meshy Gold / roll dodge",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_roll_dodge_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((934)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[62]*/ (
-            id: (63),
-            name: "Meshy Gold / run 02",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_run_02_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((936)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[63]*/ (
-            id: (64),
-            name: "Meshy Gold / run 03",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_run_03_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((938)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[64]*/ (
-            id: (65),
-            name: "Meshy Gold / run 03 baselayer 2",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_run_03_baselayer_2.psxanim",
-                skeleton: Some((4)),
-                source: Some((940)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[65]*/ (
-            id: (66),
-            name: "Meshy Gold / run fast 9",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_run_fast_9_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((942)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[66]*/ (
-            id: (67),
-            name: "Meshy Gold / runfast",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_runfast_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((944)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[67]*/ (
-            id: (68),
-            name: "Meshy Gold / running",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_running_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((946)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[68]*/ (
-            id: (69),
-            name: "Meshy Gold / running baselayer 2",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_running_baselayer_2.psxanim",
-                skeleton: Some((4)),
-                source: Some((948)),
-                bake: ModelNative,
-                role: Run,
-                looping: true,
-                tags: ["run"],
-            )),
-        ),
-        /*[69]*/ (
-            id: (70),
-            name: "Meshy Gold / step back",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_step_back_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((950)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[70]*/ (
-            id: (71),
-            name: "Meshy Gold / sword parry backward 1",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_sword_parry_backward_1_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((952)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[71]*/ (
-            id: (72),
-            name: "Meshy Gold / sword shout",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_sword_shout_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((954)),
-                bake: ModelNative,
-                role: Generic,
-                looping: true,
-                tags: [],
-            )),
-        ),
-        /*[72]*/ (
-            id: (73),
-            name: "Meshy Gold / triple combo attack",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_triple_combo_attack_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((956)),
-                bake: ModelNative,
-                role: Attack,
-                looping: false,
-                tags: ["attack"],
-            )),
-        ),
-        /*[73]*/ (
-            id: (74),
-            name: "Meshy Gold / walk backward",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_walk_backward_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((958)),
-                bake: ModelNative,
-                role: Walk,
-                looping: true,
-                tags: ["walk"],
-            )),
-        ),
-        /*[74]*/ (
-            id: (75),
-            name: "Meshy Gold / walk backward with sword",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_walk_backward_with_sword_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((960)),
-                bake: ModelNative,
-                role: Walk,
-                looping: true,
-                tags: ["walk"],
-            )),
-        ),
-        /*[75]*/ (
-            id: (76),
-            name: "Meshy Gold / walk backward with sword inplace",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_walk_backward_with_sword_inplace_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((962)),
-                bake: ModelNative,
-                role: Walk,
-                looping: true,
-                tags: ["walk"],
-            )),
-        ),
-        /*[76]*/ (
-            id: (77),
-            name: "Meshy Gold / walking 2 inplace",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_walking_2_inplace_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((964)),
-                bake: ModelNative,
-                role: Walk,
-                looping: true,
-                tags: ["walk"],
-            )),
-        ),
-        /*[77]*/ (
-            id: (78),
-            name: "Meshy Gold / walking man",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_walking_man_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((966)),
-                bake: ModelNative,
-                role: Walk,
-                looping: true,
-                tags: ["walk"],
-            )),
-        ),
-        /*[78]*/ (
-            id: (79),
-            name: "Meshy Gold / walking man baselayer 2",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_walking_man_baselayer_2.psxanim",
-                skeleton: Some((4)),
-                source: Some((968)),
-                bake: ModelNative,
-                role: Walk,
-                looping: true,
-                tags: ["walk"],
-            )),
-        ),
-        /*[79]*/ (
-            id: (80),
-            name: "Meshy Gold / weapon combo 1",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_weapon_combo_1_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((970)),
-                bake: ModelNative,
-                role: Attack,
-                looping: false,
-                tags: ["attack"],
-            )),
-        ),
-        /*[80]*/ (
-            id: (81),
-            name: "Meshy Gold / weapon combo 2",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_weapon_combo_2_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((972)),
-                bake: ModelNative,
-                role: Attack,
-                looping: false,
-                tags: ["attack"],
-            )),
-        ),
-        /*[81]*/ (
-            id: (82),
-            name: "Meshy Gold / weapon combo",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_weapon_combo_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((974)),
-                bake: ModelNative,
-                role: Attack,
-                looping: false,
-                tags: ["attack"],
-            )),
-        ),
-        /*[82]*/ (
-            id: (83),
-            name: "Meshy Gold / male head down charge",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_male_head_down_charge_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((977)),
-                bake: ModelNative,
-                role: Generic,
-                looping: false,
-                tags: ["meshy", "gold", "charge"],
-            )),
-        ),
-        /*[83]*/ (
-            id: (84),
-            name: "Meshy Gold / idle 3",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_3_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((979)),
-                bake: ModelNative,
-                role: Idle,
-                looping: true,
-                tags: ["idle", "meshy", "gold"],
-            )),
-        ),
-        /*[84]*/ (
-            id: (85),
-            name: "Crimson Cross Knight / idle 8",
-            data: AnimationClip((
-                psxanim_path: "assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_8_baselayer.psxanim",
-                skeleton: Some((4)),
-                source: Some((981)),
-                bake: Retargeted,
-                role: Idle,
-                looping: true,
-                tags: ["idle", "meshy", "gold"],
-            )),
-        ),
-        /*[85]*/ (
+        /*[11]*/ (
             id: (86),
             name: "Aletha / Idle",
             data: AnimationClip((
@@ -1366,7 +392,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[86]*/ (
+        /*[12]*/ (
             id: (87),
             name: "Aletha / Walk",
             data: AnimationClip((
@@ -1380,7 +406,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[87]*/ (
+        /*[13]*/ (
             id: (88),
             name: "Aletha / Run",
             data: AnimationClip((
@@ -1394,7 +420,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[88]*/ (
+        /*[14]*/ (
             id: (89),
             name: "Aletha / Roll",
             data: AnimationClip((
@@ -1408,7 +434,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[89]*/ (
+        /*[15]*/ (
             id: (90),
             name: "Aletha / Light Attack",
             data: AnimationClip((
@@ -1422,7 +448,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[90]*/ (
+        /*[16]*/ (
             id: (91),
             name: "Aletha / Heavy Attack",
             data: AnimationClip((
@@ -1436,7 +462,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[91]*/ (
+        /*[17]*/ (
             id: (92),
             name: "Aletha / Combo Attack",
             data: AnimationClip((
@@ -1450,7 +476,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[92]*/ (
+        /*[18]*/ (
             id: (93),
             name: "Aletha / Hit React",
             data: AnimationClip((
@@ -1464,7 +490,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[93]*/ (
+        /*[19]*/ (
             id: (94),
             name: "Aletha / Death",
             data: AnimationClip((
@@ -1478,7 +504,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[94]*/ (
+        /*[20]*/ (
             id: (95),
             name: "Aletha / Walk Backward",
             data: AnimationClip((
@@ -1492,7 +518,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[95]*/ (
+        /*[21]*/ (
             id: (96),
             name: "Aletha / Strafe Left",
             data: AnimationClip((
@@ -1506,7 +532,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[96]*/ (
+        /*[22]*/ (
             id: (97),
             name: "Aletha / Strafe Right",
             data: AnimationClip((
@@ -1520,7 +546,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[97]*/ (
+        /*[23]*/ (
             id: (98),
             name: "Rust Mantis / Idle",
             data: AnimationClip((
@@ -1534,7 +560,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[98]*/ (
+        /*[24]*/ (
             id: (99),
             name: "Rust Mantis / Walk",
             data: AnimationClip((
@@ -1548,7 +574,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[99]*/ (
+        /*[25]*/ (
             id: (100),
             name: "Rust Mantis / Run",
             data: AnimationClip((
@@ -1562,7 +588,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[100]*/ (
+        /*[26]*/ (
             id: (101),
             name: "aletha_dash_bwd",
             data: AnimationClip((
@@ -1575,7 +601,7 @@
                 tags: [],
             )),
         ),
-        /*[101]*/ (
+        /*[27]*/ (
             id: (102),
             name: "aletha_dash_fwd",
             data: AnimationClip((
@@ -1588,7 +614,7 @@
                 tags: [],
             )),
         ),
-        /*[102]*/ (
+        /*[28]*/ (
             id: (103),
             name: "aletha_dash_lft",
             data: AnimationClip((
@@ -1601,7 +627,7 @@
                 tags: [],
             )),
         ),
-        /*[103]*/ (
+        /*[29]*/ (
             id: (104),
             name: "aletha_dash_rgt",
             data: AnimationClip((
@@ -1614,7 +640,7 @@
                 tags: [],
             )),
         ),
-        /*[104]*/ (
+        /*[30]*/ (
             id: (105),
             name: "aletha_death",
             data: AnimationClip((
@@ -1627,7 +653,7 @@
                 tags: [],
             )),
         ),
-        /*[105]*/ (
+        /*[31]*/ (
             id: (106),
             name: "aletha_heavy_wpn_heavy_atk",
             data: AnimationClip((
@@ -1640,7 +666,7 @@
                 tags: [],
             )),
         ),
-        /*[106]*/ (
+        /*[32]*/ (
             id: (107),
             name: "aletha_heavy_wpn_light_atk_a",
             data: AnimationClip((
@@ -1653,7 +679,7 @@
                 tags: [],
             )),
         ),
-        /*[107]*/ (
+        /*[33]*/ (
             id: (108),
             name: "aletha_heavy_wpn_light_atk_b",
             data: AnimationClip((
@@ -1666,7 +692,7 @@
                 tags: [],
             )),
         ),
-        /*[108]*/ (
+        /*[34]*/ (
             id: (109),
             name: "aletha_hurt_a",
             data: AnimationClip((
@@ -1679,7 +705,7 @@
                 tags: [],
             )),
         ),
-        /*[109]*/ (
+        /*[35]*/ (
             id: (110),
             name: "aletha_hurt_b",
             data: AnimationClip((
@@ -1692,7 +718,7 @@
                 tags: [],
             )),
         ),
-        /*[110]*/ (
+        /*[36]*/ (
             id: (111),
             name: "aletha_idle",
             data: AnimationClip((
@@ -1705,7 +731,7 @@
                 tags: [],
             )),
         ),
-        /*[111]*/ (
+        /*[37]*/ (
             id: (112),
             name: "aletha_light_wpn_heavy_atk",
             data: AnimationClip((
@@ -1718,7 +744,7 @@
                 tags: [],
             )),
         ),
-        /*[112]*/ (
+        /*[38]*/ (
             id: (113),
             name: "aletha_light_wpn_light_atk_a",
             data: AnimationClip((
@@ -1731,7 +757,7 @@
                 tags: [],
             )),
         ),
-        /*[113]*/ (
+        /*[39]*/ (
             id: (114),
             name: "aletha_light_wpn_light_atk_b",
             data: AnimationClip((
@@ -1744,7 +770,7 @@
                 tags: [],
             )),
         ),
-        /*[114]*/ (
+        /*[40]*/ (
             id: (115),
             name: "aletha_rest_pose",
             data: AnimationClip((
@@ -1757,7 +783,7 @@
                 tags: [],
             )),
         ),
-        /*[115]*/ (
+        /*[41]*/ (
             id: (116),
             name: "aletha_run_bwd",
             data: AnimationClip((
@@ -1770,7 +796,7 @@
                 tags: [],
             )),
         ),
-        /*[116]*/ (
+        /*[42]*/ (
             id: (117),
             name: "aletha_run_fwd",
             data: AnimationClip((
@@ -1783,7 +809,7 @@
                 tags: [],
             )),
         ),
-        /*[117]*/ (
+        /*[43]*/ (
             id: (118),
             name: "aletha_run_lft",
             data: AnimationClip((
@@ -1796,7 +822,7 @@
                 tags: [],
             )),
         ),
-        /*[118]*/ (
+        /*[44]*/ (
             id: (119),
             name: "aletha_run_rgt",
             data: AnimationClip((
@@ -1809,7 +835,7 @@
                 tags: [],
             )),
         ),
-        /*[119]*/ (
+        /*[45]*/ (
             id: (120),
             name: "aletha_stun",
             data: AnimationClip((
@@ -1822,7 +848,7 @@
                 tags: [],
             )),
         ),
-        /*[120]*/ (
+        /*[46]*/ (
             id: (121),
             name: "aletha_stun_recovery",
             data: AnimationClip((
@@ -1835,7 +861,7 @@
                 tags: [],
             )),
         ),
-        /*[121]*/ (
+        /*[47]*/ (
             id: (122),
             name: "aletha_walk_bkw",
             data: AnimationClip((
@@ -1848,7 +874,7 @@
                 tags: [],
             )),
         ),
-        /*[122]*/ (
+        /*[48]*/ (
             id: (123),
             name: "aletha_walk_fwd",
             data: AnimationClip((
@@ -1861,7 +887,7 @@
                 tags: [],
             )),
         ),
-        /*[123]*/ (
+        /*[49]*/ (
             id: (124),
             name: "aletha_walk_lft",
             data: AnimationClip((
@@ -1874,7 +900,7 @@
                 tags: [],
             )),
         ),
-        /*[124]*/ (
+        /*[50]*/ (
             id: (125),
             name: "aletha_walk_rgt",
             data: AnimationClip((
@@ -1887,7 +913,7 @@
                 tags: [],
             )),
         ),
-        /*[125]*/ (
+        /*[51]*/ (
             id: (126),
             name: "prop_bind_pose",
             data: AnimationClip((
@@ -1900,97 +926,7 @@
                 tags: ["prop"],
             )),
         ),
-        /*[126]*/ (
-            id: (127),
-            name: "Obsidian Wraith Enemy Set",
-            data: AnimationSet((
-                skeleton: Some((3)),
-                idle_clip: Some((21)),
-                walk_clip: Some((22)),
-                run_clip: Some((22)),
-                turn_clip: None,
-                roll_clip: None,
-                backstep_clip: None,
-                action_clips: [],
-                clips: [(23), (24), (25), (26), (27), (28)],
-            )),
-        ),
-        /*[127]*/ (
-            id: (128),
-            name: "Crimson Cross Knight Player Set",
-            data: AnimationSet((
-                skeleton: Some((3)),
-                idle_clip: Some((21)),
-                walk_clip: Some((22)),
-                run_clip: Some((22)),
-                turn_clip: None,
-                roll_clip: None,
-                backstep_clip: None,
-                action_clips: [],
-                clips: [(23), (24), (25), (26), (27), (28)],
-            )),
-        ),
-        /*[128]*/ (
-            id: (129),
-            name: "Hooded Wretch Enemy Set",
-            data: AnimationSet((
-                skeleton: Some((3)),
-                idle_clip: Some((21)),
-                walk_clip: Some((22)),
-                run_clip: Some((22)),
-                turn_clip: None,
-                roll_clip: None,
-                backstep_clip: None,
-                action_clips: [],
-                clips: [(23), (24), (25), (26), (27), (28)],
-            )),
-        ),
-        /*[129]*/ (
-            id: (130),
-            name: "Crowned Wraith Enemy Set",
-            data: AnimationSet((
-                skeleton: Some((3)),
-                idle_clip: Some((21)),
-                walk_clip: Some((22)),
-                run_clip: Some((22)),
-                turn_clip: None,
-                roll_clip: None,
-                backstep_clip: None,
-                action_clips: [],
-                clips: [(23), (24), (25), (26), (27), (28)],
-            )),
-        ),
-        /*[130]*/ (
-            id: (131),
-            name: "Crimson Cross Knight / Meshy Gold Standard",
-            data: AnimationSet((
-                skeleton: Some((4)),
-                idle_clip: Some((51)),
-                walk_clip: Some((34)),
-                run_clip: Some((46)),
-                turn_clip: None,
-                roll_clip: None,
-                backstep_clip: None,
-                action_clips: [],
-                clips: [(29), (30), (31), (32), (33), (35), (36), (37), (38), (39), (40), (41), (42), (43), (44), (45), (47), (48), (49), (50), (52), (53), (54), (55), (56), (57), (58), (59), (60), (61), (62), (63), (64), (65), (66), (67), (68), (69), (70), (71), (72), (73), (74), (75), (76), (77), (78), (79), (80), (81), (82), (83), (84), (85)],
-            )),
-        ),
-        /*[131]*/ (
-            id: (132),
-            name: "Aletha Complete Animation Set",
-            data: AnimationSet((
-                skeleton: Some((5)),
-                idle_clip: None,
-                walk_clip: None,
-                run_clip: None,
-                turn_clip: None,
-                roll_clip: None,
-                backstep_clip: None,
-                action_clips: [(action: Idle, clip: (86)), (action: Walk, clip: (87)), (action: Run, clip: (88)), (action: Roll, clip: (89), options: Some((looping: false, in_place: true, speed_q8: 1024, frame_start: 0, frame_end: 25, push_distance: 0, push_frame_start: 0, push_frame_end: 65535))), (action: Backstep, clip: (95), options: Some((looping: false, in_place: true, speed_q8: 512, frame_start: 0, frame_end: 8, push_distance: 0, push_frame_start: 0, push_frame_end: 65535))), (action: LightAttack, clip: (90), options: Some((looping: false, in_place: true, speed_q8: 768, frame_start: 0, frame_end: 65535, push_distance: 96, push_frame_start: 8, push_frame_end: 20))), (action: HeavyAttack, clip: (91), options: Some((looping: false, in_place: true, speed_q8: 512, frame_start: 0, frame_end: 65535, push_distance: 128, push_frame_start: 6, push_frame_end: 18))), (action: ComboAttack, clip: (92), options: Some((looping: false, in_place: true, speed_q8: 768, frame_start: 0, frame_end: 65535, push_distance: 144, push_frame_start: 9, push_frame_end: 31))), (action: HitReact, clip: (93)), (action: Death, clip: (94)), (action: WalkBackward, clip: (95), options: Some((looping: true, in_place: true, speed_q8: 512, frame_start: 0, frame_end: 65535, push_distance: 0, push_frame_start: 0, push_frame_end: 65535))), (action: StrafeLeft, clip: (96)), (action: StrafeRight, clip: (97))],
-                clips: [(86), (87), (88), (89), (90), (91), (92), (93), (94), (95), (96), (97)],
-            )),
-        ),
-        /*[132]*/ (
+        /*[52]*/ (
             id: (133),
             name: "Rust Mantis Starter Animation Set",
             data: AnimationSet((
@@ -2005,7 +941,7 @@
                 clips: [(98), (99), (100)],
             )),
         ),
-        /*[133]*/ (
+        /*[53]*/ (
             id: (134),
             name: "Aletha Delivered Animation Set",
             data: AnimationSet((
@@ -2020,167 +956,7 @@
                 clips: [(101), (102), (103), (104), (105), (106), (107), (108), (109), (110), (111), (112), (113), (114), (115), (116), (117), (118), (119), (120), (121), (122), (123), (124), (125)],
             )),
         ),
-        /*[134]*/ (
-            id: (135),
-            name: "Crimson Cross Knight Player",
-            data: Character((
-                model: Some((13)),
-                material: None,
-                animation_set: Some((131)),
-                combat_capsules: [],
-                spawn_role: Auto,
-                enemy_behavior: None,
-                radius: 192,
-                height: 1024,
-                walk_speed: 48,
-                run_speed: 96,
-                turn_speed_degrees_per_second: 180,
-                stamina_max_q12: 4096,
-                sprint_min_q12: 384,
-                sprint_drain_q12: 10,
-                stamina_recover_q12: 36,
-                roll_cost_q12: 768,
-                roll_speed: 96,
-                roll_active_frames: 14,
-                roll_recovery_frames: 12,
-                roll_invulnerable_frames: 10,
-                backstep_cost_q12: 512,
-                backstep_speed: 72,
-                backstep_active_frames: 8,
-                backstep_recovery_frames: 10,
-                backstep_invulnerable_frames: 6,
-                camera_distance: 6144,
-                camera_height: 1280,
-                camera_target_height: 640,
-                camera_lock_rise_percent: 25,
-                camera_min_floor_clearance: 64,
-                camera_orbit_speed_level: 5,
-                camera_position_lag_shift: 2,
-                camera_focus_lag_shift: 2,
-                camera_distance_lag_shift: 3,
-            )),
-        ),
-        /*[135]*/ (
-            id: (136),
-            name: "Obsidian Wraith Enemy",
-            data: Character((
-                model: Some((9)),
-                material: None,
-                animation_set: Some((127)),
-                combat_capsules: [],
-                spawn_role: Enemy,
-                enemy_behavior: Some((aggro_radius: 2335, patrol_offset: (0, 0, -6000), patrol_wait_ticks: 60, reaction_ticks: 22, preferred_distance: 768, spacing_tolerance: 128, decision_interval_ticks: 12, circle_chance: 65, attack_priority: 4, attack_cooldown_ticks: 45, group_attack_delay_ticks: 18, windup_ticks: 20, recovery_ticks: 24, poise: 100, touch_damage: 10, max_health: 100)),
-                radius: 192,
-                height: 1024,
-                walk_speed: 28,
-                run_speed: 96,
-                turn_speed_degrees_per_second: 180,
-                stamina_max_q12: 4096,
-                sprint_min_q12: 384,
-                sprint_drain_q12: 10,
-                stamina_recover_q12: 36,
-                roll_cost_q12: 768,
-                roll_speed: 96,
-                roll_active_frames: 14,
-                roll_recovery_frames: 12,
-                roll_invulnerable_frames: 10,
-                backstep_cost_q12: 512,
-                backstep_speed: 72,
-                backstep_active_frames: 8,
-                backstep_recovery_frames: 10,
-                backstep_invulnerable_frames: 6,
-                camera_distance: 6144,
-                camera_height: 1280,
-                camera_target_height: 640,
-                camera_lock_rise_percent: 25,
-                camera_min_floor_clearance: 64,
-                camera_orbit_speed_level: 5,
-                camera_position_lag_shift: 2,
-                camera_focus_lag_shift: 2,
-                camera_distance_lag_shift: 3,
-            )),
-        ),
-        /*[136]*/ (
-            id: (137),
-            name: "Hooded Wretch Enemy",
-            data: Character((
-                model: Some((11)),
-                material: None,
-                animation_set: Some((129)),
-                combat_capsules: [],
-                spawn_role: Enemy,
-                enemy_behavior: Some((aggro_radius: 2335, patrol_offset: (0, 0, -6000), patrol_wait_ticks: 60, reaction_ticks: 22, preferred_distance: 768, spacing_tolerance: 128, decision_interval_ticks: 12, circle_chance: 65, attack_priority: 4, attack_cooldown_ticks: 45, group_attack_delay_ticks: 18, windup_ticks: 20, recovery_ticks: 24, poise: 100, touch_damage: 10, max_health: 100)),
-                radius: 192,
-                height: 1024,
-                walk_speed: 28,
-                run_speed: 96,
-                turn_speed_degrees_per_second: 180,
-                stamina_max_q12: 4096,
-                sprint_min_q12: 384,
-                sprint_drain_q12: 10,
-                stamina_recover_q12: 36,
-                roll_cost_q12: 768,
-                roll_speed: 96,
-                roll_active_frames: 14,
-                roll_recovery_frames: 12,
-                roll_invulnerable_frames: 10,
-                backstep_cost_q12: 512,
-                backstep_speed: 72,
-                backstep_active_frames: 8,
-                backstep_recovery_frames: 10,
-                backstep_invulnerable_frames: 6,
-                camera_distance: 6144,
-                camera_height: 1280,
-                camera_target_height: 640,
-                camera_lock_rise_percent: 25,
-                camera_min_floor_clearance: 64,
-                camera_orbit_speed_level: 5,
-                camera_position_lag_shift: 2,
-                camera_focus_lag_shift: 2,
-                camera_distance_lag_shift: 3,
-            )),
-        ),
-        /*[137]*/ (
-            id: (138),
-            name: "Crowned Wraith Enemy",
-            data: Character((
-                model: Some((12)),
-                material: None,
-                animation_set: Some((130)),
-                combat_capsules: [],
-                spawn_role: Enemy,
-                enemy_behavior: Some((aggro_radius: 2335, patrol_offset: (0, 0, -6000), patrol_wait_ticks: 60, reaction_ticks: 22, preferred_distance: 768, spacing_tolerance: 128, decision_interval_ticks: 12, circle_chance: 65, attack_priority: 4, attack_cooldown_ticks: 45, group_attack_delay_ticks: 18, windup_ticks: 20, recovery_ticks: 24, poise: 100, touch_damage: 10, max_health: 100)),
-                radius: 192,
-                height: 1024,
-                walk_speed: 28,
-                run_speed: 96,
-                turn_speed_degrees_per_second: 180,
-                stamina_max_q12: 4096,
-                sprint_min_q12: 384,
-                sprint_drain_q12: 10,
-                stamina_recover_q12: 36,
-                roll_cost_q12: 768,
-                roll_speed: 96,
-                roll_active_frames: 14,
-                roll_recovery_frames: 12,
-                roll_invulnerable_frames: 10,
-                backstep_cost_q12: 512,
-                backstep_speed: 72,
-                backstep_active_frames: 8,
-                backstep_recovery_frames: 10,
-                backstep_invulnerable_frames: 6,
-                camera_distance: 6144,
-                camera_height: 1280,
-                camera_target_height: 640,
-                camera_lock_rise_percent: 25,
-                camera_min_floor_clearance: 64,
-                camera_orbit_speed_level: 5,
-                camera_position_lag_shift: 2,
-                camera_focus_lag_shift: 2,
-                camera_distance_lag_shift: 3,
-            )),
-        ),
-        /*[138]*/ (
+        /*[54]*/ (
             id: (139),
             name: "Aletha",
             data: Character((
@@ -2220,7 +996,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[139]*/ (
+        /*[55]*/ (
             id: (140),
             name: "Rust Mantis Enemy",
             data: Character((
@@ -2260,7 +1036,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[140]*/ (
+        /*[56]*/ (
             id: (141),
             name: "Sanctum Slate",
             data: Material((
@@ -2277,7 +1053,7 @@
                 double_sided: false,
             )),
         ),
-        /*[141]*/ (
+        /*[57]*/ (
             id: (142),
             name: "Sanctum Masonry",
             data: Material((
@@ -2294,7 +1070,7 @@
                 double_sided: false,
             )),
         ),
-        /*[142]*/ (
+        /*[58]*/ (
             id: (143),
             name: "Sanctum Trim",
             data: Material((
@@ -2311,7 +1087,7 @@
                 double_sided: false,
             )),
         ),
-        /*[143]*/ (
+        /*[59]*/ (
             id: (144),
             name: "Sanctum Gate",
             data: Material((
@@ -2328,7 +1104,7 @@
                 double_sided: false,
             )),
         ),
-        /*[144]*/ (
+        /*[60]*/ (
             id: (145),
             name: "Sanctum Metal",
             data: Material((
