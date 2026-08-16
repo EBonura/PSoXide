@@ -211,6 +211,18 @@ impl ClassicAffineProfile {
         subdivide_twice_at: 60,
         underdraw_slot_bias: 8,
     };
+
+    /// PSoXide brush-world profile: the same topology as
+    /// [`Self::QUAKE_REFERENCE`] but each subdivision band reaches twice as
+    /// far. Quake's first-person camera looks at walls square-on; a
+    /// third-person camera looks down at the floor from a few dozen units
+    /// up, and 128-unit patches split only within ~80 units left ~100 px
+    /// affine triangles underfoot that swim whenever the view pitches.
+    pub const PXBSP_THIRD_PERSON: Self = Self {
+        subdivide_once_at: 272,
+        subdivide_twice_at: 136,
+        ..Self::QUAKE_REFERENCE
+    };
 }
 
 /// Result of one fan submission.
