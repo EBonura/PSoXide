@@ -4507,23 +4507,27 @@ mod focus_tests {
             .resources
             .iter()
             .find_map(|resource| {
-                (resource.name == "Aletha" && matches!(resource.data, ResourceData::Model(_)))
-                    .then_some(resource.id)
+                (resource.name == "Aletha Delivered"
+                    && matches!(resource.data, ResourceData::Model(_)))
+                .then_some(resource.id)
             })
-            .expect("Aletha model exists");
+            .expect("Aletha Delivered model exists");
+        let skeleton = match &project.resource(model).unwrap().data {
+            ResourceData::Model(m) => m.skeleton,
+            _ => unreachable!(),
+        };
         let clip = project
             .resources
             .iter()
             .find_map(|resource| match &resource.data {
                 ResourceData::AnimationClip(animation)
-                    if animation.target_model == Some(model)
-                        && resource.name == "Aletha / Idle" =>
+                    if animation.skeleton == skeleton && resource.name == "aletha_idle" =>
                 {
                     Some(resource.id)
                 }
                 _ => None,
             })
-            .expect("Aletha idle exists");
+            .expect("Aletha Delivered idle exists");
         let mut viewer = ModelAnimationViewerState::default();
         viewer.focus_resource(&project, clip);
         let model_context = load_model_context_cached(&project, project_root, &mut viewer, model)
