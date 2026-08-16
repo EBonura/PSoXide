@@ -18,7 +18,7 @@ merge.
 | Demo disc | `psx-demo-disc-quake-shareware` | `codex/quake-shareware-demo-disc` | `psx-demo-disc/main` |
 
 The PSoXide integration worktree carries exactly one dirty file, the owner's
-saved camera state in `editor/projects/brush-first-playable/project.ron`.
+saved camera state in `editor/archive/fixtures/brush-first-playable/project.ron`.
 Never stage, reset, format, or overwrite it.
 
 The canonical PSoXide checkout (`/Users/ebonura/Desktop/repos/PSoXide` on

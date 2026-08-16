@@ -29,7 +29,7 @@ fn main() {
     let output_dir = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir.join("../../projects/brush-combat-fixture"));
+        .unwrap_or_else(|| manifest_dir.join("../../archive/fixtures/brush-combat-fixture"));
 
     let sample_text = std::fs::read_to_string(sample_root.join("project.ron"))
         .expect("read tracked cortex_v1 sample");

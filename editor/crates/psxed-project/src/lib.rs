@@ -67,11 +67,35 @@ const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/default/projec
 /// fixture because a large share of the cook/playtest suites exercise
 /// the grid pipeline through its scenes and resources.
 const LEGACY_GRID_STARTER_RON: &str =
-    include_str!("../../../projects/legacy-grid-starter/project.ron");
+    include_str!("../../../archive/fixtures/legacy-grid-starter/project.ron");
 
 /// On-disk root of the legacy grid fixture (asset-backed tests).
 pub fn legacy_grid_starter_dir() -> PathBuf {
-    projects_dir().join("legacy-grid-starter")
+    fixtures_dir().join("legacy-grid-starter")
+}
+
+/// Tracked reference projects that are not user projects: test fixtures,
+/// gate slices and the New Project template. They live outside
+/// [`projects_dir`] so the editor's project browser only lists real
+/// projects. Same precedence as [`projects_dir`]: an explicit override, then
+/// the source tree, then the per-user data directory (a shipped build must
+/// install them there).
+pub fn fixtures_dir() -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("PSOXIDE_FIXTURES_DIR") {
+        return PathBuf::from(override_dir);
+    }
+    let source_tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("archive")
+        .join("fixtures");
+    if source_tree.is_dir() {
+        return source_tree;
+    }
+    user_projects_dir()
+        .parent()
+        .map(|root| root.join("fixtures"))
+        .unwrap_or_else(user_projects_dir)
 }
 
 /// Where user projects live, resolved for both the dev tree and a shipped
@@ -428,7 +452,7 @@ pub const NEW_PROJECT_COURTYARD_CENTER: i32 = NEW_PROJECT_COURTYARD_OUTER_SIZE /
 /// authors start in a large roofless courtyard, while replay evidence keeps its
 /// frozen fixture and hashes. Both use the same normal PXBSP cook path.
 pub fn new_project_template_dir() -> PathBuf {
-    projects_dir().join("brush-open-courtyard")
+    fixtures_dir().join("brush-open-courtyard")
 }
 
 /// Enumerate every directory under [`projects_dir`] that contains a

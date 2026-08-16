@@ -26,11 +26,11 @@ mod tests {
     #[test]
     fn first_playable_brush_world_uses_the_normal_gameplay_package() {
         let project = ProjectDocument::from_ron_str(include_str!(
-            "../../../projects/brush-first-playable/project.ron"
+            "../../../archive/fixtures/brush-first-playable/project.ron"
         ))
         .expect("brush first-playable fixture");
         let fixture_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
         let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
         assert!(report.is_ok(), "normal brush package: {:?}", report.errors);
         let package = package.expect("normal package");
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn pxbsp_sky_off_omits_the_panorama_and_preserves_brush_texture_ids() {
         let mut project = ProjectDocument::from_ron_str(include_str!(
-            "../../../projects/brush-first-playable/project.ron"
+            "../../../archive/fixtures/brush-first-playable/project.ron"
         ))
         .expect("brush first-playable fixture");
         let world_id = project.active_scene().root;
@@ -122,7 +122,7 @@ mod tests {
         sky.mode = SkyMode::Off;
 
         let fixture_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
         let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
         assert!(report.is_ok(), "normal brush package: {:?}", report.errors);
         let package = package.expect("normal package");
@@ -132,7 +132,7 @@ mod tests {
 
         let enabled_world_bytes = {
             let enabled_project = ProjectDocument::from_ron_str(include_str!(
-                "../../../projects/brush-first-playable/project.ron"
+                "../../../archive/fixtures/brush-first-playable/project.ron"
             ))
             .expect("enabled brush first-playable fixture");
             let enabled_package = crate::playtest::build_package(&enabled_project, &fixture_dir)
@@ -163,11 +163,11 @@ mod tests {
     #[test]
     fn brush_combat_cooks_authored_player_and_enemy_body_hulls() {
         let project = ProjectDocument::from_ron_str(include_str!(
-            "../../../projects/brush-combat-fixture/project.ron"
+            "../../../archive/fixtures/brush-combat-fixture/project.ron"
         ))
         .expect("brush combat fixture");
         let fixture_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-combat-fixture");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-combat-fixture");
         let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
         assert!(report.is_ok(), "brush combat package: {:?}", report.errors);
         let package = package.expect("brush combat package");
@@ -207,11 +207,11 @@ mod tests {
     #[test]
     fn project_cook_choice_reaches_the_normal_package_and_compiler() {
         let mut project = ProjectDocument::from_ron_str(include_str!(
-            "../../../projects/brush-first-playable/project.ron"
+            "../../../archive/fixtures/brush-first-playable/project.ron"
         ))
         .expect("brush first-playable fixture");
         let fixture_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
 
         assert_eq!(project.bsp_cook_mode, BrushWorldCookMode::Draft);
         let draft = crate::playtest::build_package(&project, &fixture_dir)
@@ -244,11 +244,11 @@ mod tests {
     #[test]
     fn first_playable_fixture_opens_a_player_hull_route_through_its_door() {
         let mut project = ProjectDocument::from_ron_str(include_str!(
-            "../../../projects/brush-first-playable/project.ron"
+            "../../../archive/fixtures/brush-first-playable/project.ron"
         ))
         .expect("brush first-playable fixture");
         let fixture_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
         crate::units::scale_project_to_engine_units(&mut project);
         let compiled = compile_brush_world(
             &project,
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn real_pxbsp_player_and_npc_steps_obey_cooked_box_and_arch_props() {
         let mut project = ProjectDocument::from_ron_str(include_str!(
-            "../../../projects/brush-first-playable/project.ron"
+            "../../../archive/fixtures/brush-first-playable/project.ron"
         ))
         .expect("brush first-playable fixture");
         let material = project.resources[0].id;
@@ -483,7 +483,7 @@ mod tests {
             .translation = [736.0, 65.0, 384.0];
 
         let fixture_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
         let (package, report) = crate::playtest::build_package(&project, &fixture_dir);
         assert!(report.is_ok(), "PXBSP prop package: {:?}", report.errors);
         let package = package.expect("PXBSP prop package");

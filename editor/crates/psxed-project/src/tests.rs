@@ -4304,7 +4304,7 @@ fn legacy_prefab_resources_load_but_do_not_reserialize() {
 #[test]
 fn legacy_grid_projects_without_the_field_load_as_grid() {
     for relative in [
-        "../../projects/legacy-grid-starter/project.ron",
+        "../../archive/fixtures/legacy-grid-starter/project.ron",
         "../../samples/cortex_v1/project.ron",
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -4326,7 +4326,7 @@ fn legacy_grid_projects_without_the_field_load_as_grid() {
 #[test]
 fn bsp_projects_without_the_field_load_as_bsp() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../projects/brush-first-playable/project.ron");
+        .join("../../archive/fixtures/brush-first-playable/project.ron");
     let mut text = std::fs::read_to_string(&path).expect("tracked BSP project is readable");
     // Strip the field if the tracked copy already carries it: the point is
     // the pre-discriminator shape, which must still resolve to BSP.
@@ -4433,7 +4433,7 @@ fn a_bsp_project_without_brushes_fails_the_cook_closed() {
 /// The tracked BSP first-playable, loaded as a synthetic-mutation base.
 fn bsp_fixture() -> (ProjectDocument, std::path::PathBuf) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../projects/brush-first-playable");
+        .join("../../archive/fixtures/brush-first-playable");
     let project = ProjectDocument::load_from_path(dir.join("project.ron"))
         .expect("tracked BSP first-playable loads");
     assert_eq!(project.world_format(), ProjectWorldFormat::Bsp);

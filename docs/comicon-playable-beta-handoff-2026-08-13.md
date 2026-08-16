@@ -359,7 +359,7 @@ To open the tracked souls slice directly:
 ```sh
 cd /Users/ebonura/Desktop/repos/PSoXide/emu
 cargo run -p frontend --release -- --editor --windowed \
-  --editor-project /Users/ebonura/Desktop/repos/PSoXide/editor/projects/souls-bsp-vertical-slice \
+  --editor-project /Users/ebonura/Desktop/repos/PSoXide/editor/archive/fixtures/souls-bsp-vertical-slice \
   --editor-view 3d
 ```
 
@@ -639,7 +639,7 @@ Additional dirty WIP:
 - `/Users/ebonura/Desktop/repos/quake-psx-target-graph-start` is old, dirty and
   far behind final. Preserve for forensic comparison only.
 - `/Users/ebonura/Desktop/repos/PSoXide-convergence` has the owner's camera
-  edit in `editor/projects/brush-first-playable/project.ron`. Preserve it
+  edit in `editor/archive/fixtures/brush-first-playable/project.ron`. Preserve it
   separately; it does not belong in this release automatically.
 
 All production fixes from the route workers have already been integrated in

@@ -66,7 +66,7 @@ checkpoint and respawn; one door or mover; one trigger; one liquid or
 environmental hazard; entity visibility and PVS behaviour; and editor
 Cook/Rebuild/Play integration.
 
-Current coverage: the tracked `editor/projects/souls-bsp-vertical-slice`
+Current coverage: the tracked `editor/archive/fixtures/souls-bsp-vertical-slice`
 authored through the production editor commands and gated by
 `make editor-souls-bsp-check` satisfies this list. The mapping from each
 required element to its pinned evidence is:
