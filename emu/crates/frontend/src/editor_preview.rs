@@ -3133,10 +3133,15 @@ fn visual_model_origin(
     origin: psx_engine::WorldVertex,
     world_height: i32,
     visual_offset: [i16; 3],
-    _visual_scale_q8: u16,
+    visual_scale_q8: u16,
     instance_rotation: Mat3I16,
 ) -> psx_engine::WorldVertex {
-    let origin = floor_anchored_model_origin(origin, world_height);
+    // Same rule as the runtime: the mesh scales about its mid-height
+    // origin, so the floor lift is the scaled half height.
+    let scaled_height = (world_height.max(0) as i64 * visual_scale_q8.max(1) as i64
+        + (psxed_project::MODEL_SCALE_ONE_Q8 as i64 / 2))
+        / psxed_project::MODEL_SCALE_ONE_Q8 as i64;
+    let origin = floor_anchored_model_origin(origin, scaled_height as i32);
     let offset = rotate_visual_offset(instance_rotation, visual_offset);
     psx_engine::WorldVertex::new(
         origin.x.saturating_add(offset[0]),
