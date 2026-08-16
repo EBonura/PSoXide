@@ -29,6 +29,9 @@ from pathlib import Path
 import bpy
 from mathutils import Matrix, Quaternion, Vector
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from aletha_bvh_retarget import gait_window, import_bvh, retarget  # noqa: E402
+
 PREVIEW_FPS = 30
 
 
@@ -36,7 +39,14 @@ def parse_args() -> argparse.Namespace:
     argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path, help="Rigged GLB with takes")
-    parser.add_argument("--take", required=True, help="Gait action name (exact)")
+    parser.add_argument("--take", help="Gait action name in the GLB (artist take)")
+    parser.add_argument(
+        "--gait-bvh", type=Path, help="Retarget this MoMask/HumanML3D BVH onto the rig as the gait"
+    )
+    parser.add_argument(
+        "--gait-window", type=int, nargs=2, metavar=("FIRST", "LAST"),
+        help="Gait frames to cycle (30 fps timeline); default: artist take = whole, BVH = auto",
+    )
     parser.add_argument("--idle-take", default="aletha_idle")
     parser.add_argument("--output", required=True, type=Path, help="Preview MP4 path")
     parser.add_argument("--fbx-output", type=Path, help="Baked study FBX (armature only)")
@@ -108,12 +118,12 @@ def sample_pose(rig: bpy.types.Object, action: bpy.types.Action, frame: float):
 
 
 def world_positions(
-    rig: bpy.types.Object, action: bpy.types.Action, bone: str, frames: int
+    rig: bpy.types.Object, action: bpy.types.Action, bone: str, first: int, frames: int
 ) -> list[Vector]:
     rig.animation_data.action = action
     out = []
     for frame in range(frames):
-        set_frame(frame + 1)
+        set_frame(first + frame)
         out.append((rig.matrix_world @ rig.pose.bones[bone].matrix).translation.copy())
     return out
 
@@ -162,27 +172,49 @@ def main() -> None:
     rig = import_source(args.source.expanduser())
     for bone in rig.pose.bones:
         bone.rotation_mode = "QUATERNION"
-    gait = action_named(args.take)
     idle = action_named(args.idle_take)
-    gait_frames = int(gait.frame_range[1] - gait.frame_range[0]) or 1
     idle_frames = int(idle.frame_range[1] - idle.frame_range[0]) or 1
+    take_label = args.take
+    if args.gait_bvh:
+        src = import_bvh(args.gait_bvh.expanduser())
+        src_action = src.animation_data.action
+        src_first, src_last = int(src_action.frame_range[0]), int(src_action.frame_range[1])
+        window = tuple(args.gait_window) if args.gait_window else gait_window(src, src_first, src_last)
+        gait, speed = retarget(src, rig, "generated_gait", window[0], window[1])
+        gait_first, gait_frames = window[0], max(1, window[1] - window[0])
+        take_label = args.gait_bvh.name
+        print(f"[study] bvh window={window} of {src_first}..{src_last} source_speed={speed:.3f} m/s")
+    elif args.take:
+        gait = action_named(args.take)
+        gait_first = int(gait.frame_range[0])
+        gait_frames = int(gait.frame_range[1] - gait.frame_range[0]) or 1
+        if args.gait_window:
+            gait_first, gait_frames = args.gait_window[0], max(1, args.gait_window[1] - args.gait_window[0])
+    else:
+        raise SystemExit("need --take or --gait-bvh")
 
     hips = bone_by_suffix(rig, "hips")
     left = bone_by_suffix(rig, "leftfoot")
     right = bone_by_suffix(rig, "rightfoot")
 
     feet = {
-        "left": world_positions(rig, gait, left, gait_frames),
-        "right": world_positions(rig, gait, right, gait_frames),
+        "left": world_positions(rig, gait, left, gait_first, gait_frames),
+        "right": world_positions(rig, gait, right, gait_first, gait_frames),
     }
-    hips_track = {"hips": world_positions(rig, gait, hips, gait_frames)}
+    hips_track = {"hips": world_positions(rig, gait, hips, gait_first, gait_frames)}
     cycle = detect_cycle({**feet, **hips_track}, gait_frames)
-    contact = contact_frame(feet, cycle)
     drift = (hips_track["hips"][-1] - hips_track["hips"][0]).length
+    # Loop exactly one cycle, the last full one in the take (past any run-in),
+    # so the wrap lands on the same phase instead of hitching.
+    loop_at = gait_frames - cycle
+    feet = {side: series[loop_at : loop_at + cycle] for side, series in feet.items()}
+    contact = contact_frame(feet, cycle)
+    gait_first += loop_at
     print(
-        f"[study] take={args.take} frames={gait_frames} cycle={cycle} "
+        f"[study] take={take_label} frames={gait_frames} cycle={cycle} loop_at={loop_at} "
         f"contact={contact} root_drift={drift:.4f}"
     )
+    gait_frames = cycle
 
     idle_lead = int(args.idle_seconds * PREVIEW_FPS)
     transition = int(args.transition_seconds * PREVIEW_FPS)
@@ -196,7 +228,7 @@ def main() -> None:
         "idle_out": [idle_lead + transition + cruise + transition + 1, total],
     }
 
-    output_action = bpy.data.actions.new(f"{args.take}_study")
+    output_action = bpy.data.actions.new(f"{Path(take_label).stem}_study")
     half = cycle * 0.5
 
     def gait_phase_at(output_index: int) -> tuple[float, float]:
@@ -220,13 +252,20 @@ def main() -> None:
 
     # The idle take plays continuously as the base layer; the gait is layered
     # on top with the envelope, so both joins land on the live idle pose.
+    # Bones the gait does not drive (a retarget leaves hands, fingers and
+    # clavicles unmapped) stay on the idle layer instead of fading to bind.
+    driven = {
+        fc.data_path.split('"')[1]
+        for fc in gait.fcurves
+        if fc.data_path.startswith('pose.bones["')
+    }
     frames_keyed = 0
     for output_index in range(total):
         idle_frame = idle.frame_range[0] + (output_index % idle_frames)
         base = sample_pose(rig, idle, idle_frame)
         phase, envelope = gait_phase_at(output_index)
         layer = (
-            sample_pose(rig, gait, gait.frame_range[0] + (phase % gait_frames))
+            sample_pose(rig, gait, gait_first + (phase % gait_frames))
             if envelope > 0.0
             else base
         )
@@ -235,7 +274,7 @@ def main() -> None:
         out_frame = output_index + 1
         for bone in rig.pose.bones:
             idle_loc, idle_rot, idle_scale = base[bone.name]
-            loc, rot, scale = layer[bone.name]
+            loc, rot, scale = layer[bone.name] if bone.name in driven else base[bone.name]
             loc = idle_loc.lerp(loc, envelope)
             rot = idle_rot.slerp(rot, envelope)
             scale = idle_scale.lerp(scale, envelope)
@@ -331,7 +370,7 @@ def main() -> None:
         meta.write_text(
             json.dumps(
                 {
-                    "take": args.take,
+                    "take": take_label,
                     "tempo": args.tempo,
                     "cycle_source_frames": cycle,
                     "contact_source_frame": contact,
