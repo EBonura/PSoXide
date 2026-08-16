@@ -148,8 +148,9 @@ pub struct RuntimeModelAsset {
     pub world_height: u16,
     pub collision_radius: u16,
     pub local_to_world: LocalToWorldScale,
-    /// Origin-to-feet distance of the bind pose (world units, before the
-    /// instance visual scale): the floor lift. See `Model::bind_pose_floor_lift`.
+    /// Origin-to-feet distance of the bind pose in MODEL units; scale it with
+    /// the instance's composed local-to-world to get the floor lift. See
+    /// `Model::bind_pose_floor_lift`.
     pub floor_lift: i32,
 }
 
@@ -860,7 +861,7 @@ pub fn resolve_player_actor_pose<
     );
     let blend_from = player_pose_blend(character, model, clips, blend, video_hz);
     let clip_anchor = model_clip_anchor(tables, model, clip_local);
-    let reference_anchor = model_clip_anchor(tables, model, character.clip_for(PlayerAnim::Idle));
+    let reference_anchor = clip_anchor;
     let pose_translation = model_pose_anchor_translation(
         animation,
         phase_q12,
@@ -869,16 +870,16 @@ pub fn resolve_player_actor_pose<
         character.action_in_place_override(anim_action),
     );
     let rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
+    let local_to_world = visual_model_local_to_world(model, character.visual_scale_q8);
     let origin = visual_model_origin(
         x,
         y,
         z,
-        model.floor_lift,
+        clip_floor_lift(clip_anchor, model),
+        local_to_world,
         character.visual_offset,
-        character.visual_scale_q8,
         &rotation,
     );
-    let local_to_world = visual_model_local_to_world(model, character.visual_scale_q8);
     Some(PlayerActorPoseSnapshot {
         model,
         clip_local,
@@ -1536,10 +1537,12 @@ pub fn player_actor_depth_for_room<const MAX_RUNTIME_MODELS: usize>(
 ) -> Option<i32> {
     let character = character?;
     let runtime_model = models.get(character.model.to_usize()).copied().flatten()?;
-    // Depth only: the unscaled lift is close enough for room ordering.
+    // Depth only: an approximate lift is close enough for room ordering.
     let origin = WorldVertex::new(
         player.x.saturating_sub(active.offset_x),
-        player.y.saturating_add(runtime_model.floor_lift),
+        player
+            .y
+            .saturating_add(runtime_model.local_to_world.apply(runtime_model.floor_lift)),
         player.z.saturating_sub(active.offset_z),
     );
     Some(camera.view_vertex(origin).z)
@@ -1625,21 +1628,34 @@ fn visual_model_local_to_world(
     LocalToWorldScale::from_q12(q12.clamp(1, u16::MAX as u32) as u16)
 }
 
+/// Origin-to-feet distance in model units for the clip being played: the
+/// clip's own cooked floor (the lowest posed vertex of its first frame,
+/// measured by the cook with the runtime's skinning, so pose and
+/// quantization are already in it). Falls back to the bind pose when a clip
+/// has no cooked bounds.
+fn clip_floor_lift(anchor: Option<ModelClipAnchor>, model: RuntimeModelAsset) -> i32 {
+    match anchor {
+        Some(anchor) if anchor.floor_y < 0 => -anchor.floor_y,
+        _ => model.floor_lift,
+    }
+}
+
 fn visual_model_origin(
     x: i32,
     y: i32,
     z: i32,
     floor_lift: i32,
+    local_to_world: LocalToWorldScale,
     visual_offset: [i16; 3],
-    visual_scale_q8: u16,
     rotation: &Mat3I16,
 ) -> WorldVertex {
-    // The mesh scales about its origin, so the lift from the floor to the
-    // origin (the bind pose's origin-to-feet distance) scales with it.
-    let lift = ((floor_lift.max(0) as i64 * visual_scale_q8.max(1) as i64
-        + (MODEL_VISUAL_SCALE_ONE_Q8 / 2) as i64)
-        / MODEL_VISUAL_SCALE_ONE_Q8 as i64) as i32;
-    let origin = WorldVertex::new(x, y.saturating_add(lift), z);
+    // The lift must use the SAME scale the mesh is drawn with, or the feet
+    // miss the floor by the difference between the two roundings.
+    let origin = WorldVertex::new(
+        x,
+        y.saturating_add(local_to_world.apply(floor_lift.max(0))),
+        z,
+    );
     let offset = rotate_offset_q12(
         rotation,
         [
@@ -1695,8 +1711,9 @@ pub fn player_joint_world_transform(
     joint: u8,
 ) -> Option<JointWorldTransform> {
     let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
-    let reference_anchor =
-        model_clip_anchor(tables, runtime_model, character.clip_for(PlayerAnim::Idle));
+    // The origin already grounds this clip by its own cooked floor, so the
+    // clip-to-reference reconciliation is the identity here.
+    let reference_anchor = clip_anchor;
     let pose_translation = model_pose_anchor_translation(
         animation,
         phase_q12,
@@ -1709,9 +1726,9 @@ pub fn player_joint_world_transform(
         x,
         y,
         z,
-        runtime_model.floor_lift,
+        clip_floor_lift(clip_anchor, runtime_model),
+        visual_model_local_to_world(runtime_model, character.visual_scale_q8),
         character.visual_offset,
-        character.visual_scale_q8,
         &model_rotation,
     );
     let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);

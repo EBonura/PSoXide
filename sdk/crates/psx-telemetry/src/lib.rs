@@ -808,12 +808,15 @@ id_table! {
     /// Player animation state as its cooked action index
     /// (`CharacterAnimationAction::to_index`), sampled every sim tick.
     pub const PLAYER_ANIM_ACTION: u16 = 264;
+    /// Player feet Y (motor position), biased for unsigned transport like the
+    /// X/Z map counters.
+    pub const ROOM_PLAYER_LOCAL_Y_BIASED: u16 = 265;
     }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 265;
+pub const COUNTER_COUNT: usize = 266;
 
-const _: () = assert!(counter::PLAYER_ANIM_ACTION as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::ROOM_PLAYER_LOCAL_Y_BIASED as usize == COUNTER_COUNT - 1);

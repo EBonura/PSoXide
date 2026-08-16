@@ -844,6 +844,10 @@ pub(super) fn emit_player_map_debug(
         encode_debug_map_position(position.z),
     );
     telemetry::counter(
+        telemetry::counter::ROOM_PLAYER_LOCAL_Y_BIASED,
+        encode_debug_map_position(position.y),
+    );
+    telemetry::counter(
         telemetry::counter::ROOM_PLAYER_VIEW_YAW_Q12,
         view_yaw_q12 as u32,
     );
@@ -893,7 +897,13 @@ pub(super) fn emit_player_map_debug(
     );
 }
 
-pub(super) fn debug_log_reconcile_room(label: &str, room: RoomIndex, stream_slot: u16, resident: bool, loading: bool) {
+pub(super) fn debug_log_reconcile_room(
+    label: &str,
+    room: RoomIndex,
+    stream_slot: u16,
+    resident: bool,
+    loading: bool,
+) {
     let mut line = DebugLogLine::new("recon ");
     line.push_str(label);
     line.push_str(" room=");
