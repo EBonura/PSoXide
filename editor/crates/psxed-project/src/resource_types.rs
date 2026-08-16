@@ -260,6 +260,8 @@ pub enum CharacterAnimationAction {
     WalkWindup,
     /// Walk-to-idle transition (one shot), played while the motor decelerates.
     WalkWinddown,
+    /// Walk winddown from the other foot (mirrored), for the half-stride phase.
+    WalkWinddownAlt,
 }
 
 impl CharacterAnimationAction {
@@ -293,6 +295,7 @@ impl CharacterAnimationAction {
         Self::Intro,
         Self::WalkWindup,
         Self::WalkWinddown,
+        Self::WalkWinddownAlt,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -328,6 +331,7 @@ impl CharacterAnimationAction {
             Self::Intro => "Intro",
             Self::WalkWindup => "Walk Windup",
             Self::WalkWinddown => "Walk Winddown",
+            Self::WalkWinddownAlt => "Walk Winddown (mirror)",
         }
     }
 
@@ -362,6 +366,7 @@ impl CharacterAnimationAction {
             Self::Intro => 26,
             Self::WalkWindup => 27,
             Self::WalkWinddown => 28,
+            Self::WalkWinddownAlt => 29,
         }
     }
 
@@ -386,7 +391,9 @@ impl CharacterAnimationAction {
             // A spawn intro is its own thing; no existing role fits, and
             // guessing one would auto-assign it to gameplay slots.
             Self::Intro => None,
-            Self::WalkWindup | Self::WalkWinddown => Some(AnimationRole::Walk),
+            Self::WalkWindup | Self::WalkWinddown | Self::WalkWinddownAlt => {
+                Some(AnimationRole::Walk)
+            }
             Self::WalkBackward
             | Self::StrafeLeft
             | Self::StrafeRight
@@ -449,6 +456,9 @@ impl CharacterAnimationAction {
         }
         if name.contains("walk") && name.contains("windup") {
             return Some(Self::WalkWindup);
+        }
+        if name.contains("walk") && name.contains("winddown") && name.contains("mirror") {
+            return Some(Self::WalkWinddownAlt);
         }
         if name.contains("walk") && name.contains("winddown") {
             return Some(Self::WalkWinddown);
