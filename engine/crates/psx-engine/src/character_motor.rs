@@ -459,9 +459,11 @@ pub struct CharacterMotorConfig {
     pub radius: i32,
     /// Vertical-cylinder height in world units.
     pub height: i32,
-    /// Forward/backward walking speed in world units per display frame.
+    /// Forward/backward walking speed in Q8 world units per display frame
+    /// (256 = one unit per tick). Sub-unit speeds accumulate in the motor's
+    /// per-axis remainder, so partial stick deflection still moves the body.
     pub walk_speed: i32,
-    /// Sprint speed in world units per display frame.
+    /// Sprint speed in Q8 world units per display frame.
     pub run_speed: i32,
     /// Turn speed per display frame.
     pub yaw_step: Angle,
@@ -479,7 +481,7 @@ pub struct CharacterMotorConfig {
     pub stamina_recover_q12: i32,
     /// Stamina spent to start a roll.
     pub roll_cost_q12: i32,
-    /// Roll travel speed in world units per display frame.
+    /// Roll travel speed in Q8 world units per display frame.
     pub roll_speed: i32,
     /// Display frames where roll keeps moving.
     pub roll_active_frames: u8,
@@ -492,7 +494,7 @@ pub struct CharacterMotorConfig {
     /// Kept under the legacy `backstep_*` field names so existing cooked
     /// character records remain binary-compatible.
     pub backstep_cost_q12: i32,
-    /// Legacy quickstep travel speed in world units per display frame.
+    /// Legacy quickstep travel speed in Q8 world units per display frame.
     pub backstep_speed: i32,
     /// Legacy quickstep active movement frames.
     pub backstep_active_frames: u8,
@@ -529,12 +531,12 @@ impl CharacterMotorConfig {
             sprint_drain_q12: 40,
             stamina_recover_q12: 36,
             roll_cost_q12: 768,
-            roll_speed: 6,
+            roll_speed: 6 << 8,
             roll_active_frames: 14,
             roll_recovery_frames: 12,
             roll_invulnerable_frames: 10,
             backstep_cost_q12: 512,
-            backstep_speed: 5,
+            backstep_speed: 5 << 8,
             backstep_active_frames: 8,
             backstep_recovery_frames: 10,
             backstep_invulnerable_frames: 6,
@@ -673,6 +675,11 @@ pub struct CharacterMotorState {
     /// ground query is skipped. Any XZ movement re-resolves.
     ground_anchor_x: i32,
     ground_anchor_z: i32,
+    /// Sub-unit XZ displacement carried between ticks (Q8). Speeds are Q8
+    /// units per tick, so a walk below one unit per tick moves the integer
+    /// position only when the remainder rolls over a whole unit.
+    remainder_x_q8: i32,
+    remainder_z_q8: i32,
 }
 
 impl CharacterMotorState {
@@ -693,7 +700,21 @@ impl CharacterMotorState {
             ground_floor: 0,
             ground_anchor_x: 0,
             ground_anchor_z: 0,
+            remainder_x_q8: 0,
+            remainder_z_q8: 0,
         }
+    }
+
+    /// Fold a Q8 displacement into the remainders and return the whole
+    /// units to move this tick.
+    fn take_whole_units(&mut self, dx_q8: i32, dz_q8: i32) -> (i32, i32) {
+        self.remainder_x_q8 = self.remainder_x_q8.saturating_add(dx_q8);
+        self.remainder_z_q8 = self.remainder_z_q8.saturating_add(dz_q8);
+        let dx = self.remainder_x_q8 >> 8;
+        let dz = self.remainder_z_q8 >> 8;
+        self.remainder_x_q8 -= dx << 8;
+        self.remainder_z_q8 -= dz << 8;
+        (dx, dz)
     }
 
     /// Reset position, yaw, stamina, and any in-progress action.
@@ -708,6 +729,8 @@ impl CharacterMotorState {
         self.sprint_exhausted = false;
         self.velocity_y = 0;
         self.grounded = false;
+        self.remainder_x_q8 = 0;
+        self.remainder_z_q8 = 0;
     }
 
     /// Move the motor to another coordinate space while preserving
@@ -1120,16 +1143,18 @@ impl CharacterMotorState {
         if signed_speed == 0 {
             return Ok((false, false));
         }
-        let sin_yaw = yaw.sin();
-        let cos_yaw = yaw.cos();
+        // Q12 direction * Q8 speed >> 12 = Q8 units this tick.
+        let (dx, dz) = self.take_whole_units(
+            yaw.sin().mul_i32(signed_speed),
+            yaw.cos().mul_i32(signed_speed),
+        );
+        if dx == 0 && dz == 0 {
+            return Ok((false, false));
+        }
         let target = RoomPoint::new(
-            self.position
-                .x
-                .saturating_add(sin_yaw.mul_i32(signed_speed)),
+            self.position.x.saturating_add(dx),
             self.position.y,
-            self.position
-                .z
-                .saturating_add(cos_yaw.mul_i32(signed_speed)),
+            self.position.z.saturating_add(dz),
         );
         self.try_commit_move(collision, target, radius, height)
     }
@@ -1146,8 +1171,7 @@ impl CharacterMotorState {
         if speed == 0 {
             return Ok((false, false));
         }
-        let dx = move_x.mul_i32(speed);
-        let dz = move_z.mul_i32(speed);
+        let (dx, dz) = self.take_whole_units(move_x.mul_i32(speed), move_z.mul_i32(speed));
         if dx == 0 && dz == 0 {
             return Ok((false, false));
         }
@@ -2012,7 +2036,6 @@ fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorA
         CharacterMotorAnim::StrafeRight
     }
 }
-
 
 fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Option<i32> {
     let height = floor_height_at(room, x, z)?;
@@ -2958,30 +2981,22 @@ fn aabb_distance_sq_at_fraction_q12(
     // Q20.12 squared would require costly 64-bit helpers on PS1. Q24.8 retains
     // 1/256-unit precision using the engine's normal saturating 32-bit math.
     let fraction_q12 = fraction_q12.clamp(0, Q12::SCALE);
-    let point_x_q8 = query
-        .start
-        .x
-        .saturating_mul(256)
-        .saturating_add(
-            query
-                .end
-                .x
-                .saturating_sub(query.start.x)
-                .saturating_mul(fraction_q12)
-                >> 4,
-        );
-    let point_z_q8 = query
-        .start
-        .z
-        .saturating_mul(256)
-        .saturating_add(
-            query
-                .end
-                .z
-                .saturating_sub(query.start.z)
-                .saturating_mul(fraction_q12)
-                >> 4,
-        );
+    let point_x_q8 = query.start.x.saturating_mul(256).saturating_add(
+        query
+            .end
+            .x
+            .saturating_sub(query.start.x)
+            .saturating_mul(fraction_q12)
+            >> 4,
+    );
+    let point_z_q8 = query.start.z.saturating_mul(256).saturating_add(
+        query
+            .end
+            .z
+            .saturating_sub(query.start.z)
+            .saturating_mul(fraction_q12)
+            >> 4,
+    );
     let min_x_q8 = min.x.saturating_mul(256);
     let max_x_q8 = max.x.saturating_mul(256);
     let min_z_q8 = min.z.saturating_mul(256);
@@ -3164,7 +3179,7 @@ mod tests {
     }
 
     fn config() -> CharacterMotorConfig {
-        CharacterMotorConfig::character(64, 32, 64, Angle::from_q12(16))
+        CharacterMotorConfig::character(64, 32 << 8, 64 << 8, Angle::from_q12(16))
     }
 
     #[test]
@@ -4114,10 +4129,16 @@ mod tests {
                 sprint,
                 ..CharacterMotorInput::default()
             };
-            let walked = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO)
-                .update(None, input(false), config());
-            let sprinted = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO)
-                .update(None, input(true), config());
+            let walked = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO).update(
+                None,
+                input(false),
+                config(),
+            );
+            let sprinted = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO).update(
+                None,
+                input(true),
+                config(),
+            );
 
             // Facing is held on the target regardless of speed or direction.
             assert_eq!(walked.yaw, Angle::ZERO);
@@ -4160,7 +4181,7 @@ mod tests {
         assert_eq!(frame.yaw, Angle::ZERO, "facing stays on the target");
         assert_eq!(frame.anim, CharacterMotorAnim::StrafeRight);
         assert!(!frame.sprinting, "no sprint sideways under lock");
-        assert_eq!(frame.position.x, config().walk_speed);
+        assert_eq!(frame.position.x, config().walk_speed >> 8);
     }
 
     #[test]
@@ -4241,7 +4262,7 @@ mod tests {
     fn actor_cylinder_blocks_horizontal_overlap() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let mut cfg = config();
-        cfg.walk_speed = 160;
+        cfg.walk_speed = 160 << 8;
         cfg.height = 768;
         let blockers = [CharacterCollisionCylinder::new(
             RoomPoint::new(0, 0, 160),
@@ -4266,7 +4287,7 @@ mod tests {
     fn actor_cylinder_ignores_vertical_gap() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let mut cfg = config();
-        cfg.walk_speed = 160;
+        cfg.walk_speed = 160 << 8;
         cfg.height = 256;
         let blockers = [CharacterCollisionCylinder::new(
             RoomPoint::new(0, 512, 160),
@@ -4291,7 +4312,7 @@ mod tests {
     fn actor_aabb_blocks_horizontal_overlap() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let mut cfg = config();
-        cfg.walk_speed = 160;
+        cfg.walk_speed = 160 << 8;
         cfg.height = 768;
         let blockers = [CharacterCollisionAabb::new(
             RoomPoint::new(-64, 0, 96),
@@ -4317,7 +4338,7 @@ mod tests {
         let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
         let mut motor = CharacterMotorState::new(RoomPoint::new(512, 0, 800), Angle::ZERO);
         let mut cfg = config();
-        cfg.walk_speed = 288;
+        cfg.walk_speed = 288 << 8;
         cfg.height = 768;
         let frame = motor.update(
             Some(room.collision()),
@@ -4555,7 +4576,7 @@ mod tests {
         let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
         let mut motor = CharacterMotorState::new(RoomPoint::new(128, 0, 128), Angle::ZERO);
         let mut cfg = config();
-        cfg.walk_speed = 64;
+        cfg.walk_speed = 64 << 8;
         for _ in 0..8 {
             let f = motor.update_vblanks_with_collision(
                 CharacterCollision::rooms(&rooms, &[]),
@@ -4582,7 +4603,7 @@ mod tests {
         ];
         let mut motor = CharacterMotorState::new(RoomPoint::new(960, 0, 512), Angle::QUARTER);
         let mut cfg = config();
-        cfg.walk_speed = 128;
+        cfg.walk_speed = 128 << 8;
         cfg.radius = 96;
 
         let frame = motor.update_vblanks_with_collision(

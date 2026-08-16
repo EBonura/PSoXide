@@ -3302,9 +3302,10 @@ pub struct LevelCharacterRecord {
     pub radius: u16,
     /// Capsule height in engine units.
     pub height: u16,
-    /// Forward walk speed (engine units per 60 Hz frame).
+    /// Forward walk speed, Q8 engine units per 60 Hz frame (256 = one
+    /// unit per tick; the motor carries the sub-unit remainder).
     pub walk_speed: i32,
-    /// Forward run speed (engine units per 60 Hz frame).
+    /// Forward run speed, Q8 engine units per 60 Hz frame.
     pub run_speed: i32,
     /// Yaw rate the controller applies when turning.
     pub turn_speed_degrees_per_second: u16,
@@ -3318,7 +3319,7 @@ pub struct LevelCharacterRecord {
     pub stamina_recover_q12: i32,
     /// Stamina spent to start a roll.
     pub roll_cost_q12: i32,
-    /// Roll travel speed in world units per display frame.
+    /// Roll travel speed in Q8 world units per display frame.
     pub roll_speed: i32,
     /// Display frames where roll keeps moving.
     pub roll_active_frames: u8,
@@ -3328,7 +3329,7 @@ pub struct LevelCharacterRecord {
     pub roll_invulnerable_frames: u8,
     /// Stamina spent to start a backstep.
     pub backstep_cost_q12: i32,
-    /// Backstep travel speed in world units per display frame.
+    /// Backstep travel speed in Q8 world units per display frame.
     pub backstep_speed: i32,
     /// Display frames where backstep keeps moving.
     pub backstep_active_frames: u8,

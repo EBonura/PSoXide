@@ -513,6 +513,8 @@ pub(crate) fn cook_player_character(
         // project clone; the built-in fallback is constructed here,
         // after scaling, so it divides through the same path.
         crate::units::scale_default_character_to_engine_units(&mut default_character);
+    } else {
+        crate::units::character_speeds_to_q8_unscaled(&mut default_character);
     }
     let (character, character_name) = match character_id {
         Some(character_id) => {

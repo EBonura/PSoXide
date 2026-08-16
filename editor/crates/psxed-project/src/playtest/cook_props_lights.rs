@@ -1466,8 +1466,9 @@ pub(crate) fn push_game_entity(
         yaw,
         radius: settings.radius,
         height: settings.height,
-        walk_speed: settings.walk_speed,
-        run_speed: settings.run_speed,
+        // Enemy movement is whole units per tick; settings arrive in Q8.
+        walk_speed: (settings.walk_speed >> 8).max(1),
+        run_speed: (settings.run_speed >> 8).max(1),
         patrol: [
             pos[0].saturating_add(enemy.patrol_offset[0]),
             pos[1].saturating_add(enemy.patrol_offset[1]),

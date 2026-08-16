@@ -227,11 +227,12 @@ fn player_character_controller_settings_drive_cooked_character() {
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let character = &package.expect("package returned on ok report").characters[0];
-    assert_eq!(character.walk_speed, 61);
-    assert_eq!(character.run_speed, 133);
+    // Grid projects cook speeds to Q8 units per tick (x256).
+    assert_eq!(character.walk_speed, 61 << 8);
+    assert_eq!(character.run_speed, 133 << 8);
     assert_eq!(character.turn_speed_degrees_per_second, 270);
     assert_eq!(character.stamina_max_q12, 2048);
-    assert_eq!(character.roll_speed, 144);
+    assert_eq!(character.roll_speed, 144 << 8);
 }
 
 #[test]
@@ -606,7 +607,7 @@ fn component_player_without_profile_uses_model_renderer_and_animator() {
     );
     let package = package.expect("component player cooks");
     let character = &package.characters[0];
-    assert_eq!(character.walk_speed, 77);
+    assert_eq!(character.walk_speed, 77 << 8);
     assert_eq!(
         package.models[character.model as usize].source_resource,
         model
