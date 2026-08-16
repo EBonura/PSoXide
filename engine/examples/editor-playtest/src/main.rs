@@ -123,6 +123,7 @@ mod particle_runtime;
 mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
+use playtest_update::LocoPhase;
 mod room_lighting_runtime;
 mod runtime_arenas;
 mod runtime_config;
@@ -341,6 +342,14 @@ struct Playtest {
     /// clip-local tick, and the switch tick the blend ramps from.
     /// Cleared on init/respawn; expires by elapsed ticks at render.
     anim_blend_from: Option<(PlayerAnim, u32, SimTick)>,
+    /// Three-part walk (windup / cruise / winddown) phase; see
+    /// `walk_transition_input` and `walk_transition_state`.
+    loco: LocoPhase,
+    /// Tick the current locomotion phase began.
+    loco_start_tick: SimTick,
+    /// Last analog move vector while the stick was active; the winddown
+    /// glides along it while the clip settles.
+    loco_glide: (Q12, Q12),
     /// Active-window reconcile needed: set by visibility refreshes,
     /// crossings, and stream progress; cleared when a pass converges.
     /// Keeps the steady-state reconcile at a two-branch early-out.
@@ -622,6 +631,7 @@ impl Playtest {
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;
+        self.loco = LocoPhase::Idle;
         self.box_props.init();
         self.orbit_yaw = CAMERA_START_YAW;
         self.orbit_radius = CAMERA_START_RADIUS;

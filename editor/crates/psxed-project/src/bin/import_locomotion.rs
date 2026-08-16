@@ -24,6 +24,8 @@
 //! | `run_bwd`   | RunBackward    |
 //! | `run_lft`   | RunStrafeLeft  |
 //! | `run_rgt`   | RunStrafeRight |
+//! | `walk_fwd_windup`   | WalkWindup (one shot) |
+//! | `walk_fwd_winddown` | WalkWinddown (one shot) |
 //!
 //! Missing files are skipped, so a partial pack (walk only) is a valid run
 //! and leaves the other slots on whatever they were bound to.
@@ -58,7 +60,19 @@ use psxed_project::{
 /// Pack filename stem, the gameplay action it binds, its clip role, and
 /// whether gameplay loops it. Only looping clips are cycle-trimmed; a
 /// one-shot has no cycle to find and must keep its full length.
-const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 14] = [
+const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 16] = [
+    (
+        "walk_fwd_windup",
+        CharacterAnimationAction::WalkWindup,
+        AnimationRole::Walk,
+        false,
+    ),
+    (
+        "walk_fwd_winddown",
+        CharacterAnimationAction::WalkWinddown,
+        AnimationRole::Walk,
+        false,
+    ),
     (
         "idle",
         CharacterAnimationAction::Idle,

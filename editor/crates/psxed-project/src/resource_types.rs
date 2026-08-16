@@ -256,6 +256,10 @@ pub enum CharacterAnimationAction {
     AltComboAttack,
     /// First-spawn intro, played once with control locked out.
     Intro,
+    /// Idle-to-walk transition (one shot); the walk cruise starts where it ends.
+    WalkWindup,
+    /// Walk-to-idle transition (one shot), played while the motor decelerates.
+    WalkWinddown,
 }
 
 impl CharacterAnimationAction {
@@ -287,6 +291,8 @@ impl CharacterAnimationAction {
         Self::AltHeavyAttack,
         Self::AltComboAttack,
         Self::Intro,
+        Self::WalkWindup,
+        Self::WalkWinddown,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -320,6 +326,8 @@ impl CharacterAnimationAction {
             Self::AltHeavyAttack => "Alt Heavy Attack",
             Self::AltComboAttack => "Alt Combo Attack",
             Self::Intro => "Intro",
+            Self::WalkWindup => "Walk Windup",
+            Self::WalkWinddown => "Walk Winddown",
         }
     }
 
@@ -352,6 +360,8 @@ impl CharacterAnimationAction {
             Self::AltHeavyAttack => 24,
             Self::AltComboAttack => 25,
             Self::Intro => 26,
+            Self::WalkWindup => 27,
+            Self::WalkWinddown => 28,
         }
     }
 
@@ -376,6 +386,7 @@ impl CharacterAnimationAction {
             // A spawn intro is its own thing; no existing role fits, and
             // guessing one would auto-assign it to gameplay slots.
             Self::Intro => None,
+            Self::WalkWindup | Self::WalkWinddown => Some(AnimationRole::Walk),
             Self::WalkBackward
             | Self::StrafeLeft
             | Self::StrafeRight
@@ -435,6 +446,12 @@ impl CharacterAnimationAction {
         }
         if name.contains("run") && backward {
             return Some(Self::RunBackward);
+        }
+        if name.contains("walk") && name.contains("windup") {
+            return Some(Self::WalkWindup);
+        }
+        if name.contains("walk") && name.contains("winddown") {
+            return Some(Self::WalkWinddown);
         }
         if name.contains("walk") && left {
             return Some(Self::StrafeLeft);

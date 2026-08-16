@@ -32,6 +32,10 @@ pub enum PlayerAnim {
     /// First-spawn intro, played once with control locked out.
     Intro,
     Death,
+    /// Idle-to-walk transition, one shot; Walk begins where it ends.
+    WalkWindup,
+    /// Walk-to-idle transition, one shot, over the motor's deceleration.
+    WalkWinddown,
 }
 
 impl PlayerAnim {
@@ -54,6 +58,8 @@ impl PlayerAnim {
             Self::ComboAttack => CharacterAnimationAction::ComboAttack,
             Self::Intro => CharacterAnimationAction::Intro,
             Self::Death => CharacterAnimationAction::Death,
+            Self::WalkWindup => CharacterAnimationAction::WalkWindup,
+            Self::WalkWinddown => CharacterAnimationAction::WalkWinddown,
         }
     }
 
@@ -274,6 +280,14 @@ impl RuntimeCharacter {
         match anim.action() {
             CharacterAnimationAction::Idle => idle,
             CharacterAnimationAction::Walk => walk,
+            // The playtest only enters these states when the clip is bound;
+            // the walk itself is the fallback for any other caller.
+            CharacterAnimationAction::WalkWindup => self
+                .action_clip(CharacterAnimationAction::WalkWindup)
+                .unwrap_or(walk),
+            CharacterAnimationAction::WalkWinddown => self
+                .action_clip(CharacterAnimationAction::WalkWinddown)
+                .unwrap_or(walk),
             CharacterAnimationAction::WalkBackward => self
                 .action_clip(CharacterAnimationAction::WalkBackward)
                 .unwrap_or(walk),
@@ -499,11 +513,29 @@ mod tests {
     #[test]
     fn player_damage_kills_exactly_at_zero() {
         let survived = apply_player_damage(100, false, 99);
-        assert_eq!(survived, PlayerDamageOutcome { health: 1, died: false });
+        assert_eq!(
+            survived,
+            PlayerDamageOutcome {
+                health: 1,
+                died: false
+            }
+        );
         let killed = apply_player_damage(1, false, 1);
-        assert_eq!(killed, PlayerDamageOutcome { health: 0, died: true });
+        assert_eq!(
+            killed,
+            PlayerDamageOutcome {
+                health: 0,
+                died: true
+            }
+        );
         let overkill = apply_player_damage(10, false, u16::MAX);
-        assert_eq!(overkill, PlayerDamageOutcome { health: 0, died: true });
+        assert_eq!(
+            overkill,
+            PlayerDamageOutcome {
+                health: 0,
+                died: true
+            }
+        );
     }
 
     #[test]
@@ -511,12 +543,24 @@ mod tests {
         // A hit landing during the death countdown keeps health floored
         // without starting a second death sequence.
         let during_death = apply_player_damage(0, true, 25);
-        assert_eq!(during_death, PlayerDamageOutcome { health: 0, died: false });
+        assert_eq!(
+            during_death,
+            PlayerDamageOutcome {
+                health: 0,
+                died: false
+            }
+        );
     }
 
     #[test]
     fn zero_damage_is_not_a_death_event() {
         let nothing = apply_player_damage(0, false, 0);
-        assert_eq!(nothing, PlayerDamageOutcome { health: 0, died: false });
+        assert_eq!(
+            nothing,
+            PlayerDamageOutcome {
+                health: 0,
+                died: false
+            }
+        );
     }
 }
