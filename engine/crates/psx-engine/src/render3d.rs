@@ -2723,7 +2723,11 @@ fn scaled_pose_matrix(pose: JointPose, local_to_world: LocalToWorldScale) -> Mat
         while col < 3 {
             // i16 x u16 always fits in i32, so the generic Q12 saturating
             // multiply's overflow checks are unnecessary for pose matrices.
-            out[row][col] = clamp_i16(((pose.matrix[col][row] as i32) * scale) >> 12);
+            // Round to nearest: an arithmetic shift truncates toward -inf,
+            // and at small composed scales (a 70/4096 model under a Q8
+            // visual scale composes to ~98/4096) that bias reaches ~1% of
+            // every vector, which lifted characters visibly off the floor.
+            out[row][col] = clamp_i16(((pose.matrix[col][row] as i32) * scale + (1 << 11)) >> 12);
             col += 1;
         }
         row += 1;
