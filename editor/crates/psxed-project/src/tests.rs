@@ -1639,10 +1639,21 @@ fn embedded_default_project_ron_deserializes() {
     let ResourceData::AnimationSet(animation_set) = &animation_set_resource.data else {
         panic!("starter animation set has the wrong resource kind");
     };
-    // The artist moveset's native clip stems, bound role by role.
+    // Walk is the approved generated gait (MoMask candidate C, cooked by
+    // import-locomotion); the rest are the artist moveset's native takes.
+    let walk_clip = animation_set
+        .action_clip(CharacterAnimationAction::Walk)
+        .expect("starter animation set is missing Walk");
+    let walk = project
+        .resource(walk_clip)
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) => Some(clip),
+            _ => None,
+        })
+        .expect("starter Walk clip resource missing");
+    assert_eq!(walk.psxanim_path, "assets/animations/gen/walk_fwd.psxanim");
     for (action, stem) in [
         (CharacterAnimationAction::Idle, "aletha_idle"),
-        (CharacterAnimationAction::Walk, "aletha_walk_fwd"),
         (CharacterAnimationAction::Run, "aletha_run_fwd"),
         (CharacterAnimationAction::Roll, "aletha_dash_fwd"),
         (

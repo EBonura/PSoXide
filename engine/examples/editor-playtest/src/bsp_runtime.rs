@@ -40,7 +40,7 @@ pub(super) const BSP_PLAYER_RADIUS: i32 = 1;
 pub(super) const BSP_PLAYER_HEIGHT: i32 = 4;
 /// Preserve the first-playable fixture's authored walking cadence when it has
 /// no Character resource. Character-backed projects keep their authored speed.
-pub(super) const BSP_FALLBACK_PLAYER_SPEED: i32 = 4;
+pub(super) const BSP_FALLBACK_PLAYER_SPEED: i32 = 4 << 8;
 /// Compact third-person rig for the characterless BSP debug controller. The
 /// ordinary authored camera remains authoritative once a Character is bound.
 pub(super) const BSP_FALLBACK_CAMERA_DISTANCE: i32 = 192;

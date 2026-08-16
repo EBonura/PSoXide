@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--idle-take", default="aletha_idle")
     parser.add_argument("--output", required=True, type=Path, help="Preview MP4 path")
     parser.add_argument("--fbx-output", type=Path, help="Baked study FBX (armature only)")
+    parser.add_argument(
+        "--phase-glb-dir", type=Path,
+        help="Export windup / cruise / winddown as <stem>_windup.glb, <stem>.glb, <stem>_winddown.glb "
+             "(rig + mesh, one action each) for import-locomotion",
+    )
+    parser.add_argument("--phase-stem", default="walk_fwd")
     parser.add_argument("--metadata", type=Path, help="Phase-range JSON")
     parser.add_argument("--tempo", type=float, default=1.35, help="Gait speed-up baked in")
     parser.add_argument("--cruise-cycles", type=int, default=2)
@@ -164,6 +170,60 @@ def smoothstep(v: float) -> float:
     return v * v * (3.0 - 2.0 * v)
 
 
+def export_phase_glbs(
+    rig: bpy.types.Object,
+    assembled: bpy.types.Action,
+    splits: dict[str, list[int]],
+    out_dir: Path,
+    stem: str,
+) -> None:
+    """Slice the assembled clip into per-phase actions (rebased to frame 1)
+    and export each as its own GLB: the locomotion importer cooks one take per
+    file. The cruise is exactly the loop cycle."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    scene = bpy.context.scene
+    phases = {
+        f"{stem}_windup": splits["windup"],
+        stem: splits["cruise_loop"],
+        f"{stem}_winddown": splits["winddown"],
+    }
+    for name, (first, last) in phases.items():
+        poses = [sample_pose(rig, assembled, frame) for frame in range(first, last + 1)]
+        action = bpy.data.actions.new(name)
+        rig.animation_data.action = action
+        for index, pose in enumerate(poses):
+            for bone in rig.pose.bones:
+                bone.location, bone.rotation_quaternion, bone.scale = pose[bone.name]
+                bone.keyframe_insert("location", frame=index + 1, group=bone.name)
+                bone.keyframe_insert("rotation_quaternion", frame=index + 1, group=bone.name)
+                bone.keyframe_insert("scale", frame=index + 1, group=bone.name)
+        for fcurve in action.fcurves:
+            for key in fcurve.keyframe_points:
+                key.interpolation = "LINEAR"
+        scene.frame_start, scene.frame_end = 1, len(poses)
+        bpy.ops.object.select_all(action="DESELECT")
+        rig.select_set(True)
+        for child in rig.children_recursive:
+            child.select_set(True)
+        bpy.context.view_layer.objects.active = rig
+        path = out_dir / f"{name}.glb"
+        result = bpy.ops.export_scene.gltf(
+            filepath=str(path),
+            export_format="GLB",
+            use_selection=True,
+            export_animations=True,
+            export_animation_mode="ACTIVE_ACTIONS",
+            export_frame_range=True,
+            export_force_sampling=True,
+            export_anim_single_armature=True,
+            export_reset_pose_bones=True,
+            export_optimize_animation_size=False,
+        )
+        if "FINISHED" not in result:
+            raise RuntimeError(f"GLB export failed: {path}")
+        print(f"[study] phase {name}: frames 1..{len(poses)} -> {path}")
+
+
 def main() -> None:
     args = parse_args()
     scene = bpy.context.scene
@@ -224,6 +284,10 @@ def main() -> None:
         "idle_in": [1, idle_lead],
         "windup": [idle_lead + 1, idle_lead + transition],
         "cruise": [idle_lead + transition + 1, idle_lead + transition + cruise],
+        "cruise_loop": [
+            idle_lead + transition + 1,
+            idle_lead + transition + int(round(cycle / args.tempo)),
+        ],
         "winddown": [idle_lead + transition + cruise + 1, idle_lead + transition + cruise + transition],
         "idle_out": [idle_lead + transition + cruise + transition + 1, total],
     }
@@ -363,6 +427,9 @@ def main() -> None:
             bake_anim_step=1.0,
             bake_anim_simplify_factor=0.0,
         )
+
+    if args.phase_glb_dir:
+        export_phase_glbs(rig, output_action, splits, args.phase_glb_dir.expanduser(), args.phase_stem)
 
     if args.metadata:
         meta = args.metadata.expanduser()

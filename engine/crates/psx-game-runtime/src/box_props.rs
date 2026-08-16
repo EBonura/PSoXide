@@ -803,7 +803,8 @@ mod collision_tests {
                 | box_prop_flags::BREAK_ON_WALK
                 | box_prop_flags::BREAK_ON_ATTACK,
         )];
-        let config = CharacterMotorConfig::character_with_body(2, 8, 12, 12, Angle::from_q12(1));
+        let config =
+            CharacterMotorConfig::character_with_body(2, 8, 12 << 8, 12 << 8, Angle::from_q12(1));
         let input = CharacterMotorInput {
             walk: 1,
             ..CharacterMotorInput::default()
@@ -1185,7 +1186,8 @@ fn box_prop_movement_probe_target(
     } else {
         config.walk_speed
     };
-    let speed = base_speed.saturating_mul(delta_vblanks.clamp(1, 4) as i32);
+    // Motor speeds are Q8 units per tick; the probe wants whole units.
+    let speed = base_speed.saturating_mul(delta_vblanks.clamp(1, 4) as i32) >> 8;
     let dx = input.move_x.mul_i32(speed);
     let dz = input.move_z.mul_i32(speed);
     if dx != 0 || dz != 0 {
