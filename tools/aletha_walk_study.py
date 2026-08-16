@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path, help="Preview MP4 path")
     parser.add_argument("--fbx-output", type=Path, help="Baked study FBX (armature only)")
     parser.add_argument("--metadata", type=Path, help="Phase-range JSON")
-    parser.add_argument("--tempo", type=float, default=3.0, help="Gait speed-up baked in")
+    parser.add_argument("--tempo", type=float, default=1.35, help="Gait speed-up baked in")
     parser.add_argument("--cruise-cycles", type=int, default=2)
     parser.add_argument("--idle-seconds", type=float, default=1.2)
     parser.add_argument("--transition-seconds", type=float, default=0.5)
@@ -184,10 +184,6 @@ def main() -> None:
         f"contact={contact} root_drift={drift:.4f}"
     )
 
-    idle_join = 1.0  # calm reference frame of the idle take
-    idle_pose = sample_pose(rig, idle, idle_join)
-    hips_rest_xy = idle_pose[hips][0].copy()
-
     idle_lead = int(args.idle_seconds * PREVIEW_FPS)
     transition = int(args.transition_seconds * PREVIEW_FPS)
     cruise = int(round(args.cruise_cycles * cycle / args.tempo))
@@ -209,54 +205,44 @@ def main() -> None:
         c0 = w0 + transition
         d0 = c0 + cruise
         end = d0 + transition
-        if output_index < w0:
+        if output_index < w0 or output_index >= end:
             return 0.0, 0.0
         if output_index < c0:
-            progress = (output_index - w0) / max(1, transition - 1)
+            progress = (output_index - w0 + 1) / (transition + 1)
             envelope = smoothstep(progress)
-            phase = contact + half * envelope
-            return phase, envelope
+            return contact + half * envelope, envelope
         if output_index < d0:
             i = output_index - c0
-            phase = contact + half + (i + 1) * args.tempo
-            return phase, 1.0
-        if output_index < end:
-            progress = (output_index - d0 + 1) / max(1, transition)
-            envelope = 1.0 - smoothstep(progress)
-            phase = contact + half + cruise * args.tempo + half * smoothstep(progress)
-            return phase, envelope
-        return 0.0, 0.0
+            return contact + half + (i + 1) * args.tempo, 1.0
+        progress = (output_index - d0 + 1) / (transition + 1)
+        envelope = 1.0 - smoothstep(progress)
+        return contact + half + cruise * args.tempo + half * smoothstep(progress), envelope
 
+    # The idle take plays continuously as the base layer; the gait is layered
+    # on top with the envelope, so both joins land on the live idle pose.
     frames_keyed = 0
     for output_index in range(total):
-        in_idle = output_index < idle_lead or output_index >= total - idle_lead
-        if in_idle:
-            # Live idle, wrapped so lead-out continues where lead-in left off.
-            offset = (
-                output_index
-                if output_index < idle_lead
-                else output_index - (total - idle_lead) + idle_lead
-            )
-            frame = idle_join + (offset % idle_frames)
-            pose = sample_pose(rig, idle, frame)
-            envelope = 0.0
-        else:
-            phase, envelope = gait_phase_at(output_index)
-            pose = sample_pose(rig, gait, gait.frame_range[0] + (phase % gait_frames))
+        idle_frame = idle.frame_range[0] + (output_index % idle_frames)
+        base = sample_pose(rig, idle, idle_frame)
+        phase, envelope = gait_phase_at(output_index)
+        layer = (
+            sample_pose(rig, gait, gait.frame_range[0] + (phase % gait_frames))
+            if envelope > 0.0
+            else base
+        )
 
         rig.animation_data.action = output_action
         out_frame = output_index + 1
         for bone in rig.pose.bones:
-            loc, rot, scale = pose[bone.name]
-            idle_loc, idle_rot, idle_scale = idle_pose[bone.name]
-            if envelope > 0.0:
-                loc = idle_loc.lerp(loc, envelope)
-                rot = idle_rot.slerp(rot, envelope)
-                scale = idle_scale.lerp(scale, envelope)
+            idle_loc, idle_rot, idle_scale = base[bone.name]
+            loc, rot, scale = layer[bone.name]
+            loc = idle_loc.lerp(loc, envelope)
+            rot = idle_rot.slerp(rot, envelope)
+            scale = idle_scale.lerp(scale, envelope)
             if bone.name == hips:
                 # The character motor owns horizontal travel.
-                loc.x = hips_rest_xy.x
-                loc.y = hips_rest_xy.y
+                loc.x = idle_loc.x
+                loc.y = idle_loc.y
             bone.location = loc
             bone.rotation_quaternion = rot
             bone.scale = scale
