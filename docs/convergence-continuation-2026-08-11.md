@@ -15,7 +15,7 @@ worker's confident diagnosis.
 
 | Lane | Worktree | Branch | Head | State |
 |---|---|---|---|---|
-| PSoXide integration | `PSoXide-convergence` | `codex/quake-psoxide-convergence` | `41875824` | one dirty file: the owner's camera edit in `editor/projects/brush-first-playable/project.ron`. PRESERVE. |
+| PSoXide integration | `PSoXide-convergence` | `codex/quake-psoxide-convergence` | `41875824` | one dirty file: the owner's camera edit in `editor/archive/fixtures/brush-first-playable/project.ron`. PRESERVE. |
 | Quake integration | `quake-psx-convergence` | `codex/quake-convergence` | `7a4b0a4` | clean; FULL 14-gate matrix green at this head (see below); a worker is extending it on `codex/quake-q6-routes` |
 | Demo disc | `psx-demo-disc-quake-shareware` | `codex/quake-shareware-demo-disc` | `dc9e41a` | clean; Quake now DEFAULT; still on old pins |
 | Quake source pin | `PSoXide-rc1-pin` | detached | `f9f83c35` | clean; every Quake command needs `--psoxide` pointing here |

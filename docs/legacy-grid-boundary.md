@@ -207,7 +207,7 @@ are in tests: `editor/crates/psxed-ui/src/tests/project_workspace.rs:1127,1183`)
 |---|---|---|---|
 | P1 | `NodeKind::Section`/`Water`/`Portal` node kinds and `WorldGrid` payload inside `scenes` (`scene_types.rs`, `world_types.rs:757`) | `Scene.brushes` | compatibility-only (load forever within the window; never write new ones after freeze) |
 | P2 | Grid-only World-node settings (A11) and `runtime_*` grid render knobs (`document_types.rs:339-350`: `runtime_depth_sort_mode`, `runtime_texture_split_mode`, `runtime_room_draw_order_mode`, `runtime_texture_split_max_edge`, all documented against cooked rooms) | `bsp_cook_mode` (`document_types.rs:335-338`) | compatibility-only |
-| P3 | `ProjectDocument::starter()` deserializes the embedded GRID default project (`document_types.rs:412-424`; `DEFAULT_PROJECT_RON` = `editor/projects/default/project.ron`, `lib.rs:64`); used by the starter character catalogue sync (`editor/crates/psxed-ui/src/starter_catalogue.rs:112`) and as the fixture for most cook tests (section 6) | New Project uses `new_project_template_dir()` = `editor/projects/brush-first-playable` (`lib.rs:315-323`) | compatibility-only; `default_project_dir` doc comment already states the intended status: "retained as the compatibility/fallback project while existing grid content remains supported" (`lib.rs:308-313`). If grid retires fully, the starter-catalogue resource source must move off the grid project |
+| P3 | `ProjectDocument::starter()` deserializes the embedded GRID default project (`document_types.rs:412-424`; `DEFAULT_PROJECT_RON` = `editor/projects/default/project.ron`, `lib.rs:64`); used by the starter character catalogue sync (`editor/crates/psxed-ui/src/starter_catalogue.rs:112`) and as the fixture for most cook tests (section 6) | New Project uses `new_project_template_dir()` = `editor/archive/fixtures/brush-first-playable` (`lib.rs:315-323`) | compatibility-only; `default_project_dir` doc comment already states the intended status: "retained as the compatibility/fallback project while existing grid content remains supported" (`lib.rs:308-313`). If grid retires fully, the starter-catalogue resource source must move off the grid project |
 
 ### 2.4 Runtime: static world render (guest)
 
@@ -338,7 +338,7 @@ serde alias of `Section`; `brushes:` presence checked separately):
   attack capsules, hurtboxes. The flagship combat authoring evidence
   therefore currently REQUIRES the grid runtime; the handoff's Level-B "BSP
   combat fixture" (section 14 item 2) does not exist yet.
-- `editor/projects/brush-first-playable/project.ron`: brushes present. BSP.
+- `editor/archive/fixtures/brush-first-playable/project.ron`: brushes present. BSP.
   Tracked with its replay tape `walk-through-door.pxitape.csv`.
 - Untracked but load-bearing for owner workflows: `Makefile` targets
   `profile-demo3*`/`profile-demo7-camera-sweep` cook `projects/demo_03` /
@@ -439,7 +439,7 @@ Nothing tracked and automated. The grid guest runtime is exercised by:
 and by the owner's untracked tapes/projects (Makefile demo targets,
 `~/Library/Application Support/com.psoxide.PSoXide/editor/playtest_tapes/`).
 The only tracked end-to-end replay fixture in the repo is the BSP one
-(`editor/projects/brush-first-playable/walk-through-door.pxitape.csv`). The
+(`editor/archive/fixtures/brush-first-playable/walk-through-door.pxitape.csv`). The
 committed placeholder manifest is grid (`generated/level_manifest.rs:39`), so
 plain `make build-editor-playtest` still builds a grid guest, but no CI-style
 gate replays it.

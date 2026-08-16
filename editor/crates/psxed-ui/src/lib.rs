@@ -3438,10 +3438,18 @@ impl EditorWorkspace {
         if self.project.name == self.saved_project_name {
             return Ok(());
         }
-        let parent = self
-            .project_dir
-            .parent()
-            .ok_or_else(|| format!("{} has no parent directory", self.project_dir.display()))?;
+        // A protected bundled project (the default arena, the New Project
+        // template) is copied into the user's projects root; those sources
+        // may live outside it. A user project renames in place beside itself.
+        let protected = bundled_project_is_protected(&self.project_dir);
+        let parent = if protected {
+            psxed_project::projects_dir()
+        } else {
+            self.project_dir
+                .parent()
+                .ok_or_else(|| format!("{} has no parent directory", self.project_dir.display()))?
+                .to_path_buf()
+        };
         let target = parent.join(psxed_project::project_file_stem(&self.project.name));
         if paths_equivalent(&self.project_dir, &target) {
             return Ok(());
@@ -3449,7 +3457,7 @@ impl EditorWorkspace {
         if target.exists() {
             return Err(format!("{} already exists", short_path(&target)));
         }
-        if bundled_project_is_protected(&self.project_dir) {
+        if protected {
             copy_dir_recursive(&self.project_dir, &target)
                 .map_err(|error| format!("copy project directory: {error}"))?;
         } else {

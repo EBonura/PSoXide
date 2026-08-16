@@ -117,7 +117,7 @@ The demo-disc side owns:
 
 | Lane | Worktree | Baseline | State |
 |---|---|---:|---|
-| PSoXide integration | `/Users/ebonura/Desktop/repos/PSoXide-convergence` | `04d53bae` | One preserved user change in `editor/projects/brush-first-playable/project.ron` |
+| PSoXide integration | `/Users/ebonura/Desktop/repos/PSoXide-convergence` | `04d53bae` | One preserved user change in `editor/archive/fixtures/brush-first-playable/project.ron` |
 | Quake integration | `/Users/ebonura/Desktop/repos/quake-psx-convergence` | `09ff502` | Clean |
 | Quake E1M1 route | `/Users/ebonura/Desktop/repos/quake-psx-target-graph-start` | committed base `d7e521e` | Dirty, old-base implementation and temporary diagnostics; never merge as-is |
 | Demo disc | `/Users/ebonura/Desktop/repos/psx-demo-disc-quake-shareware` | `ba250ef` | Clean, proven old-pin chain-load |

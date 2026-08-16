@@ -570,7 +570,7 @@ impl ProjectDocument {
     /// verbatim as the fixture behind the grid cook/playtest suites.
     pub fn legacy_grid_starter() -> Self {
         Self::from_ron_str(crate::LEGACY_GRID_STARTER_RON)
-            .expect("editor/projects/legacy-grid-starter/project.ron is malformed")
+            .expect("editor/archive/fixtures/legacy-grid-starter/project.ron is malformed")
     }
 
     /// Which spatial authority this project uses.

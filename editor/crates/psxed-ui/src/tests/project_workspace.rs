@@ -674,7 +674,7 @@ fn opening_bsp_project_preserves_a_custom_camera_exactly() {
 #[test]
 fn opening_tracked_starter_preserves_its_authored_interior_camera() {
     let fixture_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
     let authored = ProjectDocument::load_from_path(fixture_dir.join("project.ron"))
         .unwrap()
         .editor_camera;
@@ -2372,7 +2372,7 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
 #[test]
 fn one_click_play_and_rebuild_recook_the_persisted_bsp_mode() {
     let fixture_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
     let project = ProjectDocument::load_from_path(fixture_dir.join("project.ron")).unwrap();
     let output = test_temp_dir("bsp-mode-replay-output");
     let _ = std::fs::remove_dir_all(&output);
@@ -3374,7 +3374,7 @@ fn write_souls_slice_negative_tape(dir: &Path) {
 #[test]
 fn tracked_souls_slice_opens_clean_in_the_editor_and_cooks_without_errors() {
     let dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/souls-bsp-vertical-slice");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/souls-bsp-vertical-slice");
     let mut workspace = EditorWorkspace::open_directory(&dir).expect("open the tracked slice");
     assert!(
         !workspace.is_dirty(),
@@ -3596,7 +3596,7 @@ fn fresh_project_inspector_switches_logic_to_door_and_interactable_to_checkpoint
 /// mover, both equipment records, and the trigger-to-checkpoint chain.
 /// With PSOXIDE_SOULS_SLICE_PROJECT_OUT set, exports the authored project
 /// (plus the canonical and negative tapes) for the tracked copy at
-/// editor/projects/souls-bsp-vertical-slice.
+/// editor/archive/fixtures/souls-bsp-vertical-slice.
 #[test]
 fn souls_slice_project_is_authored_through_production_commands() {
     let mut workspace =

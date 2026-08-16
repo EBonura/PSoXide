@@ -93,7 +93,8 @@ fn copy_texture(output_dir: &Path, relative: &str) {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("projects")
+        .join("archive")
+        .join("fixtures")
         .join("brush-open-courtyard")
         .join(relative);
     let destination = output_dir.join(relative);

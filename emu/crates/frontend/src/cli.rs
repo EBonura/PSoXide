@@ -3562,7 +3562,7 @@ mod press_script_tests {
     #[test]
     fn editor_frame_selection_is_applied_before_preview_extraction() {
         let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../editor/projects/brush-first-playable");
+            .join("../../../editor/archive/fixtures/brush-first-playable");
         let mut editor = EditorWorkspace::open_directory(project).unwrap();
         editor.show_workspace(psxed_project::EditorWorkspaceView::Room);
         assert_eq!(editor.viewport_3d_camera().radius, 550);

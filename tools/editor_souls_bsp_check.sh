@@ -1,6 +1,6 @@
 #!/bin/sh
 # Souls vertical-slice regression gate for the tracked BSP project at
-# editor/projects/souls-bsp-vertical-slice.
+# editor/archive/fixtures/souls-bsp-vertical-slice.
 #
 # From clean inputs: re-authors the slice through the production editor
 # command test (and fails if the export disagrees with the tracked copy),
@@ -23,7 +23,7 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TMPDIR:-/tmp}/psoxide-souls-bsp-check"
-PROJECT="editor/projects/souls-bsp-vertical-slice"
+PROJECT="editor/archive/fixtures/souls-bsp-vertical-slice"
 GENERATED="engine/examples/editor-playtest/generated"
 CUE="build/examples/mipsel-sony-psx/release/editor-playtest.cue"
 
@@ -174,7 +174,7 @@ rm -rf "$GENERATED"
 # The generated tree also carries the TRACKED placeholder manifest; put it
 # back so a gate run leaves a clean worktree.
 git checkout -- "$GENERATED"
-(cd editor && cargo run -p psxed-project --bin cook-playtest --quiet -- "projects/souls-bsp-vertical-slice/project.ron" >/dev/null)
+(cd editor && cargo run -p psxed-project --bin cook-playtest --quiet -- "archive/fixtures/souls-bsp-vertical-slice/project.ron" >/dev/null)
 
 echo "editor-souls-bsp-check: MIPS guest"
 make build-editor-playtest EDITOR_PLAYTEST_FEATURES="cd-stream-bench emulator-telemetry" >/dev/null

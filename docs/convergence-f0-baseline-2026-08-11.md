@@ -12,7 +12,7 @@ worker trees it creates):
 
 | Lane | Path | Branch | Head | Dirty state |
 |---|---|---|---:|---|
-| PSoXide integration | `/Users/ebonura/Desktop/repos/PSoXide-convergence` | `codex/quake-psoxide-convergence` | `2af919d0` | exactly one user-owned edit: `editor/projects/brush-first-playable/project.ron` (saved orbit camera + final newline; never reset/stage/commit without owner choice) |
+| PSoXide integration | `/Users/ebonura/Desktop/repos/PSoXide-convergence` | `codex/quake-psoxide-convergence` | `2af919d0` | exactly one user-owned edit: `editor/archive/fixtures/brush-first-playable/project.ron` (saved orbit camera + final newline; never reset/stage/commit without owner choice) |
 | Quake integration | `/Users/ebonura/Desktop/repos/quake-psx-convergence` | `codex/quake-convergence` | `09ff502` | clean |
 | Quake E1M1 route donor | `/Users/ebonura/Desktop/repos/quake-psx-target-graph-start` | `codex/quake-target-graph-start` | `d7e521e` | dirty by design: 7 tracked files + `game/src/e1m1_chain_regression.rs` + temporary `examples/` diagnostics. READ-ONLY donor; salvage ports onto a fresh branch (Q1); never merged wholesale |
 | Demo disc | `/Users/ebonura/Desktop/repos/psx-demo-disc-quake-shareware` | `codex/quake-shareware-demo-disc` | `ba250ef` | clean; still pinned to pre-convergence revisions until D1 |
@@ -98,7 +98,7 @@ replays from exact-source frontend, L4 original PlayStation.
 | Claim | Owner package | Source paths | Host test | MIPS gate | Replay gate | Hardware gate |
 |---|---|---|---|---|---|---|
 | Shared BSP traversal/PVS/contents/mover/collision is single-authority | S1 | `engine/crates/psx-bsp`, adapters in `quake-core`/`psx-game-runtime` | `psx-bsp --lib`, quake parity tests | n/a | n/a | n/a |
-| Editor authors a fresh souls-like BSP level end to end | P1 | `editor/crates/*`, `engine/examples/editor-playtest`, `editor/projects/souls-bsp-vertical-slice` | `psxed-project`, `psxed-ui` | `make editor-souls-bsp-check` (builds real MIPS) | same gate, two replays, pinned counters | H1 battery |
+| Editor authors a fresh souls-like BSP level end to end | P1 | `editor/crates/*`, `engine/examples/editor-playtest`, `editor/archive/fixtures/souls-bsp-vertical-slice` | `psxed-project`, `psxed-ui` | `make editor-souls-bsp-check` (builds real MIPS) | same gate, two replays, pinned counters | H1 battery |
 | Editor workflow is production-usable | P2 | `editor/crates/psxed-ui` | real-egui suites | blank-playtest gate | blank-playtest gate | owner native test |
 | BSP projects cannot fall back to grid authority | P3 | `editor/crates/psxed-project`, `engine/crates/psx-game-runtime` | discriminator tests | full matrix | full matrix | n/a |
 | Quake E1M1 authored target route completes | Q1 | `game/src/e1m1_chain_regression.rs`, `crates/quake-core` | mover/targets tests | `e1m1-chain-regress` | same, twice | H1 |

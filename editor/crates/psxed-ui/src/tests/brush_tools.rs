@@ -1015,7 +1015,7 @@ fn bsp_marquee_multi_selects_brushes_in_every_orthographic_view_via_real_egui() 
 #[test]
 fn tracked_bsp_starter_top_view_emits_headless_brush_outline_shapes() {
     let fixture_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/brush-first-playable");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
     let project = ProjectDocument::load_from_path(fixture_dir.join("project.ron"))
         .expect("tracked BSP starter loads");
     let expected_segments = project

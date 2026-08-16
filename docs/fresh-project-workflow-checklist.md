@@ -2,7 +2,7 @@
 
 A short hands-on pass proving a project you create today supports the whole
 souls authoring loop. Its sibling, [souls-slice-acceptance.md](souls-slice-acceptance.md),
-is the same idea for the *tracked* slice at `editor/projects/souls-bsp-vertical-slice`;
+is the same idea for the *tracked* slice at `editor/archive/fixtures/souls-bsp-vertical-slice`;
 this one starts from File > New Project instead, so it also covers the steps
 you only take once per map.
 
@@ -23,7 +23,7 @@ Rust Mantis, both swords and their clips into the project. Do this first;
 without it the Place > Character lane has nothing to place.
 
 *Proven headlessly:* the template copy is byte-identical to the tracked
-`editor/projects/brush-open-courtyard` (`make editor-blank-playtest-check`
+`editor/archive/fixtures/brush-open-courtyard` (`make editor-blank-playtest-check`
 diffs `project.ron` and both `.psxt` files), and the sync lands every model,
 clip and profile as a byte-copy of the verified defaults
 (`starter_character_sync_arms_a_new_project_with_verified_combat_content`).

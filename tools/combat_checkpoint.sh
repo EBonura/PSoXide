@@ -14,7 +14,7 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TMPDIR:-/tmp}/psoxide-combat-checkpoint"
-FIXTURE="editor/projects/brush-combat-fixture"
+FIXTURE="editor/archive/fixtures/brush-combat-fixture"
 GENERATED="engine/examples/editor-playtest/generated"
 CUE="build/examples/mipsel-sony-psx/release/editor-playtest.cue"
 
@@ -77,7 +77,7 @@ rm -rf "$GENERATED"
 # The generated tree also carries the TRACKED placeholder manifest; put it
 # back so a checkpoint run leaves a clean worktree.
 git checkout -- "$GENERATED"
-(cd editor && cargo run -p psxed-project --bin cook-playtest --quiet -- projects/brush-combat-fixture/project.ron >/dev/null)
+(cd editor && cargo run -p psxed-project --bin cook-playtest --quiet -- archive/fixtures/brush-combat-fixture/project.ron >/dev/null)
 
 echo "combat-checkpoint: MIPS guest"
 make build-editor-playtest EDITOR_PLAYTEST_FEATURES="cd-stream-bench emulator-telemetry" >/dev/null
