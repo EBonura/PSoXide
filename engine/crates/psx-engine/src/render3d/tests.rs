@@ -1880,3 +1880,150 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
     assert!(all_in_front);
     assert!(all_inside);
 }
+
+/// GROUNDING PROBE (diagnostic, remove after the float is closed): replicate
+/// the full player vertex chain on the host GTE for the settled pitched-down
+/// frame and diff it against exact f64 math, stage by stage.
+#[test]
+fn grounding_probe_player_lowest_vertex_matches_reference() {
+    extern crate std;
+    let model_bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/editor-playtest/generated/models/model_000_aletha_delivered/mesh.psxmdl"
+    ))
+    .expect("cooked mesh");
+    let clip_bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/editor-playtest/generated/models/model_000_aletha_delivered/clip_14_aletha_idle.psxanim"
+    ))
+    .expect("cooked idle");
+    let model = psx_asset::Model::from_bytes(&model_bytes).expect("model");
+    let clip = psx_asset::Animation::from_bytes(&clip_bytes).expect("clip");
+
+    psx_gte::host::reset();
+    // The settled pitched-down frame: camera basis + positions from telemetry.
+    let projection = WorldProjection::new(160, 120, 320, 4);
+    let camera = WorldCamera::from_basis(
+        projection,
+        WorldVertex::new(128, 170, 182),
+        Q12::from_raw(0),
+        Q12::from_raw(4096),
+        Q12::from_raw(-3702),
+        Q12::from_raw(1769),
+    );
+    // origin = player (128,4,128) + lift apply(1754) with composed q12 98.
+    let composed = LocalToWorldScale::from_q12(98);
+    let lift = composed.apply(1754);
+    let origin = WorldVertex::new(128, 4 + lift, 128);
+    let instance_rotation = Mat3I16::IDENTITY;
+
+    let camera_view = camera_gte_view_matrix(camera);
+    let view_instance = mat3_mul_q12(&camera_view, &instance_rotation);
+    let view_origin_translation =
+        compute_view_origin_translation(camera_view, origin, camera.position);
+    load_world_projection_gte(camera.projection);
+
+    // Find the model's lowest vertex and its part joint at idle frame 0.
+    let first = model.vertex(0).unwrap();
+    let mut lowest = (i32::MAX, 0u16, first);
+    for part_index in 0..model.part_count() {
+        let part = model.part(part_index).unwrap();
+        let joint = part.joint_index() as u16;
+        let pose = clip.pose(0, joint).unwrap();
+        for v in part.first_vertex()..part.first_vertex() + part.vertex_count() {
+            let vertex = model.vertex(v).unwrap();
+            // exact world y of this vertex
+            let m = pose.matrix;
+            let p = [
+                vertex.position.x as f64,
+                vertex.position.y as f64,
+                vertex.position.z as f64,
+            ];
+            let ry = (m[0][1] as f64 * p[0] + m[1][1] as f64 * p[1] + m[2][1] as f64 * p[2])
+                / 4096.0
+                + pose.translation.y as f64;
+            let world_y = ry * 98.0 / 4096.0;
+            if (world_y as i32) < lowest.0 {
+                lowest = (world_y as i32, joint, vertex);
+            }
+        }
+    }
+    let (_, joint, vertex) = lowest;
+    let pose = clip.pose(0, joint).unwrap();
+
+    // Guest chain (the shipping non-packed path).
+    let (rotation, translation) = textured_model_part_gte_transform_with_view_gte_translation(
+        view_instance,
+        view_origin_translation,
+        pose,
+        composed,
+    );
+    scene::load_rotation(&rotation);
+    scene::load_translation(translation);
+    let gte = scene::project_vertex_scheduled(vertex.position);
+
+    // Exact f64 reference of the same chain.
+    let m = pose.matrix;
+    let p = [
+        vertex.position.x as f64,
+        vertex.position.y as f64,
+        vertex.position.z as f64,
+    ];
+    let local = [
+        (m[0][0] as f64 * p[0] + m[1][0] as f64 * p[1] + m[2][0] as f64 * p[2]) / 4096.0
+            + pose.translation.x as f64,
+        (m[0][1] as f64 * p[0] + m[1][1] as f64 * p[1] + m[2][1] as f64 * p[2]) / 4096.0
+            + pose.translation.y as f64,
+        (m[0][2] as f64 * p[0] + m[1][2] as f64 * p[1] + m[2][2] as f64 * p[2]) / 4096.0
+            + pose.translation.z as f64,
+    ];
+    let scale = 98.0 / 4096.0;
+    let world = [
+        origin.x as f64 + local[0] * scale,
+        origin.y as f64 + local[1] * scale,
+        origin.z as f64 + local[2] * scale,
+    ];
+    let cam = [
+        camera.position.x as f64,
+        camera.position.y as f64,
+        camera.position.z as f64,
+    ];
+    let d = [world[0] - cam[0], world[1] - cam[1], world[2] - cam[2]];
+    let (sy, cy, sp, cp) = (0.0, 1.0, -3702.0 / 4096.0, 1769.0 / 4096.0);
+    let x1 = d[0] * cy - d[2] * sy;
+    let z1 = -d[0] * sy - d[2] * cy;
+    let y2 = d[1] * cp - z1 * sp;
+    let z2 = d[1] * sp + z1 * cp;
+    let ref_sx = 160.0 + x1 * 320.0 / z2;
+    let ref_sy = 120.0 - y2 * 320.0 / z2;
+
+    // Floor point under her via the same reference math.
+    let fd = [0.0, 4.0 - cam[1], 128.0 - cam[2]];
+    let fz1 = -fd[2] * cy;
+    let fy2 = fd[1] * cp - fz1 * sp;
+    let fz2 = fd[1] * sp + fz1 * cp;
+    let floor_sy = 120.0 - fy2 * 320.0 / fz2;
+
+    // Floor point at the VERTEX's own (x,z): the grounded reference for it.
+    let vfd = [world[0] - cam[0], 4.0 - cam[1], world[2] - cam[2]];
+    let vx1 = vfd[0] * cy - vfd[2] * sy;
+    let vz1 = -vfd[0] * sy - vfd[2] * cy;
+    let vy2 = vfd[1] * cp - vz1 * sp;
+    let vz2 = vfd[1] * sp + vz1 * cp;
+    let vertex_floor_sy = 120.0 - vy2 * 320.0 / vz2;
+    std::eprintln!(
+        "PROBE world=({:.2},{:.2},{:.2}) gte=({},{}) ref=({:.2},{:.2}) own_floor_sy={:.2} centre_floor_sy={:.2}",
+        world[0], world[1], world[2], gte.sx, gte.sy, ref_sx, ref_sy, vertex_floor_sy, floor_sy
+    );
+    // The regression this probe protects: the GTE chain must track the exact
+    // projection within the PS1's own quantization (2px here), i.e. no hidden
+    // vertical offset inside the joint/vertex pipeline.
+    assert!(
+        (f64::from(gte.sy) - ref_sy).abs() <= 2.0,
+        "GTE sy drifted from the reference"
+    );
+    assert!(
+        (f64::from(gte.sx) - ref_sx).abs() <= 3.0,
+        "GTE sx drifted from the reference"
+    );
+}
