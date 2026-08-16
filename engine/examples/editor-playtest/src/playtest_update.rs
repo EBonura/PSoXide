@@ -795,6 +795,9 @@ pub(crate) enum LocoPhase {
     Idle = 0,
     Windup,
     Cruise,
+    /// Stick released while cruising: keep walking at full speed until the
+    /// stride reaches a phase a winddown clip starts from, then stop.
+    StopPending,
     Winddown,
 }
 
@@ -855,10 +858,14 @@ impl Playtest {
                     input.move_z = input.move_z.mul_q12(ramp);
                 }
             }
+            LocoPhase::StopPending if !stick_active => {
+                input.move_x = self.loco_glide.0;
+                input.move_z = self.loco_glide.1;
+                input.walk = 0;
+                input.sprint = false;
+            }
             LocoPhase::Winddown if !stick_active => {
-                if let Some(duration) =
-                    self.walk_transition_ticks(PlayerAnim::WalkWinddown, video_hz)
-                {
+                if let Some(duration) = self.walk_transition_ticks(self.loco_stop_anim, video_hz) {
                     let fade = Q12::from_raw(Q12::SCALE - smoothstep_q12(elapsed, duration).raw());
                     input.move_x = self.loco_glide.0.mul_q12(fade);
                     input.move_z = self.loco_glide.1.mul_q12(fade);
@@ -889,6 +896,7 @@ impl Playtest {
         // keep the phase and show what the motor says, as before.
         let walking = motor_anim == PlayerAnim::Walk;
         let released = !stick_active;
+        let other = !(walking || motor_anim == PlayerAnim::Idle);
         match self.loco {
             LocoPhase::Idle => {
                 if walking {
@@ -906,10 +914,8 @@ impl Playtest {
             }
             LocoPhase::Windup => {
                 if released && winddown.is_some() {
-                    self.loco = LocoPhase::Winddown;
-                    self.loco_start_tick = now;
-                    PlayerAnim::WalkWinddown
-                } else if released || !(walking || motor_anim == PlayerAnim::Idle) {
+                    self.begin_winddown(PlayerAnim::WalkWinddown, now)
+                } else if released || other {
                     self.loco = LocoPhase::Idle;
                     motor_anim
                 } else if windup.is_some_and(|d| elapsed >= d) {
@@ -923,9 +929,9 @@ impl Playtest {
                 if walking {
                     PlayerAnim::Walk
                 } else if released && winddown.is_some() {
-                    self.loco = LocoPhase::Winddown;
+                    self.loco = LocoPhase::StopPending;
                     self.loco_start_tick = now;
-                    PlayerAnim::WalkWinddown
+                    self.stop_if_in_phase(now, video_hz)
                 } else if motor_anim == PlayerAnim::Idle && !released {
                     // blocked while holding the stick
                     PlayerAnim::Idle
@@ -934,21 +940,65 @@ impl Playtest {
                     motor_anim
                 }
             }
+            LocoPhase::StopPending => {
+                if stick_active && walking {
+                    self.loco = LocoPhase::Cruise;
+                    PlayerAnim::Walk
+                } else if other {
+                    self.loco = LocoPhase::Idle;
+                    motor_anim
+                } else {
+                    self.stop_if_in_phase(now, video_hz)
+                }
+            }
             LocoPhase::Winddown => {
                 if stick_active && walking {
                     // Stick back before the stop finished: straight into cruise.
                     self.loco = LocoPhase::Cruise;
                     PlayerAnim::Walk
-                } else if !(walking || motor_anim == PlayerAnim::Idle) {
+                } else if other {
                     self.loco = LocoPhase::Idle;
                     motor_anim
-                } else if winddown.is_none_or(|d| elapsed >= d) {
+                } else if self
+                    .walk_transition_ticks(self.loco_stop_anim, video_hz)
+                    .is_none_or(|d| elapsed >= d)
+                {
                     self.loco = LocoPhase::Idle;
                     PlayerAnim::Idle
                 } else {
-                    PlayerAnim::WalkWinddown
+                    self.loco_stop_anim
                 }
             }
+        }
+    }
+
+    fn begin_winddown(&mut self, anim: PlayerAnim, now: SimTick) -> PlayerAnim {
+        self.loco = LocoPhase::Winddown;
+        self.loco_start_tick = now;
+        self.loco_stop_anim = anim;
+        anim
+    }
+
+    /// While a stop is pending: keep the walk cycle until it reaches the
+    /// stride start (winddown clip) or, when the mirrored clip is bound, the
+    /// half stride (its mirror). Falls back to an immediate stop when the walk
+    /// clip's cycle length cannot be resolved.
+    fn stop_if_in_phase(&mut self, now: SimTick, video_hz: VideoHz) -> PlayerAnim {
+        let Some(cycle) = self.walk_transition_ticks(PlayerAnim::Walk, video_hz) else {
+            return self.begin_winddown(PlayerAnim::WalkWinddown, now);
+        };
+        let alt_bound = self.character.is_some_and(|c| {
+            c.action_clip(PlayerAnim::WalkWinddownAlt.action())
+                .is_some()
+        });
+        // Ticks since the Walk clip started (its frame 0 is the stride start).
+        let position = now.as_u32().saturating_sub(self.anim_start_tick.as_u32()) % cycle;
+        if position <= 1 || position + 1 >= cycle {
+            self.begin_winddown(PlayerAnim::WalkWinddown, now)
+        } else if alt_bound && position.abs_diff(cycle / 2) <= 1 {
+            self.begin_winddown(PlayerAnim::WalkWinddownAlt, now)
+        } else {
+            PlayerAnim::Walk
         }
     }
 }
