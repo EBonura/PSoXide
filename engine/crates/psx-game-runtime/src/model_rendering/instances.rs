@@ -449,13 +449,13 @@ pub(super) fn instance_actor_pose_from_components(
     } else {
         euler_q12_rotation([inst.pitch, combined_yaw.as_q12() as i16, inst.roll])
     };
-    // Authored instance positions are floor anchors; cooked
-    // model vertices are centred around their bounds.
+    // Authored instance positions are floor anchors; the model's origin
+    // sits its bind-pose floor lift above them.
     let origin = visual_model_origin(
         x,
         y,
         z,
-        runtime_model.world_height,
+        runtime_model.floor_lift,
         inst.visual_offset,
         inst.visual_scale_q8,
         &rotation,

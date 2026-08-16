@@ -148,6 +148,9 @@ pub struct RuntimeModelAsset {
     pub world_height: u16,
     pub collision_radius: u16,
     pub local_to_world: LocalToWorldScale,
+    /// Origin-to-feet distance of the bind pose (world units, before the
+    /// instance visual scale): the floor lift. See `Model::bind_pose_floor_lift`.
+    pub floor_lift: i32,
 }
 
 /// Resolved player model plus its render-independent pose authority.
@@ -241,6 +244,7 @@ impl RuntimeModelAsset {
             world_height: record.world_height,
             collision_radius: record.collision_radius,
             local_to_world: LocalToWorldScale::from_q12(model.local_to_world_q12()),
+            floor_lift: model.bind_pose_floor_lift(),
         })
     }
 
@@ -869,7 +873,7 @@ pub fn resolve_player_actor_pose<
         x,
         y,
         z,
-        model.world_height,
+        model.floor_lift,
         character.visual_offset,
         character.visual_scale_q8,
         &rotation,
@@ -1532,11 +1536,11 @@ pub fn player_actor_depth_for_room<const MAX_RUNTIME_MODELS: usize>(
 ) -> Option<i32> {
     let character = character?;
     let runtime_model = models.get(character.model.to_usize()).copied().flatten()?;
-    let origin = floor_anchored_model_origin(
+    // Depth only: the unscaled lift is close enough for room ordering.
+    let origin = WorldVertex::new(
         player.x.saturating_sub(active.offset_x),
-        player.y,
+        player.y.saturating_add(runtime_model.floor_lift),
         player.z.saturating_sub(active.offset_z),
-        runtime_model.world_height,
     );
     Some(camera.view_vertex(origin).z)
 }
@@ -1625,18 +1629,17 @@ fn visual_model_origin(
     x: i32,
     y: i32,
     z: i32,
-    world_height: u16,
+    floor_lift: i32,
     visual_offset: [i16; 3],
     visual_scale_q8: u16,
     rotation: &Mat3I16,
 ) -> WorldVertex {
-    // The mesh scales about its origin (mid-height), so the floor lift must
-    // scale too or a 1.4x character sinks 0.4 x half-height into the floor.
-    let scaled_height = ((world_height as u32 * visual_scale_q8.max(1) as u32
-        + (MODEL_VISUAL_SCALE_ONE_Q8 / 2) as u32)
-        / MODEL_VISUAL_SCALE_ONE_Q8 as u32)
-        .min(u16::MAX as u32) as u16;
-    let origin = floor_anchored_model_origin(x, y, z, scaled_height);
+    // The mesh scales about its origin, so the lift from the floor to the
+    // origin (the bind pose's origin-to-feet distance) scales with it.
+    let lift = ((floor_lift.max(0) as i64 * visual_scale_q8.max(1) as i64
+        + (MODEL_VISUAL_SCALE_ONE_Q8 / 2) as i64)
+        / MODEL_VISUAL_SCALE_ONE_Q8 as i64) as i32;
+    let origin = WorldVertex::new(x, y.saturating_add(lift), z);
     let offset = rotate_offset_q12(
         rotation,
         [
@@ -1706,7 +1709,7 @@ pub fn player_joint_world_transform(
         x,
         y,
         z,
-        runtime_model.world_height,
+        runtime_model.floor_lift,
         character.visual_offset,
         character.visual_scale_q8,
         &model_rotation,
@@ -1825,18 +1828,6 @@ fn model_pose_translated_origin(
         origin.y.saturating_add(offset[1]),
         origin.z.saturating_add(offset[2]),
     )
-}
-
-fn floor_anchored_model_origin(x: i32, y: i32, z: i32, world_height: u16) -> WorldVertex {
-    WorldVertex::new(
-        x,
-        y.saturating_add(model_origin_floor_lift(world_height)),
-        z,
-    )
-}
-
-fn model_origin_floor_lift(world_height: u16) -> i32 {
-    (world_height as i32) >> 1
 }
 
 const MODEL_BOUNDS_SCREEN_MARGIN: i32 = 192;
