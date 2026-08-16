@@ -237,6 +237,20 @@ fn scale_controller_settings(settings: &mut crate::CharacterControllerSettings) 
     settings.run_speed = div_i32_min1(settings.run_speed);
     settings.roll_speed = div_i32_min1(settings.roll_speed);
     settings.backstep_speed = div_i32_min1(settings.backstep_speed);
+    // Placed enemies may override the Character's behavior on the node;
+    // the embedded block carries the same length-typed fields.
+    if let Some(behavior) = &mut settings.enemy {
+        scale_enemy_behavior(behavior);
+    }
+}
+
+fn scale_enemy_behavior(behavior: &mut crate::EnemyBehaviorSettings) {
+    behavior.aggro_radius = div_u16_min1(behavior.aggro_radius);
+    behavior.preferred_distance = div_u16_min1(behavior.preferred_distance);
+    behavior.spacing_tolerance = div_u16_min1(behavior.spacing_tolerance);
+    for axis in behavior.patrol_offset.iter_mut() {
+        *axis = div_i32(*axis);
+    }
 }
 
 fn scale_scene(scene: &mut Scene) {
@@ -262,12 +276,7 @@ fn scale_resource(data: &mut ResourceData) {
             character.camera_target_height = div_i32(character.camera_target_height);
             character.camera_min_floor_clearance = div_i32(character.camera_min_floor_clearance);
             if let Some(behavior) = &mut character.enemy_behavior {
-                behavior.aggro_radius = div_u16_min1(behavior.aggro_radius);
-                behavior.preferred_distance = div_u16_min1(behavior.preferred_distance);
-                behavior.spacing_tolerance = div_u16_min1(behavior.spacing_tolerance);
-                for axis in behavior.patrol_offset.iter_mut() {
-                    *axis = div_i32(*axis);
-                }
+                scale_enemy_behavior(behavior);
             }
             // Joint-local endpoints ride on the (÷16) model-local space;
             // the radius is engine units. Both divide.
