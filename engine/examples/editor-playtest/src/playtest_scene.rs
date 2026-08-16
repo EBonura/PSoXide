@@ -849,6 +849,19 @@ impl Scene for Playtest {
             // Player draws through the same compact model path as
             // placed model instances.
             if let (Some(character), Some(player_pose)) = (self.character, self.player_actor_pose) {
+                {
+                    // Diagnostic: the model's rendered forward (local +Z through the
+                    // rotation the draw uses), to compare with the motor's facing.
+                    let m = player_pose.pose().rotation().m;
+                    telemetry::counter(
+                        telemetry::counter::PLAYER_RENDER_FORWARD_X_Q12_BIASED,
+                        (m[0][2] as i32 + 4096) as u32,
+                    );
+                    telemetry::counter(
+                        telemetry::counter::PLAYER_RENDER_FORWARD_Z_Q12_BIASED,
+                        (m[2][2] as i32 + 4096) as u32,
+                    );
+                }
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
                 let actor_options = current_actor_surface_options(self.room_index);

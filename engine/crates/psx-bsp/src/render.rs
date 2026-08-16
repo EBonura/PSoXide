@@ -163,11 +163,19 @@ pub fn load_view(camera: Camera) -> ViewTransform {
 }
 
 /// Build and load the Y-up camera transform used by PSoXide brush worlds.
+///
+/// Zero angles look along world +X with +Y up; the remap must be a proper
+/// rotation (determinant > 0) so the world keeps the editor's handedness:
+/// view right = world +Z, view down = world -Y, view depth = world +X. The
+/// previous `-Z` right axis was a reflection and drew every brush world as
+/// its mirror image (models, which use the engine camera, were not
+/// mirrored, so characters faced the wrong way and the analog stick read
+/// mirrored).
 pub fn load_pxbsp_view(camera: Camera) -> ViewTransform {
     load_view_with_coordinates(
         camera,
         Mat3I16 {
-            m: [[0, 0, -0x3000], [0, -0x3000, 0], [0x3000, 0, 0]],
+            m: [[0, 0, 0x3000], [0, -0x3000, 0], [0x3000, 0, 0]],
         },
     )
 }
@@ -1219,7 +1227,6 @@ fn layered_sky_batch_surfaces(
     ]
 }
 
-
 fn pxbsp_material_state(
     material: PxbspMaterial,
     binding: PxbspTextureBinding,
@@ -1433,7 +1440,11 @@ mod tests {
     }
 
     #[test]
-    fn pxbsp_view_projects_y_up_and_turns_toward_positive_z() {
+    fn pxbsp_view_projects_y_up_with_positive_z_on_the_right() {
+        // Zero angles look along +X with +Y up. In a right-handed Y-up world
+        // (the editor's and the model pipeline's convention) the view's right
+        // is +Z, so +Z must land right of centre; the old remap put it on the
+        // left and mirrored every brush world.
         psx_gte::host::reset();
         configure_projection();
         load_pxbsp_view(Camera {
@@ -1445,13 +1456,16 @@ mod tests {
         let positive_z = scene::project_vertex(GteVec3I16::new(128, 0, 64));
         assert_eq!((centered.sx, centered.sy), (160, 120));
         assert!(above.sy < centered.sy);
-        assert!(positive_z.sx < centered.sx);
+        assert!(positive_z.sx > centered.sx);
 
+        // A quarter turn of yaw looks along -Z (the engine feeds
+        // `orbit_yaw + 1024`, so a camera north of its target at engine
+        // yaw 0 looks south).
         load_pxbsp_view(Camera {
             origin: Vec3I32::default(),
             angles: [0, 1024, 0],
         });
-        let turned = scene::project_vertex(GteVec3I16::new(0, 0, 128));
+        let turned = scene::project_vertex(GteVec3I16::new(0, 0, -128));
         assert_eq!((turned.sx, turned.sy), (160, 120));
         assert!(turned.sz > 0);
     }
