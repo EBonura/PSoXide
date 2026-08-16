@@ -7,7 +7,7 @@
 use crate::{ClipNode, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32};
 use psx_engine::div_q12_i32;
 use psx_gte::math::Mat3I16;
-use psx_math::int32::mul_q12_i32;
+use psx_math::int32::{mul_q12_i32, mul_q12_i32_wide};
 
 pub const CONTENTS_EMPTY: i16 = -1;
 pub const CONTENTS_SOLID: i16 = -2;
@@ -538,16 +538,23 @@ impl TransformedCollisionHull<'_> {
     }
 }
 
+/// Signed Q20.12 distance of `point` from `plane`.
+///
+/// Q20.12 points against Q3.12 unit normals keep every product and the
+/// three-term sum inside `i32`, so the wide multiply and wrapping adds are
+/// exactly the saturating form's result on validated hulls, at a fraction of
+/// its instruction count (this runs twice per visited node).
+#[inline(always)]
 fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
     let dot = match plane.kind {
         0 => point.x,
         1 => point.y,
         2 => point.z,
-        _ => mul_q12_i32(point.x, plane.normal.x as i32)
-            .saturating_add(mul_q12_i32(point.y, plane.normal.y as i32))
-            .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
+        _ => mul_q12_i32_wide(point.x, plane.normal.x as i32)
+            .wrapping_add(mul_q12_i32_wide(point.y, plane.normal.y as i32))
+            .wrapping_add(mul_q12_i32_wide(point.z, plane.normal.z as i32)),
     };
-    dot.saturating_sub(plane.distance)
+    dot.wrapping_sub(plane.distance)
 }
 
 const fn liquid_precedence(contents: i16) -> u8 {
@@ -560,16 +567,14 @@ const fn liquid_precedence(contents: i16) -> u8 {
 }
 
 fn interpolate(start: Vec3I32, end: Vec3I32, fraction: i32) -> Vec3I32 {
+    // Segment deltas are Q20.12 world spans against a Q0.12 fraction: bounded
+    // like the plane math above, so the wide multiply is exact here too.
+    let along =
+        |from: i32, to: i32| from.wrapping_add(mul_q12_i32_wide(to.wrapping_sub(from), fraction));
     Vec3I32 {
-        x: start
-            .x
-            .saturating_add(mul_q12_i32(end.x.saturating_sub(start.x), fraction)),
-        y: start
-            .y
-            .saturating_add(mul_q12_i32(end.y.saturating_sub(start.y), fraction)),
-        z: start
-            .z
-            .saturating_add(mul_q12_i32(end.z.saturating_sub(start.z), fraction)),
+        x: along(start.x, end.x),
+        y: along(start.y, end.y),
+        z: along(start.z, end.z),
     }
 }
 
@@ -1281,9 +1286,8 @@ mod tests {
             assert_eq!(flag.is_set(), byte != 0, "0x{byte:02x} normalizes wrong");
             // Constructing the `bool` may not smuggle the byte through.
             let boolean: bool = flag.into();
-            let observed = unsafe {
-                core::ptr::read_volatile(core::ptr::from_ref(&boolean).cast::<u8>())
-            };
+            let observed =
+                unsafe { core::ptr::read_volatile(core::ptr::from_ref(&boolean).cast::<u8>()) };
             assert!(observed <= 1, "0x{byte:02x} produced an invalid bool byte");
         }
         assert_eq!(TraceFlag::default(), TraceFlag::CLEAR);
