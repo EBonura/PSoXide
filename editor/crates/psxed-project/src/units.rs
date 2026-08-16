@@ -54,6 +54,45 @@ fn div_i32(value: i32) -> i32 {
 }
 
 #[inline]
+/// Movement speeds cook to Q8 engine units per tick (256 = one unit per
+/// tick) so the divisor loses no precision: the player motor carries a
+/// sub-unit remainder. Enemy records still take whole units (see
+/// `cook_props_lights`), which shift this back down.
+fn speed_q8(value: i32) -> i32 {
+    value.saturating_mul(256 / WORLD_UNIT_DIVISOR)
+}
+
+/// Grid-format projects cook at authored scale, but the runtime reads
+/// speeds in Q8 regardless: convert only the speed fields (x256).
+pub fn speeds_to_q8_unscaled(project: &mut ProjectDocument) {
+    let q8 = |v: i32| v.saturating_mul(256);
+    for scene in &mut project.scenes {
+        for node in &mut scene.nodes {
+            if let NodeKind::CharacterController { settings, .. } = &mut node.kind {
+                settings.walk_speed = q8(settings.walk_speed);
+                settings.run_speed = q8(settings.run_speed);
+                settings.roll_speed = q8(settings.roll_speed);
+                settings.backstep_speed = q8(settings.backstep_speed);
+            }
+        }
+    }
+    for resource in &mut project.resources {
+        if let ResourceData::Character(character) = &mut resource.data {
+            character_speeds_to_q8_unscaled(character);
+        }
+    }
+}
+
+/// Grid-format counterpart of [`scale_default_character_to_engine_units`]
+/// for a Character built after the clone pass (the cook's fallback).
+pub fn character_speeds_to_q8_unscaled(character: &mut crate::CharacterResource) {
+    let q8 = |v: i32| v.saturating_mul(256);
+    character.walk_speed = q8(character.walk_speed);
+    character.run_speed = q8(character.run_speed);
+    character.roll_speed = q8(character.roll_speed);
+    character.backstep_speed = q8(character.backstep_speed);
+}
+
 fn div_i32_min1(value: i32) -> i32 {
     if value > 0 {
         div_i32(value).max(1)
@@ -233,10 +272,10 @@ fn scale_node(node: &mut SceneNode) {
 fn scale_controller_settings(settings: &mut crate::CharacterControllerSettings) {
     settings.radius = div_u16_min1(settings.radius);
     settings.height = div_u16_min1(settings.height);
-    settings.walk_speed = div_i32_min1(settings.walk_speed);
-    settings.run_speed = div_i32_min1(settings.run_speed);
-    settings.roll_speed = div_i32_min1(settings.roll_speed);
-    settings.backstep_speed = div_i32_min1(settings.backstep_speed);
+    settings.walk_speed = speed_q8(settings.walk_speed);
+    settings.run_speed = speed_q8(settings.run_speed);
+    settings.roll_speed = speed_q8(settings.roll_speed);
+    settings.backstep_speed = speed_q8(settings.backstep_speed);
     // Placed enemies may override the Character's behavior on the node;
     // the embedded block carries the same length-typed fields.
     if let Some(behavior) = &mut settings.enemy {
@@ -267,10 +306,10 @@ fn scale_resource(data: &mut ResourceData) {
         ResourceData::Character(character) => {
             character.radius = div_u16_min1(character.radius);
             character.height = div_u16_min1(character.height);
-            character.walk_speed = div_i32_min1(character.walk_speed);
-            character.run_speed = div_i32_min1(character.run_speed);
-            character.roll_speed = div_i32_min1(character.roll_speed);
-            character.backstep_speed = div_i32_min1(character.backstep_speed);
+            character.walk_speed = speed_q8(character.walk_speed);
+            character.run_speed = speed_q8(character.run_speed);
+            character.roll_speed = speed_q8(character.roll_speed);
+            character.backstep_speed = speed_q8(character.backstep_speed);
             character.camera_distance = div_i32_min1(character.camera_distance);
             character.camera_height = div_i32(character.camera_height);
             character.camera_target_height = div_i32(character.camera_target_height);

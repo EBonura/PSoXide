@@ -329,15 +329,15 @@ pub fn build_package(
     // BSP projects cook at engine (Quake) scale: divide every authored
     // length by WORLD_UNIT_DIVISOR on an in-memory clone. Authored
     // files and the editor's preview stay at the historical scale.
-    let scaled_project;
-    let project = if project.world_format() == crate::ProjectWorldFormat::Bsp {
-        let mut clone = project.clone();
-        crate::units::scale_project_to_engine_units(&mut clone);
-        scaled_project = clone;
-        &scaled_project
+    // Both formats hand the cook Q8 movement speeds (see units.rs); the
+    // grid path only converts the representation, lengths stay authored.
+    let mut scaled_project = project.clone();
+    if project.world_format() == crate::ProjectWorldFormat::Bsp {
+        crate::units::scale_project_to_engine_units(&mut scaled_project);
     } else {
-        project
-    };
+        crate::units::speeds_to_q8_unscaled(&mut scaled_project);
+    }
+    let project = &scaled_project;
     let mut report = PlaytestValidationReport::default();
     let scene = project.active_scene();
 

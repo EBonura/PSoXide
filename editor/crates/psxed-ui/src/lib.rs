@@ -292,6 +292,7 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/aletha_delivered",
     "assets/models/rust_mantis",
     "assets/animations/aletha_delivered",
+    "assets/animations/gen",
     "assets/animations/rust_mantis_starter",
     "assets/models/sword1_light",
     "assets/models/sword1_heavy",

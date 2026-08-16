@@ -654,7 +654,8 @@ pub fn player_action_push_speed<
         .saturating_mul(video_hz.as_nonzero_u32())
         .div_ceil(sample_rate);
     let duration = scale_duration_for_action_speed(unscaled, character.action_speed(action));
-    Some((push.distance as u32).div_ceil(duration).max(1) as i32)
+    // Q8 units per tick, like every motor speed.
+    Some(((push.distance as u32) << 8).div_ceil(duration).max(1) as i32)
 }
 
 /// Parse every cooked model + animation into the runtime tables:
