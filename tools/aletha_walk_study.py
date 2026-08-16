@@ -170,6 +170,44 @@ def smoothstep(v: float) -> float:
     return v * v * (3.0 - 2.0 * v)
 
 
+def mesh_floor_z(rig: bpy.types.Object) -> float:
+    """Lowest world Z of the skinned mesh in the rig's current pose."""
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    lowest = float("inf")
+    for child in rig.children_recursive:
+        if child.type != "MESH":
+            continue
+        evaluated = child.evaluated_get(depsgraph)
+        for vertex in evaluated.data.vertices:
+            lowest = min(lowest, (evaluated.matrix_world @ vertex.co).z)
+    return lowest
+
+
+def level_poses_to_floor(
+    rig: bpy.types.Object,
+    assembled: bpy.types.Action,
+    frames: list[int],
+    floor_z: float,
+) -> list[dict]:
+    """Sample `frames` of `assembled` and shift the Hips of each pose so the
+    mesh's lowest point sits exactly on `floor_z`. A rotation-only retarget
+    onto a rig with other leg proportions loses the source's foot planting
+    (the planted foot bobs a few cm through its stance, which the runtime,
+    anchoring a clip by its first frame only, shows as floating mid-stride).
+    Pinning the lowest point per frame keeps the planted foot on the ground
+    and lets the swing foot rise."""
+    hips = bone_by_suffix(rig, "hips")
+    rest_inv = rig.data.bones[hips].matrix_local.to_3x3().inverted()
+    poses = []
+    for frame in frames:
+        pose = sample_pose(rig, assembled, frame)
+        delta = mesh_floor_z(rig) - floor_z
+        loc, rot, scale = pose[hips]
+        pose[hips] = (loc + rest_inv @ Vector((0.0, 0.0, -delta)), rot, scale)
+        poses.append(pose)
+    return poses
+
+
 def export_phase_glbs(
     rig: bpy.types.Object,
     assembled: bpy.types.Action,
@@ -179,16 +217,20 @@ def export_phase_glbs(
 ) -> None:
     """Slice the assembled clip into per-phase actions (rebased to frame 1)
     and export each as its own GLB: the locomotion importer cooks one take per
-    file. The cruise is exactly the loop cycle."""
+    file. The cruise is exactly the loop cycle. Every phase is levelled to
+    the idle's floor (frame 1 of the assembled clip)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     scene = bpy.context.scene
+    sample_pose(rig, assembled, 1)
+    floor_z = mesh_floor_z(rig)
+    print(f"[study] floor from idle frame 1: z={floor_z:.4f}")
     phases = {
         f"{stem}_windup": splits["windup"],
         stem: splits["cruise_loop"],
         f"{stem}_winddown": splits["winddown"],
     }
     for name, (first, last) in phases.items():
-        poses = [sample_pose(rig, assembled, frame) for frame in range(first, last + 1)]
+        poses = level_poses_to_floor(rig, assembled, list(range(first, last + 1)), floor_z)
         action = bpy.data.actions.new(name)
         rig.animation_data.action = action
         for index, pose in enumerate(poses):
@@ -228,7 +270,7 @@ def export_phase_glbs(
     # is centred and the gait is in place) and left/right bones swapped, so it
     # does not depend on Blender's bone-roll mirror convention.
     first, last = splits["winddown"]
-    poses = [sample_pose(rig, assembled, frame) for frame in range(first, last + 1)]
+    poses = level_poses_to_floor(rig, assembled, list(range(first, last + 1)), floor_z)
     mirror = Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0))
     partner = {}
     for bone in rig.data.bones:
@@ -243,11 +285,12 @@ def export_phase_glbs(
     action = bpy.data.actions.new(name)
     world_inv = rig.matrix_world.inverted()
     for index, pose in enumerate(poses):
-        # Pose the rig with the original frame and read every bone's world matrix.
-        rig.animation_data.action = assembled
-        set_frame(first + index)
-        world = {b.name: (rig.matrix_world @ b.matrix).copy() for b in rig.pose.bones}
+        # Apply the levelled pose and read every bone's world matrix.
         rig.animation_data.action = action
+        for bone in ordered:
+            bone.location, bone.rotation_quaternion, bone.scale = pose[bone.name]
+        bpy.context.view_layer.update()
+        world = {b.name: (rig.matrix_world @ b.matrix).copy() for b in rig.pose.bones}
         for bone in ordered:
             target = mirror @ world[partner[bone.name]] @ mirror
             bone.matrix = world_inv @ target
