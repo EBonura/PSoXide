@@ -1627,10 +1627,16 @@ fn visual_model_origin(
     z: i32,
     world_height: u16,
     visual_offset: [i16; 3],
-    _visual_scale_q8: u16,
+    visual_scale_q8: u16,
     rotation: &Mat3I16,
 ) -> WorldVertex {
-    let origin = floor_anchored_model_origin(x, y, z, world_height);
+    // The mesh scales about its origin (mid-height), so the floor lift must
+    // scale too or a 1.4x character sinks 0.4 x half-height into the floor.
+    let scaled_height = ((world_height as u32 * visual_scale_q8.max(1) as u32
+        + (MODEL_VISUAL_SCALE_ONE_Q8 / 2) as u32)
+        / MODEL_VISUAL_SCALE_ONE_Q8 as u32)
+        .min(u16::MAX as u32) as u16;
+    let origin = floor_anchored_model_origin(x, y, z, scaled_height);
     let offset = rotate_offset_q12(
         rotation,
         [
