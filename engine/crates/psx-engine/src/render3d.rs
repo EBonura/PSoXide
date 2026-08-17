@@ -2652,6 +2652,41 @@ fn rotate_translation_q12(rot: &Mat3I16, t: Vec3I32) -> Vec3I32 {
     Vec3I32::new(row(rot.m[0]), row(rot.m[1]), row(rot.m[2]))
 }
 
+/// GTE RTPS caps `H / SZ` at 2.0 (the divide-overflow flag), so with H=320
+/// anything nearer than 160 units projects as if it sat at 160: it shrinks
+/// and slides toward the screen centre. The third-person camera holds the
+/// player at ~115 units, so the player lived inside that zone permanently:
+/// drawn ~0.72x and with the feet well above the (CPU-projected) floor.
+/// Models fold this scale into the view's X and Y rows and divide H by it:
+/// the projection is identical, depth (OT order) is untouched, and the
+/// clamp moves to 160 / MODEL_GTE_XY_SCALE units.
+pub(crate) const MODEL_GTE_XY_SCALE: i32 = 4;
+
+/// The model path's camera-view matrix: [`camera_gte_view_matrix`] with the
+/// X and Y rows scaled by [`MODEL_GTE_XY_SCALE`]. Pair with
+/// [`model_gte_projection`].
+pub(crate) fn model_gte_view_matrix(camera: WorldCamera) -> Mat3I16 {
+    let mut view = camera_gte_view_matrix(camera);
+    for row in 0..2 {
+        for col in 0..3 {
+            view.m[row][col] = clamp_i16(view.m[row][col] as i32 * MODEL_GTE_XY_SCALE);
+        }
+    }
+    view
+}
+
+/// The model path's projection: focal length divided by
+/// [`MODEL_GTE_XY_SCALE`], for the GTE H register and for every CPU
+/// fallback that divides X/Y already carrying the scale.
+pub(crate) fn model_gte_projection(projection: WorldProjection) -> WorldProjection {
+    WorldProjection::new(
+        projection.screen_x,
+        projection.screen_y,
+        (projection.focal_length / MODEL_GTE_XY_SCALE).max(1),
+        projection.near_z,
+    )
+}
+
 fn camera_gte_view_matrix(camera: WorldCamera) -> Mat3I16 {
     let sy_sp = camera.sin_yaw.mul_q12(camera.sin_pitch).raw();
     let cy_sp = camera.cos_yaw.mul_q12(camera.sin_pitch).raw();

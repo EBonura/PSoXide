@@ -179,8 +179,8 @@ pub fn draw_actor_shadow<const OT_DEPTH: usize>(
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_add(h)),
     ];
     let shadow_options = options
-        .with_depth_policy(DepthPolicy::Nearest)
-        .with_depth_bias(shadow.depth_bias.saturating_neg())
+        .with_depth_policy(DepthPolicy::Average)
+        .with_depth_bias(-6)
         .with_cull_mode(CullMode::None)
         .with_material_layer(material);
     const UVS: [(u8, u8); 4] = [
