@@ -2026,9 +2026,9 @@ fn yaw_from_vector(dx: Q12, dz: Q12) -> Angle {
 /// Locked-on backward walk speed as a percentage of `walk_speed`.
 /// ponytail: constants; promote to CharacterMotorConfig when a project
 /// wants to author them.
-pub const LOCKED_BACKWARD_SPEED_PERCENT: i32 = 60;
+pub const LOCKED_BACKWARD_SPEED_PERCENT: i32 = 40;
 /// Locked-on strafe speed as a percentage of `walk_speed`.
-pub const LOCKED_STRAFE_SPEED_PERCENT: i32 = 70;
+pub const LOCKED_STRAFE_SPEED_PERCENT: i32 = 90;
 
 /// Locked-on evade clip choice by slide direction relative to facing.
 /// Sector convention matches [`locked_locomotion_anim`]; forward maps
