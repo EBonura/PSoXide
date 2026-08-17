@@ -47,6 +47,9 @@ pub(super) const BSP_FALLBACK_CAMERA_DISTANCE: i32 = 192;
 pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 128;
 pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 64;
 pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 16;
+/// Extra boom-to-wall margin for the follow camera in brush worlds, on top
+/// of the body hull's own radius (world units).
+pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 12;
 pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 16;
 pub(super) const BSP_USE_DISTANCE: i32 = 256;
 
@@ -508,9 +511,14 @@ impl BspRuntime {
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
+        // Spring-arm containment: the solver's point queries run through the
+        // standard body hull (the world expanded by that hull's radius) instead
+        // of hull 0, so the boom is effectively a swept box: side walls push
+        // the camera off them too and it never sits flush against, or inside,
+        // a wall it is skimming along.
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
-            BSP_POINT_HULL_INDEX,
+            PXBSP_BODY_HULLS[0].hull_index,
             &models[..count],
             CollisionTraceShape::Point,
             &mut self.trace_scratch,

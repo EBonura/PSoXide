@@ -511,6 +511,20 @@ impl ThirdPersonCameraState {
             );
         }
 
+        // Spring arm: a shortened boom slides the camera along the arm's own
+        // direction toward the focus, so the height comes down with the
+        // distance and the pitch holds. Holding the full height while the arm
+        // collapses parks the camera almost directly above the player,
+        // looking straight down. The lock-on boost stays additive on top.
+        let base_camera_y_goal = if self.distance < config.distance {
+            let above_focus = base_camera_y_goal.saturating_sub(self.focus.y);
+            self.focus.y.saturating_add(
+                ((above_focus as i64 * self.distance as i64) / config.distance.max(1) as i64)
+                    as i32,
+            )
+        } else {
+            base_camera_y_goal
+        };
         let desired_base_position = camera_position_at_height(
             self.focus,
             self.distance,
@@ -2307,9 +2321,17 @@ mod tests {
         }
 
         assert!(frame.distance < config.distance);
+        // The shortened arm slides the camera toward the focus (spring arm),
+        // so the base height scales with the distance; the lock boost stays
+        // additive on top of that.
+        let focus_y = frame.focus.y;
+        let slid_base = focus_y
+            + ((target.player.y + config.height - focus_y) as i64 * frame.distance as i64
+                / config.distance as i64) as i32;
+        assert!(frame.camera.position.y < target.player.y + config.height);
         assert_eq!(
             frame.camera.position.y,
-            target.player.y + config.height + config.lock_height_boost
+            slid_base + config.lock_height_boost
         );
     }
 
