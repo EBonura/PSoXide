@@ -809,6 +809,20 @@ fn run_headless_launch(
             .map(|samples| (samples.len() as u64).saturating_add(args.input_tape_delay_ticks))
     });
     let capture_gpu_commands = args.dump_hw.is_some() || args.gpu_frame_stats_log.is_some();
+    // ponytail: env-var probe, not a CLI flag -- pure diagnostics for
+    // "which GP0 packet drew this VRAM pixel?" when a dump disagrees
+    // with the other backend. `PSOXIDE_TRACE_PIXEL=x,y[;x,y...]`.
+    let trace_pixels: Vec<(u16, u16)> = std::env::var("PSOXIDE_TRACE_PIXEL")
+        .ok()
+        .map(|s| {
+            s.split(';')
+                .filter_map(|p| {
+                    let (x, y) = p.split_once(',')?;
+                    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut cpu = Cpu::new();
 
@@ -1118,6 +1132,9 @@ fn run_headless_launch(
         }
         None => None,
     };
+    if !trace_pixels.is_empty() {
+        bus.gpu.enable_pixel_tracer();
+    }
     let initial_display_area = bus.gpu.display_area();
     let mut route_last_display_start = (initial_display_area.x, initial_display_area.y);
     let mut gpu_stats_last_display_start = route_last_display_start;
@@ -1812,6 +1829,18 @@ fn run_headless_launch(
                 let _ = std::fs::write(&p, out);
                 eprintln!("[cli] cmd_log csv → {p}");
             }
+        }
+    }
+
+    for &(x, y) in &trace_pixels {
+        match bus.gpu.pixel_owner_at(x, y) {
+            Some(entry) => eprintln!(
+                "[cli] pixel ({x},{y}) drawn by cmd #{} op=0x{:02X} fifo={:08X?}",
+                entry.index,
+                entry.opcode,
+                &entry.fifo[..entry.fifo.len().min(12)]
+            ),
+            None => eprintln!("[cli] pixel ({x},{y}) untouched since tracer start"),
         }
     }
 
@@ -3121,9 +3150,21 @@ fn dump_hw_ppm(
     hw.set_texture_filter(texture_filter);
     let initial_vram =
         vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
-    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
+    // ponytail: env knob, not a CLI flag -- bisecting "which packet made
+    // the HW dump diverge from the CPU dump" is the only use.
+    let limit = std::env::var("PSOXIDE_HW_REPLAY_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(usize::MAX)
+        .min(bus.gpu.cmd_log.len());
+    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log[..limit], &initial_vram);
 
     let s = hw.internal_scale();
+    if let Ok(p) = std::env::var("PSOXIDE_DUMP_HW_VRAM") {
+        let (vw, vh, vrgba) =
+            hw.read_subrect_rgba8(0, 0, psx_gpu_render::VRAM_WIDTH * s, psx_gpu_render::VRAM_HEIGHT * s);
+        write_rgb_ppm_from_rgba(std::path::Path::new(&p), vw, vh, &vrgba)?;
+    }
     let (w, h, rgba) = hw.read_subrect_rgba8(
         display.x as u32 * s,
         display.y as u32 * s,
