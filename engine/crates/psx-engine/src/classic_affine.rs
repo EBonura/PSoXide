@@ -1,12 +1,12 @@
 //! Compact classic-affine world submission for retained C/Rust renderers.
 //!
 //! This path keeps the historical PS1 packet topology: camera-space
-//! midpoints are reprojected, near triangles use a fixed two-level lattice,
-//! compatible leaves are paired into GP0(3Ch) quads, and optional root-edge
-//! underdraw seals rasterisation cracks. It deliberately emits the compact
-//! no-texture-window packets from `psx-gpu`; callers set one texture-window
-//! state for the pass and finish the staged tags with PSoXide's tagged-stream
-//! OT linker.
+//! midpoints are reprojected, near or visibly warped triangles use a fixed
+//! two-level lattice, compatible leaves are paired into GP0(3Ch) quads, and
+//! optional root-edge underdraw seals rasterisation cracks. It deliberately
+//! emits the compact no-texture-window packets from `psx-gpu`; callers set one
+//! texture-window state for the pass and finish the staged tags with PSoXide's
+//! tagged-stream OT linker.
 
 use core::{mem::size_of, ptr};
 
@@ -66,6 +66,21 @@ pub struct ClassicAffineWordSourceVertex {
     /// Two light contributions in the low bytes or baked RGB in the low 24 bits.
     pub light: u32,
 }
+
+/// Indexed retained-world corner with material attributes separated from its
+/// shared position.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassicAffineIndexedCorner {
+    /// Index into the caller-owned shared-position array.
+    pub position_index: u16,
+    /// Material-relative or baked atlas UV.
+    pub uv: [u8; 2],
+    /// Two light contributions in the low bytes or baked RGB.
+    pub light: u32,
+}
+
+const _: [(); 8] = [(); size_of::<ClassicAffineIndexedCorner>()];
 
 /// Compact projected vertex used by the packed world-fan path.
 #[repr(C)]
@@ -128,6 +143,106 @@ pub unsafe fn materialize_classic_affine_word_vertices(
             ptr::write(destination_words, position_xy);
             ptr::write(destination_words.add(1), position_z_uv);
             ptr::write(destination_words.add(2), color);
+        }
+        index += 1;
+    }
+}
+
+/// Expand indexed corners and shared positions into projection scratch.
+///
+/// # Safety
+/// `corners` and `destination` must contain `vertex_count` records, every
+/// corner index must address `positions`, and all ranges must be aligned and
+/// non-overlapping.
+pub unsafe fn materialize_classic_affine_indexed_vertices(
+    corners: *const ClassicAffineIndexedCorner,
+    positions: *const ClassicAffinePosition,
+    position_count: usize,
+    vertex_count: usize,
+    destination: *mut ClassicAffineVertex,
+    uv_offset: [u8; 2],
+    light_weights: [u16; 2],
+    baked_uv: bool,
+    baked_light: bool,
+) {
+    let mut index = 0usize;
+    while index < vertex_count {
+        let corner = unsafe { ptr::read(corners.add(index)) };
+        let position_index = corner.position_index as usize;
+        debug_assert!(position_index < position_count);
+        let position = unsafe { ptr::read(positions.add(position_index)) };
+        let uv = if baked_uv {
+            corner.uv
+        } else {
+            [
+                corner.uv[0].wrapping_add(uv_offset[0]),
+                corner.uv[1].wrapping_add(uv_offset[1]),
+            ]
+        };
+        let color = if baked_light {
+            corner.light
+        } else {
+            light_color(
+                [corner.light as u8, (corner.light >> 8) as u8],
+                light_weights,
+            )
+        };
+        // Projection overwrites screen/depth before either field is read. As
+        // with the retained word-source path, initialize only the first three
+        // words and avoid eight bytes of dead stores per visible corner.
+        let destination_words = unsafe { destination.add(index).cast::<u32>() };
+        let position_xy = u32::from(position.position[0] as u16)
+            | (u32::from(position.position[1] as u16) << 16);
+        let position_z_uv = u32::from(position.position[2] as u16)
+            | (u32::from(uv[0]) << 16)
+            | (u32::from(uv[1]) << 24);
+        unsafe {
+            ptr::write(destination_words, position_xy);
+            ptr::write(destination_words.add(1), position_z_uv);
+            ptr::write(destination_words.add(2), color);
+        }
+        index += 1;
+    }
+}
+
+/// Expand indexed corners while reusing already projected shared positions.
+///
+/// # Safety
+/// The requirements of [`materialize_classic_affine_indexed_vertices`] apply,
+/// and `projected` must contain `position_count` records produced for the
+/// active camera.
+pub unsafe fn materialize_classic_affine_indexed_projected_vertices(
+    corners: *const ClassicAffineIndexedCorner,
+    positions: *const ClassicAffinePosition,
+    projected: *const ClassicAliasProjectedVertex,
+    position_count: usize,
+    vertex_count: usize,
+    destination: *mut ClassicAffineVertex,
+    uv_offset: [u8; 2],
+    light_weights: [u16; 2],
+    baked_uv: bool,
+    baked_light: bool,
+) {
+    unsafe {
+        materialize_classic_affine_indexed_vertices(
+            corners,
+            positions,
+            position_count,
+            vertex_count,
+            destination,
+            uv_offset,
+            light_weights,
+            baked_uv,
+            baked_light,
+        );
+    }
+    let mut index = 0usize;
+    while index < vertex_count {
+        let corner = unsafe { ptr::read(corners.add(index)) };
+        let cached = unsafe { ptr::read(projected.add(corner.position_index as usize)) };
+        unsafe {
+            (*destination.add(index)).screen = cached.screen;
+            (*destination.add(index)).depth = cached.depth as i32;
         }
         index += 1;
     }
@@ -197,6 +312,16 @@ pub struct ClassicAffineProfile {
     pub subdivide_once_at: u16,
     /// OTZ below which two subdivision levels are used.
     pub subdivide_twice_at: u16,
+    /// Predicted affine error in texels above which one level is used.
+    ///
+    /// Zero disables the error trigger and retains the historical depth-only
+    /// schedule.
+    pub subdivide_once_error_texels: u8,
+    /// Predicted affine error in texels above which two levels are used.
+    ///
+    /// Zero disables the error trigger. This must be no smaller than
+    /// [`Self::subdivide_once_error_texels`] when both are enabled.
+    pub subdivide_twice_error_texels: u8,
     /// OT slot bias applied to crack-sealing underdraw triangles.
     pub underdraw_slot_bias: u16,
 }
@@ -209,6 +334,32 @@ impl ClassicAffineProfile {
         ot_depth: 2048,
         subdivide_once_at: 136,
         subdivide_twice_at: 60,
+        subdivide_once_error_texels: 0,
+        subdivide_twice_error_texels: 0,
+        underdraw_slot_bias: 8,
+    };
+
+    /// Experimental bounded-lattice affine-error profile.
+    ///
+    /// The depth bands preserve the historical close-surface workload. The
+    /// additional error trigger uses the measured p90 affine-error bound and
+    /// spends one split above four predicted texels, then the existing second
+    /// split above eight. A bisection can reduce the worst near-side edge
+    /// error by as little as half, so the eight-texel threshold keeps each
+    /// resulting edge near the four-texel budget without introducing a third
+    /// lattice level or changing packet-capacity bounds. This profile is not
+    /// selected by a shipping world renderer until that renderer also owns a
+    /// hard per-frame extra-packet budget. A fixed-camera Quake measurement
+    /// showed that selecting it globally could increase modeled GPU cost by
+    /// 82 percent and reach the emulator's 4,096-draw census envelope.
+    pub const RUNTIME_ADAPTIVE: Self = Self {
+        screen_width: 320,
+        screen_height: 240,
+        ot_depth: 2048,
+        subdivide_once_at: 136,
+        subdivide_twice_at: 60,
+        subdivide_once_error_texels: 4,
+        subdivide_twice_error_texels: 8,
         underdraw_slot_bias: 8,
     };
 
@@ -357,39 +508,31 @@ pub unsafe fn project_classic_affine_indexed_vertices(
 
     let mut index = 0usize;
     while index + 2 < index_count {
-        let a_index = unsafe { *indices.add(index) } as usize;
-        let b_index = unsafe { *indices.add(index + 1) } as usize;
-        let c_index = unsafe { *indices.add(index + 2) } as usize;
-        debug_assert!(a_index < position_count);
-        debug_assert!(b_index < position_count);
-        debug_assert!(c_index < position_count);
+        let position_indices = [
+            unsafe { *indices.add(index) } as usize,
+            unsafe { *indices.add(index + 1) } as usize,
+            unsafe { *indices.add(index + 2) } as usize,
+        ];
+        debug_assert!(position_indices
+            .iter()
+            .all(|&position_index| position_index < position_count));
         let output = scene::project_triangle_scheduled(
-            classic_position_vec3(unsafe { *positions.add(a_index) }),
-            classic_position_vec3(unsafe { *positions.add(b_index) }),
-            classic_position_vec3(unsafe { *positions.add(c_index) }),
+            classic_position_vec3(unsafe { *positions.add(position_indices[0]) }),
+            classic_position_vec3(unsafe { *positions.add(position_indices[1]) }),
+            classic_position_vec3(unsafe { *positions.add(position_indices[2]) }),
         );
-        unsafe {
-            ptr::write(
-                projected.add(a_index),
-                ClassicAliasProjectedVertex {
-                    screen: [output[0].sx, output[0].sy],
-                    depth: output[0].sz,
-                },
-            );
-            ptr::write(
-                projected.add(b_index),
-                ClassicAliasProjectedVertex {
-                    screen: [output[1].sx, output[1].sy],
-                    depth: output[1].sz,
-                },
-            );
-            ptr::write(
-                projected.add(c_index),
-                ClassicAliasProjectedVertex {
-                    screen: [output[2].sx, output[2].sy],
-                    depth: output[2].sz,
-                },
-            );
+        let mut lane = 0usize;
+        while lane < 3 {
+            unsafe {
+                ptr::write(
+                    projected.add(position_indices[lane]),
+                    ClassicAliasProjectedVertex {
+                        screen: [output[lane].sx, output[lane].sy],
+                        depth: output[lane].sz,
+                    },
+                );
+            }
+            lane += 1;
         }
         index += 3;
     }
@@ -833,6 +976,92 @@ fn average3(vertices: [&ClassicAffineVertex; 3]) -> u16 {
     scene::classic_otz3_from_sum(sum)
 }
 
+trait ClassicAffineSample {
+    fn affine_uv(&self) -> [u8; 2];
+    fn affine_depth(&self) -> i32;
+}
+
+impl ClassicAffineSample for ClassicAffineVertex {
+    #[inline(always)]
+    fn affine_uv(&self) -> [u8; 2] {
+        self.uv
+    }
+
+    #[inline(always)]
+    fn affine_depth(&self) -> i32 {
+        self.depth
+    }
+}
+
+impl ClassicAffineSample for ClassicAffineProjectedVertex {
+    #[inline(always)]
+    fn affine_uv(&self) -> [u8; 2] {
+        self.uv
+    }
+
+    #[inline(always)]
+    fn affine_depth(&self) -> i32 {
+        self.depth
+    }
+}
+
+/// Select the existing zero-, one-, or two-level lattice from depth and a
+/// calibrated affine texture-error bound.
+///
+/// For an edge spanning `du` texels between positive depths `za` and `zb`,
+/// its exact midpoint error is `du * |zb-za| / (2 * (za+zb))`. The measured
+/// p90 worst-polygon multiplier is 2.4, so the bound exceeds `target` exactly
+/// when `6 * du * |zb-za| > 5 * target * (za+zb)`. This comparison avoids a
+/// guest division and stays within `u32` for PS1 UV and GTE depth ranges.
+#[inline(always)]
+fn classic_affine_subdivision_level<T: ClassicAffineSample>(
+    vertices: [&T; 3],
+    otz: u16,
+    profile: ClassicAffineProfile,
+) -> u8 {
+    let mut level = if otz < profile.subdivide_twice_at {
+        2
+    } else if otz < profile.subdivide_once_at {
+        1
+    } else {
+        0
+    };
+    if level == 2 || profile.subdivide_once_error_texels == 0 {
+        return level;
+    }
+
+    debug_assert!(
+        profile.subdivide_twice_error_texels == 0
+            || profile.subdivide_twice_error_texels >= profile.subdivide_once_error_texels
+    );
+    for (a, b) in [(0usize, 1usize), (1, 2), (2, 0)] {
+        let za = vertices[a].affine_depth();
+        let zb = vertices[b].affine_depth();
+        if za <= 0 || zb <= 0 {
+            continue;
+        }
+        // Projected GTE depths are u16. Clamp caller-supplied projected
+        // records as well so the public preprojected path cannot overflow the
+        // fixed-width comparison even if its safety contract is violated.
+        let za = (za as u32).min(u16::MAX as u32);
+        let zb = (zb as u32).min(u16::MAX as u32);
+        let uv_a = vertices[a].affine_uv();
+        let uv_b = vertices[b].affine_uv();
+        let du = u32::from(uv_a[0].abs_diff(uv_b[0]).max(uv_a[1].abs_diff(uv_b[1])));
+        let scaled_error = du * za.abs_diff(zb) * 6;
+        let scaled_depth = (za + zb) * 5;
+        if profile.subdivide_twice_error_texels != 0
+            && scaled_error > scaled_depth * u32::from(profile.subdivide_twice_error_texels)
+        {
+            return 2;
+        }
+        if scaled_error > scaled_depth * u32::from(profile.subdivide_once_error_texels) {
+            level = 1;
+        }
+    }
+    level
+}
+
 #[inline(always)]
 unsafe fn sorted_tri<W: AffinePacketWriter>(
     writer: &mut W,
@@ -1140,12 +1369,20 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
             root_depth + previous_ref.depth as u16 as u32 + current_ref.depth as u16 as u32,
         );
         if otz > 0 && otz < profile.ot_depth {
+            let subdivision_level =
+                classic_affine_subdivision_level([root, previous_ref, current_ref], otz, profile);
             let next = unsafe { current.add(1) };
-            if otz >= profile.subdivide_once_at && next != end {
+            if subdivision_level == 0 && next != end {
                 let next_ref = unsafe { &*next };
-                if scene::classic_otz3_from_sum(
+                let next_otz = scene::classic_otz3_from_sum(
                     root_depth + current_ref.depth as u16 as u32 + next_ref.depth as u16 as u32,
-                ) == otz
+                );
+                if next_otz == otz
+                    && classic_affine_subdivision_level(
+                        [root, current_ref, next_ref],
+                        next_otz,
+                        profile,
+                    ) == 0
                 {
                     // GP0 quads split on q1-q2. Reorder two adjacent fan
                     // triangles so that edge lands on the fan's shared 0-2
@@ -1159,9 +1396,9 @@ unsafe fn submit_classic_affine_projected_fan_into_writer<W: AffinePacketWriter>
                     continue;
                 }
             }
-            if otz < profile.subdivide_twice_at {
+            if subdivision_level == 2 {
                 unsafe { subdivide_twice(writer, root, previous_ref, current_ref, generated, otz) };
-            } else if otz < profile.subdivide_once_at {
+            } else if subdivision_level == 1 {
                 unsafe { subdivide_once(writer, root, previous_ref, current_ref, generated, otz) };
             } else {
                 let root_refs = [root, previous_ref, current_ref];
@@ -1216,6 +1453,75 @@ pub unsafe fn submit_classic_affine_batch(
     while vertex < vertex_count {
         unsafe { project_one(vertices.add(vertex)) };
         vertex += 1;
+    }
+
+    let generated = unsafe { vertices.add(vertex_count) };
+    let mut writer = PacketWriter {
+        next: output,
+        packets: 0,
+        clut_high_word: 0,
+        tpage_high_word: 0,
+        profile,
+    };
+    let surface_end = unsafe { surfaces.add(surface_count) };
+    let mut surface_ptr = surfaces;
+    while surface_ptr != surface_end {
+        let surface = unsafe { ptr::read(surface_ptr) };
+        let first_vertex = surface.first_vertex as usize;
+        let surface_vertices = surface.vertex_count as usize;
+        debug_assert!(surface_vertices >= 3);
+        debug_assert!(first_vertex + surface_vertices <= vertex_count);
+        writer.tpage_high_word = (surface.tpage as u32) << 16;
+        writer.clut_high_word = (surface.clut as u32) << 16;
+        unsafe {
+            submit_classic_affine_projected_fan_into_writer(
+                vertices.add(first_vertex),
+                surface_vertices,
+                generated,
+                &mut writer,
+            );
+        }
+        surface_ptr = unsafe { surface_ptr.add(1) };
+    }
+
+    unsafe { writer.finish(output) }
+}
+
+/// Submit several contiguous convex fans whose source vertices already carry
+/// screen coordinates and cached GTE depths.
+///
+/// This is the indexed-cache counterpart to [`submit_classic_affine_batch`].
+/// A retained renderer can project shared positions once, scatter those
+/// results into its per-corner attribute stream, and preserve the exact same
+/// clipping, subdivision, packet topology, and ordering-table behaviour.
+///
+/// # Safety
+/// `vertices` must point to `vertex_count + 12` writable records, with the
+/// final records reserved for shared subdivision scratch. `surfaces` must
+/// contain `surface_count` descriptors whose vertex ranges fit entirely in
+/// the first `vertex_count` records. Every source record's `screen` and
+/// `depth` fields must have been produced for the currently intended camera.
+/// `output` must have room for every fan's worst-case packet expansion and
+/// remain live until submission completes.
+pub unsafe fn submit_classic_affine_projected_batch(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    if vertices.is_null()
+        || surfaces.is_null()
+        || output.is_null()
+        || vertex_count == 0
+        || surface_count == 0
+    {
+        return ClassicAffineSubmit {
+            next_packet: output,
+            packets: 0,
+            hardware_triangles: 0,
+        };
     }
 
     let generated = unsafe { vertices.add(vertex_count) };
@@ -1386,6 +1692,57 @@ pub unsafe fn submit_classic_affine_windowed_batch(
     output: *mut u32,
     profile: ClassicAffineProfile,
 ) -> ClassicAffineSubmit {
+    unsafe {
+        submit_classic_affine_windowed_batch_impl::<false>(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            profile,
+        )
+    }
+}
+
+/// Project and submit several independently windowed convex fans whose OT
+/// packets restore an unwindowed GP0(E2) state after every polygon.
+///
+/// Use this when windowed surfaces share an ordering table with compact world,
+/// brush-model, or alias packets. OT linking can interleave those consumers at
+/// any depth, so a reset at the end of a CPU-side batch is not sufficient.
+/// The caller's worst-case output capacity must include one additional data
+/// word per emitted polygon for the trailing reset command.
+///
+/// # Safety
+/// The contract matches [`submit_classic_affine_windowed_batch`].
+pub unsafe fn submit_classic_affine_scoped_windowed_batch(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineWindowedBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    unsafe {
+        submit_classic_affine_windowed_batch_impl::<true>(
+            vertices,
+            vertex_count,
+            surfaces,
+            surface_count,
+            output,
+            profile,
+        )
+    }
+}
+
+unsafe fn submit_classic_affine_windowed_batch_impl<const RESTORE_WINDOW: bool>(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineWindowedBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
     if vertices.is_null()
         || surfaces.is_null()
         || output.is_null()
@@ -1410,7 +1767,7 @@ pub unsafe fn submit_classic_affine_windowed_batch(
     }
 
     let generated = unsafe { vertices.add(vertex_count) };
-    let mut writer = WindowedPacketWriter::<false> {
+    let mut writer = WindowedPacketWriter::<RESTORE_WINDOW> {
         next: output,
         packets: 0,
         clut_high_word: 0,
@@ -1515,7 +1872,8 @@ pub unsafe fn submit_classic_affine_packed_fan(
             root[2].depth as u16,
         ]);
         if otz > 0 && otz < profile.ot_depth {
-            if otz < profile.subdivide_once_at {
+            let subdivision_level = classic_affine_subdivision_level(root, otz, profile);
+            if subdivision_level != 0 {
                 let source = [
                     unsafe { ptr::read_unaligned(vertices) },
                     unsafe { ptr::read_unaligned(vertices.add(fan - 1)) },
@@ -1526,7 +1884,7 @@ pub unsafe fn submit_classic_affine_packed_fan(
                     expand_source(source[1], root[1]),
                     expand_source(source[2], root[2]),
                 ];
-                if otz < profile.subdivide_twice_at {
+                if subdivision_level == 2 {
                     unsafe {
                         subdivide_twice(
                             &mut writer,
@@ -1957,6 +2315,25 @@ mod tests {
     }
 
     #[test]
+    fn projected_batch_rejects_empty_inputs_without_touching_output() {
+        let mut output = [0xdead_beefu32; 4];
+        let submitted = unsafe {
+            submit_classic_affine_projected_batch(
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null(),
+                0,
+                output.as_mut_ptr(),
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        };
+        assert_eq!(submitted.next_packet, output.as_mut_ptr());
+        assert_eq!(submitted.packets, 0);
+        assert_eq!(submitted.hardware_triangles, 0);
+        assert_eq!(output, [0xdead_beef; 4]);
+    }
+
+    #[test]
     fn midpoint_matches_byte_attribute_and_signed_position_averages() {
         let a = ClassicAffineVertex {
             position: [-3, 10, 21],
@@ -1992,6 +2369,165 @@ mod tests {
                 assert_eq!(midpoint(&left, &right).uv, [expected; 2]);
             }
         }
+    }
+
+    fn affine_sample(uv: [u8; 2], depth: i32) -> ClassicAffineVertex {
+        ClassicAffineVertex {
+            uv,
+            depth,
+            ..ClassicAffineVertex::default()
+        }
+    }
+
+    fn affine_refs(vertices: &[ClassicAffineVertex; 3]) -> [&ClassicAffineVertex; 3] {
+        [&vertices[0], &vertices[1], &vertices[2]]
+    }
+
+    #[test]
+    fn adaptive_profile_splits_far_oblique_texture_edges_by_predicted_error() {
+        let moderate = [
+            affine_sample([0, 0], 900),
+            affine_sample([63, 0], 1100),
+            affine_sample([0, 0], 900),
+        ];
+        let severe = [
+            affine_sample([0, 0], 900),
+            affine_sample([80, 0], 1100),
+            affine_sample([0, 0], 900),
+        ];
+        assert_eq!(
+            classic_affine_subdivision_level(
+                affine_refs(&moderate),
+                500,
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            ),
+            0,
+            "the historical profile must remain byte-compatible"
+        );
+        assert_eq!(
+            classic_affine_subdivision_level(
+                affine_refs(&moderate),
+                500,
+                ClassicAffineProfile::RUNTIME_ADAPTIVE,
+            ),
+            1,
+            "7.56 predicted texels fit after one bounded bisection"
+        );
+        assert_eq!(
+            classic_affine_subdivision_level(
+                affine_refs(&severe),
+                500,
+                ClassicAffineProfile::RUNTIME_ADAPTIVE,
+            ),
+            2,
+            "9.6 predicted texels require the existing second lattice level"
+        );
+    }
+
+    #[test]
+    fn adaptive_error_rule_ignores_constant_or_invalid_depth_edges() {
+        let constant = [
+            affine_sample([0, 0], 1000),
+            affine_sample([255, 255], 1000),
+            affine_sample([0, 255], 1000),
+        ];
+        let behind = [
+            affine_sample([0, 0], 0),
+            affine_sample([255, 255], 1000),
+            affine_sample([0, 255], -1),
+        ];
+        for vertices in [&constant, &behind] {
+            assert_eq!(
+                classic_affine_subdivision_level(
+                    [&vertices[0], &vertices[1], &vertices[2]],
+                    500,
+                    ClassicAffineProfile::RUNTIME_ADAPTIVE,
+                ),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_error_rule_never_exceeds_the_existing_two_level_packet_bound() {
+        let extreme = [
+            affine_sample([0, 0], 1),
+            affine_sample([255, 255], u16::MAX as i32),
+            affine_sample([0, 255], 1),
+        ];
+        assert_eq!(
+            classic_affine_subdivision_level(
+                [&extreme[0], &extreme[1], &extreme[2]],
+                500,
+                ClassicAffineProfile::RUNTIME_ADAPTIVE,
+            ),
+            2
+        );
+
+        let flat_near = [
+            affine_sample([0, 0], 1000),
+            affine_sample([0, 0], 1000),
+            affine_sample([0, 0], 1000),
+        ];
+        assert_eq!(
+            classic_affine_subdivision_level(
+                [&flat_near[0], &flat_near[1], &flat_near[2]],
+                50,
+                ClassicAffineProfile::RUNTIME_ADAPTIVE,
+            ),
+            2,
+            "the original close-surface depth schedule remains authoritative"
+        );
+    }
+
+    fn adaptive_packet_count(uv_span: u8, profile: ClassicAffineProfile) -> ClassicAffineSubmit {
+        psx_gte::host::reset();
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(160);
+        scene::set_avsz_weights(0x155, 0x100);
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::ZERO);
+
+        let mut vertices = [ClassicAffineVertex::default(); 3 + EXTRA_VERTICES];
+        for (index, (position, uv, screen, depth)) in [
+            ([-100, 0, 900], [0, 0], [142, 120], 900),
+            ([100, 0, 1100], [uv_span, 0], [175, 120], 1100),
+            ([0, 100, 900], [0, 0], [160, 102], 900),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            vertices[index] = ClassicAffineVertex {
+                position,
+                uv,
+                color: 0x0080_8080,
+                screen,
+                depth,
+            };
+        }
+        let mut packets = [0u32; 19 * 14];
+        unsafe {
+            submit_classic_affine_projected_fan(
+                vertices.as_mut_ptr(),
+                3,
+                packets.as_mut_ptr(),
+                0,
+                0,
+                profile,
+            )
+        }
+    }
+
+    #[test]
+    fn adaptive_packet_goldens_use_only_the_existing_bounded_lattices() {
+        let historical = adaptive_packet_count(63, ClassicAffineProfile::QUAKE_REFERENCE);
+        let once = adaptive_packet_count(63, ClassicAffineProfile::RUNTIME_ADAPTIVE);
+        let twice = adaptive_packet_count(80, ClassicAffineProfile::RUNTIME_ADAPTIVE);
+
+        assert_eq!((historical.packets, historical.hardware_triangles), (1, 1));
+        assert_eq!((once.packets, once.hardware_triangles), (6, 7));
+        assert_eq!((twice.packets, twice.hardware_triangles), (16, 25));
+        assert!(twice.packets <= 19, "packet-capacity contract changed");
     }
 
     #[test]
@@ -2089,6 +2625,57 @@ mod tests {
         });
         assert_eq!(submit.packets, 2);
         assert_eq!(submit.hardware_triangles, 3);
+    }
+
+    #[test]
+    fn scoped_windowed_batch_restores_full_window_inside_its_ot_packet() {
+        psx_gte::host::reset();
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(160);
+        scene::set_avsz_weights(0x155, 0x100);
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::ZERO);
+
+        let mut vertices = [ClassicAffineVertex::default(); 3 + EXTRA_VERTICES];
+        for (index, position) in [[-64, -64, 1024], [64, -64, 1024], [0, 64, 1024]]
+            .into_iter()
+            .enumerate()
+        {
+            vertices[index] = ClassicAffineVertex {
+                position,
+                color: 0x0080_8080,
+                ..ClassicAffineVertex::default()
+            };
+        }
+        let window = TextureWindow::power_of_two_tile(64, 64, 64, 64).word();
+        let surface = ClassicAffineWindowedBatchSurface {
+            first_vertex: 0,
+            vertex_count: 3,
+            tpage: 0x0160,
+            clut: 0x1234,
+            uv_offset: [0; 2],
+            texture_window_word: window,
+            color_command_word: 0x3400_0000,
+        };
+        let mut storage = [0u32; 19 * 15];
+        let submitted = unsafe {
+            submit_classic_affine_scoped_windowed_batch(
+                vertices.as_mut_ptr(),
+                3,
+                &surface,
+                1,
+                storage.as_mut_ptr(),
+                ClassicAffineProfile::QUAKE_REFERENCE,
+            )
+        };
+
+        assert_eq!(submitted.packets, 1);
+        let data_words = (storage[0] >> 24) as usize;
+        assert_eq!(storage[1], window);
+        assert_eq!(storage[data_words], TextureWindow::NONE.word());
+        assert_eq!(submitted.next_packet, unsafe {
+            storage.as_mut_ptr().add(data_words + 1)
+        });
     }
 
     #[test]
