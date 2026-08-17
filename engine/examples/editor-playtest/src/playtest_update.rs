@@ -397,9 +397,9 @@ impl Playtest {
                     let position = self.motor.position();
                     let yaw = self.motor.yaw();
                     self.lock_anchor = Some(RoomPoint::new(
-                        position.x.saturating_add(yaw.sin().mul_i32(LOCK_RANGE)),
+                        position.x.saturating_add(yaw.sin().mul_i32(LOCK_ANCHOR_DISTANCE)),
                         position.y.saturating_add(LOCK_ANCHOR_HEIGHT),
-                        position.z.saturating_add(yaw.cos().mul_i32(LOCK_RANGE)),
+                        position.z.saturating_add(yaw.cos().mul_i32(LOCK_ANCHOR_DISTANCE)),
                     ));
                 }
             }
