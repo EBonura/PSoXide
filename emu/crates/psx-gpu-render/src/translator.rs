@@ -262,6 +262,9 @@ impl Translator {
         color: [u8; 4],
         kind: BlendKind,
     ) {
+        if exceeds_hw_extent(v0, v1, v2) {
+            return;
+        }
         let clip = self.current_clip();
         for v in [v0, v1, v2] {
             self.push_vertex(
@@ -598,6 +601,9 @@ impl Translator {
         prim_flags: u32,
         kind: BlendKind,
     ) {
+        if exceeds_hw_extent(v0, v1, v2) {
+            return;
+        }
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
         let make = |v: (i32, i32), uv: (u16, u16)| HwVertex {
@@ -623,7 +629,9 @@ impl Translator {
         let [c0, c1, c2] = colors.map(mono_color_rgba8);
         if self.wireframe {
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
-        } else {
+        } else if !exceeds_hw_extent(v0, v1, v2) {
+            // Gated here rather than in `push_shaded_tri`: that pusher is
+            // shared with the GP0 line paths, and lines carry no extent rule.
             self.push_shaded_tri(v0, c0, v1, c1, v2, c2, self.dither_flag(), kind);
         }
     }
@@ -638,8 +646,12 @@ impl Translator {
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
         } else {
             let dither = self.dither_flag();
-            self.push_shaded_tri(v1, c1, v3, c3, v2, c2, dither, kind);
-            self.push_shaded_tri(v0, c0, v1, c1, v2, c2, dither, kind);
+            if !exceeds_hw_extent(v1, v3, v2) {
+                self.push_shaded_tri(v1, c1, v3, c3, v2, c2, dither, kind);
+            }
+            if !exceeds_hw_extent(v0, v1, v2) {
+                self.push_shaded_tri(v0, c0, v1, c1, v2, c2, dither, kind);
+            }
         }
     }
 
@@ -811,6 +823,9 @@ impl Translator {
         prim_flags: u32,
         kind: BlendKind,
     ) {
+        if exceeds_hw_extent(v0, v1, v2) {
+            return;
+        }
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
         let make = |v: (i32, i32), uv: (u16, u16), c: [u8; 4]| HwVertex {
@@ -989,6 +1004,23 @@ fn tex_tint(cmd: u32) -> [u8; 4] {
 
 fn uv16(uv: (u8, u8)) -> (u16, u16) {
     (uv.0 as u16, uv.1 as u16)
+}
+
+/// Hardware extent rule -- byte-for-byte the CPU rasterizer's
+/// `raster::triangle_exceeds_hw_extent`: any triangle with a vertex
+/// PAIR more than 1023 apart horizontally or 511 vertically is
+/// silently dropped by real silicon. Off-screen geometry coming out
+/// of projection hits this constantly, so without the gate the HW
+/// path smears giant garbage polygons over the frame that the CPU
+/// path never draws. Quads are pre-split, so each half is gated
+/// independently, matching hardware. Wireframe mode bypasses it on
+/// both sides.
+fn exceeds_hw_extent(v0: (i32, i32), v1: (i32, i32), v2: (i32, i32)) -> bool {
+    const MAX_DX: i32 = 1023;
+    const MAX_DY: i32 = 511;
+    [(v0, v1), (v1, v2), (v2, v0)]
+        .iter()
+        .any(|(a, b)| (a.0 - b.0).abs() > MAX_DX || (a.1 - b.1).abs() > MAX_DY)
 }
 
 #[cfg(test)]
@@ -1551,4 +1583,45 @@ mod tests {
         assert_eq!(frame.runs.len(), 1);
         assert_eq!(frame.runs[0].count, 12);
     }
+
+    /// Oversized polygons must be dropped exactly like the CPU
+    /// rasterizer drops them (`raster::triangle_exceeds_hw_extent`).
+    /// Regression guard: nitroxide emits Gouraud quads with an
+    /// off-screen vertex at (-1024, -1024) every frame; without the
+    /// gate they smeared over the whole sky in `--dump-hw` and not in
+    /// `--dump-display`.
+    #[test]
+    fn oversized_polygon_is_dropped_like_the_cpu() {
+        let quad = |x: i32, y: i32| {
+            GpuCmdLogEntry {
+                index: 0,
+                opcode: 0x38,
+                fifo: vec![
+                    0x38_5F_3F_37,
+                    ((y as u32 & 0x7FF) << 16) | (x as u32 & 0x7FF),
+                    0x00_5F_3F_37,
+                    (10 << 16) | 200,
+                    0x00_5F_3F_37,
+                    (100 << 16) | 10,
+                    0x00_5F_3F_37,
+                    (100 << 16) | 200,
+                ],
+            }
+        };
+        let mut t = Translator::new();
+        assert_eq!(
+            t.translate(&[quad(10, 10)]).total(),
+            6,
+            "in-extent quad must draw both halves"
+        );
+        // Hardware gates each half independently: only the half carrying
+        // the far vertex dies, exactly as `Gpu::draw_shaded_quad` does.
+        let mut t = Translator::new();
+        assert_eq!(
+            t.translate(&[quad(-1024, -1024)]).total(),
+            3,
+            "half carrying a vertex 1024+ away must be dropped"
+        );
+    }
+
 }
