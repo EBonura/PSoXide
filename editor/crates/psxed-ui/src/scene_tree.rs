@@ -25,6 +25,27 @@ pub(crate) fn compact_middle(text: &str, max_chars: usize) -> String {
     out
 }
 
+fn tree_row_text_regions(
+    rect: Rect,
+    text_left: f32,
+    show_detail: bool,
+    has_child_count: bool,
+) -> (f32, Option<Rect>) {
+    let accessories_left = rect.right() - if has_child_count { 56.0 } else { 28.0 };
+    let available = (accessories_left - text_left).max(0.0);
+    if !show_detail || available < 116.0 {
+        return (accessories_left.max(text_left), None);
+    }
+
+    let detail_width = (available * 0.45).clamp(56.0, 92.0);
+    let detail_left = accessories_left - detail_width;
+    let detail_rect = Rect::from_min_max(
+        Pos2::new(detail_left, rect.top()),
+        Pos2::new(accessories_left, rect.bottom()),
+    );
+    ((detail_left - 6.0).max(text_left), Some(detail_rect))
+}
+
 pub(crate) fn scene_node_label(scene: &psxed_project::Scene, id: NodeId) -> String {
     scene
         .node(id)
@@ -571,15 +592,7 @@ pub(crate) fn draw_ui_node_row(
     let painter = ui.painter_at(rect);
     let hovered = response.hovered();
 
-    if selected {
-        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 3.0, STUDIO_ACCENT_DIM);
-    } else if hovered {
-        painter.rect_filled(
-            rect.shrink2(Vec2::new(0.0, 1.0)),
-            3.0,
-            Color32::from_rgba_unmultiplied(42, 58, 70, 120),
-        );
-    }
+    paint_list_row(&painter, rect, selected, hovered);
 
     let indent = row.depth as f32 * 16.0;
     let content_left = rect.left() + 4.0 + indent;
@@ -590,7 +603,7 @@ pub(crate) fn draw_ui_node_row(
                 Pos2::new(line_x, rect.top()),
                 Pos2::new(line_x, rect.bottom()),
             ],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 86, 102, 92)),
+            Stroke::new(1.0, STUDIO_TREE_GUIDE),
         );
     }
 
@@ -621,10 +634,16 @@ pub(crate) fn draw_ui_node_row(
     };
     let text_left = icon_rect.right() + 7.0;
     let label = compact_middle(&row.name, dock_label_limit(row.depth));
+    let (name_clip_right, detail_rect) = tree_row_text_regions(
+        rect,
+        text_left,
+        row.id != UiNodeId::ROOT,
+        row.child_count > 0,
+    );
     painter
         .with_clip_rect(Rect::from_min_max(
             Pos2::new(text_left, rect.top()),
-            Pos2::new((rect.right() - 142.0).max(text_left + 56.0), rect.bottom()),
+            Pos2::new(name_clip_right, rect.bottom()),
         ))
         .text(
             Pos2::new(text_left, rect.center().y),
@@ -634,24 +653,21 @@ pub(crate) fn draw_ui_node_row(
             text_color,
         );
 
-    if row.id != UiNodeId::ROOT {
+    if let Some(detail_rect) = detail_rect {
         let detail = row
             .tag
             .as_ref()
             .map(|tag| format!("{}  #{}", row.kind, compact_middle(tag, 18)))
             .unwrap_or_else(|| row.kind.to_string());
-        painter.text(
-            Pos2::new(
-                (rect.right() - 136.0).max(text_left + 72.0),
-                rect.center().y,
-            ),
+        painter.with_clip_rect(detail_rect).text(
+            Pos2::new(detail_rect.left(), rect.center().y),
             Align2::LEFT_CENTER,
-            detail,
+            compact_middle(&detail, 18),
             FontId::proportional(11.0),
             if effectively_hidden {
                 Color32::from_rgb(84, 96, 108)
             } else if selected {
-                Color32::from_rgb(204, 229, 236)
+                STUDIO_TEXT
             } else {
                 STUDIO_TEXT_WEAK
             },
@@ -917,15 +933,7 @@ pub(crate) fn draw_scene_node_row(
     let hovered = response.hovered();
     let display_kind = scene_tree_kind_label(row.kind);
 
-    if selected {
-        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 3.0, STUDIO_ACCENT_DIM);
-    } else if hovered {
-        painter.rect_filled(
-            rect.shrink2(Vec2::new(0.0, 1.0)),
-            3.0,
-            Color32::from_rgba_unmultiplied(42, 58, 70, 120),
-        );
-    }
+    paint_list_row(&painter, rect, selected, hovered);
 
     let indent = row.depth as f32 * 16.0;
     let content_left = rect.left() + 4.0 + indent;
@@ -936,7 +944,7 @@ pub(crate) fn draw_scene_node_row(
                 Pos2::new(line_x, rect.top()),
                 Pos2::new(line_x, rect.bottom()),
             ],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 86, 102, 92)),
+            Stroke::new(1.0, STUDIO_TREE_GUIDE),
         );
     }
 
@@ -1002,6 +1010,12 @@ pub(crate) fn draw_scene_node_row(
     };
     let text_left = icon_rect.right() + 7.0;
     let text_pos = Pos2::new(text_left, rect.center().y);
+    let (name_clip_right, detail_rect) = tree_row_text_regions(
+        rect,
+        text_left,
+        row.id != NodeId::ROOT,
+        row.child_count > 0 && row.id != NodeId::ROOT,
+    );
 
     if in_rename {
         let edit_rect = Rect::from_min_size(
@@ -1029,11 +1043,6 @@ pub(crate) fn draw_scene_node_row(
             }
         }
     } else {
-        let name_clip_right = if row.id != NodeId::ROOT {
-            (rect.right() - 142.0).max(text_left + 72.0)
-        } else {
-            rect.right() - 28.0
-        };
         painter
             .with_clip_rect(Rect::from_min_max(
                 Pos2::new(text_left, rect.top()),
@@ -1048,23 +1057,22 @@ pub(crate) fn draw_scene_node_row(
             );
     }
 
-    if !in_rename && row.id != NodeId::ROOT {
-        painter.text(
-            Pos2::new(
-                (rect.right() - 136.0).max(text_pos.x + 78.0),
-                rect.center().y,
-            ),
-            Align2::LEFT_CENTER,
-            display_kind,
-            FontId::proportional(11.0),
-            if effectively_hidden {
-                Color32::from_rgb(84, 96, 108)
-            } else if selected {
-                Color32::from_rgb(204, 229, 236)
-            } else {
-                STUDIO_TEXT_WEAK
-            },
-        );
+    if !in_rename {
+        if let Some(detail_rect) = detail_rect {
+            painter.with_clip_rect(detail_rect).text(
+                Pos2::new(detail_rect.left(), rect.center().y),
+                Align2::LEFT_CENTER,
+                compact_middle(display_kind, 18),
+                FontId::proportional(11.0),
+                if effectively_hidden {
+                    Color32::from_rgb(84, 96, 108)
+                } else if selected {
+                    STUDIO_TEXT
+                } else {
+                    STUDIO_TEXT_WEAK
+                },
+            );
+        }
     }
 
     if row.child_count > 0 && row.id != NodeId::ROOT {
