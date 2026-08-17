@@ -1403,19 +1403,21 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     self.draw_project_identity(ui);
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     self.draw_main_menus(ctx, ui, playtest_status);
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     self.draw_build_play_controls(ui, playtest_status, play_metrics);
-                    ui.add_space(10.0);
-
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width().max(180.0), status_strip_height),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            self.draw_build_status_strip(ui, playtest_status);
-                        },
-                    );
+                    let remaining = ui.available_width();
+                    if remaining >= 80.0 {
+                        ui.add_space(8.0);
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width().max(1.0), status_strip_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                self.draw_build_status_strip(ui, playtest_status);
+                            },
+                        );
+                    }
                 });
             });
     }
@@ -1423,10 +1425,9 @@ impl EditorWorkspace {
     pub(crate) fn draw_project_identity(&mut self, ui: &mut egui::Ui) {
         let logo_texture = self.psoxide_logo_texture_id(ui.ctx());
         egui::Frame::new()
-            .fill(STUDIO_PANEL_DARK)
-            .stroke(Stroke::new(1.0, STUDIO_BORDER))
-            .corner_radius(egui::CornerRadius::same(4))
-            .inner_margin(egui::Margin::symmetric(4, 4))
+            .fill(Color32::TRANSPARENT)
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(2, 2))
             .show(ui, |ui| {
                 if let Some(texture_id) = logo_texture {
                     ui.add(egui::Image::new((texture_id, Vec2::splat(28.0))));
