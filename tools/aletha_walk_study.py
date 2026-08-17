@@ -30,7 +30,7 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from aletha_bvh_retarget import gait_window, import_bvh, retarget  # noqa: E402
+from aletha_bvh_retarget import gait_window, import_animation_source, retarget  # noqa: E402
 
 PREVIEW_FPS = 30
 
@@ -41,7 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", required=True, type=Path, help="Rigged GLB with takes")
     parser.add_argument("--take", help="Gait action name in the GLB (artist take)")
     parser.add_argument(
-        "--gait-bvh", type=Path, help="Retarget this MoMask/HumanML3D BVH onto the rig as the gait"
+        "--gait-bvh", "--gait-file", dest="gait_bvh", type=Path,
+        help="Retarget this source onto the rig as the gait: MoMask BVH, Mixamo FBX, "
+        "or a GLB animation library (UE-named rig, pick with --gait-take)",
+    )
+    parser.add_argument("--gait-take", help="Action name inside a multi-take gait source")
+    parser.add_argument(
+        "--loop-take", action="store_true",
+        help="The gait source is exactly one authored loop: cycle = whole take, no smoothing",
     )
     parser.add_argument(
         "--gait-window", type=int, nargs=2, metavar=("FIRST", "LAST"),
@@ -58,6 +65,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase-stem", default="walk_fwd")
     parser.add_argument("--metadata", type=Path, help="Phase-range JSON")
     parser.add_argument("--tempo", type=float, default=1.35, help="Gait speed-up baked in")
+    parser.add_argument(
+        "--cycle-frames", type=int, help="Override the detected gait cycle length (30 fps frames)"
+    )
+    parser.add_argument(
+        "--torso-keep",
+        type=float,
+        default=0.15,
+        help="Fraction of the torso's own motion kept around its mean gait "
+        "orientation (1 = untouched). Generated takes wander in pitch; the "
+        "mean forward lean survives, the pumping goes.",
+    )
+    parser.add_argument(
+        "--lean-offset-deg",
+        type=float,
+        default=0.0,
+        help="Extra constant forward torso lean added on top of the take's mean",
+    )
+    parser.add_argument(
+        "--arm-swing-deg",
+        type=float,
+        default=0.0,
+        help="Replace the take's arm motion with a procedural pumping cycle "
+        "locked to the legs (upper-arm swing amplitude; 0 = keep the take's arms)",
+    )
+    parser.add_argument("--elbow-deg", type=float, default=90.0, help="Procedural arms: elbow bend")
+    parser.add_argument(
+        "--arm-abduct-deg", type=float, default=10.0, help="Procedural arms: outward tilt"
+    )
+    parser.add_argument(
+        "--view", choices=("threequarter", "side", "front"), default="threequarter",
+        help="Review camera placement",
+    )
     parser.add_argument("--cruise-cycles", type=int, default=2)
     parser.add_argument("--idle-seconds", type=float, default=1.2)
     parser.add_argument("--transition-seconds", type=float, default=0.5)
@@ -136,9 +175,10 @@ def world_positions(
 
 def detect_cycle(positions: dict[str, list[Vector]], frames: int) -> int:
     """Autocorrelation over foot+hips world positions: the lag with minimal
-    mean distance to the unshifted signal, searched in 25%..75% of the take."""
+    mean distance to the unshifted signal, searched in 25%..90% of the take
+    (a single-cycle take's true period sits near its full length)."""
     best_lag, best_score = 0, float("inf")
-    for lag in range(frames // 4, (frames * 3) // 4):
+    for lag in range(frames // 4, (frames * 9) // 10):
         score = 0.0
         count = 0
         for series in positions.values():
@@ -149,6 +189,40 @@ def detect_cycle(positions: dict[str, list[Vector]], frames: int) -> int:
         if score < best_score:
             best_score, best_lag = score, lag
     return best_lag
+
+
+def stance_speed(
+    rig: bpy.types.Object,
+    action: bpy.types.Action,
+    feet: dict[str, list[Vector]],
+    hips: list[Vector],
+    first: int,
+) -> float:
+    """Ground speed implied by the retargeted gait: how fast the planted foot
+    slides backward under the hips (m/s at 30 fps). Independent of any root
+    travel, so it also works for in-place loops; this is the number the motor
+    must match to avoid foot skating."""
+    lh = bone_by_suffix(rig, "leftupperleg")
+    rh = bone_by_suffix(rig, "rightupperleg")
+    speeds = []
+    n = len(hips)
+    for series in feet.values():
+        zs = [p.z for p in series]
+        z0, zspan = min(zs), max(max(zs) - min(zs), 1e-6)
+        for i in range(1, n - 1):
+            if (series[i].z - z0) / zspan > 0.15:
+                continue
+            set_frame(first + i)
+            w = lambda name: (rig.matrix_world @ rig.pose.bones[name].matrix).translation
+            lateral = w(lh) - w(rh)
+            lateral.z = 0.0
+            if lateral.length < 1e-6:
+                continue
+            fwd = lateral.normalized().cross(Vector((0.0, 0.0, 1.0)))
+            rel = (series[i + 1] - hips[i + 1]) - (series[i - 1] - hips[i - 1])
+            speeds.append(-rel.dot(fwd) * 0.5 * PREVIEW_FPS)
+    speeds = sorted(v for v in speeds if v > 0.0)
+    return speeds[len(speeds) // 2] if speeds else 0.0
 
 
 def contact_frame(feet: dict[str, list[Vector]], cycle: int) -> int:
@@ -163,6 +237,202 @@ def contact_frame(feet: dict[str, list[Vector]], cycle: int) -> int:
             if score < best_score:
                 best_score, best = score, i
     return best
+
+
+def flatten_torso_lean(
+    rig: bpy.types.Object,
+    action: bpy.types.Action,
+    first: int,
+    frames: int,
+    keep: float,
+    offset_deg: float = 0.0,
+) -> None:
+    """Hold the torso's world-space lean at its mean (+ offset) over the gait window.
+
+    The lean (spine-base->neck axis vs vertical, in the facing plane) mostly
+    rides on the PELVIS rotation, which local-bone smoothing cannot see. Per
+    frame the deviation from the mean lean is measured in world space and the
+    Spine bone (root of the upper body; the legs are not its children) is
+    counter-rotated about the world lateral axis through its own head, so the
+    feet keep their placement while the torso holds its lean. `keep` leaves a
+    fraction of the natural deviation (stride bounce)."""
+    import math as _math
+
+    spine = bone_by_suffix(rig, "spine")
+    neck = bone_by_suffix(rig, "neck")
+    lh = bone_by_suffix(rig, "leftupperleg")
+    rh = bone_by_suffix(rig, "rightupperleg")
+    rig.animation_data.action = action
+    measures = []
+    for frame in range(first, first + frames + 1):
+        set_frame(frame)
+        w = lambda name: (rig.matrix_world @ rig.pose.bones[name].matrix).translation
+        axis = w(neck) - w(spine)
+        lateral = w(lh) - w(rh)
+        fwd = lateral.cross(Vector((0, 0, 1)))
+        fwd.z = 0.0
+        if fwd.length < 1e-6 or axis.length < 1e-6:
+            measures.append((frame, 0.0, Vector((1, 0, 0))))
+            continue
+        fwd.normalize()
+        horiz = Vector((axis.x, axis.y, 0.0))
+        lean = _math.atan2(horiz.dot(fwd), axis.z)
+        measures.append((frame, lean, lateral.normalized()))
+    mean = sum(lean for _, lean, _ in measures) / max(len(measures), 1)
+    offset = _math.radians(offset_deg)
+    for frame, lean, lateral in measures:
+        # new lean = mean + offset + keep * (lean - mean)
+        delta = (lean - mean) * (1.0 - keep) - offset
+        if abs(delta) < 1e-4:
+            continue
+        set_frame(frame)
+        pb = rig.pose.bones[spine]
+        head = pb.matrix.translation.copy()
+        correction = (
+            Matrix.Translation(head)
+            @ Matrix.Rotation(-delta, 4, lateral)
+            @ Matrix.Translation(-head)
+        )
+        pb.matrix = correction @ pb.matrix
+        bpy.context.view_layer.update()
+        pb.keyframe_insert("rotation_quaternion", frame=frame, group=spine)
+        pb.keyframe_insert("location", frame=frame, group=spine)
+    for fc in action.fcurves:
+        fc.update()
+
+
+def procedural_arms(
+    rig: bpy.types.Object,
+    action: bpy.types.Action,
+    first: int,
+    frames: int,
+    swing_deg: float,
+    elbow_deg: float,
+    abduct_deg: float,
+) -> None:
+    """Overwrite the arm swing with a clean pumping cycle locked to the legs.
+
+    Generated takes carry noisy, low-energy arms (elbows at the waist, hands
+    trailing). A run's arms are simple: upper arm swings about the shoulder in
+    opposition to the same-side leg, elbow held bent so the hand rides
+    forward-up when the arm is ahead. Phase comes straight from the feet
+    (right foot ahead => left arm forward), so it never desyncs from the
+    stride. Hands stay unmapped (idle pose)."""
+    import math as _math
+
+    lf, rf = bone_by_suffix(rig, "leftfoot"), bone_by_suffix(rig, "rightfoot")
+    lh, rh = bone_by_suffix(rig, "leftupperleg"), bone_by_suffix(rig, "rightupperleg")
+    arms = {
+        "left": (bone_by_suffix(rig, "leftupperarm"), bone_by_suffix(rig, "leftlowerarm")),
+        "right": (bone_by_suffix(rig, "rightupperarm"), bone_by_suffix(rig, "rightlowerarm")),
+    }
+    rig.animation_data.action = action
+    world3 = rig.matrix_world.to_3x3()
+    rest_dir, rest_rot = {}, {}
+    for ua, la in arms.values():
+        for name in (ua, la):
+            b = rig.data.bones[name]
+            rest_dir[name] = (world3 @ (b.tail_local - b.head_local)).normalized()
+            rest_rot[name] = (rig.matrix_world @ b.matrix_local).to_quaternion()
+
+    lo = int(action.frame_range[0])
+    hi = int(action.frame_range[1])
+    up = Vector((0.0, 0.0, 1.0))
+    samples = []
+    for frame in range(lo, hi + 1):
+        set_frame(frame)
+        w = lambda n: (rig.matrix_world @ rig.pose.bones[n].matrix).translation
+        left_dir = w(lh) - w(rh)
+        left_dir.z = 0.0
+        if left_dir.length < 1e-6:
+            left_dir = Vector((-1.0, 0.0, 0.0))
+        left_dir.normalize()
+        fwd = left_dir.cross(up).normalized()
+        samples.append((frame, left_dir, fwd, (w(rf) - w(lf)).dot(fwd)))
+    in_window = [d for f, _, _, d in samples if first <= f <= first + frames]
+    # Sinusoid amplitude from the RMS (a single foot pop must not shrink the
+    # whole swing); clamped to +-1 below.
+    dmax = (sum(d * d for d in in_window) / max(len(in_window), 1)) ** 0.5 * 2 ** 0.5 or 1.0
+
+    SWING_CENTRE = _math.radians(-15.0)
+    ELBOW_MODULATION = _math.radians(-15.0)
+    swing = _math.radians(swing_deg)
+    elbow = _math.radians(elbow_deg)
+    abduct = _math.radians(abduct_deg)
+    for frame, left_dir, fwd, d in samples:
+        set_frame(frame)
+        s = max(-1.0, min(1.0, d / dmax))
+        right_dir = -left_dir
+        for side, (ua, la) in arms.items():
+            out_dir = left_dir if side == "left" else right_dir
+            phase = s if side == "left" else -s
+            # Swing centred a little behind vertical (elbows ride behind the
+            # torso); the elbow closes slightly as the hand comes forward.
+            angle = SWING_CENTRE + swing * phase
+            bend = elbow + ELBOW_MODULATION * phase
+            hang = -up * _math.cos(abduct) + out_dir * _math.sin(abduct)
+            upper = Matrix.Rotation(angle, 3, right_dir) @ hang
+            lower = Matrix.Rotation(bend, 3, right_dir) @ upper
+            for name, direction in ((ua, upper), (la, lower)):
+                pb = rig.pose.bones[name]
+                head = (rig.matrix_world @ pb.matrix).translation
+                q = rest_dir[name].rotation_difference(direction) @ rest_rot[name]
+                world = Matrix.Translation(head) @ q.to_matrix().to_4x4()
+                pb.matrix = rig.matrix_world.inverted() @ world
+                bpy.context.view_layer.update()
+                pb.keyframe_insert("rotation_quaternion", frame=frame, group=name)
+    for fc in action.fcurves:
+        fc.update()
+
+
+def stabilize_torso(
+    rig: bpy.types.Object,
+    action: bpy.types.Action,
+    first: int,
+    frames: int,
+    keep: float,
+) -> None:
+    """Pull the torso chain toward its mean orientation over the gait window,
+    keeping `keep` of each frame's own deviation. Kills the slow forward/back
+    pitching the generator wanders through while preserving the mean lean and
+    a natural fraction of stride-coupled torso motion."""
+    if keep >= 0.999:
+        return
+    names = [
+        bone.name
+        for bone in rig.pose.bones
+        if bone.name.lower().endswith(("spine", "chest", "neck"))
+    ]
+    for name in names:
+        curves = [
+            fc
+            for fc in action.fcurves
+            if fc.data_path == f'pose.bones["{name}"].rotation_quaternion'
+        ]
+        if len(curves) != 4:
+            continue
+        curves.sort(key=lambda fc: fc.array_index)
+        qs = []
+        for frame in range(first, first + frames + 1):
+            qs.append(Quaternion([fc.evaluate(frame) for fc in curves]))
+        reference = qs[0]
+        total = [0.0, 0.0, 0.0, 0.0]
+        for q in qs:
+            aligned = -q if reference.dot(q) < 0 else q
+            for i in range(4):
+                total[i] += aligned[i]
+        mean = Quaternion(total).normalized()
+        for offset, q in enumerate(qs):
+            aligned = -q if mean.dot(q) < 0 else q
+            stabilized = mean.slerp(aligned, keep)
+            frame = first + offset
+            for fc in curves:
+                for key in fc.keyframe_points:
+                    if abs(key.co.x - frame) < 0.5:
+                        key.co.y = stabilized[fc.array_index]
+                        break
+        for fc in curves:
+            fc.update()
 
 
 def smoothstep(v: float) -> float:
@@ -339,14 +609,23 @@ def main() -> None:
     idle_frames = int(idle.frame_range[1] - idle.frame_range[0]) or 1
     take_label = args.take
     if args.gait_bvh:
-        src = import_bvh(args.gait_bvh.expanduser())
+        src = import_animation_source(args.gait_bvh.expanduser(), args.gait_take)
         src_action = src.animation_data.action
         src_first, src_last = int(src_action.frame_range[0]), int(src_action.frame_range[1])
-        window = tuple(args.gait_window) if args.gait_window else gait_window(src, src_first, src_last)
-        gait, speed = retarget(src, rig, "generated_gait", window[0], window[1])
+        if args.gait_window:
+            window = tuple(args.gait_window)
+        elif args.loop_take:
+            window = (src_first, src_last)
+        else:
+            window = gait_window(src, src_first, src_last)
+        gait, speed = retarget(
+            src, rig, "generated_gait", window[0], window[1], smooth=not args.loop_take
+        )
         gait_first, gait_frames = window[0], max(1, window[1] - window[0])
-        take_label = args.gait_bvh.name
-        print(f"[study] bvh window={window} of {src_first}..{src_last} source_speed={speed:.3f} m/s")
+        take_label = args.gait_take or args.gait_bvh.name
+        print(f"[study] gait window={window} of {src_first}..{src_last} source_speed={speed:.3f} m/s")
+        if args.loop_take:
+            args.cycle_frames = gait_frames
     elif args.take:
         gait = action_named(args.take)
         gait_first = int(gait.frame_range[0])
@@ -365,7 +644,15 @@ def main() -> None:
         "right": world_positions(rig, gait, right, gait_first, gait_frames),
     }
     hips_track = {"hips": world_positions(rig, gait, hips, gait_first, gait_frames)}
-    cycle = detect_cycle({**feet, **hips_track}, gait_frames)
+    print(f"[study] stance_speed={stance_speed(rig, gait, feet, hips_track['hips'], gait_first):.3f} m/s")
+    stabilize_torso(rig, gait, gait_first, gait_frames, args.torso_keep)
+    flatten_torso_lean(rig, gait, gait_first, gait_frames, args.torso_keep, args.lean_offset_deg)
+    if args.arm_swing_deg > 0.0:
+        procedural_arms(
+            rig, gait, gait_first, gait_frames,
+            args.arm_swing_deg, args.elbow_deg, args.arm_abduct_deg,
+        )
+    cycle = args.cycle_frames or detect_cycle({**feet, **hips_track}, gait_frames)
     drift = (hips_track["hips"][-1] - hips_track["hips"][0]).length
     # Loop exactly one cycle, the last full one in the take (past any run-in),
     # so the wrap lands on the same phase instead of hitching.
@@ -426,6 +713,7 @@ def main() -> None:
         for fc in gait.fcurves
         if fc.data_path.startswith('pose.bones["')
     }
+    SEAM = 3  # cruise frames blended into the loop-start pose at each wrap
     frames_keyed = 0
     for output_index in range(total):
         idle_frame = idle.frame_range[0] + (output_index % idle_frames)
@@ -436,7 +724,25 @@ def main() -> None:
             if envelope > 0.0
             else base
         )
-
+        # Loop crossfade: the take continues PAST the loop window on both
+        # sides (loop_at > 0 picks the last cycle), so the frames just before
+        # gait_first are exactly what flows into the loop start. Blending the
+        # cycle's tail toward those pre-window frames makes the wrap C1-
+        # continuous instead of hoping the detected cycle is exact.
+        in_cruise = splits["cruise"][0] <= output_index + 1 <= splits["cruise"][1]
+        if envelope > 0.0 and in_cruise and cycle > 2 * SEAM and gait_first > SEAM:
+            cycle_pos = phase % cycle
+            to_end = cycle - cycle_pos
+            if to_end <= SEAM:
+                t = (SEAM - to_end + 1) / (SEAM + 1)
+                pre = sample_pose(rig, gait, gait_first + cycle_pos - cycle)
+                for bone_name, (loc0, rot0, sc0) in layer.items():
+                    p_loc, p_rot, p_sc = pre[bone_name]
+                    layer[bone_name] = (
+                        loc0.lerp(p_loc, t),
+                        rot0.slerp(p_rot, t),
+                        sc0.lerp(p_sc, t),
+                    )
         rig.animation_data.action = output_action
         out_frame = output_index + 1
         for bone in rig.pose.bones:
@@ -464,6 +770,61 @@ def main() -> None:
     scene.frame_start, scene.frame_end = 1, total
     scene.frame_set(1)
 
+    # Jitter metric over the cruise: mean second difference of joint angles,
+    # deg/frame^2 (higher = twitchier). Printed for candidate pre-screening.
+    c0, c1 = splits["cruise"]
+    prev_step = None
+    total_jerk = 0.0
+    jerk_samples = 0
+    prev_pose = None
+    for frame in range(c0, c1 + 1):
+        pose = sample_pose(rig, output_action, frame)
+        if prev_pose is not None:
+            step = {
+                name: prev_pose[name][1].rotation_difference(pose[name][1]).angle
+                for name in pose
+            }
+            if prev_step is not None:
+                for name, angle in step.items():
+                    total_jerk += abs(angle - prev_step[name])
+                    jerk_samples += 1
+            prev_step = step
+        prev_pose = pose
+    if jerk_samples:
+        import math as _math
+        print(f"[study] cruise_jerk_deg={_math.degrees(total_jerk / jerk_samples):.3f}")
+
+    # Torso lean trace over the cruise: the angle of the spine-base->neck
+    # axis from vertical, signed forward, per frame. THE anti-bob metric:
+    # its std is what "the torso holds its lean" means numerically.
+    import math as _math
+    spine_name = bone_by_suffix(rig, "spine")
+    neck_name = bone_by_suffix(rig, "neck")
+    lh = bone_by_suffix(rig, "leftupperleg")
+    rh = bone_by_suffix(rig, "rightupperleg")
+    leans = []
+    for frame in range(c0, c1 + 1):
+        sample_pose(rig, output_action, frame)
+        bpy.context.view_layer.update()
+        w = lambda name: (rig.matrix_world @ rig.pose.bones[name].matrix).translation
+        axis = w(neck_name) - w(spine_name)
+        lateral = w(lh) - w(rh)
+        fwd = lateral.cross(Vector((0, 0, 1)))
+        fwd.z = 0.0
+        if fwd.length < 1e-6 or axis.length < 1e-6:
+            continue
+        fwd.normalize()
+        horiz = Vector((axis.x, axis.y, 0.0))
+        lean = _math.degrees(_math.atan2(horiz.dot(fwd), axis.z))
+        leans.append(lean)
+    if leans:
+        mean = sum(leans) / len(leans)
+        std = (sum((v - mean) ** 2 for v in leans) / len(leans)) ** 0.5
+        print(
+            f"[study] cruise_lean_deg mean={mean:.1f} min={min(leans):.1f} "
+            f"max={max(leans):.1f} std={std:.2f}"
+        )
+
     # Review render: studio workbench, camera framing the whole figure.
     out = args.output.expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -488,7 +849,12 @@ def main() -> None:
     aim = bpy.data.objects.new("Study_Aim", None)
     bpy.context.collection.objects.link(aim)
     aim.location = center
-    camera.location = center + Vector((1.3, -1.9, 0.35)) * height
+    view_offset = {
+        "threequarter": Vector((1.0, -1.45, 0.25)),
+        "side": Vector((1.75, 0.0, 0.15)),
+        "front": Vector((0.0, -1.75, 0.15)),
+    }[args.view]
+    camera.location = center + view_offset * height
     track = camera.constraints.new(type="TRACK_TO")
     track.target = aim
     track.track_axis = "TRACK_NEGATIVE_Z"
