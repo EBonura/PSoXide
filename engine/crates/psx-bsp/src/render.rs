@@ -202,6 +202,202 @@ fn load_view_with_coordinates(camera: Camera, coordinates: Mat3I16) -> ViewTrans
 }
 
 /// Cached PVS and projection scratch for the XBSP render path.
+/// Projection parameters the brush-face frustum clip is built from: the GTE
+/// H register and the screen half-extents the caller projects into, plus a
+/// pixel margin kept outside the visible edge and the near distance in world
+/// units.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ViewProjection {
+    pub focal_length: i32,
+    pub half_width: i32,
+    pub half_height: i32,
+    pub edge_margin: i32,
+    pub near_world: i32,
+}
+
+impl ViewProjection {
+    /// The widest projection any consumer uses (H=160, 90 degree horizontal
+    /// FOV): a consumer that never calls `set_view_projection` clips less
+    /// than it could, never more.
+    pub const DEFAULT: Self = Self {
+        focal_length: 160,
+        half_width: 160,
+        half_height: 120,
+        edge_margin: 16,
+        near_world: 8,
+    };
+}
+
+/// Frustum planes in the space the loaded GTE view transforms from (world
+/// for the world model, model-local for movers): `dot(normal, p) + offset >= 0`
+/// keeps `p`. Normals are the view rows combined per plane (Q12), offsets are
+/// in the same Q12 domain; dot products run in i64.
+///
+/// Brush faces are not clipped by the GPU: a face with a vertex behind the
+/// camera projects to garbage or to a primitive beyond the 1023x511 GPU limit
+/// and is dropped whole, which blacks out entire rooms when the third-person
+/// camera is cornered. Clipping the polygon here, before projection, keeps
+/// every emitted vertex inside the frustum, so nothing the GPU receives can
+/// be oversize.
+#[derive(Copy, Clone, Debug)]
+pub struct FrustumPlanes {
+    planes: [([i32; 3], i64); 5],
+}
+
+impl FrustumPlanes {
+    /// Build from the view rotation/translation currently loaded in the GTE.
+    /// The view may carry a uniform scale (PXBSP loads x3); the near distance
+    /// is scaled by the row length so `near_world` stays in world units.
+    pub fn from_view(
+        rotation: &Mat3I16,
+        translation: GteVec3I32,
+        projection: ViewProjection,
+    ) -> Self {
+        let row = |i: usize| -> [i32; 3] {
+            [
+                rotation.m[i][0] as i32,
+                rotation.m[i][1] as i32,
+                rotation.m[i][2] as i32,
+            ]
+        };
+        let (right, down, forward) = (row(0), row(1), row(2));
+        let scale_q12 = isqrt_i64(
+            forward[0] as i64 * forward[0] as i64
+                + forward[1] as i64 * forward[1] as i64
+                + forward[2] as i64 * forward[2] as i64,
+        ) as i32;
+        let near_view = projection.near_world.saturating_mul(scale_q12) >> 12;
+        // near: forward.p + T.z >= near_view
+        let near = (forward, ((translation.z - near_view) as i64) << 12);
+        // side planes: |view_x| <= (half_w + margin)/H * view_z, same for y.
+        let kx = projection.half_width + projection.edge_margin;
+        let ky = projection.half_height + projection.edge_margin;
+        let h = projection.focal_length.max(1);
+        let combine = |axis: [i32; 3], axis_t: i32, k: i32, sign: i32| -> ([i32; 3], i64) {
+            let n = [
+                k * forward[0] - sign * h * axis[0],
+                k * forward[1] - sign * h * axis[1],
+                k * forward[2] - sign * h * axis[2],
+            ];
+            let c =
+                (k as i64 * translation.z as i64 - sign as i64 * h as i64 * axis_t as i64) << 12;
+            (n, c)
+        };
+        Self {
+            planes: [
+                near,
+                combine(right, translation.x, kx, 1),
+                combine(right, translation.x, kx, -1),
+                combine(down, translation.y, ky, 1),
+                combine(down, translation.y, ky, -1),
+            ],
+        }
+    }
+
+    #[inline]
+    fn distance(plane: &([i32; 3], i64), position: [i16; 3]) -> i64 {
+        plane.0[0] as i64 * position[0] as i64
+            + plane.0[1] as i64 * position[1] as i64
+            + plane.0[2] as i64 * position[2] as i64
+            + plane.1
+    }
+
+    /// Clip a convex polygon in place. Returns the vertex count after
+    /// clipping (0 when nothing remains). `vertices` must have room for
+    /// `count + 5` records; `scratch` the same.
+    pub fn clip_polygon(
+        &self,
+        vertices: &mut [ClassicAffineVertex],
+        count: usize,
+        scratch: &mut [ClassicAffineVertex],
+    ) -> usize {
+        let mut count = count;
+        // Trivial accept: every vertex inside every plane (the common case).
+        let mut all_inside = true;
+        'planes: for plane in &self.planes {
+            for v in &vertices[..count] {
+                if Self::distance(plane, v.position) < 0 {
+                    all_inside = false;
+                    break 'planes;
+                }
+            }
+        }
+        if all_inside {
+            return count;
+        }
+        for plane in &self.planes {
+            if count < 3 {
+                return 0;
+            }
+            let mut out = 0usize;
+            let mut prev = vertices[count - 1];
+            let mut prev_d = Self::distance(plane, prev.position);
+            for i in 0..count {
+                let cur = vertices[i];
+                let cur_d = Self::distance(plane, cur.position);
+                if (prev_d >= 0) != (cur_d >= 0) {
+                    // Crossing: interpolate at t = prev_d / (prev_d - cur_d), Q16.
+                    let t = ((prev_d << 16) / (prev_d - cur_d)).clamp(0, 1 << 16);
+                    scratch[out] = lerp_vertex(&prev, &cur, t);
+                    out += 1;
+                }
+                if cur_d >= 0 {
+                    scratch[out] = cur;
+                    out += 1;
+                }
+                prev = cur;
+                prev_d = cur_d;
+            }
+            vertices[..out].copy_from_slice(&scratch[..out]);
+            count = out;
+        }
+        if count < 3 {
+            0
+        } else {
+            count
+        }
+    }
+}
+
+fn lerp_vertex(
+    a: &ClassicAffineVertex,
+    b: &ClassicAffineVertex,
+    t_q16: i64,
+) -> ClassicAffineVertex {
+    let lerp_i = |x: i32, y: i32| -> i32 { (x as i64 + (((y - x) as i64 * t_q16) >> 16)) as i32 };
+    let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
+    let ca = a.color;
+    let cb = b.color;
+    let color = (lerp_u8(ca as u8, cb as u8) as u32)
+        | ((lerp_u8((ca >> 8) as u8, (cb >> 8) as u8) as u32) << 8)
+        | ((lerp_u8((ca >> 16) as u8, (cb >> 16) as u8) as u32) << 16)
+        | (ca & 0xff00_0000);
+    ClassicAffineVertex {
+        position: [
+            lerp_i(a.position[0] as i32, b.position[0] as i32).clamp(-32768, 32767) as i16,
+            lerp_i(a.position[1] as i32, b.position[1] as i32).clamp(-32768, 32767) as i16,
+            lerp_i(a.position[2] as i32, b.position[2] as i32).clamp(-32768, 32767) as i16,
+        ],
+        uv: [lerp_u8(a.uv[0], b.uv[0]), lerp_u8(a.uv[1], b.uv[1])],
+        color,
+        screen: [0, 0],
+        depth: 0,
+    }
+}
+
+fn isqrt_i64(value: i64) -> i64 {
+    if value <= 0 {
+        return 0;
+    }
+    let mut x = value;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + value / x) / 2;
+    }
+    x
+}
+
 pub struct Renderer {
     frame: u32,
     face_visible: Vec<u8>,
@@ -213,11 +409,20 @@ pub struct Renderer {
     visible_entity_indices: Vec<u16>,
     cached_frustum: Option<(Camera, [AabbClipPlane; 4])>,
     light_styles: [u16; DUMMY_LIGHT_STYLE + 1],
+    /// Projection the brush-face frustum clip assumes (see
+    /// [`Renderer::set_view_projection`]).
+    view_projection: ViewProjection,
 }
 
 impl Renderer {
     pub fn new() -> Self {
         Self::with_capacities(MAX_FACE_COUNT, MAX_ALIAS_VERTICES, MAX_RENDER_ENTITIES)
+    }
+
+    /// Declare the projection the caller renders with (GTE H and screen
+    /// half-extents), so the brush-face frustum clip matches it.
+    pub fn set_view_projection(&mut self, projection: ViewProjection) {
+        self.view_projection = projection;
     }
 
     /// Construct the render scratch needed by a validated PXBSP world.
@@ -246,6 +451,7 @@ impl Renderer {
             alias_projected: vec![ClassicAliasProjectedVertex::default(); alias_vertex_count],
             visible_entity_indices: Vec::with_capacity(render_entity_count),
             cached_frustum: None,
+            view_projection: ViewProjection::DEFAULT,
             light_styles,
         }
     }
@@ -458,10 +664,13 @@ impl Renderer {
         scene::load_rotation(&view.rotation);
         scene::load_translation(view.translation);
 
+        let frustum =
+            FrustumPlanes::from_view(&view.rotation, view.translation, self.view_projection);
         let frame = if self.mark_visible_pxbsp_faces(map, camera.origin) {
             self.draw_pxbsp_faces(
                 map,
                 camera.origin,
+                &frustum,
                 materials,
                 material_tick,
                 PxbspFaceSelection::VisibleWorld,
@@ -509,6 +718,7 @@ impl Renderer {
         );
         scene::load_rotation(&rotation);
         scene::load_translation(translation);
+        let frustum = FrustumPlanes::from_view(&rotation, translation, self.view_projection);
 
         // ponytail: the first mover slice scans its bounded face range. The
         // recursive near/far node walker with bounds culling replaces this
@@ -516,6 +726,7 @@ impl Renderer {
         let frame = self.draw_pxbsp_faces(
             map,
             local_camera,
+            &frustum,
             materials,
             material_tick,
             PxbspFaceSelection::ModelRange {
@@ -532,6 +743,7 @@ impl Renderer {
         &self,
         map: &PxbspResidentMap,
         camera_origin: Vec3I32,
+        frustum: &FrustumPlanes,
         materials: &[Option<PxbspTextureBinding>],
         material_tick: u32,
         selection: PxbspFaceSelection,
@@ -545,6 +757,10 @@ impl Renderer {
         let mut batch_vertices =
             [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES];
         let mut batch_surfaces = [ClassicAffineWindowedBatchSurface::default(); BATCH_MAX_SURFACES];
+        // One face at a time is materialized here, frustum-clipped, then
+        // copied into the batch (a clip adds at most one vertex per plane).
+        let mut face_vertices = [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + 8];
+        let mut clip_scratch = [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + 8];
         let mut batch_vertex_count = 0usize;
         let mut batch_surface_count = 0usize;
         let mut batch_worst_words = 0usize;
@@ -571,10 +787,24 @@ impl Renderer {
                 continue;
             }
 
-            let vertex_count = face.vertex_count as usize;
-            if vertex_count > BATCH_MAX_VERTICES {
+            let source_count = face.vertex_count as usize;
+            if source_count > BATCH_MAX_VERTICES {
                 stats.packet_overflow_avoided = true;
                 break;
+            }
+            let state = pxbsp_material_state(material, binding, material_tick);
+            self.materialize_pxbsp_face(
+                map,
+                face,
+                state.uv_offset,
+                &mut face_vertices[..source_count],
+            );
+            let vertex_count =
+                frustum.clip_polygon(&mut face_vertices, source_count, &mut clip_scratch);
+            if vertex_count == 0 || vertex_count > BATCH_MAX_VERTICES {
+                // Fully outside the frustum (or too many vertices after the
+                // clip for one batch, which a face this size never is).
+                continue;
             }
             let face_worst_words = (vertex_count - 2) * WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE;
             if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
@@ -607,7 +837,6 @@ impl Renderer {
                 break;
             }
 
-            let state = pxbsp_material_state(material, binding, material_tick);
             if material.flags & crate::pxbsp::material_flags::LAYERED_SKY != 0 {
                 // quake-psx layered sky: the atlas holds a masked
                 // foreground tile (left) and a solid background tile
@@ -648,12 +877,8 @@ impl Renderer {
                 );
                 batch_surfaces[batch_surface_count] = layers[0];
                 batch_surfaces[batch_surface_count + 1] = layers[1];
-                self.materialize_pxbsp_face(
-                    map,
-                    face,
-                    state.uv_offset,
-                    &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
-                );
+                batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count]
+                    .copy_from_slice(&face_vertices[..vertex_count]);
                 batch_vertex_count += vertex_count;
                 batch_surface_count += 2;
                 batch_worst_words += face_worst_words * 2;
@@ -673,12 +898,8 @@ impl Renderer {
                 texture_window_word: binding.texture_window_word,
                 color_command_word: state.color_command_word,
             };
-            self.materialize_pxbsp_face(
-                map,
-                face,
-                state.uv_offset,
-                &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
-            );
+            batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count]
+                .copy_from_slice(&face_vertices[..vertex_count]);
             batch_vertex_count += vertex_count;
             batch_surface_count += 1;
             batch_worst_words += face_worst_words;
@@ -1702,5 +1923,87 @@ mod tests {
                 &mut packets,
             )
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod frustum_tests {
+    use super::*;
+
+    fn planes_for(origin: [i32; 3], yaw: i16, pitch: i16) -> (FrustumPlanes, ViewTransform) {
+        psx_gte::host::reset();
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: origin[0] << 12,
+                y: origin[1] << 12,
+                z: origin[2] << 12,
+            },
+            angles: [pitch, yaw, 0],
+        };
+        let view = load_pxbsp_view(camera);
+        let projection = ViewProjection {
+            focal_length: 320,
+            half_width: 160,
+            half_height: 120,
+            ..ViewProjection::DEFAULT
+        };
+        (
+            FrustumPlanes::from_view(&view.rotation, view.translation, projection),
+            view,
+        )
+    }
+
+    fn vertex(p: [i16; 3]) -> ClassicAffineVertex {
+        ClassicAffineVertex {
+            position: p,
+            uv: [0, 0],
+            color: 0x808080,
+            screen: [0, 0],
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn point_in_front_of_the_cornered_camera_survives_the_clip() {
+        // The lap-tape pose that blacked out: camera at (37,70,273) looking
+        // roughly -Z (engine orbit yaw 0 -> PXBSP yaw 1024) and a little down.
+        let (planes, _) = planes_for([37, 70, 273], 1024, 100);
+        // The far wall ahead of the camera (x across, full height, z=130).
+        let mut quad = [
+            vertex([16, 0, 130]),
+            vertex([200, 0, 130]),
+            vertex([200, 192, 130]),
+            vertex([16, 192, 130]),
+        ];
+        let mut scratch = [vertex([0; 3]); 16];
+        let mut verts = [vertex([0; 3]); 16];
+        verts[..4].copy_from_slice(&quad);
+        let n = planes.clip_polygon(&mut verts, 4, &mut scratch);
+        assert!(
+            n >= 3,
+            "far wall in front of the camera was clipped away (n={n})"
+        );
+        // A wall face that runs from behind the camera to far ahead keeps its
+        // far part.
+        quad = [
+            vertex([16, 0, 340]),
+            vertex([16, 192, 340]),
+            vertex([16, 192, 100]),
+            vertex([16, 0, 100]),
+        ];
+        verts[..4].copy_from_slice(&quad);
+        let n = planes.clip_polygon(&mut verts, 4, &mut scratch);
+        assert!(
+            n >= 3,
+            "side wall spanning the near plane was clipped away (n={n})"
+        );
+        for v in &verts[..n] {
+            let d = FrustumPlanes::distance(&planes.planes[0], v.position);
+            assert!(
+                d >= -(1i64 << 14),
+                "clipped vertex behind the near plane: {:?} d={d}",
+                v.position
+            );
+        }
     }
 }
