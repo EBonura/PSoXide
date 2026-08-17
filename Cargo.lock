@@ -3278,6 +3278,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-bsp"
+version = "0.1.0"
+dependencies = [
+ "psx-engine",
+ "psx-math",
+]
+
+[[package]]
 name = "psx-engine"
 version = "0.1.0"
 dependencies = [
@@ -3482,6 +3490,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "psx-asset",
+ "psx-bsp",
  "psx-engine",
  "psx-iso",
  "psx-level",
