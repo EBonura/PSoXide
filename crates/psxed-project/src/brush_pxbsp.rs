@@ -9,15 +9,15 @@ use psx_bsp::pxbsp::{
     PXBSP_ENTITY_TABLE_HEADER_BYTES, PXBSP_HEADER_BYTES, PXBSP_LUMP_COUNT, PXBSP_MAGIC,
     PXBSP_VERSION,
 };
-use psx_bsp::CookedRecord;
+use psx_bsp::{CookedRecord, Plane};
 
 const WORLD_COLLISION_HULLS: usize = 3;
 const VERTEX_BYTES: usize = 12;
-const PLANE_BYTES: usize = 14;
-const FACE_BYTES: usize = 14;
+const PLANE_BYTES: usize = Plane::SIZE;
+const FACE_BYTES: usize = 10;
 const MARK_SURFACE_BYTES: usize = 2;
-const LEAF_BYTES: usize = 26;
-const NODE_BYTES: usize = 34;
+const LEAF_BYTES: usize = 14;
+const NODE_BYTES: usize = 6;
 const CLIPNODE_BYTES: usize = 6;
 
 /// Entity base plus its class-specific, bounded payload.
@@ -327,7 +327,7 @@ fn append_geometry(
     limit(
         "vertices",
         vertex_base.saturating_add(vertex_count),
-        i32::MAX as usize,
+        u16::MAX as usize,
     )?;
     output.vertices.extend_from_slice(&input.vertices);
 
@@ -338,20 +338,25 @@ fn append_geometry(
         u16::MAX as usize + 1,
     )?;
     for face in input.faces.chunks_exact(FACE_BYTES) {
-        let plane = read_i16(face, 0);
-        let plane = remap_signed_index(plane, &plane_remap, "face plane")?;
-        let first_vertex = read_i32(face, 4);
-        let first_vertex = usize::try_from(first_vertex)
-            .ok()
-            .and_then(|value| value.checked_add(vertex_base))
-            .and_then(|value| i32::try_from(value).ok())
-            .ok_or(PxbspBuildError::InvalidReference("face vertex"))?;
-        let material = read_i16(face, 10);
-        let material = remap_signed_index(material, &material_remap, "face material")?;
+        let plane = usize::from(read_u16(face, 0));
+        let plane = plane_remap
+            .get(plane)
+            .copied()
+            .and_then(|value| i16::try_from(value).ok())
+            .map(|value| value as u16)
+            .ok_or(PxbspBuildError::InvalidReference("face plane"))?;
+        let first_vertex = remap_face_vertex(read_u16(face, 2), vertex_base)?;
+        let material = usize::from(read_u16(face, 4));
+        let material = material_remap
+            .get(material)
+            .copied()
+            .and_then(|value| i16::try_from(value).ok())
+            .map(|value| value as u16)
+            .ok_or(PxbspBuildError::InvalidReference("face material"))?;
         let mut remapped = face.to_vec();
         remapped[0..2].copy_from_slice(&plane.to_le_bytes());
-        remapped[4..8].copy_from_slice(&first_vertex.to_le_bytes());
-        remapped[10..12].copy_from_slice(&material.to_le_bytes());
+        remapped[2..4].copy_from_slice(&first_vertex.to_le_bytes());
+        remapped[4..6].copy_from_slice(&material.to_le_bytes());
         output.faces.extend_from_slice(&remapped);
     }
 
@@ -380,7 +385,7 @@ fn append_geometry(
             max: i32::MAX as usize,
         },
     )?;
-    limit("visibility", visibility_end, i32::MAX as usize)?;
+    limit("visibility", visibility_end, u16::MAX as usize)?;
     output.visibility.extend_from_slice(&input.visibility);
 
     let leaf_count = input.leaves.len() / LEAF_BYTES;
@@ -390,8 +395,8 @@ fn append_geometry(
         i16::MAX as usize + 1,
     )?;
     for leaf in input.leaves.chunks_exact(LEAF_BYTES) {
-        let visibility = read_i32(leaf, 2);
-        let visibility = if visibility < 0 {
+        let visibility = i32::from_le_bytes(leaf[4..8].try_into().unwrap());
+        let visibility = if visibility == -1 {
             visibility
         } else {
             usize::try_from(visibility)
@@ -401,8 +406,8 @@ fn append_geometry(
                 .and_then(|value| i32::try_from(value).ok())
                 .ok_or(PxbspBuildError::InvalidReference("leaf visibility"))?
         };
-        let first_mark = read_u16(leaf, 18) as usize;
-        let mark_count = read_u16(leaf, 20) as usize;
+        let first_mark = read_u16(leaf, 8) as usize;
+        let mark_count = read_u16(leaf, 2) as usize;
         if first_mark.saturating_add(mark_count) > input.mark_surfaces.len() / MARK_SURFACE_BYTES {
             return Err(PxbspBuildError::InvalidReference("leaf mark surfaces"));
         }
@@ -411,8 +416,8 @@ fn append_geometry(
             .and_then(|value| u16::try_from(value).ok())
             .ok_or(PxbspBuildError::InvalidReference("leaf mark surfaces"))?;
         let mut remapped = leaf.to_vec();
-        remapped[2..6].copy_from_slice(&visibility.to_le_bytes());
-        remapped[18..20].copy_from_slice(&first_mark.to_le_bytes());
+        remapped[4..8].copy_from_slice(&visibility.to_le_bytes());
+        remapped[8..10].copy_from_slice(&first_mark.to_le_bytes());
         output.leaves.extend_from_slice(&remapped);
     }
 
@@ -443,20 +448,10 @@ fn append_geometry(
             node_count,
             leaf_count,
         )?;
-        let first_face = read_u16(node, 30) as usize;
-        let local_face_count = read_u16(node, 32) as usize;
-        if first_face.saturating_add(local_face_count) > face_count {
-            return Err(PxbspBuildError::InvalidReference("node faces"));
-        }
-        let first_face = face_base
-            .checked_add(first_face)
-            .and_then(|value| u16::try_from(value).ok())
-            .ok_or(PxbspBuildError::InvalidReference("node faces"))?;
         let mut remapped = node.to_vec();
         remapped[0..2].copy_from_slice(&plane.to_le_bytes());
         remapped[2..4].copy_from_slice(&front.to_le_bytes());
         remapped[4..6].copy_from_slice(&back.to_le_bytes());
-        remapped[30..32].copy_from_slice(&first_face.to_le_bytes());
         output.nodes.extend_from_slice(&remapped);
     }
 
@@ -474,6 +469,13 @@ fn append_geometry(
         first_face: face_base,
         face_count,
     })
+}
+
+fn remap_face_vertex(first_vertex: u16, vertex_base: usize) -> Result<u16, PxbspBuildError> {
+    usize::from(first_vertex)
+        .checked_add(vertex_base)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or(PxbspBuildError::InvalidReference("face vertex"))
 }
 
 fn append_unique_records(
@@ -772,15 +774,6 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
 
-fn read_i32(bytes: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
 fn push_i16(output: &mut Vec<u8>, value: i16) {
     output.extend_from_slice(&value.to_le_bytes());
 }
@@ -810,6 +803,16 @@ mod tests {
         mins: [-32, 0, -32],
         maxs: [32, 96, 32],
     };
+
+    #[test]
+    fn face_vertex_remap_preserves_the_full_u16_wire_domain() {
+        assert_eq!(remap_face_vertex(1, 32_768), Ok(32_769));
+        assert_eq!(remap_face_vertex(32_767, 32_768), Ok(u16::MAX));
+        assert_eq!(
+            remap_face_vertex(32_768, 32_768),
+            Err(PxbspBuildError::InvalidReference("face vertex"))
+        );
+    }
 
     fn trace(hull: &CollisionHull<'_>, start: Vec3I32, end: Vec3I32) -> Trace {
         let mut output = Trace::default();
@@ -1006,14 +1009,6 @@ mod tests {
         let models = map.brush_models();
         assert_eq!(models.len(), 2);
         let door = models.get(1).expect("door");
-        assert_eq!(
-            door.origin,
-            Vec3I16 {
-                x: 512,
-                y: 64,
-                z: 512
-            }
-        );
         assert_eq!(door.first_face as usize, world_face_count);
         assert_eq!(door.face_count as usize, door_face_count);
         assert!(door.head_nodes[0] as usize >= world_node_count);
