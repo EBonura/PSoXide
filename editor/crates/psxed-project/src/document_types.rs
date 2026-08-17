@@ -156,8 +156,7 @@ pub struct EditorWorkspaceState {
 /// This affects embedded play and generated runtime manifests. The editor
 /// preview remains the reference view, but the PS1 path needs explicit
 /// tradeoffs between stable ordering and per-triangle work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RuntimeDepthSortMode {
     /// Use the legacy fixed cell depth key for every cached surface.
     FixedCell,
@@ -208,7 +207,6 @@ impl RuntimeDepthSortMode {
     }
 }
 
-
 /// Default projected edge threshold for runtime room subdivision.
 ///
 /// `0` disables visual subdivision and keeps splitting limited to PS1
@@ -220,8 +218,7 @@ pub(crate) const fn default_runtime_texture_split_max_edge() -> u16 {
 }
 
 /// Scope for runtime room triangle subdivision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RuntimeTextureSplitMode {
     /// Apply the edge threshold to every cached room surface.
     #[default]
@@ -260,10 +257,8 @@ impl RuntimeTextureSplitMode {
     }
 }
 
-
 /// Runtime draw ordering for active room chunks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RuntimeRoomDrawOrderMode {
     /// Sort active visible rooms by their camera-space center depth.
     #[default]
@@ -303,7 +298,6 @@ impl RuntimeRoomDrawOrderMode {
         }
     }
 }
-
 
 /// One editor project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -346,9 +346,7 @@ pub(crate) fn fbx_skinned_mesh(
     Err(Error::MissingFbxSkinnedMesh)
 }
 
-pub(crate) fn fbx_static_mesh(
-    scene: &ufbx::Scene,
-) -> Result<(&ufbx::Node, &ufbx::Mesh), Error> {
+pub(crate) fn fbx_static_mesh(scene: &ufbx::Scene) -> Result<(&ufbx::Node, &ufbx::Mesh), Error> {
     for node in &scene.nodes {
         let Some(mesh) = node.mesh.as_deref() else {
             continue;
@@ -1211,12 +1209,11 @@ pub(crate) fn cook_fbx_base_color_texture(
         transparent_index_zero: true,
     };
     for material in &mesh.materials {
-        let texture = material
-            .pbr
-            .base_color
+        let texture = material.pbr.base_color.texture.as_deref().or(material
+            .fbx
+            .diffuse_color
             .texture
-            .as_deref()
-            .or(material.fbx.diffuse_color.texture.as_deref());
+            .as_deref());
         let Some(texture) = texture else {
             continue;
         };

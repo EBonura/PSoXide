@@ -771,8 +771,7 @@ pub struct PlaytestBoxProp {
 /// [`psx_level::LevelUiAction`]: the authored `GotoScene(UiSceneId)`
 /// is resolved to a cooked [`PlaytestUiScene::id`] at cook time, and
 /// the option/game ids are carried as compact integers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaytestUiAction {
     /// Switch to the cooked composed scene state with this id.
     GotoState {
@@ -857,7 +856,6 @@ pub enum PlaytestTransitionKind {
     /// Digital glitch break.
     GlitchBreak,
 }
-
 
 /// One cooked UI gradient paint. Nodes reference these by small indices
 /// when one of their color roles needs something richer than a solid fill.

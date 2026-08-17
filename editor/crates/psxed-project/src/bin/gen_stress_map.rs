@@ -95,13 +95,7 @@ fn run(args: &Args) -> Result<(), String> {
     let (floor_mat, wall_mat, ceiling_mat, sector_size) = harvest_template(&project)?;
 
     let grid = match args.pattern.as_str() {
-        "corridor" => corridor_grid(
-            args,
-            sector_size,
-            floor_mat,
-            wall_mat,
-            ceiling_mat,
-        ),
+        "corridor" => corridor_grid(args, sector_size, floor_mat, wall_mat, ceiling_mat),
         "field" => field_grid(args, sector_size, floor_mat, wall_mat),
         other => return Err(format!("unknown pattern {other} (corridor|field)")),
     };
@@ -235,7 +229,10 @@ fn run(args: &Args) -> Result<(), String> {
 
     let out_root = std::path::Path::new(&args.out);
     std::fs::create_dir_all(out_root).map_err(|e| e.to_string())?;
-    copy_assets(std::path::Path::new("projects/default/assets"), &out_root.join("assets"))?;
+    copy_assets(
+        std::path::Path::new("projects/default/assets"),
+        &out_root.join("assets"),
+    )?;
     project
         .save_to_path(out_root.join("project.ron"))
         .map_err(|e| format!("{e:?}"))?;
@@ -313,16 +310,28 @@ fn corridor_grid(
                 sector.ceiling = Some(GridHorizontalFace::flat(WALL_TOP, ceiling_mat));
             }
             if x == 0 {
-                sector.walls.west.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .west
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             if x == w - 1 {
-                sector.walls.east.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .east
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             if z == 0 {
-                sector.walls.south.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .south
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             if z == l - 1 {
-                sector.walls.north.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .north
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             // Door frames: periodic cross walls with a two-sector gap in the
             // middle. Adds triangle load and occlusion without blocking the
@@ -332,7 +341,10 @@ fn corridor_grid(
                 && z != 0
                 && (x < w / 2 - 1 || x > w / 2)
             {
-                sector.walls.south.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .south
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             let index = x as usize * l as usize + z as usize;
             grid.sectors[index] = Some(sector);
@@ -353,16 +365,28 @@ fn field_grid(
         for z in 0..s {
             let mut sector = GridSector::with_floor(0, floor_mat);
             if x == 0 {
-                sector.walls.west.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .west
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             if x == s - 1 {
-                sector.walls.east.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .east
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             if z == 0 {
-                sector.walls.south.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .south
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             if z == s - 1 {
-                sector.walls.north.push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
+                sector
+                    .walls
+                    .north
+                    .push(GridVerticalFace::flat(0, WALL_TOP, wall_mat));
             }
             let index = x as usize * s as usize + z as usize;
             grid.sectors[index] = Some(sector);
