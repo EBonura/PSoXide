@@ -918,6 +918,18 @@ impl CharacterMotorState {
             let sprinting = !locked_lateral && self.can_sprint(wants_sprint, config);
             let base_speed = if sprinting {
                 config.run_speed
+            } else if locked_lateral {
+                // Souls-style: strafing and backing off are slower than
+                // walking forward, and the backward/strafe clips stride
+                // shorter, so the feet track the ground.
+                let percent = match input
+                    .facing_yaw
+                    .map(|facing_yaw| locked_locomotion_anim(facing_yaw, move_yaw))
+                {
+                    Some(CharacterMotorAnim::WalkBackward) => LOCKED_BACKWARD_SPEED_PERCENT,
+                    _ => LOCKED_STRAFE_SPEED_PERCENT,
+                };
+                config.walk_speed.saturating_mul(percent) / 100
             } else {
                 config.walk_speed
             };
@@ -2010,6 +2022,13 @@ fn yaw_from_vector(dx: Q12, dz: Q12) -> Angle {
     };
     Angle::from_q12((angle & 0x0FFF) as u16)
 }
+
+/// Locked-on backward walk speed as a percentage of `walk_speed`.
+/// ponytail: constants; promote to CharacterMotorConfig when a project
+/// wants to author them.
+pub const LOCKED_BACKWARD_SPEED_PERCENT: i32 = 60;
+/// Locked-on strafe speed as a percentage of `walk_speed`.
+pub const LOCKED_STRAFE_SPEED_PERCENT: i32 = 70;
 
 /// Locked-on evade clip choice by slide direction relative to facing.
 /// Sector convention matches [`locked_locomotion_anim`]; forward maps
@@ -4180,7 +4199,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_lateral_stick_refuses_sprint_and_strafes_at_walk_speed() {
+    fn locked_lateral_stick_refuses_sprint_and_strafes_at_strafe_speed() {
         // Camera-relative forward can be lateral to the target for a few frames
         // right after lock-on. The character strafes at walk speed facing the
         // target rather than turning away into a run.
@@ -4201,7 +4220,11 @@ mod tests {
         // +X is the left side when facing +Z.
         assert_eq!(frame.anim, CharacterMotorAnim::StrafeLeft);
         assert!(!frame.sprinting, "no sprint sideways under lock");
-        assert_eq!(frame.position.x, config().walk_speed >> 8);
+        // Strafes move at the locked strafe percentage of walk speed.
+        assert_eq!(
+            frame.position.x,
+            (config().walk_speed * LOCKED_STRAFE_SPEED_PERCENT / 100) >> 8
+        );
     }
 
     #[test]
