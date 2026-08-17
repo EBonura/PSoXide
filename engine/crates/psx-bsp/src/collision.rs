@@ -220,7 +220,7 @@ impl Trace {
 /// straddle; on a 460-brush map that was ~1.4M cycles per camera solve.
 #[derive(Copy, Clone)]
 enum HullNodes<'a> {
-    Clip(RecordSlice<'a, ClipNode>),
+    Clip(ClipNodeRecords<'a>),
     Render {
         nodes: RecordSlice<'a, Node>,
         leaves: RecordSlice<'a, Leaf>,
@@ -271,8 +271,48 @@ impl<'a> HullNodes<'a> {
 }
 
 #[derive(Copy, Clone)]
+enum PlaneRecords<'a> {
+    Packed(RecordSlice<'a, Plane>),
+    Decoded(&'a [Plane]),
+}
+
+impl PlaneRecords<'_> {
+    #[inline(always)]
+    fn get(self, index: usize) -> Option<Plane> {
+        match self {
+            Self::Packed(records) => records.get(index),
+            Self::Decoded(records) => records.get(index).copied(),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum ClipNodeRecords<'a> {
+    Packed(RecordSlice<'a, ClipNode>),
+    Decoded(&'a [ClipNode]),
+}
+
+impl ClipNodeRecords<'_> {
+    #[inline(always)]
+    fn len(self) -> usize {
+        match self {
+            Self::Packed(records) => records.len(),
+            Self::Decoded(records) => records.len(),
+        }
+    }
+
+    #[inline(always)]
+    fn get(self, index: usize) -> Option<ClipNode> {
+        match self {
+            Self::Packed(records) => records.get(index),
+            Self::Decoded(records) => records.get(index).copied(),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
 pub struct CollisionHull<'a> {
-    planes: RecordSlice<'a, Plane>,
+    planes: PlaneRecords<'a>,
     nodes: HullNodes<'a>,
     head_node: i16,
 }
@@ -284,8 +324,8 @@ impl<'a> CollisionHull<'a> {
         head_node: i16,
     ) -> Self {
         Self {
-            planes,
-            nodes: HullNodes::Clip(nodes),
+            planes: PlaneRecords::Packed(planes),
+            nodes: HullNodes::Clip(ClipNodeRecords::Packed(nodes)),
             head_node,
         }
     }
@@ -299,8 +339,19 @@ impl<'a> CollisionHull<'a> {
         head_node: i16,
     ) -> Self {
         Self {
-            planes,
+            planes: PlaneRecords::Packed(planes),
             nodes: HullNodes::Render { nodes, leaves },
+            head_node,
+        }
+    }
+
+    /// Construct a collision hull over records decoded once by the map owner.
+    /// This removes packed-record decoding from every traversal step while
+    /// retaining the same validated collision implementation.
+    pub const fn new_decoded(planes: &'a [Plane], nodes: &'a [ClipNode], head_node: i16) -> Self {
+        Self {
+            planes: PlaneRecords::Decoded(planes),
+            nodes: HullNodes::Clip(ClipNodeRecords::Decoded(nodes)),
             head_node,
         }
     }
@@ -624,9 +675,10 @@ fn normal_dot_point(normal: Vec3I16, point: Vec3I32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CookedRecord;
     use alloc::vec::Vec;
 
-    fn axial_x_plane() -> [u8; 14] {
+    fn axial_x_plane() -> [u8; Plane::SIZE] {
         plane(
             Vec3I16 {
                 x: Q12_ONE as i16,
@@ -638,8 +690,8 @@ mod tests {
         )
     }
 
-    fn plane(normal: Vec3I16, distance: i32, kind: i32) -> [u8; 14] {
-        let mut bytes = [0u8; 14];
+    fn plane(normal: Vec3I16, distance: i32, kind: i32) -> [u8; Plane::SIZE] {
+        let mut bytes = [0u8; Plane::SIZE];
         bytes[0..2].copy_from_slice(&normal.x.to_le_bytes());
         bytes[2..4].copy_from_slice(&normal.y.to_le_bytes());
         bytes[4..6].copy_from_slice(&normal.z.to_le_bytes());
@@ -766,6 +818,32 @@ mod tests {
                 z: 0
             }),
             Some(CONTENTS_SOLID)
+        );
+    }
+
+    #[test]
+    fn decoded_working_set_matches_packed_collision() {
+        let plane_bytes = axial_x_plane();
+        let node_bytes = one_node();
+        let packed = hull(&plane_bytes, &node_bytes);
+        let decoded_planes = [Plane::decode(&plane_bytes)];
+        let decoded_nodes = [ClipNode::decode(&node_bytes)];
+        let decoded = CollisionHull::new_decoded(&decoded_planes, &decoded_nodes, 0);
+        let start = Vec3I32 {
+            x: Q12_ONE,
+            y: 0,
+            z: 0,
+        };
+        let end = Vec3I32 {
+            x: -Q12_ONE,
+            y: 0,
+            z: 0,
+        };
+
+        assert_eq!(packed.point_contents(start), decoded.point_contents(start));
+        assert_eq!(
+            trace(&packed, start, end, &mut TraceScratch::new()),
+            trace(&decoded, start, end, &mut TraceScratch::new())
         );
     }
 

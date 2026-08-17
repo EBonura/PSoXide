@@ -26,9 +26,49 @@ use core::marker::PhantomData;
 
 /// `PSX%` as emitted by the original Quake PSX map cooker.
 pub const PSB_MAGIC: u32 = 0x2558_5350;
+/// `PSX2` in little-endian byte order: unsupported experimental compact records.
+///
+/// This value is retained so callers can identify and reject the short-lived
+/// Plane10 layout without ever interpreting it as the final compact format.
+pub const PSB2_MAGIC: u32 = 0x3258_5350;
+/// `PSX3` in little-endian byte order: the first compact structural records
+/// (retained only to reject old files by name).
+pub const PSB3_MAGIC: u32 = 0x3358_5350;
+/// `PSX4` in little-endian byte order: compact records with indexed corners
+/// but eight-bit leaf mark counts and no brush-model origin (retained only to
+/// reject old files by name).
+pub const PSB4_MAGIC: u32 = 0x3458_5350;
+/// `PSX5` in little-endian byte order: compact records with indexed corners,
+/// sixteen-bit leaf mark counts, wide visibility offsets and brush-model
+/// origins, so one record set serves Quake's cooked maps and the editor's
+/// brush worlds alike.
+pub const PSB5_MAGIC: u32 = 0x3558_5350;
 pub const PSB_HEADER_BYTES: u32 = 4;
 pub const LUMP_HEADER_BYTES: u32 = 8;
 pub const LUMP_COUNT: usize = 15;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PsbVersion {
+    LegacyV1,
+    IndexedV5,
+}
+
+impl PsbVersion {
+    pub const fn magic(self) -> u32 {
+        match self {
+            Self::LegacyV1 => PSB_MAGIC,
+            Self::IndexedV5 => PSB5_MAGIC,
+        }
+    }
+
+    const fn from_magic(magic: u32) -> Option<Self> {
+        match magic {
+            PSB_MAGIC => Some(Self::LegacyV1),
+            PSB5_MAGIC => Some(Self::IndexedV5),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -69,18 +109,36 @@ impl LumpKind {
         Self::Entities,
     ];
 
-    pub const fn record_size(self) -> Option<u32> {
+    pub const fn record_size(self, version: PsbVersion) -> Option<u32> {
         match self {
             Self::TextureData | Self::SoundData | Self::ModelData | Self::Visibility => None,
-            Self::Vertices => Some(12),
-            Self::Planes => Some(14),
+            Self::Vertices => match version {
+                PsbVersion::IndexedV5 => None,
+                _ => Some(12),
+            },
+            Self::Planes => Some(match version {
+                PsbVersion::LegacyV1 => 14,
+                PsbVersion::IndexedV5 => Plane::SIZE as u32,
+            }),
             Self::TextureInfo => Some(14),
-            Self::Faces => Some(14),
+            Self::Faces => Some(match version {
+                PsbVersion::LegacyV1 => 14,
+                PsbVersion::IndexedV5 => Face::SIZE as u32,
+            }),
             Self::MarkSurfaces => Some(2),
-            Self::Leaves => Some(26),
-            Self::Nodes => Some(34),
+            Self::Leaves => Some(match version {
+                PsbVersion::LegacyV1 => 26,
+                PsbVersion::IndexedV5 => Leaf::SIZE as u32,
+            }),
+            Self::Nodes => Some(match version {
+                PsbVersion::LegacyV1 => 34,
+                PsbVersion::IndexedV5 => Node::SIZE as u32,
+            }),
             Self::ClipNodes => Some(6),
-            Self::Models => Some(32),
+            Self::Models => Some(match version {
+                PsbVersion::LegacyV1 => 32,
+                PsbVersion::IndexedV5 => BrushModel::SIZE as u32,
+            }),
             Self::Strings => Some(1),
             Self::Entities => Some(50),
         }
@@ -100,8 +158,8 @@ impl LumpRange {
         self.offset + self.len
     }
 
-    pub const fn record_count(self, kind: LumpKind) -> Option<u32> {
-        match kind.record_size() {
+    pub const fn record_count(self, kind: LumpKind, version: PsbVersion) -> Option<u32> {
+        match kind.record_size(version) {
             Some(size) => Some(self.len / size),
             None => None,
         }
@@ -221,6 +279,7 @@ impl<E: fmt::Display> fmt::Display for PsbError<E> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PsbIndex {
+    version: PsbVersion,
     file_len: u32,
     lumps: [LumpRange; LUMP_COUNT],
 }
@@ -235,9 +294,7 @@ impl PsbIndex {
         let mut word = [0u8; 4];
         reader.read_exact_at(0, &mut word).map_err(PsbError::Read)?;
         let magic = u32::from_le_bytes(word);
-        if magic != PSB_MAGIC {
-            return Err(PsbError::BadMagic { found: magic });
-        }
+        let version = PsbVersion::from_magic(magic).ok_or(PsbError::BadMagic { found: magic })?;
 
         let mut lumps = [LumpRange::EMPTY; LUMP_COUNT];
         let mut cursor = PSB_HEADER_BYTES;
@@ -259,7 +316,7 @@ impl PsbIndex {
                 });
             }
             let size = signed_size as u32;
-            if let Some(record_size) = expected.record_size() {
+            if let Some(record_size) = expected.record_size(version) {
                 if size % record_size != 0 {
                     return Err(PsbError::MisalignedLump {
                         kind: expected,
@@ -283,7 +340,19 @@ impl PsbIndex {
                 len: file_len,
             });
         }
-        Ok(Self { file_len, lumps })
+        Ok(Self {
+            version,
+            file_len,
+            lumps,
+        })
+    }
+
+    pub const fn version(&self) -> PsbVersion {
+        self.version
+    }
+
+    pub const fn magic(&self) -> u32 {
+        self.version.magic()
     }
 
     pub const fn file_len(&self) -> u32 {
@@ -386,6 +455,15 @@ impl<'a, T: CookedRecord> RecordSlice<'a, T> {
         self.bytes.is_empty()
     }
 
+    /// Return the validated wire bytes backing this record view.
+    ///
+    /// This does not imply that every cooked record is native-layout. Callers
+    /// may only cast records whose type explicitly pins its endian-independent
+    /// wire layout and alignment.
+    pub const fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
     pub fn get(self, index: usize) -> Option<T> {
         let start = index.checked_mul(T::SIZE)?;
         self.bytes.get(start..start + T::SIZE)?;
@@ -468,16 +546,49 @@ impl CookedRecord for Vertex {
     }
 }
 
+/// `IVX1` header stored at the front of a PSB4 vertex lump.
+pub const INDEXED_VERTEX_MAGIC: u32 = 0x3158_5649;
+/// Bytes in the fixed PSB4 indexed-vertex header.
+pub const INDEXED_VERTEX_HEADER_BYTES: usize = 8;
+
+/// One face corner referencing a shared position in a PSB4 vertex lump.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexedVertexCorner {
+    /// Index into the position array following all corner records.
+    pub position_index: u16,
+    /// Material-relative or baked atlas UV.
+    pub texture: [u8; 2],
+    /// Two light contributions in the low bytes or baked RGB.
+    pub light: u32,
+}
+
+/// One exact quantized position shared by PSB4 corners.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexedVertexPosition {
+    /// Signed world/model coordinates in cooked Quake units.
+    pub position: [i16; 3],
+}
+
+const _: [(); 8] = [(); core::mem::size_of::<IndexedVertexCorner>()];
+const _: [(); 6] = [(); core::mem::size_of::<IndexedVertexPosition>()];
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Plane {
     /// Q3.12 unit normal.
     pub normal: Vec3I16,
     /// Q20.12 distance from the origin.
     pub distance: i32,
+    /// Cooker-authored axial fast-path class. Kept at its legacy semantic and
+    /// physical width because exact real-MIPS A/B evidence proves that
+    /// reclassifying the quantized normal is not visually equivalent.
     pub kind: i32,
 }
 
 impl CookedRecord for Plane {
+    // Exact real-MIPS A/B evidence requires the cooker-authored classification
+    // for visual parity; reclassifying the quantized normal dropped geometry.
     const SIZE: usize = 14;
 
     fn decode(bytes: &[u8]) -> Self {
@@ -528,25 +639,28 @@ impl CookedRecord for TextureInfo {
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Face {
+    /// Non-negative plane index. Compact v3 stores this as `u16`, while the
+    /// semantic type stays legacy-shaped for the MIPS aggregate-return ABI.
     pub plane: i16,
     pub flags: u16,
     pub first_vertex: i32,
     pub vertex_count: i16,
+    /// Non-negative texture/material index; see [`Self::plane`].
     pub texture: i16,
     pub light_styles: [u8; 2],
 }
 
 impl CookedRecord for Face {
-    const SIZE: usize = 14;
+    const SIZE: usize = 10;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
-            plane: i16_at(bytes, 0),
-            flags: u16_at(bytes, 2),
-            first_vertex: i32_at(bytes, 4),
-            vertex_count: i16_at(bytes, 8),
-            texture: i16_at(bytes, 10),
-            light_styles: [bytes[12], bytes[13]],
+            plane: u16_at(bytes, 0) as i16,
+            first_vertex: u16_at(bytes, 2) as i32,
+            texture: u16_at(bytes, 4) as i16,
+            flags: bytes[6] as u16,
+            vertex_count: bytes[7] as i16,
+            light_styles: [bytes[8], bytes[9]],
         }
     }
 }
@@ -555,6 +669,8 @@ impl CookedRecord for Face {
 pub struct Leaf {
     pub contents: i16,
     pub visibility_offset: i32,
+    /// Legacy semantic bounds retained for the proven MIPS ABI. The compact
+    /// record omits these unused fields and decodes them as zero.
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
     pub first_mark_surface: u16,
@@ -563,19 +679,22 @@ pub struct Leaf {
     pub light_styles: [u8; 2],
 }
 
+/// Compact leaf: contents i8, pad, mark count u16, visibility offset i32
+/// (`-1` = none), first mark u16, lightmap, light styles. Wide enough for the
+/// editor's exact per-leaf marks and multi-page visibility lumps.
 impl CookedRecord for Leaf {
-    const SIZE: usize = 26;
+    const SIZE: usize = 14;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
-            contents: i16_at(bytes, 0),
-            visibility_offset: i32_at(bytes, 2),
-            mins: vec3_i16(bytes, 6),
-            maxs: vec3_i16(bytes, 12),
-            first_mark_surface: u16_at(bytes, 18),
-            mark_surface_count: u16_at(bytes, 20),
-            lightmap: [bytes[22], bytes[23]],
-            light_styles: [bytes[24], bytes[25]],
+            contents: bytes[0] as i8 as i16,
+            mark_surface_count: u16_at(bytes, 2),
+            visibility_offset: i32_at(bytes, 4),
+            mins: Vec3I16::default(),
+            maxs: Vec3I16::default(),
+            first_mark_surface: u16_at(bytes, 8),
+            lightmap: [bytes[10], bytes[11]],
+            light_styles: [bytes[12], bytes[13]],
         }
     }
 }
@@ -585,6 +704,8 @@ pub struct Node {
     pub plane: u16,
     /// Negative values encode `-(leaf + 1)`.
     pub children: [i16; 2],
+    /// Legacy semantic bounds/range retained for the proven MIPS ABI.
+    /// Compact v3 omits these unused fields and decodes them as zero.
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
     pub surface_mins: Vec3I16,
@@ -594,26 +715,81 @@ pub struct Node {
 }
 
 impl CookedRecord for Node {
-    const SIZE: usize = 34;
+    const SIZE: usize = 6;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
             plane: u16_at(bytes, 0),
             children: [i16_at(bytes, 2), i16_at(bytes, 4)],
-            mins: vec3_i16(bytes, 6),
-            maxs: vec3_i16(bytes, 12),
-            surface_mins: vec3_i16(bytes, 18),
-            surface_maxs: vec3_i16(bytes, 24),
-            first_face: u16_at(bytes, 30),
-            face_count: u16_at(bytes, 32),
+            mins: Vec3I16::default(),
+            maxs: Vec3I16::default(),
+            surface_mins: Vec3I16::default(),
+            surface_maxs: Vec3I16::default(),
+            first_face: 0,
+            face_count: 0,
         }
     }
 }
 
+/// Native view of the compact six-byte render-tree node wire record.
+///
+/// The public [`Node`] retains its proven legacy aggregate layout for MIPS
+/// callers. Traversal-only consumers can borrow this narrow representation
+/// directly after resident-map validation.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompactNode {
+    pub plane: u16,
+    pub children: [i16; 2],
+}
+
+const _: [(); 6] = [(); core::mem::size_of::<CompactNode>()];
+const _: [(); 2] = [(); core::mem::align_of::<CompactNode>()];
+
+impl<'a> RecordSlice<'a, Node> {
+    /// Borrow validated compact node records without reconstructing the
+    /// legacy semantic aggregate on every tree step.
+    #[cfg(target_endian = "little")]
+    pub fn as_native_compact_nodes(self) -> Option<&'a [CompactNode]> {
+        let bytes = self.as_bytes();
+        if bytes
+            .as_ptr()
+            .align_offset(core::mem::align_of::<CompactNode>())
+            != 0
+        {
+            return None;
+        }
+        Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<CompactNode>(), self.len()) })
+    }
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ClipNode {
     pub plane: i16,
     pub children: [i16; 2],
+}
+
+const _: [(); 6] = [(); core::mem::size_of::<ClipNode>()];
+const _: [(); 2] = [(); core::mem::align_of::<ClipNode>()];
+
+impl<'a> RecordSlice<'a, ClipNode> {
+    /// Borrow little-endian clip-node wire records as their identical native
+    /// representation. Resident BSP lump packing guarantees at least 4-byte
+    /// alignment; this method still checks alignment so independent callers
+    /// fail closed rather than creating a misaligned slice.
+    #[cfg(target_endian = "little")]
+    pub fn as_native_clip_nodes(self) -> Option<&'a [ClipNode]> {
+        let bytes = self.as_bytes();
+        if bytes
+            .as_ptr()
+            .align_offset(core::mem::align_of::<ClipNode>())
+            != 0
+        {
+            return None;
+        }
+        Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<ClipNode>(), self.len()) })
+    }
 }
 
 impl CookedRecord for ClipNode {
@@ -631,6 +807,9 @@ impl CookedRecord for ClipNode {
 pub struct BrushModel {
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
+    /// Legacy semantic origin retained for the proven MIPS ABI. Entity/mover
+    /// transforms own placement, so compact v3 decodes this unused field as
+    /// zero rather than storing it.
     pub origin: Vec3I16,
     pub head_nodes: [i16; 4],
     pub visible_leaves: i16,
@@ -638,6 +817,8 @@ pub struct BrushModel {
     pub face_count: u16,
 }
 
+/// Brush model: the legacy 32-byte layout, origin included (Quake writes
+/// zero, the editor's doors and lifts carry theirs).
 impl CookedRecord for BrushModel {
     const SIZE: usize = 32;
 
@@ -1276,7 +1457,11 @@ mod tests {
     }
 
     fn valid_file() -> Bytes {
-        let mut bytes = Vec::from(PSB_MAGIC.to_le_bytes());
+        valid_file_with_magic(PSB_MAGIC)
+    }
+
+    fn valid_file_with_magic(magic: u32) -> Bytes {
+        let mut bytes = Vec::from(magic.to_le_bytes());
         for kind in LumpKind::ALL {
             bytes.extend_from_slice(&(kind as i32).to_le_bytes());
             bytes.extend_from_slice(&0i32.to_le_bytes());
@@ -1326,6 +1511,101 @@ mod tests {
         assert_eq!(index.file_len(), 4 + LUMP_COUNT as u32 * 8);
         assert_eq!(index.lump(LumpKind::TextureData).offset, 12);
         assert_eq!(index.lump(LumpKind::Entities).len, 0);
+        assert_eq!(index.version(), PsbVersion::LegacyV1);
+        assert_eq!(index.magic(), PSB_MAGIC);
+    }
+
+    #[test]
+    fn recognizes_compact_v5_magic_and_record_contract() {
+        let mut bytes = valid_file_with_magic(PSB5_MAGIC);
+        let index = PsbIndex::read(&mut bytes).expect("compact index");
+        assert_eq!(index.version(), PsbVersion::IndexedV5);
+        assert_eq!(index.magic(), PSB5_MAGIC);
+        assert_eq!(LumpKind::Planes.record_size(index.version()), Some(14));
+        assert_eq!(LumpKind::Faces.record_size(index.version()), Some(10));
+        assert_eq!(LumpKind::Leaves.record_size(index.version()), Some(14));
+        assert_eq!(LumpKind::Nodes.record_size(index.version()), Some(6));
+        assert_eq!(LumpKind::Models.record_size(index.version()), Some(32));
+        assert_eq!(LumpKind::Vertices.record_size(index.version()), None);
+    }
+
+    #[test]
+    fn rejects_the_retired_compact_magics() {
+        for magic in [PSB2_MAGIC, PSB3_MAGIC, PSB4_MAGIC] {
+            let mut bytes = valid_file_with_magic(magic);
+            assert!(PsbIndex::read(&mut bytes).is_err(), "{magic:#x}");
+        }
+    }
+
+    #[test]
+    fn rejects_experimental_psb2_before_reading_ambiguous_records() {
+        let mut bytes = Vec::from(PSB2_MAGIC.to_le_bytes());
+        for kind in LumpKind::ALL {
+            bytes.extend_from_slice(&(kind as i32).to_le_bytes());
+            // Seventy is divisible by both the experimental 10-byte and final
+            // 14-byte plane strides. The magic rejects it before that
+            // structurally ambiguous payload can be interpreted.
+            let payload_len = if kind == LumpKind::Planes { 70 } else { 0 };
+            bytes.extend_from_slice(&(payload_len as i32).to_le_bytes());
+            bytes.resize(bytes.len() + payload_len, 0);
+        }
+        assert!(matches!(
+            PsbIndex::read(&mut Bytes(bytes)),
+            Err(PsbError::BadMagic { found: PSB2_MAGIC })
+        ));
+    }
+
+    #[test]
+    fn compact_wire_records_keep_the_proven_legacy_semantic_abi() {
+        assert_eq!(Plane::SIZE, 14);
+        assert_eq!(Face::SIZE, 10);
+        assert_eq!(Leaf::SIZE, 14);
+        assert_eq!(Node::SIZE, 6);
+        assert_eq!(BrushModel::SIZE, 32);
+
+        // These are semantic Rust values returned by RecordSlice::get on the
+        // MIPS guest, not their compact wire strides. Keep the layouts pinned
+        // independently so future physical-format work cannot silently alter
+        // aggregate-return codegen again.
+        assert_eq!(core::mem::size_of::<Plane>(), 16);
+        assert_eq!(core::mem::align_of::<Plane>(), 4);
+        assert_eq!(core::mem::size_of::<Face>(), 16);
+        assert_eq!(core::mem::align_of::<Face>(), 4);
+        assert_eq!(core::mem::size_of::<Leaf>(), 28);
+        assert_eq!(core::mem::align_of::<Leaf>(), 4);
+        assert_eq!(core::mem::size_of::<Node>(), 34);
+        assert_eq!(core::mem::align_of::<Node>(), 2);
+        assert_eq!(core::mem::size_of::<ClipNode>(), 6);
+        assert_eq!(core::mem::align_of::<ClipNode>(), 2);
+        assert_eq!(core::mem::size_of::<BrushModel>(), 32);
+        assert_eq!(core::mem::align_of::<BrushModel>(), 2);
+
+        let leaf = Leaf::decode(&[
+            -1i8 as u8, 0, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0x34, 0x12, 5, 6, 7, 8,
+        ]);
+        assert_eq!(leaf.contents, -1);
+        assert_eq!(leaf.mark_surface_count, 256);
+        assert_eq!(leaf.visibility_offset, -1);
+        assert_eq!(leaf.first_mark_surface, 0x1234);
+        assert_eq!(leaf.lightmap, [5, 6]);
+        assert_eq!(leaf.light_styles, [7, 8]);
+        assert_eq!(leaf.mins, Vec3I16::default());
+        assert_eq!(leaf.maxs, Vec3I16::default());
+        let node = Node::decode(&[0; Node::SIZE]);
+        assert_eq!(node.mins, Vec3I16::default());
+        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(node.surface_mins, Vec3I16::default());
+        assert_eq!(node.surface_maxs, Vec3I16::default());
+        assert_eq!(node.first_face, 0);
+        assert_eq!(node.face_count, 0);
+        let mut model_bytes = [0u8; BrushModel::SIZE];
+        model_bytes[12..14].copy_from_slice(&128i16.to_le_bytes());
+        model_bytes[14..16].copy_from_slice(&16i16.to_le_bytes());
+        model_bytes[16..18].copy_from_slice(&96i16.to_le_bytes());
+        model_bytes[30..32].copy_from_slice(&7u16.to_le_bytes());
+        let model = BrushModel::decode(&model_bytes);
+        assert_eq!(model.origin, Vec3I16 { x: 128, y: 16, z: 96 });
+        assert_eq!(model.face_count, 7);
     }
 
     #[test]
@@ -1386,25 +1666,31 @@ mod tests {
         bytes[0..2].copy_from_slice(&7u16.to_le_bytes());
         bytes[2..4].copy_from_slice(&3i16.to_le_bytes());
         bytes[4..6].copy_from_slice(&(-5i16).to_le_bytes());
-        bytes[6..8].copy_from_slice(&(-64i16).to_le_bytes());
-        bytes[8..10].copy_from_slice(&32i16.to_le_bytes());
-        bytes[10..12].copy_from_slice(&96i16.to_le_bytes());
-        bytes[30..32].copy_from_slice(&120u16.to_le_bytes());
-        bytes[32..34].copy_from_slice(&9u16.to_le_bytes());
 
         let node = RecordSlice::<Node>::new(&bytes).unwrap().get(0).unwrap();
         assert_eq!(node.plane, 7);
         assert_eq!(node.children, [3, -5]);
+    }
+
+    #[test]
+    fn borrows_aligned_clip_nodes_without_decoding_or_copying() {
+        #[repr(align(2))]
+        struct Aligned([u8; ClipNode::SIZE]);
+
+        let mut bytes = Aligned([0; ClipNode::SIZE]);
+        bytes.0[0..2].copy_from_slice(&7i16.to_le_bytes());
+        bytes.0[2..4].copy_from_slice(&3i16.to_le_bytes());
+        bytes.0[4..6].copy_from_slice(&(-5i16).to_le_bytes());
+        let packed = RecordSlice::<ClipNode>::new(&bytes.0).unwrap();
+        let native = packed.as_native_clip_nodes().unwrap();
         assert_eq!(
-            node.mins,
-            Vec3I16 {
-                x: -64,
-                y: 32,
-                z: 96
-            }
+            native,
+            &[ClipNode {
+                plane: 7,
+                children: [3, -5]
+            }]
         );
-        assert_eq!(node.first_face, 120);
-        assert_eq!(node.face_count, 9);
+        assert_eq!(native.as_ptr().cast::<u8>(), bytes.0.as_ptr());
     }
 
     #[test]

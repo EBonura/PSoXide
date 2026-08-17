@@ -41,8 +41,9 @@ mod tests {
         // faces are all under one 2048-unit patch, so the packed world
         // matches the pre-subdivision geometry; the byte pin moved when
         // exact per-leaf marks replaced the conservative split-path
-        // lists (fewer mark entries, same surfaces).
-        assert_eq!(world.bytes.len(), 12_248);
+        // lists (fewer mark entries, same surfaces), and again when the
+        // structural lumps went to the compact PXBSP v4 records.
+        assert_eq!(world.bytes.len(), 9_724);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);

@@ -2,8 +2,10 @@ use std::collections::BTreeSet;
 use std::mem::size_of;
 use std::path::Path;
 
-use psx_bsp::pxbsp::{PxbspIndex, PxbspLumpKind};
-use psx_bsp::SliceReader;
+use psx_bsp::pxbsp::{PxbspIndex, PxbspLumpKind, PxbspVersion};
+use psx_bsp::{
+    BrushModel, ClipNode, CookedRecord, Face, Leaf, Node, Plane, RecordSlice, SliceReader, Vertex,
+};
 
 use super::{
     playtest_performance_envelope, streamed_room_chunk_memory_report, PlaytestAssetKind,
@@ -182,11 +184,13 @@ pub fn estimate_playtest_budgets(
     let pvs_bytes = leaf_count.saturating_mul(pvs_row_bytes);
     let directory_bytes = 8usize.saturating_add(16 * 12);
     let bsp_bytes = directory_bytes
-        .saturating_add(vertex_count.saturating_mul(12))
-        .saturating_add(face_count.saturating_mul(14 + 14 + 2 + 34 + 6))
-        .saturating_add(leaf_count.saturating_mul(26))
+        .saturating_add(vertex_count.saturating_mul(Vertex::SIZE))
+        .saturating_add(face_count.saturating_mul(
+            Plane::SIZE + Face::SIZE + size_of::<u16>() + Node::SIZE + ClipNode::SIZE,
+        ))
+        .saturating_add(leaf_count.saturating_mul(Leaf::SIZE))
         .saturating_add(pvs_bytes)
-        .saturating_add(32);
+        .saturating_add(BrushModel::SIZE);
     let light_count = scene
         .nodes()
         .iter()
@@ -263,17 +267,17 @@ pub fn cooked_playtest_budgets(
             let leaves = index.lump(PxbspLumpKind::Leaves);
             let faces = index.lump(PxbspLumpKind::Faces);
             pvs_bytes = visibility.len as usize;
-            pvs_row_bytes = (leaves.len as usize / 26).saturating_sub(1).div_ceil(8);
-            light_bytes = light_bytes.saturating_add(vertices.len as usize / 12 * 3);
+            let leaf_size = PxbspLumpKind::Leaves
+                .record_size(index.version())
+                .expect("PXBSP leaves are fixed records") as usize;
+            pvs_row_bytes = (leaves.len as usize / leaf_size)
+                .saturating_sub(1)
+                .div_ceil(8);
+            light_bytes = light_bytes.saturating_add(vertices.len as usize / Vertex::SIZE * 3);
             let face_start = faces.offset as usize;
             let face_end = faces.end() as usize;
             if let Some(face_bytes) = world.bytes.get(face_start..face_end) {
-                bsp_packets = face_bytes
-                    .chunks_exact(14)
-                    .map(|face| {
-                        usize::from(u16::from_le_bytes([face[8], face[9]])).saturating_sub(2)
-                    })
-                    .sum();
+                bsp_packets = pxbsp_face_packets(index.version(), face_bytes).unwrap_or(0);
             }
         }
     }
@@ -392,6 +396,29 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
         total
     } else {
         worst
+    }
+}
+
+fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
+    match version {
+        PxbspVersion::V4 => {
+            RecordSlice::<Face>::new(bytes)?
+                .iter()
+                .try_fold(0usize, |total, face| {
+                    let vertex_count = usize::try_from(face.vertex_count).ok()?;
+                    total.checked_add(vertex_count.saturating_sub(2))
+                })
+        }
+        PxbspVersion::V1 => {
+            let faces = bytes.chunks_exact(14);
+            if !faces.remainder().is_empty() {
+                return None;
+            }
+            faces.fold(Some(0usize), |total, face| {
+                let vertex_count = usize::try_from(i16::from_le_bytes([face[8], face[9]])).ok()?;
+                total?.checked_add(vertex_count.saturating_sub(2))
+            })
+        }
     }
 }
 
@@ -542,6 +569,7 @@ fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetRe
 mod tests {
     use super::*;
     use crate::brush::Brush;
+    use crate::playtest::build_package;
 
     #[test]
     fn estimated_packet_overflow_points_at_largest_brush() {
@@ -581,5 +609,42 @@ mod tests {
             derived_packet_capacity(9999),
             PLAYTEST_PACKET_CAPACITY_CEILING
         );
+    }
+
+    #[test]
+    fn compact_v3_budget_decodes_face_counts_and_leaf_stride() {
+        let project = ProjectDocument::from_ron_str(include_str!(
+            "../../../../archive/fixtures/brush-open-courtyard/project.ron"
+        ))
+        .expect("tracked PXBSP project");
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../archive/fixtures/brush-open-courtyard");
+        let (package, report) = build_package(&project, &fixture_dir);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let package = package.expect("cooked PXBSP package");
+        let PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
+            panic!("tracked fixture must cook PXBSP");
+        };
+        let index = PxbspIndex::read(&mut SliceReader::new(&world.bytes)).expect("PXBSP index");
+        assert_eq!(index.version(), PxbspVersion::V4);
+        let faces = index.lump(PxbspLumpKind::Faces);
+        assert_eq!(faces.len % Face::SIZE as u32, 0);
+        let face_bytes = &world.bytes[faces.offset as usize..faces.end() as usize];
+        let face_count = face_bytes.len() / Face::SIZE;
+        assert!(face_count > 0);
+        // The compact face parser counts vertex_count - 2 packets per face
+        // (a legacy 14-byte parse of these records read light-style bytes as
+        // the count and inflated wildly); every packet total stays bounded
+        // by three triangles per face and the worst-leaf sizing never
+        // exceeds the map total.
+        let total = pxbsp_face_packets(PxbspVersion::V4, face_bytes).expect("compact faces");
+        assert!(total >= face_count && total <= face_count * 3, "{total} for {face_count} faces");
+        let worst_leaf = cooked_bsp_packets(&package);
+        assert!(worst_leaf > 0 && worst_leaf <= total, "{worst_leaf} vs {total}");
+        let budget = cooked_playtest_budgets(&project, &package);
+        assert_eq!(budget.packet_count, cooked_packet_count(&package, worst_leaf));
+        let leaves = index.lump(PxbspLumpKind::Leaves).len as usize
+            / PxbspLumpKind::Leaves.record_size(PxbspVersion::V4).unwrap() as usize;
+        assert_eq!(budget.pvs_row_bytes, leaves.saturating_sub(1).div_ceil(8));
     }
 }

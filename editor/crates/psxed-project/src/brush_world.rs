@@ -528,7 +528,7 @@ pub fn compile_brush_world(
         let model_index = u16::try_from(submodels.len() + 1)
             .map_err(|_| BrushWorldCookError::ModelIndexOverflow(node.id))?;
         let leaf_probe = model_center_world_q12(origin, geometry.mins, geometry.maxs);
-        // ponytail: PXBSP v1 links one representative leaf. Replace this
+        // ponytail: PXBSP links one representative leaf. Replace this
         // with a touched-leaf span before full entity PVS activation ships.
         let leaf = packed_point_leaf(&world_geometry, leaf_probe)?;
         if leaf == 0 {
