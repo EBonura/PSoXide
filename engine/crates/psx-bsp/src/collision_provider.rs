@@ -302,6 +302,7 @@ fn merge_trace(best: &mut Trace, candidate: Trace) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CookedRecord;
     use crate::{ClipNode, Plane, RecordSlice};
     use psx_engine::COLLISION_FRACTION_ONE_Q12;
 
@@ -363,11 +364,10 @@ mod tests {
         ]));
     }
 
-    fn plane_x(distance_units: i32) -> [u8; 14] {
-        let mut bytes = [0u8; 14];
+    fn plane_x(distance_units: i32) -> [u8; Plane::SIZE] {
+        let mut bytes = [0u8; Plane::SIZE];
         bytes[0..2].copy_from_slice(&(Q12_ONE as i16).to_le_bytes());
         bytes[6..10].copy_from_slice(&distance_units.saturating_mul(Q12_ONE).to_le_bytes());
-        bytes[10..14].copy_from_slice(&0i32.to_le_bytes());
         bytes
     }
 

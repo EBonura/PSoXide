@@ -13,6 +13,7 @@
 
 use crate::brush::{Brush, BrushContents, FaceUv, Plane};
 use crate::ResourceId;
+use psx_bsp::CookedRecord;
 
 /// Fixed-point scale shared with the runtime: positions and plane
 /// distances are Q20.12, normals Q3.12.
@@ -21,7 +22,7 @@ pub const Q12_ONE: i32 = 4096;
 /// Packed collision BSP ready for `psx_bsp` record slices.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompiledCollision {
-    /// Packed 14-byte XBSP plane records.
+    /// Packed compact BSP plane records.
     pub planes: Vec<u8>,
     /// Packed 6-byte XBSP clipnode records.
     pub clipnodes: Vec<u8>,
@@ -656,7 +657,7 @@ pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
             let Some((packed, flipped)) = pack_plane(&plane) else {
                 continue;
             };
-            let index = planes.len() / 14;
+            let index = planes.len() / psx_bsp::Plane::SIZE;
             if index > i16::MAX as usize {
                 break;
             }
@@ -702,10 +703,10 @@ pub fn compile_collision(brushes: &[Brush]) -> CompiledCollision {
     }
 }
 
-/// Pack one kernel plane as a 14-byte XBSP record: Q3.12 unit normal,
-/// Q20.12 distance, axial kind. Returns the bytes and whether the
-/// stored plane is flipped relative to the face's outward normal
-/// (axial planes are canonicalized to positive normals).
+/// Pack one kernel plane as the canonical 14-byte BSP record: Q3.12 unit
+/// normal, Q20.12 distance, and the stored i32 axial fast-path kind. Returns
+/// the bytes and whether the stored plane is flipped relative to the face's
+/// outward normal (axial planes are canonicalized to positive normals).
 pub(crate) fn pack_plane(plane: &Plane) -> Option<([u8; 14], bool)> {
     let n = plane.normal.map(|v| v as f64);
     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
@@ -815,6 +816,22 @@ mod tests {
         CONTENTS_SOLID, CONTENTS_WATER,
     };
     use psx_bsp::{ClipNode, Plane as BspPlane, RecordSlice, Vec3I32};
+
+    #[test]
+    fn packed_planes_retain_the_cooker_authored_classifier() {
+        for (normal, expected_kind) in [
+            ([1.0, 0.0, 0.0], 0),
+            ([0.0, 1.0, 0.0], 1),
+            ([0.0, 0.0, 1.0], 2),
+            ([0.5, 0.5, 0.7071067811865476], 3),
+        ] {
+            let (packed, _) = pack_normalized_plane(normal, 12.0).expect("valid plane");
+            assert_eq!(
+                i32::from_le_bytes(packed[10..14].try_into().unwrap()),
+                expected_kind
+            );
+        }
+    }
 
     fn hull(compiled: &CompiledCollision) -> CollisionHull<'_> {
         CollisionHull::new(

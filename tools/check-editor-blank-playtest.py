@@ -29,17 +29,18 @@ EXPECTED_VRAM_HASH = "0xda4fdfcfe3c27a87"
 EXPECTED_DISPLAY_HASH = "0xdf10b8075b9d718b"
 EXPECTED_GPU_CENSUS: dict[str, int | str] = {
     "rows": 152,
-    "commands": 3_393,
+    "commands": 4_427,
     "draws": 1_576,
     "fills": 60,
     "textured_tris": 927,
     "textured_quads": 555,
     "textured_rects": 84,
-    "run_draw_words": 19_213,
-    # Re-pinned when the authored panorama became available to the resident
-    # PXBSP path. The brush world bytes and movement/triangle pins stay fixed;
-    # the extra rows, draws and textured quads are the streamed cyclorama.
-    "run_draw_hash": "0x9d2fff86ad1adfdc",
+    "run_draw_words": 21_281,
+    # Re-pinned after 84ed9633 made depth-sorted texture-window packets
+    # self-scoped. Its 1,034 additional GP0(E2) full-window resets account
+    # exactly for the command delta and two hashed words each (length plus
+    # payload). Draw-class, visual, movement, and collision pins are unchanged.
+    "run_draw_hash": "0x019fa1138fdeaa58",
 }
 IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".ppm", ".webp"}
 

@@ -70,12 +70,65 @@ impl<const N: usize> OrderingTable<N> {
         }
     }
 
+    #[cfg(not(target_arch = "mips"))]
     fn clear_software(&mut self) {
         // Slot 0 is the sentinel; chain walks stop here.
         self.entries[0] = 0x00FF_FFFF;
         for i in 1..N {
             let prev = &self.entries[i - 1] as *const u32 as u32 & 0x00FF_FFFF;
             self.entries[i] = prev;
+        }
+    }
+
+    #[cfg(target_arch = "mips")]
+    fn clear_software(&mut self) {
+        // The PS1 RAM window occupies only the low 2 MiB of the DMA address
+        // domain, so advancing a low-24-bit OT address across this table
+        // cannot wrap. Schedule eight dependent pointer values per branch;
+        // this preserves the exact OTC chain while avoiding the scalar
+        // pointer-mask and branch cost for every one of the 2,048 Quake slots.
+        let entries = self.entries.as_mut_ptr();
+        unsafe { ptr::write(entries, OT_END) };
+        let bulk_words = (N.saturating_sub(1) / 8) * 8;
+        let mut cursor = unsafe { entries.add(1) };
+        let bulk_end = unsafe { cursor.add(bulk_words) };
+        let mut previous = entries as u32 & OT_ADDR_MASK;
+        if bulk_words != 0 {
+            unsafe {
+                core::arch::asm!(
+                    ".set noreorder",
+                    "2:",
+                    "sw $9, 0($8)",
+                    "addiu $9, $9, 4",
+                    "sw $9, 4($8)",
+                    "addiu $9, $9, 4",
+                    "sw $9, 8($8)",
+                    "addiu $9, $9, 4",
+                    "sw $9, 12($8)",
+                    "addiu $9, $9, 4",
+                    "sw $9, 16($8)",
+                    "addiu $9, $9, 4",
+                    "sw $9, 20($8)",
+                    "addiu $9, $9, 4",
+                    "sw $9, 24($8)",
+                    "addiu $9, $9, 4",
+                    "sw $9, 28($8)",
+                    "addiu $9, $9, 4",
+                    "addiu $8, $8, 32",
+                    "bne $8, $10, 2b",
+                    "nop",
+                    ".set reorder",
+                    inout("$8") cursor,
+                    inout("$9") previous,
+                    in("$10") bulk_end,
+                    options(nostack),
+                );
+            }
+        }
+        while cursor < unsafe { entries.add(N) } {
+            unsafe { ptr::write(cursor, previous) };
+            cursor = unsafe { cursor.add(1) };
+            previous = previous.wrapping_add(4);
         }
     }
 

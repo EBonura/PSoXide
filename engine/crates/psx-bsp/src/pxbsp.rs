@@ -6,12 +6,41 @@ use crate::{CookedRecord, LumpRange, ReadAt, Vec3I16, Vec3I32};
 
 /// `PXB%` in little-endian byte order.
 pub const PXBSP_MAGIC: u32 = 0x2542_5850;
-pub const PXBSP_VERSION: u16 = 1;
+pub const PXBSP_VERSION_V1: u16 = 1;
+/// Unsupported experimental compact layout with ten-byte plane records.
+pub const PXBSP_VERSION_V2: u16 = 2;
+/// PXBSP compact version 3 (eight-bit leaf marks, no model origin), rejected.
+pub const PXBSP_VERSION_V3: u16 = 3;
+pub const PXBSP_VERSION: u16 = 4;
 pub const PXBSP_HEADER_BYTES: u32 = 8;
 pub const PXBSP_DIRECTORY_ENTRY_BYTES: u32 = 12;
 pub const PXBSP_LUMP_COUNT: usize = 16;
 /// Maximum decompressed PVS row supported by the resident PS1 runtime.
 pub const PXBSP_MAX_VISIBILITY_BYTES: usize = 1024;
+
+/// Recognized PXBSP physical record layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PxbspVersion {
+    V1,
+    V4,
+}
+
+impl PxbspVersion {
+    pub const fn wire(self) -> u16 {
+        match self {
+            Self::V1 => PXBSP_VERSION_V1,
+            Self::V4 => PXBSP_VERSION,
+        }
+    }
+
+    const fn from_wire(value: u16) -> Option<Self> {
+        match value {
+            PXBSP_VERSION_V1 => Some(Self::V1),
+            PXBSP_VERSION => Some(Self::V4),
+            _ => None,
+        }
+    }
+}
 
 /// Decompress one leaf's PVS row into caller-owned bytes.
 ///
@@ -101,17 +130,32 @@ impl PxbspLumpKind {
         Self::StreamingIndex,
     ];
 
-    pub const fn record_size(self) -> Option<u32> {
+    pub const fn record_size(self, version: PxbspVersion) -> Option<u32> {
         match self {
             Self::Vertices => Some(12),
-            Self::Planes => Some(14),
+            Self::Planes => Some(match version {
+                PxbspVersion::V1 => 14,
+                PxbspVersion::V4 => crate::Plane::SIZE as u32,
+            }),
             Self::Materials => Some(PxbspMaterial::SIZE as u32),
-            Self::Faces => Some(14),
+            Self::Faces => Some(match version {
+                PxbspVersion::V1 => 14,
+                PxbspVersion::V4 => 10,
+            }),
             Self::MarkSurfaces => Some(2),
-            Self::Leaves => Some(26),
-            Self::Nodes => Some(34),
+            Self::Leaves => Some(match version {
+                PxbspVersion::V1 => 26,
+                PxbspVersion::V4 => crate::Leaf::SIZE as u32,
+            }),
+            Self::Nodes => Some(match version {
+                PxbspVersion::V1 => 34,
+                PxbspVersion::V4 => 6,
+            }),
             Self::ClipNodes => Some(6),
-            Self::Models => Some(32),
+            Self::Models => Some(match version {
+                PxbspVersion::V1 => 32,
+                PxbspVersion::V4 => crate::BrushModel::SIZE as u32,
+            }),
             Self::Strings => Some(1),
             Self::TextureData
             | Self::SoundData
@@ -627,6 +671,7 @@ impl<E: fmt::Display> fmt::Display for PxbspError<E> {
 /// Validated random-access ranges for one PXBSP file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PxbspIndex {
+    version: PxbspVersion,
     file_len: u32,
     lumps: [LumpRange; PXBSP_LUMP_COUNT],
 }
@@ -645,10 +690,10 @@ impl PxbspIndex {
         if magic != PXBSP_MAGIC {
             return Err(PxbspError::BadMagic { found: magic });
         }
-        let version = u16::from_le_bytes(header[4..6].try_into().unwrap());
-        if version != PXBSP_VERSION {
-            return Err(PxbspError::BadVersion { found: version });
-        }
+        let found_version = u16::from_le_bytes(header[4..6].try_into().unwrap());
+        let version = PxbspVersion::from_wire(found_version).ok_or(PxbspError::BadVersion {
+            found: found_version,
+        })?;
         let lump_count = u16::from_le_bytes(header[6..8].try_into().unwrap());
         if lump_count as usize != PXBSP_LUMP_COUNT {
             return Err(PxbspError::BadLumpCount { found: lump_count });
@@ -698,7 +743,7 @@ impl PxbspIndex {
                     previous_end,
                 });
             }
-            if let Some(record_size) = expected.record_size() {
+            if let Some(record_size) = expected.record_size(version) {
                 if len % record_size != 0 {
                     return Err(PxbspError::MisalignedLump {
                         kind: expected,
@@ -717,7 +762,15 @@ impl PxbspIndex {
                 len: file_len,
             });
         }
-        Ok(Self { file_len, lumps })
+        Ok(Self {
+            version,
+            file_len,
+            lumps,
+        })
+    }
+
+    pub const fn version(&self) -> PxbspVersion {
+        self.version
     }
 
     pub const fn file_len(&self) -> u32 {
@@ -756,7 +809,7 @@ mod tests {
     fn valid_file() -> Vec<u8> {
         let directory_end =
             PXBSP_HEADER_BYTES as usize + PXBSP_DIRECTORY_ENTRY_BYTES as usize * PXBSP_LUMP_COUNT;
-        let payload_sizes = [0usize, 0, 0, 12, 14, 0, 14, 2, 1, 26, 34, 6, 32, 1, 0, 0];
+        let payload_sizes = [0usize, 0, 0, 12, 14, 0, 10, 2, 1, 14, 6, 6, 32, 1, 0, 0];
         let mut offsets = [0usize; PXBSP_LUMP_COUNT];
         let mut cursor = aligned(directory_end);
         for (index, size) in payload_sizes.into_iter().enumerate() {
@@ -784,17 +837,27 @@ mod tests {
         let bytes = valid_file();
         let index = PxbspIndex::read(&mut SliceReader::new(&bytes)).expect("index");
         assert_eq!(index.file_len(), bytes.len() as u32);
+        assert_eq!(index.version(), PxbspVersion::V4);
         assert_eq!(index.lump(PxbspLumpKind::Vertices).len, 12);
-        assert_eq!(index.lump(PxbspLumpKind::Nodes).len, 34);
+        assert_eq!(index.lump(PxbspLumpKind::Nodes).len, 6);
+        assert_eq!(PxbspLumpKind::Planes.record_size(index.version()), Some(14));
+        assert_eq!(PxbspLumpKind::Faces.record_size(index.version()), Some(10));
+        assert_eq!(PxbspLumpKind::Leaves.record_size(index.version()), Some(14));
+        assert_eq!(PxbspLumpKind::Models.record_size(index.version()), Some(32));
     }
 
     #[test]
     fn rejects_unknown_version_and_lump_count() {
         let mut bytes = valid_file();
-        bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+        bytes[4..6].copy_from_slice(&5u16.to_le_bytes());
         assert!(matches!(
             PxbspIndex::read(&mut SliceReader::new(&bytes)),
-            Err(PxbspError::BadVersion { found: 2 })
+            Err(PxbspError::BadVersion { found: 5 })
+        ));
+        bytes[4..6].copy_from_slice(&PXBSP_VERSION_V3.to_le_bytes());
+        assert!(matches!(
+            PxbspIndex::read(&mut SliceReader::new(&bytes)),
+            Err(PxbspError::BadVersion { found: PXBSP_VERSION_V3 })
         ));
         bytes[4..6].copy_from_slice(&PXBSP_VERSION.to_le_bytes());
         bytes[6..8].copy_from_slice(&15u16.to_le_bytes());
@@ -833,6 +896,22 @@ mod tests {
                 kind: PxbspLumpKind::Faces,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn rejects_experimental_v2_before_reading_ambiguous_records() {
+        let mut bytes = valid_file();
+        let planes = PXBSP_HEADER_BYTES as usize
+            + PxbspLumpKind::Planes as usize * PXBSP_DIRECTORY_ENTRY_BYTES as usize;
+        // Seventy is divisible by both the experimental 10-byte and final
+        // 14-byte plane strides. The version rejects it before that
+        // structurally ambiguous payload can be interpreted.
+        bytes[planes + 8..planes + 12].copy_from_slice(&70u32.to_le_bytes());
+        bytes[4..6].copy_from_slice(&PXBSP_VERSION_V2.to_le_bytes());
+        assert!(matches!(
+            PxbspIndex::read(&mut SliceReader::new(&bytes)),
+            Err(PxbspError::BadVersion { found: PXBSP_VERSION_V2 })
         ));
     }
 
