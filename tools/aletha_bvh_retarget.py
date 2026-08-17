@@ -335,6 +335,48 @@ def smooth_action_rotations(
         fc.update()
 
 
+def face_forward(src: bpy.types.Object, frame_start: int, frame_end: int) -> float:
+    """Counter-rotate the source armature about world Z so the pelvis, on
+    average over the window, faces the way it faces in the rest pose. Generated
+    takes often walk turned 30-60 degrees off their rest facing; under a
+    lock-on the body must face the target, so the take's own turn is removed
+    here and only the stride's direction relative to the body survives.
+    Returns the removed turn in degrees."""
+    import math
+
+    scene = bpy.context.scene
+
+    def pelvis_forward(rest: bool):
+        p = (lambda b: _rest_world(src, b).translation) if rest else (lambda b: _pose_world(src, b).translation)
+        lateral = p("LeftUpLeg") - p("RightUpLeg")
+        lateral.z = 0.0
+        if lateral.length < 1e-6:
+            return None
+        forward = lateral.cross(Vector((0.0, 0.0, 1.0)))
+        forward.normalize()
+        return forward
+
+    rest_forward = pelvis_forward(rest=True)
+    if rest_forward is None:
+        return 0.0
+    sum_x = sum_y = 0.0
+    for frame in range(frame_start, frame_end + 1):
+        scene.frame_set(frame)
+        bpy.context.view_layer.update()
+        f = pelvis_forward(rest=False)
+        if f is not None:
+            sum_x += f.x
+            sum_y += f.y
+    if abs(sum_x) + abs(sum_y) < 1e-6:
+        return 0.0
+    mean_yaw = math.atan2(sum_y, sum_x)
+    rest_yaw = math.atan2(rest_forward.y, rest_forward.x)
+    turn = mean_yaw - rest_yaw
+    src.rotation_euler = (src.rotation_euler.x, src.rotation_euler.y, src.rotation_euler.z - turn)
+    bpy.context.view_layer.update()
+    return math.degrees(turn)
+
+
 def gait_window(src: bpy.types.Object, frame_start: int, frame_end: int) -> tuple[int, int]:
     """Frames where the source root moves at >= 50% of its peak smoothed speed:
     trims the standing intro/outro that text-to-motion samples often carry."""

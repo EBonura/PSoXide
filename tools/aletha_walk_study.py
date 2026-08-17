@@ -30,7 +30,7 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from aletha_bvh_retarget import gait_window, import_animation_source, retarget  # noqa: E402
+from aletha_bvh_retarget import face_forward, gait_window, import_animation_source, retarget  # noqa: E402
 
 PREVIEW_FPS = 30
 
@@ -51,6 +51,14 @@ def parse_args() -> argparse.Namespace:
         help="The gait source is exactly one authored loop: cycle = whole take, no smoothing",
     )
     parser.add_argument(
+        "--face-forward", action="store_true",
+        help="Remove the take's mean body turn (pelvis facing) before retargeting",
+    )
+    parser.add_argument(
+        "--reverse", action="store_true",
+        help="Play the gait window backwards (a forward walk reversed reads as walking backward)",
+    )
+    parser.add_argument(
         "--gait-window", type=int, nargs=2, metavar=("FIRST", "LAST"),
         help="Gait frames to cycle (30 fps timeline); default: artist take = whole, BVH = auto",
     )
@@ -63,6 +71,10 @@ def parse_args() -> argparse.Namespace:
              "(rig + mesh, one action each) for import-locomotion",
     )
     parser.add_argument("--phase-stem", default="walk_fwd")
+    parser.add_argument(
+        "--mirror-cruise-stem",
+        help="Also export the cruise loop mirrored (left/right swapped) under this stem",
+    )
     parser.add_argument("--metadata", type=Path, help="Phase-range JSON")
     parser.add_argument("--tempo", type=float, default=1.35, help="Gait speed-up baked in")
     parser.add_argument(
@@ -191,6 +203,18 @@ def detect_cycle(positions: dict[str, list[Vector]], frames: int) -> int:
     return best_lag
 
 
+def reverse_action_window(action: bpy.types.Action, first: int, last: int) -> None:
+    """Mirror every keyframe inside [first, last] in time: frame f -> first + last - f."""
+    for fc in action.fcurves:
+        for key in fc.keyframe_points:
+            f = key.co.x
+            if first - 0.5 <= f <= last + 0.5:
+                key.co.x = first + last - f
+                key.handle_left.x = first + last - key.handle_left.x
+                key.handle_right.x = first + last - key.handle_right.x
+        fc.update()
+
+
 def stance_speed(
     rig: bpy.types.Object,
     action: bpy.types.Action,
@@ -220,8 +244,9 @@ def stance_speed(
                 continue
             fwd = lateral.normalized().cross(Vector((0.0, 0.0, 1.0)))
             rel = (series[i + 1] - hips[i + 1]) - (series[i - 1] - hips[i - 1])
-            speeds.append(-rel.dot(fwd) * 0.5 * PREVIEW_FPS)
-    speeds = sorted(v for v in speeds if v > 0.0)
+            rel.z = 0.0
+            speeds.append(rel.length * 0.5 * PREVIEW_FPS)
+    speeds = sorted(speeds)
     return speeds[len(speeds) // 2] if speeds else 0.0
 
 
@@ -535,11 +560,30 @@ def export_phase_glbs(
             raise RuntimeError(f"GLB export failed: {path}")
         print(f"[study] phase {name}: frames 1..{len(poses)} -> {path}")
 
-    # Mirrored winddown: the same stop from the other foot, for the half-stride
-    # phase. Mirrored in WORLD space across the sagittal plane (x = 0, the rig
-    # is centred and the gait is in place) and left/right bones swapped, so it
-    # does not depend on Blender's bone-roll mirror convention.
-    first, last = splits["winddown"]
+    # The mirrored winddown (other foot) and, when requested, the mirrored
+    # cruise: a left strafe mirrored is the right strafe.
+    export_mirrored_phase(rig, assembled, splits["winddown"], floor_z, out_dir, f"{stem}_winddown_mirror")
+    if MIRROR_CRUISE_STEM:
+        export_mirrored_phase(rig, assembled, splits["cruise_loop"], floor_z, out_dir, MIRROR_CRUISE_STEM)
+
+
+# Set from --mirror-cruise-stem: also export the cruise loop mirrored under this stem.
+MIRROR_CRUISE_STEM = ""
+
+
+def export_mirrored_phase(
+    rig: bpy.types.Object,
+    assembled: bpy.types.Action,
+    phase: list[int],
+    floor_z: float,
+    out_dir: Path,
+    name: str,
+) -> None:
+    """Export one phase mirrored in WORLD space across the sagittal plane
+    (x = 0, the rig is centred and the gait is in place) with left/right bones
+    swapped, so it does not depend on Blender's bone-roll mirror convention."""
+    scene = bpy.context.scene
+    first, last = phase
     poses = level_poses_to_floor(rig, assembled, list(range(first, last + 1)), floor_z)
     mirror = Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0))
     partner = {}
@@ -551,11 +595,9 @@ def export_phase_glbs(
         else:
             partner[bone.name] = bone.name
     ordered = sorted(rig.pose.bones, key=lambda b: len(b.parent_recursive))
-    name = f"{stem}_winddown_mirror"
     action = bpy.data.actions.new(name)
     world_inv = rig.matrix_world.inverted()
     for index, pose in enumerate(poses):
-        # Apply the levelled pose and read every bone's world matrix.
         rig.animation_data.action = action
         for bone in ordered:
             bone.location, bone.rotation_quaternion, bone.scale = pose[bone.name]
@@ -618,6 +660,9 @@ def main() -> None:
             window = (src_first, src_last)
         else:
             window = gait_window(src, src_first, src_last)
+        if args.face_forward:
+            turn = face_forward(src, window[0], window[1])
+            print(f"[study] face_forward removed {turn:+.1f} deg of body turn")
         gait, speed = retarget(
             src, rig, "generated_gait", window[0], window[1], smooth=not args.loop_take
         )
@@ -634,6 +679,9 @@ def main() -> None:
             gait_first, gait_frames = args.gait_window[0], max(1, args.gait_window[1] - args.gait_window[0])
     else:
         raise SystemExit("need --take or --gait-bvh")
+
+    if args.reverse:
+        reverse_action_window(gait, gait_first, gait_first + gait_frames)
 
     hips = bone_by_suffix(rig, "hips")
     left = bone_by_suffix(rig, "leftfoot")
@@ -898,6 +946,8 @@ def main() -> None:
         )
 
     if args.phase_glb_dir:
+        global MIRROR_CRUISE_STEM
+        MIRROR_CRUISE_STEM = args.mirror_cruise_stem or ""
         export_phase_glbs(rig, output_action, splits, args.phase_glb_dir.expanduser(), args.phase_stem)
 
     if args.metadata:
