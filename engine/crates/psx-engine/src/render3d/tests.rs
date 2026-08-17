@@ -1892,11 +1892,22 @@ fn grounding_probe_player_lowest_vertex_matches_reference() {
         "/../../examples/editor-playtest/generated/models/model_000_aletha_delivered/mesh.psxmdl"
     ))
     .expect("cooked mesh");
-    let clip_bytes = std::fs::read(concat!(
+    // By name, not by index: the clip_NN prefix shifts whenever a clip is
+    // added to the character's set.
+    let models = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/editor-playtest/generated/models/model_000_aletha_delivered/clip_14_aletha_idle.psxanim"
-    ))
-    .expect("cooked idle");
+        "/../../examples/editor-playtest/generated/models/model_000_aletha_delivered"
+    );
+    let idle = std::fs::read_dir(models)
+        .expect("cooked model dir")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("_aletha_idle.psxanim"))
+        })
+        .expect("cooked idle clip");
+    let clip_bytes = std::fs::read(idle).expect("cooked idle");
     let model = psx_asset::Model::from_bytes(&model_bytes).expect("model");
     let clip = psx_asset::Animation::from_bytes(&clip_bytes).expect("clip");
 
