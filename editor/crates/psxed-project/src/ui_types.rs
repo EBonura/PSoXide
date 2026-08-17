@@ -381,8 +381,7 @@ pub(crate) fn default_ui_transition_seed() -> u16 {
 /// Action a [`UiNodeKind::Button`] fires when activated. Runtime
 /// dispatch is a later step; this carries the authored intent so the
 /// cook can lower it to a [`psx_level::LevelUiAction`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UiAction {
     /// Switch to a composed screen state by stable id.
     GotoState(SceneStateId),
@@ -422,7 +421,6 @@ pub enum UiAction {
     /// Game-specific action dispatched by opaque id.
     Game(u16),
 }
-
 
 impl UiAction {
     /// Editor-facing label for the action variant.
@@ -577,8 +575,7 @@ pub struct OptionDef {
 }
 
 /// Built-in bitmap font a text UI node draws with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UiFontChoice {
     /// 8x8 basic ASCII font.
     #[default]
@@ -654,7 +651,6 @@ pub enum UiFontChoice {
     /// Jura UI font.
     Jura,
 }
-
 
 impl UiFontChoice {
     /// All editor-selectable built-in UI fonts.

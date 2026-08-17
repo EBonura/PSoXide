@@ -149,13 +149,12 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                 mesh: Some(model),
                 animation_clip,
                 ..
+            } if project
+                .resource(*model)
+                .is_some_and(|r| matches!(r.data, ResourceData::Model(_))) =>
+            {
+                add_model_clip_requirement(project, &mut out, *model, *animation_clip);
             }
-                if project
-                    .resource(*model)
-                    .is_some_and(|r| matches!(r.data, ResourceData::Model(_)))
-                => {
-                    add_model_clip_requirement(project, &mut out, *model, *animation_clip);
-                }
             NodeKind::SpawnPoint {
                 character: Some(character_id),
                 ..
@@ -1021,8 +1020,7 @@ pub(crate) fn register_model_for_instance(
             ));
             return None;
         }
-        if seen_sockets.contains(&socket.name.as_str())
-        {
+        if seen_sockets.contains(&socket.name.as_str()) {
             report.error(format!(
                 "Model '{}' has duplicate attachment socket '{}'",
                 resource.name, socket.name
