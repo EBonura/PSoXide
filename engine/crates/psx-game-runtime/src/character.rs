@@ -38,6 +38,12 @@ pub enum PlayerAnim {
     WalkWinddown,
     /// Mirrored walk-to-idle transition (other foot), for the half-stride phase.
     WalkWinddownAlt,
+    /// Idle-to-run transition, one shot; Run begins where it ends.
+    RunWindup,
+    /// Run-to-idle transition, one shot, over the motor's deceleration.
+    RunWinddown,
+    /// Mirrored run-to-idle transition (other foot), for the half-stride phase.
+    RunWinddownAlt,
 }
 
 impl PlayerAnim {
@@ -63,6 +69,9 @@ impl PlayerAnim {
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
             Self::WalkWinddown => CharacterAnimationAction::WalkWinddown,
             Self::WalkWinddownAlt => CharacterAnimationAction::WalkWinddownAlt,
+            Self::RunWindup => CharacterAnimationAction::RunWindup,
+            Self::RunWinddown => CharacterAnimationAction::RunWinddown,
+            Self::RunWinddownAlt => CharacterAnimationAction::RunWinddownAlt,
         }
     }
 
@@ -280,6 +289,7 @@ impl RuntimeCharacter {
         let walk = self
             .action_clip(CharacterAnimationAction::Walk)
             .unwrap_or(idle);
+        let run = self.action_clip(CharacterAnimationAction::Run).unwrap_or(walk);
         match anim.action() {
             CharacterAnimationAction::Idle => idle,
             CharacterAnimationAction::Walk => walk,
@@ -296,6 +306,19 @@ impl RuntimeCharacter {
                 .unwrap_or(
                     self.action_clip(CharacterAnimationAction::WalkWinddown)
                         .unwrap_or(walk),
+                ),
+            // Run transitions fall back to the run cruise, then the walk.
+            CharacterAnimationAction::RunWindup => self
+                .action_clip(CharacterAnimationAction::RunWindup)
+                .unwrap_or(run),
+            CharacterAnimationAction::RunWinddown => self
+                .action_clip(CharacterAnimationAction::RunWinddown)
+                .unwrap_or(run),
+            CharacterAnimationAction::RunWinddownAlt => self
+                .action_clip(CharacterAnimationAction::RunWinddownAlt)
+                .unwrap_or(
+                    self.action_clip(CharacterAnimationAction::RunWinddown)
+                        .unwrap_or(run),
                 ),
             CharacterAnimationAction::WalkBackward => self
                 .action_clip(CharacterAnimationAction::WalkBackward)
