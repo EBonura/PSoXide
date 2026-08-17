@@ -208,7 +208,15 @@ impl BspRuntime {
         if material_count == 0 {
             return Err(BspRuntimeInitError::NoMaterials);
         }
-        let renderer = Renderer::new_pxbsp(map.faces().len());
+        let mut renderer = Renderer::new_pxbsp(map.faces().len());
+        // The frustum clip must match the projection this example renders
+        // with (H and screen half-extents), or it clips too much or too little.
+        renderer.set_view_projection(psx_bsp::render::ViewProjection {
+            focal_length: PROJECTION.focal_length,
+            half_width: i32::from(PROJECTION.screen_x),
+            half_height: i32::from(PROJECTION.screen_y),
+            ..psx_bsp::render::ViewProjection::DEFAULT
+        });
         Ok(Self {
             map,
             renderer,
@@ -577,6 +585,7 @@ impl BspRuntime {
             );
             let mut used_words = world.packet_words;
             let mut packet_count = world.stats.packets as usize;
+
             for door in self.doors.iter() {
                 let Some(frame) = self.renderer.draw_pxbsp_model(
                     &self.map,
