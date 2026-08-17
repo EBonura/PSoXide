@@ -1928,11 +1928,13 @@ fn grounding_probe_player_lowest_vertex_matches_reference() {
     let origin = WorldVertex::new(128, 4 + lift, 128);
     let instance_rotation = Mat3I16::IDENTITY;
 
-    let camera_view = camera_gte_view_matrix(camera);
+    // The model path's convention: X/Y rows scaled and H divided (see
+    // MODEL_GTE_XY_SCALE), which keeps RTPS out of its H/SZ <= 2 clamp.
+    let camera_view = model_gte_view_matrix(camera);
     let view_instance = mat3_mul_q12(&camera_view, &instance_rotation);
     let view_origin_translation =
         compute_view_origin_translation(camera_view, origin, camera.position);
-    load_world_projection_gte(camera.projection);
+    load_world_projection_gte(model_gte_projection(camera.projection));
 
     // Find the model's lowest vertex and its part joint at idle frame 0.
     let first = model.vertex(0).unwrap();

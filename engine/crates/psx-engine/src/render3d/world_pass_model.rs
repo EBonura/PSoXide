@@ -430,7 +430,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         blend_vertices: bool,
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
-        let camera_view = camera_gte_view_matrix(camera);
+        // X/Y-scaled view + H/scale: see MODEL_GTE_XY_SCALE.
+        let camera_view = model_gte_view_matrix(camera);
+        let gte_projection = model_gte_projection(camera.projection);
         let view_instance = if MODEL_GTE_JOINT_COMPOSE || MODEL_GTE_JOINT_TRANSLATION {
             mat3_mul_q12(&camera_view, &instance_rotation)
         } else {
@@ -441,7 +443,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         } else {
             Vec3I32::ZERO
         };
-        load_world_projection_gte(camera.projection);
+        load_world_projection_gte(gte_projection);
 
         let joint_count = (model.joint_count() as usize).min(joint_view_transforms.len());
         let pose_sample = animation.looped_pose_sample_q12(frame_q12);
@@ -609,7 +611,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             vertex,
                             primary,
                             joint_view_transforms,
-                            camera.projection,
+                            gte_projection,
                         );
                         all_projected_vertices_in_front &=
                             projected_model_vertex_in_front(projected, near_z);
@@ -645,7 +647,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                                     vertices,
                                     primary,
                                     joint_view_transforms,
-                                    camera.projection,
+                                    gte_projection,
                                     near_z,
                                     projected_vertices,
                                     &mut all_projected_vertices_in_front,
@@ -745,7 +747,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         vertices,
                         primary,
                         joint_view_transforms,
-                        camera.projection,
+                        gte_projection,
                         near_z,
                         projected_vertices,
                         &mut all_projected_vertices_in_front,
