@@ -386,11 +386,24 @@ impl Playtest {
         }
 
         if ctx.just_pressed(button::R3) {
-            self.lock_target = match self.lock_target {
-                Some(_) => None,
-                None => self.find_best_lock_target(LOCK_RANGE),
-            };
-            if self.lock_target.is_some() {
+            if self.is_locked() {
+                self.lock_target = None;
+                self.lock_anchor = None;
+            } else {
+                self.lock_target = self.find_best_lock_target(LOCK_RANGE);
+                if self.lock_target.is_none() {
+                    // Nothing to lock onto: bind facing to a point ahead, so
+                    // the locked locomotion set can be exercised anywhere.
+                    let position = self.motor.position();
+                    let yaw = self.motor.yaw();
+                    self.lock_anchor = Some(RoomPoint::new(
+                        position.x.saturating_add(yaw.sin().mul_i32(LOCK_RANGE)),
+                        position.y.saturating_add(LOCK_ANCHOR_HEIGHT),
+                        position.z.saturating_add(yaw.cos().mul_i32(LOCK_RANGE)),
+                    ));
+                }
+            }
+            if self.is_locked() {
                 telemetry::debug_log("player lock:on");
             } else {
                 telemetry::debug_log("player lock:off");
@@ -765,7 +778,7 @@ impl Playtest {
         }
         let (camera_right_x, _) = ctx.pad.sticks.right_centered();
         self.camera_turning_last_tick =
-            self.lock_target.is_none() && abs_i16(camera_right_x) >= CAMERA_STICK_DEADZONE;
+            !self.is_locked() && abs_i16(camera_right_x) >= CAMERA_STICK_DEADZONE;
         if SOFT_LOCK_ENABLED {
             self.update_soft_lock(ctx);
         } else {

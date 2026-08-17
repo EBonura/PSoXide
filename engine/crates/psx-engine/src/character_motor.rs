@@ -2022,13 +2022,17 @@ fn locked_evade_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorAnim {
         CharacterMotorAnim::Roll
     } else if abs_delta >= 1536 {
         CharacterMotorAnim::Quickstep
-    } else if delta < 0 {
+    } else if delta > 0 {
         CharacterMotorAnim::DashLeft
     } else {
         CharacterMotorAnim::DashRight
     }
 }
 
+/// Yaw runs from +Z toward +X (`x = sin`, `z = cos`); in the engine's
+/// right-handed Y-up frame that is a turn to the LEFT, so a positive delta
+/// from facing to move direction means the move is on the left side. (The
+/// old `delta < 0 => Left` was a leftover of the mirrored brush world.)
 fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorAnim {
     let delta = facing_yaw.shortest_delta_q12(move_yaw);
     let abs_delta = i32::from(delta).abs();
@@ -2036,7 +2040,7 @@ fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorA
         CharacterMotorAnim::Walk
     } else if abs_delta >= 1536 {
         CharacterMotorAnim::WalkBackward
-    } else if delta < 0 {
+    } else if delta > 0 {
         CharacterMotorAnim::StrafeLeft
     } else {
         CharacterMotorAnim::StrafeRight
@@ -4049,8 +4053,9 @@ mod tests {
         let cases = [
             (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Roll),
             (Q12::ZERO, Q12::NEG_ONE, CharacterMotorAnim::Quickstep),
-            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::DashLeft),
-            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::DashRight),
+            // Facing +Z, right is -X.
+            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::DashLeft),
+            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::DashRight),
         ];
         for (move_x, move_z, expected) in cases {
             let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
@@ -4097,8 +4102,9 @@ mod tests {
         let cases = [
             (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Walk),
             (Q12::ZERO, Q12::NEG_ONE, CharacterMotorAnim::WalkBackward),
-            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::StrafeLeft),
-            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::StrafeRight),
+            // Facing +Z, right is -X (right = forward x up).
+            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::StrafeLeft),
+            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::StrafeRight),
         ];
         for (move_x, move_z, expected) in cases {
             let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
@@ -4192,7 +4198,8 @@ mod tests {
         );
 
         assert_eq!(frame.yaw, Angle::ZERO, "facing stays on the target");
-        assert_eq!(frame.anim, CharacterMotorAnim::StrafeRight);
+        // +X is the left side when facing +Z.
+        assert_eq!(frame.anim, CharacterMotorAnim::StrafeLeft);
         assert!(!frame.sprinting, "no sprint sideways under lock");
         assert_eq!(frame.position.x, config().walk_speed >> 8);
     }
@@ -4205,8 +4212,9 @@ mod tests {
         let directions = [
             (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Roll),
             (Q12::ZERO, Q12::NEG_ONE, CharacterMotorAnim::Quickstep),
-            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::DashLeft),
-            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::DashRight),
+            // Relative to the +Z lock facing, -X is the right side.
+            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::DashRight),
+            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::DashLeft),
             (Q12::ONE, Q12::ONE, CharacterMotorAnim::Roll),
             (Q12::NEG_ONE, Q12::ONE, CharacterMotorAnim::Roll),
             (Q12::ONE, Q12::NEG_ONE, CharacterMotorAnim::Quickstep),
