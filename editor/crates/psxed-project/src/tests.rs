@@ -1661,12 +1661,8 @@ fn embedded_default_project_ron_deserializes() {
         })
         .expect("starter Run clip resource missing");
     assert_eq!(run.psxanim_path, "assets/animations/gen/run_fwd.psxanim");
-    // The locked set (backward + both strafes) is generated too.
-    for (action, stem) in [
-        (CharacterAnimationAction::WalkBackward, "walk_bwd"),
-        (CharacterAnimationAction::StrafeLeft, "walk_lft"),
-        (CharacterAnimationAction::StrafeRight, "walk_rgt"),
-    ] {
+    // The locked backward walk is generated; the strafes are the artist's.
+    for (action, stem) in [(CharacterAnimationAction::WalkBackward, "walk_bwd")] {
         let clip = animation_set
             .action_clip(action)
             .and_then(|id| project.resource(id))
@@ -1694,6 +1690,8 @@ fn embedded_default_project_ron_deserializes() {
         ),
         (CharacterAnimationAction::HitReact, "aletha_hurt_a"),
         (CharacterAnimationAction::Death, "aletha_death"),
+        (CharacterAnimationAction::StrafeLeft, "aletha_walk_lft"),
+        (CharacterAnimationAction::StrafeRight, "aletha_walk_rgt"),
     ] {
         let clip_id = animation_set
             .action_clip(action)
