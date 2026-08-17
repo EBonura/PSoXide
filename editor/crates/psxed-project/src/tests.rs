@@ -1652,9 +1652,17 @@ fn embedded_default_project_ron_deserializes() {
         })
         .expect("starter Walk clip resource missing");
     assert_eq!(walk.psxanim_path, "assets/animations/gen/walk_fwd.psxanim");
+    let run = animation_set
+        .action_clip(CharacterAnimationAction::Run)
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) => Some(clip),
+            _ => None,
+        })
+        .expect("starter Run clip resource missing");
+    assert_eq!(run.psxanim_path, "assets/animations/gen/run_fwd.psxanim");
     for (action, stem) in [
         (CharacterAnimationAction::Idle, "aletha_idle"),
-        (CharacterAnimationAction::Run, "aletha_run_fwd"),
         (CharacterAnimationAction::Roll, "aletha_dash_fwd"),
         (
             CharacterAnimationAction::LightAttack,

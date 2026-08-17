@@ -49,6 +49,73 @@ JOINT_MAP: dict[str, tuple[str, str]] = {
 }
 
 
+MIXAMO_PREFIX = "mixamorig:"
+# UE-mannequin vocabulary (Quaternius Universal Animation Library and friends)
+# -> the Mixamo names JOINT_MAP speaks.
+UE_ALIASES = {
+    "pelvis": "Hips",
+    "spine_01": "Spine",
+    "spine_03": "Spine2",
+    "neck_01": "Neck",
+    "head": "Head",
+    "upperarm_l": "LeftArm",
+    "lowerarm_l": "LeftForeArm",
+    "thigh_l": "LeftUpLeg",
+    "calf_l": "LeftLeg",
+    "foot_l": "LeftFoot",
+    "upperarm_r": "RightArm",
+    "lowerarm_r": "RightForeArm",
+    "thigh_r": "RightUpLeg",
+    "calf_r": "RightLeg",
+    "foot_r": "RightFoot",
+}
+
+
+def import_animation_source(path: Path, take: str | None = None) -> bpy.types.Object:
+    """Import a gait source: MoMask BVH, Mixamo FBX, or a GLB animation library
+    (UE-named rig). Bones are renamed into the Mixamo vocabulary so the same
+    JOINT_MAP applies; imported meshes are deleted (they would render)."""
+    ext = path.suffix.lower()
+    if ext == ".bvh":
+        return import_bvh(path)
+    before = {obj.name for obj in bpy.data.objects}
+    if ext == ".fbx":
+        result = bpy.ops.import_scene.fbx(filepath=str(path), use_anim=True)
+    elif ext in (".glb", ".gltf"):
+        result = bpy.ops.import_scene.gltf(filepath=str(path))
+    else:
+        raise RuntimeError(f"Unsupported gait source {path}")
+    if "FINISHED" not in result:
+        raise RuntimeError(f"Could not import {path}")
+    added = [o for o in bpy.data.objects if o.name not in before]
+    armatures = [o for o in added for _ in [0] if o.type == "ARMATURE"]
+    if not armatures:
+        raise RuntimeError(f"No armature in {path}")
+    src = armatures[0]
+    for obj in added:
+        if obj.type != "ARMATURE":
+            bpy.data.objects.remove(obj, do_unlink=True)
+    for bone in src.data.bones:
+        name = bone.name
+        if name.startswith(MIXAMO_PREFIX):
+            bone.name = name[len(MIXAMO_PREFIX):]
+        elif name.lower() in UE_ALIASES:
+            bone.name = UE_ALIASES[name.lower()]
+    if src.animation_data is None:
+        src.animation_data_create()
+    if take:
+        matches = [a for a in bpy.data.actions if a.name == take or a.name.startswith(take)]
+        if not matches:
+            raise RuntimeError(f"Take {take!r} not in {path.name}")
+        src.animation_data.action = matches[0]
+    elif src.animation_data.action is None:
+        fresh = [a for a in bpy.data.actions if a.users == 0 or a.name.startswith("Armature")]
+        if fresh:
+            src.animation_data.action = fresh[0]
+    src.name = "Gait_Source"
+    return src
+
+
 def import_bvh(path: Path) -> bpy.types.Object:
     before = {obj.name for obj in bpy.data.objects}
     result = bpy.ops.import_anim.bvh(
@@ -114,10 +181,12 @@ def retarget(
     action_name: str,
     frame_start: int,
     frame_end: int,
+    smooth: bool = True,
 ) -> tuple[bpy.types.Action, float]:
     """Bake src's current action onto tgt as a new action keyed on every integer
     frame in [frame_start, frame_end]. Returns (action, mean forward speed m/s
-    of the source root before its travel was cancelled)."""
+    of the source root before its travel was cancelled). `smooth` runs the
+    temporal low-pass meant for 20 fps generated takes; off for authored loops."""
     scene = bpy.context.scene
     missing = [s for s in JOINT_MAP if s not in src.data.bones]
     if missing:
@@ -189,8 +258,81 @@ def retarget(
     for fc in action.fcurves:
         for k in fc.keyframe_points:
             k.interpolation = "LINEAR"
+    if smooth:
+        smooth_action_rotations(tgt, action, frame_start, frame_end, passes=2, strength=0.35)
     seconds = (frame_end - frame_start) / scene.render.fps
     return action, (travel / seconds if seconds > 0 else 0.0)
+
+
+def smooth_action_rotations(
+    tgt: bpy.types.Object,
+    action: bpy.types.Action,
+    frame_start: int,
+    frame_end: int,
+    passes: int = 1,
+    strength: float = 0.3,
+) -> None:
+    """Light temporal low-pass over the baked bone rotations (and the hips
+    bob): each frame is slerped toward the midpoint of its neighbours. The
+    20 fps generator resampled to 30 fps carries per-frame jitter that a fast
+    gait amplifies into visible glitching; two passes at 0.35 remove the
+    frame-to-frame noise while leaving the stride's real accelerations
+    (verified by eye against the source: contact timing unchanged)."""
+    frames = list(range(frame_start, frame_end + 1))
+    bones = [b.name for b in tgt.pose.bones]
+    # Read all keyed values once.
+    rot: dict[str, list[Quaternion]] = {}
+    loc: dict[str, list[Vector]] = {}
+    for name in bones:
+        rq = [None] * len(frames)
+        lv = [None] * len(frames)
+        for fc in action.fcurves:
+            if not fc.data_path.startswith(f'pose.bones["{name}"].'):
+                continue
+            channel = fc.data_path.rsplit(".", 1)[1]
+            for i, frame in enumerate(frames):
+                v = fc.evaluate(frame)
+                if channel == "rotation_quaternion":
+                    if rq[i] is None:
+                        rq[i] = [0.0, 0.0, 0.0, 0.0]
+                    rq[i][fc.array_index] = v
+                elif channel == "location":
+                    if lv[i] is None:
+                        lv[i] = [0.0, 0.0, 0.0]
+                    lv[i][fc.array_index] = v
+        if rq[0] is not None:
+            rot[name] = [Quaternion(q) for q in rq]
+        if lv[0] is not None:
+            loc[name] = [Vector(v) for v in lv]
+    for _ in range(passes):
+        for name, qs in rot.items():
+            prev = list(qs)
+            for i in range(1, len(qs) - 1):
+                mid = prev[i - 1].slerp(prev[i + 1], 0.5)
+                qs[i] = prev[i].slerp(mid, strength)
+        for name, vs in loc.items():
+            prev = list(vs)
+            for i in range(1, len(vs) - 1):
+                mid = (prev[i - 1] + prev[i + 1]) * 0.5
+                vs[i] = prev[i].lerp(mid, strength)
+    # Write back.
+    for fc in action.fcurves:
+        if not fc.data_path.startswith('pose.bones["'):
+            continue
+        name = fc.data_path.split('"')[1]
+        channel = fc.data_path.rsplit(".", 1)[1]
+        for i, frame in enumerate(frames):
+            if channel == "rotation_quaternion" and name in rot:
+                value = rot[name][i][fc.array_index]
+            elif channel == "location" and name in loc:
+                value = loc[name][i][fc.array_index]
+            else:
+                continue
+            for k in fc.keyframe_points:
+                if abs(k.co.x - frame) < 0.5:
+                    k.co.y = value
+                    break
+        fc.update()
 
 
 def gait_window(src: bpy.types.Object, frame_start: int, frame_end: int) -> tuple[int, int]:
