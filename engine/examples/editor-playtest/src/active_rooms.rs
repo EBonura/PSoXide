@@ -734,6 +734,7 @@ impl Playtest {
             self.render_camera.position.z.saturating_add(camera_delta.z),
         );
         self.lock_target = None;
+        self.lock_anchor = None;
         self.lock_switch_stick_held = false;
         self.lock_invalid_ticks = 0;
         self.soft_lock_target = None;
