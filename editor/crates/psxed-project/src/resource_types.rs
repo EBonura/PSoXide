@@ -262,6 +262,9 @@ pub enum CharacterAnimationAction {
     WalkWinddown,
     /// Walk winddown from the other foot (mirrored), for the half-stride phase.
     WalkWinddownAlt,
+    RunWindup,
+    RunWinddown,
+    RunWinddownAlt,
 }
 
 impl CharacterAnimationAction {
@@ -296,6 +299,9 @@ impl CharacterAnimationAction {
         Self::WalkWindup,
         Self::WalkWinddown,
         Self::WalkWinddownAlt,
+        Self::RunWindup,
+        Self::RunWinddown,
+        Self::RunWinddownAlt,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -332,6 +338,9 @@ impl CharacterAnimationAction {
             Self::WalkWindup => "Walk Windup",
             Self::WalkWinddown => "Walk Winddown",
             Self::WalkWinddownAlt => "Walk Winddown (mirror)",
+            Self::RunWindup => "Run Windup",
+            Self::RunWinddown => "Run Winddown",
+            Self::RunWinddownAlt => "Run Winddown (mirror)",
         }
     }
 
@@ -367,6 +376,9 @@ impl CharacterAnimationAction {
             Self::WalkWindup => 27,
             Self::WalkWinddown => 28,
             Self::WalkWinddownAlt => 29,
+            Self::RunWindup => 30,
+            Self::RunWinddown => 31,
+            Self::RunWinddownAlt => 32,
         }
     }
 
@@ -394,6 +406,7 @@ impl CharacterAnimationAction {
             Self::WalkWindup | Self::WalkWinddown | Self::WalkWinddownAlt => {
                 Some(AnimationRole::Walk)
             }
+            Self::RunWindup | Self::RunWinddown | Self::RunWinddownAlt => Some(AnimationRole::Run),
             Self::WalkBackward
             | Self::StrafeLeft
             | Self::StrafeRight
@@ -453,6 +466,15 @@ impl CharacterAnimationAction {
         }
         if name.contains("run") && backward {
             return Some(Self::RunBackward);
+        }
+        if name.contains("run") && name.contains("windup") {
+            return Some(Self::RunWindup);
+        }
+        if name.contains("run") && name.contains("winddown") && name.contains("mirror") {
+            return Some(Self::RunWinddownAlt);
+        }
+        if name.contains("run") && name.contains("winddown") {
+            return Some(Self::RunWinddown);
         }
         if name.contains("walk") && name.contains("windup") {
             return Some(Self::WalkWindup);
