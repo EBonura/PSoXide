@@ -801,6 +801,40 @@ pub(crate) enum LocoPhase {
     Winddown,
 }
 
+/// The four clips one gait's phase machine drives. Walk and run differ only
+/// in which actions they name, so the machine below is written once.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) struct Gait {
+    cruise: PlayerAnim,
+    windup: PlayerAnim,
+    winddown: PlayerAnim,
+    winddown_alt: PlayerAnim,
+}
+
+const WALK_GAIT: Gait = Gait {
+    cruise: PlayerAnim::Walk,
+    windup: PlayerAnim::WalkWindup,
+    winddown: PlayerAnim::WalkWinddown,
+    winddown_alt: PlayerAnim::WalkWinddownAlt,
+};
+
+const RUN_GAIT: Gait = Gait {
+    cruise: PlayerAnim::Run,
+    windup: PlayerAnim::RunWindup,
+    winddown: PlayerAnim::RunWinddown,
+    winddown_alt: PlayerAnim::RunWinddownAlt,
+};
+
+/// The gait a motor animation belongs to, `None` for everything that is not
+/// a forward stepping cycle (idle, attacks, rolls, strafes).
+const fn gait_of(anim: PlayerAnim) -> Option<Gait> {
+    match anim {
+        PlayerAnim::Walk => Some(WALK_GAIT),
+        PlayerAnim::Run => Some(RUN_GAIT),
+        _ => None,
+    }
+}
+
 /// Q12 smoothstep of `elapsed / duration`, clamped to 0..=1.
 fn smoothstep_q12(elapsed: u32, duration: u32) -> Q12 {
     let t = if duration == 0 {
@@ -851,8 +885,7 @@ impl Playtest {
         let elapsed = now.as_u32().saturating_sub(self.loco_start_tick.as_u32());
         match self.loco {
             LocoPhase::Windup => {
-                if let Some(duration) = self.walk_transition_ticks(PlayerAnim::WalkWindup, video_hz)
-                {
+                if let Some(duration) = self.walk_transition_ticks(self.gait().windup, video_hz) {
                     let ramp = smoothstep_q12(elapsed, duration);
                     input.move_x = input.move_x.mul_q12(ramp);
                     input.move_z = input.move_z.mul_q12(ramp);
@@ -890,23 +923,32 @@ impl Playtest {
         video_hz: VideoHz,
     ) -> PlayerAnim {
         let elapsed = now.as_u32().saturating_sub(self.loco_start_tick.as_u32());
-        let windup = self.walk_transition_ticks(PlayerAnim::WalkWindup, video_hz);
-        let winddown = self.walk_transition_ticks(PlayerAnim::WalkWinddown, video_hz);
+        let motor_gait = gait_of(motor_anim);
+        // Sprint pressed or released mid-move swaps the gait under the phase.
+        if let Some(gait) = motor_gait {
+            if self.loco == LocoPhase::Idle {
+                self.loco_gait = gait;
+            }
+        }
+        let gait = self.gait();
+        let windup = self.walk_transition_ticks(gait.windup, video_hz);
+        let winddown = self.walk_transition_ticks(gait.winddown, video_hz);
         // Blocked against a wall the motor reports Idle with the stick held;
         // keep the phase and show what the motor says, as before.
-        let walking = motor_anim == PlayerAnim::Walk;
+        let stepping = motor_gait == Some(gait);
+        let switched = motor_gait.is_some() && !stepping;
         let released = !stick_active;
-        let other = !(walking || motor_anim == PlayerAnim::Idle);
+        let other = !(motor_gait.is_some() || motor_anim == PlayerAnim::Idle);
         match self.loco {
             LocoPhase::Idle => {
-                if walking {
+                if stepping {
                     self.loco_start_tick = now;
                     if windup.is_some() {
                         self.loco = LocoPhase::Windup;
-                        PlayerAnim::WalkWindup
+                        gait.windup
                     } else {
                         self.loco = LocoPhase::Cruise;
-                        PlayerAnim::Walk
+                        gait.cruise
                     }
                 } else {
                     motor_anim
@@ -914,20 +956,28 @@ impl Playtest {
             }
             LocoPhase::Windup => {
                 if released && winddown.is_some() {
-                    self.begin_winddown(PlayerAnim::WalkWinddown, now)
+                    self.begin_winddown(gait.winddown, now)
                 } else if released || other {
                     self.loco = LocoPhase::Idle;
                     motor_anim
+                } else if switched {
+                    // Gait changed during the ramp: run the new gait's windup.
+                    self.enter_gait_windup(motor_anim, now, video_hz)
                 } else if windup.is_some_and(|d| elapsed >= d) {
                     self.loco = LocoPhase::Cruise;
-                    PlayerAnim::Walk
+                    gait.cruise
                 } else {
-                    PlayerAnim::WalkWindup
+                    gait.windup
                 }
             }
             LocoPhase::Cruise => {
-                if walking {
-                    PlayerAnim::Walk
+                if stepping {
+                    gait.cruise
+                } else if switched {
+                    // Walk <-> run at speed: no transition clip exists between
+                    // the two cycles, so the cruise swaps directly.
+                    self.loco_gait = gait_of(motor_anim).unwrap_or(WALK_GAIT);
+                    motor_anim
                 } else if released && winddown.is_some() {
                     self.loco = LocoPhase::StopPending;
                     self.loco_start_tick = now;
@@ -941,9 +991,13 @@ impl Playtest {
                 }
             }
             LocoPhase::StopPending => {
-                if stick_active && walking {
+                if stick_active && stepping {
                     self.loco = LocoPhase::Cruise;
-                    PlayerAnim::Walk
+                    gait.cruise
+                } else if stick_active && switched {
+                    self.loco = LocoPhase::Cruise;
+                    self.loco_gait = gait_of(motor_anim).unwrap_or(WALK_GAIT);
+                    motor_anim
                 } else if other {
                     self.loco = LocoPhase::Idle;
                     motor_anim
@@ -952,10 +1006,12 @@ impl Playtest {
                 }
             }
             LocoPhase::Winddown => {
-                if stick_active && walking {
+                if stick_active && stepping {
                     // Stick back before the stop finished: straight into cruise.
                     self.loco = LocoPhase::Cruise;
-                    PlayerAnim::Walk
+                    gait.cruise
+                } else if stick_active && switched {
+                    self.enter_gait_windup(motor_anim, now, video_hz)
                 } else if other {
                     self.loco = LocoPhase::Idle;
                     motor_anim
@@ -972,6 +1028,31 @@ impl Playtest {
         }
     }
 
+    /// The gait whose clips the current phase is playing.
+    fn gait(&self) -> Gait {
+        self.loco_gait
+    }
+
+    /// Start (or restart) a gait's windup, falling straight through to its
+    /// cruise when no windup clip is bound.
+    fn enter_gait_windup(
+        &mut self,
+        motor_anim: PlayerAnim,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> PlayerAnim {
+        let gait = gait_of(motor_anim).unwrap_or(WALK_GAIT);
+        self.loco_gait = gait;
+        self.loco_start_tick = now;
+        if self.walk_transition_ticks(gait.windup, video_hz).is_some() {
+            self.loco = LocoPhase::Windup;
+            gait.windup
+        } else {
+            self.loco = LocoPhase::Cruise;
+            gait.cruise
+        }
+    }
+
     fn begin_winddown(&mut self, anim: PlayerAnim, now: SimTick) -> PlayerAnim {
         self.loco = LocoPhase::Winddown;
         self.loco_start_tick = now;
@@ -984,21 +1065,21 @@ impl Playtest {
     /// half stride (its mirror). Falls back to an immediate stop when the walk
     /// clip's cycle length cannot be resolved.
     fn stop_if_in_phase(&mut self, now: SimTick, video_hz: VideoHz) -> PlayerAnim {
-        let Some(cycle) = self.walk_transition_ticks(PlayerAnim::Walk, video_hz) else {
-            return self.begin_winddown(PlayerAnim::WalkWinddown, now);
+        let gait = self.gait();
+        let Some(cycle) = self.walk_transition_ticks(gait.cruise, video_hz) else {
+            return self.begin_winddown(gait.winddown, now);
         };
-        let alt_bound = self.character.is_some_and(|c| {
-            c.action_clip(PlayerAnim::WalkWinddownAlt.action())
-                .is_some()
-        });
+        let alt_bound = self
+            .character
+            .is_some_and(|c| c.action_clip(gait.winddown_alt.action()).is_some());
         // Ticks since the Walk clip started (its frame 0 is the stride start).
         let position = now.as_u32().saturating_sub(self.anim_start_tick.as_u32()) % cycle;
         if position <= 1 || position + 1 >= cycle {
-            self.begin_winddown(PlayerAnim::WalkWinddown, now)
+            self.begin_winddown(gait.winddown, now)
         } else if alt_bound && position.abs_diff(cycle / 2) <= 1 {
-            self.begin_winddown(PlayerAnim::WalkWinddownAlt, now)
+            self.begin_winddown(gait.winddown_alt, now)
         } else {
-            PlayerAnim::Walk
+            gait.cruise
         }
     }
 }

@@ -123,7 +123,7 @@ mod particle_runtime;
 mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
-use playtest_update::LocoPhase;
+use playtest_update::{Gait, LocoPhase};
 mod room_lighting_runtime;
 mod runtime_arenas;
 mod runtime_config;
@@ -342,16 +342,18 @@ struct Playtest {
     /// clip-local tick, and the switch tick the blend ramps from.
     /// Cleared on init/respawn; expires by elapsed ticks at render.
     anim_blend_from: Option<(PlayerAnim, u32, SimTick)>,
-    /// Three-part walk (windup / cruise / winddown) phase; see
+    /// Three-part gait (windup / cruise / winddown) phase; see
     /// `walk_transition_input` and `walk_transition_state`.
     loco: LocoPhase,
+    /// Which gait's clips the phase is playing (walk or run).
+    loco_gait: Gait,
     /// Tick the current locomotion phase began.
     loco_start_tick: SimTick,
     /// Last analog move vector while the stick was active; the winddown
     /// glides along it while the clip settles.
     loco_glide: (Q12, Q12),
-    /// Winddown variant chosen for the current stop (`WalkWinddown` from the
-    /// stride start, `WalkWinddownAlt` from the half stride).
+    /// Winddown variant chosen for the current stop (the gait's winddown from
+    /// the stride start, its mirror from the half stride).
     loco_stop_anim: PlayerAnim,
     /// Active-window reconcile needed: set by visibility refreshes,
     /// crossings, and stream progress; cleared when a pass converges.
