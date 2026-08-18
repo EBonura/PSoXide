@@ -349,8 +349,9 @@ struct Playtest {
     loco_gait: Gait,
     /// Charge attack: tick the button went down, and the level reached
     /// (0 light, 1 heavy, 2 combo). `None` when not charging.
-    /// Tick a shoulder button first went down, while the pair window runs.
-    attack_press: Option<SimTick>,
+    /// Tick a shoulder button first went down and which axis it belongs to,
+    /// while the pair window runs.
+    attack_press: Option<(SimTick, u8)>,
     /// Tick the current locomotion phase began.
     loco_start_tick: SimTick,
     /// Last analog move vector while the stick was active; the winddown

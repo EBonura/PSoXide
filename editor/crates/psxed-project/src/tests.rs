@@ -1667,6 +1667,13 @@ fn embedded_default_project_ron_deserializes() {
         (CharacterAnimationAction::WalkBackward, "walk_bwd"),
         (CharacterAnimationAction::StrafeLeft, "walk_lft"),
         (CharacterAnimationAction::StrafeRight, "walk_rgt"),
+        // Combat is the recorded set too: the three horizontal levels, the
+        // vertical axis's first level, and the hit reaction.
+        (CharacterAnimationAction::LightAttack, "light_attack"),
+        (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
+        (CharacterAnimationAction::ComboAttack, "combo_attack"),
+        (CharacterAnimationAction::VertLightAttack, "vert_light_attack"),
+        (CharacterAnimationAction::HitReact, "hit_react"),
     ] {
         let clip = animation_set
             .action_clip(action)
@@ -1681,20 +1688,17 @@ fn embedded_default_project_ron_deserializes() {
     for (action, stem) in [
         (CharacterAnimationAction::Idle, "aletha_idle"),
         (CharacterAnimationAction::Roll, "aletha_dash_fwd"),
-        (
-            CharacterAnimationAction::LightAttack,
-            "aletha_light_wpn_light_atk_a",
-        ),
-        (
-            CharacterAnimationAction::HeavyAttack,
-            "aletha_light_wpn_heavy_atk",
-        ),
-        (
-            CharacterAnimationAction::ComboAttack,
-            "aletha_light_wpn_light_atk_b",
-        ),
-        (CharacterAnimationAction::HitReact, "aletha_hurt_a"),
         (CharacterAnimationAction::Death, "aletha_death"),
+        // The delivered heavy-weapon set keeps the alternate slots; the
+        // vertical axis has its own actions and does not touch them.
+        (
+            CharacterAnimationAction::AltLightAttack,
+            "aletha_heavy_wpn_light_atk_a",
+        ),
+        (
+            CharacterAnimationAction::AltHeavyAttack,
+            "aletha_heavy_wpn_heavy_atk",
+        ),
     ] {
         let clip_id = animation_set
             .action_clip(action)

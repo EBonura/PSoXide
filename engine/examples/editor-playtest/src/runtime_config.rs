@@ -162,6 +162,11 @@ pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
 /// what the three source performances were recorded as.
 pub(super) const LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const HEAVY_ATTACK_BUTTON: u16 = button::R2;
+/// The vertical axis is the same three levels on the left shoulder pair. A
+/// level with no clip bound is simply not available, so the axis can ship one
+/// clip at a time.
+pub(super) const VERT_LIGHT_ATTACK_BUTTON: u16 = button::L1;
+pub(super) const VERT_HEAVY_ATTACK_BUTTON: u16 = button::L2;
 /// Ticks to wait after the first shoulder press before committing to a single
 /// attack. Two buttons meant as one press never land on the same tick, so
 /// without a window R1+R2 just fires whichever arrived first. 4 ticks is 67 ms

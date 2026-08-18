@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read the attacks out of a headless counter log and check they play whole.
 
-The contract is simple now: R1 is light, R2 is heavy, both together are the
-combo, and each plays its clip from frame 0 to the end. That is exactly what
+The contract is simple now: R1/R2/R1+R2 swing horizontally, L1/L2/L1+L2 strike
+vertically, and each plays its clip from frame 0 to the end. That is exactly what
 is easy to break silently, so it is what this asserts, from the
 `player_anim_phase_q12` counter (sampled where rendering samples the pose)
 rather than from a video.
@@ -25,8 +25,15 @@ import csv
 import sys
 from pathlib import Path
 
-# action index -> (name, cooked frames, strike frame)
-ATTACKS = {6: ("light", 37, 25), 7: ("heavy", 63, 38), 8: ("combo", 68, 45)}
+# action index -> (name, cooked frames, strike frame). Horizontal axis on the
+# right shoulder pair, vertical on the left; strike frames measured with
+# tools/psxanim_profile.py on the cooked clips.
+ATTACKS = {
+    6: ("light", 37, 25),
+    7: ("heavy", 63, 38),
+    8: ("combo", 68, 45),
+    30: ("vert light", 57, 28),
+}
 
 
 def main() -> None:

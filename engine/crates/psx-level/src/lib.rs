@@ -3117,7 +3117,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 30;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 33;
 
 /// Runtime animation action slot.
 ///
@@ -3190,6 +3190,12 @@ pub enum CharacterAnimationAction {
     /// [`Self::RunWinddown`] from the other foot (mirrored), for the
     /// half-stride phase.
     RunWinddownAlt = 29,
+    /// Vertical axis level 1: an overhead strike, the second attack axis.
+    VertLightAttack = 30,
+    /// Vertical axis level 2.
+    VertHeavyAttack = 31,
+    /// Vertical axis level 3.
+    VertComboAttack = 32,
 }
 
 impl CharacterAnimationAction {
@@ -3225,6 +3231,9 @@ impl CharacterAnimationAction {
         Self::RunWindup,
         Self::RunWinddown,
         Self::RunWinddownAlt,
+        Self::VertLightAttack,
+        Self::VertHeavyAttack,
+        Self::VertComboAttack,
     ];
 
     /// Convert to the cooked action slot index.

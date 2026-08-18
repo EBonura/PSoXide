@@ -54,7 +54,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def load(path: Path, take: str | None):
+def load(path: Path, take: str | None, fps: int = 30):
+    # Set the rate BEFORE importing: the glTF importer converts sampler times
+    # to frames with the scene's fps, so a 30 fps take read into Blender's
+    # default 24 fps scene comes back with 0.8x the frames.
+    bpy.context.scene.render.fps = fps
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
     for action in list(bpy.data.actions):
@@ -152,13 +156,13 @@ def report(label, names, frames, first, top):
 
 def main() -> None:
     args = parse_args()
-    rig, action = load(args.clip.expanduser(), args.take)
+    rig, action = load(args.clip.expanduser(), args.take, args.fps)
     names, frames, first = sample(rig, action, args.fps)
     peak, mean, per_frame = report("clip", names, frames, first, args.top)
 
     verdict_ok = True
     if args.against:
-        rig2, action2 = load(args.against.expanduser(), args.against_take)
+        rig2, action2 = load(args.against.expanduser(), args.against_take, args.fps)
         names2, frames2, first2 = sample(rig2, action2, args.fps)
         # Compare only joints the two rigs share (retargets rename).
         shared = [n for n in names2 if n in names]
