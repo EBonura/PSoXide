@@ -829,7 +829,9 @@ def main() -> None:
     gait_frames = cycle
 
     idle_lead = int(args.idle_seconds * PREVIEW_FPS)
-    transition = 2 if args.one_shot else int(args.transition_seconds * PREVIEW_FPS)
+    # A one-shot take often starts mid-pose (an attack opens already lunging),
+    # so it needs a real crossfade from idle, not a 2-frame cut.
+    transition = int(args.transition_seconds * PREVIEW_FPS)
     cruise = int(round((1 if args.one_shot else args.cruise_cycles) * cycle / args.tempo))
     total = idle_lead + transition + cruise + transition + idle_lead
     splits = {
