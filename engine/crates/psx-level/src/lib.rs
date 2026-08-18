@@ -3117,7 +3117,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 33;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 30;
 
 /// Runtime animation action slot.
 ///
@@ -3157,45 +3157,39 @@ pub enum CharacterAnimationAction {
     StrafeLeft = 13,
     /// Locked-on right strafe while preserving facing.
     StrafeRight = 14,
-    /// Locked-on fast backward locomotion while preserving facing.
-    RunBackward = 15,
-    /// Locked-on fast left strafe while preserving facing.
-    RunStrafeLeft = 16,
-    /// Locked-on fast right strafe while preserving facing.
-    RunStrafeRight = 17,
     /// Locked-on left evade.
-    DashLeft = 18,
+    DashLeft = 15,
     /// Locked-on right evade.
-    DashRight = 19,
+    DashRight = 16,
     /// Poise broken: reeling, controls dead until recovery.
-    Stun = 20,
+    Stun = 17,
     /// Regaining footing after [`Self::Stun`].
-    StunRecovery = 21,
+    StunRecovery = 18,
     /// Damage reaction variant, alternated with [`Self::HitReact`].
-    HitReactAlt = 22,
+    HitReactAlt = 19,
     /// Primary attack with the alternate (heavy) weapon class.
-    AltLightAttack = 23,
+    AltLightAttack = 20,
     /// Secondary attack with the alternate (heavy) weapon class.
-    AltHeavyAttack = 24,
+    AltHeavyAttack = 21,
     /// Follow-up / combo with the alternate (heavy) weapon class.
-    AltComboAttack = 25,
+    AltComboAttack = 22,
     /// First-spawn intro: played once when gameplay begins, with player
     /// control locked out for the clip's duration.
-    Intro = 26,
+    Intro = 23,
     /// Idle-to-walk transition (one shot); the walk cruise starts where it ends.
-    WalkWindup = 27,
+    WalkWindup = 24,
     /// Walk-to-idle transition (one shot), played while the motor decelerates.
-    WalkWinddown = 28,
+    WalkWinddown = 25,
     /// [`Self::WalkWinddown`] from the other foot (mirrored), for the
     /// half-stride phase, so a stop is never more than half a stride away.
-    WalkWinddownAlt = 29,
+    WalkWinddownAlt = 26,
     /// Idle-to-run transition (one shot); the run cruise starts where it ends.
-    RunWindup = 30,
+    RunWindup = 27,
     /// Run-to-idle transition (one shot), played while the motor decelerates.
-    RunWinddown = 31,
+    RunWinddown = 28,
     /// [`Self::RunWinddown`] from the other foot (mirrored), for the
     /// half-stride phase.
-    RunWinddownAlt = 32,
+    RunWinddownAlt = 29,
 }
 
 impl CharacterAnimationAction {
@@ -3216,9 +3210,6 @@ impl CharacterAnimationAction {
         Self::WalkBackward,
         Self::StrafeLeft,
         Self::StrafeRight,
-        Self::RunBackward,
-        Self::RunStrafeLeft,
-        Self::RunStrafeRight,
         Self::DashLeft,
         Self::DashRight,
         Self::Stun,
