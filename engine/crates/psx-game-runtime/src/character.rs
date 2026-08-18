@@ -29,6 +29,10 @@ pub enum PlayerAnim {
     LightAttack,
     HeavyAttack,
     ComboAttack,
+    /// Vertical axis: overhead strikes, cooked as the Alt* actions.
+    VertLightAttack,
+    VertHeavyAttack,
+    VertComboAttack,
     /// First-spawn intro, played once with control locked out.
     Intro,
     Death,
@@ -64,6 +68,9 @@ impl PlayerAnim {
             Self::LightAttack => CharacterAnimationAction::LightAttack,
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
             Self::ComboAttack => CharacterAnimationAction::ComboAttack,
+            Self::VertLightAttack => CharacterAnimationAction::VertLightAttack,
+            Self::VertHeavyAttack => CharacterAnimationAction::VertHeavyAttack,
+            Self::VertComboAttack => CharacterAnimationAction::VertComboAttack,
             Self::Intro => CharacterAnimationAction::Intro,
             Self::Death => CharacterAnimationAction::Death,
             Self::WalkWindup => CharacterAnimationAction::WalkWindup,
@@ -98,7 +105,12 @@ impl PlayerAnim {
 pub const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
     matches!(
         anim,
-        PlayerAnim::LightAttack | PlayerAnim::HeavyAttack | PlayerAnim::ComboAttack
+        PlayerAnim::LightAttack
+            | PlayerAnim::HeavyAttack
+            | PlayerAnim::ComboAttack
+            | PlayerAnim::VertLightAttack
+            | PlayerAnim::VertHeavyAttack
+            | PlayerAnim::VertComboAttack
     )
 }
 
@@ -344,6 +356,18 @@ impl RuntimeCharacter {
                     self.action_clip(CharacterAnimationAction::Roll)
                         .unwrap_or(walk),
                 ),
+            // The vertical axis has NO fallback on purpose: an unauthored
+            // level must resolve to nothing so the input can refuse it,
+            // rather than swinging some other clip.
+            CharacterAnimationAction::VertLightAttack => self
+                .action_clip(CharacterAnimationAction::VertLightAttack)
+                .unwrap_or(idle),
+            CharacterAnimationAction::VertHeavyAttack => self
+                .action_clip(CharacterAnimationAction::VertHeavyAttack)
+                .unwrap_or(idle),
+            CharacterAnimationAction::VertComboAttack => self
+                .action_clip(CharacterAnimationAction::VertComboAttack)
+                .unwrap_or(idle),
             CharacterAnimationAction::LightAttack => self
                 .action_clip(CharacterAnimationAction::LightAttack)
                 .to_option()
