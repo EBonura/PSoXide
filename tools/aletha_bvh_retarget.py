@@ -52,6 +52,25 @@ JOINT_MAP: dict[str, tuple[str, str]] = {
 MIXAMO_PREFIX = "mixamorig:"
 # UE-mannequin vocabulary (Quaternius Universal Animation Library and friends)
 # -> the Mixamo names JOINT_MAP speaks.
+# Synty Polygon vocabulary (the sword-combat pack).
+SYNTY_ALIASES = {
+    "hips": "Hips",
+    "spine_01": "Spine",
+    "spine_03": "Spine2",
+    "neck": "Neck",
+    "head": "Head",
+    "shoulder_l": "LeftArm",
+    "elbow_l": "LeftForeArm",
+    "shoulder_r": "RightArm",
+    "elbow_r": "RightForeArm",
+    "upperleg_l": "LeftUpLeg",
+    "lowerleg_l": "LeftLeg",
+    "ankle_l": "LeftFoot",
+    "upperleg_r": "RightUpLeg",
+    "lowerleg_r": "RightLeg",
+    "ankle_r": "RightFoot",
+}
+
 UE_ALIASES = {
     "pelvis": "Hips",
     "spine_01": "Spine",
@@ -101,6 +120,8 @@ def import_animation_source(path: Path, take: str | None = None) -> bpy.types.Ob
             bone.name = name[len(MIXAMO_PREFIX):]
         elif name.lower() in UE_ALIASES:
             bone.name = UE_ALIASES[name.lower()]
+        elif name.lower() in SYNTY_ALIASES:
+            bone.name = SYNTY_ALIASES[name.lower()]
     if src.animation_data is None:
         src.animation_data_create()
     if take:
