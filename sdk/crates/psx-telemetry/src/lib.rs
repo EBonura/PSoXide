@@ -811,12 +811,18 @@ id_table! {
     /// Player feet Y (motor position), biased for unsigned transport like the
     /// X/Z map counters.
     pub const ROOM_PLAYER_LOCAL_Y_BIASED: u16 = 265;
+    /// Phase of the player's active clip in Q12 (0 = first frame, 4096 = last),
+    /// sampled where rendering samples it. Timing questions ("is the strike
+    /// where the constant says?") are answered from this, not from the source
+    /// clip in Blender: it accounts for the cook, playback speed and frame
+    /// range that the guest actually applies.
+    pub const PLAYER_ANIM_PHASE_Q12: u16 = 266;
     }
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 266;
+pub const COUNTER_COUNT: usize = 267;
 
-const _: () = assert!(counter::ROOM_PLAYER_LOCAL_Y_BIASED as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PLAYER_ANIM_PHASE_Q12 as usize == COUNTER_COUNT - 1);

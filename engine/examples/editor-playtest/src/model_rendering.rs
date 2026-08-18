@@ -171,6 +171,15 @@ impl Playtest {
             )
         });
 
+        // Where rendering samples the phase is where it is worth measuring:
+        // this is the number that says which cooked frame is on screen.
+        if let Some(pose) = self.player_actor_pose {
+            telemetry::counter(
+                telemetry::counter::PLAYER_ANIM_PHASE_Q12,
+                pose.pose().phase_q12(),
+            );
+        }
+
         for pose in self.instance_actor_poses.iter_mut() {
             *pose = None;
         }
