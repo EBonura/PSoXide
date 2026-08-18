@@ -117,7 +117,11 @@ pub(super) fn draw_player_equipment_from_pose<
     let character_pose = player_pose.pose();
 
     let mut drawn = 0usize;
-    for equipment in tables.equipment {
+    for (index, equipment) in tables.equipment.iter().enumerate() {
+        // What is held changes with the action; the cooked records do not.
+        if index < 32 && knobs.equipment_mask & (1 << index) == 0 {
+            continue;
+        }
         // Player equipment follows the player across rooms, matching the
         // room-agnostic melee spec (combat::player_melee_spec): the
         // record's `room` field is only the spawn room, so filtering on
@@ -705,3 +709,4 @@ mod tests {
         }
     }
 }
+

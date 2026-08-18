@@ -34,7 +34,41 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
     texture_split_max_edge: MODEL_TEXTURE_SPLIT_MAX_EDGE,
     max_model_instances: MAX_MODEL_INSTANCES,
     max_equipment_draws: MAX_EQUIPMENT_DRAWS,
+    equipment_mask: u32::MAX,
 };
+
+/// Which equipment records are in hand for `anim`: level 1 swings the light
+/// sword, level 2 the heavy one, level 3 is a double attack, heavy in the main
+/// hand and light in the off hand. Anything that is not an attack holds level
+/// 1's weapon.
+///
+/// Matched on the cooked weapon NAME and the socket, not on table order, so
+/// adding a third weapon or reordering the scene cannot silently arm the wrong
+/// hand.
+pub(super) fn equipment_mask_for(anim: PlayerAnim) -> u32 {
+    let level = match anim {
+        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack => 2,
+        PlayerAnim::ComboAttack | PlayerAnim::VertComboAttack => 3,
+        _ => 1,
+    };
+    let mut mask = 0;
+    for (index, record) in EQUIPMENT.iter().enumerate().take(32) {
+        let Some(weapon) = WEAPONS.get(record.weapon.to_usize()) else {
+            continue;
+        };
+        let heavy = weapon.name.ends_with("Heavy");
+        let off_hand = record.character_socket == "left_hand_grip";
+        let held = match level {
+            2 => heavy && !off_hand,
+            3 => (heavy && !off_hand) || (!heavy && off_hand),
+            _ => !heavy && !off_hand,
+        };
+        if held {
+            mask |= 1 << index;
+        }
+    }
+    mask
+}
 
 /// This example's actor floor-shadow tuning (the `SHADOW_*` consts in
 /// `runtime_config`, as the crate value struct).
@@ -331,6 +365,7 @@ pub(super) fn draw_instance_equipment(
 
 /// Draw the player's attached equipment through the crate policy.
 pub(super) fn draw_player_equipment(
+    equipment_mask: u32,
     player_pose: PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -345,6 +380,8 @@ pub(super) fn draw_player_equipment(
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
+    let mut knobs = MODEL_DRAW_KNOBS;
+    knobs.equipment_mask = equipment_mask;
     mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,
@@ -354,7 +391,7 @@ pub(super) fn draw_player_equipment(
         MODEL_PROFILE_ENABLED,
     >(
         model_tables(),
-        MODEL_DRAW_KNOBS,
+        knobs,
         model_scratch_arena(),
         player_pose,
         models,
