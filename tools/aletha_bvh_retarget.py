@@ -281,8 +281,72 @@ def retarget(
             k.interpolation = "LINEAR"
     if smooth:
         smooth_action_rotations(tgt, action, frame_start, frame_end, passes=2, strength=0.35)
+    # NOTE: no despike here. An earlier version replaced "spike" frames with
+    # the midpoint of their neighbours, which flattened the strike itself: a
+    # whip IS a one-frame acceleration. Fix real pops at the source instead.
     seconds = (frame_end - frame_start) / scene.render.fps
     return action, (travel / seconds if seconds > 0 else 0.0)
+
+
+def despike_action_rotations(
+    tgt: bpy.types.Object,
+    action: bpy.types.Action,
+    frame_start: int,
+    frame_end: int,
+    limit_deg: float = 25.0,
+) -> int:
+    """Remove isolated rotation pops without touching the performance.
+
+    For every bone, the per-frame angular step is measured; a frame whose step
+    changes by more than `limit_deg` from the previous one AND changes back
+    (an isolated spike, not an acceleration) is replaced by the slerp midpoint
+    of its neighbours. Sustained accelerations, which is what a strike is, are
+    left alone. Returns how many frames were replaced.
+    """
+    import math
+
+    frames = list(range(frame_start, frame_end + 1))
+    if len(frames) < 5:
+        return 0
+    fixed = 0
+    for bone in tgt.pose.bones:
+        curves = sorted(
+            (
+                fc
+                for fc in action.fcurves
+                if fc.data_path == f'pose.bones["{bone.name}"].rotation_quaternion'
+            ),
+            key=lambda fc: fc.array_index,
+        )
+        if len(curves) != 4:
+            continue
+        values = [
+            Quaternion([fc.evaluate(frame) for fc in curves]).normalized()
+            for frame in frames
+        ]
+        step = []
+        for a, b in zip(values, values[1:]):
+            q = b.copy()
+            if a.dot(q) < 0.0:
+                q.negate()
+            angle = math.degrees(a.rotation_difference(q).angle)
+            step.append(min(angle, 360.0 - angle))
+        for index in range(1, len(step) - 1):
+            spike = step[index] - step[index - 1]
+            recover = step[index] - step[index + 1]
+            if spike > limit_deg and recover > limit_deg:
+                mid = values[index].slerp(values[index + 2], 0.5)
+                values[index + 1] = mid
+                fixed += 1
+        for index, frame in enumerate(frames):
+            for fc in curves:
+                for key in fc.keyframe_points:
+                    if abs(key.co.x - frame) < 0.5:
+                        key.co.y = values[index][fc.array_index]
+                        break
+        for fc in curves:
+            fc.update()
+    return fixed
 
 
 def smooth_action_rotations(
