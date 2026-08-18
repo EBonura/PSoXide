@@ -167,10 +167,19 @@ pub(super) const CHARGE_ATTACK_BUTTON: u16 = button::R2;
 pub(super) const CHARGE_LEVEL2_TICKS: u32 = 24;
 pub(super) const CHARGE_LEVEL3_TICKS: u32 = 54;
 pub(super) const CHARGE_FULL_TICKS: u32 = 84;
-/// Cooked frame each level's windup ends / strike begins (measured on the
-/// clips: hand-speed peak with 25-percent-of-peak boundaries, source frames
-/// 35 / 51 / 68 at 30 fps, cooked at 15 Hz). Releasing jumps here.
-pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [17, 25, 34];
+/// Cooked frame each level's windup ends / strike begins. Derived as a
+/// FRACTION of each clip (hand-speed peak with 25-percent-of-peak
+/// boundaries: 0.625 / 0.51 / 0.635) times its cooked length (37 / 63 / 68),
+/// because frame numbers depend on the rate the file is read at while the
+/// fraction does not. Releasing commits here.
+pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [23, 32, 43];
+/// Cooked frames of windup left to play before the strike when a level is
+/// released. Level 1 commits immediately (a tap is meant to be fast), the
+/// higher levels show a visible last-moment wind so they do not read as the
+/// same attack: the clips themselves are near-identical swings (measured:
+/// the hand lands in the same place, arcs of 0.82 / 1.10 / 0.88 m), so the
+/// pre-strike wind is what distinguishes them.
+pub(super) const CHARGE_RELEASE_LEAD: [u32; 3] = [0, 6, 12];
 /// Cooked clip rate for the attack clips, for the frame-to-tick conversion.
 pub(super) const CHARGE_CLIP_HZ: u32 = 15;
 
