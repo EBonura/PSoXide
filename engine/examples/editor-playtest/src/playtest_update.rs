@@ -529,11 +529,16 @@ impl Playtest {
                 lock_facing_yaw,
             )
         };
-        if !action_locked && self.motor.action().is_idle() {
+        // Charge attack: pressing winds up, holding escalates the level, and
+        // releasing commits by jumping to that clip's strike. See
+        // `update_charge_attack`.
+        let charging = self.update_charge_attack(ctx, now, action_locked);
+        if charging {
+            input = CharacterMotorInput::default();
+        }
+        if !charging && !action_locked && self.motor.action().is_idle() {
             let started = if ctx.just_pressed(LIGHT_ATTACK_BUTTON) {
                 self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.video_hz)
-            } else if ctx.just_pressed(HEAVY_ATTACK_BUTTON) {
-                self.start_player_anim_action(PlayerAnim::HeavyAttack, now, ctx.video_hz)
             } else if ctx.just_pressed(COMBO_ATTACK_BUTTON) {
                 self.start_player_anim_action(PlayerAnim::ComboAttack, now, ctx.video_hz)
             } else {
@@ -1064,6 +1069,81 @@ impl Playtest {
             self.loco = LocoPhase::Cruise;
             gait.cruise
         }
+    }
+
+    /// Charge attack on one button: the three attack clips are one
+    /// performance each whose windup is long, so the windup doubles as the
+    /// charge. Press starts level 1's windup; holding past the thresholds
+    /// swaps to the next level's clip at the same elapsed point, so the
+    /// character keeps winding up; releasing jumps that clip's phase to its
+    /// strike frame and locks the player for what remains.
+    ///
+    /// Returns true while the charge owns the player's input.
+    fn update_charge_attack(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
+        const LEVEL_ANIM: [PlayerAnim; 3] = [
+            PlayerAnim::LightAttack,
+            PlayerAnim::HeavyAttack,
+            PlayerAnim::ComboAttack,
+        ];
+        let held = ctx.is_held(CHARGE_ATTACK_BUTTON);
+        let Some((start, level)) = self.charge else {
+            if !action_locked
+                && self.motor.action().is_idle()
+                && ctx.just_pressed(CHARGE_ATTACK_BUTTON)
+                && self.start_player_anim_action(LEVEL_ANIM[0], now, ctx.video_hz)
+            {
+                // Charging is rooted; the lock is extended every tick the
+                // button stays down so the windup never runs into its strike
+                // on its own.
+                self.charge = Some((now, 0));
+                telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
+                return true;
+            }
+            return false;
+        };
+        let elapsed = now.as_u32().saturating_sub(start.as_u32());
+        if held {
+            let wanted: u8 = if elapsed >= CHARGE_LEVEL3_TICKS {
+                2
+            } else if elapsed >= CHARGE_LEVEL2_TICKS {
+                1
+            } else {
+                0
+            };
+            if wanted != level {
+                // Swap to the next level's clip, entering it at the same
+                // elapsed point so the windup reads as continuous.
+                self.switch_player_anim(LEVEL_ANIM[wanted as usize], now, ctx.video_hz);
+                self.anim_start_tick = start;
+                self.charge = Some((start, wanted));
+            }
+            // Hold the lock open while the button is down.
+            self.anim_lock_until_tick = now.saturating_add(2);
+            return true;
+        }
+        // Released: commit. Jump the clip's phase to its strike and lock for
+        // the rest of the clip.
+        self.charge = None;
+        let anim = LEVEL_ANIM[level as usize];
+        let strike_ticks = CHARGE_STRIKE_FRAME[level as usize]
+            .saturating_mul(ctx.video_hz.as_nonzero_u32())
+            / CHARGE_CLIP_HZ.max(1);
+        self.anim_start_tick = SimTick::from_u32(now.as_u32().saturating_sub(strike_ticks));
+        if let Some(character) = self.character {
+            let clip = character.clip_for(anim);
+            let total = self
+                .player_clip_duration_vblanks(
+                    character,
+                    clip,
+                    ctx.video_hz,
+                    character.action_speed(anim.action()),
+                    character.action_frame_range(anim.action()),
+                )
+                .unwrap_or(30);
+            self.anim_lock_until_tick = now.saturating_add(total.saturating_sub(strike_ticks).max(1));
+        }
+        self.swing_hit_mask = 0;
+        true
     }
 
     fn begin_winddown(&mut self, anim: PlayerAnim, now: SimTick) -> PlayerAnim {
