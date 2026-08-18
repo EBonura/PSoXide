@@ -347,6 +347,9 @@ struct Playtest {
     loco: LocoPhase,
     /// Which gait's clips the phase is playing (walk or run).
     loco_gait: Gait,
+    /// Charge attack: tick the button went down, and the level reached
+    /// (0 light, 1 heavy, 2 combo). `None` when not charging.
+    charge: Option<(SimTick, u8)>,
     /// Tick the current locomotion phase began.
     loco_start_tick: SimTick,
     /// Last analog move vector while the stick was active; the winddown
@@ -584,6 +587,7 @@ impl Playtest {
         addr_of_mut!((*scene).player_actor_pose).write(None);
         addr_of_mut!((*scene).lock_target).write(None);
         addr_of_mut!((*scene).lock_anchor).write(None);
+        addr_of_mut!((*scene).charge).write(None);
         addr_of_mut!((*scene).soft_lock_target).write(None);
         addr_of_mut!((*scene).active_interactable).write(None);
         addr_of_mut!((*scene).checkpoint).write(None);

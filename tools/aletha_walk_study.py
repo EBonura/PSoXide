@@ -804,8 +804,12 @@ def main() -> None:
     }
     hips_track = {"hips": world_positions(rig, gait, hips, gait_first, gait_frames)}
     print(f"[study] stance_speed={stance_speed(rig, gait, feet, hips_track['hips'], gait_first):.3f} m/s")
-    stabilize_torso(rig, gait, gait_first, gait_frames, args.torso_keep)
-    flatten_torso_lean(rig, gait, gait_first, gait_frames, args.torso_keep, args.lean_offset_deg)
+    if not args.one_shot:
+        # Gait repair only: these hold a walk/run torso steady over a cycle.
+        # On a one-shot action they fight the performance frame by frame and
+        # the result trembles.
+        stabilize_torso(rig, gait, gait_first, gait_frames, args.torso_keep)
+        flatten_torso_lean(rig, gait, gait_first, gait_frames, args.torso_keep, args.lean_offset_deg)
     if args.arm_swing_deg > 0.0:
         procedural_arms(
             rig, gait, gait_first, gait_frames,
