@@ -335,7 +335,9 @@ def smooth_action_rotations(
         fc.update()
 
 
-def face_forward(src: bpy.types.Object, frame_start: int, frame_end: int) -> float:
+def face_forward(
+    src: bpy.types.Object, frame_start: int, frame_end: int, keep_deg: float = 0.0
+) -> float:
     """Counter-rotate the source armature about world Z so the pelvis, on
     average over the window, faces the way it faces in the rest pose. Generated
     takes often walk turned 30-60 degrees off their rest facing; under a
@@ -372,6 +374,8 @@ def face_forward(src: bpy.types.Object, frame_start: int, frame_end: int) -> flo
     mean_yaw = math.atan2(sum_y, sum_x)
     rest_yaw = math.atan2(rest_forward.y, rest_forward.x)
     turn = mean_yaw - rest_yaw
+    if keep_deg != 0.0:
+        turn -= math.radians(abs(keep_deg)) * (1.0 if turn >= 0 else -1.0)
     src.rotation_euler = (src.rotation_euler.x, src.rotation_euler.y, src.rotation_euler.z - turn)
     bpy.context.view_layer.update()
     return math.degrees(turn)

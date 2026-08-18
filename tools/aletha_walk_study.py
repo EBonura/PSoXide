@@ -55,6 +55,14 @@ def parse_args() -> argparse.Namespace:
         help="Remove the take's mean body turn (pelvis facing) before retargeting",
     )
     parser.add_argument(
+        "--face-forward-keep",
+        type=float,
+        default=0.0,
+        help="Degrees of the take's own body turn to KEEP when facing it "
+        "forward: a locked strafe reads better angled into its travel "
+        "direction than square to the camera (sign follows the take)",
+    )
+    parser.add_argument(
         "--reverse", action="store_true",
         help="Play the gait window backwards (a forward walk reversed reads as walking backward)",
     )
@@ -220,6 +228,7 @@ def face_forward_action(
     action: bpy.types.Action,
     first: int,
     last: int,
+    keep_deg: float = 0.0,
 ) -> float:
     """Remove a baked take's mean body turn so it can serve as a locked
     directional clip: an artist "walk left" take yaws the body ~84 degrees
@@ -263,6 +272,12 @@ def face_forward_action(
     if abs(sum_x) + abs(sum_y) < 1e-6:
         return 0.0
     turn = math.atan2(sum_y, sum_x) - rest_yaw
+    # Keep a slice of the take's own turn: rotating the root carries the legs
+    # too, so removing all of it leaves a forward stride. A locked strafe
+    # reads best angled into its travel direction.
+    if keep_deg != 0.0:
+        keep = math.radians(abs(keep_deg)) * (1.0 if turn >= 0 else -1.0)
+        turn -= keep
 
     rest_local = rig.data.bones[root].matrix_local
     basis_rotation = (
@@ -742,7 +757,7 @@ def main() -> None:
         else:
             window = gait_window(src, src_first, src_last)
         if args.face_forward:
-            turn = face_forward(src, window[0], window[1])
+            turn = face_forward(src, window[0], window[1], args.face_forward_keep)
             print(f"[study] face_forward removed {turn:+.1f} deg of body turn")
         gait, speed = retarget(
             src, rig, "generated_gait", window[0], window[1], smooth=not args.loop_take
@@ -761,7 +776,9 @@ def main() -> None:
             # itself: counter-rotate every frame's root so the body's mean
             # facing matches the rest pose. A "walk left" take that turns the
             # character 84 degrees becomes a true strafe.
-            turn = face_forward_action(rig, gait, gait_first, gait_first + gait_frames)
+            turn = face_forward_action(
+                rig, gait, gait_first, gait_first + gait_frames, args.face_forward_keep
+            )
             print(f"[study] face_forward removed {turn:+.1f} deg of body turn")
         if args.gait_window:
             gait_first, gait_frames = args.gait_window[0], max(1, args.gait_window[1] - args.gait_window[0])
