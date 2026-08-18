@@ -388,34 +388,6 @@ impl RuntimeCharacter {
             // Locked-on fast locomotion degrades to the walk-speed strafe
             // set, then plain locomotion, so a character bound before the
             // full moveset existed keeps moving.
-            CharacterAnimationAction::RunBackward => self
-                .action_clip(CharacterAnimationAction::RunBackward)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::WalkBackward)
-                        .to_option()
-                })
-                .or_else(|| self.action_clip(CharacterAnimationAction::Run).to_option())
-                .unwrap_or(walk),
-            CharacterAnimationAction::RunStrafeLeft => self
-                .action_clip(CharacterAnimationAction::RunStrafeLeft)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::StrafeLeft)
-                        .to_option()
-                })
-                .or_else(|| self.action_clip(CharacterAnimationAction::Run).to_option())
-                .unwrap_or(walk),
-            CharacterAnimationAction::RunStrafeRight => self
-                .action_clip(CharacterAnimationAction::RunStrafeRight)
-                .to_option()
-                .or_else(|| {
-                    self.action_clip(CharacterAnimationAction::StrafeRight)
-                        .to_option()
-                })
-                .or_else(|| self.action_clip(CharacterAnimationAction::Run).to_option())
-                .unwrap_or(walk),
-            // Lateral evades degrade to the forward roll.
             CharacterAnimationAction::DashLeft => self
                 .action_clip(CharacterAnimationAction::DashLeft)
                 .to_option()
