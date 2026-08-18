@@ -35,21 +35,79 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
     max_model_instances: MAX_MODEL_INSTANCES,
     max_equipment_draws: MAX_EQUIPMENT_DRAWS,
     equipment_mask: u32::MAX,
+    equipment_assemble_q12: mr::ASSEMBLED_Q12,
 };
+
+/// Attack level for `anim`, or `None` when she is not swinging: the weapons
+/// are nanobot constructs, so outside an attack there is nothing in her hands.
+fn attack_level(anim: PlayerAnim) -> Option<u8> {
+    match anim {
+        PlayerAnim::LightAttack | PlayerAnim::VertLightAttack => Some(1),
+        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack => Some(2),
+        PlayerAnim::ComboAttack | PlayerAnim::VertComboAttack => Some(3),
+        _ => None,
+    }
+}
+
+/// When a weapon materialises, in CLIP FRAMES: the swing frame where the fist
+/// is fully extended, which is the moment the blade has to be solid for.
+///
+/// Measured off the cooked clips (the frame where the right hand is farthest
+/// from the hips), not eyeballed. Re-measure if a clip is re-authored.
+fn extension_frame(anim: PlayerAnim) -> Option<u16> {
+    match anim {
+        PlayerAnim::LightAttack => Some(25),
+        PlayerAnim::HeavyAttack => Some(35),
+        PlayerAnim::ComboAttack => Some(44),
+        PlayerAnim::VertLightAttack => Some(33),
+        PlayerAnim::VertHeavyAttack => Some(39),
+        PlayerAnim::VertComboAttack => Some(40),
+        _ => None,
+    }
+}
+
+/// How long the materialise takes, in CLIP FRAMES. Clips run at roughly a
+/// quarter of a frame per tick here, so 8 frames is about half a second.
+const MATERIALISE_FRAMES: u32 = 8;
+
+/// How far through the materialise the weapons are. Nothing until the ramp
+/// opens, solid from the extension frame through the strike, then the same
+/// ramp backwards over the tail of the clip.
+///
+/// `phase_q12` counts CLIP FRAMES in Q12, not a 0..4096 progress (it runs to
+/// 143360 on the 37-frame light attack), so it compares directly against the
+/// frame numbers above once they are shifted.
+pub(super) fn equipment_assemble_for(anim: PlayerAnim, phase_q12: u32, frame_count: u16) -> u16 {
+    let Some(extension) = extension_frame(anim) else {
+        return mr::ASSEMBLED_Q12;
+    };
+    let ramp_q12 = MATERIALISE_FRAMES << 12;
+    // Solid BY the extension, so the ramp runs into it rather than out of it.
+    let open_q12 = u32::from(extension).saturating_mul(4096).saturating_sub(ramp_q12);
+    if phase_q12 < open_q12 {
+        return 0;
+    }
+    // Dissolve over the tail: the same ramp, ending on the clip's last frame.
+    let last_q12 = u32::from(frame_count.saturating_sub(1)).saturating_mul(4096);
+    let close_q12 = last_q12.saturating_sub(ramp_q12).max(u32::from(extension) * 4096);
+    let assemble = if phase_q12 >= close_q12 {
+        (last_q12.saturating_sub(phase_q12)) / MATERIALISE_FRAMES
+    } else {
+        (phase_q12 - open_q12) / MATERIALISE_FRAMES
+    };
+    assemble.min(u32::from(mr::ASSEMBLED_Q12)) as u16
+}
 
 /// Which equipment records are in hand for `anim`: level 1 swings the light
 /// sword, level 2 the heavy one, level 3 is a double attack, heavy in the main
-/// hand and light in the off hand. Anything that is not an attack holds level
-/// 1's weapon.
+/// hand and light in the off hand. Nothing is held outside an attack.
 ///
 /// Matched on the cooked weapon NAME and the socket, not on table order, so
 /// adding a third weapon or reordering the scene cannot silently arm the wrong
 /// hand.
 pub(super) fn equipment_mask_for(anim: PlayerAnim) -> u32 {
-    let level = match anim {
-        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack => 2,
-        PlayerAnim::ComboAttack | PlayerAnim::VertComboAttack => 3,
-        _ => 1,
+    let Some(level) = attack_level(anim) else {
+        return 0;
     };
     let mut mask = 0;
     for (index, record) in EQUIPMENT.iter().enumerate().take(32) {
@@ -366,6 +424,7 @@ pub(super) fn draw_instance_equipment(
 /// Draw the player's attached equipment through the crate policy.
 pub(super) fn draw_player_equipment(
     equipment_mask: u32,
+    assemble_q12: u16,
     player_pose: PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -382,6 +441,7 @@ pub(super) fn draw_player_equipment(
 ) -> EquipmentDrawStats {
     let mut knobs = MODEL_DRAW_KNOBS;
     knobs.equipment_mask = equipment_mask;
+    knobs.equipment_assemble_q12 = assemble_q12;
     mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,
