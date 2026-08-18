@@ -36,8 +36,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fps",
         type=int,
-        default=0,
-        help="Scene fps; 0 keeps the clip's own rate (no resampling)",
+        default=30,
+        help="Scene fps. MUST match the source's rate: Blender's default scene "
+        "is 24, so exporting a 30 fps take from a 24 fps scene stretches it by "
+        "1.25x, which the cook then bakes in (a 1.9 s attack became 2.4 s).",
     )
     parser.add_argument(
         "--smooth",
@@ -49,6 +51,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # Set the rate BEFORE importing: the glTF importer converts sampler times
+    # to frames with the scene's fps.
+    bpy.context.scene.render.fps = args.fps or 30
     rig = import_source(args.source.expanduser())
     for bone in rig.pose.bones:
         bone.rotation_mode = "QUATERNION"
@@ -56,8 +61,6 @@ def main() -> None:
     src = import_animation_source(args.clip.expanduser(), args.take)
     action = src.animation_data.action
     first, last = int(action.frame_range[0]), int(action.frame_range[1])
-    if args.fps:
-        bpy.context.scene.render.fps = args.fps
     print(f"[retarget] {args.clip.name}: frames {first}..{last} ({last - first + 1})")
 
     baked, speed = retarget(src, rig, args.clip.stem, first, last, smooth=args.smooth)

@@ -1128,13 +1128,18 @@ impl Playtest {
             self.anim_lock_until_tick = now.saturating_add(2);
             return true;
         }
-        // Released: commit. Jump the clip's phase to its strike and lock for
-        // the rest of the clip.
+        // Released: commit. The phase moves to just before the strike, and
+        // the switch is taken through switch_player_anim so the runtime's
+        // crossfade blends the held windup pose into it. Backdating alone
+        // teleported the pose, which reads as the first half of the clip
+        // being fast-forwarded.
         self.charge = None;
         let anim = LEVEL_ANIM[level as usize];
-        let strike_ticks = CHARGE_STRIKE_FRAME[level as usize]
-            .saturating_mul(ctx.video_hz.as_nonzero_u32())
-            / CHARGE_CLIP_HZ.max(1);
+        let commit_frame = CHARGE_STRIKE_FRAME[level as usize]
+            .saturating_sub(CHARGE_RELEASE_LEAD[level as usize]);
+        let strike_ticks =
+            commit_frame.saturating_mul(ctx.video_hz.as_nonzero_u32()) / CHARGE_CLIP_HZ.max(1);
+        self.switch_player_anim(anim, now, ctx.video_hz);
         self.anim_start_tick = SimTick::from_u32(now.as_u32().saturating_sub(strike_ticks));
         if let Some(character) = self.character {
             let clip = character.clip_for(anim);
@@ -1148,6 +1153,7 @@ impl Playtest {
                 )
                 .unwrap_or(30);
             self.anim_lock_until_tick = now.saturating_add(total.saturating_sub(strike_ticks).max(1));
+            let _ = clip;
         }
         self.swing_hit_mask = 0;
         true
