@@ -1118,8 +1118,14 @@ impl Playtest {
             // at the end of this clip's windup. Real-time playback would show
             // only the first fraction of a 1.2-2.3 s windup during a hold this
             // short, which is why the charge was barely visible.
+            // The hold stops at the commit frame, NOT at the strike: sweeping
+            // to the strike means the swing plays out while the button is
+            // still down, and the release then jumps the phase BACK to the
+            // commit frame and plays the same swing a second time. That
+            // replay was the stray double movement at full charge.
             let progress = elapsed.min(CHARGE_FULL_TICKS);
             let windup_ticks = CHARGE_STRIKE_FRAME[wanted as usize]
+                .saturating_sub(CHARGE_RELEASE_LEAD[wanted as usize])
                 .saturating_mul(ctx.video_hz.as_nonzero_u32())
                 / CHARGE_CLIP_HZ.max(1);
             let phase_ticks = windup_ticks.saturating_mul(progress) / CHARGE_FULL_TICKS.max(1);

@@ -167,18 +167,18 @@ pub(super) const CHARGE_ATTACK_BUTTON: u16 = button::R2;
 pub(super) const CHARGE_LEVEL2_TICKS: u32 = 24;
 pub(super) const CHARGE_LEVEL3_TICKS: u32 = 54;
 pub(super) const CHARGE_FULL_TICKS: u32 = 84;
-/// Cooked frame the strike lands on, taken from the weapon hand's speed peak
-/// as a FRACTION of each clip (0.718 / 0.597 / 0.515 of its length) applied
-/// to the cooked length (37 / 63 / 68). A fraction survives the file being
-/// read at a different rate; a frame number does not.
-pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [27, 38, 35];
+/// Cooked frame the strike lands on, measured on the COOKED clip with
+/// `tools/psxanim_profile.py` (peak per-frame joint motion): light 25 of 37,
+/// heavy 38 of 63, combo 45 of 68. Derived from the Blender source instead,
+/// these were 27 / 38 / 35, and the combo's was a smaller earlier swing.
+pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [25, 38, 45];
 /// Cooked frames of windup left to play before the strike when a level is
-/// released. Level 1 commits immediately (a tap is meant to be fast), the
-/// higher levels show a visible last-moment wind so they do not read as the
-/// same attack: the clips themselves are near-identical swings (measured:
-/// the hand lands in the same place, arcs of 0.82 / 1.10 / 0.88 m), so the
-/// pre-strike wind is what distinguishes them.
-pub(super) const CHARGE_RELEASE_LEAD: [u32; 3] = [6, 12, 18];
+/// released, i.e. how much raise is still visible after the commit. Every
+/// level gets some: a tap that jumps straight into the swing reads as no
+/// windup at all. Level 3 is deliberately short because the combo clip has a
+/// second, smaller swing at frames 34-35 and committing before it replays
+/// that as a stray extra movement.
+pub(super) const CHARGE_RELEASE_LEAD: [u32; 3] = [7, 10, 9];
 /// Cooked clip rate for the attack clips, for the frame-to-tick conversion.
 pub(super) const CHARGE_CLIP_HZ: u32 = 15;
 
