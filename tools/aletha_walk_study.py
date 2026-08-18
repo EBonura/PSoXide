@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--gait-take", help="Action name inside a multi-take gait source")
     parser.add_argument(
+        "--one-shot", action="store_true",
+        help="The take is a one-shot action (an attack), not a gait: assemble "
+        "idle -> take -> idle with no cycle detection and no loop, and export "
+        "the whole take as a single phase",
+    )
+    parser.add_argument(
         "--loop-take", action="store_true",
         help="The gait source is exactly one authored loop: cycle = whole take, no smoothing",
     )
@@ -805,11 +811,14 @@ def main() -> None:
             rig, gait, gait_first, gait_frames,
             args.arm_swing_deg, args.elbow_deg, args.arm_abduct_deg,
         )
-    cycle = args.cycle_frames or detect_cycle({**feet, **hips_track}, gait_frames)
+    if args.one_shot:
+        cycle = gait_frames
+    else:
+        cycle = args.cycle_frames or detect_cycle({**feet, **hips_track}, gait_frames)
     drift = (hips_track["hips"][-1] - hips_track["hips"][0]).length
     # Loop exactly one cycle, the last full one in the take (past any run-in),
     # so the wrap lands on the same phase instead of hitching.
-    loop_at = gait_frames - cycle
+    loop_at = 0 if args.one_shot else gait_frames - cycle
     feet = {side: series[loop_at : loop_at + cycle] for side, series in feet.items()}
     contact = contact_frame(feet, cycle)
     gait_first += loop_at
@@ -820,8 +829,8 @@ def main() -> None:
     gait_frames = cycle
 
     idle_lead = int(args.idle_seconds * PREVIEW_FPS)
-    transition = int(args.transition_seconds * PREVIEW_FPS)
-    cruise = int(round(args.cruise_cycles * cycle / args.tempo))
+    transition = 2 if args.one_shot else int(args.transition_seconds * PREVIEW_FPS)
+    cruise = int(round((1 if args.one_shot else args.cruise_cycles) * cycle / args.tempo))
     total = idle_lead + transition + cruise + transition + idle_lead
     splits = {
         "idle_in": [1, idle_lead],
