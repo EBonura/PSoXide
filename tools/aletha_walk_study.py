@@ -221,11 +221,17 @@ def face_forward_action(
     first: int,
     last: int,
 ) -> float:
-    """Remove a baked take's mean body turn: measure the pelvis facing over
-    the window against the rest pose, then counter-rotate the root bone by
-    that angle on every frame (the root carries the whole body, so the stride
-    keeps its direction relative to the body while the body faces front).
-    Returns the removed turn in degrees."""
+    """Remove a baked take's mean body turn so it can serve as a locked
+    directional clip: an artist "walk left" take yaws the body ~84 degrees
+    into the direction of travel, but under lock-on the body must face the
+    target while the feet carry the direction.
+
+    The correction rewrites the ROOT bone's keyframe values directly (rather
+    than posing per frame, which the depsgraph re-evaluates from the action
+    and partially discards): with `rest` the root's armature-space rest
+    matrix and `R` the world-Z counter-rotation, every basis is left-
+    multiplied by `rest^-1 * R * rest`. Returns the removed turn in degrees.
+    """
     import math
 
     lh, rh = bone_by_suffix(rig, "leftupperleg"), bone_by_suffix(rig, "rightupperleg")
@@ -257,15 +263,34 @@ def face_forward_action(
     if abs(sum_x) + abs(sum_y) < 1e-6:
         return 0.0
     turn = math.atan2(sum_y, sum_x) - rest_yaw
-    correction = Matrix.Rotation(-turn, 4, "Z")
-    pb = rig.pose.bones[root]
-    for frame in range(first, last + 1):
-        set_frame(frame)
-        world = rig.matrix_world @ pb.matrix
-        pb.matrix = rig.matrix_world.inverted() @ correction @ world
-        bpy.context.view_layer.update()
-        pb.keyframe_insert("rotation_quaternion", frame=frame, group=root)
-        pb.keyframe_insert("location", frame=frame, group=root)
+
+    rest_local = rig.data.bones[root].matrix_local
+    basis_rotation = (
+        rest_local.inverted() @ Matrix.Rotation(-turn, 4, "Z") @ rest_local
+    ).to_3x3()
+    basis_quat = basis_rotation.to_quaternion()
+
+    curves = {}
+    for fc in action.fcurves:
+        if fc.data_path == f'pose.bones["{root}"].rotation_quaternion':
+            curves.setdefault("rot", {})[fc.array_index] = fc
+        elif fc.data_path == f'pose.bones["{root}"].location':
+            curves.setdefault("loc", {})[fc.array_index] = fc
+    rot = curves.get("rot", {})
+    if len(rot) == 4:
+        frames = [key.co.x for key in rot[0].keyframe_points]
+        for index, frame in enumerate(frames):
+            q = Quaternion([rot[axis].keyframe_points[index].co.y for axis in range(4)])
+            q = basis_quat @ q
+            for axis in range(4):
+                rot[axis].keyframe_points[index].co.y = q[axis]
+    loc = curves.get("loc", {})
+    if len(loc) == 3:
+        for index in range(len(loc[0].keyframe_points)):
+            v = Vector([loc[axis].keyframe_points[index].co.y for axis in range(3)])
+            v = basis_rotation @ v
+            for axis in range(3):
+                loc[axis].keyframe_points[index].co.y = v[axis]
     for fc in action.fcurves:
         fc.update()
     return math.degrees(turn)
