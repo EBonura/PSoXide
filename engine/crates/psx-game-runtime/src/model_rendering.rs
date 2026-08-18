@@ -37,6 +37,7 @@ use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 
 mod equipment;
+pub use equipment::ASSEMBLED_Q12;
 mod instances;
 
 pub use self::instances::{
@@ -87,6 +88,10 @@ pub struct ModelDrawKnobs {
     /// records are static, so the choice has to live here. All ones draws
     /// every record, which is the old behaviour.
     pub equipment_mask: u32,
+    /// How assembled the player's weapons are this frame, Q12: 4096 draws the
+    /// solid model, 0 is fully dispersed, and anything between runs the
+    /// materialise effect. Dissolving is the same ramp read downwards.
+    pub equipment_assemble_q12: u16,
 }
 
 /// Actor floor-shadow tuning, as one value.
