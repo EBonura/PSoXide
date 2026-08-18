@@ -243,9 +243,6 @@ pub enum CharacterAnimationAction {
     WalkBackward,
     StrafeLeft,
     StrafeRight,
-    RunBackward,
-    RunStrafeLeft,
-    RunStrafeRight,
     DashLeft,
     DashRight,
     Stun,
@@ -284,9 +281,6 @@ impl CharacterAnimationAction {
         Self::WalkBackward,
         Self::StrafeLeft,
         Self::StrafeRight,
-        Self::RunBackward,
-        Self::RunStrafeLeft,
-        Self::RunStrafeRight,
         Self::DashLeft,
         Self::DashRight,
         Self::Stun,
@@ -323,9 +317,6 @@ impl CharacterAnimationAction {
             Self::WalkBackward => "Walk Backward",
             Self::StrafeLeft => "Strafe Left",
             Self::StrafeRight => "Strafe Right",
-            Self::RunBackward => "Run Backward",
-            Self::RunStrafeLeft => "Run Strafe Left",
-            Self::RunStrafeRight => "Run Strafe Right",
             Self::DashLeft => "Dash Left",
             Self::DashRight => "Dash Right",
             Self::Stun => "Stun",
@@ -361,24 +352,21 @@ impl CharacterAnimationAction {
             Self::WalkBackward => 12,
             Self::StrafeLeft => 13,
             Self::StrafeRight => 14,
-            Self::RunBackward => 15,
-            Self::RunStrafeLeft => 16,
-            Self::RunStrafeRight => 17,
-            Self::DashLeft => 18,
-            Self::DashRight => 19,
-            Self::Stun => 20,
-            Self::StunRecovery => 21,
-            Self::HitReactAlt => 22,
-            Self::AltLightAttack => 23,
-            Self::AltHeavyAttack => 24,
-            Self::AltComboAttack => 25,
-            Self::Intro => 26,
-            Self::WalkWindup => 27,
-            Self::WalkWinddown => 28,
-            Self::WalkWinddownAlt => 29,
-            Self::RunWindup => 30,
-            Self::RunWinddown => 31,
-            Self::RunWinddownAlt => 32,
+            Self::DashLeft => 15,
+            Self::DashRight => 16,
+            Self::Stun => 17,
+            Self::StunRecovery => 18,
+            Self::HitReactAlt => 19,
+            Self::AltLightAttack => 20,
+            Self::AltHeavyAttack => 21,
+            Self::AltComboAttack => 22,
+            Self::Intro => 23,
+            Self::WalkWindup => 24,
+            Self::WalkWinddown => 25,
+            Self::WalkWinddownAlt => 26,
+            Self::RunWindup => 27,
+            Self::RunWinddown => 28,
+            Self::RunWinddownAlt => 29,
         }
     }
 
@@ -409,10 +397,7 @@ impl CharacterAnimationAction {
             Self::RunWindup | Self::RunWinddown | Self::RunWinddownAlt => Some(AnimationRole::Run),
             Self::WalkBackward
             | Self::StrafeLeft
-            | Self::StrafeRight
-            | Self::RunBackward
-            | Self::RunStrafeLeft
-            | Self::RunStrafeRight => None,
+            | Self::StrafeRight => None,
         }
     }
 
@@ -457,15 +442,6 @@ impl CharacterAnimationAction {
             } else {
                 Self::Roll
             });
-        }
-        if name.contains("run") && left {
-            return Some(Self::RunStrafeLeft);
-        }
-        if name.contains("run") && right {
-            return Some(Self::RunStrafeRight);
-        }
-        if name.contains("run") && backward {
-            return Some(Self::RunBackward);
         }
         if name.contains("run") && name.contains("windup") {
             return Some(Self::RunWindup);
