@@ -157,6 +157,18 @@ pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
 pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
+/// Charge attack (R2, the horizontal axis). Hold ticks at 60 Hz decide the
+/// level; the clips are one performance each, whose long windup IS the charge.
+pub(super) const CHARGE_ATTACK_BUTTON: u16 = button::R2;
+/// Hold ticks to reach level 2 (heavy) and level 3 (combo).
+pub(super) const CHARGE_LEVEL2_TICKS: u32 = 12;
+pub(super) const CHARGE_LEVEL3_TICKS: u32 = 30;
+/// Cooked frame each level's strike begins on (measured from the clips:
+/// hand-speed peak, 25 percent-of-peak boundaries). Releasing jumps here.
+pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [9, 26, 22];
+/// Cooked clip rate for the attack clips, for the frame-to-tick conversion.
+pub(super) const CHARGE_CLIP_HZ: u32 = 15;
+
 pub(super) const LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const HEAVY_ATTACK_BUTTON: u16 = button::R2;
 pub(super) const COMBO_ATTACK_BUTTON: u16 = button::L2;
