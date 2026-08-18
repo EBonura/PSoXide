@@ -215,6 +215,62 @@ def reverse_action_window(action: bpy.types.Action, first: int, last: int) -> No
         fc.update()
 
 
+def face_forward_action(
+    rig: bpy.types.Object,
+    action: bpy.types.Action,
+    first: int,
+    last: int,
+) -> float:
+    """Remove a baked take's mean body turn: measure the pelvis facing over
+    the window against the rest pose, then counter-rotate the root bone by
+    that angle on every frame (the root carries the whole body, so the stride
+    keeps its direction relative to the body while the body faces front).
+    Returns the removed turn in degrees."""
+    import math
+
+    lh, rh = bone_by_suffix(rig, "leftupperleg"), bone_by_suffix(rig, "rightupperleg")
+    root = bone_by_suffix(rig, "hips")
+
+    def facing(rest: bool):
+        if rest:
+            p = lambda b: (rig.matrix_world @ rig.data.bones[b].matrix_local).translation
+        else:
+            p = lambda b: (rig.matrix_world @ rig.pose.bones[b].matrix).translation
+        lateral = p(lh) - p(rh)
+        lateral.z = 0.0
+        if lateral.length < 1e-6:
+            return None
+        forward = lateral.normalized().cross(Vector((0.0, 0.0, 1.0)))
+        return math.atan2(forward.y, forward.x)
+
+    rig.animation_data.action = action
+    rest_yaw = facing(rest=True)
+    if rest_yaw is None:
+        return 0.0
+    sum_x = sum_y = 0.0
+    for frame in range(first, last + 1):
+        set_frame(frame)
+        yaw = facing(rest=False)
+        if yaw is not None:
+            sum_x += math.cos(yaw)
+            sum_y += math.sin(yaw)
+    if abs(sum_x) + abs(sum_y) < 1e-6:
+        return 0.0
+    turn = math.atan2(sum_y, sum_x) - rest_yaw
+    correction = Matrix.Rotation(-turn, 4, "Z")
+    pb = rig.pose.bones[root]
+    for frame in range(first, last + 1):
+        set_frame(frame)
+        world = rig.matrix_world @ pb.matrix
+        pb.matrix = rig.matrix_world.inverted() @ correction @ world
+        bpy.context.view_layer.update()
+        pb.keyframe_insert("rotation_quaternion", frame=frame, group=root)
+        pb.keyframe_insert("location", frame=frame, group=root)
+    for fc in action.fcurves:
+        fc.update()
+    return math.degrees(turn)
+
+
 def stance_speed(
     rig: bpy.types.Object,
     action: bpy.types.Action,
@@ -675,6 +731,13 @@ def main() -> None:
         gait = action_named(args.take)
         gait_first = int(gait.frame_range[0])
         gait_frames = int(gait.frame_range[1] - gait.frame_range[0]) or 1
+        if args.face_forward:
+            # Same normalisation as the import path, applied to the baked take
+            # itself: counter-rotate every frame's root so the body's mean
+            # facing matches the rest pose. A "walk left" take that turns the
+            # character 84 degrees becomes a true strafe.
+            turn = face_forward_action(rig, gait, gait_first, gait_first + gait_frames)
+            print(f"[study] face_forward removed {turn:+.1f} deg of body turn")
         if args.gait_window:
             gait_first, gait_frames = args.gait_window[0], max(1, args.gait_window[1] - args.gait_window[0])
     else:
