@@ -262,6 +262,10 @@ pub enum CharacterAnimationAction {
     RunWindup,
     RunWinddown,
     RunWinddownAlt,
+    /// Vertical axis (overhead strikes), levels 1 to 3.
+    VertLightAttack,
+    VertHeavyAttack,
+    VertComboAttack,
 }
 
 impl CharacterAnimationAction {
@@ -296,6 +300,9 @@ impl CharacterAnimationAction {
         Self::RunWindup,
         Self::RunWinddown,
         Self::RunWinddownAlt,
+        Self::VertLightAttack,
+        Self::VertHeavyAttack,
+        Self::VertComboAttack,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -332,6 +339,9 @@ impl CharacterAnimationAction {
             Self::RunWindup => "Run Windup",
             Self::RunWinddown => "Run Winddown",
             Self::RunWinddownAlt => "Run Winddown (mirror)",
+            Self::VertLightAttack => "Vert Light Attack",
+            Self::VertHeavyAttack => "Vert Heavy Attack",
+            Self::VertComboAttack => "Vert Combo Attack",
         }
     }
 
@@ -367,6 +377,9 @@ impl CharacterAnimationAction {
             Self::RunWindup => 27,
             Self::RunWinddown => 28,
             Self::RunWinddownAlt => 29,
+            Self::VertLightAttack => 30,
+            Self::VertHeavyAttack => 31,
+            Self::VertComboAttack => 32,
         }
     }
 
@@ -398,6 +411,10 @@ impl CharacterAnimationAction {
             Self::WalkBackward
             | Self::StrafeLeft
             | Self::StrafeRight => None,
+            // No role hint on purpose: a vertical level binds only when it is
+            // authored, so an axis can ship one clip at a time without the
+            // other levels quietly adopting some other Attack-role clip.
+            Self::VertLightAttack | Self::VertHeavyAttack | Self::VertComboAttack => None,
         }
     }
 
@@ -475,6 +492,16 @@ impl CharacterAnimationAction {
         }
         if name.contains("hurt") {
             return Some(Self::HitReact);
+        }
+        // The vertical axis: overhead strikes, named vert_*.
+        if name.contains("vert") && name.contains("att") {
+            return Some(if name.contains("combo") {
+                Self::VertComboAttack
+            } else if name.contains("heavy") {
+                Self::VertHeavyAttack
+            } else {
+                Self::VertLightAttack
+            });
         }
         // The delivered heavy-weapon set maps onto the alternate slots.
         if name.contains("heavy_wpn") {
