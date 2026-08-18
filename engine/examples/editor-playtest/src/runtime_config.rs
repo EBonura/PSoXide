@@ -157,34 +157,16 @@ pub(super) const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 pub(super) const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
 pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
-/// Charge attack (R2, the horizontal axis). Hold ticks at 60 Hz decide the
-/// level; the clips are one performance each, whose long windup IS the charge.
-pub(super) const CHARGE_ATTACK_BUTTON: u16 = button::R2;
-/// Hold ticks to reach level 2 (heavy) and level 3 (combo), and to reach the
-/// end of the windup. The charge phase is mapped onto the windup by hold
-/// PROGRESS, not by real time: holding to full walks the whole windup, so the
-/// wind-up is visible however long the authored clip happens to be.
-pub(super) const CHARGE_LEVEL2_TICKS: u32 = 24;
-pub(super) const CHARGE_LEVEL3_TICKS: u32 = 54;
-pub(super) const CHARGE_FULL_TICKS: u32 = 84;
-/// Cooked frame the strike lands on, measured on the COOKED clip with
-/// `tools/psxanim_profile.py` (peak per-frame joint motion): light 25 of 37,
-/// heavy 38 of 63, combo 45 of 68. Derived from the Blender source instead,
-/// these were 27 / 38 / 35, and the combo's was a smaller earlier swing.
-pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [25, 38, 45];
-/// Cooked frames of windup left to play before the strike when a level is
-/// released, i.e. how much raise is still visible after the commit. Every
-/// level gets some: a tap that jumps straight into the swing reads as no
-/// windup at all. Level 3 is deliberately short because the combo clip has a
-/// second, smaller swing at frames 34-35 and committing before it replays
-/// that as a stray extra movement.
-pub(super) const CHARGE_RELEASE_LEAD: [u32; 3] = [7, 10, 9];
-/// Cooked clip rate for the attack clips, for the frame-to-tick conversion.
-pub(super) const CHARGE_CLIP_HZ: u32 = 15;
-
+/// Attacks: one button per level, and both shoulder buttons together for the
+/// third. Each level plays its clip whole, from frame 0 to the end, which is
+/// what the three source performances were recorded as.
 pub(super) const LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const HEAVY_ATTACK_BUTTON: u16 = button::R2;
-pub(super) const COMBO_ATTACK_BUTTON: u16 = button::L2;
+/// Ticks to wait after the first shoulder press before committing to a single
+/// attack. Two buttons meant as one press never land on the same tick, so
+/// without a window R1+R2 just fires whichever arrived first. 4 ticks is 67 ms
+/// of input delay on light and heavy, the standard cost of a two-button input.
+pub(super) const ATTACK_PAIR_WINDOW_TICKS: u32 = 4;
 /// Player health pool at gameplay init (the phase-3 combat slice's
 /// sane cooked default -- the Character record carries no health
 /// field yet; authoring it is a future editor slice). Death/respawn
