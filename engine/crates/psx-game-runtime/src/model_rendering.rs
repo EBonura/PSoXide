@@ -81,6 +81,12 @@ pub struct ModelDrawKnobs {
     pub max_model_instances: usize,
     /// Cap on attached weapon/equipment visuals rendered per frame.
     pub max_equipment_draws: usize,
+    /// Which player equipment records to draw this frame, one bit per record
+    /// in table order. What is HELD changes with the action (a light sword in
+    /// one hand, or a heavy one plus an off-hand light), while the cooked
+    /// records are static, so the choice has to live here. All ones draws
+    /// every record, which is the old behaviour.
+    pub equipment_mask: u32,
 }
 
 /// Actor floor-shadow tuning, as one value.
