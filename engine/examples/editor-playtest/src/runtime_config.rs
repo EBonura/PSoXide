@@ -160,12 +160,17 @@ pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
 /// Charge attack (R2, the horizontal axis). Hold ticks at 60 Hz decide the
 /// level; the clips are one performance each, whose long windup IS the charge.
 pub(super) const CHARGE_ATTACK_BUTTON: u16 = button::R2;
-/// Hold ticks to reach level 2 (heavy) and level 3 (combo).
-pub(super) const CHARGE_LEVEL2_TICKS: u32 = 12;
-pub(super) const CHARGE_LEVEL3_TICKS: u32 = 30;
-/// Cooked frame each level's strike begins on (measured from the clips:
-/// hand-speed peak, 25 percent-of-peak boundaries). Releasing jumps here.
-pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [9, 26, 22];
+/// Hold ticks to reach level 2 (heavy) and level 3 (combo), and to reach the
+/// end of the windup. The charge phase is mapped onto the windup by hold
+/// PROGRESS, not by real time: holding to full walks the whole windup, so the
+/// wind-up is visible however long the authored clip happens to be.
+pub(super) const CHARGE_LEVEL2_TICKS: u32 = 24;
+pub(super) const CHARGE_LEVEL3_TICKS: u32 = 54;
+pub(super) const CHARGE_FULL_TICKS: u32 = 84;
+/// Cooked frame each level's windup ends / strike begins (measured on the
+/// clips: hand-speed peak with 25-percent-of-peak boundaries, source frames
+/// 35 / 51 / 68 at 30 fps, cooked at 15 Hz). Releasing jumps here.
+pub(super) const CHARGE_STRIKE_FRAME: [u32; 3] = [17, 25, 34];
 /// Cooked clip rate for the attack clips, for the frame-to-tick conversion.
 pub(super) const CHARGE_CLIP_HZ: u32 = 15;
 
