@@ -61,7 +61,7 @@ use psxed_project::{
 /// Pack filename stem, the gameplay action it binds, its clip role, and
 /// whether gameplay loops it. Only looping clips are cycle-trimmed; a
 /// one-shot has no cycle to find and must keep its full length.
-const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 17] = [
+const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 20] = [
     (
         "walk_fwd_winddown_mirror",
         CharacterAnimationAction::WalkWinddownAlt,
@@ -131,6 +131,26 @@ const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 17] = [
     (
         "combo_attack",
         CharacterAnimationAction::ComboAttack,
+        AnimationRole::Attack,
+        false,
+    ),
+    // The vertical axis: overhead strikes, its own three actions. The Alt*
+    // slots are already the delivered heavy-weapon set (they bind by name).
+    (
+        "vert_light_attack",
+        CharacterAnimationAction::VertLightAttack,
+        AnimationRole::Attack,
+        false,
+    ),
+    (
+        "vert_heavy_attack",
+        CharacterAnimationAction::VertHeavyAttack,
+        AnimationRole::Attack,
+        false,
+    ),
+    (
+        "vert_combo_attack",
+        CharacterAnimationAction::VertComboAttack,
         AnimationRole::Attack,
         false,
     ),

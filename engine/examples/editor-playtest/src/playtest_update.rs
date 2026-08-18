@@ -529,7 +529,7 @@ impl Playtest {
                 lock_facing_yaw,
             )
         };
-        // R1 light, R2 heavy, both together combo. See `update_attack_input`.
+        // R1/R2/R1+R2 horizontal, L1/L2/L1+L2 vertical. See `update_attack_input`.
         if self.update_attack_input(ctx, now, action_locked) {
             input = CharacterMotorInput::default();
         }
@@ -1055,43 +1055,70 @@ impl Playtest {
         }
     }
 
-    /// Attacks. One button per level, both shoulder buttons for the third,
-    /// and every level plays its clip whole: these three are single recorded
-    /// performances, and the earlier charge machine could only show a piece of
-    /// one because it had to jump into the swing to stay responsive.
+    /// Attacks. Two axes, three levels each: R1/R2/R1+R2 swing horizontally,
+    /// L1/L2/L1+L2 strike vertically. Every level plays its clip whole, which
+    /// is what these single recorded performances were made for.
     ///
-    /// The pair window is why this is not a plain `just_pressed` chain: R1+R2
-    /// meant as one press arrives on two different ticks, so the first press
-    /// waits [`ATTACK_PAIR_WINDOW_TICKS`] to see whether its partner follows.
+    /// The pair window is why this is not a plain `just_pressed` chain: two
+    /// buttons meant as one press arrive on different ticks, so the first
+    /// press waits [`ATTACK_PAIR_WINDOW_TICKS`] to see whether its partner
+    /// follows. A level whose clip is not bound is skipped, so an axis can
+    /// ship one clip at a time.
     ///
     /// Returns true while an attack owns the player's input.
     fn update_attack_input(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
-        let light = ctx.is_held(LIGHT_ATTACK_BUTTON);
-        let heavy = ctx.is_held(HEAVY_ATTACK_BUTTON);
-        let Some(pressed_at) = self.attack_press else {
-            if !action_locked
-                && self.motor.action().is_idle()
-                && (ctx.just_pressed(LIGHT_ATTACK_BUTTON) || ctx.just_pressed(HEAVY_ATTACK_BUTTON))
-            {
-                self.attack_press = Some(now);
-                return true;
+        /// (level 1 button, level 2 button, the three level animations)
+        const AXES: [(u16, u16, [PlayerAnim; 3]); 2] = [
+            (
+                LIGHT_ATTACK_BUTTON,
+                HEAVY_ATTACK_BUTTON,
+                [
+                    PlayerAnim::LightAttack,
+                    PlayerAnim::HeavyAttack,
+                    PlayerAnim::ComboAttack,
+                ],
+            ),
+            (
+                VERT_LIGHT_ATTACK_BUTTON,
+                VERT_HEAVY_ATTACK_BUTTON,
+                [
+                    PlayerAnim::VertLightAttack,
+                    PlayerAnim::VertHeavyAttack,
+                    PlayerAnim::VertComboAttack,
+                ],
+            ),
+        ];
+        let Some((pressed_at, axis)) = self.attack_press else {
+            if action_locked || !self.motor.action().is_idle() {
+                return false;
+            }
+            for (index, (first, second, _)) in AXES.iter().enumerate() {
+                if ctx.just_pressed(*first) || ctx.just_pressed(*second) {
+                    self.attack_press = Some((now, index as u8));
+                    return true;
+                }
             }
             return false;
         };
+        let (first, second, anims) = AXES[axis as usize];
+        let (low, high) = (ctx.is_held(first), ctx.is_held(second));
         // Both down resolves the window early; there is nothing left to wait for.
         let waited = now.as_u32().saturating_sub(pressed_at.as_u32());
-        if !(light && heavy) && waited < ATTACK_PAIR_WINDOW_TICKS {
+        if !(low && high) && waited < ATTACK_PAIR_WINDOW_TICKS {
             return true;
         }
         self.attack_press = None;
-        let anim = match (light, heavy) {
-            (true, true) => PlayerAnim::ComboAttack,
-            (false, true) => PlayerAnim::HeavyAttack,
-            // A press that is already released by the end of the window is
-            // still a light attack: the buttons are taps, not holds.
-            _ => PlayerAnim::LightAttack,
+        let anim = match (low, high) {
+            (true, true) => anims[2],
+            (false, true) => anims[1],
+            // A press already released by the end of the window is still a
+            // level 1: these buttons are taps, not holds.
+            _ => anims[0],
         };
-        if self.start_player_anim_action(anim, now, ctx.video_hz) {
+        let bound = self
+            .character
+            .is_some_and(|character| character.action_clip(anim.action()).is_some());
+        if bound && self.start_player_anim_action(anim, now, ctx.video_hz) {
             telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
         }
         true
