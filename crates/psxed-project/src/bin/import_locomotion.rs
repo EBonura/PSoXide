@@ -21,9 +21,6 @@
 //! | `walk_lft`  | StrafeLeft     |
 //! | `walk_rgt`  | StrafeRight    |
 //! | `run_fwd`   | Run            |
-//! | `run_bwd`   | RunBackward    |
-//! | `run_lft`   | RunStrafeLeft  |
-//! | `run_rgt`   | RunStrafeRight |
 //! | `walk_fwd_windup`   | WalkWindup (one shot) |
 //! | `walk_fwd_winddown` | WalkWinddown (one shot) |
 //! | `walk_fwd_winddown_mirror` | WalkWinddownAlt (one shot, other foot) |
@@ -64,7 +61,7 @@ use psxed_project::{
 /// Pack filename stem, the gameplay action it binds, its clip role, and
 /// whether gameplay loops it. Only looping clips are cycle-trimmed; a
 /// one-shot has no cycle to find and must keep its full length.
-const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 20] = [
+const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 17] = [
     (
         "walk_fwd_winddown_mirror",
         CharacterAnimationAction::WalkWinddownAlt,
@@ -164,24 +161,6 @@ const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 20] = [
     (
         "run_fwd",
         CharacterAnimationAction::Run,
-        AnimationRole::Run,
-        true,
-    ),
-    (
-        "run_bwd",
-        CharacterAnimationAction::RunBackward,
-        AnimationRole::Run,
-        true,
-    ),
-    (
-        "run_lft",
-        CharacterAnimationAction::RunStrafeLeft,
-        AnimationRole::Run,
-        true,
-    ),
-    (
-        "run_rgt",
-        CharacterAnimationAction::RunStrafeRight,
         AnimationRole::Run,
         true,
     ),
@@ -877,9 +856,6 @@ const fn is_gait(action: CharacterAnimationAction) -> bool {
             | CharacterAnimationAction::StrafeLeft
             | CharacterAnimationAction::StrafeRight
             | CharacterAnimationAction::Run
-            | CharacterAnimationAction::RunBackward
-            | CharacterAnimationAction::RunStrafeLeft
-            | CharacterAnimationAction::RunStrafeRight
     )
 }
 
