@@ -922,6 +922,11 @@ impl Scene for Playtest {
                     player_lighting.map_or(EquipmentDrawStats::default(), |lighting| {
                         draw_player_equipment(
                             crate::model_rendering::equipment_mask_for(self.anim_state),
+                            crate::model_rendering::equipment_assemble_for(
+                                self.anim_state,
+                                player_pose.pose().phase_q12(),
+                                player_pose.pose().animation().frame_count(),
+                            ),
                             player_pose,
                             &self.models,
                             &self.model_faces[..self.model_face_count],
