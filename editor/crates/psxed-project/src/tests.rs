@@ -1673,6 +1673,7 @@ fn embedded_default_project_ron_deserializes() {
         (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
         (CharacterAnimationAction::ComboAttack, "combo_attack"),
         (CharacterAnimationAction::VertLightAttack, "vert_light_attack"),
+        (CharacterAnimationAction::VertHeavyAttack, "vert_heavy_attack"),
         (CharacterAnimationAction::HitReact, "hit_react"),
     ] {
         let clip = animation_set
