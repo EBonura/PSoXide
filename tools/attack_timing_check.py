@@ -33,6 +33,7 @@ ATTACKS = {
     7: ("heavy", 63, 38),
     8: ("combo", 68, 45),
     30: ("vert light", 57, 28),
+    31: ("vert heavy", 64, 33),
 }
 
 

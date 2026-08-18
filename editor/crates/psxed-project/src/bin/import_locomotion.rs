@@ -186,6 +186,51 @@ const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 20] = [
     ),
 ];
 
+/// How far the feet may rise, in the units of the freshly baked clip (16x the
+/// cooked ones, the scale to engine units happens later). Measured across the
+/// shipped set, every grounded clip stays under 600: walk 80, light attack
+/// 270, the vertical strikes 310 and 577. The same vertical clip baked from a
+/// foreign rig reads 9206, so this sits an order of magnitude clear of both.
+const FLOOR_LIFT_WARN_UNITS: i32 = 2000;
+
+/// How far the lowest posed VERTEX rises above its frame-0 height, in model
+/// units. Deliberately not the cooked frame bounds: those are a sphere, and a
+/// crouch shrinks the sphere, so its underside climbs even with planted feet.
+fn clip_floor_lift(model_bytes: &[u8], clip_bytes: &[u8]) -> Option<i32> {
+    let model = psx_asset::Model::from_bytes(model_bytes).ok()?;
+    let clip = psx_asset::Animation::from_bytes(clip_bytes).ok()?;
+    let lowest = |frame: u16| -> i64 {
+        let mut low = i64::MAX;
+        for part_index in 0..model.part_count() {
+            let Some(part) = model.part(part_index) else {
+                continue;
+            };
+            let Some(pose) = clip.pose(frame, part.joint_index() as u16) else {
+                continue;
+            };
+            for v in part.first_vertex()..part.first_vertex() + part.vertex_count() {
+                let Some(vertex) = model.vertex(v) else {
+                    continue;
+                };
+                let m = pose.matrix;
+                let p = [
+                    vertex.position.x as i64,
+                    vertex.position.y as i64,
+                    vertex.position.z as i64,
+                ];
+                let y = (m[0][1] as i64 * p[0] + m[1][1] as i64 * p[1] + m[2][1] as i64 * p[2])
+                    / 4096
+                    + pose.translation.y as i64;
+                low = low.min(y);
+            }
+        }
+        low
+    };
+    let first = lowest(0);
+    let peak = (1..clip.frame_count()).map(lowest).max().unwrap_or(first);
+    Some((peak - first) as i32)
+}
+
 /// Source extensions tried for each pack stem, in order.
 const EXTENSIONS: [&str; 3] = ["glb", "gltf", "fbx"];
 
@@ -368,6 +413,16 @@ fn main() {
                 "{stem}: cooked {} joints, model has {model_joints}; the cook would reject this bundle",
                 stats.joint_count
             ));
+        }
+        // See `clip_floor_lift`: feet climbing off the floor is how a clip
+        // baked from a foreign rig shows up.
+        if let Some(lift) = clip_floor_lift(&package.model, &bytes) {
+            if lift > FLOOR_LIFT_WARN_UNITS {
+                println!(
+                    "  WARNING {stem}: feet rise {lift} model units above the clip's own floor. \
+                     If this is not a jump, the source is rigged on another skeleton -- retarget it first."
+                );
+            }
         }
 
         let psxanim_path = out_dir.join(format!("{stem}.psxanim"));
@@ -726,6 +781,19 @@ fn build_native_model(
                 "{stem}: {} joints against a {model_joints}-joint model",
                 stats.joint_count
             ));
+        }
+        // A clip baked from a source rigged on a DIFFERENT skeleton keeps its
+        // rotations but loses the root's motion, and the tell is the feet: the
+        // hips stay at rest height, so a crouch lifts the feet off the floor
+        // instead of lowering the body. Retarget the source onto this model
+        // first (tools/retarget_clip.py). A real jump lifts off too, hence a
+        // warning and not an error.
+        if let Some(lift) = clip_floor_lift(&package.model, &bytes) {
+            if lift > FLOOR_LIFT_WARN_UNITS {
+                println!(
+                    "  WARNING {stem}: feet rise {lift} model units above the clip's own floor.                      If this is not a jump, the source is rigged on another skeleton -- retarget it first."
+                );
+            }
         }
         let psxanim_path = out_dir.join(format!("{stem}.psxanim"));
         std::fs::write(&psxanim_path, &bytes)
