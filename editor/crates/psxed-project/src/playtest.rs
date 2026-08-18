@@ -1593,7 +1593,7 @@ pub fn build_package(
                     }
                 }
 
-                if let Some(equipped) = component_equipment(scene, node) {
+                for equipped in component_equipment(scene, node).collect::<Vec<_>>() {
                     if let Some(weapon_id) = equipped.weapon {
                         let Some(weapon_index) = register_weapon_for_equipment(
                             project,

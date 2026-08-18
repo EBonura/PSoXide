@@ -1887,18 +1887,23 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
 #[test]
 fn grounding_probe_player_lowest_vertex_matches_reference() {
     extern crate std;
-    let model_bytes = std::fs::read(concat!(
+    // By name, not by index: the model_NN prefix shifts whenever a model is
+    // added to the scene (the swords pushed Aletha from 000 to 002), and the
+    // clip_NN prefix shifts whenever a clip joins the character's set.
+    let models = std::fs::read_dir(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/editor-playtest/generated/models/model_000_aletha_delivered/mesh.psxmdl"
+        "/../../examples/editor-playtest/generated/models"
     ))
-    .expect("cooked mesh");
-    // By name, not by index: the clip_NN prefix shifts whenever a clip is
-    // added to the character's set.
-    let models = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/editor-playtest/generated/models/model_000_aletha_delivered"
-    );
-    let idle = std::fs::read_dir(models)
+    .expect("cooked models dir")
+    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+    .find(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("_aletha_delivered"))
+    })
+    .expect("cooked aletha model dir");
+    let model_bytes = std::fs::read(models.join("mesh.psxmdl")).expect("cooked mesh");
+    let idle = std::fs::read_dir(&models)
         .expect("cooked model dir")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .find(|path| {

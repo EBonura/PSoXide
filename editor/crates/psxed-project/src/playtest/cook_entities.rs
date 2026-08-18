@@ -133,7 +133,7 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                         }
                     }
                 }
-                if let Some(equipment) = component_equipment(scene, node) {
+                for equipment in component_equipment(scene, node) {
                     if let Some(weapon_id) = equipment.weapon {
                         if let Some(ResourceData::Weapon(weapon)) =
                             project.resource(weapon_id).map(|r| &r.data)
@@ -1281,14 +1281,21 @@ pub(crate) fn register_model_for_instance(
             return None;
         }
         seen_sockets.push(socket.name.as_str());
+        // The authored offset is relative to the JOINT, but a cooked pose
+        // record is a skinning matrix, so its translation is not where the
+        // joint is: for Aletha the foot joints read y=0 while the foot mesh
+        // sits at y=-1642. Anchoring on the joint's bind point restores the
+        // meaning the runtime composition already assumes.
+        let anchor = joint_bind_anchor(&parsed_model, socket.joint);
+        let translation = [
+            anchor[0] + socket.translation[0],
+            anchor[1] + socket.translation[1],
+            anchor[2] + socket.translation[2],
+        ];
         // Compact joint-local envelope, same contract as combat capsules:
         // the runtime attachment math is regression-tested exactly to this
         // cooker-enforced range.
-        if socket
-            .translation
-            .iter()
-            .any(|&v| i16::try_from(v).is_err())
-        {
+        if translation.iter().any(|&v| i16::try_from(v).is_err()) {
             report.error_at(
                 PlaytestValidationTarget::Resource(model_resource_id),
                 format!(
@@ -1302,7 +1309,7 @@ pub(crate) fn register_model_for_instance(
             model: model_index,
             name: socket.name.clone(),
             joint: socket.joint,
-            translation: socket.translation,
+            translation,
             rotation_q12: socket.rotation_q12,
         });
     }
@@ -2438,11 +2445,14 @@ pub(crate) fn physics_body_weight_q8(scene: &crate::Scene, host: &SceneNode) -> 
         .unwrap_or(PHYSICS_WEIGHT_ONE_Q8)
 }
 
+/// Every Equipment child of `host`, in scene order. A character can hold more
+/// than one thing at once (a sword in each hand), and which of them is drawn
+/// is a runtime decision, so the cook emits them all.
 pub(crate) fn component_equipment<'a>(
     scene: &'a crate::Scene,
     host: &'a SceneNode,
-) -> Option<EquipmentComponent<'a>> {
-    component_children(scene, host).find_map(|node| match &node.kind {
+) -> impl Iterator<Item = EquipmentComponent<'a>> + 'a {
+    component_children(scene, host).filter_map(|node| match &node.kind {
         NodeKind::Equipment {
             weapon,
             character_socket,
@@ -2484,4 +2494,84 @@ pub(crate) fn component_children<'a>(
         .iter()
         .filter_map(|id| scene.node(*id))
         .filter(|node| node.kind.is_component())
+}
+
+/// Where joint `joint` actually sits in the model's bind space: the centroid
+/// of the mesh rigidly bound to it.
+///
+/// A cooked pose record is a SKINNING matrix (pose composed with the inverse
+/// bind), so `pose.translation` is not the joint's position and nothing in the
+/// cooked model carries the bind skeleton. The mesh does: the vertices of the
+/// parts bound to a joint are that joint's geometry, and their centroid is the
+/// palm for a hand, the head of the bone for anything else.
+///
+/// ponytail: centroid, not the exact bone head. It puts a grip in the fist,
+/// and the authored socket offset is the knob for the rest. Store real bind
+/// positions in the model if a socket ever needs sub-centimetre placement.
+fn joint_bind_anchor(model: &psx_asset::Model<'_>, joint: u16) -> [i32; 3] {
+    let mut sum = [0i64; 3];
+    let mut count = 0i64;
+    for part_index in 0..model.part_count() {
+        let Some(part) = model.part(part_index) else {
+            continue;
+        };
+        if part.joint_index() as u16 != joint {
+            continue;
+        }
+        for index in part.first_vertex()..part.first_vertex() + part.vertex_count() {
+            let Some(vertex) = model.vertex(index) else {
+                continue;
+            };
+            sum[0] += i64::from(vertex.position.x);
+            sum[1] += i64::from(vertex.position.y);
+            sum[2] += i64::from(vertex.position.z);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        // A jointless socket (or one on a bone with no geometry) keeps the
+        // authored offset as-is, which is the pre-anchor behaviour.
+        return [0; 3];
+    }
+    [
+        (sum[0] / count) as i32,
+        (sum[1] / count) as i32,
+        (sum[2] / count) as i32,
+    ]
+}
+
+#[cfg(test)]
+mod socket_anchor_tests {
+    use super::joint_bind_anchor;
+
+    /// Aletha's hand sockets must land on her hands. Before the anchor they
+    /// were composed on the skinning-matrix translation, which put the right
+    /// hand grip on her left side and half a body away.
+    #[test]
+    fn hand_sockets_anchor_on_the_hand_mesh() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../projects/default/assets/models/aletha_delivered/aletha_delivered.psxmdl"
+        );
+        let bytes = std::fs::read(path).expect("aletha mesh");
+        let model = psx_asset::Model::from_bytes(&bytes).expect("model");
+        const RIGHT_HAND: u16 = 13;
+        const LEFT_HAND: u16 = 21;
+        let right = joint_bind_anchor(&model, RIGHT_HAND);
+        let left = joint_bind_anchor(&model, LEFT_HAND);
+        assert_ne!(right, [0; 3], "right hand anchor collapsed to the origin");
+        assert_ne!(left, [0; 3], "left hand anchor collapsed to the origin");
+        // Hands sit on opposite sides of the body, and a hand is nowhere near
+        // the model centre: both fail if the anchor picks up the wrong joint.
+        assert!(
+            right[0].signum() != left[0].signum(),
+            "hand anchors landed on the same side: {right:?} vs {left:?}"
+        );
+        for anchor in [right, left] {
+            assert!(
+                anchor[0].abs() > 100,
+                "hand anchor sits on the centreline: {anchor:?}"
+            );
+        }
+    }
 }
