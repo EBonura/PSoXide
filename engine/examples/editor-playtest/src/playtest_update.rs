@@ -529,25 +529,9 @@ impl Playtest {
                 lock_facing_yaw,
             )
         };
-        // Charge attack: pressing winds up, holding escalates the level, and
-        // releasing commits by jumping to that clip's strike. See
-        // `update_charge_attack`.
-        let charging = self.update_charge_attack(ctx, now, action_locked);
-        if charging {
+        // R1 light, R2 heavy, both together combo. See `update_attack_input`.
+        if self.update_attack_input(ctx, now, action_locked) {
             input = CharacterMotorInput::default();
-        }
-        if !charging && !action_locked && self.motor.action().is_idle() {
-            let started = if ctx.just_pressed(LIGHT_ATTACK_BUTTON) {
-                self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.video_hz)
-            } else if ctx.just_pressed(COMBO_ATTACK_BUTTON) {
-                self.start_player_anim_action(PlayerAnim::ComboAttack, now, ctx.video_hz)
-            } else {
-                false
-            };
-            if started {
-                telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
-                input = CharacterMotorInput::default();
-            }
         }
         // Three-part walk: ramp the stick during the windup, glide on the
         // held vector during the winddown (the clips are in place; the
@@ -1071,97 +1055,45 @@ impl Playtest {
         }
     }
 
-    /// Charge attack on one button: the three attack clips are one
-    /// performance each whose windup is long, so the windup doubles as the
-    /// charge. Press starts level 1's windup; holding past the thresholds
-    /// swaps to the next level's clip at the same elapsed point, so the
-    /// character keeps winding up; releasing jumps that clip's phase to its
-    /// strike frame and locks the player for what remains.
+    /// Attacks. One button per level, both shoulder buttons for the third,
+    /// and every level plays its clip whole: these three are single recorded
+    /// performances, and the earlier charge machine could only show a piece of
+    /// one because it had to jump into the swing to stay responsive.
     ///
-    /// Returns true while the charge owns the player's input.
-    fn update_charge_attack(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
-        const LEVEL_ANIM: [PlayerAnim; 3] = [
-            PlayerAnim::LightAttack,
-            PlayerAnim::HeavyAttack,
-            PlayerAnim::ComboAttack,
-        ];
-        let held = ctx.is_held(CHARGE_ATTACK_BUTTON);
-        let Some((start, level)) = self.charge else {
+    /// The pair window is why this is not a plain `just_pressed` chain: R1+R2
+    /// meant as one press arrives on two different ticks, so the first press
+    /// waits [`ATTACK_PAIR_WINDOW_TICKS`] to see whether its partner follows.
+    ///
+    /// Returns true while an attack owns the player's input.
+    fn update_attack_input(&mut self, ctx: &Ctx, now: SimTick, action_locked: bool) -> bool {
+        let light = ctx.is_held(LIGHT_ATTACK_BUTTON);
+        let heavy = ctx.is_held(HEAVY_ATTACK_BUTTON);
+        let Some(pressed_at) = self.attack_press else {
             if !action_locked
                 && self.motor.action().is_idle()
-                && ctx.just_pressed(CHARGE_ATTACK_BUTTON)
-                && self.start_player_anim_action(LEVEL_ANIM[0], now, ctx.video_hz)
+                && (ctx.just_pressed(LIGHT_ATTACK_BUTTON) || ctx.just_pressed(HEAVY_ATTACK_BUTTON))
             {
-                // Charging is rooted; the lock is extended every tick the
-                // button stays down so the windup never runs into its strike
-                // on its own.
-                self.charge = Some((now, 0));
-                telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
+                self.attack_press = Some(now);
                 return true;
             }
             return false;
         };
-        let elapsed = now.as_u32().saturating_sub(start.as_u32());
-        if held {
-            let wanted: u8 = if elapsed >= CHARGE_LEVEL3_TICKS {
-                2
-            } else if elapsed >= CHARGE_LEVEL2_TICKS {
-                1
-            } else {
-                0
-            };
-            if wanted != level {
-                self.switch_player_anim(LEVEL_ANIM[wanted as usize], now, ctx.video_hz);
-                self.charge = Some((start, wanted));
-            }
-            // Drive the windup by hold PROGRESS: at full charge the phase sits
-            // at the end of this clip's windup. Real-time playback would show
-            // only the first fraction of a 1.2-2.3 s windup during a hold this
-            // short, which is why the charge was barely visible.
-            // The hold stops at the commit frame, NOT at the strike: sweeping
-            // to the strike means the swing plays out while the button is
-            // still down, and the release then jumps the phase BACK to the
-            // commit frame and plays the same swing a second time. That
-            // replay was the stray double movement at full charge.
-            let progress = elapsed.min(CHARGE_FULL_TICKS);
-            let windup_ticks = CHARGE_STRIKE_FRAME[wanted as usize]
-                .saturating_sub(CHARGE_RELEASE_LEAD[wanted as usize])
-                .saturating_mul(ctx.video_hz.as_nonzero_u32())
-                / CHARGE_CLIP_HZ.max(1);
-            let phase_ticks = windup_ticks.saturating_mul(progress) / CHARGE_FULL_TICKS.max(1);
-            self.anim_start_tick = SimTick::from_u32(now.as_u32().saturating_sub(phase_ticks));
-            // Hold the lock open while the button is down.
-            self.anim_lock_until_tick = now.saturating_add(2);
+        // Both down resolves the window early; there is nothing left to wait for.
+        let waited = now.as_u32().saturating_sub(pressed_at.as_u32());
+        if !(light && heavy) && waited < ATTACK_PAIR_WINDOW_TICKS {
             return true;
         }
-        // Released: commit. The phase moves to just before the strike, and
-        // the switch is taken through switch_player_anim so the runtime's
-        // crossfade blends the held windup pose into it. Backdating alone
-        // teleported the pose, which reads as the first half of the clip
-        // being fast-forwarded.
-        self.charge = None;
-        let anim = LEVEL_ANIM[level as usize];
-        let commit_frame = CHARGE_STRIKE_FRAME[level as usize]
-            .saturating_sub(CHARGE_RELEASE_LEAD[level as usize]);
-        let strike_ticks =
-            commit_frame.saturating_mul(ctx.video_hz.as_nonzero_u32()) / CHARGE_CLIP_HZ.max(1);
-        self.switch_player_anim(anim, now, ctx.video_hz);
-        self.anim_start_tick = SimTick::from_u32(now.as_u32().saturating_sub(strike_ticks));
-        if let Some(character) = self.character {
-            let clip = character.clip_for(anim);
-            let total = self
-                .player_clip_duration_vblanks(
-                    character,
-                    clip,
-                    ctx.video_hz,
-                    character.action_speed(anim.action()),
-                    character.action_frame_range(anim.action()),
-                )
-                .unwrap_or(30);
-            self.anim_lock_until_tick = now.saturating_add(total.saturating_sub(strike_ticks).max(1));
-            let _ = clip;
+        self.attack_press = None;
+        let anim = match (light, heavy) {
+            (true, true) => PlayerAnim::ComboAttack,
+            (false, true) => PlayerAnim::HeavyAttack,
+            // A press that is already released by the end of the window is
+            // still a light attack: the buttons are taps, not holds.
+            _ => PlayerAnim::LightAttack,
+        };
+        if self.start_player_anim_action(anim, now, ctx.video_hz) {
+            telemetry::counter(telemetry::counter::PLAYER_ATTACK_STARTS, 1);
         }
-        self.swing_hit_mask = 0;
         true
     }
 
