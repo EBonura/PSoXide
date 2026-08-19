@@ -1,0 +1,151 @@
+"""Retarget a MoMask / HumanML3D BVH onto the Rust Mantis rig, in Blender.
+
+    blender -b --python tools/mantis_bvh_retarget.py -- \
+        <repo> <mantis.fbx> <take.bvh> <action name> <out.blend> \
+        [max frames] [start frame]
+
+Take a SETTLED window, not the head of the file. Generated takes begin from
+rest and spend their opening on a wind-up: the walk take here travels 0.02 m/s
+over its first 60 frames and 0.50 m/s over its whole length, so sampling from
+frame 1 cooks a shuffle and calls it a walk. The reported source speed is the
+check.
+
+The mantis carries a stock Mixamo humanoid armature, so once the `mixamorig:`
+prefix is stripped its bones answer to the same names `aletha_bvh_retarget`'s
+joint map already speaks. This module therefore loads that one and swaps only
+the map: the METHODS are the valuable part and they transfer unchanged.
+
+Why not something simpler. The two rests are nowhere near each other, measured
+per bone: the hips are inverted 154 degrees, and the arms point the same way
+(2-7 degrees apart) while their rest ROLL differs by about 258 degrees, the
+usual Mixamo-FBX versus BVH axis convention. So:
+
+  * copying absolute world rotations (a Copy Rotation constraint) injects every
+    one of those numbers as permanent distortion, and no amount of clean baking
+    saves it;
+  * taking the delta is right for hips, legs and feet, where the rests differ
+    mostly in roll and the delta cancels it;
+  * the arms need direction-aiming, which points the target bone along the
+    source bone's world direction while keeping the target's OWN rest roll.
+    That is what neutralises the 258 degrees;
+  * the spine needs the torso treated as one rigid frame, because a template's
+    spine rest is a zig-zag and per-bone deltas transplant that zig-zag as sag.
+
+One implementation detail is worth repeating because getting it wrong is
+invisible until it is catastrophic: a bone's target matrix must take its
+CURRENTLY EVALUATED head position, not its rest position. Pinning a child to
+its rest head detaches it from the parent the moment the parent rotates, which
+looks like limbs flying off on their own.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import bpy
+
+# Same methods as the Aletha bridge; both sides speak bare Mixamo names here.
+MANTIS_JOINT_MAP: dict[str, tuple[str, str]] = {
+    "Hips": ("Hips", "delta"),
+    "LeftUpLeg": ("LeftUpLeg", "delta"),
+    "LeftLeg": ("LeftLeg", "delta"),
+    "LeftFoot": ("LeftFoot", "delta"),
+    "RightUpLeg": ("RightUpLeg", "delta"),
+    "RightLeg": ("RightLeg", "delta"),
+    "RightFoot": ("RightFoot", "delta"),
+    "Spine": ("Spine", "torso"),
+    "Spine2": ("Spine2", "torso"),
+    "Neck": ("Neck", "neck"),
+    "LeftArm": ("LeftArm", "direction"),
+    "LeftForeArm": ("LeftForeArm", "direction"),
+    "RightArm": ("RightArm", "direction"),
+    "RightForeArm": ("RightForeArm", "direction"),
+}
+
+
+def load_aletha_module(repo: Path):
+    """Import the proven retargeter as a module, not a copy of its maths."""
+    spec = importlib.util.spec_from_file_location(
+        "aletha_bvh_retarget", str(repo / "tools" / "aletha_bvh_retarget.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def import_mantis(fbx_path: str, prefix: str) -> bpy.types.Object:
+    """Take the NORMALISED glb, not the raw FBX.
+
+    In the FBX the mesh object sits at scale 100 and the armature at 0.01, and
+    that mismatch survives retargeting: cooked clips came out with pose
+    translations of 2,827,904 against roughly 20,000 for a known-good Aletha
+    clip, 130x too large, which drove the cooked clip bounds to a floor 154714
+    units below a model only 18616 units tall and threw the character clean out
+    of frame. A glTF round trip puts mesh and rig in one space.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    if fbx_path.lower().endswith((".glb", ".gltf")):
+        bpy.ops.import_scene.gltf(filepath=fbx_path)
+    else:
+        bpy.ops.import_scene.fbx(filepath=fbx_path)
+    armature = next(o for o in bpy.data.objects if o.type == "ARMATURE")
+    armature.name = "MantisRig"
+    # Bake the object scale into the bone data. The cooker reads local bone
+    # positions and ignores node transforms, the same blind spot that put the
+    # mesh on its back; left alone, an armature sitting at 0.01 scale beside a
+    # mesh at 100 cooks pose translations ~94x too large.
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in bpy.data.objects:
+        if obj.type in {"ARMATURE", "MESH"}:
+            obj.select_set(True)
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    for action in list(bpy.data.actions):
+        bpy.data.actions.remove(action)
+    for bone in armature.data.bones:
+        if bone.name.startswith(prefix):
+            bone.name = bone.name[len(prefix) :]
+    return armature
+
+
+def main() -> None:
+    argv = sys.argv[sys.argv.index("--") + 1 :]
+    repo, fbx_path, bvh_path, action_name, out_blend = argv[:5]
+    max_frames = int(argv[5]) if len(argv) > 5 else 90
+    start_at = int(argv[6]) if len(argv) > 6 else 0
+
+    retargeter = load_aletha_module(Path(repo))
+    target = import_mantis(fbx_path, retargeter.MIXAMO_PREFIX)
+    source = retargeter.import_animation_source(Path(bvh_path))
+    retargeter.JOINT_MAP = MANTIS_JOINT_MAP
+
+    scene = bpy.context.scene
+    start = int(scene.frame_start) + start_at
+    end = min(int(scene.frame_end), start + max_frames - 1)
+    action, speed = retargeter.retarget(source, target, action_name, start, end)
+    # The source's own travel, reported because a generated take that barely
+    # moves reads as a shuffle no matter how clean the transfer is.
+    print(f"RETARGETED {action_name} frames {start}..{end} source speed {speed:.2f} m/s")
+
+    # Drop the hips vertical bob. The Aletha bridge scales it by the ratio of
+    # the two rigs' leg lengths, which assumes both are in the same units; this
+    # BVH is in metres and the mantis armature in centimetres, so the bob comes
+    # out roughly 90x too big and the cooked clip bounds report a floor 154738
+    # units down. The character motor owns translation anyway, so the safe form
+    # of this clip has no root translation at all.
+    for curve in list(action.fcurves):
+        if curve.data_path.endswith("location"):
+            action.fcurves.remove(curve)
+
+    bpy.data.objects.remove(source, do_unlink=True)
+    for other in list(bpy.data.actions):
+        if other is not action:
+            bpy.data.actions.remove(other)
+    scene.frame_start, scene.frame_end = start, end
+    bpy.ops.wm.save_as_mainfile(filepath=out_blend)
+    print("SAVED", out_blend)
+
+
+main()
