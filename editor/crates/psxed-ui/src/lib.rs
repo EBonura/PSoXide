@@ -294,6 +294,9 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/animations/aletha_delivered",
     "assets/animations/gen",
     "assets/animations/rust_mantis_starter",
+    // The mantis's attack / stagger / death, which the enemy FSM needs and
+    // which live in their own pack beside its locomotion.
+    "assets/animations/mantis_combat",
     "assets/models/sword1_light",
     "assets/models/sword1_heavy",
 ];
