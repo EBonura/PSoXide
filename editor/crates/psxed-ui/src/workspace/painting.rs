@@ -1021,7 +1021,10 @@ impl EditorWorkspace {
             "Character Controller",
             NodeKind::CharacterController {
                 character: Some(character_id),
-                settings,
+                // No override: the placement inherits the Character, so later
+                // edits to the type reach it. `settings` is materialised only
+                // when this placement is actually tuned away from its type.
+                settings: None,
                 player,
             },
         );

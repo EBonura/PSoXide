@@ -771,7 +771,7 @@ fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
         "Character Controller",
         NodeKind::CharacterController {
             character: Some(character_id),
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: false,
         },
     );

@@ -117,7 +117,7 @@ fn add_enemy_entity(
         "Character Controller",
         NodeKind::CharacterController {
             character,
-            settings,
+            settings: Some(settings),
             player: false,
         },
     );
@@ -324,7 +324,7 @@ fn plain_non_player_controller_cooks_no_game_entity() {
         "Character Controller",
         NodeKind::CharacterController {
             character: Some(character),
-            settings: crate::CharacterControllerSettings::defaults(),
+            settings: Some(crate::CharacterControllerSettings::defaults()),
             player: false,
         },
     );
@@ -684,7 +684,7 @@ fn game_entities_cook_character_bound_body_and_speeds() {
         "Character Controller",
         NodeKind::CharacterController {
             character: Some(character),
-            settings,
+            settings: Some(settings),
             player: false,
         },
     );

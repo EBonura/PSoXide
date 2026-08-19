@@ -263,7 +263,7 @@ fn component_templates_filter_by_host_kind_and_singletons() {
     let entity_existing = [
         NodeKind::CharacterController {
             character: None,
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: false,
         },
         NodeKind::PhysicsBody {
@@ -365,7 +365,7 @@ fn inline_character_controller_edit_undoes_with_entity_selected() {
         "Character Controller",
         NodeKind::CharacterController {
             character: None,
-            settings,
+            settings: Some(settings),
             player: false,
         },
     );
@@ -374,7 +374,7 @@ fn inline_character_controller_edit_undoes_with_entity_selected() {
     let before = workspace.project.clone();
     let history_epoch = workspace.history.epoch();
 
-    let NodeKind::CharacterController { settings, .. } = &mut workspace
+    let NodeKind::CharacterController { settings: Some(settings), .. } = &mut workspace
         .project
         .active_scene_mut()
         .node_mut(controller)
@@ -388,7 +388,7 @@ fn inline_character_controller_edit_undoes_with_entity_selected() {
     workspace.do_undo();
 
     assert_eq!(workspace.selection.selected_node, entity);
-    let NodeKind::CharacterController { settings, .. } = &workspace
+    let NodeKind::CharacterController { settings: Some(settings), .. } = &workspace
         .project
         .active_scene()
         .node(controller)
@@ -411,7 +411,7 @@ fn character_action_preview_uses_animator_binding_without_mutating_animator() {
         "Character Controller",
         NodeKind::CharacterController {
             character: None,
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: false,
         },
     );
@@ -467,7 +467,7 @@ fn editing_animator_clears_transient_action_preview_that_would_mask_editor_clip(
         "Character Controller",
         NodeKind::CharacterController {
             character: None,
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: true,
         },
     );
@@ -538,7 +538,7 @@ fn character_motion_preview_moves_without_mutating_authored_transform_and_tracks
         "Character Controller",
         NodeKind::CharacterController {
             character: None,
-            settings,
+            settings: Some(settings),
             player: true,
         },
     );
@@ -646,7 +646,7 @@ fn add_component_to_host_creates_child_and_selects_it() {
             "Character Controller",
             NodeKind::CharacterController {
                 character: None,
-                settings: CharacterControllerSettings::default(),
+                settings: Some(CharacterControllerSettings::default()),
                 player: false,
             },
         )
@@ -922,7 +922,7 @@ fn dropping_enemy_profile_first_preserves_authored_enemy_defaults() {
         .filter_map(|id| scene.node(*id))
         .find_map(|child| match child.kind {
             NodeKind::CharacterController {
-                player, settings, ..
+                player, settings: Some(settings), ..
             } => Some((player, settings)),
             _ => None,
         })
@@ -1017,7 +1017,7 @@ fn dropping_player_profile_applies_camera_preset_and_replaces_player_source() {
         .find_map(|child| match child.kind {
             NodeKind::CharacterController {
                 player: true,
-                settings,
+                settings: Some(settings),
                 ..
             } => Some(settings),
             _ => None,
@@ -1077,7 +1077,7 @@ fn player_source_demote_handles_spawn_points_and_character_controllers() {
         "Character Controller",
         NodeKind::CharacterController {
             character: None,
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: true,
         },
     );
@@ -1122,7 +1122,7 @@ fn character_controller_player_toggle_demotes_existing_player_source() {
         "Character Controller",
         NodeKind::CharacterController {
             character: None,
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: false,
         },
     );

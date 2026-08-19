@@ -1690,7 +1690,7 @@ pub(crate) fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'stati
             "Character Controller",
             NodeKind::CharacterController {
                 character: None,
-                settings: CharacterControllerSettings::default(),
+                settings: None,
                 player: false,
             },
         ),

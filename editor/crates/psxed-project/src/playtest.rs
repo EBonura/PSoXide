@@ -325,6 +325,25 @@ fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) ->
 /// player spawn.
 ///
 /// On any validation error the returned package is `None`.
+/// The enemy tuning this controller actually runs with: its own override if it
+/// has one, otherwise the Character's. Keeping this in one place is what lets a
+/// placed enemy inherit changes made to its type.
+fn controller_enemy_behavior(
+    project: &ProjectDocument,
+    controller: &CharacterControllerComponent,
+) -> Option<crate::EnemyBehaviorSettings> {
+    if let Some(settings) = controller.settings {
+        return settings.enemy;
+    }
+    controller
+        .character
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => character.enemy_behavior,
+            _ => None,
+        })
+}
+
 pub fn build_package(
     project: &ProjectDocument,
     project_root: &Path,
@@ -1444,7 +1463,7 @@ pub fn build_package(
                             room_index,
                             position: pos,
                             character: controller.character,
-                            controller_settings: Some(controller.settings),
+                            controller_settings: controller.settings,
                             camera: component_camera(scene, node).map(|camera| camera.settings),
                             weight_q8,
                             renderer: component_model_renderer(scene, node),
@@ -1452,7 +1471,7 @@ pub fn build_package(
                         });
                     } else if component_model_renderer(scene, node).is_none() {
                         let Some(character_id) = controller.character else {
-                            if controller.settings.enemy.is_some() {
+                            if controller_enemy_behavior(project, &controller).is_some() {
                                 report.error(format!(
                                     "Enemy on '{}' has no Character - the archetype \
                                      tag is the Character resource name",
@@ -1498,7 +1517,7 @@ pub fn build_package(
 
                 if let Some(controller) = character_controller {
                     if !controller.player {
-                        if let Some(enemy) = controller.settings.enemy {
+                        if let Some(enemy) = controller_enemy_behavior(project, &controller) {
                             let Some(character_id) = controller.character else {
                                 report.error(format!(
                                     "Enemy on '{}' has no Character - the archetype \
@@ -1575,7 +1594,13 @@ pub fn build_package(
                                         room_index,
                                         pos,
                                         yaw,
-                                        &controller.settings,
+                                        // Override if the placement has one,
+                                        // otherwise the Character's own tuning.
+                                        &controller.settings.unwrap_or_else(|| {
+                                            crate::CharacterControllerSettings::from_character(
+                                                enemy_character,
+                                            )
+                                        }),
                                         enemy,
                                         node_model_instance,
                                         state_clips,

@@ -68,7 +68,11 @@ pub fn speeds_to_q8_unscaled(project: &mut ProjectDocument) {
     let q8 = |v: i32| v.saturating_mul(256);
     for scene in &mut project.scenes {
         for node in &mut scene.nodes {
-            if let NodeKind::CharacterController { settings, .. } = &mut node.kind {
+            if let NodeKind::CharacterController {
+                settings: Some(settings),
+                ..
+            } = &mut node.kind
+            {
                 settings.walk_speed = q8(settings.walk_speed);
                 settings.run_speed = q8(settings.run_speed);
                 settings.roll_speed = q8(settings.roll_speed);
@@ -257,7 +261,11 @@ fn scale_node(node: &mut SceneNode) {
             geometry.height = div_u16_min1(geometry.height);
         }
         NodeKind::CharacterController { settings, .. } => {
-            scale_controller_settings(settings);
+            // A controller with no override has nothing of its own to scale;
+            // the Character resource it defers to is scaled with the others.
+            if let Some(settings) = settings {
+                scale_controller_settings(settings);
+            }
         }
         NodeKind::Camera { settings } => {
             settings.distance = div_i32_min1(settings.distance);
