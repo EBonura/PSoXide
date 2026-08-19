@@ -232,6 +232,22 @@ fn main() -> ExitCode {
                         );
                     }
                 }
+                // Session-resident payloads, reported every cook so the trend
+                // is visible well before the ceiling. Over it, the cook has
+                // already refused and this line never prints.
+                let resident = psxed_project::playtest::audit_resident_assets(&package);
+                println!(
+                    "[cook-playtest] Resident assets: {}B of {}B ({}%) across {} payloads{}",
+                    resident.total_bytes,
+                    resident.cap_bytes,
+                    resident.percent_of_cap(),
+                    resident.entries.len(),
+                    resident
+                        .by_owner()
+                        .iter()
+                        .map(|(owner, bytes)| format!(" [{owner} {bytes}B]"))
+                        .collect::<String>(),
+                );
                 match playtest_performance_envelope(&package) {
                     Ok(envelope) => {
                         let packet_capacity =

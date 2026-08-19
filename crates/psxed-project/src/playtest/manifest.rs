@@ -62,6 +62,19 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // oversized-chunk case is the one that actually fires, so check every room
     // up front and fail as a clean no-op.
     validate_streamed_room_chunks(package)?;
+    // Same discipline for the session-resident payloads. Without this the
+    // ceiling is only reported by a MIPS link failure naming a section, long
+    // after the cook that caused it.
+    let resident = super::budget::validate_resident_assets(package)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if resident.near_cap() {
+        println!(
+            "warning: {} (over {}% of the ceiling){}",
+            resident.summary(),
+            crate::playtest::budget::PLAYTEST_RESIDENT_ASSET_WARN_PERCENT,
+            resident.breakdown(6),
+        );
+    }
 
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
