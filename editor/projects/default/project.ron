@@ -46,8 +46,8 @@
         snap_units: 64,
     ),
     world_format: Bsp,
-    animation_trim_still_percent: 8,
     bsp_cook_mode: Draft,
+    animation_trim_still_percent: 8,
     runtime_depth_sort_mode: HybridWalls,
     runtime_texture_split_mode: All,
     runtime_room_draw_order_mode: Distance,
@@ -64,15 +64,15 @@
                 /*[3]*/ (id: (93), name: "Model Renderer", kind: ModelRenderer(model: Some((4043)), material: Some((1657)), visual_offset: (0, 1, 0), visual_scale_q8: 256), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
                 /*[4]*/ (id: (94), name: "Animator", kind: Animator(clip: Some(10), action_clips: [], autoplay: true, pose_frame: 0), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
                 /*[5]*/ (id: (95), name: "Character Controller", kind: CharacterController(character: Some((1655)), settings: (radius: 188, height: 1024, walk_speed: 10, run_speed: 75, turn_speed_degrees_per_second: 359, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 165, roll_active_frames: 17, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: None), player: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
-                /*[7]*/ (id: (98), name: "Equipment Light", kind: Equipment(weapon: Some((1706)), character_socket: "right_hand_grip", weapon_grip: "grip"), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
-                /*[8]*/ (id: (99), name: "Equipment Heavy", kind: Equipment(weapon: Some((1707)), character_socket: "right_hand_grip", weapon_grip: "grip"), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
-                /*[9]*/ (id: (100), name: "Equipment Off Hand", kind: Equipment(weapon: Some((1706)), character_socket: "left_hand_grip", weapon_grip: "grip"), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
-                /*[6]*/ (id: (96), name: "Camera", kind: Camera(settings: (distance: 2600, height: 1400, target_height: 800, lock_rise_percent: 25, min_floor_clearance: 110, orbit_speed_level: 3, position_lag_shift: 6, focus_lag_shift: 2, distance_lag_shift: 3)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
+                /*[6]*/ (id: (98), name: "Equipment Light", kind: Equipment(weapon: Some((1706)), character_socket: "right_hand_grip", weapon_grip: "grip"), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
+                /*[7]*/ (id: (99), name: "Equipment Heavy", kind: Equipment(weapon: Some((1707)), character_socket: "right_hand_grip", weapon_grip: "grip"), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
+                /*[8]*/ (id: (100), name: "Equipment Off Hand", kind: Equipment(weapon: Some((1706)), character_socket: "left_hand_grip", weapon_grip: "grip"), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
+                /*[9]*/ (id: (96), name: "Camera", kind: Camera(settings: (distance: 2600, height: 1400, target_height: 800, lock_rise_percent: 25, min_floor_clearance: 110, orbit_speed_level: 3, position_lag_shift: 6, focus_lag_shift: 2, distance_lag_shift: 3)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((92)), children: []),
                 /*[10]*/ (id: (101), name: "Rust Mantis", kind: Entity, transform: (translation: (3600.0, 65.0, 2048.0), rotation_degrees: (0.0, 200.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: [(102), (103), (104)]),
                 /*[11]*/ (id: (102), name: "Model Renderer", kind: ModelRenderer(model: Some((1637)), material: None, visual_offset: (0, 1, 0), visual_scale_q8: 282), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((101)), children: []),
                 /*[12]*/ (id: (103), name: "Animator", kind: Animator(clip: Some(0), action_clips: [], autoplay: true, pose_frame: 0), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((101)), children: []),
                 /*[13]*/ (id: (104), name: "Character Controller", kind: CharacterController(character: Some((1656)), settings: (radius: 211, height: 1126, walk_speed: 28, run_speed: 96, turn_speed_degrees_per_second: 180, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 10, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 96, roll_active_frames: 14, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6, enemy: Some((aggro_radius: 2335, patrol_offset: (0, 0, -6000), patrol_wait_ticks: 60, reaction_ticks: 22, preferred_distance: 768, spacing_tolerance: 128, decision_interval_ticks: 12, circle_chance: 65, attack_priority: 4, attack_cooldown_ticks: 45, group_attack_delay_ticks: 18, windup_ticks: 20, recovery_ticks: 24, poise: 100, touch_damage: 10, max_health: 100))), player: false), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((101)), children: []),
-                /*[7]*/ (id: (97), name: "Arena Light", kind: PointLight(color: (255, 246, 224), intensity: 1.2, radius: 2.0), transform: (translation: (3584.0, 1600.0, 3072.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: []),
+                /*[14]*/ (id: (97), name: "Arena Light", kind: PointLight(color: (255, 246, 224), intensity: 1.2, radius: 2.0), transform: (translation: (3584.0, 1600.0, 3072.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), floor: 0, parent: Some((1)), children: []),
             ],
             brushes: [
                 /*[0]*/ (faces: [(points: ((0, 0, 0), (0, 64, 0), (5376, 64, 0)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((5376, 0, 5312), (5376, 64, 5312), (0, 64, 5312)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 0, 5312), (0, 64, 5312), (0, 64, 0)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((5376, 0, 0), (5376, 64, 0), (5376, 64, 5312)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 0, 0), (5376, 0, 0), (5376, 0, 5312)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512))), (points: ((0, 64, 5312), (5376, 64, 5312), (5376, 64, 0)), material: Some((1714)), uv: (offset_texels: (0, 0), rotation_deg: 0, scale_q8: (512, 512)))]),
@@ -141,7 +141,7 @@
             name: "Rust Mantis",
             data: Model((
                 model_path: "assets/models/rust_mantis/rust_mantis.psxmdl",
-                source_path: None,
+                source_path: Some("source_assets/characters/rust_mantis.glb"),
                 texture_path: Some("assets/models/rust_mantis/rust_mantis.psxt"),
                 skeleton: Some((1635)),
                 world_height: 1024,
@@ -193,7 +193,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[strafe]*/ (
+        /*[5]*/ (
             id: (4088),
             name: "Rust Mantis / Strafe Left",
             data: AnimationClip((
@@ -207,7 +207,7 @@
                 tags: ["starter"],
             )),
         ),
-        (
+        /*[6]*/ (
             id: (4089),
             name: "Rust Mantis / Strafe Right",
             data: AnimationClip((
@@ -221,7 +221,7 @@
                 tags: ["starter"],
             )),
         ),
-        /*[5]*/ (
+        /*[7]*/ (
             id: (1654),
             name: "Rust Mantis Starter Animation Set",
             data: AnimationSet((
@@ -232,11 +232,11 @@
                 turn_clip: None,
                 roll_clip: None,
                 backstep_clip: None,
-                action_clips: [(action: Idle, clip: (1651)), (action: Walk, clip: (1652)), (action: Run, clip: (1653)), (action: StrafeLeft, clip: (4088)), (action: StrafeRight, clip: (4089))],
+                action_clips: [(action: Idle, clip: (1651)), (action: Walk, clip: (1652)), (action: Run, clip: (1653)), (action: StrafeLeft, clip: (4088)), (action: StrafeRight, clip: (4089)), (action: Death, clip: (4090)), (action: HitReact, clip: (4091)), (action: LightAttack, clip: (4092))],
                 clips: [(1651), (1652), (1653), (4088), (4089)],
             )),
         ),
-        /*[6]*/ (
+        /*[8]*/ (
             id: (1655),
             name: "Aletha",
             data: Character((
@@ -276,7 +276,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[7]*/ (
+        /*[9]*/ (
             id: (1656),
             name: "Rust Mantis Enemy",
             data: Character((
@@ -316,7 +316,7 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
-        /*[8]*/ (
+        /*[10]*/ (
             id: (1657),
             name: "Aletha Crystal",
             data: Material((
@@ -332,7 +332,7 @@
                 double_sided: false,
             )),
         ),
-        /*[9]*/ (
+        /*[11]*/ (
             id: (1702),
             name: "Sword1 Light Skeleton",
             data: Skeleton((
@@ -343,7 +343,7 @@
                 joint_names: ["root"],
             )),
         ),
-        /*[10]*/ (
+        /*[12]*/ (
             id: (1703),
             name: "Sword1 Light",
             data: Model((
@@ -358,7 +358,7 @@
                 attachments: [],
             )),
         ),
-        /*[11]*/ (
+        /*[13]*/ (
             id: (1704),
             name: "Sword1 Heavy",
             data: Model((
@@ -373,7 +373,7 @@
                 attachments: [],
             )),
         ),
-        /*[12]*/ (
+        /*[14]*/ (
             id: (1705),
             name: "prop_bind_pose",
             data: AnimationClip((
@@ -386,7 +386,7 @@
                 tags: ["prop"],
             )),
         ),
-        /*[13]*/ (
+        /*[15]*/ (
             id: (1706),
             name: "Sword1 Light",
             data: Weapon((
@@ -400,7 +400,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[14]*/ (
+        /*[16]*/ (
             id: (1707),
             name: "Sword1 Heavy",
             data: Weapon((
@@ -414,7 +414,7 @@
                 poise_damage: 25,
             )),
         ),
-        /*[15]*/ (
+        /*[17]*/ (
             id: (1708),
             name: "Sanctum Masonry",
             data: Material((
@@ -431,7 +431,7 @@
                 double_sided: false,
             )),
         ),
-        /*[16]*/ (
+        /*[18]*/ (
             id: (1709),
             name: "Sanctum Slate",
             data: Material((
@@ -448,7 +448,7 @@
                 double_sided: false,
             )),
         ),
-        /*[17]*/ (
+        /*[19]*/ (
             id: (1710),
             name: "Sanctum Metal",
             data: Material((
@@ -465,7 +465,7 @@
                 double_sided: false,
             )),
         ),
-        /*[18]*/ (
+        /*[20]*/ (
             id: (1711),
             name: "Sanctum Trim",
             data: Material((
@@ -482,7 +482,7 @@
                 double_sided: false,
             )),
         ),
-        /*[19]*/ (
+        /*[21]*/ (
             id: (1712),
             name: "Sanctum Gate",
             data: Material((
@@ -499,7 +499,7 @@
                 double_sided: false,
             )),
         ),
-        /*[20]*/ (
+        /*[22]*/ (
             id: (1713),
             name: "Courtyard Brick",
             data: Material((
@@ -516,7 +516,7 @@
                 double_sided: false,
             )),
         ),
-        /*[21]*/ (
+        /*[23]*/ (
             id: (1714),
             name: "Courtyard Cobbles",
             data: Material((
@@ -533,7 +533,7 @@
                 double_sided: false,
             )),
         ),
-        /*[22]*/ (
+        /*[24]*/ (
             id: (4042),
             name: "Aletha Delivered Skeleton",
             data: Skeleton((
@@ -544,7 +544,7 @@
                 joint_names: ["Hips", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot", "Spine", "Chest", "Neck", "RightShoulder", "RightUpperArm", "RightLowerArm", "RightHand", "RightThumbMetacarpal", "RightThumbProximal", "RightIndexProximal", "RightIndexIntermediate", "LeftShoulder", "LeftUpperArm", "LeftLowerArm", "LeftHand", "LeftThumbMetacarpal", "LeftThumbProximal", "LeftIndexProximal", "LeftIndexIntermediate"],
             )),
         ),
-        /*[23]*/ (
+        /*[25]*/ (
             id: (4043),
             name: "Aletha Delivered",
             data: Model((
@@ -559,7 +559,7 @@
                 attachments: [(name: "right_hand_grip", joint: 13, translation: (-1280, -2032, 80), rotation_q12: (32, 0, 1696)), (name: "left_hand_grip", joint: 21, translation: (1280, -2032, 80), rotation_q12: (32, 0, -1696))],
             )),
         ),
-        /*[24]*/ (
+        /*[26]*/ (
             id: (4069),
             name: "Aletha Delivered Animation Set",
             data: AnimationSet((
@@ -574,7 +574,7 @@
                 clips: [(4044), (4045), (4046), (4047), (4048), (4049), (4050), (4051), (4052), (4053), (4054), (4055), (4056), (4057), (4058), (4059), (4060), (4061), (4062), (4063), (4064), (4065), (4066), (4067), (4068)],
             )),
         ),
-        /*[25]*/ (
+        /*[27]*/ (
             id: (4044),
             name: "aletha_dash_bwd",
             data: AnimationClip((
@@ -587,7 +587,7 @@
                 tags: [],
             )),
         ),
-        /*[26]*/ (
+        /*[28]*/ (
             id: (4045),
             name: "aletha_dash_fwd",
             data: AnimationClip((
@@ -600,7 +600,7 @@
                 tags: [],
             )),
         ),
-        /*[27]*/ (
+        /*[29]*/ (
             id: (4046),
             name: "aletha_dash_lft",
             data: AnimationClip((
@@ -613,7 +613,7 @@
                 tags: [],
             )),
         ),
-        /*[28]*/ (
+        /*[30]*/ (
             id: (4047),
             name: "aletha_dash_rgt",
             data: AnimationClip((
@@ -626,7 +626,7 @@
                 tags: [],
             )),
         ),
-        /*[29]*/ (
+        /*[31]*/ (
             id: (4048),
             name: "aletha_death",
             data: AnimationClip((
@@ -639,7 +639,7 @@
                 tags: [],
             )),
         ),
-        /*[30]*/ (
+        /*[32]*/ (
             id: (4049),
             name: "aletha_heavy_wpn_heavy_atk",
             data: AnimationClip((
@@ -652,7 +652,7 @@
                 tags: [],
             )),
         ),
-        /*[31]*/ (
+        /*[33]*/ (
             id: (4050),
             name: "aletha_heavy_wpn_light_atk_a",
             data: AnimationClip((
@@ -665,7 +665,7 @@
                 tags: [],
             )),
         ),
-        /*[32]*/ (
+        /*[34]*/ (
             id: (4051),
             name: "aletha_heavy_wpn_light_atk_b",
             data: AnimationClip((
@@ -678,7 +678,7 @@
                 tags: [],
             )),
         ),
-        /*[33]*/ (
+        /*[35]*/ (
             id: (4052),
             name: "aletha_hurt_a",
             data: AnimationClip((
@@ -691,7 +691,7 @@
                 tags: [],
             )),
         ),
-        /*[34]*/ (
+        /*[36]*/ (
             id: (4053),
             name: "aletha_hurt_b",
             data: AnimationClip((
@@ -704,7 +704,7 @@
                 tags: [],
             )),
         ),
-        /*[35]*/ (
+        /*[37]*/ (
             id: (4054),
             name: "aletha_idle",
             data: AnimationClip((
@@ -717,7 +717,7 @@
                 tags: [],
             )),
         ),
-        /*[36]*/ (
+        /*[38]*/ (
             id: (4055),
             name: "aletha_light_wpn_heavy_atk",
             data: AnimationClip((
@@ -730,7 +730,7 @@
                 tags: [],
             )),
         ),
-        /*[37]*/ (
+        /*[39]*/ (
             id: (4056),
             name: "aletha_light_wpn_light_atk_a",
             data: AnimationClip((
@@ -743,7 +743,7 @@
                 tags: [],
             )),
         ),
-        /*[38]*/ (
+        /*[40]*/ (
             id: (4057),
             name: "aletha_light_wpn_light_atk_b",
             data: AnimationClip((
@@ -756,7 +756,7 @@
                 tags: [],
             )),
         ),
-        /*[39]*/ (
+        /*[41]*/ (
             id: (4058),
             name: "aletha_rest_pose",
             data: AnimationClip((
@@ -769,7 +769,7 @@
                 tags: [],
             )),
         ),
-        /*[40]*/ (
+        /*[42]*/ (
             id: (4059),
             name: "aletha_run_bwd",
             data: AnimationClip((
@@ -782,7 +782,7 @@
                 tags: [],
             )),
         ),
-        /*[41]*/ (
+        /*[43]*/ (
             id: (4060),
             name: "aletha_run_fwd",
             data: AnimationClip((
@@ -795,7 +795,7 @@
                 tags: [],
             )),
         ),
-        /*[42]*/ (
+        /*[44]*/ (
             id: (4061),
             name: "aletha_run_lft",
             data: AnimationClip((
@@ -808,7 +808,7 @@
                 tags: [],
             )),
         ),
-        /*[43]*/ (
+        /*[45]*/ (
             id: (4062),
             name: "aletha_run_rgt",
             data: AnimationClip((
@@ -821,7 +821,7 @@
                 tags: [],
             )),
         ),
-        /*[44]*/ (
+        /*[46]*/ (
             id: (4063),
             name: "aletha_stun",
             data: AnimationClip((
@@ -834,7 +834,7 @@
                 tags: [],
             )),
         ),
-        /*[45]*/ (
+        /*[47]*/ (
             id: (4064),
             name: "aletha_stun_recovery",
             data: AnimationClip((
@@ -847,7 +847,7 @@
                 tags: [],
             )),
         ),
-        /*[46]*/ (
+        /*[48]*/ (
             id: (4065),
             name: "aletha_walk_bkw",
             data: AnimationClip((
@@ -860,7 +860,7 @@
                 tags: [],
             )),
         ),
-        /*[47]*/ (
+        /*[49]*/ (
             id: (4066),
             name: "aletha_walk_fwd",
             data: AnimationClip((
@@ -873,7 +873,7 @@
                 tags: [],
             )),
         ),
-        /*[48]*/ (
+        /*[50]*/ (
             id: (4067),
             name: "aletha_walk_lft",
             data: AnimationClip((
@@ -886,7 +886,7 @@
                 tags: [],
             )),
         ),
-        /*[49]*/ (
+        /*[51]*/ (
             id: (4068),
             name: "aletha_walk_rgt",
             data: AnimationClip((
@@ -899,7 +899,7 @@
                 tags: [],
             )),
         ),
-        /*[50]*/ (
+        /*[52]*/ (
             id: (4070),
             name: "gen_walk_fwd",
             data: AnimationClip((
@@ -913,7 +913,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[51]*/ (
+        /*[53]*/ (
             id: (4071),
             name: "gen_walk_fwd_windup",
             data: AnimationClip((
@@ -927,7 +927,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[52]*/ (
+        /*[54]*/ (
             id: (4072),
             name: "gen_walk_fwd_winddown",
             data: AnimationClip((
@@ -941,7 +941,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[53]*/ (
+        /*[55]*/ (
             id: (4073),
             name: "gen_walk_fwd_winddown_mirror",
             data: AnimationClip((
@@ -955,7 +955,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[54]*/ (
+        /*[56]*/ (
             id: (4074),
             name: "gen_run_fwd",
             data: AnimationClip((
@@ -969,7 +969,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[55]*/ (
+        /*[57]*/ (
             id: (4075),
             name: "gen_run_fwd_winddown_mirror",
             data: AnimationClip((
@@ -983,7 +983,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[56]*/ (
+        /*[58]*/ (
             id: (4076),
             name: "gen_run_fwd_windup",
             data: AnimationClip((
@@ -997,7 +997,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[57]*/ (
+        /*[59]*/ (
             id: (4077),
             name: "gen_run_fwd_winddown",
             data: AnimationClip((
@@ -1011,7 +1011,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[58]*/ (
+        /*[60]*/ (
             id: (4078),
             name: "gen_walk_bwd",
             data: AnimationClip((
@@ -1025,7 +1025,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[59]*/ (
+        /*[61]*/ (
             id: (4079),
             name: "gen_walk_lft",
             data: AnimationClip((
@@ -1039,7 +1039,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[60]*/ (
+        /*[62]*/ (
             id: (4080),
             name: "gen_walk_rgt",
             data: AnimationClip((
@@ -1053,7 +1053,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[61]*/ (
+        /*[63]*/ (
             id: (4081),
             name: "gen_light_attack",
             data: AnimationClip((
@@ -1067,7 +1067,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[62]*/ (
+        /*[64]*/ (
             id: (4082),
             name: "gen_heavy_attack",
             data: AnimationClip((
@@ -1081,7 +1081,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[63]*/ (
+        /*[65]*/ (
             id: (4083),
             name: "gen_combo_attack",
             data: AnimationClip((
@@ -1095,7 +1095,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[64]*/ (
+        /*[66]*/ (
             id: (4084),
             name: "gen_hit_react",
             data: AnimationClip((
@@ -1109,7 +1109,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[65]*/ (
+        /*[67]*/ (
             id: (4085),
             name: "gen_vert_light_attack",
             data: AnimationClip((
@@ -1123,7 +1123,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[66]*/ (
+        /*[68]*/ (
             id: (4086),
             name: "gen_vert_heavy_attack",
             data: AnimationClip((
@@ -1137,7 +1137,7 @@
                 tags: ["gen"],
             )),
         ),
-        /*[67]*/ (
+        /*[69]*/ (
             id: (4087),
             name: "gen_vert_combo_attack",
             data: AnimationClip((
@@ -1151,6 +1151,48 @@
                 tags: ["gen"],
             )),
         ),
+        /*[70]*/ (
+            id: (4090),
+            name: "mantis_combat_death",
+            data: AnimationClip((
+                psxanim_path: "assets/animations/mantis_combat/death.psxanim",
+                skeleton: Some((1635)),
+                target_model: Some((1637)),
+                source: None,
+                bake: Retargeted,
+                role: Death,
+                looping: false,
+                tags: ["mantis_combat"],
+            )),
+        ),
+        /*[71]*/ (
+            id: (4091),
+            name: "mantis_combat_hit_react",
+            data: AnimationClip((
+                psxanim_path: "assets/animations/mantis_combat/hit_react.psxanim",
+                skeleton: Some((1635)),
+                target_model: Some((1637)),
+                source: None,
+                bake: Retargeted,
+                role: Hit,
+                looping: false,
+                tags: ["mantis_combat"],
+            )),
+        ),
+        /*[72]*/ (
+            id: (4092),
+            name: "mantis_combat_light_attack",
+            data: AnimationClip((
+                psxanim_path: "assets/animations/mantis_combat/light_attack.psxanim",
+                skeleton: Some((1635)),
+                target_model: Some((1637)),
+                source: None,
+                bake: Retargeted,
+                role: Attack,
+                looping: false,
+                tags: ["mantis_combat"],
+            )),
+        ),
     ],
-    next_resource_id: 4090,
+    next_resource_id: 4093,
 )

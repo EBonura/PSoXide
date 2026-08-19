@@ -267,6 +267,7 @@ pub enum NodeKind {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_controller_settings",
             deserialize_with = "deserialize_controller_settings"
         )]
         settings: Option<CharacterControllerSettings>,
@@ -630,6 +631,20 @@ pub struct PortalGeometry {
     pub vertices: [[i32; 3]; 4],
 }
 
+
+/// Write an override as the bare struct older projects already used, so the
+/// on-disk shape never changed and a file stays readable by both. `None` is
+/// skipped entirely, which is what marks a placement as following its type.
+fn serialize_controller_settings<S: serde::Serializer>(
+    value: &Option<CharacterControllerSettings>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::Serialize as _;
+    value
+        .as_ref()
+        .expect("skip_serializing_if keeps None out of here")
+        .serialize(serializer)
+}
 
 /// Accept both shapes of `CharacterController::settings`: the bare struct that
 /// older projects wrote, and an absent field on newly placed controllers.
