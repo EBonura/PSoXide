@@ -206,6 +206,66 @@ impl VramRect {
     pub const fn pixel_count(self) -> u32 {
         (self.w as u32) * (self.h as u32)
     }
+
+    /// Do these two rectangles share a pixel?
+    ///
+    /// Const so a game can prove its fixed VRAM layout at compile time. See
+    /// [`first_vram_overlap`].
+    pub const fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+}
+
+/// Index of the first pair of rectangles in `rects` that share a pixel.
+///
+/// This exists because VRAM is the one PS1 resource with no allocator between
+/// the writer and the hardware: a picture uploaded to the wrong row silently
+/// reinterprets whatever was there, and the symptom is a wrong-looking texture
+/// somewhere else entirely, often only on the map that fills VRAM deepest.
+///
+/// A game that hardcodes its layout should list every fixed rectangle it owns
+/// (framebuffers, texture-page bands, CLUT rows, HUD and font strips) and pin
+/// the list at compile time, which costs no image bytes:
+///
+/// ```
+/// use psx_vram::{first_vram_overlap, VramRect};
+///
+/// const LAYOUT: [VramRect; 3] = [
+///     VramRect::new(0, 0, 320, 240),     // framebuffer A
+///     VramRect::new(0, 240, 320, 240),   // framebuffer B
+///     VramRect::new(0, 480, 320, 32),    // CLUT block
+/// ];
+/// const _: () = assert!(
+///     matches!(first_vram_overlap(&LAYOUT), None),
+///     "VRAM layout overlaps",
+/// );
+/// ```
+///
+/// A dynamic allocator's reachable output is a rectangle too. Bound it and
+/// list that bound, so a later change to the bound, the band or the row count
+/// fails the build rather than corrupting VRAM on one map.
+pub const fn first_vram_overlap(rects: &[VramRect]) -> Option<(usize, usize)> {
+    let mut i = 0;
+    while i < rects.len() {
+        let mut j = i + 1;
+        while j < rects.len() {
+            if rects[i].overlaps(rects[j]) {
+                return Some((i, j));
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// True when no two rectangles in `rects` share a pixel. See
+/// [`first_vram_overlap`] for the pattern and why it is worth pinning.
+pub const fn vram_layout_is_disjoint(rects: &[VramRect]) -> bool {
+    matches!(first_vram_overlap(rects), None)
 }
 
 // ======================================================================
@@ -1370,5 +1430,37 @@ mod tests {
             (first.origin_u(), first.origin_v()),
             "released slot is reused"
         );
+    }
+
+    #[test]
+    fn overlapping_layout_rectangles_are_found_in_listed_order() {
+        // Disjoint: the two framebuffers and the block under them.
+        let clean = [
+            VramRect::new(0, 0, 320, 240),
+            VramRect::new(0, 240, 320, 240),
+            VramRect::new(0, 480, 320, 32),
+        ];
+        assert_eq!(first_vram_overlap(&clean), None);
+        assert!(vram_layout_is_disjoint(&clean));
+
+        // The hl-psx bug in miniature: CLUT rows at Y=480..503 that run past
+        // X=320 sit inside a texture page banded at Y=256.
+        let clashing = [
+            VramRect::new(0, 0, 320, 240),
+            VramRect::new(320, 256, 64, 256),
+            VramRect::new(0, 480, 640, 24),
+        ];
+        assert_eq!(first_vram_overlap(&clashing), Some((1, 2)));
+        assert!(!vram_layout_is_disjoint(&clashing));
+
+        // Touching edges are not an overlap.
+        let touching = [VramRect::new(0, 0, 320, 240), VramRect::new(320, 0, 64, 240)];
+        assert_eq!(first_vram_overlap(&touching), None);
+        let stacked = [VramRect::new(0, 0, 320, 240), VramRect::new(0, 240, 320, 8)];
+        assert_eq!(first_vram_overlap(&stacked), None);
+
+        // A single rect, and none at all, are trivially disjoint.
+        assert!(vram_layout_is_disjoint(&[VramRect::new(0, 0, 1, 1)]));
+        assert!(vram_layout_is_disjoint(&[]));
     }
 }
