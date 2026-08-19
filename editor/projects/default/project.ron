@@ -232,8 +232,8 @@
                 turn_clip: None,
                 roll_clip: None,
                 backstep_clip: None,
-                action_clips: [(action: Idle, clip: (1651)), (action: Walk, clip: (1652)), (action: Run, clip: (1653)), (action: StrafeLeft, clip: (4088)), (action: StrafeRight, clip: (4089)), (action: Death, clip: (4090)), (action: HitReact, clip: (4091)), (action: LightAttack, clip: (4092))],
-                clips: [(1651), (1652), (1653), (4088), (4089), (4090), (4091), (4092)],
+                action_clips: [(action: Idle, clip: (5021)), (action: Walk, clip: (1652)), (action: Run, clip: (1653)), (action: StrafeLeft, clip: (4088)), (action: StrafeRight, clip: (4089)), (action: Death, clip: (4090)), (action: HitReact, clip: (4091)), (action: LightAttack, clip: (4092))],
+                clips: [(1651), (1652), (1653), (4088), (4089), (4090), (4091), (4092), (5021)],
             )),
         ),
         /*[8]*/ (
@@ -1550,6 +1550,20 @@
                 double_sided: false,
             )),
         ),
+        /*[94]*/ (
+            id: (5021),
+            name: "mantis_combat_idle",
+            data: AnimationClip((
+                psxanim_path: "assets/animations/mantis_combat/idle.psxanim",
+                skeleton: Some((1635)),
+                target_model: Some((1637)),
+                source: None,
+                bake: Retargeted,
+                role: Idle,
+                looping: true,
+                tags: ["mantis_combat"],
+            )),
+        ),
     ],
-    next_resource_id: 5021,
+    next_resource_id: 5022,
 )
