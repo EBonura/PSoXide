@@ -119,17 +119,45 @@ peak is auditable at build time; per-clip streaming is more dynamic and suits
 rooms that come and go. Whichever we pick, the format has to agree with it, so
 pick before porting.
 
-Suggested sequence:
+Sequence, with the first step done.
 
-1. Extract the core (packed affine, bone ranges, interpolation) into
-   `psx-asset` as the shared type, HL-specific sections gated by the flags that
-   already exist.
+**1. Extract the reader into `psx-asset`. DONE.** It is
+`sdk/crates/psx-asset/src/hmd8.rs`, lifted whole from hl-psx's
+`game/src/model.rs`. The lift was almost free: the file's only outside
+dependencies were `psx_gte::math`, which is already an SDK crate and already a
+`psx-asset` dependency, and one game-local vertex-count constant, now
+`DEFAULT_MAX_VERTS` with `Model::load_with_vertex_cap` for a caller policing its
+own arena. Everything else is `core`.
+
+Verified two ways, because a parser that compiles proves nothing:
+
+- **232 real cooked HMD8 chunks** from hl-psx's model pack parse through the
+  extracted reader with every invariant holding (ranges inside the vertex
+  stream, bones inside the pose stream, clip frames inside the frame count,
+  triangle indices inside the mesh). Those chunks are Half-Life-derived so none
+  are committed; the test reads them only when `HMD8_FIXTURE_DIR` points at a
+  pack, and otherwise runs against a hand-built blob.
+- The committed test is not vacuous: changing the range stride by one byte
+  fails two of its four cases.
+
+The reader also rejects damage rather than trusting it, which is what makes it
+safe against streamed chunks, and there is now a case per failure mode. That
+guard is load-bearing: pointed at a texture chunk by mistake, it returned the
+null model instead of reading wild memory.
+
 2. Decide residency: per-scene cooked variants (hl-psx's answer) or per-clip
    streaming. This determines whether poses stay merged into the model blob.
 3. Move PSoXide's cook onto it, keeping `.psxanim` readable until the games
    have migrated.
 4. Point hl-psx at the SDK type and delete its private copy, which is the
    check that the extraction actually generalised.
+
+Step 4 needs staging that is worth knowing before starting it. hl-psx does not
+track PSoXide's `main`; it consumes a pinned rev (`psoxide-link` at
+`9c298d83`) with path dependencies into a local `.psoxide` checkout. So it
+cannot see this module until that pin moves, and moving it pulls in everything
+else that has landed since. That makes step 4 a deliberate bump rather than
+something to slip in alongside a format change.
 
 ## Why this direction
 
