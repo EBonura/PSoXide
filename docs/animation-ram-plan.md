@@ -87,9 +87,41 @@ matrix is the cross product of the other two, so six of the nine codes suffice.
 That is roughly 20% more for a cross product at decode. Smaller than it looked
 before, because the easy 17% was already taken.
 
-**4. Audit the peak at build time.** Port hl-psx's habit: compute resident
-animation per scene, compare against a declared cap, fail the cook. Cheap, and
-it turns "the linker refused" into "this clip is 12 KB over".
+**4. Audit the peak at build time. DONE.** `audit_resident_assets` in
+`editor/crates/psxed-project/src/playtest/budget.rs` sums every
+`PersistentGameplay` payload, word-padded, which is exactly the sum the manifest
+turns into `PERSISTENT_ASSET_PAGE_COUNT`, so the audit's figure and the guest's
+compiled constant cannot disagree. `write_package` refuses a cook that exceeds
+the cap, before touching the filesystem, and prints a breakdown above 90%.
+
+The cap is measured, not guessed. Raising `PERSISTENT_ASSET_PAGE_COUNT` in the
+generated manifest and relinking puts the ceiling at **354 pages (724,992 B)**:
+355 overflows the RAM region by 368 bytes. The linker gives static sections
+`2M - 64K BIOS - 32K stack` = 1,998,848 B, so that ceiling is whatever this
+build's code and other arenas leave behind, and it moves when they do. The cap
+sits at 344 pages, ten under the measured point, so ordinary code growth cannot
+put the linker back in front of the audit. Re-measure the same way after any
+large code change.
+
+What it said the first time it ran on the default project:
+
+```
+resident assets 643900 B in 315 pages of 344 (91%), 43 payloads
+  Aletha Delivered: 474512 B
+  Rust Mantis: 100508 B
+  Sword1 Light: 67732 B
+  Sword1 Heavy: 1148 B
+  largest payloads:
+    clip_27_aletha_idle.psxanim   88420 B
+    sword1_light/atlas.psxt       66076 B
+    clip_17_gen_vert_combo_attack.psxanim  36940 B
+```
+
+Two things fall out immediately. The largest single payload in the game is an
+IDLE clip at 88 KB, 12% of the whole resident budget. The second largest is a
+sword's texture atlas at 66 KB, which is not animation at all and had never
+been counted against this ceiling. Headroom is 29 pages, about 59 KB, which is
+less than one more mantis variant.
 
 ## Lifting HMD8 into the SDK
 
