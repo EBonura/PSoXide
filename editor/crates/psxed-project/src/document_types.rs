@@ -425,6 +425,16 @@ pub struct ProjectDocument {
     /// stride per clip would be the same decision made worse, by hand.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub animation_error_budget_degrees: u8,
+    /// Leading and trailing frames of a one-shot clip whose motion sits under
+    /// this percentage of the clip's own peak are dead time, and the cook drops
+    /// them. `0` disables trimming.
+    ///
+    /// This is not only a RAM saving. The cooked character record plays an
+    /// action's full frame range, so a still head is half a second of nothing
+    /// between the button and the swing. Looping clips are never trimmed:
+    /// their quiet stretch is part of the cycle.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub animation_trim_still_percent: u8,
     /// Cooked playtest cached-room depth sorting mode.
     #[serde(default)]
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
@@ -555,6 +565,7 @@ impl ProjectDocument {
             // instead of letting an empty scene read as "legacy grid".
             world_format: Some(ProjectWorldFormat::Bsp),
             animation_error_budget_degrees: 0,
+            animation_trim_still_percent: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
             runtime_texture_split_mode: RuntimeTextureSplitMode::default(),

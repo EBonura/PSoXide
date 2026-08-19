@@ -46,6 +46,7 @@
         snap_units: 64,
     ),
     world_format: Bsp,
+    animation_trim_still_percent: 15,
     bsp_cook_mode: Draft,
     runtime_depth_sort_mode: HybridWalls,
     runtime_texture_split_mode: All,
