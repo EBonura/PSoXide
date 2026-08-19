@@ -1,4 +1,5 @@
 use super::*;
+use psx_gpu::prim::LineMono;
 
 impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Start a world render pass.
@@ -440,6 +441,54 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             options.render_layer,
             tri as *mut TriGouraud as *mut u32,
             TriGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
+    /// Submit a monochrome line between two already-projected vertices.
+    ///
+    /// The GPU's own line rasteriser (GP0 0x40), not a thin quad: three data
+    /// words, no texture, no culling (a line has no facing). Depth is the
+    /// nearer end, so a wireframe over solid geometry sorts in front of it.
+    pub fn submit_projected_line(
+        &mut self,
+        lines: &mut impl PrimitiveSink<LineMono>,
+        verts: [ProjectedVertex; 2],
+        color: (u8, u8, u8),
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+        let Some(line) = lines.push(LineMono::new(
+            verts[0].sx,
+            verts[0].sy,
+            verts[1].sx,
+            verts[1].sy,
+            color.0,
+            color.1,
+            color.2,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+        let depth = CameraDepth::new(
+            verts[0]
+                .sz
+                .min(verts[1].sz)
+                .saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            line as *mut LineMono as *mut u32,
+            LineMono::WORDS,
         );
         stats.submitted_triangles = 1;
         stats
