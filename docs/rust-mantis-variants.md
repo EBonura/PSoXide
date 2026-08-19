@@ -1,4 +1,55 @@
-# Rust Mantis variants
+# Enemy roster, and the Rust Mantis variants
+
+## The roster substrate mostly exists already
+
+`CharacterResource` is the enemy-type record and it is a good one: model,
+material, animation set, combat capsules, spawn role, enemy behaviour tuning,
+radius, height, speeds, stamina, roll and camera. A roster is every Character
+whose `spawn_role` is `Enemy`, and a variant is a Character that reuses another
+one's model and animation set while differing in the few things that make it a
+different creature. Clip dedupe (by content, already in) means variants sharing
+a rig cost no extra animation RAM, so this is cheap by construction.
+
+Three things stop it working that way today.
+
+**1. Placement stamps a full copy of the stats, so the type never applies.**
+The cook reads `controller_settings.unwrap_or_else(|| from_character(character))`
+(`cook_entities.rs`), so the Character IS the fallback. But the editor writes a
+complete `settings` tuple onto every placed Character Controller, so the
+override always wins and editing the type reaches nothing already placed. This
+is why the two mantis scales had to be set per placement.
+
+The fix is small and is the one that unlocks the rest: stamp `settings: None`
+on placement, and materialise an override only when someone actually deviates
+from the type. Nothing in the cook changes.
+
+**2. Visual scale is not on the Character.** `visual_scale_q8` lives on the
+Model Renderer node, and scale is precisely the axis variants differ on (claw
+10%, weapon 20%). It belongs on the Character with an optional node override,
+the same shape as `settings`.
+
+**3. Equipment is a scene subtree.** Which weapon a variant carries is
+Equipment child nodes, so "the same creature holding the light sword" cannot be
+expressed as a type at all. An equipment list on the Character would fix it,
+and the runtime substrate for it already exists.
+
+With those three, a roster entry is one resource, variants are references
+rather than copies, and adding the fourth mantis or a boss is authoring one
+Character instead of rebuilding a subtree.
+
+## What the enemy runtime can actually play
+
+`GameEntityRuntime::clip_for_state` (`entities.rs`) reads exactly six clips:
+`idle`, `walk`, `run`, `attack`, `stagger`, `death`. The mantis has the first
+three. Attack drives three FSM states (Windup, Attack, Recover) from ONE clip,
+phase-offset by `windup_ticks` and the active window, so the attack clip has to
+contain all three beats in order.
+
+Worth knowing before authoring more locomotion: the enemy FSM never plays a
+strafe. Circling maps to `walk_clip`. The mantis strafe pair is only reachable
+while the mantis is the player in `projects/mantis`.
+
+## Rust Mantis variants
 
 One enemy, four silhouettes. The plan and, more usefully, what each axis
 actually costs, because they are not remotely equal.
