@@ -185,6 +185,18 @@ pub fn resample_animation_bytes(animation: &Animation<'_>, target_hz: u16) -> Op
         shift += 1;
     }
 
+    Some(write_flat_clip(joints, out_frames, target_hz, shift, &poses))
+}
+
+/// Write a flat v2 clip blob. The caller's normal compaction pass picks the
+/// packed v3 encoding from it, exactly as it would for an untouched clip.
+fn write_flat_clip(
+    joints: u16,
+    frames: u16,
+    sample_rate_hz: u16,
+    shift: u16,
+    poses: &[JointPose],
+) -> Vec<u8> {
     let payload_len = psxed_format::animation::AnimationHeader::SIZE
         + poses.len() * psxed_format::animation::POSE_RECORD_SIZE;
     let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
@@ -193,10 +205,10 @@ pub fn resample_animation_bytes(animation: &Animation<'_>, target_hz: u16) -> Op
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&(payload_len as u32).to_le_bytes());
     out.extend_from_slice(&joints.to_le_bytes());
-    out.extend_from_slice(&out_frames.to_le_bytes());
-    out.extend_from_slice(&target_hz.to_le_bytes());
+    out.extend_from_slice(&frames.to_le_bytes());
+    out.extend_from_slice(&sample_rate_hz.to_le_bytes());
     out.extend_from_slice(&shift.to_le_bytes());
-    for pose in &poses {
+    for pose in poses {
         for column in pose.matrix {
             for value in column {
                 out.extend_from_slice(&value.to_le_bytes());
@@ -208,7 +220,139 @@ pub fn resample_animation_bytes(animation: &Animation<'_>, target_hz: u16) -> Op
             );
         }
     }
-    Some(out)
+    out
+}
+
+/// Per-frame motion of a clip: how far the whole pose moves from the frame
+/// before it, summed over every joint.
+fn frame_motion(animation: &Animation<'_>) -> Vec<i64> {
+    let joints = animation.joint_count();
+    let frames = animation.frame_count();
+    let mut motion = Vec::with_capacity(frames.saturating_sub(1) as usize);
+    for frame in 1..frames {
+        let mut total = 0i64;
+        for joint in 0..joints {
+            let (Some(a), Some(b)) = (
+                animation.pose(frame - 1, joint),
+                animation.pose(frame, joint),
+            ) else {
+                continue;
+            };
+            for column in 0..3 {
+                for row in 0..3 {
+                    total += (b.matrix[column][row] as i64 - a.matrix[column][row] as i64).abs();
+                }
+            }
+            total += (b.translation.x as i64 - a.translation.x as i64).abs();
+            total += (b.translation.y as i64 - a.translation.y as i64).abs();
+            total += (b.translation.z as i64 - a.translation.z as i64).abs();
+        }
+        motion.push(total);
+    }
+    motion
+}
+
+/// `true` when the clip's last frame repeats its first, which is how the cook
+/// writes a loop so playback can blend the end back to the start.
+///
+/// Trimming a loop is not the same operation: its quiet stretch is part of the
+/// cycle, and cutting it would make the animation jump. Only one-shots are
+/// safe to trim, and this is how they are told apart without asking anyone to
+/// author a flag.
+pub fn is_looping(animation: &Animation<'_>) -> bool {
+    let last = animation.frame_count().saturating_sub(1);
+    if last == 0 {
+        return false;
+    }
+    (0..animation.joint_count()).all(|joint| {
+        match (animation.pose(0, joint), animation.pose(last, joint)) {
+            (Some(a), Some(b)) => a.matrix == b.matrix && a.translation == b.translation,
+            _ => false,
+        }
+    })
+}
+
+/// First and last frame worth keeping: the run of leading and trailing frames
+/// whose motion sits under `still_percent` of the clip's own peak is dead time.
+///
+/// Measured on the shipped attacks, 16 to 31% of each one is this, and the
+/// cooked character record plays the full range, so it is also half a second of
+/// nothing before the swing starts.
+///
+/// Returns the whole clip when trimming is off, when the clip loops, or when
+/// there is not enough left to be worth it.
+pub fn live_frame_range(animation: &Animation<'_>, still_percent: u8) -> (u16, u16) {
+    let frames = animation.frame_count();
+    let whole = (0, frames.saturating_sub(1));
+    if still_percent == 0 || frames < MIN_TRIMMED_FRAMES + 2 || is_looping(animation) {
+        return whole;
+    }
+    let motion = frame_motion(animation);
+    let Some(&peak) = motion.iter().max() else {
+        return whole;
+    };
+    if peak == 0 {
+        return whole;
+    }
+    let threshold = peak * still_percent as i64 / 100;
+    let live: Vec<usize> = motion
+        .iter()
+        .enumerate()
+        .filter(|(_, &m)| m > threshold)
+        .map(|(i, _)| i)
+        .collect();
+    let (Some(&first_live), Some(&last_live)) = (live.first(), live.last()) else {
+        return whole;
+    };
+    // `motion[i]` is the step INTO frame i + 1, so the first live frame is the
+    // one the first live step starts from.
+    let first = first_live as u16;
+    let last = (last_live as u16 + 1).min(frames - 1);
+    if last.saturating_sub(first) + 1 < MIN_TRIMMED_FRAMES {
+        return whole;
+    }
+    (first, last)
+}
+
+/// Smallest clip a trim may leave behind. Below this the runtime has nothing to
+/// blend and the saving is not worth the risk.
+const MIN_TRIMMED_FRAMES: u16 = 4;
+
+/// Rewrite a clip keeping only frames `first..=last`, at the same rate.
+pub fn trim_animation_bytes(
+    animation: &Animation<'_>,
+    first: u16,
+    last: u16,
+) -> Option<Vec<u8>> {
+    if first == 0 && last + 1 >= animation.frame_count() {
+        return None;
+    }
+    let joints = animation.joint_count();
+    let kept = last.checked_sub(first)?.checked_add(1)?;
+    let mut poses = Vec::with_capacity(kept as usize * joints as usize);
+    let mut max_abs = 0i32;
+    for frame in first..=last {
+        for joint in 0..joints {
+            let pose = animation.pose(frame, joint)?;
+            for value in [pose.translation.x, pose.translation.y, pose.translation.z] {
+                max_abs = max_abs.max(if value == i32::MIN { i32::MAX } else { value.abs() });
+            }
+            poses.push(pose);
+        }
+    }
+    let mut shift = 0u16;
+    let mut scaled = max_abs;
+    while scaled > i16::MAX as i32 && shift < 15 {
+        scaled = (scaled + 1) >> 1;
+        shift += 1;
+    }
+    Some(write_flat_clip(
+        joints,
+        kept,
+        animation.sample_rate_hz(),
+        shift,
+        &poses,
+    ))
 }
 
 #[cfg(test)]
@@ -222,6 +366,16 @@ mod tests {
     /// the resampler correctly throws away almost all of it. Only curvature
     /// costs anything, which is what `oscillating_clip` supplies.
     fn clip_from(frames: u16, joints: u16, hz: u16, value_of: impl Fn(u16) -> i16) -> Vec<u8> {
+        clip_from_with(frames, joints, hz, value_of, |frame| frame as i16)
+    }
+
+    fn clip_from_with(
+        frames: u16,
+        joints: u16,
+        hz: u16,
+        value_of: impl Fn(u16) -> i16,
+        translation_of: impl Fn(u16) -> i16,
+    ) -> Vec<u8> {
         let payload_len = psxed_format::animation::AnimationHeader::SIZE
             + frames as usize * joints as usize * psxed_format::animation::POSE_RECORD_SIZE;
         let mut out = Vec::new();
@@ -243,7 +397,7 @@ mod tests {
                     }
                 }
                 for _ in 0..3 {
-                    out.extend_from_slice(&(frame as i16).to_le_bytes());
+                    out.extend_from_slice(&translation_of(frame).to_le_bytes());
                 }
             }
         }
@@ -313,6 +467,73 @@ mod tests {
         let last_in = animation.pose(animation.frame_count() - 1, 0).expect("pose");
         let last_out = out.pose(out.frame_count() - 1, 0).expect("pose");
         assert_eq!(last_out.matrix, last_in.matrix);
+    }
+
+    /// Still frames, then real motion, then still frames again: the shape the
+    /// trim exists for.
+    fn padded_clip(head: u16, live: u16, tail: u16, joints: u16, hz: u16) -> Vec<u8> {
+        clip_from(head + live + tail, joints, hz, move |frame| {
+            if frame < head {
+                4096
+            } else if frame < head + live {
+                4096 - (frame - head) as i16 * 100
+            } else {
+                4096 - (live.saturating_sub(1)) as i16 * 100
+            }
+        })
+    }
+
+    #[test]
+    fn trimming_drops_the_dead_ends_and_keeps_the_motion() {
+        let bytes = padded_clip(10, 20, 12, 3, 15);
+        let animation = Animation::from_bytes(&bytes).expect("clip");
+        let (first, last) = live_frame_range(&animation, 15);
+        assert_eq!((first, last), (10, 29), "must keep exactly the moving span");
+
+        let trimmed = trim_animation_bytes(&animation, first, last).expect("trimmed");
+        let out = Animation::from_bytes(&trimmed).expect("trimmed clip");
+        assert_eq!(out.frame_count(), 20);
+        assert_eq!(out.sample_rate_hz(), animation.sample_rate_hz());
+        // the kept frames must be the original ones, untouched
+        for frame in 0..out.frame_count() {
+            assert_eq!(
+                out.pose(frame, 0).unwrap().matrix,
+                animation.pose(frame + first, 0).unwrap().matrix,
+                "frame {frame} changed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_looping_clip_is_never_trimmed() {
+        // Its quiet stretch is part of the cycle; cutting it makes the loop
+        // jump. Detected from the data, not from an authored flag.
+        // Constant translation as well, or the last frame would not match the
+        // first and this would not be a loop at all.
+        let bytes = clip_from_with(
+            40,
+            3,
+            12,
+            |frame| if frame == 0 || frame == 39 { 4096 } else { 4096 - 200 },
+            |_| 0,
+        );
+        let animation = Animation::from_bytes(&bytes).expect("clip");
+        assert!(is_looping(&animation));
+        assert_eq!(live_frame_range(&animation, 15), (0, 39));
+    }
+
+    #[test]
+    fn trimming_off_and_all_motion_leave_the_clip_alone() {
+        let bytes = padded_clip(10, 20, 12, 3, 15);
+        let animation = Animation::from_bytes(&bytes).expect("clip");
+        assert_eq!(live_frame_range(&animation, 0), (0, 41));
+
+        // A clip that moves throughout has no dead ends to find.
+        let busy = linear_clip(30, 3, 15, 60);
+        let busy = Animation::from_bytes(&busy).expect("clip");
+        let (first, last) = live_frame_range(&busy, 15);
+        assert_eq!((first, last), (0, 29));
+        assert!(trim_animation_bytes(&busy, first, last).is_none());
     }
 
     #[test]

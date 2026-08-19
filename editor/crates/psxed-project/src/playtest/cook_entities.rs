@@ -1175,10 +1175,15 @@ pub(crate) fn register_model_for_instance(
         // Resample AFTER pose correction, so the budget is measured against the
         // poses that actually ship, and BEFORE frame bounds are baked, so the
         // bounds describe the frames the runtime will really read.
+        let label = format!("{} / {}", resource.name, clip.name);
+        // Trim BEFORE resampling so the rate is chosen against real motion
+        // rather than against a stretch of stillness that is about to go.
+        let animation_bytes =
+            trim_still_ends(animation_bytes, project.animation_trim_still_percent, &label);
         let animation_bytes = resample_under_budget(
             animation_bytes,
             project.animation_error_budget_degrees,
-            &format!("{} / {}", resource.name, clip.name),
+            &label,
         );
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
@@ -1359,6 +1364,39 @@ pub(crate) fn register_model_for_instance(
 /// Culling-radius pad added to baked model frame bounds, in AUTHORED
 /// world units; the cook divides it for engine-unit (BSP) projects.
 pub const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
+
+/// Drop the still head and tail of a one-shot clip. Returns the input
+/// untouched when trimming is off, the clip loops, or there is nothing dead.
+fn trim_still_ends(bytes: Vec<u8>, still_percent: u8, label: &str) -> Vec<u8> {
+    if still_percent == 0 {
+        return bytes;
+    }
+    let Ok(animation) = psx_asset::Animation::from_bytes(&bytes) else {
+        return bytes;
+    };
+    let frames = animation.frame_count();
+    let (first, last) = crate::animation_resample::live_frame_range(&animation, still_percent);
+    let Some(trimmed) = crate::animation_resample::trim_animation_bytes(&animation, first, last)
+    else {
+        return bytes;
+    };
+    let Ok(parsed) = psx_asset::Animation::from_bytes(&trimmed) else {
+        return bytes;
+    };
+    let out = compact_animation_bytes(&parsed);
+    let hz = animation.sample_rate_hz().max(1) as u32;
+    println!(
+        "[cook] trimmed {label}: {frames} -> {} frames (head {first}, tail {}), \
+         {} -> {} B, {} -> {} ms",
+        parsed.frame_count(),
+        frames.saturating_sub(1).saturating_sub(last),
+        bytes.len(),
+        out.len(),
+        1000 * frames.saturating_sub(1) as u32 / hz,
+        1000 * parsed.frame_count().saturating_sub(1) as u32 / hz,
+    );
+    out
+}
 
 /// Drop a clip to the lowest sample rate that holds the project's error budget,
 /// then re-compact it. Returns the input untouched when the budget is off or

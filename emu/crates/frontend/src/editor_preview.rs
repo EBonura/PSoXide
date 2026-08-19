@@ -689,6 +689,10 @@ struct PreviewModelReference {
     material_override: Option<ResourceId>,
     clip_override: Option<u16>,
     autoplay: bool,
+    /// Frame the animator is parked on when `autoplay` is false. The cook and
+    /// the inspector both honour this; the viewport used to pin frame 0, so
+    /// scrubbing a pose in the inspector changed nothing on screen.
+    pose_frame: u16,
     renderer_node: Option<NodeId>,
     animator_node: Option<NodeId>,
     visual_offset: [i16; 3],
@@ -707,6 +711,7 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
             material_override: *material,
             clip_override: *animation_clip,
             autoplay: true,
+            pose_frame: 0,
             renderer_node: None,
             animator_node: None,
             visual_offset: [0; 3],
@@ -733,8 +738,13 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                             *visual_scale_q8,
                         ));
                     }
-                    NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
-                        animator = Some((child.id, *clip, *autoplay));
+                    NodeKind::Animator {
+                        clip,
+                        autoplay,
+                        pose_frame,
+                        ..
+                    } if animator.is_none() => {
+                        animator = Some((child.id, *clip, *autoplay, *pose_frame));
                     }
                     _ => {}
                 }
@@ -751,10 +761,11 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                     PreviewModelReference {
                         model_id,
                         material_override,
-                        clip_override: animator.and_then(|(_, clip, _)| clip),
-                        autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
+                        clip_override: animator.and_then(|(_, clip, _, _)| clip),
+                        autoplay: animator.is_none_or(|(_, _, autoplay, _)| autoplay),
+                        pose_frame: animator.map_or(0, |(_, _, _, frame)| frame),
                         renderer_node: Some(renderer_node),
-                        animator_node: animator.map(|(node_id, _, _)| node_id),
+                        animator_node: animator.map(|(node_id, _, _, _)| node_id),
                         visual_offset,
                         visual_yaw_q12,
                         visual_scale_q8,
@@ -789,6 +800,8 @@ struct PreviewPlayerReference {
     renderer_node: Option<NodeId>,
     animator_node: Option<NodeId>,
     autoplay: bool,
+    /// Frame the animator is parked on when `autoplay` is false.
+    pose_frame: u16,
     visual_offset: [i16; 3],
     visual_yaw_q12: u16,
     visual_scale_q8: u16,
@@ -808,6 +821,7 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
             renderer_node: None,
             animator_node: None,
             autoplay: true,
+            pose_frame: 0,
             visual_offset: [0; 3],
             visual_yaw_q12: 0,
             visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
@@ -840,8 +854,13 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                             *visual_scale_q8,
                         ));
                     }
-                    NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
-                        animator = Some((child.id, *clip, *autoplay));
+                    NodeKind::Animator {
+                        clip,
+                        autoplay,
+                        pose_frame,
+                        ..
+                    } if animator.is_none() => {
+                        animator = Some((child.id, *clip, *autoplay, *pose_frame));
                     }
                     _ => {}
                 }
@@ -870,11 +889,12 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                     character,
                     model_override,
                     material_override,
-                    clip_override: animator.and_then(|(_, clip, _)| clip),
+                    clip_override: animator.and_then(|(_, clip, _, _)| clip),
                     controller_node: Some(controller_node),
                     renderer_node,
-                    animator_node: animator.map(|(node_id, _, _)| node_id),
-                    autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
+                    animator_node: animator.map(|(node_id, _, _, _)| node_id),
+                    autoplay: animator.is_none_or(|(_, _, autoplay, _)| autoplay),
+                        pose_frame: animator.map_or(0, |(_, _, _, frame)| frame),
                     visual_offset,
                     visual_yaw_q12,
                     visual_scale_q8,
@@ -2386,8 +2406,10 @@ struct PreviewModelInstance<'a> {
     /// Authored model face-sidedness after material override.
     face_sidedness: psxed_project::MaterialFaceSidedness,
     /// Whether the editor preview should advance this instance's
-    /// animation phase. Disabled instances hold frame zero.
+    /// animation phase. Disabled instances hold `pose_frame`.
     autoplay: bool,
+    /// Frame held when `autoplay` is false.
+    pose_frame: u16,
 }
 
 /// Render every Model-backed legacy `MeshInstance` or component
@@ -2517,6 +2539,7 @@ fn walk_model_instances(
                 None,
             ),
             autoplay: preview_transform.is_some() || reference.autoplay,
+            pose_frame: reference.pose_frame,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
@@ -2659,6 +2682,7 @@ fn walk_bsp_model_instances(
                 None,
             ),
             autoplay: preview_transform.is_some() || reference.autoplay,
+            pose_frame: reference.pose_frame,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
@@ -2763,6 +2787,7 @@ fn resolve_and_draw_model_instances(
                     }
                 }),
             autoplay: meta.autoplay,
+            pose_frame: meta.pose_frame,
         });
     }
 
@@ -2909,6 +2934,7 @@ fn walk_player_spawn_preview(
                 reference.animator_node,
             ),
             autoplay: preview_transform.is_some() || reference.autoplay,
+            pose_frame: reference.pose_frame,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
@@ -3105,6 +3131,8 @@ struct InstanceMeta {
     is_selected: bool,
     /// Yaw in PSX angle units, retained for the facing arrow.
     yaw_q12: u16,
+    /// Frame to hold when `autoplay` is false.
+    pose_frame: u16,
     /// Ground-contact radius used for the editor shadow decal.
     collision_radius: i32,
     /// Approximate world-space height for the facing arrow's
@@ -3253,10 +3281,16 @@ fn submit_preview_model_instance(
     source_vertex_pool: &mut [psx_asset::ModelVertex],
     joint_view_transforms: &mut [psx_engine::JointViewTransform],
 ) -> bool {
+    // Parked animators hold their authored pose frame. Same convention as the
+    // runtime's model instances: whole frames in the high bits of a Q12 phase,
+    // clamped so an authored frame past the end of a shorter clip still draws.
     let frame_q12 = if instance.autoplay {
         instance.animation.phase_at_tick_q12(tick, 60)
     } else {
-        0
+        (instance
+            .pose_frame
+            .min(instance.animation.frame_count().saturating_sub(1)) as u32)
+            << 12
     };
     let material = TextureMaterial::opaque(
         instance.texture.clut_word,
