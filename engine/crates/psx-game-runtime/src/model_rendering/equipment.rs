@@ -1,5 +1,6 @@
 use super::*;
-use psx_engine::{JointWorldTransform, LoadedWorldCameraGte, TexturedViewVertex};
+use psx_engine::{JointWorldTransform, LoadedWorldCameraGte, ProjectedVertex, WorldRenderLayer};
+use psx_gpu::prim::LineMono;
 use psx_level::equipment_flags;
 
 #[derive(Copy, Clone)]
@@ -38,7 +39,7 @@ pub(super) fn draw_player_equipment<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let Some(player_pose) = resolve_player_actor_pose(
@@ -109,7 +110,7 @@ pub(super) fn draw_player_equipment_from_pose<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let mut out = EquipmentDrawStats::default();
@@ -118,8 +119,14 @@ pub(super) fn draw_player_equipment_from_pose<
 
     let mut drawn = 0usize;
     for (index, equipment) in tables.equipment.iter().enumerate() {
-        // What is held changes with the action; the cooked records do not.
-        if index < 32 && knobs.equipment_mask & (1 << index) == 0 {
+        // What is held changes with the action, and each weapon has its own
+        // beat in the swing; the cooked records do not know either.
+        let wire_q12 = knobs
+            .equipment_wire_q12
+            .get(index)
+            .copied()
+            .unwrap_or(ASSEMBLED_Q12);
+        if knobs.equipment_wireframe && wire_q12 == 0 {
             continue;
         }
         // Player equipment follows the player across rooms, matching the
@@ -153,6 +160,7 @@ pub(super) fn draw_player_equipment_from_pose<
         >(
             weapon,
             socket_pose,
+            wire_q12,
             knobs,
             scratch,
             models,
@@ -195,6 +203,7 @@ fn submit_equipped_weapon<
 >(
     weapon: &LevelWeaponRecord,
     socket_pose: AttachmentPose,
+    wire_q12: u16,
     knobs: ModelDrawKnobs,
     scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -207,7 +216,7 @@ fn submit_equipped_weapon<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> Option<TexturedModelRenderStats> {
     let weapon_model = models.get(weapon.model?.to_usize()).copied().flatten()?;
@@ -217,24 +226,6 @@ fn submit_equipped_weapon<
         weapon.grip_rotation_q12,
         weapon_model.local_to_world,
     );
-    if knobs.equipment_assemble_q12 < SOLID_FROM_Q12 {
-        let material = lighting.shade_model_material(origin, weapon_model.material);
-        submit_weapon_assemble(
-            weapon_model,
-            origin,
-            weapon_rotation,
-            knobs,
-            model_faces,
-            model_parts,
-            model_vertices,
-            camera,
-            options,
-            material,
-            triangles,
-            world,
-        );
-        return Some(TexturedModelRenderStats::default());
-    }
     let anim = weapon_model.clip(clips, weapon_model.default_clip)?;
     let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
     let material = lighting.shade_model_material(origin, weapon_model.material);
@@ -245,6 +236,38 @@ fn submit_equipped_weapon<
         .with_textured_triangle_splitting(true)
         .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
     let faces = runtime_model_faces(weapon_model, model_faces);
+    // The weapon's faces are sorted hilt-first at load, so how much of it has
+    // materialised is just how much of the face slice is drawn solid. The rest
+    // is the wireframe it fills into.
+    if knobs.equipment_wireframe {
+        // A nanobot weapon is never solid: it is a wireframe construct that
+        // grows up the blade and retreats the same way. The faces are sorted
+        // hilt-first, so how much of it exists is how much of the face list
+        // gets an outline.
+        let wired = if wire_q12 >= ASSEMBLED_Q12 {
+            faces.len()
+        } else {
+            faces.len() * usize::from(wire_q12) / 4096
+        };
+        if wired > 0 {
+            if let Some(geometry) =
+                runtime_model_geometry(weapon_model, model_parts, model_vertices)
+            {
+                submit_weapon_wireframe(
+                    weapon_model,
+                    origin,
+                    weapon_rotation,
+                    &faces[..wired],
+                    geometry.vertices,
+                    camera,
+                    options,
+                    triangles,
+                    world,
+                );
+            }
+        }
+        return Some(TexturedModelRenderStats::default());
+    }
     Some(submit_runtime_model_predecoded(
         world,
         triangles,
@@ -276,202 +299,96 @@ pub const ASSEMBLED_Q12: u16 = 4096;
 /// cloud safe: the effect never has to show a complete weapon.
 const SOLID_FROM_Q12: u16 = 3584;
 
-/// Materialise a weapon out of its own triangles.
+/// Draw the not-yet-solid part of a weapon as a green wireframe.
 ///
-/// Each face seats at its own moment (a hash off the face index staggers the
-/// timeline), and until it does it floats out along the ray from the weapon's
-/// own origin, scattered and tumbling, over-brightened. So the blade converges
-/// out of its own loose triangles, which is the Final Fantasy dissolve read
-/// backwards. Dissolving is this function with `assemble_q12` running down.
+/// The whole point of this over a shard cloud: the weapon stays RIGID, so every
+/// vertex shares one transform. Project the model's vertices once and an edge
+/// is then two screen points and a three-word line packet, with no per-edge
+/// transform at all. That is the case the engine is fast at, and the shard
+/// cloud was the case it is slow at.
 ///
-/// The triangles stay rigid: no stretching into shards. The scatter and the
-/// tumble are what keep it from reading as the model simply scaling up.
-///
-/// ponytail: no sparkle sprites, no transparency. Over-bright tint carries the
-/// glow (additive submission is dropped by the world pass, see the
-/// nanobot-assemble handoff), and the swords are 94 and 61 faces, so the whole
-/// effect is a per-face loop with no scratch buffer.
+/// ponytail: shared edges are drawn twice (once per adjoining face). Dedupe if
+/// the line count ever matters; on a 94-face sword it does not.
 #[allow(clippy::too_many_arguments)]
-fn submit_weapon_assemble<const OT_DEPTH: usize>(
+fn submit_weapon_wireframe<const OT_DEPTH: usize>(
     weapon_model: RuntimeModelAsset,
     origin: WorldVertex,
     rotation: Mat3I16,
-    knobs: ModelDrawKnobs,
-    model_faces: &[TexturedModelRenderFace],
-    model_parts: &[ModelPart],
-    model_vertices: &[ModelVertex],
+    faces: &[TexturedModelRenderFace],
+    vertices: &[ModelVertex],
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    material: TextureMaterial,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    lines: &mut impl PrimitiveSink<LineMono>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> usize {
-    // A face starts scattered in world units around where it will land, with
-    // only a slight outward bias. Scatter has to dominate: pushing faces along
-    // the ray from the weapon origin is a pure stretch on a model as long and
-    // thin as a sword, and the cloud reads as a needle.
-    const SPREAD_Q12: i32 = 1024;
-    const SCATTER: i32 = 44;
-    /// Full turns a face makes on its way in.
-    const SPINS: i32 = 3;
-    /// Distinct tumble angles and brightness steps across the flight. Both were
-    /// computed per face at first, and both are expensive: an euler build is
-    /// three matrices and two matrix multiplies, and `with_tint` rebuilds a
-    /// packet material. That cost 690k cycles a frame against 22k for drawing
-    /// the same 94 faces solid. Bucketing by how far along the face is costs 16
-    /// of each instead of one per face, and is not visible at these steps.
-    const STEPS: usize = 16;
-    /// Most shards drawn at once. A face costs ~7200 cycles down this path
-    /// against ~560 down the normal model path (measured: 680k against 52k for
-    /// the same 94 faces), because nothing about a shard can be shared with its
-    /// neighbours, so the count has to be capped rather than optimised away. A
-    /// converging cloud reads the same at 40 pieces as at 94.
-    const MAX_SHARDS: usize = 40;
+    /// Nanobot green.
+    const WIRE_COLOR: (u8, u8, u8) = (32, 255, 128);
 
-    let Some(geometry) = runtime_model_geometry(weapon_model, model_parts, model_vertices) else {
+    /// Vertices a weapon may have for the wireframe path. The swords have 54
+    /// and 45; anything larger falls back to no wireframe rather than growing
+    /// the guest stack.
+    const VERTEX_CAP: usize = 96;
+
+    if vertices.len() > VERTEX_CAP {
         return 0;
-    };
-    let faces = runtime_model_faces(weapon_model, model_faces);
-    let vertices = geometry.vertices;
-    let stride = faces.len().div_ceil(MAX_SHARDS).max(1);
-    let scale = weapon_model.local_to_world;
-    let mut submitted = 0usize;
-
-    // Subdivision is ON by default, and a zero max edge means subdivide
-    // unconditionally: that alone was most of the effect's cost, because every
-    // shard was being split every frame. A shard is small, short-lived and
-    // untextured-looking anyway, so it does not need the affine correction.
-    // No backface culling either, or half the tumbling triangles wink out.
-    let shard_options = options
-        .with_depth_policy(DepthPolicy::Average)
-        .with_cull_mode(CullMode::None)
-        .with_textured_triangle_splitting(false);
-
-    // Every shard vertex is at its own place in the world, so nothing can be
-    // shared between faces, but the CAMERA transform can: the plain world
-    // submit redoes the world-to-view matrix in CPU fixed point for all 282
-    // corners. Loading the camera into the GTE once and projecting through it
-    // is what this projector exists for.
+    }
     let projector = LoadedWorldCameraGte::load(*camera);
-
-    let mut tumbles = [Mat3I16::IDENTITY; STEPS];
-    let mut materials = [material; STEPS];
-    for step in 0..STEPS {
-        let remaining = (step * 4096 / STEPS) as i32;
-        let turn = SPINS * 4096 * remaining >> 12;
-        tumbles[step] = euler_q12_rotation([
-            (turn & 0xFFF) as i16,
-            ((turn * 3 / 2) & 0xFFF) as i16,
-            ((turn / 2) & 0xFFF) as i16,
-        ]);
-        if step > 0 {
-            // 128 is 1.0 on PS1 modulation, so an airborne shard burns white
-            // and cools to the weapon's own material as it lands.
-            let level = (128 + ((remaining * 127) >> 12)) as u8;
-            materials[step] = material.with_tint((level, level, level));
+    let scale = weapon_model.local_to_world;
+    let mut projected = [ProjectedVertex::INVALID; VERTEX_CAP];
+    for (index, vertex) in vertices.iter().enumerate() {
+        let local = [
+            scale.apply(i32::from(vertex.position.x)),
+            scale.apply(i32::from(vertex.position.y)),
+            scale.apply(i32::from(vertex.position.z)),
+        ];
+        let rotated = rotate_offset_q12(&rotation, local);
+        if let Some(point) = projector.project_world(WorldVertex::new(
+            origin.x.saturating_add(rotated[0]),
+            origin.y.saturating_add(rotated[1]),
+            origin.z.saturating_add(rotated[2]),
+        )) {
+            projected[index] = point;
         }
     }
 
-    for (face_index, face) in faces.iter().enumerate().step_by(stride) {
-        let seed = (face_index as u32).wrapping_mul(0x9E37_79B9);
-        // Doubling the progress leaves room for the per-face stagger while
-        // still landing every face by the time the ramp completes.
-        let seated = ((i32::from(knobs.equipment_assemble_q12)) * 2 - ((seed & 0x07FF) as i32))
-            .clamp(0, 4096);
-        if seated == 0 {
+    let wire_options = options.with_render_layer(WorldRenderLayer::Opaque);
+    let mut drawn = 0usize;
+    for face in faces {
+        // One line per face, its longest edge. Drawing all three overlaps into
+        // a solid green bar on a 40-pixel blade and hides the fill under it,
+        // but culling by a fixed length is worse: a sword TAPERS, so every edge
+        // near the tip falls under any threshold that thins out the hilt, and
+        // the cage vanishes exactly where the effect is happening. Longest-edge
+        // gives every face one line wherever it sits on the blade.
+        let mut best = (0i32, 0usize, 0usize);
+        for corner in 0..3 {
+            let a = (face.corner_words[corner] & 0xFFFF) as usize;
+            let b = (face.corner_words[(corner + 1) % 3] & 0xFFFF) as usize;
+            if a >= vertices.len() || b >= vertices.len() {
+                continue;
+            }
+            let (pa, pb) = (vertices[a].position, vertices[b].position);
+            let (dx, dy, dz) = (
+                i32::from(pa.x) - i32::from(pb.x),
+                i32::from(pa.y) - i32::from(pb.y),
+                i32::from(pa.z) - i32::from(pb.z),
+            );
+            let length = dx * dx + dy * dy + dz * dz;
+            if length > best.0 {
+                best = (length, a, b);
+            }
+        }
+        if best.0 == 0 {
             continue;
         }
-        let remaining = 4096 - seated;
-
-        let mut verts = [WorldVertex::ZERO; 3];
-        let mut uvs = [(0u8, 0u8); 3];
-        let mut missing = false;
-        for corner in 0..3 {
-            let word = face.corner_words[corner];
-            let Some(vertex) = vertices.get((word & 0xFFFF) as usize) else {
-                missing = true;
-                break;
-            };
-            let local = [
-                scale.apply(i32::from(vertex.position.x)),
-                scale.apply(i32::from(vertex.position.y)),
-                scale.apply(i32::from(vertex.position.z)),
-            ];
-            let rotated = rotate_offset_q12(&rotation, local);
-            verts[corner] = WorldVertex::new(
-                origin.x.saturating_add(rotated[0]),
-                origin.y.saturating_add(rotated[1]),
-                origin.z.saturating_add(rotated[2]),
-            );
-            uvs[corner] = (((word >> 16) & 0xFF) as u8, ((word >> 24) & 0xFF) as u8);
-        }
-        if missing {
+        let (a, b) = (projected[best.1], projected[best.2]);
+        if a == ProjectedVertex::INVALID || b == ProjectedVertex::INVALID {
             continue;
         }
-
-        let centre = [
-            (verts[0].x + verts[1].x + verts[2].x) / 3,
-            (verts[0].y + verts[1].y + verts[2].y) / 3,
-            (verts[0].z + verts[1].z + verts[2].z) / 3,
-        ];
-        // The ray out of the weapon's own origin: no normalisation needed,
-        // because a face's distance from the origin IS how far it travels.
-        let spread = (SPREAD_Q12 * remaining) >> 12;
-        let offset = [
-            ((centre[0] - origin.x) * spread >> 12)
-                + (((seed >> 3) & 0x3F) as i32 - 32) * SCATTER * remaining / 4096 / 32,
-            ((centre[1] - origin.y) * spread >> 12)
-                + (((seed >> 11) & 0x3F) as i32 - 32) * SCATTER * remaining / 4096 / 32,
-            ((centre[2] - origin.z) * spread >> 12)
-                + (((seed >> 19) & 0x3F) as i32 - 32) * SCATTER * remaining / 4096 / 32,
-        ];
-        // Tumble about the face's own centre, unwinding as it seats so the
-        // triangle arrives on the pose rather than sliding in already aligned.
-        // The turn COUNT is what reads as a spin: under one turn across the
-        // whole flight looks like a settle. Faces stagger, so they sit at
-        // different steps and do not turn in unison.
-        let step = ((remaining as usize) * STEPS / 4096).min(STEPS - 1);
-        let tumble = tumbles[step];
-        for corner in 0..3 {
-            let relative = [
-                verts[corner].x - centre[0],
-                verts[corner].y - centre[1],
-                verts[corner].z - centre[2],
-            ];
-            let spun = rotate_offset_q12(&tumble, relative);
-            verts[corner] = WorldVertex::new(
-                centre[0] + spun[0] + offset[0],
-                centre[1] + spun[1] + offset[1],
-                centre[2] + spun[2] + offset[2],
-            );
-        }
-
-        world.submit_textured_view_triangle(
-            triangles,
-            [
-                TexturedViewVertex::new(
-                    projector.view_vertex(verts[0]),
-                    i32::from(uvs[0].0),
-                    i32::from(uvs[0].1),
-                ),
-                TexturedViewVertex::new(
-                    projector.view_vertex(verts[1]),
-                    i32::from(uvs[1].0),
-                    i32::from(uvs[1].1),
-                ),
-                TexturedViewVertex::new(
-                    projector.view_vertex(verts[2]),
-                    i32::from(uvs[2].0),
-                    i32::from(uvs[2].1),
-                ),
-            ],
-            camera.projection,
-            materials[step],
-            shard_options,
-        );
-        submitted += 1;
+        world.submit_projected_line(lines, [a, b], WIRE_COLOR, wire_options);
+        drawn += 1;
     }
-    submitted
+    drawn
 }
 
 /// Draw weapons riding NON-player equipment records: each record bound
@@ -505,7 +422,7 @@ pub(super) fn draw_instance_equipment_from_pose<
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let mut out = EquipmentDrawStats::default();
@@ -588,7 +505,7 @@ pub(super) fn draw_instance_equipment<
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     pose_overrides: &[super::instances::ModelInstancePoseOverride],
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let mut out = EquipmentDrawStats::default();
@@ -676,7 +593,7 @@ fn submit_instance_equipment_record_from_pose<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> Option<TexturedModelRenderStats> {
     let weapon = tables.weapons.get(equipment.weapon.to_usize())?;
@@ -699,6 +616,7 @@ fn submit_instance_equipment_record_from_pose<
     >(
         weapon,
         socket_pose,
+        ASSEMBLED_Q12,
         knobs,
         scratch,
         models,

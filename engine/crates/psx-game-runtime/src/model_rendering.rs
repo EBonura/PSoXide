@@ -18,7 +18,7 @@ use psx_engine::{
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
-    prim::TriTextured,
+    prim::{LineMono, TriTextured},
 };
 use psx_level::{
     model_clip_flags, model_override_blend, AssetId, AssetKind, CharacterAnimationAction,
@@ -69,6 +69,9 @@ pub struct ModelTables {
     pub entities: &'static [EntityRecord],
 }
 
+/// Player equipment records the wireframe timing can address.
+pub const MAX_PLAYER_EQUIPMENT: usize = 8;
+
 /// Model draw policy knobs, as one value: the split threshold and
 /// per-frame draw caps the game selects. The culling/profiling
 /// TOGGLES ride as `const` parameters on the draw functions instead
@@ -82,16 +85,18 @@ pub struct ModelDrawKnobs {
     pub max_model_instances: usize,
     /// Cap on attached weapon/equipment visuals rendered per frame.
     pub max_equipment_draws: usize,
-    /// Which player equipment records to draw this frame, one bit per record
-    /// in table order. What is HELD changes with the action (a light sword in
-    /// one hand, or a heavy one plus an off-hand light), while the cooked
-    /// records are static, so the choice has to live here. All ones draws
-    /// every record, which is the old behaviour.
-    pub equipment_mask: u32,
-    /// How assembled the player's weapons are this frame, Q12: 4096 draws the
-    /// solid model, 0 is fully dispersed, and anything between runs the
-    /// materialise effect. Dissolving is the same ramp read downwards.
-    pub equipment_assemble_q12: u16,
+    /// How far up the blade each player equipment record has grown, Q12, one
+    /// entry per record in table order. The weapon's faces are sorted
+    /// hilt-first, so this is how much of the face list gets an outline; zero
+    /// draws nothing at all, which is also how a record is held back.
+    ///
+    /// Per record rather than one shared value because each weapon appears on
+    /// its own beat: the light sword on the first throw of the arm, the heavy
+    /// one on the second.
+    pub equipment_wire_q12: [u16; MAX_PLAYER_EQUIPMENT],
+    /// Draw the player's weapons as a wireframe construct rather than a solid
+    /// model. Equipment on model instances stays solid.
+    pub equipment_wireframe: bool,
 }
 
 /// Actor floor-shadow tuning, as one value.
@@ -942,7 +947,7 @@ pub fn draw_player<
     lighting: &RuntimeRoomLighting,
     room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
     let Some(player_pose) = resolve_player_actor_pose(
@@ -1011,7 +1016,7 @@ pub fn draw_player_from_pose<
     lighting: &RuntimeRoomLighting,
     room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
     let runtime_model = player_pose.model();
@@ -1270,7 +1275,7 @@ pub fn draw_instance_equipment<
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     pose_overrides: &[ModelInstancePoseOverride],
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     equipment::draw_instance_equipment::<
@@ -1335,7 +1340,7 @@ pub fn draw_instance_equipment_from_pose<
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     equipment::draw_instance_equipment_from_pose::<
@@ -1400,7 +1405,7 @@ pub fn draw_player_equipment<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     equipment::draw_player_equipment::<
@@ -1468,7 +1473,7 @@ pub fn draw_player_equipment_from_pose<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     equipment::draw_player_equipment_from_pose::<

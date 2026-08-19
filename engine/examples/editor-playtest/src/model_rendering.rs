@@ -34,98 +34,184 @@ const MODEL_DRAW_KNOBS: mr::ModelDrawKnobs = mr::ModelDrawKnobs {
     texture_split_max_edge: MODEL_TEXTURE_SPLIT_MAX_EDGE,
     max_model_instances: MAX_MODEL_INSTANCES,
     max_equipment_draws: MAX_EQUIPMENT_DRAWS,
-    equipment_mask: u32::MAX,
-    equipment_assemble_q12: mr::ASSEMBLED_Q12,
+    equipment_wire_q12: [mr::ASSEMBLED_Q12; mr::MAX_PLAYER_EQUIPMENT],
+    equipment_wireframe: false,
 };
 
-/// Attack level for `anim`, or `None` when she is not swinging: the weapons
-/// are nanobot constructs, so outside an attack there is nothing in her hands.
-fn attack_level(anim: PlayerAnim) -> Option<u8> {
-    match anim {
-        PlayerAnim::LightAttack | PlayerAnim::VertLightAttack => Some(1),
-        PlayerAnim::HeavyAttack | PlayerAnim::VertHeavyAttack => Some(2),
-        PlayerAnim::ComboAttack | PlayerAnim::VertComboAttack => Some(3),
-        _ => None,
-    }
+/// One weapon's appearance in a swing: which weapon, which hand, and the clip
+/// frames it materialises on and dissolves away at.
+struct WeaponBeat {
+    heavy: bool,
+    off_hand: bool,
+    /// Clip frame the arm is thrown to the side, where the blade is whole.
+    throw_frame: u16,
+    /// Clip frame it is gone by. `u16::MAX` means the end of the clip, which
+    /// is what the last weapon in a swing uses.
+    until_frame: u16,
 }
 
-/// When a weapon materialises, in CLIP FRAMES: the swing frame where the fist
-/// is fully extended, which is the moment the blade has to be solid for.
+const CLIP_END: u16 = u16::MAX;
+
+/// Which weapons appear when, per attack.
 ///
-/// Measured off the cooked clips (the frame where the right hand is farthest
-/// from the hips), not eyeballed. Re-measure if a clip is re-authored.
-fn extension_frame(anim: PlayerAnim) -> Option<u16> {
+/// The structure is yours: level 1 throws the right arm once and the light
+/// sword rides it. Level 2 throws it twice, light on the first, heavy on the
+/// second, and the light one goes away as the heavy arrives. Level 3 is level 2
+/// plus the left arm's own throw, which brings the light sword to that hand.
+///
+/// The frames come from the cooked clips (peaks of the right and left hand's
+/// distance from the hips), but which peak counts as a throw is a judgement,
+/// not a measurement: the vertical clips show the two-beat structure cleanly
+/// while the horizontal ones have a wind-up bump of nearly the same size. Move
+/// a number here if a weapon lands on the wrong beat.
+fn weapon_beats(anim: PlayerAnim) -> &'static [WeaponBeat] {
+    const LIGHT_ATTACK: &[WeaponBeat] = &[WeaponBeat {
+        heavy: false,
+        off_hand: false,
+        throw_frame: 25,
+        until_frame: CLIP_END,
+    }];
+    const HEAVY_ATTACK: &[WeaponBeat] = &[
+        WeaponBeat {
+            heavy: false,
+            off_hand: false,
+            throw_frame: 23,
+            until_frame: 35,
+        },
+        WeaponBeat {
+            heavy: true,
+            off_hand: false,
+            throw_frame: 35,
+            until_frame: CLIP_END,
+        },
+    ];
+    const COMBO_ATTACK: &[WeaponBeat] = &[
+        WeaponBeat {
+            heavy: false,
+            off_hand: false,
+            throw_frame: 25,
+            until_frame: 44,
+        },
+        WeaponBeat {
+            heavy: true,
+            off_hand: false,
+            throw_frame: 44,
+            until_frame: CLIP_END,
+        },
+        WeaponBeat {
+            heavy: false,
+            off_hand: true,
+            throw_frame: 35,
+            until_frame: CLIP_END,
+        },
+    ];
+    const VERT_LIGHT_ATTACK: &[WeaponBeat] = &[WeaponBeat {
+        heavy: false,
+        off_hand: false,
+        throw_frame: 33,
+        until_frame: CLIP_END,
+    }];
+    const VERT_HEAVY_ATTACK: &[WeaponBeat] = &[
+        WeaponBeat {
+            heavy: false,
+            off_hand: false,
+            throw_frame: 20,
+            until_frame: 39,
+        },
+        WeaponBeat {
+            heavy: true,
+            off_hand: false,
+            throw_frame: 39,
+            until_frame: CLIP_END,
+        },
+    ];
+    const VERT_COMBO_ATTACK: &[WeaponBeat] = &[
+        WeaponBeat {
+            heavy: false,
+            off_hand: false,
+            throw_frame: 15,
+            until_frame: 40,
+        },
+        WeaponBeat {
+            heavy: true,
+            off_hand: false,
+            throw_frame: 40,
+            until_frame: CLIP_END,
+        },
+        WeaponBeat {
+            heavy: false,
+            off_hand: true,
+            throw_frame: 26,
+            until_frame: CLIP_END,
+        },
+    ];
     match anim {
-        PlayerAnim::LightAttack => Some(25),
-        PlayerAnim::HeavyAttack => Some(35),
-        PlayerAnim::ComboAttack => Some(44),
-        PlayerAnim::VertLightAttack => Some(33),
-        PlayerAnim::VertHeavyAttack => Some(39),
-        PlayerAnim::VertComboAttack => Some(40),
-        _ => None,
+        PlayerAnim::LightAttack => LIGHT_ATTACK,
+        PlayerAnim::HeavyAttack => HEAVY_ATTACK,
+        PlayerAnim::ComboAttack => COMBO_ATTACK,
+        PlayerAnim::VertLightAttack => VERT_LIGHT_ATTACK,
+        PlayerAnim::VertHeavyAttack => VERT_HEAVY_ATTACK,
+        PlayerAnim::VertComboAttack => VERT_COMBO_ATTACK,
+        _ => &[],
     }
 }
 
-/// How long the materialise takes, in CLIP FRAMES. Clips run at roughly a
-/// quarter of a frame per tick here, so 8 frames is about half a second.
+/// How long a weapon takes to grow up the blade, in CLIP FRAMES. Clips run at
+/// roughly a quarter of a frame per tick here, so 8 frames is about half a
+/// second. The same ramp runs backwards when it goes away.
 const MATERIALISE_FRAMES: u32 = 8;
 
-/// How far through the materialise the weapons are. Nothing until the ramp
-/// opens, solid from the extension frame through the strike, then the same
-/// ramp backwards over the tail of the clip.
+/// How far up the blade this beat's weapon has reached at `phase_q12`, Q12.
 ///
-/// `phase_q12` counts CLIP FRAMES in Q12, not a 0..4096 progress (it runs to
-/// 143360 on the 37-frame light attack), so it compares directly against the
-/// frame numbers above once they are shifted.
-pub(super) fn equipment_assemble_for(anim: PlayerAnim, phase_q12: u32, frame_count: u16) -> u16 {
-    let Some(extension) = extension_frame(anim) else {
-        return mr::ASSEMBLED_Q12;
-    };
+/// The ramp runs INTO the throw, so the blade is whole at the moment the arm is
+/// out, holds, then retreats into `until_frame` the way it came. Taking the
+/// smaller of the two ramps means a short window simply never reaches full
+/// rather than snapping.
+fn wire_for_beat(beat: &WeaponBeat, phase_q12: u32, frame_count: u16) -> u16 {
     let ramp_q12 = MATERIALISE_FRAMES << 12;
-    // Solid BY the extension, so the ramp runs into it rather than out of it.
-    let open_q12 = u32::from(extension).saturating_mul(4096).saturating_sub(ramp_q12);
-    if phase_q12 < open_q12 {
+    let open_q12 = u32::from(beat.throw_frame)
+        .saturating_mul(4096)
+        .saturating_sub(ramp_q12);
+    let until = if beat.until_frame == CLIP_END {
+        frame_count.saturating_sub(1)
+    } else {
+        beat.until_frame
+    };
+    let until_q12 = u32::from(until).saturating_mul(4096);
+    if phase_q12 < open_q12 || phase_q12 >= until_q12 {
         return 0;
     }
-    // Dissolve over the tail: the same ramp, ending on the clip's last frame.
-    let last_q12 = u32::from(frame_count.saturating_sub(1)).saturating_mul(4096);
-    let close_q12 = last_q12.saturating_sub(ramp_q12).max(u32::from(extension) * 4096);
-    let assemble = if phase_q12 >= close_q12 {
-        (last_q12.saturating_sub(phase_q12)) / MATERIALISE_FRAMES
-    } else {
-        (phase_q12 - open_q12) / MATERIALISE_FRAMES
-    };
-    assemble.min(u32::from(mr::ASSEMBLED_Q12)) as u16
+    let rising = (phase_q12 - open_q12) / MATERIALISE_FRAMES;
+    let falling = (until_q12 - phase_q12) / MATERIALISE_FRAMES;
+    rising.min(falling).min(4096) as u16
 }
 
-/// Which equipment records are in hand for `anim`: level 1 swings the light
-/// sword, level 2 the heavy one, level 3 is a double attack, heavy in the main
-/// hand and light in the off hand. Nothing is held outside an attack.
+/// How far up the blade every player equipment record has grown this frame.
 ///
-/// Matched on the cooked weapon NAME and the socket, not on table order, so
-/// adding a third weapon or reordering the scene cannot silently arm the wrong
-/// hand.
-pub(super) fn equipment_mask_for(anim: PlayerAnim) -> u32 {
-    let Some(level) = attack_level(anim) else {
-        return 0;
-    };
-    let mut mask = 0;
-    for (index, record) in EQUIPMENT.iter().enumerate().take(32) {
+/// Each cooked record is matched to a beat by the weapon's NAME and its socket,
+/// not by table order, so reordering the scene cannot arm the wrong hand.
+pub(super) fn equipment_wire_q12(
+    anim: PlayerAnim,
+    phase_q12: u32,
+    frame_count: u16,
+) -> [u16; mr::MAX_PLAYER_EQUIPMENT] {
+    let mut wire = [0u16; mr::MAX_PLAYER_EQUIPMENT];
+    let beats = weapon_beats(anim);
+    for (index, record) in EQUIPMENT.iter().enumerate().take(mr::MAX_PLAYER_EQUIPMENT) {
         let Some(weapon) = WEAPONS.get(record.weapon.to_usize()) else {
             continue;
         };
         let heavy = weapon.name.ends_with("Heavy");
         let off_hand = record.character_socket == "left_hand_grip";
-        let held = match level {
-            2 => heavy && !off_hand,
-            3 => (heavy && !off_hand) || (!heavy && off_hand),
-            _ => !heavy && !off_hand,
+        let Some(beat) = beats
+            .iter()
+            .find(|beat| beat.heavy == heavy && beat.off_hand == off_hand)
+        else {
+            continue;
         };
-        if held {
-            mask |= 1 << index;
-        }
+        wire[index] = wire_for_beat(beat, phase_q12, frame_count);
     }
-    mask
+    wire
 }
 
 /// This example's actor floor-shadow tuning (the `SHADOW_*` consts in
@@ -213,6 +299,50 @@ impl Playtest {
             runtime_model_asset_bytes,
             ensure_model_atlas_uploaded,
         );
+        self.sort_weapon_faces_hilt_first();
+    }
+
+    /// Order every weapon model's faces along its blade, hilt first.
+    ///
+    /// This is what makes the materialise effect cheap: with the faces in this
+    /// order, "filled up to here" is a slice of the face list, so the solid
+    /// part goes through the ordinary model path in one call instead of being
+    /// submitted face by face. Face order is otherwise arbitrary, since the
+    /// ordering table sorts by depth.
+    fn sort_weapon_faces_hilt_first(&mut self) {
+        for weapon in WEAPONS {
+            let Some(model_index) = weapon.model else {
+                continue;
+            };
+            let Some(Some(model)) = self.models.get(model_index.to_usize()) else {
+                continue;
+            };
+            let first = model.face_first as usize;
+            let count = model.face_count as usize;
+            let vertex_first = model.vertex_first as usize;
+            if first + count > self.model_face_count {
+                continue;
+            }
+            // Insertion sort: a weapon has fewer than a hundred faces, and the
+            // guest does not need a general sort dragged in for it.
+            let axis = |face: &TexturedModelRenderFace| -> i32 {
+                let mut sum = 0i32;
+                for corner in 0..3 {
+                    let index = vertex_first + (face.corner_words[corner] & 0xFFFF) as usize;
+                    if let Some(vertex) = self.model_vertices.get(index) {
+                        sum += i32::from(vertex.position.y);
+                    }
+                }
+                sum
+            };
+            for i in first + 1..first + count {
+                let mut j = i;
+                while j > first && axis(&self.model_faces[j - 1]) > axis(&self.model_faces[j]) {
+                    self.model_faces.swap(j - 1, j);
+                    j -= 1;
+                }
+            }
+        }
     }
 }
 
@@ -328,7 +458,7 @@ pub(super) fn draw_player(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
     mr::draw_player_from_pose::<
@@ -375,7 +505,7 @@ pub(super) fn draw_instance_equipment(
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let mut out = EquipmentDrawStats::default();
@@ -423,8 +553,7 @@ pub(super) fn draw_instance_equipment(
 
 /// Draw the player's attached equipment through the crate policy.
 pub(super) fn draw_player_equipment(
-    equipment_mask: u32,
-    assemble_q12: u16,
+    wire_q12: [u16; mr::MAX_PLAYER_EQUIPMENT],
     player_pose: PlayerActorPoseSnapshot,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -436,12 +565,12 @@ pub(super) fn draw_player_equipment(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let mut knobs = MODEL_DRAW_KNOBS;
-    knobs.equipment_mask = equipment_mask;
-    knobs.equipment_assemble_q12 = assemble_q12;
+    knobs.equipment_wire_q12 = wire_q12;
+    knobs.equipment_wireframe = true;
     mr::draw_player_equipment_from_pose::<
         MAX_RUNTIME_MODELS,
         MAX_RUNTIME_MODEL_CLIPS,
@@ -483,7 +612,7 @@ pub(super) fn draw_model_instances(
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     depth_pass: ModelInstanceDepthPass,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
     let mut out = ModelInstanceDrawStats::default();
@@ -537,7 +666,7 @@ pub(super) fn draw_model_instance_shadows(
     pose_overrides: &[ModelInstancePoseOverride],
     // psx-numeric-allow-next-line: one bit per model instance; the width IS the instance capacity
     visible_instance_mask: u64,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     mr::draw_model_instance_shadows(
@@ -565,7 +694,7 @@ pub(super) fn draw_actor_shadow(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     material: TextureMaterial,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut (impl PrimitiveSink<TriTextured> + PrimitiveSink<psx_gpu::prim::LineMono>),
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     mr::draw_actor_shadow(
