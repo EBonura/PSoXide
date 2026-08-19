@@ -183,23 +183,33 @@ def main() -> None:
         print("MIRRORED", action_name)
     print(f"RETARGETED {action_name} frames {start}..{end} source speed {speed:.2f} m/s")
 
-    # Drop the hips vertical bob. The Aletha bridge scales it by the ratio of
-    # the two rigs' leg lengths, which assumes both are in the same units; this
-    # BVH is in metres and the mantis armature in centimetres, so the bob comes
-    # out roughly 90x too big and the cooked clip bounds report a floor 154738
-    # units down. The character motor owns translation anyway, so the safe form
-    # of this clip has no root translation at all.
-    for curve in list(action.fcurves):
-        if curve.data_path.endswith("location"):
-            action.fcurves.remove(curve)
+    # Root height: keep it or drop it, and the reason has changed.
+    #
+    # This used to delete every location curve unconditionally, on the grounds
+    # that the BVH is in metres and the mantis armature in centimetres so the
+    # bob came out about 90x too large. That was true of the RAW FBX, whose
+    # armature sits at scale 0.01. It is not true of the normalised glb this
+    # script now takes: measured on it, the retarget's leg-length ratio is
+    # 0.9083, and the death take's hips drop 0.76 source units becomes 0.69 on
+    # a rig 2.0 units tall, a 35% collapse. That is the motion, not an error.
+    #
+    # It still defaults to dropping, because the character motor owns
+    # translation for locomotion and the shipped gaits were tuned without it.
+    # A one-shot that IS a fall needs it: a death with its hips pinned at rest
+    # height topples in place and swings its legs upward instead of going down.
+    #
+    # The Aletha bridge writes this curve vertical-only and relative to frame
+    # zero, so keeping it never introduces horizontal drift.
+    if "--keep-root-height" not in argv:
+        for curve in list(action.fcurves):
+            if curve.data_path.endswith("location"):
+                action.fcurves.remove(curve)
 
-    # Optional GLB export for import-locomotion, which cooks one take per file.
-    # Same export flags as the walk study so both paths produce identical rigs.
     # Explicit flag: the SOURCE model is a .glb too, so scanning by extension
     # would happily export over the input.
     glb_out = argv[argv.index("--glb") + 1] if "--glb" in argv else None
+    bpy.data.objects.remove(source, do_unlink=True)
     if glb_out:
-        bpy.data.objects.remove(source, do_unlink=True)
         bpy.ops.object.select_all(action="DESELECT")
         target.select_set(True)
         for child in target.children_recursive:
