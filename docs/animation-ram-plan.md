@@ -13,9 +13,11 @@ Measured, both sides, before proposing anything.
 The ceiling is not an estimate: 438 KB of Aletha plus 198 KB of mantis
 overflowed guest `.bss` by exactly 33,136 bytes, which pins it.
 
-Format is 24 bytes per bone per frame: a full 3x3 `i16` matrix plus an `i16`
-translation, per joint, per frame. Aletha's 26 joints cost 624 bytes a frame,
-the mantis's 22 cost 528. Every cooked clip is
+Format is **already v3: 20 bytes** per bone per frame, nine 12-bit Q11 rotation
+codes in fourteen bytes plus a shifted `i16` translation. That is the same
+packed encoding hl-psx ships on silicon, and the cook selects it automatically
+whenever a clip's matrix elements fit, which every rigid clip does. Aletha's 26
+joints cost 520 bytes a frame, the mantis's 22 cost 440. Every cooked clip is
 `StreamedClass::PersistentGameplay`, so **every clip of every character is
 resident for the entire game**.
 
@@ -37,8 +39,8 @@ things get it there, and they are not equally important.
 by that map." This is the structural difference and it dwarfs the rest. We hold
 every clip forever; it holds what the current map can actually play.
 
-**A tighter affine.** `HMD8_AFFINE_BYTES = 20` against our 24, storing the
-composed bone palette as packed Q1.11 rather than nine full `i16`. About 17%.
+**A tighter affine, which we already match.** `HMD8_AFFINE_BYTES = 20`, and our
+v3 record is also 20 with the same Q11 packing. No gap here.
 
 **One bone-local mesh.** Vertices are stored once, grouped into contiguous
 bone ranges so each range pays one matrix load, rather than duplicating skinned
@@ -59,18 +61,21 @@ about classification rather than new mechanism. Expect the win to scale with
 how many characters exist rather than being a fixed percentage, which is
 exactly what a boss plus four mantis variants needs.
 
-**2. Dedupe cooked animations by content.** Textures already dedupe on
-`asset.bytes == bytes` twenty lines away in the same file; animations are
-pushed unconditionally. Until that changes, every mesh variant re-pays for
-every clip it shares: +90 KB for a variant sharing five clips, +162 KB sharing
-nine. This is small and unblocks the variant plan.
+**2. Dedupe cooked animations by content.** Textures dedupe on
+`asset.bytes == bytes` twenty lines away in the same file; the animation push
+had no such check, so the code is now there. UNVERIFIED: no test yet
+demonstrates it firing, and by the same token the duplicate it guards against
+has not been observed either. Clip resolution already dedupes by PATH, so two
+clip resources naming one file never both reach the cook; whether two MODELS
+sharing a rig actually emit the payload twice is the open question. Settle it
+by registering the no-claw variant and measuring cooked animation bytes, not
+by reading the code.
 
-**3. Trim the affine, 24 to 18 bytes.** The third row of an orthonormal matrix
-is the cross product of the other two, so it need not be stored: six multiplies
-at decode for a flat 25% off every clip, no visual change, no format
-philosophy. That is a better first trim than adopting Q1.11 because it is
-lossless. Going further to Q1.11 (20 bytes composed, or 8 with quaternions)
-trades CPU for bytes, and this game is CPU-bound, so measure before choosing.
+**3. Trim the affine further, 20 to about 16 bytes.** The Q11 packing is
+already in; the remaining lossless win is that the third row of an orthonormal
+matrix is the cross product of the other two, so six of the nine codes suffice.
+That is roughly 20% more for a cross product at decode. Smaller than it looked
+before, because the easy 17% was already taken.
 
 **4. Audit the peak at build time.** Port hl-psx's habit: compute resident
 animation per scene, compare against a declared cap, fail the cook. Cheap, and

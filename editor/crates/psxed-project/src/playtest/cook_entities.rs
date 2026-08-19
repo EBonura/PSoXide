@@ -1207,15 +1207,29 @@ pub(crate) fn register_model_for_instance(
                 0
             },
         });
-        let asset_index = assets.len();
+        // Same contract as the shared atlas above: content identity, not path.
+        // Model VARIANTS (one enemy cut into claw/weapon/legless silhouettes)
+        // share a rig and therefore share byte-identical clips, and animation
+        // is the largest resident asset class there is, so a duplicate payload
+        // costs far more than a texture's would.
         let safe_clip = sanitise_model_dirname(&clip.name);
-        assets.push(PlaytestAsset {
-            kind: PlaytestAssetKind::ModelAnimation,
-            bytes: animation_bytes,
-            filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
-            source_label: format!("{} / {}", resource.name, clip.name),
-            streamed_class: StreamedClass::PersistentGameplay,
-        });
+        let asset_index = if let Some(existing) = assets.iter().position(|asset| {
+            asset.kind == PlaytestAssetKind::ModelAnimation
+                && asset.streamed_class == StreamedClass::PersistentGameplay
+                && asset.bytes == animation_bytes
+        }) {
+            existing
+        } else {
+            let idx = assets.len();
+            assets.push(PlaytestAsset {
+                kind: PlaytestAssetKind::ModelAnimation,
+                bytes: animation_bytes,
+                filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
+                source_label: format!("{} / {}", resource.name, clip.name),
+                streamed_class: StreamedClass::PersistentGameplay,
+            });
+            idx
+        };
         clip_remap[resolved_i as usize] = u16::try_from(local_i).ok();
         model_clips.push(PlaytestModelClip {
             model: model_index,
