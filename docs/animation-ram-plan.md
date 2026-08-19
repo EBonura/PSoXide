@@ -188,6 +188,76 @@ cannot see this module until that pin moves, and moving it pulls in everything
 else that has landed since. That makes step 4 a deliberate bump rather than
 something to slip in alongside a format change.
 
+## Why hl-psx's animation is so much smaller
+
+Not the format. Measured across its 232 cooked chunks against ours:
+
+| | hl-psx | PSoXide (Aletha) |
+| --- | --- | --- |
+| bytes per frame | 465 (23.3 bones) | 520 (26 joints) |
+| frames per clip | **3.9 median 4** | **28.5** |
+| clips per model | **5.3** | **30** |
+| pose bytes per model | **10.6 KB** | **449 KB** |
+
+The per-frame cost is the same, because it is the same 20-byte record. The 42x
+gap is 7x more frames in each clip multiplied by 6x more clips kept resident.
+hl-psx stores roughly four keyframes per animation and only the handful a map
+can reach. A third of its clips are one or two frames.
+
+So the lever was never encoding. It is how many frames a clip holds and how
+many clips a character keeps.
+
+## Cook-time resampling, and what it can and cannot pay for
+
+`ProjectDocument::animation_error_budget_degrees` (default 0, off) lets the cook
+drop each clip to the lowest rate that holds a worst-case rotation error. See
+`animation_resample.rs` for why it resamples rather than dropping frames.
+
+Measured on the default project, total session-resident bytes:
+
+| budget | resident | Aletha | notes |
+| --- | --- | --- | --- |
+| off | 643,900 | 474,512 | idle 12 Hz, 170 frames |
+| 1 deg | 633,700 | 468,272 | |
+| 2 deg | 590,700 | 431,872 | idle to 7 Hz, 100 frames |
+| 4 deg | 542,300 | 408,992 | idle to 5 Hz, 72 frames |
+
+Attacks keep their authored rate at every budget tried, which is the
+self-selection working: their motion blows the budget at the first step down.
+
+**It is worth about 15%, not 40%.** Two other techniques were measured and
+rejected. Lossless static-joint elision saves 1%, and freezing joints that move
+under 5 degrees saves 2%, because the records are composed world-space matrices,
+so a toe inherits the whole chain's motion and nothing is ever still. Local-space
+storage would be sparse, but composing it back costs per-joint CPU we do not
+have. Adaptive non-uniform keyframes reach 26% at the same budget, and need a
+format change to store frame indices.
+
+### Against a 40/30/30 player/enemy/boss split
+
+The cap is 344 pages, 704,512 B, so the shares are 281,805 / 211,354 / 211,354.
+
+| | now | at 4 deg | share | |
+| --- | --- | --- | --- | --- |
+| player (Aletha + both swords) | 543,392 | 477,872 | 281,805 | **170% over at 4 deg** |
+| enemy (Rust Mantis) | 100,508 | 64,428 | 211,354 | fine, room for variants |
+| boss | 0 | 0 | 211,354 | untouched |
+
+The enemy and boss shares are comfortable. The player is the whole problem, and
+resampling closes about a quarter of the gap. The remaining ~196 KB has to come
+from content, and the measurements say where:
+
+- **Dead head and tail on the attack clips.** 16 to 31% of each long attack is
+  motion under 15% of its peak, and the cooked character record plays the FULL
+  range, so that is half a second of nothing before a swing. Trimming is worth
+  roughly 45 KB across six clips and makes the attacks more responsive.
+- **The idle's first 8 seconds.** 98 of its 170 frames are near-still with the
+  gesture at the end. Trimming beats resampling here by a wide margin.
+- **The light sword's atlas, 66,076 B.** Not animation at all, and 9.4% of the
+  entire cap for one weapon's texture, sitting in the player's bucket.
+- **Clip count.** 30 player clips against hl-psx's 5.3 per model. Six of ours
+  are 8-frame windup/winddown transitions.
+
 ## Residency, measured
 
 Numbers below come from hl-psx's own build reports (`.hlpsx/reports/`,
