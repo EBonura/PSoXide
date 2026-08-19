@@ -185,6 +185,34 @@
                 tags: ["starter"],
             )),
         ),
+        /*[strafe]*/ (
+            id: (4088),
+            name: "Rust Mantis / Strafe Left",
+            data: AnimationClip((
+                psxanim_path: "assets/animations/rust_mantis_starter/strafe_left.psxanim",
+                skeleton: Some((1635)),
+                target_model: Some((1637)),
+                source: None,
+                bake: Retargeted,
+                role: Walk,
+                looping: true,
+                tags: ["starter"],
+            )),
+        ),
+        (
+            id: (4089),
+            name: "Rust Mantis / Strafe Right",
+            data: AnimationClip((
+                psxanim_path: "assets/animations/rust_mantis_starter/strafe_right.psxanim",
+                skeleton: Some((1635)),
+                target_model: Some((1637)),
+                source: None,
+                bake: Retargeted,
+                role: Walk,
+                looping: true,
+                tags: ["starter"],
+            )),
+        ),
         /*[5]*/ (
             id: (1654),
             name: "Rust Mantis Starter Animation Set",
@@ -196,8 +224,8 @@
                 turn_clip: None,
                 roll_clip: None,
                 backstep_clip: None,
-                action_clips: [(action: Idle, clip: (1651)), (action: Walk, clip: (1652)), (action: Run, clip: (1653))],
-                clips: [(1651), (1652), (1653)],
+                action_clips: [(action: Idle, clip: (1651)), (action: Walk, clip: (1652)), (action: Run, clip: (1653)), (action: StrafeLeft, clip: (4088)), (action: StrafeRight, clip: (4089))],
+                clips: [(1651), (1652), (1653), (4088), (4089)],
             )),
         ),
         /*[6]*/ (
@@ -1116,5 +1144,5 @@
             )),
         ),
     ],
-    next_resource_id: 4088,
+    next_resource_id: 4090,
 )
