@@ -183,6 +183,33 @@ def main() -> None:
         print("MIRRORED", action_name)
     print(f"RETARGETED {action_name} frames {start}..{end} source speed {speed:.2f} m/s")
 
+    # Servo stepping: hold a pose, then change it in a single frame.
+    #
+    # A generated "robotic" take is still organic motion, and the runtime
+    # blends between stored frames, so a one-frame twitch in the source gets
+    # averaged into a smooth drift by the time it is cooked. Measured on the
+    # best of them: 80x jerk in the source became 1.8x on screen.
+    #
+    # Holding each pose for N frames and then jumping is what actually reads as
+    # mechanical, and it costs nothing: the clip keeps the same frame count, the
+    # held frames are just identical, so the blend has nothing to do until the
+    # step. At 12 Hz a step lands in 83 ms, which is a snap.
+    servo = int(argv[argv.index("--servo") + 1]) if "--servo" in argv else 0
+    if servo > 1:
+        for curve in action.fcurves:
+            frames = sorted({int(k.co[0]) for k in curve.keyframe_points})
+            if not frames:
+                continue
+            base = frames[0]
+            held = {f: curve.evaluate(base + ((f - base) // servo) * servo) for f in frames}
+            for key in curve.keyframe_points:
+                value = held[int(key.co[0])]
+                key.co[1] = value
+                key.handle_left[1] = value
+                key.handle_right[1] = value
+            curve.update()
+        print(f"SERVO stepped every {servo} frames")
+
     # Root height: keep it or drop it, and the reason has changed.
     #
     # This used to delete every location curve unconditionally, on the grounds
