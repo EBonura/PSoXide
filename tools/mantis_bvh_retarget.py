@@ -110,11 +110,62 @@ def import_mantis(fbx_path: str, prefix: str) -> bpy.types.Object:
     return armature
 
 
+def mirror_action(action) -> None:
+    """Flip a baked action left-to-right, in place.
+
+    Generated side-steps are unreliable: all three "steps to their left" takes
+    turned the body instead of staying square, while the right-hand take was
+    clean. Mirroring the good one gives a matched pair for free and guarantees
+    the two directions agree.
+
+    Bones swap with their opposite number and each local quaternion mirrors
+    across the rig's lateral plane, which for Blender's pose convention is
+    (w, x, -y, -z).
+    """
+    import re
+
+    curves: dict[str, dict[int, object]] = {}
+    for curve in action.fcurves:
+        match = re.match(r'pose\.bones\["([^"]+)"\]\.rotation_quaternion', curve.data_path)
+        if match:
+            curves.setdefault(match.group(1), {})[curve.array_index] = curve
+
+    def partner(name: str) -> str:
+        if "Left" in name:
+            return name.replace("Left", "Right")
+        if "Right" in name:
+            return name.replace("Right", "Left")
+        return name
+
+    # snapshot first: bones read from each other, so rewriting in place mid-pass
+    # would feed already-mirrored values back in
+    frames = sorted(
+        {int(key.co[0]) for axes in curves.values() for c in axes.values() for key in c.keyframe_points}
+    )
+    snapshot = {
+        bone: {f: [axes[i].evaluate(f) for i in range(4)] for f in frames}
+        for bone, axes in curves.items()
+    }
+    for bone, axes in curves.items():
+        source = partner(bone) if partner(bone) in snapshot else bone
+        for f in frames:
+            w, x, y, z = snapshot[source][f]
+            for i, value in enumerate((w, x, -y, -z)):
+                for key in axes[i].keyframe_points:
+                    if int(key.co[0]) == f:
+                        key.co[1] = value
+                        key.handle_left[1] = value
+                        key.handle_right[1] = value
+        for i in range(4):
+            axes[i].update()
+
+
 def main() -> None:
     argv = sys.argv[sys.argv.index("--") + 1 :]
     repo, fbx_path, bvh_path, action_name, out_blend = argv[:5]
     max_frames = int(argv[5]) if len(argv) > 5 else 90
     start_at = int(argv[6]) if len(argv) > 6 else 0
+    mirror = len(argv) > 7 and argv[7] == "mirror"
 
     retargeter = load_aletha_module(Path(repo))
     target = import_mantis(fbx_path, retargeter.MIXAMO_PREFIX)
@@ -127,6 +178,9 @@ def main() -> None:
     action, speed = retargeter.retarget(source, target, action_name, start, end)
     # The source's own travel, reported because a generated take that barely
     # moves reads as a shuffle no matter how clean the transfer is.
+    if mirror:
+        mirror_action(action)
+        print("MIRRORED", action_name)
     print(f"RETARGETED {action_name} frames {start}..{end} source speed {speed:.2f} m/s")
 
     # Drop the hips vertical bob. The Aletha bridge scales it by the ratio of
