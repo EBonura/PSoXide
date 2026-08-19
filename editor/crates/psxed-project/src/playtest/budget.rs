@@ -9,7 +9,7 @@ use psx_bsp::{
 
 use super::{
     playtest_performance_envelope, streamed_room_chunk_memory_report, PlaytestAssetKind,
-    PlaytestPackage, PlaytestValidationTarget, PlaytestWorldGeometry,
+    PlaytestPackage, PlaytestValidationTarget, PlaytestWorldGeometry, StreamedClass,
 };
 use crate::brush_world::BrushWorldCookMode;
 use crate::{NodeKind, ProjectDocument, ResourceData};
@@ -46,6 +46,49 @@ pub const PLAYTEST_VRAM_ASSET_SLOT_LIMIT: usize = 64;
 pub const PLAYTEST_RAM_PHYSICAL_BYTES: usize = 2 * 1024 * 1024;
 pub const PLAYTEST_VRAM_PHYSICAL_BYTES: usize = 1024 * 512 * 2;
 
+/// The runtime holds session-resident payloads in whole 2 KiB disc pages, and
+/// the cooked manifest turns their total into `PERSISTENT_ASSET_PAGE_COUNT`.
+/// Budgeting in the same unit keeps the audit's figure identical to the
+/// constant the guest is actually compiled with.
+pub const PLAYTEST_RESIDENT_ASSET_PAGE_BYTES: usize = 2048;
+
+/// Ceiling, in 2 KiB pages, on assets that stay resident for the whole
+/// gameplay session: every model mesh, atlas and animation clip cooked as
+/// `StreamedClass::PersistentGameplay`.
+///
+/// A canary, not the real gate. The real gate is the MIPS link, because the
+/// arena is guest `.bss`, and until now the only thing that ever reported the
+/// limit was a linker overflow after the fact, naming a section rather than a
+/// clip.
+///
+/// Measured 2026-08-19 by raising `PERSISTENT_ASSET_PAGE_COUNT` in the
+/// generated manifest and relinking: 354 pages (724,992 B) fits, 355 overflows
+/// the RAM region by 368 bytes. The linker script gives static sections
+/// `2M - 64K BIOS - 32K stack` = 1,998,848 B, so that ceiling is really "what
+/// is left after this build's code and other arenas", and it moves when they
+/// do. The cap sits 10 pages under the measured point so ordinary code growth
+/// cannot win the race and put the linker back in front of the audit.
+///
+/// ponytail: one global number, because every model clip is currently
+/// `PersistentGameplay` and so resident for the entire session. When per-scene
+/// residency lands this becomes a per-scene figure. Re-measure by bisecting the
+/// manifest constant against the link; do not trust this value after a large
+/// code change.
+pub const PLAYTEST_RESIDENT_ASSET_PAGES: usize = 344;
+
+/// Measured link ceiling behind [`PLAYTEST_RESIDENT_ASSET_PAGES`], kept so the
+/// margin is visible rather than folded into one rounded number.
+pub const PLAYTEST_RESIDENT_ASSET_MEASURED_PAGES: usize = 354;
+
+/// Resident ceiling in bytes.
+pub const PLAYTEST_RESIDENT_ASSET_BYTES: usize =
+    PLAYTEST_RESIDENT_ASSET_PAGES * PLAYTEST_RESIDENT_ASSET_PAGE_BYTES;
+
+/// How close to the ceiling counts as worth saying out loud. Catching it at
+/// 101% is too late to be useful; the point of the audit is hearing about it
+/// while there is still room to act.
+pub const PLAYTEST_RESIDENT_ASSET_WARN_PERCENT: usize = 90;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestBudgetStage {
     AuthoredEstimate,
@@ -61,6 +104,7 @@ pub enum PlaytestBudgetKind {
     Ram,
     Vram,
     Packets,
+    ResidentAssets,
 }
 
 impl PlaytestBudgetKind {
@@ -73,6 +117,7 @@ impl PlaytestBudgetKind {
             Self::Ram => "RAM",
             Self::Vram => "VRAM",
             Self::Packets => "Packets",
+            Self::ResidentAssets => "Resident assets",
         }
     }
 }
@@ -122,6 +167,10 @@ pub struct PlaytestBudgetReport {
     /// Packet limit this report was judged against: the derivation ceiling
     /// for authored estimates, the exact derived arena capacity after a cook.
     pub packet_limit: usize,
+    /// Payloads that stay in RAM for the whole gameplay session. Zero on the
+    /// authored estimate, which has no cooked asset table to measure; the
+    /// number is only exact after a cook, which is where the gate lives.
+    pub resident_asset_bytes: usize,
     pub issues: Vec<PlaytestBudgetIssue>,
 }
 
@@ -132,7 +181,7 @@ impl PlaytestBudgetReport {
 
     pub fn concise_summary(&self) -> String {
         format!(
-            "{}: BSP {}B, PVS {}B (row {}/{}B), light {}B, textures {}B, RAM {}/{}B ({} slots), VRAM {}/{}B ({} slots), packets {}/{}",
+            "{}: BSP {}B, PVS {}B (row {}/{}B), light {}B, textures {}B, RAM {}/{}B ({} slots), VRAM {}/{}B ({} slots), packets {}/{}, resident {}/{}B",
             self.mode.label(),
             self.bsp_bytes,
             self.pvs_bytes,
@@ -148,6 +197,8 @@ impl PlaytestBudgetReport {
             self.vram_asset_slots,
             self.packet_count,
             self.packet_limit,
+            self.resident_asset_bytes,
+            PLAYTEST_RESIDENT_ASSET_BYTES,
         )
     }
 }
@@ -232,6 +283,10 @@ pub fn estimate_playtest_budgets(
         vram_bytes: texture_bytes,
         vram_asset_slots,
         packet_count,
+        // Nothing to measure yet: clips are only word-padded and classified
+        // during the cook, and guessing from the authored resources would put
+        // a number here that the cook then contradicts.
+        resident_asset_bytes: 0,
         // Before a cook the arena can still grow to the ceiling, so only
         // content the derivation cannot cover is an authoring problem.
         packet_limit: PLAYTEST_PACKET_CAPACITY_CEILING,
@@ -330,6 +385,7 @@ pub fn cooked_playtest_budgets(
         vram_asset_slots,
         packet_count,
         packet_limit: derived_packet_capacity(packet_count),
+        resident_asset_bytes: audit_resident_assets(package).total_bytes,
         issues: Vec::new(),
     };
     attach_budget_issues(project, &mut report);
@@ -563,6 +619,192 @@ fn attach_budget_issues(project: &ProjectDocument, report: &mut PlaytestBudgetRe
             action: "split visibility or simplify the focused brush/room",
         });
     }
+    if report.resident_asset_bytes > PLAYTEST_RESIDENT_ASSET_BYTES {
+        report.issues.push(PlaytestBudgetIssue {
+            kind: PlaytestBudgetKind::ResidentAssets,
+            used: report.resident_asset_bytes,
+            limit: PLAYTEST_RESIDENT_ASSET_BYTES,
+            unit: "B",
+            target: ram_target,
+            action: "shorten or drop animation clips; every clip stays resident for the \
+                     whole session",
+        });
+    }
+}
+
+/// One resident payload, as the audit reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentAssetEntry {
+    /// Owning model, parsed out of the asset's diagnostic label.
+    pub owner: String,
+    /// Cooked filename, so an offender can be found on disc.
+    pub filename: String,
+    /// Bytes as the runtime arena counts them, word-padded.
+    pub bytes: usize,
+    /// What the payload is.
+    pub kind: PlaytestAssetKind,
+}
+
+/// What stays in RAM for the whole gameplay session, and how close that is to
+/// the ceiling.
+///
+/// hl-psx re-measures this on every cook and fails the build when a growing
+/// model would hide an actor on hardware. We had the same information arriving
+/// as a linker error, which is both later and less specific: it names a
+/// section, not a clip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentAssetAudit {
+    /// Total resident bytes, matching what sizes the runtime asset arena.
+    pub total_bytes: usize,
+    /// Ceiling this was judged against.
+    pub cap_bytes: usize,
+    /// Every resident payload, largest first.
+    pub entries: Vec<ResidentAssetEntry>,
+}
+
+impl ResidentAssetAudit {
+    /// Pages the runtime arena actually reserves, which is the number the
+    /// cooked manifest emits as `PERSISTENT_ASSET_PAGE_COUNT` and therefore the
+    /// number the linker sees. Judging raw bytes would under-report by up to a
+    /// page and disagree with the guest build.
+    pub fn resident_pages(&self) -> usize {
+        self.total_bytes.div_ceil(PLAYTEST_RESIDENT_ASSET_PAGE_BYTES)
+    }
+
+    /// Over the ceiling, so the cook must refuse.
+    pub fn over_cap(&self) -> bool {
+        self.resident_pages() > PLAYTEST_RESIDENT_ASSET_PAGES
+    }
+
+    /// Close enough to the ceiling to be worth a line of output.
+    pub fn near_cap(&self) -> bool {
+        self.percent_of_cap() >= PLAYTEST_RESIDENT_ASSET_WARN_PERCENT
+    }
+
+    /// Share of the ceiling used, rounded down.
+    pub fn percent_of_cap(&self) -> usize {
+        if PLAYTEST_RESIDENT_ASSET_PAGES == 0 {
+            return 0;
+        }
+        self.resident_pages().saturating_mul(100) / PLAYTEST_RESIDENT_ASSET_PAGES
+    }
+
+    /// Resident bytes per owning model, largest first. This is the view that
+    /// answers "which character is eating the budget".
+    pub fn by_owner(&self) -> Vec<(String, usize)> {
+        let mut totals: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for entry in &self.entries {
+            *totals.entry(entry.owner.as_str()).or_default() += entry.bytes;
+        }
+        let mut rows: Vec<(String, usize)> = totals
+            .into_iter()
+            .map(|(owner, bytes)| (owner.to_string(), bytes))
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+
+    /// One line for the cook log.
+    pub fn summary(&self) -> String {
+        format!(
+            "resident assets {} B in {} pages of {} ({}%), {} payloads",
+            self.total_bytes,
+            self.resident_pages(),
+            PLAYTEST_RESIDENT_ASSET_PAGES,
+            self.percent_of_cap(),
+            self.entries.len(),
+        )
+    }
+
+    /// The breakdown, owners first and then the biggest individual payloads.
+    /// `clip_limit` bounds the payload list so a 43-clip character does not
+    /// bury the owner totals.
+    pub fn breakdown(&self, clip_limit: usize) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for (owner, bytes) in self.by_owner() {
+            let _ = write!(out, "\n  {owner}: {bytes} B");
+        }
+        if self.entries.len() > 1 {
+            let _ = write!(out, "\n  largest payloads:");
+            for entry in self.entries.iter().take(clip_limit) {
+                let _ = write!(out, "\n    {} {} B", entry.filename, entry.bytes);
+            }
+            if self.entries.len() > clip_limit {
+                let _ = write!(
+                    out,
+                    "\n    ... and {} more",
+                    self.entries.len() - clip_limit
+                );
+            }
+        }
+        out
+    }
+}
+
+/// Measure what the cooked package keeps resident for the whole session.
+///
+/// Counts exactly what sizes the runtime arena: `PersistentGameplay` payloads,
+/// word-padded, the same sum the manifest turns into
+/// `PERSISTENT_ASSET_PAGE_COUNT`. Anything streamed per room or per menu is
+/// deliberately absent, since it does not compete for this ceiling.
+pub fn audit_resident_assets(package: &PlaytestPackage) -> ResidentAssetAudit {
+    let mut entries: Vec<ResidentAssetEntry> = package
+        .assets
+        .iter()
+        .filter(|asset| asset.streamed_class == StreamedClass::PersistentGameplay)
+        .map(|asset| ResidentAssetEntry {
+            owner: resident_asset_owner(&asset.source_label),
+            filename: asset.filename.clone(),
+            bytes: asset.bytes.len().next_multiple_of(4),
+            kind: asset.kind,
+        })
+        .collect();
+    entries.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.filename.cmp(&b.filename)));
+    ResidentAssetAudit {
+        total_bytes: entries.iter().map(|entry| entry.bytes).sum(),
+        cap_bytes: PLAYTEST_RESIDENT_ASSET_BYTES,
+        entries,
+    }
+}
+
+/// Pull the owning model out of an asset's diagnostic label. Clips are labelled
+/// `"<model> / <clip>"` and atlases `"<model> atlas"`, so both collapse onto the
+/// model that carries them.
+fn resident_asset_owner(source_label: &str) -> String {
+    let head = source_label
+        .split_once(" / ")
+        .map(|(owner, _)| owner)
+        .unwrap_or(source_label);
+    head.strip_suffix(" atlas").unwrap_or(head).to_string()
+}
+
+/// Refuse a package whose session-resident payloads exceed the ceiling.
+///
+/// Returns the full breakdown as the error, because the useful form of this
+/// failure is "this clip is 12 KB over", not "the build is too big".
+pub fn validate_resident_assets(package: &PlaytestPackage) -> Result<ResidentAssetAudit, String> {
+    let audit = audit_resident_assets(package);
+    if !audit.over_cap() {
+        return Ok(audit);
+    }
+    let over_pages = audit.resident_pages() - PLAYTEST_RESIDENT_ASSET_PAGES;
+    Err(format!(
+        "session-resident assets need {} pages, {} over the {}-page ceiling \
+         ({} B used, {} B over).\n\
+         Every model mesh, atlas and animation clip is cooked PersistentGameplay, so all \
+         of it sits in guest .bss for the whole session; the MIPS link is what fails next \
+         (measured ceiling {} pages).{}\n\
+         Shorten or drop clips, or scope them per scene. Nothing was written; the \
+         previously generated output is intact.",
+        audit.resident_pages(),
+        over_pages,
+        PLAYTEST_RESIDENT_ASSET_PAGES,
+        audit.total_bytes,
+        over_pages * PLAYTEST_RESIDENT_ASSET_PAGE_BYTES,
+        PLAYTEST_RESIDENT_ASSET_MEASURED_PAGES,
+        audit.breakdown(12),
+    ))
 }
 
 #[cfg(test)]
@@ -609,6 +851,156 @@ mod tests {
             derived_packet_capacity(9999),
             PLAYTEST_PACKET_CAPACITY_CEILING
         );
+    }
+
+    /// A resident payload as the cook emits it: model clips carry
+    /// `"<model> / <clip>"` labels, atlases `"<model> atlas"`.
+    fn resident_asset(
+        kind: PlaytestAssetKind,
+        source_label: &str,
+        filename: &str,
+        bytes: usize,
+    ) -> super::super::PlaytestAsset {
+        super::super::PlaytestAsset {
+            kind,
+            bytes: vec![0u8; bytes],
+            filename: filename.to_string(),
+            source_label: source_label.to_string(),
+            streamed_class: StreamedClass::PersistentGameplay,
+        }
+    }
+
+    /// The audit only reads `package.assets`, so cook the tracked fixture for
+    /// a valid package and swap its asset table for the case under test.
+    fn package_with_assets(assets: Vec<super::super::PlaytestAsset>) -> PlaytestPackage {
+        let project = ProjectDocument::from_ron_str(include_str!(
+            "../../../../archive/fixtures/brush-open-courtyard/project.ron"
+        ))
+        .expect("tracked project");
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../archive/fixtures/brush-open-courtyard");
+        let (package, report) = build_package(&project, &fixture_dir);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let mut package = package.expect("fixture cooks");
+        package.assets = assets;
+        package
+    }
+
+    #[test]
+    fn resident_audit_groups_clips_under_their_model_and_ignores_streamed_assets() {
+        let mut assets = vec![
+            resident_asset(PlaytestAssetKind::ModelMesh, "Aletha", "aletha/mesh.psxmdl", 4_000),
+            resident_asset(
+                PlaytestAssetKind::Texture,
+                "Aletha atlas",
+                "aletha/atlas.psxt",
+                2_000,
+            ),
+            resident_asset(
+                PlaytestAssetKind::ModelAnimation,
+                "Aletha / run",
+                "aletha/clip_00_run.psxanim",
+                9_000,
+            ),
+            resident_asset(
+                PlaytestAssetKind::ModelAnimation,
+                "Rust Mantis / idle",
+                "mantis/clip_00_idle.psxanim",
+                5_000,
+            ),
+        ];
+        // A room texture streams per room, so it must not count against the
+        // session-resident ceiling.
+        let mut streamed = resident_asset(
+            PlaytestAssetKind::Texture,
+            "Room atlas",
+            "rooms/atlas.psxt",
+            500_000,
+        );
+        streamed.streamed_class = StreamedClass::Gameplay;
+        assets.push(streamed);
+
+        let audit = audit_resident_assets(&package_with_assets(assets));
+
+        assert_eq!(audit.total_bytes, 4_000 + 2_000 + 9_000 + 5_000);
+        assert_eq!(audit.entries.len(), 4, "streamed asset must be excluded");
+        assert_eq!(
+            audit.by_owner(),
+            vec![
+                ("Aletha".to_string(), 15_000),
+                ("Rust Mantis".to_string(), 5_000),
+            ],
+            "clips and atlas must fold into the model that carries them"
+        );
+        // Largest first, so the breakdown opens with the offender.
+        assert_eq!(audit.entries[0].filename, "aletha/clip_00_run.psxanim");
+        assert!(!audit.over_cap());
+    }
+
+    #[test]
+    fn resident_audit_counts_the_padding_the_arena_pays() {
+        // The manifest sizes the arena from word-padded lengths, so an audit
+        // reading raw lengths would under-report every odd-sized clip.
+        let audit = audit_resident_assets(&package_with_assets(vec![resident_asset(
+            PlaytestAssetKind::ModelAnimation,
+            "Aletha / run",
+            "aletha/clip_00_run.psxanim",
+            4_001,
+        )]));
+        assert_eq!(audit.total_bytes, 4_004);
+    }
+
+    #[test]
+    fn resident_audit_refuses_over_the_ceiling_and_names_the_offender() {
+        let over = PLAYTEST_RESIDENT_ASSET_BYTES + 12 * 1024;
+        let package = package_with_assets(vec![
+            resident_asset(
+                PlaytestAssetKind::ModelAnimation,
+                "Aletha / run",
+                "aletha/clip_00_run.psxanim",
+                over - 1_000,
+            ),
+            resident_asset(
+                PlaytestAssetKind::ModelAnimation,
+                "Rust Mantis / idle",
+                "mantis/clip_00_idle.psxanim",
+                1_000,
+            ),
+        ]);
+
+        let audit = audit_resident_assets(&package);
+        assert!(audit.over_cap());
+        assert!(audit.near_cap());
+
+        let message = validate_resident_assets(&package).expect_err("must refuse");
+        assert!(
+            message.contains("12288 B over"),
+            "the overage is the actionable number: {message}"
+        );
+        assert!(
+            message.contains("aletha/clip_00_run.psxanim"),
+            "must name the biggest payload: {message}"
+        );
+        assert!(
+            message.contains("Nothing was written"),
+            "must promise a clean no-op: {message}"
+        );
+    }
+
+    #[test]
+    fn resident_audit_warns_before_it_refuses() {
+        // The point of the audit is hearing about the ceiling early, so the
+        // warn band must fire while the cook still succeeds.
+        let near = PLAYTEST_RESIDENT_ASSET_BYTES / 100 * PLAYTEST_RESIDENT_ASSET_WARN_PERCENT;
+        let package = package_with_assets(vec![resident_asset(
+            PlaytestAssetKind::ModelAnimation,
+            "Aletha / run",
+            "aletha/clip_00_run.psxanim",
+            near,
+        )]);
+        let audit = validate_resident_assets(&package).expect("under the ceiling");
+        assert!(audit.near_cap(), "{}", audit.summary());
+        assert!(!audit.over_cap(), "{}", audit.summary());
     }
 
     #[test]
