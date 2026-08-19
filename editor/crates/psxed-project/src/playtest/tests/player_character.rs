@@ -215,7 +215,7 @@ fn player_character_controller_settings_drive_cooked_character() {
     let controller_id = player_controller_component_id(&project);
     let scene = project.active_scene_mut();
     let controller = scene.node_mut(controller_id).unwrap();
-    let NodeKind::CharacterController { settings, .. } = &mut controller.kind else {
+    let NodeKind::CharacterController { settings: Some(settings), .. } = &mut controller.kind else {
         panic!("starter player controller must be a Character Controller");
     };
     settings.walk_speed = 61;
@@ -233,6 +233,91 @@ fn player_character_controller_settings_drive_cooked_character() {
     assert_eq!(character.turn_speed_degrees_per_second, 270);
     assert_eq!(character.stamina_max_q12, 2048);
     assert_eq!(character.roll_speed, 144 << 8);
+}
+
+/// The whole point of the override being optional: a placement that has not
+/// been tuned follows its Character, so editing the type reaches everything
+/// already placed instead of only the next thing placed.
+#[test]
+fn a_controller_without_an_override_follows_its_character() {
+    let mut project = project_with_one_room();
+    let controller_id = player_controller_component_id(&project);
+
+    let character_id = {
+        let scene = project.active_scene_mut();
+        let controller = scene.node_mut(controller_id).unwrap();
+        let NodeKind::CharacterController {
+            character, settings, ..
+        } = &mut controller.kind
+        else {
+            panic!("starter player controller must be a Character Controller");
+        };
+        // Drop the stamped copy: this placement now defers to its type.
+        *settings = None;
+        character.expect("starter controller carries a Character")
+    };
+
+    let tune = |project: &mut ProjectDocument, walk: i32, radius: u16| {
+        let Some(ResourceData::Character(character)) = project
+            .resource_mut(character_id)
+            .map(|resource| &mut resource.data)
+        else {
+            panic!("Character resource");
+        };
+        character.walk_speed = walk;
+        character.radius = radius;
+    };
+
+    tune(&mut project, 61, 200);
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let cooked = &package.expect("package").characters[0];
+    assert_eq!(cooked.walk_speed, 61 << 8, "type's speed must reach the cook");
+    assert_eq!(cooked.radius, 200);
+
+    // Editing the type again moves the already-placed controller with it.
+    tune(&mut project, 75, 240);
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let cooked = &package.expect("package").characters[0];
+    assert_eq!(cooked.walk_speed, 75 << 8);
+    assert_eq!(cooked.radius, 240);
+}
+
+/// And an override still wins, so a one-off tweak is not lost.
+#[test]
+fn an_override_still_beats_the_character() {
+    let mut project = project_with_one_room();
+    let controller_id = player_controller_component_id(&project);
+    let character_id = {
+        let scene = project.active_scene_mut();
+        let NodeKind::CharacterController {
+            character, settings, ..
+        } = &mut scene.node_mut(controller_id).unwrap().kind
+        else {
+            panic!("Character Controller");
+        };
+        let id = character.expect("Character");
+        let mut tuned = settings.expect("starter stamps an override today");
+        tuned.walk_speed = 61;
+        *settings = Some(tuned);
+        id
+    };
+    let Some(ResourceData::Character(character)) = project
+        .resource_mut(character_id)
+        .map(|resource| &mut resource.data)
+    else {
+        panic!("Character resource");
+    };
+    character.walk_speed = 999;
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    assert_eq!(
+        package.expect("package").characters[0].walk_speed,
+        61 << 8,
+        "the placement's own tuning must survive a change to its type"
+    );
 }
 
 #[test]
@@ -547,7 +632,7 @@ fn component_player_without_profile_uses_model_renderer_and_animator() {
     if let Some(controller) = scene.node_mut(controller_id) {
         let NodeKind::CharacterController {
             character,
-            settings,
+            settings: Some(settings),
             ..
         } = &mut controller.kind
         else {
@@ -638,7 +723,7 @@ fn character_controller_with_zero_radius_fails_validation() {
     let mut project = project_with_one_room();
     let controller_id = player_controller_component_id(&project);
     if let Some(node) = project.active_scene_mut().node_mut(controller_id) {
-        if let NodeKind::CharacterController { settings, .. } = &mut node.kind {
+        if let NodeKind::CharacterController { settings: Some(settings), .. } = &mut node.kind {
             settings.radius = 0;
         }
     }

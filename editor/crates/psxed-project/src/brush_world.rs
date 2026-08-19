@@ -289,9 +289,28 @@ fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
     let mut bodies = Vec::new();
     for node in scene.nodes() {
         match &node.kind {
-            NodeKind::CharacterController { settings, .. } => {
-                if settings.radius > 0 && settings.height > 0 {
-                    bodies.push((i32::from(settings.radius), i32::from(settings.height)));
+            NodeKind::CharacterController {
+                character, settings, ..
+            } => {
+                // No override means the body comes from the Character, the
+                // same resolution the cook does. Missing both leaves the hull
+                // to the other authored bodies.
+                let body = settings
+                    .map(|s| (s.radius, s.height))
+                    .or_else(|| {
+                        character
+                            .and_then(|id| project.resource(id))
+                            .and_then(|resource| match &resource.data {
+                                ResourceData::Character(character) => {
+                                    Some((character.radius, character.height))
+                                }
+                                _ => None,
+                            })
+                    });
+                if let Some((radius, height)) = body {
+                    if radius > 0 && height > 0 {
+                        bodies.push((i32::from(radius), i32::from(height)));
+                    }
                 }
             }
             NodeKind::SpawnPoint { player: true, .. } => {

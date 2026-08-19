@@ -2118,6 +2118,9 @@ pub(crate) struct NodeKindEditorContext<'a> {
     pub(crate) room_options: &'a [(NodeId, String)],
     pub(crate) model_options: &'a [(ResourceId, String, Vec<String>)],
     pub(crate) character_options: &'a [(ResourceId, String)],
+    /// Each Character's own tuning, used as the shown value and the seed for a
+    /// per-placement override.
+    pub(crate) character_defaults: &'a [(ResourceId, psxed_project::CharacterControllerSettings)],
     pub(crate) weapon_options: &'a [(ResourceId, String)],
     pub(crate) animator_clip_context: Option<&'a AnimatorClipContext>,
     pub(crate) inherited_sector_size: i32,
@@ -2139,6 +2142,7 @@ pub(crate) fn draw_node_kind_editor(
         room_options,
         model_options,
         character_options,
+        character_defaults,
         weapon_options,
         animator_clip_context,
         inherited_sector_size,
@@ -3516,15 +3520,34 @@ pub(crate) fn draw_node_kind_editor(
             player,
         } => {
             ui.weak("Component: owns this character's per-instance movement and gameplay behavior. Model Renderer owns visuals; Animator owns action clips.");
-            changed |= draw_character_controller_editor(
+            // No override means this placement follows its Character. Show the
+            // type's values, and only write an override once something here
+            // actually changes.
+            let inherited = character
+                .and_then(|id| {
+                    character_defaults
+                        .iter()
+                        .find(|(candidate, _)| *candidate == id)
+                        .map(|(_, settings)| *settings)
+                })
+                .unwrap_or_default();
+            if settings.is_none() {
+                ui.weak("Inherited from the Character. Editing anything here overrides it for this placement only.");
+            }
+            let mut working = settings.unwrap_or(inherited);
+            let edited = draw_character_controller_editor(
                 ui,
                 character,
-                settings,
+                &mut working,
                 player,
                 character_options,
                 nav_target,
                 character_preview_action,
             );
+            if edited {
+                *settings = Some(working);
+            }
+            changed |= edited;
         }
         NodeKind::Camera { settings } => {
             ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");

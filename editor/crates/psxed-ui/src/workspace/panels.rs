@@ -1760,6 +1760,22 @@ impl EditorWorkspace {
                                 let room_options = collect_room_options(&self.project);
                                 let model_options = collect_model_options(&self.project);
                                 let character_options = collect_character_options(&self.project);
+                                // Each Character's own tuning, so a placement
+                                // with no override shows its type's values.
+                                let character_defaults: Vec<_> = self
+                                    .project
+                                    .resources
+                                    .iter()
+                                    .filter_map(|resource| match &resource.data {
+                                        psxed_project::ResourceData::Character(character) => Some((
+                                            resource.id,
+                                            psxed_project::CharacterControllerSettings::from_character(
+                                                character,
+                                            ),
+                                        )),
+                                        _ => None,
+                                    })
+                                    .collect();
                                 let weapon_options = collect_weapon_options(&self.project);
                                 let selected = self.selection.selected_node;
                                 let animator_clip_context = selected_animator_clip_context(
@@ -1865,6 +1881,7 @@ impl EditorWorkspace {
                                                 ui,
                                                 &mut node.kind,
                                             NodeKindEditorContext {
+                                                character_defaults: &character_defaults,
                                                 material_options: &material_options,
                                                 material_texture_dimensions:
                                                     &material_texture_dimensions,

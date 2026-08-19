@@ -222,9 +222,9 @@ fn cortex_project_deserializes_authored_enemy_combat_profile() {
         .find_map(|node| match &node.kind {
             NodeKind::CharacterController {
                 settings:
-                    CharacterControllerSettings {
+                    Some(CharacterControllerSettings {
                         enemy: Some(enemy), ..
-                    },
+                    }),
                 player: false,
                 ..
             } => Some(*enemy),
@@ -656,7 +656,7 @@ fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
         "Character Controller",
         NodeKind::CharacterController {
             character: None,
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: true,
         },
     );
@@ -3192,7 +3192,7 @@ fn delete_resource_removes_entry_and_clears_references() {
         "Controller",
         NodeKind::CharacterController {
             character: Some(target),
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: true,
         },
     );
