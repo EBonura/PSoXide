@@ -53,13 +53,14 @@ error, which is the same information arriving too late and less precisely.
 
 ## The plan, ranked by payoff
 
-**1. Residency (structural, biggest win).** Stop marking model clips
-`PersistentGameplay`. Scope them the way room textures already are, so a scene
-holds the clips its characters can reach. PSoXide already has the streaming
-machinery, the resource-set keys, and the per-state enter/exit hooks; this is
-about classification rather than new mechanism. Expect the win to scale with
-how many characters exist rather than being a fixed percentage, which is
-exactly what a boss plus four mantis variants needs.
+**1. Residency (structural, biggest win, but read the split below).** Stop
+marking model clips `PersistentGameplay` so a scene holds only what its
+characters can reach. Correcting an earlier claim in this doc: this is NOT
+merely reclassification. `StreamedClass` has four values, `None`, `UiImage`,
+`Gameplay` and `PersistentGameplay`
+(`editor/crates/psxed-project/src/playtest/schema.rs:158`), and the finest
+model-facing scope is the whole gameplay session. Per-scene residency is new
+mechanism whichever format wins.
 
 **2. Dedupe cooked animations by content. DONE, and measured.** Textures
 dedupe on `asset.bytes == bytes`; the animation push had no such check. With
@@ -110,14 +111,11 @@ grouped into contiguous ranges so each range pays one matrix load, and pose
 interpolation between two frames. That is what both games want, and it is what
 `psx_asset` should own.
 
-One real design fork to settle first, because it changes the shape of the
-answer. HMD8 is a MERGED container (`HMRG`) that carries poses inside the model
-blob, and hl-psx gets residency by cooking a per-map VARIANT of the model
-holding only that map's reachable clips. PSoXide instead keeps every clip as
-its own stream asset. Cooking scene variants is simpler and is why hl-psx's
-peak is auditable at build time; per-clip streaming is more dynamic and suits
-rooms that come and go. Whichever we pick, the format has to agree with it, so
-pick before porting.
+One design fork was supposed to be settled first: HMD8 is a MERGED container
+(`HMRG`) carrying poses inside the model blob, and hl-psx gets residency by
+cooking a per-map VARIANT of each model holding only that map's reachable
+clips, where PSoXide keeps every clip as its own asset. Measuring hl-psx's own
+build reports shows that is the wrong fork to agonise over. See below.
 
 Sequence, with the first step done.
 
@@ -145,8 +143,7 @@ safe against streamed chunks, and there is now a case per failure mode. That
 guard is load-bearing: pointed at a texture chunk by mistake, it returned the
 null model instead of reading wild memory.
 
-2. Decide residency: per-scene cooked variants (hl-psx's answer) or per-clip
-   streaming. This determines whether poses stay merged into the model blob.
+2. Decide residency. Measured below, with a recommendation.
 3. Move PSoXide's cook onto it, keeping `.psxanim` readable until the games
    have migrated.
 4. Point hl-psx at the SDK type and delete its private copy, which is the
@@ -158,6 +155,86 @@ track PSoXide's `main`; it consumes a pinned rev (`psoxide-link` at
 cannot see this module until that pin moves, and moving it pulls in everything
 else that has landed since. That makes step 4 a deliberate bump rather than
 something to slip in alongside a format change.
+
+## Residency, measured
+
+Numbers below come from hl-psx's own build reports (`.hlpsx/reports/`,
+`model-clip-residency.csv`, `model-clip-ram.csv`, `model-residency.csv`) and
+from measuring its 108 cooked model chunks directly. It has already run the
+experiment across 101 maps, so neither case needs to be argued from taste.
+
+### The win is at the model, not the clip
+
+| | |
+| --- | --- |
+| every model chunk resident at once | **4377.2 KB** |
+| worst single map | **317.3 KB** |
+| ratio | **13.8x** |
+
+That 13.8x is the entire prize, and it comes from one decision: don't hold
+every level's models resident. Its build audit puts the same thing in absolute
+terms, worst resident 205.8 KB against a worst transient peak of 227.5 KB
+during a map transition, so the overlap while one level hands over to the next
+costs about 11% headroom.
+
+Now the part that decides the fork. Trimming a resident model down to only the
+clips ITS map can play, which is what the merged per-map variant buys on top of
+plain model-level scoping, is worth far less:
+
+| | |
+| --- | --- |
+| worst map, all clips of its models | 116.4 KB |
+| worst map, only that map's clips | 103.6 KB |
+| per-map cut | **median 13%, max 70%** |
+| maps that gain nothing | 8 of 101 |
+
+So the heaviest map saves about 13 KB from clip-level trimming, after saving
+roughly 4 MB from model-level scoping.
+
+### What merging costs
+
+Cooking a variant per (map, model) duplicates the mesh, because poses ride
+inside the model blob. Measured across the pack: 31 distinct models become 108
+chunks, one model has 21 variants, and **1487.4 KB of the chunk bytes are
+duplicate mesh copies**. Poses are only 44% of a chunk, so more than half of
+what a variant re-cooks is geometry that already existed. No map holds two
+variants of one model, so this is disc rather than RAM, but disc is load time.
+
+It also costs a build pipeline: roster extraction per map, clip manifests, a
+dedupe pass, a residency report, and an unresolved-actors list for scripted
+spawns the planner could not predict (hl-psx's answer for those is "already
+unsupported"). A variant is a cook-time prediction of what a level can play.
+
+### Our budget is shaped differently
+
+Of PSoXide's 483.1 KB resident animation, **438.3 KB is Aletha** (90.7%). She
+is the player, so she is resident in every level by definition, and no
+level-scoped residency scheme touches her. Per-level residency scopes the
+enemy clips, which are 44.7 KB today. The win therefore scales with the enemy
+roster and variant count, not with the level count, and it does nothing for
+nine tenths of the current budget. The lever on Aletha is fewer or shorter
+clips, a tighter affine, or residency keyed to something else entirely (equipped
+weapon moveset, combat versus traversal), which is a different axis and not
+this decision.
+
+Also worth stating plainly: the project has exactly one scene, `Main`, holding
+Aletha, the Rust Mantis and all equipment. Per-scene residency saves **0 KB
+today** whichever design wins. It starts paying at the 9-map Episode 1 target.
+
+### Recommendation
+
+Take the merged format, skip the variant planner, for now.
+
+Adopt HMD8 as the container, since the reader is already in the SDK and reads
+merged blobs, and cook ONE blob per model carrying all its clips. Scope
+residency at the model level per scene. That captures the 13.8x, which is the
+part that matters, without the 1487 KB of duplicated mesh or the variant
+pipeline. Revisit per-map clip variants only if a measured scene lands within
+about 15% of the cap, because 13% median is what they would buy back.
+
+Do the build-time audit first regardless of the above. It is independent of the
+fork, it is cheap, and it turns our ceiling from a linker error into a named
+clip with a byte count.
 
 ## Why this direction
 
