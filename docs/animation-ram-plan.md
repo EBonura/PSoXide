@@ -61,15 +61,24 @@ about classification rather than new mechanism. Expect the win to scale with
 how many characters exist rather than being a fixed percentage, which is
 exactly what a boss plus four mantis variants needs.
 
-**2. Dedupe cooked animations by content.** Textures dedupe on
-`asset.bytes == bytes` twenty lines away in the same file; the animation push
-had no such check, so the code is now there. UNVERIFIED: no test yet
-demonstrates it firing, and by the same token the duplicate it guards against
-has not been observed either. Clip resolution already dedupes by PATH, so two
-clip resources naming one file never both reach the cook; whether two MODELS
-sharing a rig actually emit the payload twice is the open question. Settle it
-by registering the no-claw variant and measuring cooked animation bytes, not
-by reading the code.
+**2. Dedupe cooked animations by content. DONE, and measured.** Textures
+dedupe on `asset.bytes == bytes`; the animation push had no such check. With
+the claw and no-claw mantis variants both registered in `projects/mantis`:
+
+| | clip files | bytes |
+| --- | --- | --- |
+| with dedupe | 5 | 73,140 |
+| without | 10 | 146,280 |
+
+Exactly double, so one variant sharing five clips costs 71.4 KB without it.
+
+No regression test guards this, and not for want of trying: three attempts to
+reproduce it on the `legacy-grid-starter` fixture all passed with the dedupe
+removed, because the fixture's second model never cooks clips of its own. The
+verification is the real project above. If someone wants a test later, the
+recipe that DOES reproduce it is a variant with its own `Model`, its own clip
+resources targeting that model, its own `AnimationSet`, and its own
+`Character`; clone fewer of those and the variant silently cooks no clips.
 
 **3. Trim the affine further, 20 to about 16 bytes.** The Q11 packing is
 already in; the remaining lossless win is that the third row of an orthonormal
