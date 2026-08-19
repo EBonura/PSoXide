@@ -1172,6 +1172,14 @@ pub(crate) fn register_model_for_instance(
         } else {
             crate::bake_animation_pose_corrections(&parsed_model, &parsed_anim, pose_corrections)
         };
+        // Resample AFTER pose correction, so the budget is measured against the
+        // poses that actually ship, and BEFORE frame bounds are baked, so the
+        // bounds describe the frames the runtime will really read.
+        let animation_bytes = resample_under_budget(
+            animation_bytes,
+            project.animation_error_budget_degrees,
+            &format!("{} / {}", resource.name, clip.name),
+        );
         let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
             .expect("host-generated corrected animation must parse");
         let baked_bounds =
@@ -1351,6 +1359,54 @@ pub(crate) fn register_model_for_instance(
 /// Culling-radius pad added to baked model frame bounds, in AUTHORED
 /// world units; the cook divides it for engine-unit (BSP) projects.
 pub const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
+
+/// Drop a clip to the lowest sample rate that holds the project's error budget,
+/// then re-compact it. Returns the input untouched when the budget is off or
+/// the clip cannot give anything up.
+fn resample_under_budget(bytes: Vec<u8>, budget_degrees: u8, label: &str) -> Vec<u8> {
+    if budget_degrees == 0 {
+        return bytes;
+    }
+    let Ok(animation) = psx_asset::Animation::from_bytes(&bytes) else {
+        return bytes;
+    };
+    let source_hz = animation.sample_rate_hz();
+    let target_hz = crate::animation_resample::chosen_rate_hz(&animation, budget_degrees);
+    if target_hz >= source_hz {
+        return bytes;
+    }
+    let Some(resampled) = crate::animation_resample::resample_animation_bytes(&animation, target_hz)
+    else {
+        return bytes;
+    };
+    let Ok(parsed) = psx_asset::Animation::from_bytes(&resampled) else {
+        return bytes;
+    };
+    let out = compact_animation_bytes(&parsed);
+    // Reported rather than silent: a resample changes what ships on disc and
+    // what plays on screen, and the per-clip choice is the whole audit trail.
+    //
+    // Duration is reported because it MOVES, and it is the one side effect that
+    // is not about looks. A fixed-rate clip's length is `(frames - 1) / rate`,
+    // and no integer rate divides an arbitrary frame count exactly, so a
+    // resample lands within half an output frame of the original. Anything that
+    // derives motion from clip length shifts with it: an enemy's patrol drifts
+    // to a different spot over a minute of walking. Watch this column on
+    // locomotion clips, where it matters, rather than on an idle, where it
+    // does not.
+    let source_ms = 1000 * (animation.frame_count().saturating_sub(1)) as u32 / source_hz.max(1) as u32;
+    let target_ms = 1000 * (parsed.frame_count().saturating_sub(1)) as u32 / target_hz.max(1) as u32;
+    println!(
+        "[cook] resampled {label}: {source_hz} -> {target_hz} Hz, {} -> {} frames, \
+         {} -> {} B, {source_ms} -> {target_ms} ms ({:+.1}%)",
+        animation.frame_count(),
+        parsed.frame_count(),
+        bytes.len(),
+        out.len(),
+        100.0 * (target_ms as f32 - source_ms as f32) / source_ms.max(1) as f32,
+    );
+    out
+}
 
 pub(crate) fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> Vec<u8> {
     let joint_count = animation.joint_count();

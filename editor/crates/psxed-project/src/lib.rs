@@ -12,6 +12,7 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod animation_pose_correction;
+pub mod animation_resample;
 pub mod brush;
 pub mod brush_collision_hulls;
 pub mod brush_compile;

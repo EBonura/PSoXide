@@ -415,6 +415,16 @@ pub struct ProjectDocument {
     /// in the project keeps GUI and CLI cooks on one deterministic policy.
     #[serde(default)]
     pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
+    /// Worst-case joint rotation error, in whole degrees, that the cook may
+    /// introduce by resampling animation clips to a lower rate. `0` disables
+    /// resampling and cooks every clip at its authored rate.
+    ///
+    /// One budget covers every clip because it is self-selecting: a fast clip
+    /// blows the budget at the first step down and keeps its rate, while a slow
+    /// one gives up most of its frames for an error nobody can see. Authoring a
+    /// stride per clip would be the same decision made worse, by hand.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub animation_error_budget_degrees: u8,
     /// Cooked playtest cached-room depth sorting mode.
     #[serde(default)]
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
@@ -522,6 +532,13 @@ pub enum BootTarget {
     UiScene(UiSceneId),
 }
 
+
+/// Serde predicate: leave a default budget out of the file so projects that do
+/// not resample stay byte-identical to what they were before the knob existed.
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
 impl ProjectDocument {
     /// Create an empty project with one scene.
     pub fn new(name: impl Into<String>) -> Self {
@@ -537,6 +554,7 @@ impl ProjectDocument {
             // so the geometry rule cannot answer this; state it outright
             // instead of letting an empty scene read as "legacy grid".
             world_format: Some(ProjectWorldFormat::Bsp),
+            animation_error_budget_degrees: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
             runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
