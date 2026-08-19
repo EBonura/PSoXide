@@ -255,9 +255,21 @@ pub enum NodeKind {
         /// Character profile resource.
         #[serde(default)]
         character: Option<ResourceId>,
-        /// Movement, stamina, evade, and coarse capsule tuning for this controller.
-        #[serde(default)]
-        settings: CharacterControllerSettings,
+        /// Per-placement override of the Character's movement, stamina, evade
+        /// and capsule tuning.
+        ///
+        /// `None` means "whatever the Character says", which is what makes the
+        /// Character resource a live type rather than a template that is copied
+        /// once and then drifts. Placement leaves this `None`; it is
+        /// materialised only when someone actually edits a placed controller.
+        /// Projects written before this was optional carry a bare settings
+        /// struct and deserialize into `Some`, so nothing needs migrating.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_controller_settings"
+        )]
+        settings: Option<CharacterControllerSettings>,
         /// Whether this controller drives the player.
         #[serde(default)]
         player: bool,
@@ -616,6 +628,16 @@ pub struct PortalGeometry {
     pub normal: [i32; 3],
     /// Portal corners in editor/world coordinates.
     pub vertices: [[i32; 3]; 4],
+}
+
+
+/// Accept both shapes of `CharacterController::settings`: the bare struct that
+/// older projects wrote, and an absent field on newly placed controllers.
+fn deserialize_controller_settings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<CharacterControllerSettings>, D::Error> {
+    use serde::Deserialize as _;
+    CharacterControllerSettings::deserialize(deserializer).map(Some)
 }
 
 /// A scene-tree node.

@@ -462,12 +462,7 @@ impl EditorWorkspace {
             return None;
         };
         let host = scene.node(host_id)?;
-        let settings = host.children.iter().find_map(|child| {
-            scene.node(*child).and_then(|node| match &node.kind {
-                NodeKind::CharacterController { settings, .. } => Some(*settings),
-                _ => None,
-            })
-        })?;
+        let settings = self.character_controller_settings(host_id)?;
         let bounds = self
             .collect_entity_bounds(None)
             .into_iter()
@@ -994,7 +989,20 @@ impl EditorWorkspace {
         let host = scene.node(entity)?;
         host.children.iter().find_map(|child| {
             scene.node(*child).and_then(|node| match &node.kind {
-                NodeKind::CharacterController { settings, .. } => Some(*settings),
+                // Resolve the same way the cook does, so the overlay draws the
+                // capsule the game will actually use.
+                NodeKind::CharacterController {
+                    character, settings, ..
+                } => settings.or_else(|| {
+                    character
+                        .and_then(|id| self.project.resource(id))
+                        .and_then(|resource| match &resource.data {
+                            psxed_project::ResourceData::Character(character) => {
+                                Some(CharacterControllerSettings::from_character(character))
+                            }
+                            _ => None,
+                        })
+                }),
                 _ => None,
             })
         })

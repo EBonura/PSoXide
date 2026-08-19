@@ -2439,7 +2439,7 @@ pub(crate) struct AnimatorComponent<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct CharacterControllerComponent {
     pub(crate) character: Option<ResourceId>,
-    pub(crate) settings: CharacterControllerSettings,
+    pub(crate) settings: Option<CharacterControllerSettings>,
     pub(crate) player: bool,
 }
 

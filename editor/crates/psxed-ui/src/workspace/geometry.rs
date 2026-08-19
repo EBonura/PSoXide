@@ -1829,6 +1829,28 @@ impl EditorWorkspace {
                             is_character_controller,
                             |ui| {
                                 if is_character_controller {
+                                    // Resolve the type's tuning before taking
+                                    // the mutable scene borrow.
+                                    let inherited = self
+                                        .project
+                                        .active_scene()
+                                        .node(*id)
+                                        .and_then(|node| match &node.kind {
+                                            NodeKind::CharacterController { character, .. } => {
+                                                *character
+                                            }
+                                            _ => None,
+                                        })
+                                        .and_then(|cid| self.project.resource(cid))
+                                        .and_then(|resource| match &resource.data {
+                                            psxed_project::ResourceData::Character(character) => {
+                                                Some(CharacterControllerSettings::from_character(
+                                                    character,
+                                                ))
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap_or_default();
                                     let (component_changed, became_player) = {
                                         let Some(node) =
                                             self.project.active_scene_mut().node_mut(*id)
@@ -1855,7 +1877,7 @@ impl EditorWorkspace {
                                                     draw_character_controller_editor(
                                                         ui,
                                                         character,
-                                                        settings,
+                                                        settings.get_or_insert(inherited),
                                                         player,
                                                         character_options,
                                                         nav_target,

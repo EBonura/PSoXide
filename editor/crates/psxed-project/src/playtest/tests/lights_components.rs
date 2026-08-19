@@ -559,7 +559,7 @@ fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
         "Character Controller",
         NodeKind::CharacterController {
             character: Some(character),
-            settings: CharacterControllerSettings::default(),
+            settings: Some(CharacterControllerSettings::default()),
             player: true,
         },
     );
