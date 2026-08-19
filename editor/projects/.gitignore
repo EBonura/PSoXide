@@ -4,6 +4,8 @@
 !default/**
 !tech-demo/
 !tech-demo/**
+!mantis/
+!mantis/**
 **/cooked/
 **/baked/
 **/logs/
