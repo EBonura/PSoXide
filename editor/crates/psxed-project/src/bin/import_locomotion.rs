@@ -1215,6 +1215,13 @@ fn bind_action(
                 options: None,
             }),
     }
+    // The set's clip LIST is what carries membership, and the starter
+    // catalogue copies a set by walking it. A clip bound to an action but
+    // absent from the list synced into a fresh project as a dangling
+    // reference, because its id was never in the remap.
+    if !set.clips.contains(&clip) {
+        set.clips.push(clip);
+    }
 }
 
 fn find_source(dir: &Path, stem: &str) -> Option<PathBuf> {
