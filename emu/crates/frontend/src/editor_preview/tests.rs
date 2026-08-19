@@ -1,5 +1,5 @@
 use super::{
-    animated_material_quad_uvs, euler_rotation_q12, face_side_visible, floor_anchored_model_origin,
+    animated_material_quad_uvs, euler_rotation_q12, face_side_visible,
     horizontal_triangle_world_points, light_face, material_blend_mode, material_sized_uvs,
     material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
     preview_player_reference, preview_projected_triangle_hw_safe, preview_scratch,
@@ -965,23 +965,26 @@ fn sample_aletha_crystal_preview_uses_its_generated_texture() {
         .model_override
         .or(character.model)
         .expect("player model resolves");
-    let model = project
-        .resource(model_id)
-        .and_then(|resource| match &resource.data {
-            ResourceData::Model(model) => Some(model),
-            _ => None,
-        })
-        .expect("player Model resource");
     let placement = super::floor_anchored_node_room_local_origin(grid, &player.transform);
     let player_rotation = super::yaw_rotation_q12(
         super::yaw_to_q12(player.transform.rotation_degrees[1])
             .wrapping_add(reference.visual_yaw_q12),
     );
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &project_root);
+    // Mirror the production origin exactly: the lift comes from the cooked
+    // mesh's own bind pose, not the authored world height, and travels through
+    // the same local-to-world the mesh is drawn with.
+    let mesh_bytes = assets
+        .mesh_bytes(model_id)
+        .expect("player mesh is cooked")
+        .to_vec();
+    let mesh = psx_asset::Model::from_bytes(&mesh_bytes).expect("player mesh parses");
     let render_origin = super::visual_model_origin(
         placement,
-        model.world_height as i32,
+        mesh.bind_pose_floor_lift(),
+        super::preview_local_to_world(&mesh, reference.visual_scale_q8),
         reference.visual_offset,
-        reference.visual_scale_q8,
         player_rotation,
     );
     let camera = ViewportCameraState {
@@ -992,8 +995,6 @@ fn sample_aletha_crystal_preview_uses_its_generated_texture() {
         target: [render_origin.x, render_origin.y, render_origin.z],
         position: [0; 3],
     };
-    let mut assets = crate::editor_assets::EditorAssets::new();
-    assets.refresh(&project, &project_root);
     let empty_hidden = std::collections::HashSet::new();
     let build_frame =
         |document: &ProjectDocument, texture_cache: &crate::editor_textures::EditorTextures| {
@@ -1817,16 +1818,51 @@ fn node_room_local_origin_matches_origin_aware_grid_conversion() {
     );
 }
 
+// These two replace a pair that pinned `floor_anchored_model_origin`, which
+// lifted a model by HALF its authored world height. That function was deleted
+// on purpose: the half-height lift was the actor-grounding float, and models
+// now sit on their bind pose's own origin-to-feet distance instead. The cases
+// worth keeping are the same two, aimed at the rule that replaced it.
+
 #[test]
-fn floor_anchored_model_origin_offsets_by_half_world_height() {
-    let origin = floor_anchored_model_origin(WorldVertex::new(10, 0, 20), 1024);
+fn visual_model_origin_lifts_by_the_bind_pose_floor_lift() {
+    let origin = super::visual_model_origin(
+        WorldVertex::new(10, 0, 20),
+        512,
+        psx_engine::LocalToWorldScale::IDENTITY,
+        [0; 3],
+        Mat3I16::IDENTITY,
+    );
     assert_eq!(origin, WorldVertex::new(10, 512, 20));
 }
 
 #[test]
-fn floor_anchored_model_origin_ignores_negative_height() {
-    let origin = floor_anchored_model_origin(WorldVertex::new(10, 32, 20), -128);
+fn visual_model_origin_ignores_a_negative_floor_lift() {
+    // A mesh whose lowest vertex sits above its origin must not be pushed
+    // INTO the floor.
+    let origin = super::visual_model_origin(
+        WorldVertex::new(10, 32, 20),
+        -128,
+        psx_engine::LocalToWorldScale::IDENTITY,
+        [0; 3],
+        Mat3I16::IDENTITY,
+    );
     assert_eq!(origin, WorldVertex::new(10, 32, 20));
+}
+
+#[test]
+fn visual_model_origin_scales_the_lift_with_the_mesh() {
+    // The lift is in MODEL units, so it has to travel through the same
+    // local-to-world the mesh is drawn with. Applying it unscaled is what
+    // floats a shrunken actor off the floor.
+    let origin = super::visual_model_origin(
+        WorldVertex::new(0, 0, 0),
+        512,
+        psx_engine::LocalToWorldScale::from_q12(2048),
+        [0; 3],
+        Mat3I16::IDENTITY,
+    );
+    assert_eq!(origin, WorldVertex::new(0, 256, 0));
 }
 
 #[test]
