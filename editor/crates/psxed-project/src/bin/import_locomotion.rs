@@ -61,7 +61,7 @@ use psxed_project::{
 /// Pack filename stem, the gameplay action it binds, its clip role, and
 /// whether gameplay loops it. Only looping clips are cycle-trimmed; a
 /// one-shot has no cycle to find and must keep its full length.
-const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 20] = [
+const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 21] = [
     (
         "walk_fwd_winddown_mirror",
         CharacterAnimationAction::WalkWinddownAlt,
@@ -108,6 +108,12 @@ const PACK: [(&str, CharacterAnimationAction, AnimationRole, bool); 20] = [
         "wake_up",
         CharacterAnimationAction::Intro,
         AnimationRole::Generic,
+        false,
+    ),
+    (
+        "death",
+        CharacterAnimationAction::Death,
+        AnimationRole::Death,
         false,
     ),
     (
@@ -251,6 +257,7 @@ fn main() {
     let mut trim = true;
     let mut extras: Vec<String> = Vec::new();
     let mut new_model: Option<String> = None;
+    let mut character_name: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -268,6 +275,12 @@ fn main() {
                 new_model = Some(
                     args.next()
                         .unwrap_or_else(|| fail("--new-model needs a name")),
+                );
+            }
+            "--character" => {
+                character_name = Some(
+                    args.next()
+                        .unwrap_or_else(|| fail("--character needs a resource name")),
                 );
             }
             "--extra" => {
@@ -298,7 +311,7 @@ fn main() {
     let mut project = ProjectDocument::from_ron_str(&text)
         .unwrap_or_else(|e| fail(format!("{}: parse failed: {e}", project_path.display())));
 
-    let (character_name, model_id, set_id) = find_player(&project);
+    let (character_name, model_id, set_id) = find_target(&project, character_name.as_deref());
     let (model_name, model_source, model_skeleton, world_height, cooked_model_path) =
         model_details(&project, model_id, &project_root);
 
@@ -473,6 +486,36 @@ fn main() {
             skipped.join(", ")
         );
     }
+}
+
+/// The character this run binds onto: its name, model, and animation set.
+///
+/// Named explicitly for an enemy, since an enemy's own combat clips resolve
+/// off ITS animation set, not the player's. Without a name this keeps the old
+/// behaviour and finds the player.
+fn find_target(
+    project: &ProjectDocument,
+    name: Option<&str>,
+) -> (String, ResourceId, ResourceId) {
+    let Some(name) = name else {
+        return find_player(project);
+    };
+    for resource in &project.resources {
+        let ResourceData::Character(character) = &resource.data else {
+            continue;
+        };
+        if !resource.name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let Some(model) = character.model else {
+            fail(format!("Character '{name}' has no model"));
+        };
+        let Some(set) = character.animation_set else {
+            fail(format!("Character '{name}' has no animation set"));
+        };
+        return (resource.name.clone(), model, set);
+    }
+    fail(format!("no Character resource named '{name}'"))
 }
 
 /// Player character in the project: its name, model, and animation set.
