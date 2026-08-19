@@ -284,6 +284,65 @@ fn a_controller_without_an_override_follows_its_character() {
     assert_eq!(cooked.radius, 240);
 }
 
+/// Saving and reloading has to survive both shapes. The first cut of the
+/// optional override wrote `Some(...)` and could only read a bare struct, so
+/// any tool that saved a project made it unloadable.
+#[test]
+fn an_override_survives_a_save_and_reload() {
+    let mut project = project_with_one_room();
+    let controller_id = player_controller_component_id(&project);
+    {
+        let scene = project.active_scene_mut();
+        let NodeKind::CharacterController { settings, .. } =
+            &mut scene.node_mut(controller_id).unwrap().kind
+        else {
+            panic!("Character Controller");
+        };
+        let mut tuned = settings.expect("starter stamps an override today");
+        tuned.walk_speed = 61;
+        *settings = Some(tuned);
+    }
+    let text = project.to_ron_string().expect("serialize");
+    let reloaded = ProjectDocument::from_ron_str(&text).expect("reload");
+    let NodeKind::CharacterController { settings, .. } = &reloaded
+        .active_scene()
+        .node(controller_id)
+        .expect("controller")
+        .kind
+    else {
+        panic!("Character Controller");
+    };
+    assert_eq!(settings.expect("override survives").walk_speed, 61);
+
+    // And a placement that follows its type stays that way across a round trip.
+    {
+        let scene = project.active_scene_mut();
+        let NodeKind::CharacterController { settings, .. } =
+            &mut scene.node_mut(controller_id).unwrap().kind
+        else {
+            panic!("Character Controller");
+        };
+        *settings = None;
+    }
+    let text = project.to_ron_string().expect("serialize");
+    // Camera nodes carry a `settings` of their own, so look for the
+    // controller's shape specifically.
+    assert!(
+        !text.contains("settings: (radius:"),
+        "an inherited controller must not write a settings field"
+    );
+    let reloaded = ProjectDocument::from_ron_str(&text).expect("reload");
+    let NodeKind::CharacterController { settings, .. } = &reloaded
+        .active_scene()
+        .node(controller_id)
+        .expect("controller")
+        .kind
+    else {
+        panic!("Character Controller");
+    };
+    assert!(settings.is_none(), "inheritance must survive a round trip");
+}
+
 /// And an override still wins, so a one-off tweak is not lost.
 #[test]
 fn an_override_still_beats_the_character() {

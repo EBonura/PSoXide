@@ -165,7 +165,7 @@ def main() -> None:
     repo, fbx_path, bvh_path, action_name, out_blend = argv[:5]
     max_frames = int(argv[5]) if len(argv) > 5 else 90
     start_at = int(argv[6]) if len(argv) > 6 else 0
-    mirror = len(argv) > 7 and argv[7] == "mirror"
+    mirror = "mirror" in argv[7:8]
 
     retargeter = load_aletha_module(Path(repo))
     target = import_mantis(fbx_path, retargeter.MIXAMO_PREFIX)
@@ -192,6 +192,36 @@ def main() -> None:
     for curve in list(action.fcurves):
         if curve.data_path.endswith("location"):
             action.fcurves.remove(curve)
+
+    # Optional GLB export for import-locomotion, which cooks one take per file.
+    # Same export flags as the walk study so both paths produce identical rigs.
+    # Explicit flag: the SOURCE model is a .glb too, so scanning by extension
+    # would happily export over the input.
+    glb_out = argv[argv.index("--glb") + 1] if "--glb" in argv else None
+    if glb_out:
+        bpy.data.objects.remove(source, do_unlink=True)
+        bpy.ops.object.select_all(action="DESELECT")
+        target.select_set(True)
+        for child in target.children_recursive:
+            child.select_set(True)
+        bpy.context.view_layer.objects.active = target
+        scene.frame_start, scene.frame_end = start, end
+        result = bpy.ops.export_scene.gltf(
+            filepath=glb_out,
+            export_format="GLB",
+            use_selection=True,
+            export_animations=True,
+            export_animation_mode="ACTIVE_ACTIONS",
+            export_frame_range=True,
+            export_force_sampling=True,
+            export_anim_single_armature=True,
+            export_reset_pose_bones=True,
+            export_optimize_animation_size=False,
+        )
+        if "FINISHED" not in result:
+            raise RuntimeError(f"GLB export failed: {glb_out}")
+        print("EXPORTED", glb_out)
+        return
 
     bpy.data.objects.remove(source, do_unlink=True)
     for other in list(bpy.data.actions):
