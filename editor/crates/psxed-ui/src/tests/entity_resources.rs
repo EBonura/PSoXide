@@ -922,14 +922,28 @@ fn dropping_enemy_profile_first_preserves_authored_enemy_defaults() {
         .filter_map(|id| scene.node(*id))
         .find_map(|child| match child.kind {
             NodeKind::CharacterController {
-                player, settings: Some(settings), ..
+                player, settings, ..
             } => Some((player, settings)),
             _ => None,
         })
         .expect("enemy has a controller");
     assert!(!player, "an enemy profile never claims the player slot");
-    assert_eq!(settings.walk_speed, 28);
-    assert_eq!(settings.enemy, Some(enemy_behavior));
+    // A fresh placement carries no override: it follows the profile, so
+    // retuning the enemy type later reaches this one too.
+    assert!(
+        settings.is_none(),
+        "a dropped profile must not stamp a copy of its own tuning"
+    );
+    let ResourceData::Character(profile) = &workspace
+        .project
+        .resource(character)
+        .expect("profile resource")
+        .data
+    else {
+        panic!("Character resource");
+    };
+    assert_eq!(profile.walk_speed, 28);
+    assert_eq!(profile.enemy_behavior, Some(enemy_behavior));
     assert!(scene
         .node(entity)
         .unwrap()
@@ -1016,18 +1030,27 @@ fn dropping_player_profile_applies_camera_preset_and_replaces_player_source() {
         .iter()
         .find_map(|child| match child.kind {
             NodeKind::CharacterController {
-                player: true,
-                settings: Some(settings),
-                ..
+                player: true, settings, ..
             } => Some(settings),
             _ => None,
         })
         .expect("Aletha is the player");
+    // The placement follows the profile rather than copying it, so the values
+    // to check are the profile's.
+    assert!(settings.is_none(), "a dropped profile stamps no override");
+    let ResourceData::Character(profile) = &workspace
+        .project
+        .resource(character)
+        .expect("player profile")
+        .data
+    else {
+        panic!("Character resource");
+    };
     assert_eq!(
-        (settings.radius, settings.walk_speed, settings.run_speed),
+        (profile.radius, profile.walk_speed, profile.run_speed),
         (188, 44, 94)
     );
-    assert_eq!(settings.roll_speed, 165);
+    assert_eq!(profile.roll_speed, 165);
     let camera = children
         .iter()
         .find_map(|child| match child.kind {

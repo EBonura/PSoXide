@@ -3179,8 +3179,14 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
 
     // The verified sword weapons, grips exact (scale-specific measured
     // translations), each resolving to a synced Model resource.
-    for (name, grip_translation, hitboxes) in
-        [("Sword1 Light", [0, 15077, 0], 1), ("Sword1 Heavy", [0, 18462, 0], 0)]
+    //
+    // These moved when the grips were re-measured against the hand joint
+    // rather than the skinning matrix; the expectation here was left behind
+    // and only surfaced once an earlier assertion stopped failing first.
+    for (name, grip_translation, hitboxes) in [
+        ("Sword1 Light", [0, -25370, 0], 1),
+        ("Sword1 Heavy", [0, -26320, 0], 0),
+    ]
     {
         assert!(STARTER_WEAPON_NAMES.contains(&name));
         let weapon = resource_by_name(name, |data| matches!(data, ResourceData::Weapon(_)));
@@ -3190,7 +3196,7 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
         assert_eq!(weapon.default_character_socket, "right_hand_grip");
         assert_eq!(weapon.grip.name, "grip");
         assert_eq!(weapon.grip.translation, grip_translation);
-        assert_eq!(weapon.grip.rotation_q12, [0, -1024, 0]);
+        assert_eq!(weapon.grip.rotation_q12, [0, 0, 0]);
         assert_eq!(weapon.hitboxes.len(), hitboxes);
         assert_eq!(weapon.arc_reach, 640);
         assert_eq!(weapon.damage, 25);
