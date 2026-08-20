@@ -98,8 +98,8 @@ use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
     InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
-    LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord, LevelWaterCellRecord, ModelClipIndex,
-    ParticleEmitterRecord, RoomIndex, RuntimeDebugMask,
+    LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord, LevelUiValueBinding,
+    LevelWaterCellRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex, RuntimeDebugMask,
 };
 use psx_vram::{TexDepth, Tpage};
 
@@ -960,22 +960,6 @@ impl Playtest {
             evade,
         }
     }
-}
-
-/// Node-pool range `(first, count)` of the cooked "HUD" UI scene, so the
-/// in-game overlay draws only the HUD and not the front-end menu scenes that
-/// now share the same `UI_NODES` pool. Falls back to the whole pool when no
-/// scene is named "HUD".
-fn hud_scene_range() -> (usize, usize) {
-    let mut i = 0usize;
-    while i < UI_SCENES.len() {
-        let scene = &UI_SCENES[i];
-        if scene.name == "HUD" {
-            return (scene.node_first as usize, scene.node_count as usize);
-        }
-        i += 1;
-    }
-    (0, UI_NODES.len())
 }
 
 fn interactable_is_active(interactable: &InteractableRecord) -> bool {

@@ -1652,7 +1652,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .map(|record| record.focus_style)
             .unwrap_or(psx_level::LevelUiFocusStyle::DEFAULT);
         let ui_text_seed = self.ui_text_seed;
-        let mut textures = |asset| self.gameplay.ui_texture(asset);
+        let gameplay = &self.gameplay;
+        let mut textures = |asset| gameplay.ui_texture(asset);
         let loading_progress_q12 = self.loading_progress_q12;
         let value = |binding: LevelUiValueBinding| {
             resolve_ui_value(
@@ -1661,6 +1662,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 &option_values,
                 option_len,
                 loading_progress_q12,
+                &|binding| gameplay.ui_value(binding),
             )
         };
         // Slider fill reads the live option value by id from the copied
@@ -1805,6 +1807,7 @@ fn resolve_ui_value(
     values: &[i32; MAX_OPTIONS],
     len: usize,
     loading_progress_q12: i32,
+    gameplay_value: &impl Fn(LevelUiValueBinding) -> Option<i32>,
 ) -> i32 {
     match binding {
         LevelUiValueBinding::ConstantQ12(value) => value,
@@ -1815,7 +1818,7 @@ fn resolve_ui_value(
         LevelUiValueBinding::PlayerHealth
         | LevelUiValueBinding::PlayerHealthMax
         | LevelUiValueBinding::PlayerStamina
-        | LevelUiValueBinding::PlayerStaminaMax => 0,
+        | LevelUiValueBinding::PlayerStaminaMax => gameplay_value(binding).unwrap_or(0),
     }
 }
 
@@ -2056,6 +2059,61 @@ mod tests {
             PadState::NONE,
             FrameBuffer::new(320, 240),
         )
+    }
+
+    #[test]
+    fn gameplay_ui_bindings_delegate_to_the_scene_value_resolver() {
+        let values = [0; MAX_OPTIONS];
+        let gameplay_value = |binding| match binding {
+            LevelUiValueBinding::PlayerHealth => Some(3072),
+            LevelUiValueBinding::PlayerHealthMax => Some(4096),
+            _ => None,
+        };
+
+        assert_eq!(
+            resolve_ui_value(
+                LevelUiValueBinding::PlayerHealth,
+                &[],
+                &values,
+                0,
+                1234,
+                &gameplay_value,
+            ),
+            3072,
+        );
+        assert_eq!(
+            resolve_ui_value(
+                LevelUiValueBinding::PlayerHealthMax,
+                &[],
+                &values,
+                0,
+                1234,
+                &gameplay_value,
+            ),
+            4096,
+        );
+        assert_eq!(
+            resolve_ui_value(
+                LevelUiValueBinding::PlayerStamina,
+                &[],
+                &values,
+                0,
+                1234,
+                &gameplay_value,
+            ),
+            0,
+        );
+        assert_eq!(
+            resolve_ui_value(
+                LevelUiValueBinding::LoadingProgress,
+                &[],
+                &values,
+                0,
+                1234,
+                &gameplay_value,
+            ),
+            1234,
+        );
     }
 
     #[test]
