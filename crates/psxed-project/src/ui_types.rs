@@ -1108,6 +1108,14 @@ pub enum UiNodeKind {
         value: UiValueBinding,
         /// Maximum value binding.
         max: UiValueBinding,
+        /// Optional vertical sprite strip. Frames are ordered empty-to-full.
+        /// A missing texture or fewer than two frames keeps the legacy solid
+        /// bar renderer, so old projects remain compatible.
+        #[serde(default)]
+        texture: Option<ResourceId>,
+        /// Number of equal-height frames in `texture`.
+        #[serde(default)]
+        frame_count: u8,
         /// Filled portion colour.
         fill: [u8; 3],
         /// Optional fill gradient ending colour/direction.
@@ -1291,6 +1299,22 @@ pub(crate) fn default_ui_image_tint() -> [u8; 3] {
     [128, 128, 128]
 }
 
+/// Empty, five intermediate levels, and the completely full terminal frame.
+pub const DEFAULT_HEALTH_BAR_FRAME_COUNT: u8 = 7;
+
+/// Select an empty-to-full sprite-strip frame for a bound bar value. Positive
+/// fractional values round upward so a living player never appears dead, and
+/// an exact maximum always reaches the final fully-filled frame.
+pub fn ui_bar_frame_index(value: i32, max: i32, frame_count: u8) -> u8 {
+    if max <= 0 || frame_count < 2 || value <= 0 {
+        return 0;
+    }
+    let last = i64::from(frame_count - 1);
+    let value = i64::from(value.min(max));
+    let max = i64::from(max);
+    ((value * last + max - 1) / max).min(last) as u8
+}
+
 pub(crate) fn default_ui_button_color() -> [u8; 3] {
     [52, 60, 80]
 }
@@ -1399,7 +1423,7 @@ pub struct UiScene {
 impl UiScene {
     /// Create the default HUD scene authored at PSX 320x240 resolution.
     pub fn default_hud() -> Self {
-        let mut root = UiNode::new(
+        let root = UiNode::new(
             UiNodeId::ROOT,
             None,
             "HUD",
@@ -1408,43 +1432,14 @@ impl UiScene {
                 height: 240,
             },
         );
-        let health = UiNode::new(
-            UiNodeId(2),
-            Some(UiNodeId::ROOT),
-            "Health Bar",
-            UiNodeKind::Bar {
-                rect: UiRect::new(18, 16, 120, 8),
-                value: UiValueBinding::PlayerHealth,
-                max: UiValueBinding::PlayerHealthMax,
-                fill: [94, 16, 24],
-                fill_gradient: None,
-                background: [30, 26, 28],
-                background_gradient: None,
-            },
-        );
-        let stamina = UiNode::new(
-            UiNodeId(3),
-            Some(UiNodeId::ROOT),
-            "Stamina Bar",
-            UiNodeKind::Bar {
-                rect: UiRect::new(18, 29, 96, 5),
-                value: UiValueBinding::PlayerStamina,
-                max: UiValueBinding::PlayerStaminaMax,
-                fill: [44, 98, 48],
-                fill_gradient: None,
-                background: [30, 26, 28],
-                background_gradient: None,
-            },
-        );
-        root.children = vec![health.id, stamina.id];
         Self {
             id: UiSceneId::FIRST,
             name: "HUD".to_string(),
             root: UiNodeId::ROOT,
             default_focus: None,
             focus_style: UiFocusStyle::default(),
-            next_node_id: 4,
-            nodes: vec![root, health, stamina],
+            next_node_id: 2,
+            nodes: vec![root],
         }
     }
 
@@ -1476,6 +1471,11 @@ impl UiScene {
     /// All nodes in storage order.
     pub fn nodes(&self) -> &[UiNode] {
         &self.nodes
+    }
+
+    /// Mutable node slice for project-wide reference maintenance.
+    pub(crate) fn nodes_mut(&mut self) -> &mut [UiNode] {
+        &mut self.nodes
     }
 
     /// Get a node.
