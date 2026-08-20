@@ -198,9 +198,9 @@ pub mod material_flags {
     pub const FACE_BACK: u16 = 0x0001;
     /// Draw both sides of the authored face.
     pub const FACE_BOTH: u16 = 0x0002;
-    /// Quake-style layered sky surface: the material's atlas holds a
-    /// foreground (masked) and background tile side by side, rendered
-    /// as two scrolling texture-windowed layers.
+    /// Quake-style layered sky surface: the material's atlas holds a masked
+    /// foreground and solid background tile side by side. Marked faces select
+    /// the camera-direction sky background and act only as apertures.
     pub const LAYERED_SKY: u16 = 0x0004;
     /// All flags understood by PXBSP version one.
     pub const KNOWN: u16 = FACE_MASK | LAYERED_SKY;

@@ -14,6 +14,7 @@
 use crate::brush::{Brush, BrushContents, FaceUv, Plane};
 use crate::ResourceId;
 use psx_bsp::CookedRecord;
+use std::collections::HashSet;
 
 /// Fixed-point scale shared with the runtime: positions and plane
 /// distances are Q20.12, normals Q3.12.
@@ -145,6 +146,11 @@ pub struct CompiledSurfaceBsp {
 /// survives. Tighten only together with a packet/RAM plan.
 pub const SURFACE_EXTENT_UNITS: f64 = 2048.0;
 
+/// Large host-side branches divide exact splitter scoring across CPU cores.
+/// Smaller descendants stay single-threaded so thread setup never dominates
+/// ordinary editor rooms.
+const PARALLEL_SPLITTER_SURFACES: usize = 2048;
+
 /// Split every surface into patches no wider than `max_extent` on any
 /// world axis, unconditionally: [`subdivide_surfaces_for_lighting`]
 /// with a light gate that always passes.
@@ -153,6 +159,86 @@ pub fn subdivide_surfaces_to_extent(
     max_extent: f64,
 ) -> Vec<CompiledSurface> {
     subdivide_surfaces_for_lighting(surfaces, max_extent, &[([0.0; 3], f64::INFINITY)])
+}
+
+/// Fit PS1-safe render patches into a packed face budget.
+///
+/// Small levels keep `fine_extent` everywhere. For a full resident level, the
+/// cap doubles uniformly until the packed face budget is met. Lighting still
+/// bakes on every retained vertex; its spatial resolution coarsens together
+/// with geometry instead of silently making a level impossible to link.
+pub fn subdivide_surfaces_to_budget(
+    surfaces: &[CompiledSurface],
+    fine_extent: f64,
+    max_faces: usize,
+    _light_spheres: &[([f64; 3], f64)],
+) -> Vec<CompiledSurface> {
+    let mut coarse_extent = fine_extent;
+    loop {
+        let patches = subdivide_surfaces_to_extent(surfaces.to_vec(), coarse_extent);
+        let is_unsplit = patches.len() == surfaces.len();
+        if patches.len() <= max_faces || is_unsplit {
+            return patches;
+        }
+        coarse_extent *= 2.0;
+    }
+}
+
+/// Replace partition fragments with the final authored render surfaces.
+///
+/// The BSP builder may split one polygon many times to derive exact convex
+/// leaves and portals. Those temporary fragments describe visibility space;
+/// serializing them as independent draw faces duplicates the same authored
+/// surface across branches and makes full levels exceed the packed face cap.
+/// Render surfaces instead stay single-owner records referenced by every leaf
+/// they touch. Nodes deliberately own no faces in this layout, so the runtime
+/// selects the already-deduplicated PVS face chain.
+pub fn replace_bsp_render_surfaces(bsp: &mut CompiledSurfaceBsp, surfaces: Vec<CompiledSurface>) {
+    for node in &mut bsp.nodes {
+        node.first_surface = 0;
+        node.surface_count = 0;
+    }
+    for leaf in &mut bsp.leaves {
+        leaf.mark_surfaces.clear();
+    }
+    let mut retained = Vec::with_capacity(surfaces.len());
+    for surface in surfaces {
+        let mut reached_leaves = Vec::new();
+        let mut stack = vec![(bsp.root, surface.vertices.clone())];
+        while let Some((child, polygon)) = stack.pop() {
+            match child {
+                BspChild::Leaf(leaf) => {
+                    if bsp.leaves[leaf].contents.is_visible() && !reached_leaves.contains(&leaf) {
+                        reached_leaves.push(leaf);
+                    }
+                }
+                BspChild::Node(index) => {
+                    let node = &bsp.nodes[index];
+                    match split_polygon(&polygon, node.plane) {
+                        PolygonSplit::Front(vertices) => stack.push((node.front, vertices)),
+                        PolygonSplit::Back(vertices) => stack.push((node.back, vertices)),
+                        PolygonSplit::Coplanar => {
+                            stack.push((node.front, polygon.clone()));
+                            stack.push((node.back, polygon));
+                        }
+                        PolygonSplit::Split { front, back } => {
+                            stack.push((node.front, front));
+                            stack.push((node.back, back));
+                        }
+                    }
+                }
+            }
+        }
+        if reached_leaves.is_empty() {
+            continue;
+        }
+        let surface_index = retained.len();
+        retained.push(surface);
+        for leaf in reached_leaves {
+            bsp.leaves[leaf].mark_surfaces.push(surface_index);
+        }
+    }
+    bsp.surfaces = retained;
 }
 
 /// Split every surface into patches no wider than `max_extent` along
@@ -301,9 +387,23 @@ pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
             let Some(polygon) = solved[brush_index].polygons[face_index].as_ref() else {
                 continue;
             };
+            let polygon_bounds = polygon_bounds(&polygon.verts);
             let mut fragments = vec![polygon.verts.clone()];
             for other_index in 0..brushes.len() {
                 if other_index == brush_index || !valid[other_index] {
+                    continue;
+                }
+                // A convex volume can only carve this face when their AABBs
+                // overlap. Besides avoiding pointless plane walks, this is
+                // essential for full maps: subtracting thousands of remote
+                // brushes can partition a polygon into outside fragments even
+                // though none of those volumes reaches the face. The broad
+                // phase is conservative at touching boundaries, so it cannot
+                // discard a real CSG interaction.
+                if !bounds_overlap(
+                    polygon_bounds,
+                    (solved[other_index].min, solved[other_index].max),
+                ) {
                     continue;
                 }
                 // A liquid never carves structural geometry. Solid faces
@@ -351,13 +451,65 @@ pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
     output
 }
 
+fn polygon_bounds(vertices: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for vertex in vertices {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(vertex[axis]);
+            max[axis] = max[axis].max(vertex[axis]);
+        }
+    }
+    (min, max)
+}
+
+fn bounds_overlap(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3])) -> bool {
+    (0..3).all(|axis| a.1[axis] + CSG_EPSILON >= b.0[axis] && b.1[axis] + CSG_EPSILON >= a.0[axis])
+}
+
+/// Compile one solved polygon for every authored brush face.
+///
+/// Full maps can make pairwise union CSG fragment a few thousand source faces
+/// into hundreds of thousands of coplanar pieces. The classified BSP leaves
+/// already distinguish open space from buried solid boundaries, so this
+/// representation can retain each authored face once and let leaf marks keep
+/// internal faces out of visible PVS chains.
+pub fn compile_authored_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
+    let solved: Vec<_> = brushes.iter().map(Brush::solve).collect();
+    let mut output = Vec::new();
+    for (brush_index, brush) in brushes.iter().enumerate() {
+        if !solved[brush_index].is_valid() {
+            continue;
+        }
+        for (face_index, face) in brush.faces.iter().enumerate() {
+            let Some(plane) = Plane::from_points(face.points) else {
+                continue;
+            };
+            let Some(polygon) = solved[brush_index].polygons[face_index].as_ref() else {
+                continue;
+            };
+            output.push(CompiledSurface {
+                plane,
+                vertices: polygon.verts.clone(),
+                material: face.material,
+                uv: face.uv,
+                contents: brush.contents,
+                source_brush: brush_index,
+                source_face: face_index,
+            });
+        }
+    }
+    output
+}
+
 /// Recursively partition exterior CSG polygons into a render BSP.
 ///
 /// Splitter selection exhaustively minimizes polygon splits first and tree
-/// imbalance second. Classification is allocation-free, avoiding the fragment
-/// allocation storm that made exhaustive selection unusable on full Quake
-/// maps. Input order is the final tie breaker, so identical inputs always
-/// produce identical node, leaf and surface ordering.
+/// imbalance second. Coplanar surfaces produce the same classification, so
+/// only the first occurrence of each packed plane is scored. Large branches
+/// distribute those exact scores across host CPU cores. Classification is
+/// allocation-free and input order is the final tie breaker, so identical
+/// inputs always produce identical output.
 pub fn build_surface_bsp(surfaces: &[CompiledSurface]) -> CompiledSurfaceBsp {
     let mut bsp = CompiledSurfaceBsp {
         root: BspChild::Leaf(0),
@@ -484,31 +636,79 @@ fn build_surface_bsp_branch(
 }
 
 fn choose_splitter(surfaces: &[CompiledSurface]) -> usize {
-    (0..surfaces.len())
-        .map(|candidate| {
-            let surface = &surfaces[candidate];
-            let mut front = 0usize;
-            let mut back = 0usize;
-            let mut splits = 0usize;
-            for classified in surfaces {
-                match classify_polygon(&classified.vertices, surface.plane) {
-                    PolygonSide::Front => front += 1,
-                    PolygonSide::Back => back += 1,
-                    PolygonSide::Coplanar => {}
-                    PolygonSide::Split => {
-                        front += 1;
-                        back += 1;
-                        splits += 1;
-                    }
-                }
-            }
-            let imbalance = front.abs_diff(back);
-            let score = (splits, imbalance, candidate);
-            (score, candidate)
+    let mut seen = HashSet::with_capacity(surfaces.len());
+    let candidates: Vec<_> = surfaces
+        .iter()
+        .enumerate()
+        .filter_map(|(index, surface)| {
+            let (plane, _) = pack_plane(&surface.plane)?;
+            seen.insert(plane).then_some(index)
         })
-        .min_by_key(|(score, _)| *score)
-        .map(|(_, candidate)| candidate)
-        .expect("non-empty surface set")
+        .collect();
+    assert!(!candidates.is_empty(), "surface set has no valid plane");
+
+    let worker_count = if surfaces.len() >= PARALLEL_SPLITTER_SURFACES {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(candidates.len())
+    } else {
+        1
+    };
+    if worker_count == 1 {
+        return candidates
+            .into_iter()
+            .map(|candidate| score_splitter(surfaces, candidate))
+            .min_by_key(|(score, _)| *score)
+            .unwrap()
+            .1;
+    }
+
+    let chunk_size = candidates.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = candidates
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .copied()
+                        .map(|candidate| score_splitter(surfaces, candidate))
+                        .min_by_key(|(score, _)| *score)
+                        .unwrap()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("splitter worker panicked"))
+            .min_by_key(|(score, _)| *score)
+            .unwrap()
+            .1
+    })
+}
+
+fn score_splitter(
+    surfaces: &[CompiledSurface],
+    candidate: usize,
+) -> ((usize, usize, usize), usize) {
+    let surface = &surfaces[candidate];
+    let mut front = 0usize;
+    let mut back = 0usize;
+    let mut splits = 0usize;
+    for classified in surfaces {
+        match classify_polygon(&classified.vertices, surface.plane) {
+            PolygonSide::Front => front += 1,
+            PolygonSide::Back => back += 1,
+            PolygonSide::Coplanar => {}
+            PolygonSide::Split => {
+                front += 1;
+                back += 1;
+                splits += 1;
+            }
+        }
+    }
+    let imbalance = front.abs_diff(back);
+    ((splits, imbalance, candidate), candidate)
 }
 
 fn with_vertices(surface: &CompiledSurface, vertices: Vec<[f64; 3]>) -> CompiledSurface {
@@ -843,6 +1043,21 @@ mod tests {
             assert!(piece.vertices.len() >= 3);
         }
     }
+
+    #[test]
+    fn full_level_subdivision_coarsens_only_when_the_face_budget_requires_it() {
+        let surfaces = compile_csg_surfaces(&[Brush::cuboid([0, 0, 0], [4096, 256, 4096])]);
+        let fine = subdivide_surfaces_to_extent(surfaces.clone(), 128.0);
+        assert!(fine.len() > 64);
+
+        let fitted = subdivide_surfaces_to_budget(&surfaces, 128.0, 64, &[]);
+        assert!(fitted.len() <= 64, "fitted {} faces", fitted.len());
+        assert_eq!(
+            subdivide_surfaces_to_budget(&surfaces, 128.0, fine.len(), &[]),
+            fine
+        );
+    }
+
     use super::*;
     use psx_bsp::collision::{
         CollisionHull, Trace, TraceScratch, CONTENTS_EMPTY, CONTENTS_LAVA, CONTENTS_SLIME,
@@ -918,14 +1133,19 @@ mod tests {
 
     #[test]
     fn csg_adjacent_cuboids_remove_both_shared_faces() {
-        let surfaces = compile_csg_surfaces(&[
+        let brushes = [
             Brush::cuboid([0, 0, 0], [128, 128, 128]),
             Brush::cuboid([128, 0, 0], [256, 128, 128]),
-        ]);
+        ];
+        let surfaces = compile_csg_surfaces(&brushes);
         assert_eq!(surfaces.len(), 10);
         assert!(!surfaces.iter().any(|surface| {
             surface_axis_coordinate(surface, 0).is_some_and(|x| (x - 128.0).abs() < CSG_EPSILON)
         }));
+        let authored = compile_authored_surfaces(&brushes);
+        assert_eq!(authored.len(), 12);
+        assert_eq!(authored[0].source_brush, 0);
+        assert_eq!(authored[6].source_brush, 1);
     }
 
     #[test]

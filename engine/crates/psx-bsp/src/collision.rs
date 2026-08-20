@@ -70,6 +70,20 @@ impl BrushTransform {
             },
         )
     }
+
+    /// Transform one Q20.12 model-local point into world coordinates.
+    pub fn point_to_world(self, point: Vec3I32) -> Vec3I32 {
+        let rotated = Vec3I32 {
+            x: q12_dot(self.rotation.m[0], point),
+            y: q12_dot(self.rotation.m[1], point),
+            z: q12_dot(self.rotation.m[2], point),
+        };
+        Vec3I32 {
+            x: rotated.x.saturating_add(self.origin.x),
+            y: rotated.y.saturating_add(self.origin.y),
+            z: rotated.z.saturating_add(self.origin.z),
+        }
+    }
 }
 
 /// One byte-backed flag slot in a caller-owned [`Trace`].
@@ -516,8 +530,14 @@ impl<'a> CollisionHull<'a> {
                 };
                 trace.plane_distance = plane.distance.saturating_neg();
             }
-            trace.fraction = continuation.middle_fraction;
-            trace.end = continuation.middle;
+            // Re-solve the hit against the original segment and plane. The
+            // traversal's Q0.12 middle fraction is precise enough to choose
+            // children, but over a 32K-unit floor probe one fraction step is
+            // eight world units. Interpolating that coarse fraction made feet
+            // hover above the floor. The exact ratio keeps the endpoint on
+            // the epsilon-offset contact plane and is independent of how many
+            // other BSP nodes shortened the traversal segment first.
+            (trace.fraction, trace.end) = plane_contact(*start, *end, plane, continuation.side);
             *output = trace;
             return true;
         }
@@ -579,7 +599,7 @@ impl TransformedCollisionHull<'_> {
         {
             return false;
         }
-        trace.end = interpolate(*start, *end, trace.fraction);
+        trace.end = self.transform.point_to_world(trace.end);
         trace.normal = rotate_normal(self.transform.rotation, trace.normal);
         trace.plane_distance = trace
             .plane_distance
@@ -627,6 +647,43 @@ fn interpolate(start: Vec3I32, end: Vec3I32, fraction: i32) -> Vec3I32 {
         y: along(start.y, end.y),
         z: along(start.z, end.z),
     }
+}
+
+/// Return the public Q0.12 fraction and a high-precision Q20.12 endpoint for
+/// the epsilon-offset intersection of an original segment and hit plane.
+fn plane_contact(start: Vec3I32, end: Vec3I32, plane: Plane, side: u8) -> (i32, Vec3I32) {
+    let start_distance = i64::from(plane_distance(plane, start));
+    let end_distance = i64::from(plane_distance(plane, end));
+    let mut denominator = start_distance - end_distance;
+    if denominator == 0 {
+        return (0, start);
+    }
+    let epsilon = i64::from(TRACE_PLANE_EPSILON_Q12);
+    let mut numerator = if side == 0 {
+        start_distance - epsilon
+    } else {
+        start_distance + epsilon
+    };
+    if denominator < 0 {
+        denominator = -denominator;
+        numerator = -numerator;
+    }
+    numerator = numerator.clamp(0, denominator);
+
+    let fraction = ((numerator << 12) / denominator).clamp(0, i64::from(Q12_ONE)) as i32;
+    let along = |from: i32, to: i32| {
+        let delta = i64::from(to) - i64::from(from);
+        let value = i64::from(from).saturating_add(delta.saturating_mul(numerator) / denominator);
+        value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    (
+        fraction,
+        Vec3I32 {
+            x: along(start.x, end.x),
+            y: along(start.y, end.y),
+            z: along(start.z, end.z),
+        },
+    )
 }
 
 fn inverse_rotate_q12(rotation: Mat3I16, vector: Vec3I32) -> Vec3I32 {
@@ -1113,7 +1170,10 @@ mod tests {
             &mut TraceScratch::new(),
         );
         assert_eq!(result.fraction, 2002);
-        assert_eq!(result.end, Vec3I32 { x: 92, y: 92, z: 0 });
+        // The high-precision contact solve lands exactly on the packed
+        // plane's 128-Q12 epsilon contour. Q0.12 fraction interpolation used
+        // to round both coordinates up to 92 (signed distance 130).
+        assert_eq!(result.end, Vec3I32 { x: 91, y: 91, z: 0 });
         assert_eq!(
             result.normal,
             Vec3I16 {
@@ -1214,6 +1274,37 @@ mod tests {
         assert_eq!(result.end.y, TRACE_PLANE_EPSILON_Q12);
         assert_eq!(result.normal.y, Q12_ONE as i16);
         assert_eq!(result.plane_distance, 0);
+    }
+
+    #[test]
+    fn long_floor_probe_keeps_subunit_contact_precision() {
+        let floor = 4 * Q12_ONE;
+        let planes = plane(
+            Vec3I16 {
+                x: 0,
+                y: Q12_ONE as i16,
+                z: 0,
+            },
+            floor,
+            1,
+        );
+        let result = trace(
+            &hull(&planes, &one_node()),
+            Vec3I32 {
+                x: 28 * Q12_ONE,
+                y: 6 * Q12_ONE,
+                z: 12 * Q12_ONE,
+            },
+            Vec3I32 {
+                x: 28 * Q12_ONE,
+                y: -32_762 * Q12_ONE,
+                z: 12 * Q12_ONE,
+            },
+            &mut TraceScratch::new(),
+        );
+        assert_eq!(result.end.y, floor + TRACE_PLANE_EPSILON_Q12);
+        assert_eq!(result.end.x, 28 * Q12_ONE);
+        assert_eq!(result.end.z, 12 * Q12_ONE);
     }
 
     #[test]

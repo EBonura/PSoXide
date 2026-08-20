@@ -5,6 +5,8 @@ use crate::brush_compile::{pack_normalized_plane, pack_plane};
 
 const CONTENTS_EMPTY: i16 = psx_bsp::collision::CONTENTS_EMPTY;
 const HULL_EPSILON: f64 = 1.0 / 1024.0;
+const SPATIAL_LEAF_BRUSHES: usize = 64;
+const MAX_SPATIAL_DEPTH: usize = 12;
 pub const MAX_MAP_HULLS: usize = 4;
 
 /// Local bounds of the traced body relative to its world-space origin.
@@ -43,10 +45,32 @@ pub enum CollisionHullCompileError {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PreparedHullBrush {
+    planes: Vec<(i16, bool)>,
+    mins: [f64; 3],
+    maxs: [f64; 3],
+    contents: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SpatialSplit {
+    axis: usize,
+    distance: f64,
+}
+
 /// Compile point and box-expanded collision trees into one record table.
 pub fn compile_collision_hulls(
     brushes: &[Brush],
     hulls: &[CollisionHullBounds],
+) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
+    compile_collision_hulls_inner(brushes, hulls, true)
+}
+
+fn compile_collision_hulls_inner(
+    brushes: &[Brush],
+    hulls: &[CollisionHullBounds],
+    spatial: bool,
 ) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
     limit("collision hulls", hulls.len(), MAX_MAP_HULLS)?;
     let mut ordered: Vec<_> = brushes.iter().enumerate().collect();
@@ -60,7 +84,7 @@ pub fn compile_collision_hulls(
         if (0..3).any(|axis| hull.mins[axis] > hull.maxs[axis]) {
             return Err(CollisionHullCompileError::InvalidBounds(hull_index));
         }
-        let mut escape = CONTENTS_EMPTY;
+        let mut prepared = Vec::new();
         for ((brush_index, brush), solved) in ordered.iter().zip(&solved).rev() {
             if !solved.is_valid() {
                 continue;
@@ -73,10 +97,20 @@ pub fn compile_collision_hulls(
                 }
                 other => other,
             };
-            let planes = if hull == CollisionHullBounds::POINT {
-                point_hull_planes(brush).map_err(blame)?
+            let (planes, mins, maxs) = if hull == CollisionHullBounds::POINT {
+                (
+                    point_hull_planes(brush).map_err(blame)?,
+                    solved.min,
+                    solved.max,
+                )
             } else {
-                expanded_hull_planes(brush, solved, hull).map_err(blame)?
+                let points = expanded_points(&unique_brush_vertices(solved), hull);
+                let (mins, maxs) = point_bounds(&points);
+                (
+                    expanded_hull_planes(brush, solved, hull).map_err(blame)?,
+                    mins,
+                    maxs,
+                )
             };
             if planes.is_empty() {
                 continue;
@@ -87,20 +121,24 @@ pub fn compile_collision_hulls(
                 let plane = intern_plane(&mut plane_records, record)?;
                 face_planes.push((plane, flipped));
             }
-            let mut inside = brush.contents.runtime_contents();
-            for &(plane, flipped) in face_planes.iter().rev() {
-                limit("clipnodes", nodes.len() + 1, i16::MAX as usize + 1)?;
-                let (front, back) = if flipped {
-                    (inside, escape)
-                } else {
-                    (escape, inside)
-                };
-                nodes.push([plane, front, back]);
-                inside = (nodes.len() - 1) as i16;
-            }
-            escape = inside;
+            prepared.push(PreparedHullBrush {
+                planes: face_planes,
+                mins,
+                maxs,
+                contents: brush.contents.runtime_contents(),
+            });
         }
-        head_nodes.push(escape);
+        // The authored precedence order above is low-to-high because the old
+        // chain compiler wrapped each successive brush around the previous
+        // root. Restore high-to-low before building spatial leaves so their
+        // small fallback chains preserve the exact overlap semantics.
+        prepared.reverse();
+        let brushes: Vec<_> = (0..prepared.len()).collect();
+        head_nodes.push(if spatial {
+            build_spatial_hull(&prepared, &brushes, 0, &mut plane_records, &mut nodes)?
+        } else {
+            build_brush_chain(&prepared, &brushes, &mut nodes)?
+        });
     }
 
     let mut clipnodes = Vec::with_capacity(nodes.len() * 6);
@@ -114,6 +152,154 @@ pub fn compile_collision_hulls(
         clipnodes,
         head_nodes,
     })
+}
+
+fn build_spatial_hull(
+    brushes: &[PreparedHullBrush],
+    active: &[usize],
+    depth: usize,
+    planes: &mut Vec<[u8; 14]>,
+    nodes: &mut Vec<[i16; 3]>,
+) -> Result<i16, CollisionHullCompileError> {
+    if active.len() <= SPATIAL_LEAF_BRUSHES || depth == MAX_SPATIAL_DEPTH {
+        return build_brush_chain(brushes, active, nodes);
+    }
+    let Some(split) = choose_spatial_split(brushes, active) else {
+        return build_brush_chain(brushes, active, nodes);
+    };
+    let mut front = Vec::new();
+    let mut back = Vec::new();
+    partition_brushes(brushes, active, split, &mut front, &mut back);
+    if front.len() == active.len() || back.len() == active.len() {
+        return build_brush_chain(brushes, active, nodes);
+    }
+
+    let mut normal = [0.0; 3];
+    normal[split.axis] = 1.0;
+    let (record, flipped) = pack_normalized_plane(normal, split.distance)
+        .ok_or(CollisionHullCompileError::InvalidPlane(None))?;
+    debug_assert!(!flipped, "positive axial spatial plane cannot flip");
+    let plane = intern_plane(planes, record)?;
+    limit("clipnodes", nodes.len() + 1, i16::MAX as usize + 1)?;
+    let node = nodes.len();
+    nodes.push([plane, CONTENTS_EMPTY, CONTENTS_EMPTY]);
+    let front = build_spatial_hull(brushes, &front, depth + 1, planes, nodes)?;
+    let back = build_spatial_hull(brushes, &back, depth + 1, planes, nodes)?;
+    nodes[node] = [plane, front, back];
+    Ok(node as i16)
+}
+
+fn build_brush_chain(
+    brushes: &[PreparedHullBrush],
+    active: &[usize],
+    nodes: &mut Vec<[i16; 3]>,
+) -> Result<i16, CollisionHullCompileError> {
+    let mut escape = CONTENTS_EMPTY;
+    // `active` retains high-to-low precedence. Wrap low first so the
+    // strongest contents brush becomes the root, exactly as before.
+    for &brush in active.iter().rev() {
+        let brush = &brushes[brush];
+        let mut inside = brush.contents;
+        for &(plane, flipped) in brush.planes.iter().rev() {
+            limit("clipnodes", nodes.len() + 1, i16::MAX as usize + 1)?;
+            let (front, back) = if flipped {
+                (inside, escape)
+            } else {
+                (escape, inside)
+            };
+            nodes.push([plane, front, back]);
+            inside = (nodes.len() - 1) as i16;
+        }
+        escape = inside;
+    }
+    Ok(escape)
+}
+
+fn choose_spatial_split(brushes: &[PreparedHullBrush], active: &[usize]) -> Option<SpatialSplit> {
+    let mut best: Option<((usize, usize, usize, usize), SpatialSplit)> = None;
+    for axis in 0..3 {
+        let mut centers: Vec<_> = active
+            .iter()
+            .map(|&index| (brushes[index].mins[axis] + brushes[index].maxs[axis]) * 0.5)
+            .collect();
+        centers.sort_by(f64::total_cmp);
+        centers.dedup_by(|left, right| (*left - *right).abs() <= HULL_EPSILON);
+        if centers.len() < 2 {
+            continue;
+        }
+        for numerator in [1usize, 2, 3] {
+            let pivot = centers.len().saturating_mul(numerator) / 4;
+            if pivot == 0 || pivot >= centers.len() {
+                continue;
+            }
+            let distance = (centers[pivot - 1] + centers[pivot]) * 0.5;
+            let split = SpatialSplit { axis, distance };
+            let (front, back) = partition_counts(brushes, active, split);
+            let largest = front.max(back);
+            if front == 0 || back == 0 || largest == active.len() {
+                continue;
+            }
+            let duplicates = front + back - active.len();
+            // A duplicated brush repeats its complete convex plane chain in
+            // both leaves. Penalize that more than a modest imbalance so the
+            // PS1 clipnode table remains compact as well as shallow.
+            let score = (
+                largest.saturating_add(duplicates.saturating_mul(4)),
+                largest,
+                duplicates,
+                front.abs_diff(back),
+            );
+            if best.is_none_or(|(best_score, _)| score < best_score) {
+                best = Some((score, split));
+            }
+        }
+    }
+    best.map(|(_, split)| split)
+}
+
+fn partition_counts(
+    brushes: &[PreparedHullBrush],
+    active: &[usize],
+    split: SpatialSplit,
+) -> (usize, usize) {
+    let mut front = 0;
+    let mut back = 0;
+    for &index in active {
+        let brush = &brushes[index];
+        front += usize::from(brush.maxs[split.axis] + HULL_EPSILON >= split.distance);
+        back += usize::from(brush.mins[split.axis] < split.distance - HULL_EPSILON);
+    }
+    (front, back)
+}
+
+fn partition_brushes(
+    brushes: &[PreparedHullBrush],
+    active: &[usize],
+    split: SpatialSplit,
+    front: &mut Vec<usize>,
+    back: &mut Vec<usize>,
+) {
+    for &index in active {
+        let brush = &brushes[index];
+        if brush.maxs[split.axis] + HULL_EPSILON >= split.distance {
+            front.push(index);
+        }
+        if brush.mins[split.axis] < split.distance - HULL_EPSILON {
+            back.push(index);
+        }
+    }
+}
+
+fn point_bounds(points: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
+    let mut mins = [f64::INFINITY; 3];
+    let mut maxs = [f64::NEG_INFINITY; 3];
+    for point in points {
+        for axis in 0..3 {
+            mins[axis] = mins[axis].min(point[axis]);
+            maxs[axis] = maxs[axis].max(point[axis]);
+        }
+    }
+    (mins, maxs)
 }
 
 fn point_hull_planes(brush: &Brush) -> Result<Vec<([u8; 14], bool)>, CollisionHullCompileError> {
@@ -441,6 +627,48 @@ mod tests {
             compile_collision_hulls(&brushes, &hulls),
             compile_collision_hulls(&brushes, &hulls)
         );
+    }
+
+    #[test]
+    fn spatial_hull_matches_linear_reference_on_a_large_brush_grid() {
+        let mut brushes = Vec::new();
+        for z in 0..9 {
+            for x in 0..9 {
+                let min = [x * 128, 0, z * 128];
+                brushes.push(Brush::cuboid(min, [min[0] + 48, 64, min[2] + 48]));
+            }
+        }
+        let spatial = compile_collision_hulls_inner(&brushes, &[PLAYER], true).expect("spatial");
+        let linear = compile_collision_hulls_inner(&brushes, &[PLAYER], false).expect("linear");
+        let spatial = hull(&spatial, 0);
+        let linear = hull(&linear, 0);
+
+        for z in 0..9 {
+            for x in 0..9 {
+                for point in [
+                    at(x * 128 + 24, 32, z * 128 + 24),
+                    at(x * 128 + 88, 32, z * 128 + 88),
+                ] {
+                    assert_eq!(
+                        spatial.point_contents(point),
+                        linear.point_contents(point),
+                        "contents mismatch in cell ({x}, {z})"
+                    );
+                }
+            }
+        }
+        for row in [0, 4, 8] {
+            for column in [0, 4, 8] {
+                let z = row * 128 + 24;
+                let start = at(column * 128 - 48, 32, z);
+                let end = at(column * 128 + 32, 32, z);
+                assert_eq!(
+                    trace(&spatial, start, end),
+                    trace(&linear, start, end),
+                    "trace mismatch at ({column}, {row})"
+                );
+            }
+        }
     }
 
     #[test]

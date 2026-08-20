@@ -21,6 +21,10 @@ editor = ["dep:psxed-ui", "dep:psxed-project"]
 # below and never enter the wasm dep graph; the module is additionally
 # `#[cfg(not(target_arch = "wasm32"))]`.
 mcp = ["dep:rmcp", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:base64"]
+# Opt-in allocation instrumentation for the ignored, full-project editor
+# preview benchmark. Keeping it off normal test binaries avoids an atomic
+# counter on every allocation in the frontend suite.
+editor-preview-benchmark = []
 
 [dependencies]
 emulator-core    = { workspace = true }

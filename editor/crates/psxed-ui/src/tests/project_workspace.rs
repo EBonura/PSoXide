@@ -556,6 +556,7 @@ fn editor_viewport_saves_with_project_and_restores_on_open() {
     assert_eq!(reopened.orthographic_focus, [64.0, 128.0, 256.0]);
     assert_eq!(reopened.viewport_zoom, 48.0);
     assert_eq!(reopened.snap_units, 32);
+    assert_eq!(reopened.grid_snap_units(), 32);
 
     // Out-of-range persisted zoom clamps into the interactive range.
     let mut wild = EditorWorkspace::open_directory(&project_dir).unwrap();
@@ -564,6 +565,7 @@ fn editor_viewport_saves_with_project_and_restores_on_open() {
     wild.apply_project_editor_viewport();
     assert_eq!(wild.viewport_zoom, MAX_VIEWPORT_ZOOM);
     assert_eq!(wild.snap_units, 1);
+    assert_eq!(wild.grid_snap_units(), 1);
 
     let _ = std::fs::remove_dir_all(project_dir);
 }

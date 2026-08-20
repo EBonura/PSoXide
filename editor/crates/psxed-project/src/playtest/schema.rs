@@ -136,6 +136,8 @@ pub struct PlaytestPxbspWorld {
     pub texture_asset_indices: Vec<usize>,
     /// Brush submodels in authored-node order.
     pub movers: Vec<PlaytestPxbspMover>,
+    /// Quake-style pointfile path; empty when the world is sealed.
+    pub leak_path: Vec<[i32; 3]>,
 }
 
 /// Link from an authored Door logic node to its PXBSP brush submodel.
