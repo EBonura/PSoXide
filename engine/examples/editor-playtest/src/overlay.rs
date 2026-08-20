@@ -1,93 +1,11 @@
 //! Debug/status overlays for editor-playtest.
 //!
-//! Cooked UI scenes are rendered by the engine's
-//! [`psx_engine::ui::draw_scene`]; this module only supplies the two
-//! project-specific resolvers (texture upload lookup, gameplay value
-//! bindings) plus a couple of one-off prompts the playtest still draws
-//! directly.
+//! Cooked UI scenes are rendered by the engine's scene-state UI pass. This
+//! module keeps only the one-off prompts and diagnostic overlays the playtest
+//! still draws directly.
 
 use super::*;
-use psx_engine::ui::{self, UiTextureSlot};
 use psx_gpu::draw_quad_flat;
-use psx_level::{LevelUiNodeRecord, LevelUiValueBinding};
-
-const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
-
-pub(crate) fn draw_player_hud(
-    nodes: &[LevelUiNodeRecord],
-    hud_first: usize,
-    hud_count: usize,
-    fonts: &[Option<&FontAtlas>],
-    frame: u16,
-    health: u16,
-    health_max: u16,
-    stamina_q12: i32,
-    stamina_max_q12: i32,
-) {
-    if nodes.is_empty() || hud_count == 0 {
-        return;
-    }
-    // Real player HP (the combat slice) scaled onto the HUD's Q12
-    // bar convention; a zero max (pre-init) reads as a full bar so
-    // hand-rolled manifests keep their old look.
-    let health_q12 = if health_max == 0 {
-        PLAYER_HEALTH_MAX_Q12
-    } else {
-        (i32::from(health) * PLAYER_HEALTH_MAX_Q12) / i32::from(health_max)
-    };
-    // Image nodes name an AssetId; resolve it through the example's
-    // asset table + VRAM residency manager into the words the engine
-    // renderer needs. Skips the image when the texture is missing or
-    // not resident this frame.
-    let mut resolve_texture = |asset_id: AssetId| -> Option<UiTextureSlot> {
-        let asset = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture)?;
-        let slot = ensure_texture_uploaded(asset.id, asset.bytes)?;
-        Some(UiTextureSlot {
-            clut_word: slot.clut_word,
-            tpage_word: slot.tpage_word,
-            texture_window: slot.texture_window,
-            texture_width: slot.texture_width,
-            texture_height: slot.texture_height,
-        })
-    };
-
-    // Bar nodes name a value binding; resolve gameplay fields here so
-    // the engine stays free of stamina/health knowledge.
-    let resolve_value = |binding: LevelUiValueBinding| -> i32 {
-        match binding {
-            LevelUiValueBinding::ConstantQ12(value) => value,
-            LevelUiValueBinding::Option(_) => 0,
-            LevelUiValueBinding::PlayerHealth => health_q12,
-            LevelUiValueBinding::PlayerHealthMax => PLAYER_HEALTH_MAX_Q12,
-            LevelUiValueBinding::PlayerStamina => stamina_q12,
-            LevelUiValueBinding::PlayerStaminaMax => stamina_max_q12,
-            // Loading progress is a loading-screen binding; it has no
-            // meaning on the in-game HUD.
-            LevelUiValueBinding::LoadingProgress => 0,
-        }
-    };
-
-    // HUD overlay: draw only the HUD scene's node slice (the shared pool
-    // also holds front-end menu scenes now), no menu focus so no control is
-    // highlighted. The HUD carries no sliders, so the option table is empty
-    // and the value resolver always reports zero.
-    ui::draw_scene(
-        nodes,
-        hud_first,
-        hud_count,
-        &[],
-        fonts,
-        None,
-        &psx_level::LevelUiFocusStyle::DEFAULT,
-        frame,
-        0,
-        &mut resolve_texture,
-        &resolve_value,
-        &[],
-        &|_option_id| 0,
-        &|_| true,
-    );
-}
 
 pub(crate) fn draw_analog_required_prompt(font: &FontAtlas) {
     const BOX_X0: i16 = 32;

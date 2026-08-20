@@ -1059,21 +1059,32 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
         expected,
     );
     assert!(
-        bytes.len() >= 4 && bytes.len().is_multiple_of(4),
-        "upload_bytes: byte count must be a positive multiple of 4"
+        bytes.len() >= 2 && bytes.len().is_multiple_of(2),
+        "upload_bytes: byte count must be a positive multiple of 2"
     );
 
     // FIFO path by default; see upload_16bpp for the silicon rationale.
-    // Two halfwords per word, low half first -- matches
-    // upload_16bpp's packing convention. See upload_16bpp: image payload
-    // writes must not wait on the normal command-ready bit.
+    // Two halfwords per word, low half first -- matches upload_16bpp's
+    // packing convention. GP0 image copies with an odd halfword count still
+    // consume one complete final word; its unused high halfword is ignored by
+    // the GPU, so zero-pad it. See upload_16bpp: image payload writes must not
+    // wait on the normal command-ready bit.
     copy_to_vram_header(rect);
     let mut i = 0;
-    while i + 3 < bytes.len() {
-        let w = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
-        write_gp0(w);
+    while i < bytes.len() {
+        write_gp0(packed_upload_word(bytes, i));
         i += 4;
     }
+}
+
+#[inline]
+fn packed_upload_word(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes.get(offset + 2).copied().unwrap_or(0),
+        bytes.get(offset + 3).copied().unwrap_or(0),
+    ])
 }
 
 /// Upload an already packed little-endian stream of two 16-bit VRAM pixels
@@ -1198,6 +1209,15 @@ pub fn upload_clut(clut: Clut, entries: &[Color555]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_upload_word_zero_pads_an_odd_final_halfword() {
+        assert_eq!(
+            packed_upload_word(&[0x11, 0x22, 0x33, 0x44], 0),
+            0x4433_2211
+        );
+        assert_eq!(packed_upload_word(&[0x55, 0x66], 0), 0x0000_6655);
+    }
 
     #[test]
     fn stp_is_the_mask_bit_named_for_its_palette_meaning() {
@@ -1454,7 +1474,10 @@ mod tests {
         assert!(!vram_layout_is_disjoint(&clashing));
 
         // Touching edges are not an overlap.
-        let touching = [VramRect::new(0, 0, 320, 240), VramRect::new(320, 0, 64, 240)];
+        let touching = [
+            VramRect::new(0, 0, 320, 240),
+            VramRect::new(320, 0, 64, 240),
+        ];
         assert_eq!(first_vram_overlap(&touching), None);
         let stacked = [VramRect::new(0, 0, 320, 240), VramRect::new(0, 240, 320, 8)];
         assert_eq!(first_vram_overlap(&stacked), None);

@@ -14,7 +14,7 @@
 
 use psx_font::FontAtlas;
 use psx_gpu::framebuf::FrameBuffer;
-use psx_level::{AssetId, LevelOptionDef, LevelWorldLayer};
+use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
 use psx_pad::{button, PadState};
 
 use crate::frames::{SimTick, VideoHz, VisualFrame};
@@ -327,6 +327,18 @@ pub trait Scene {
     /// menus only.
     #[inline]
     fn ui_texture(&self, _asset: AssetId) -> Option<UiTextureSlot> {
+        None
+    }
+
+    /// Resolve a gameplay-owned UI value such as player health or stamina.
+    ///
+    /// Constants, project options, and loading progress remain owned by the
+    /// flow driver. Returning `None` for a gameplay binding draws it as zero;
+    /// scenes with an authored gameplay HUD override this method so that HUD
+    /// is rendered once by the same scene-state UI pass as every other
+    /// authored overlay.
+    #[inline]
+    fn ui_value(&self, _binding: LevelUiValueBinding) -> Option<i32> {
         None
     }
 
