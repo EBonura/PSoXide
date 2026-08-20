@@ -258,6 +258,29 @@ fn model_face_packed_uv_words_match_packet_texcoords() {
 }
 
 #[test]
+fn model_face_palette_bank_uses_spare_vertex_bits_without_growing() {
+    let face = TexturedModelRenderFace::new_with_palette_bank(
+        [451, 17, 32],
+        [(3, 5), (17, 7), (11, 29)],
+        3,
+    );
+    assert_eq!(core::mem::size_of::<TexturedModelRenderFace>(), 12);
+    assert_eq!(face.vertex_indices(), [451, 17, 32]);
+    assert_eq!(face.palette_bank(), 3);
+    assert_eq!(face.corner_words[0] as u16, 0xc1c3);
+
+    let material = TextureMaterial::opaque(0x0120, 0x0160, (128, 128, 128));
+    assert_eq!(material.with_clut_bank(3).clut_word(), 0x0123);
+    assert_eq!(
+        material
+            .textured_packet_material()
+            .with_clut_bank(3)
+            .clut_high_word,
+        0x0123_0000
+    );
+}
+
+#[test]
 fn model_face_uv_offset_wraps_each_byte_independently() {
     let face = TexturedModelRenderFace::new([0, 1, 2], [(250, 1), (3, 254), (128, 64)]);
     let moved = face.with_uv_offset(ModelUvOffset::new(10, 4));
@@ -307,6 +330,7 @@ fn model_no_cull_unclamped_batch_keeps_both_windings() {
             &faces,
             material.textured_packet_material(),
             uv_offset,
+            false,
             options,
             &mut stats,
             &mut faces_considered,

@@ -328,7 +328,7 @@ impl Playtest {
             let axis = |face: &TexturedModelRenderFace| -> i32 {
                 let mut sum = 0i32;
                 for corner in 0..3 {
-                    let index = vertex_first + (face.corner_words[corner] & 0xFFFF) as usize;
+                    let index = vertex_first + face.vertex_indices()[corner] as usize;
                     if let Some(vertex) = self.model_vertices.get(index) {
                         sum += i32::from(vertex.position.y);
                     }
