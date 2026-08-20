@@ -30,6 +30,8 @@ mod model_material_texture;
 pub use model_material_texture::*;
 pub mod playtest;
 pub mod portal_rooms;
+pub mod quake_map_import;
+pub mod quake_bsp29;
 pub mod resolve;
 pub mod room_connections;
 pub mod spatial;

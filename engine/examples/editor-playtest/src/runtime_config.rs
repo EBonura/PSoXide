@@ -380,6 +380,18 @@ pub(super) const PREBUILT_ROOM_QUAD_CAP: usize = 256;
 /// two material passes; overflow beyond the derived capacity still degrades
 /// safely and is reported by telemetry.
 pub(super) const MAX_TEXTURED_TRIS: usize = PLAYTEST_PACKET_CAPACITY;
+/// PXBSP writes the static world straight into the packet arena. The generic
+/// command list is only needed for actors, props, particles, and overlays, so
+/// retaining one command for every possible BSP packet wastes scarce PS1 RAM.
+pub(super) const MAX_WORLD_COMMANDS: usize = if USES_PXBSP {
+    if MAX_TEXTURED_TRIS < 1024 {
+        MAX_TEXTURED_TRIS
+    } else {
+        1024
+    }
+} else {
+    MAX_TEXTURED_TRIS
+};
 
 /// Cap on the per-room material slot count. Single source of truth is
 /// `psx_level::MAX_ROOM_MATERIALS` (the cook<->runtime contract): the cook now

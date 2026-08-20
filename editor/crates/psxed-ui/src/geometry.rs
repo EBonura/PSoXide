@@ -69,6 +69,9 @@ pub(crate) fn describe_material_target(target: MaterialTarget) -> String {
     match target {
         MaterialTarget::Face(face) => describe_face(face),
         MaterialTarget::Triangle(triangle) => describe_triangle(triangle),
+        MaterialTarget::BrushFace { brush, face } => {
+            format!("brush {} face {}", brush + 1, face + 1)
+        }
     }
 }
 

@@ -203,8 +203,8 @@ use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
     PrimitivePacketScratch::ZERO;
-static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
-    [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
+static mut WORLD_COMMANDS: [WorldTriCommand; MAX_WORLD_COMMANDS] =
+    [WorldTriCommand::EMPTY; MAX_WORLD_COMMANDS];
 fn world_camera_from_position_focus(
     projection: WorldProjection,
     position: RoomPoint,

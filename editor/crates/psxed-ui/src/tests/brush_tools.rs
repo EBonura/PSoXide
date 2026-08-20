@@ -2,7 +2,6 @@ use super::*;
 use crate::workspace::tools::{tool_impl_3d, BrushHandle3d, ToolFrame3d, BRUSH_CREATE_HEIGHT};
 use psxed_project::brush::SolvedBrush;
 
-
 fn polyline_grab_point(polyline: &[Pos2]) -> Pos2 {
     if polyline.len() == 2 {
         polyline[0] + (polyline[1] - polyline[0]) * 0.6
@@ -1014,8 +1013,8 @@ fn bsp_marquee_multi_selects_brushes_in_every_orthographic_view_via_real_egui() 
 
 #[test]
 fn tracked_bsp_starter_top_view_emits_headless_brush_outline_shapes() {
-    let fixture_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../archive/fixtures/brush-first-playable");
     let project = ProjectDocument::load_from_path(fixture_dir.join("project.ron"))
         .expect("tracked BSP starter loads");
     let expected_segments = project
@@ -1269,7 +1268,9 @@ fn element_gizmo_drag_runs_through_real_egui_in_select_mode() {
     let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
     let vertex = crate::workspace::brush_elements::unique_vertices(&brush.solve())[0];
     workspace.apply_brush_element_selection(
-        BrushElement::Vertex(crate::workspace::brush_elements::quantize_element_point(vertex)),
+        BrushElement::Vertex(crate::workspace::brush_elements::quantize_element_point(
+            vertex,
+        )),
         egui::Modifiers::NONE,
     );
     let polylines = workspace
@@ -1295,15 +1296,17 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
         project
             .active_scene_mut()
             .brushes
-            .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 256, 256]));
+            .push(psxed_project::brush::Brush::cuboid(
+                [0, 0, 0],
+                [512, 256, 256],
+            ));
         let mut workspace =
             EditorWorkspace::with_project(test_temp_dir("element-rotate-scale"), project);
         workspace.active_tool = ViewTool::Select;
         workspace.camera_rig.mode = ViewportCameraMode::Free;
         workspace.camera_rig.free_initialized = true;
         workspace.camera_rig.free_position = [1400, 1200, -1400];
-        let (yaw, pitch) =
-            camera_angles_to_look_at([1400, 1200, -1400], [256, 128, 128]).unwrap();
+        let (yaw, pitch) = camera_angles_to_look_at([1400, 1200, -1400], [256, 128, 128]).unwrap();
         workspace.camera_rig.free_yaw = yaw;
         workspace.camera_rig.free_pitch = pitch;
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
@@ -1330,8 +1333,14 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
     workspace.set_transform_gizmo_mode(TransformGizmoMode::Rotate);
     let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
     let grab = polyline_grab_point(&polylines[1]);
-    tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
-    assert!(workspace.brush_element_transform.is_some(), "rotate grab starts");
+    tool.primary_pressed(
+        &mut workspace,
+        &element_click_frame(rect, grab, egui::Modifiers::NONE),
+    );
+    assert!(
+        workspace.brush_element_transform.is_some(),
+        "rotate grab starts"
+    );
     let center = workspace
         .brush_element_transform
         .as_ref()
@@ -1341,7 +1350,10 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
     // Quarter-turn sweep: rotate the pointer offset 90 degrees around
     // the centre (screen-space).
     let swept = center + Vec2::new(-radial.y, radial.x);
-    tool.primary_dragged(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
+    tool.primary_dragged(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
     assert_eq!(
         workspace
             .brush_element_transform
@@ -1351,7 +1363,10 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
             .abs(),
         90
     );
-    tool.primary_released(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
+    tool.primary_released(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
     assert!(
         has_vertex(&workspace, [128.0, 256.0, 384.0])
             || has_vertex(&workspace, [384.0, 256.0, -128.0]),
@@ -1367,18 +1382,36 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
     workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
     let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
     let grab = polyline_grab_point(&polylines[0]);
-    tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
-    assert!(workspace.brush_element_transform.is_some(), "scale grab starts");
+    tool.primary_pressed(
+        &mut workspace,
+        &element_click_frame(rect, grab, egui::Modifiers::NONE),
+    );
+    assert!(
+        workspace.brush_element_transform.is_some(),
+        "scale grab starts"
+    );
     let screen_axis = workspace
         .brush_element_transform
         .as_ref()
         .unwrap()
         .screen_axis;
     let swept = grab + screen_axis * 128.0;
-    tool.primary_dragged(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
-    assert_eq!(workspace.brush_element_transform.as_ref().unwrap().applied, 50);
-    tool.primary_released(&mut workspace, &element_click_frame(rect, swept, egui::Modifiers::NONE));
-    assert!(has_vertex(&workspace, [-128.0, 256.0, 0.0]), "scaled corner");
+    tool.primary_dragged(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
+    assert_eq!(
+        workspace.brush_element_transform.as_ref().unwrap().applied,
+        50
+    );
+    tool.primary_released(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
+    assert!(
+        has_vertex(&workspace, [-128.0, 256.0, 0.0]),
+        "scaled corner"
+    );
     assert!(has_vertex(&workspace, [0.0, 0.0, 0.0]), "floor untouched");
 }
 
@@ -2058,7 +2091,11 @@ fn clipped_brush_saves_reopens_and_still_cooks() {
 
     let project = reopened.project().clone();
     let (package, report) = psxed_project::playtest::build_package(&project, &dir);
-    assert!(report.is_ok(), "clipped world must cook: {:?}", report.errors);
+    assert!(
+        report.is_ok(),
+        "clipped world must cook: {:?}",
+        report.errors
+    );
     assert!(package.is_some());
 
     let _ = std::fs::remove_dir_all(dir);
@@ -2308,7 +2345,10 @@ fn element_click_workspace() -> (EditorWorkspace, Rect) {
     project
         .active_scene_mut()
         .brushes
-        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [512, 512, 512]));
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [512, 512, 512],
+        ));
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.active_tool = ViewTool::Select;
     workspace.camera_rig.mode = ViewportCameraMode::Free;
@@ -2357,7 +2397,10 @@ fn clicks_select_vertices_and_edges_individually() {
     // silhouette regression).
     let corner = screen_for_world(&workspace, rect, [0.0, 512.0, 0.0]);
     let tool = tool_impl_3d(ViewTool::Select);
-    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner, egui::Modifiers::NONE));
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, corner, egui::Modifiers::NONE),
+    );
     assert_eq!(
         workspace.selected_brush_elements,
         vec![BrushElement::Vertex([0, 512, 0])]
@@ -2366,9 +2409,15 @@ fn clicks_select_vertices_and_edges_individually() {
 
     // Shift-click adds a second vertex; shift-clicking it again removes it.
     let corner2 = screen_for_world(&workspace, rect, [512.0, 512.0, 0.0]);
-    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner2, egui::Modifiers::SHIFT));
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, corner2, egui::Modifiers::SHIFT),
+    );
     assert_eq!(workspace.selected_brush_elements.len(), 2);
-    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner2, egui::Modifiers::SHIFT));
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, corner2, egui::Modifiers::SHIFT),
+    );
     assert_eq!(
         workspace.selected_brush_elements,
         vec![BrushElement::Vertex([0, 512, 0])]
@@ -2377,7 +2426,10 @@ fn clicks_select_vertices_and_edges_individually() {
     // Edge mode: click the top-front edge midpoint; canonical key.
     workspace.set_brush_edit_mode(BrushEditMode::Edge);
     let midpoint = screen_for_world(&workspace, rect, [256.0, 512.0, 0.0]);
-    tool.primary_clicked(&mut workspace, &element_click_frame(rect, midpoint, egui::Modifiers::NONE));
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, midpoint, egui::Modifiers::NONE),
+    );
     assert_eq!(
         workspace.selected_brush_elements,
         vec![BrushElement::Edge([0, 512, 0], [512, 512, 0])]
@@ -2460,7 +2512,10 @@ fn group_drag_moves_every_selected_vertex() {
         &mut workspace,
         &element_click_frame(rect, corner_a, egui::Modifiers::NONE),
     );
-    assert!(workspace.brush_vertex_drag.is_some(), "handle grab starts a drag");
+    assert!(
+        workspace.brush_vertex_drag.is_some(),
+        "handle grab starts a drag"
+    );
     assert_eq!(
         workspace.brush_vertex_drag.as_ref().unwrap().targets.len(),
         2,
@@ -2484,13 +2539,18 @@ fn group_drag_moves_every_selected_vertex() {
     let verts = crate::workspace::brush_elements::unique_vertices(&solved);
     let moved = |target: [f64; 3]| {
         verts.iter().any(|vertex| {
-            (0..3).all(|axis| {
-                (vertex[axis] - (target[axis] + f64::from(applied[axis]))).abs() <= 0.5
-            })
+            (0..3)
+                .all(|axis| (vertex[axis] - (target[axis] + f64::from(applied[axis]))).abs() <= 0.5)
         })
     };
-    assert!(moved([0.0, 512.0, 0.0]), "corner A moved by the applied delta");
-    assert!(moved([512.0, 512.0, 0.0]), "corner B moved by the applied delta");
+    assert!(
+        moved([0.0, 512.0, 0.0]),
+        "corner A moved by the applied delta"
+    );
+    assert!(
+        moved([512.0, 512.0, 0.0]),
+        "corner B moved by the applied delta"
+    );
 
     // The selection survived its own drag (keys remapped).
     assert_eq!(
@@ -2514,14 +2574,23 @@ fn edge_drag_through_the_degenerate_zone_never_leaves_bounded_geometry() {
     // Select and grab the top-front edge, then drag it down past the
     // floor plane in steps, crossing the degenerate configuration.
     let midpoint = screen_for_world(&workspace, rect, [256.0, 512.0, 0.0]);
-    tool.primary_clicked(&mut workspace, &element_click_frame(rect, midpoint, egui::Modifiers::NONE));
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, midpoint, egui::Modifiers::NONE),
+    );
     assert_eq!(workspace.selected_brush_elements.len(), 1);
-    tool.primary_pressed(&mut workspace, &element_click_frame(rect, midpoint, egui::Modifiers::NONE));
+    tool.primary_pressed(
+        &mut workspace,
+        &element_click_frame(rect, midpoint, egui::Modifiers::NONE),
+    );
     assert!(workspace.brush_vertex_drag.is_some());
     for step in 1..=12 {
         let y = 512.0 - f64::from(step) * 96.0;
         let pointer = screen_for_world(&workspace, rect, [256.0, y, 0.0]);
-        tool.primary_dragged(&mut workspace, &element_click_frame(rect, pointer, egui::Modifiers::NONE));
+        tool.primary_dragged(
+            &mut workspace,
+            &element_click_frame(rect, pointer, egui::Modifiers::NONE),
+        );
         let solved = workspace.project.active_scene().brushes[0].solve();
         assert!(
             solved.is_valid()
@@ -2532,7 +2601,10 @@ fn edge_drag_through_the_degenerate_zone_never_leaves_bounded_geometry() {
         );
     }
     let release = screen_for_world(&workspace, rect, [256.0, -640.0, 0.0]);
-    tool.primary_released(&mut workspace, &element_click_frame(rect, release, egui::Modifiers::NONE));
+    tool.primary_released(
+        &mut workspace,
+        &element_click_frame(rect, release, egui::Modifiers::NONE),
+    );
     let solved = workspace.project.active_scene().brushes[0].solve();
     assert!(
         solved.is_valid() && solved.within_extent(psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT),
@@ -2575,7 +2647,10 @@ fn element_gizmo_drags_are_axis_constrained() {
     workspace.set_brush_edit_mode(BrushEditMode::Vertex);
     let tool = tool_impl_3d(ViewTool::Select);
     let corner = screen_for_world(&workspace, rect, [0.0, 512.0, 0.0]);
-    tool.primary_clicked(&mut workspace, &element_click_frame(rect, corner, egui::Modifiers::NONE));
+    tool.primary_clicked(
+        &mut workspace,
+        &element_click_frame(rect, corner, egui::Modifiers::NONE),
+    );
     assert_eq!(workspace.selected_brush_elements.len(), 1);
 
     // Grab the Y axis of the gizmo (a point most of the way up the arrow)
@@ -2589,17 +2664,29 @@ fn element_gizmo_drags_are_axis_constrained() {
         Some(1),
         "grab point picks the Y axis"
     );
-    tool.primary_pressed(&mut workspace, &element_click_frame(rect, grab, egui::Modifiers::NONE));
-    let drag = workspace.brush_vertex_drag.as_ref().expect("gizmo grab starts a drag");
+    tool.primary_pressed(
+        &mut workspace,
+        &element_click_frame(rect, grab, egui::Modifiers::NONE),
+    );
+    let drag = workspace
+        .brush_vertex_drag
+        .as_ref()
+        .expect("gizmo grab starts a drag");
     assert_eq!(drag.axis_mask, [false, true, false]);
     // Diagonal screen movement: only the masked-in Y axis may apply.
     let lift = grab + Vec2::new(48.0, -48.0);
-    tool.primary_dragged(&mut workspace, &element_click_frame(rect, lift, egui::Modifiers::NONE));
+    tool.primary_dragged(
+        &mut workspace,
+        &element_click_frame(rect, lift, egui::Modifiers::NONE),
+    );
     let applied = workspace.brush_vertex_drag.as_ref().unwrap().applied;
     assert_eq!(applied[0], 0, "X is masked");
     assert_eq!(applied[2], 0, "Z is masked");
     assert!(applied[1] != 0, "Y follows the drag, got {applied:?}");
-    tool.primary_released(&mut workspace, &element_click_frame(rect, lift, egui::Modifiers::NONE));
+    tool.primary_released(
+        &mut workspace,
+        &element_click_frame(rect, lift, egui::Modifiers::NONE),
+    );
 }
 
 #[test]
@@ -2630,9 +2717,10 @@ fn clip_mode_cuts_the_whole_multi_selection_in_one_undo_step() {
     let mut harness = ViewportHarness::floored_room("clip_multi", 4);
     harness.workspace.active_tool = ViewTool::Select;
     let scene = harness.workspace.project.active_scene_mut();
-    scene
-        .brushes
-        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 64, 64]));
+    scene.brushes.push(psxed_project::brush::Brush::cuboid(
+        [0, 0, 0],
+        [128, 64, 64],
+    ));
     scene.brushes.push(psxed_project::brush::Brush::cuboid(
         [256, 0, 0],
         [384, 64, 64],
@@ -2671,7 +2759,10 @@ fn clip_three_points_cut_a_sloped_plane_and_escape_clears() {
         .project
         .active_scene_mut()
         .brushes
-        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]));
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
     harness.workspace.replace_brush_selection(0, None);
     harness.workspace.set_brush_edit_mode(BrushEditMode::Clip);
 
@@ -2726,14 +2817,20 @@ fn selection_domains_are_exclusive_and_empty_click_clears_all() {
     harness
         .workspace
         .apply_node_selection_modifiers(entity, egui::Modifiers::default(), &order);
-    assert_eq!(harness.workspace.selected_brush, None, "entity pick clears brush");
+    assert_eq!(
+        harness.workspace.selected_brush, None,
+        "entity pick clears brush"
+    );
     assert_eq!(harness.workspace.selection.selected_node, entity);
 
     // Reverse direction is covered by the click handler; the promote-on-drag
     // path must clear too.
     harness.workspace.replace_brush_selection(0, None);
     harness.workspace.commit_node_selection(entity);
-    assert_eq!(harness.workspace.selected_brush, None, "drag promote clears brush");
+    assert_eq!(
+        harness.workspace.selected_brush, None,
+        "drag promote clears brush"
+    );
 
     // Empty click clears every domain.
     harness.workspace.replace_brush_selection(0, None);
@@ -3579,6 +3676,47 @@ fn apply_to_face_button_paints_only_the_selected_face_and_undoes_once() {
         workspace.project.active_scene().brushes[0].faces[2].material,
         Some(moss)
     );
+}
+
+#[test]
+fn selected_brush_face_is_a_resource_browser_material_target() {
+    let mut project = ProjectDocument::new("brush resource material assignment");
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let moss = project.add_resource(
+        "Moss",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    for face in &mut brush.faces {
+        face.material = Some(stone);
+    }
+    project.active_scene_mut().brushes.push(brush);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("brush-resource"), project);
+    workspace.replace_brush_selection(0, Some(2));
+
+    assert_eq!(
+        workspace.selected_material_targets(),
+        vec![MaterialTarget::BrushFace { brush: 0, face: 2 }]
+    );
+    assert_eq!(workspace.assign_selected_faces_material(Some(moss)), 1);
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[2].material,
+        Some(moss)
+    );
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .enumerate()
+        .all(|(index, face)| index == 2 || face.material == Some(stone)));
+
+    workspace.do_undo();
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .all(|face| face.material == Some(stone)));
 }
 
 /// Face UV offset / rotation / scale numeric edits, typed through the real

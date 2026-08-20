@@ -3049,6 +3049,13 @@ impl EditorWorkspace {
         match target {
             MaterialTarget::Face(face) => self.face_material(face),
             MaterialTarget::Triangle(triangle) => self.triangle_material(triangle),
+            MaterialTarget::BrushFace { brush, face } => self
+                .project
+                .active_scene()
+                .brushes
+                .get(brush)
+                .and_then(|brush| brush.faces.get(face))
+                .and_then(|face| face.material),
         }
     }
 
@@ -3232,6 +3239,34 @@ impl EditorWorkspace {
                     push_unique_material_target(&mut targets, MaterialTarget::Triangle(triangle));
                 }
                 Selection::Edge(_) | Selection::Vertex(_) => {}
+            }
+        }
+        if let Some(brush) = self.selected_brush {
+            let mut brush_faces: Vec<usize> = self
+                .selected_brush_elements
+                .iter()
+                .filter_map(|element| match element {
+                    BrushElement::Face(face) => Some(*face),
+                    BrushElement::Edge(..) | BrushElement::Vertex(_) => None,
+                })
+                .collect();
+            if brush_faces.is_empty() {
+                brush_faces.extend(self.selected_brush_face);
+            }
+            for face in brush_faces {
+                if self
+                    .project
+                    .active_scene()
+                    .brushes
+                    .get(brush)
+                    .and_then(|brush| brush.faces.get(face))
+                    .is_some()
+                {
+                    push_unique_material_target(
+                        &mut targets,
+                        MaterialTarget::BrushFace { brush, face },
+                    );
+                }
             }
         }
         targets
@@ -3429,6 +3464,22 @@ impl EditorWorkspace {
             MaterialTarget::Face(face) => self.assign_face_material_no_undo(face, material),
             MaterialTarget::Triangle(triangle) => {
                 self.assign_triangle_material_no_undo(triangle, material)
+            }
+            MaterialTarget::BrushFace { brush, face } => {
+                let Some(face) = self
+                    .project
+                    .active_scene_mut()
+                    .brushes
+                    .get_mut(brush)
+                    .and_then(|brush| brush.faces.get_mut(face))
+                else {
+                    return false;
+                };
+                if face.material == material {
+                    return false;
+                }
+                face.material = material;
+                true
             }
         }
     }

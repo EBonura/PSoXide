@@ -1658,9 +1658,8 @@ impl EditorWorkspace {
                     self.nudge_selected_brushes(delta);
                 }
             }
-            let repeat = ui.input(|input| {
-                input.modifiers.command && input.key_pressed(egui::Key::R)
-            });
+            let repeat =
+                ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::R));
             if repeat {
                 self.repeat_brush_actions();
             }
@@ -1966,7 +1965,49 @@ impl EditorWorkspace {
             Some(name) => format!("Material: {name}"),
             None => "Material: none (flat grey)".to_string(),
         });
-        self.draw_brush_material_picker(ui);
+        // This inspector-local picker edits the selected face directly. The
+        // toolbar's brush material remains a separate reusable paint choice,
+        // while a successful face edit also updates it for the next stroke.
+        let materials = self.project.material_options();
+        let mut selected_material = face_data.material;
+        let selected_label = selected_material
+            .and_then(|selected| {
+                materials
+                    .iter()
+                    .find(|(id, _)| *id == selected)
+                    .map(|(_, name)| name.as_str())
+            })
+            .unwrap_or("None (flat grey)");
+        ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
+            .on_hover_text("Face material");
+        let material_changed = searchable_picker(
+            ui,
+            ui.id().with(("brush-face-material-picker", index, face)),
+            &mut selected_material,
+            selected_label,
+            &materials,
+            SearchablePickerConfig::optional("None (flat grey)")
+                .with_width(180.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…"),
+        );
+        if material_changed {
+            self.brush_material = selected_material;
+            if let Some(material) = selected_material {
+                self.material_paint_sampling = false;
+                self.replace_resource_selection(material);
+            }
+            self.apply_material_to_selected_brush_face();
+            self.status = match selected_material {
+                Some(material) => format!(
+                    "Assigned {} to brush {} face {}",
+                    self.project.resource_name(material).unwrap_or("material"),
+                    index + 1,
+                    face + 1
+                ),
+                None => format!("Cleared brush {} face {} material", index + 1, face + 1),
+            };
+        }
         if ui
             .button(icons::label(icons::PALETTE, "Apply to face"))
             .clicked()
@@ -2089,10 +2130,7 @@ impl EditorWorkspace {
         for &index in &targets {
             let mut copy = self.project.active_scene().brushes[index].clone();
             if texture_lock {
-                copy.translate_with_uv_lock(
-                    offset,
-                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
-                );
+                copy.translate_with_uv_lock(offset, psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL);
             } else {
                 copy.translate(offset);
             }
@@ -2138,10 +2176,7 @@ impl EditorWorkspace {
                 continue;
             };
             if texture_lock {
-                brush.translate_with_uv_lock(
-                    delta,
-                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
-                );
+                brush.translate_with_uv_lock(delta, psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL);
             } else {
                 brush.translate(delta);
             }
@@ -2287,10 +2322,13 @@ impl EditorWorkspace {
             // Negative percentages mirror the axis (Flip H/V); zero is
             // nudged to the smallest positive step.
             let percent_to_q8 = |percent: i32| -> i16 {
-                let q8 = (percent * 256 / 100)
-                    .clamp(i32::from(i16::MIN) + 1, i32::from(i16::MAX))
+                let q8 = (percent * 256 / 100).clamp(i32::from(i16::MIN) + 1, i32::from(i16::MAX))
                     as i16;
-                if q8 == 0 { 1 } else { q8 }
+                if q8 == 0 {
+                    1
+                } else {
+                    q8
+                }
             };
             edited.scale_q8 = [percent_to_q8(scale_u), percent_to_q8(scale_v)];
             // Uniquely labelled: the Inspector shows several bare "Reset"
@@ -2854,26 +2892,23 @@ impl EditorWorkspace {
     }
 
     /// Apply the paint material to the selected brush face, as one undo
-    /// step. No-op when no brush face is selected or no material chosen.
+    /// step. No-op when no brush face is selected or the material is unchanged.
     pub(crate) fn apply_material_to_selected_brush_face(&mut self) {
-        let (Some(index), Some(face), Some(material)) = (
-            self.selected_brush,
-            self.selected_brush_face,
-            self.brush_material,
-        ) else {
+        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
             return;
         };
+        let material = self.brush_material;
         let scene = self.project.active_scene();
         if scene
             .brushes
             .get(index)
             .and_then(|brush| brush.faces.get(face))
-            .is_none()
+            .is_none_or(|selected| selected.material == material)
         {
             return;
         }
         self.push_undo();
-        self.project.active_scene_mut().brushes[index].faces[face].material = Some(material);
+        self.project.active_scene_mut().brushes[index].faces[face].material = material;
         self.mark_dirty();
     }
 
@@ -3160,8 +3195,7 @@ impl EditorWorkspace {
             self.status = "Subtract needs a selected brush to cut with".to_string();
             return false;
         }
-        let cutter_set: std::collections::HashSet<usize> =
-            cutter_indices.iter().copied().collect();
+        let cutter_set: std::collections::HashSet<usize> = cutter_indices.iter().copied().collect();
         let scene = self.project.active_scene();
         let cutters: Vec<psxed_project::brush::Brush> = cutter_indices
             .iter()
@@ -3247,9 +3281,8 @@ impl EditorWorkspace {
             }
         }
         if hollowed == 0 {
-            self.status = format!(
-                "Hollow: too thin for {thickness}-unit walls (shrink the grid step)"
-            );
+            self.status =
+                format!("Hollow: too thin for {thickness}-unit walls (shrink the grid step)");
             return false;
         }
         self.push_undo();
@@ -3263,9 +3296,7 @@ impl EditorWorkspace {
                 if hollowed == 1 { "" } else { "es" }
             )
         } else {
-            format!(
-                "Hollowed {hollowed}, left {refused} too thin for {thickness}-unit walls"
-            )
+            format!("Hollowed {hollowed}, left {refused} too thin for {thickness}-unit walls")
         };
         true
     }
