@@ -1605,7 +1605,7 @@ impl<
         }
         let texture = Texture::from_bytes(asset_bytes).ok()?;
         let texture_depth = match texture.clut_entries() {
-            16 => TexDepth::Bit4,
+            16 | 32 | 48 | 64 => TexDepth::Bit4,
             256 => TexDepth::Bit8,
             _ => return None,
         };

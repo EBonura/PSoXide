@@ -362,8 +362,9 @@ fn submit_weapon_wireframe<const OT_DEPTH: usize>(
         // gives every face one line wherever it sits on the blade.
         let mut best = (0i32, 0usize, 0usize);
         for corner in 0..3 {
-            let a = (face.corner_words[corner] & 0xFFFF) as usize;
-            let b = (face.corner_words[(corner + 1) % 3] & 0xFFFF) as usize;
+            let indices = face.vertex_indices();
+            let a = indices[corner] as usize;
+            let b = indices[(corner + 1) % 3] as usize;
             if a >= vertices.len() || b >= vertices.len() {
                 continue;
             }
@@ -851,4 +852,3 @@ mod tests {
         }
     }
 }
-

@@ -200,11 +200,17 @@ fn model_round_trip_minimal_textured_part() {
         + model::MaterialRecord::SIZE
         + model::PartRecord::SIZE
         + 3 * model::VERTEX_RECORD_SIZE
-        + model::FACE_RECORD_SIZE;
+        + model::FACE_RECORD_SIZE
+        + model::face_palette_bank_bytes(1);
     let mut buf = std::vec::Vec::new();
     buf.extend_from_slice(&model::MAGIC);
     buf.extend_from_slice(&model::VERSION.to_le_bytes());
-    buf.extend_from_slice(&(model::flags::HAS_UVS | model::flags::RIGID_SKINNED).to_le_bytes());
+    buf.extend_from_slice(
+        &(model::flags::HAS_UVS
+            | model::flags::RIGID_SKINNED
+            | model::flags::FACE_PALETTE_BANKS)
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(&(payload_len as u32).to_le_bytes());
 
     buf.extend_from_slice(&1u16.to_le_bytes()); // joints
@@ -239,6 +245,7 @@ fn model_round_trip_minimal_textured_part() {
         buf.push(u);
         buf.push(v);
     }
+    buf.push(3);
 
     let model = Model::from_bytes(&buf).expect("parse model");
     assert_eq!(model.joint_count(), 1);
@@ -263,6 +270,18 @@ fn model_round_trip_minimal_textured_part() {
     assert_eq!(face.corners[1].uv, (127, 0));
     assert_eq!(face.corners[2].vertex_index, 2);
     assert_eq!(face.corners[2].uv, (0, 127));
+    assert_eq!(model.face_palette_bank(0), Some(3));
+    assert_eq!(model.palette_bank_count(), 4);
+
+    let mut legacy = buf.clone();
+    legacy.pop();
+    legacy[4..6].copy_from_slice(&model::LEGACY_VERSION.to_le_bytes());
+    let legacy_flags = model::flags::HAS_UVS | model::flags::RIGID_SKINNED;
+    legacy[6..8].copy_from_slice(&legacy_flags.to_le_bytes());
+    legacy[8..12].copy_from_slice(&((payload_len - 1) as u32).to_le_bytes());
+    let legacy = Model::from_bytes(&legacy).expect("parse legacy model");
+    assert_eq!(legacy.face_palette_bank(0), Some(0));
+    assert_eq!(legacy.palette_bank_count(), 1);
 }
 
 #[test]

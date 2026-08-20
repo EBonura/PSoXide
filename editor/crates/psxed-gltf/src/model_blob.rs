@@ -30,54 +30,12 @@ pub(crate) fn cook_model_blob(
     let mut canonical_vertices: Vec<CookedModelVertex> = Vec::new();
     let mut vertex_face_joints: BTreeMap<u16, BTreeSet<u16>> = BTreeMap::new();
 
-    // FUTURE MULTI-ATLAS CONTRACT (keep this beside the current material-0
-    // collapse below, because this is the point where source material identity
-    // is presently discarded):
-    //
-    // * Material ownership is authored, never inferred from UV coordinates or
-    //   texture pixels. A glTF primitive supplies one material for all of its
-    //   triangles; FBX supplies the equivalent polygon-material mapping. Carry
-    //   that source assignment into `SourceFace`.
-    // * A cooked model may use at most four LOCAL material slots (0..=3).
-    //   Each slot resolves through a per-model table to a globally deduplicated
-    //   atlas AssetId plus its CLUT/tpage material. The two-bit value is not a
-    //   global atlas ID: different models may choose different sets of four,
-    //   and the project may therefore contain more than four atlas assets.
-    // * Persist one two-bit local slot per cooked face, packed four faces per
-    //   byte. Face `i` is decoded as:
-    //
-    //       (face_material_bits[i / 4] >> ((i % 4) * 2)) & 0b11
-    //
-    //   Validate at cook time that every referenced slot exists and reject a
-    //   fifth source material instead of silently remapping it. This costs only
-    //   125 bytes for a 500-triangle model and avoids expanding the 12-byte
-    //   runtime `TexturedModelRenderFace` to a 16-byte aligned record.
-    // * Pre-resolve the model's (up to) four packet materials when it loads.
-    //   The hot face loop performs one packed-slot lookup, selects exactly one
-    //   material, and emits the polygon exactly once. It must never iterate all
-    //   resident atlases and must not use the existing secondary-layer path,
-    //   which would resubmit the complete model.
-    // * Preserve fast submission by recording or forming contiguous
-    //   same-material face runs at cook/load time. Resolve the packet material
-    //   once per run, while retaining the packed per-face stream as the
-    //   authoritative assignment.
-    // * Do not rely only on `ModelPart::material_index`. Parts in this format
-    //   are primarily skeletal/joint projection ranges, and one joint may own
-    //   polygons from several artistic materials (for example, a replacement
-    //   plate on the torso). Splitting those ranges by material risks duplicate
-    //   vertex projection; the two-bit face stream represents the authored
-    //   assignment without increasing vertex work.
-    // * Atlas deduplication is independent of this face mapping: models that
-    //   reference the same resolved atlas path must share one cooked AssetId
-    //   and one resident upload. Separate 4bpp atlases retain separate CLUTs.
-    //   Packing several 128x128 pixel planes into one physical tpage is an
-    //   optional later VRAM optimization, not part of the material contract.
-    // * Introducing the packed stream requires a model-format version bump and
-    //   an explicit legacy rule: existing single-material models decode every
-    //   face as local slot 0.
-    //
-    // Until that contract is implemented, the cooker deliberately emits one
-    // material record and writes material index 0 for every part.
+    // The base importer still collapses source materials into one atlas and
+    // emits bank 0 for every face. A palette-bank post-process may replace that
+    // atlas with up to four consecutive 16-entry CLUTs and append the VERSION 5
+    // two-bit face-bank stream. Keeping the assignment separate from
+    // `ModelPart::material_index` is intentional: parts are skeletal projection
+    // ranges, and splitting them would duplicate vertex work.
     let mut grouped_faces: BTreeMap<u16, Vec<[CookedFaceCorner; 3]>> = BTreeMap::new();
 
     for face in &source.faces {
