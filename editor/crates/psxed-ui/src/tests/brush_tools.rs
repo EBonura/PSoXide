@@ -23,6 +23,60 @@ fn brush_frame(harness: &ViewportHarness, pointer: Pos2) -> ToolFrame3d {
     }
 }
 
+#[test]
+#[ignore = "developer performance benchmark over local editable E1M1"]
+fn benchmark_e1m1_viewport_pointer_resolution() {
+    let editor_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("editor root");
+    let project_root = editor_root.join("projects/quake-e1m1-geometry");
+    let project = ProjectDocument::load_from_path(project_root.join("project.ron"))
+        .expect("E1M1 project loads");
+    assert!(
+        project.active_scene().brushes.len() >= 1_200,
+        "benchmark must use the full editable E1M1 import"
+    );
+    let workspace = EditorWorkspace::with_project(project_root, project);
+    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1_280.0, 720.0));
+    let pointers: Vec<_> = (0..5)
+        .flat_map(|y| {
+            (0..9).map(move |x| {
+                Pos2::new(
+                    64.0 + x as f32 * ((1_280.0 - 128.0) / 8.0),
+                    64.0 + y as f32 * ((720.0 - 128.0) / 4.0),
+                )
+            })
+        })
+        .collect();
+
+    for &pointer in &pointers {
+        std::hint::black_box(
+            workspace.resolve_viewport_3d_pointer_target(rect, pointer, None, true),
+        );
+    }
+    let repetitions = 100;
+    let started = std::time::Instant::now();
+    let mut targets = 0_usize;
+    for _ in 0..repetitions {
+        for &pointer in &pointers {
+            targets += workspace
+                .resolve_viewport_3d_pointer_target(rect, pointer, None, true)
+                .is_some() as usize;
+        }
+    }
+    let calls = repetitions * pointers.len();
+    let elapsed = started.elapsed();
+    println!(
+        "E1M1 viewport pointer resolution: brushes={}, calls={}, targets={}, total={:?}, mean={:.3}us",
+        workspace.project.active_scene().brushes.len(),
+        calls,
+        targets,
+        elapsed,
+        elapsed.as_secs_f64() * 1_000_000.0 / calls as f64,
+    );
+}
+
 fn run_real_egui_viewport_click(
     workspace: &mut EditorWorkspace,
     point: Pos2,
