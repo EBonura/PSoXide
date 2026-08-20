@@ -146,6 +146,8 @@ pub enum Error {
     /// Indexed-bake input length doesn't match `width * height`, or
     /// the requested depth has no CLUT (e.g. Bit15).
     InvalidIndexedInput,
+    /// Input bytes are not a valid cooked PSXT texture.
+    InvalidPsxt,
 }
 
 impl core::fmt::Display for Error {
@@ -165,6 +167,7 @@ impl core::fmt::Display for Error {
             Error::InvalidIndexedInput => {
                 write!(f, "indexed bake: index buffer or depth is invalid")
             }
+            Error::InvalidPsxt => write!(f, "invalid cooked PSXT texture"),
         }
     }
 }
@@ -455,6 +458,104 @@ pub fn quantize_rgb(
         return Err(Error::InvalidIndexedInput);
     }
     Ok(median_cut_quantize(pixels, n_entries))
+}
+
+/// Requantise an existing cooked texture to 4bpp while preserving its texel
+/// dimensions and index-zero transparency contract.
+///
+/// This is intended for model atlases whose original source image is no longer
+/// available independently from the model source. Indexed and direct-colour
+/// inputs are decoded to their exact PS1 RGB555 colours before the deterministic
+/// median-cut quantiser produces a 16-colour atlas. Existing 4bpp input is
+/// returned byte-for-byte unchanged.
+pub fn requantize_psxt_to_4bpp(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    let texture = psx_asset::Texture::from_bytes(bytes).map_err(|_| Error::InvalidPsxt)?;
+    if texture.depth() == Depth::Bit4 {
+        return Ok(bytes.to_vec());
+    }
+
+    let width = texture.width();
+    let height = texture.height();
+    let pixel_count = usize::from(width) * usize::from(height);
+    let transparent_zero = texture.index_zero_transparent();
+    let mut rgba = Vec::with_capacity(pixel_count);
+
+    match texture.depth() {
+        Depth::Bit4 => unreachable!("4bpp input returned above"),
+        Depth::Bit8 => {
+            let palette = decode_clut_rgb(texture.clut_bytes())?;
+            if palette.len() < usize::from(texture.clut_entries()) {
+                return Err(Error::InvalidPsxt);
+            }
+            let halfwords_per_row = usize::from(texture.halfwords_per_row());
+            let packed = texture.pixel_bytes();
+            for y in 0..usize::from(height) {
+                for x in 0..usize::from(width) {
+                    let byte_offset = (y * halfwords_per_row + x / 2) * 2 + (x & 1);
+                    let index = *packed.get(byte_offset).ok_or(Error::InvalidPsxt)? as usize;
+                    let rgb = *palette.get(index).ok_or(Error::InvalidPsxt)?;
+                    let alpha = if transparent_zero && index == 0 {
+                        0
+                    } else {
+                        255
+                    };
+                    rgba.push([rgb[0], rgb[1], rgb[2], alpha]);
+                }
+            }
+        }
+        Depth::Bit15 => {
+            let packed = texture.pixel_bytes();
+            for index in 0..pixel_count {
+                let offset = index * 2;
+                let word = u16::from_le_bytes([
+                    *packed.get(offset).ok_or(Error::InvalidPsxt)?,
+                    *packed.get(offset + 1).ok_or(Error::InvalidPsxt)?,
+                ]);
+                let rgb = rgb555_to_rgb8(word);
+                rgba.push([rgb[0], rgb[1], rgb[2], 255]);
+            }
+        }
+    }
+
+    let (palette, indices) = if transparent_zero {
+        quantize_rgba_with_transparent_zero(&rgba, 16)?
+    } else {
+        let rgb = rgba
+            .iter()
+            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect::<Vec<_>>();
+        quantize_rgb(&rgb, 16)?
+    };
+    encode_indexed_psxt(
+        width,
+        height,
+        Depth::Bit4,
+        &indices,
+        &palette,
+        transparent_zero,
+    )
+}
+
+fn decode_clut_rgb(bytes: &[u8]) -> Result<Vec<[u8; 3]>, Error> {
+    if bytes.len() % 2 != 0 {
+        return Err(Error::InvalidPsxt);
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|pair| rgb555_to_rgb8(u16::from_le_bytes([pair[0], pair[1]])))
+        .collect())
+}
+
+fn rgb555_to_rgb8(word: u16) -> [u8; 3] {
+    let expand = |value: u16| -> u8 {
+        let value = value as u8;
+        (value << 3) | (value >> 2)
+    };
+    [
+        expand(word & 0x1f),
+        expand((word >> 5) & 0x1f),
+        expand((word >> 10) & 0x1f),
+    ]
 }
 
 /// Median-cut colour quantisation. Input: per-pixel RGB. Output:
@@ -867,5 +968,36 @@ mod tests {
         assert_eq!(palette.len(), 16);
         assert_eq!(indices.len(), pixels.len());
         assert!(indices.iter().all(|index| *index < 16));
+    }
+
+    #[test]
+    fn requantize_8bpp_to_4bpp_preserves_size_and_transparency() {
+        let indices = vec![0, 1, 2, 3, 3, 2, 1, 0];
+        let palette = (0..256)
+            .map(|index| [index as u8, 255 - index as u8, (index / 2) as u8])
+            .collect::<Vec<_>>();
+        let source = encode_indexed_psxt(4, 2, Depth::Bit8, &indices, &palette, true).unwrap();
+
+        let output = requantize_psxt_to_4bpp(&source).unwrap();
+        let texture = psx_asset::Texture::from_bytes(&output).unwrap();
+        assert_eq!(texture.depth(), Depth::Bit4);
+        assert_eq!((texture.width(), texture.height()), (4, 2));
+        assert_eq!(texture.clut_entries(), 16);
+        assert!(texture.index_zero_transparent());
+        assert!(output.len() < source.len());
+    }
+
+    #[test]
+    fn requantize_4bpp_is_byte_identical() {
+        let source = encode_indexed_psxt(
+            4,
+            1,
+            Depth::Bit4,
+            &[0, 1, 2, 3],
+            &[[0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255]],
+            true,
+        )
+        .unwrap();
+        assert_eq!(requantize_psxt_to_4bpp(&source).unwrap(), source);
     }
 }
