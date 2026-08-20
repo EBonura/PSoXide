@@ -11,8 +11,8 @@ use crate::pxbsp::{
     PxbspLumpKind, PxbspMaterial, PxbspMaterialError, PxbspVersion, PXBSP_LUMP_COUNT,
 };
 use crate::{
-    BrushModel, ClipNode, CookedRecord, Face, Leaf, LumpRange, Node, Plane, ReadAt, RecordSlice,
-    SliceReadError, SliceReader, Vec3I32, Vertex,
+    encode_node_bound_max, encode_node_bound_min, BrushModel, ClipNode, CookedRecord, Face, Leaf,
+    LumpRange, Node, Plane, ReadAt, RecordSlice, SliceReadError, SliceReader, Vec3I32, Vertex,
 };
 
 use crate::resident::MAX_RESIDENT_MAP_BYTES;
@@ -66,7 +66,8 @@ impl<E: fmt::Display> fmt::Display for PxbspMapLoadError<E> {
             ),
             Self::StaticLegacyVersion { found } => write!(
                 output,
-                "static zero-copy PXBSP requires version 3, found legacy version {found}"
+                "static zero-copy PXBSP requires version {}, found legacy version {found}",
+                crate::pxbsp::PXBSP_VERSION
             ),
             Self::LegacyRecord { kind, index } => {
                 write!(output, "legacy {kind:?} record {index} cannot be compacted")
@@ -147,7 +148,7 @@ impl PxbspResidentMap {
     ) -> Result<Self, PxbspMapLoadError<SliceReadError>> {
         let mut reader = SliceReader::new(bytes);
         let index = PxbspIndex::read(&mut reader).map_err(PxbspMapLoadError::Index)?;
-        if index.version() != PxbspVersion::V4 {
+        if index.version() != PxbspVersion::V5 {
             return Err(PxbspMapLoadError::StaticLegacyVersion {
                 found: index.version().wire(),
             });
@@ -209,25 +210,28 @@ impl PxbspResidentMap {
             let source = index.lump(kind);
             let resident_len = resident_lump_len(&index, kind);
             let end = destination + resident_len;
-            if index.version() == PxbspVersion::V1 && is_compact_lump(kind) {
-                let legacy_size =
-                    kind.record_size(PxbspVersion::V1)
-                        .expect("compacted lump has fixed v1 records") as usize;
-                let compact_size =
-                    kind.record_size(PxbspVersion::V4)
-                        .expect("compacted lump has fixed v3 records") as usize;
-                for record_index in 0..source.len as usize / legacy_size {
+            if requires_transcode(index.version(), kind) {
+                let source_size = kind
+                    .record_size(index.version())
+                    .expect("transcoded lump has fixed source records")
+                    as usize;
+                let resident_size = kind
+                    .record_size(PxbspVersion::V5)
+                    .expect("transcoded lump has fixed resident records")
+                    as usize;
+                for record_index in 0..source.len as usize / source_size {
                     let mut legacy = [0u8; 34];
-                    let offset = source.offset + (record_index * legacy_size) as u32;
-                    if let Err(error) = reader.read_exact_at(offset, &mut legacy[..legacy_size]) {
+                    let offset = source.offset + (record_index * source_size) as u32;
+                    if let Err(error) = reader.read_exact_at(offset, &mut legacy[..source_size]) {
                         self.clear_loaded_state();
                         return Err(PxbspMapLoadError::Read(error));
                     }
-                    let start = destination + record_index * compact_size;
-                    if !compact_legacy_record(
+                    let start = destination + record_index * resident_size;
+                    if !transcode_record(
                         kind,
-                        &legacy[..legacy_size],
-                        &mut self.owned_bytes_mut()[start..start + compact_size],
+                        index.version(),
+                        &legacy[..source_size],
+                        &mut self.owned_bytes_mut()[start..start + resident_size],
                     ) {
                         self.clear_loaded_state();
                         return Err(PxbspMapLoadError::LegacyRecord {
@@ -539,7 +543,12 @@ impl PxbspResidentMap {
                     (-1i32 - child as i32) as usize >= leaves.len()
                 }
             });
-            if node.plane as usize >= planes.len() || bad_child {
+            let bad_bounds =
+                node.mins.x > node.maxs.x || node.mins.y > node.maxs.y || node.mins.z > node.maxs.z;
+            let bad_face_range = usize::from(node.first_face)
+                .saturating_add(usize::from(node.face_count))
+                > faces.len();
+            if node.plane as usize >= planes.len() || bad_child || bad_bounds || bad_face_range {
                 return Err(PxbspMapLoadError::BadNode(index));
             }
         }
@@ -600,21 +609,31 @@ const fn is_compact_lump(kind: PxbspLumpKind) -> bool {
     )
 }
 
-fn resident_lump_len(index: &PxbspIndex, kind: PxbspLumpKind) -> usize {
-    let source = index.lump(kind).len as usize;
-    if index.version() != PxbspVersion::V1 || !is_compact_lump(kind) {
-        return source;
-    }
-    let legacy = kind
-        .record_size(PxbspVersion::V1)
-        .expect("compacted lump has a legacy record size") as usize;
-    let compact = kind
-        .record_size(PxbspVersion::V4)
-        .expect("compacted lump has a compact record size") as usize;
-    source / legacy * compact
+const fn requires_transcode(version: PxbspVersion, kind: PxbspLumpKind) -> bool {
+    (matches!(version, PxbspVersion::V1) && is_compact_lump(kind))
+        || (matches!(version, PxbspVersion::V4) && matches!(kind, PxbspLumpKind::Nodes))
 }
 
-fn compact_legacy_record(kind: PxbspLumpKind, source: &[u8], output: &mut [u8]) -> bool {
+fn resident_lump_len(index: &PxbspIndex, kind: PxbspLumpKind) -> usize {
+    let source = index.lump(kind).len as usize;
+    if !requires_transcode(index.version(), kind) {
+        return source;
+    }
+    let source_size = kind
+        .record_size(index.version())
+        .expect("transcoded lump has a source record size") as usize;
+    let resident_size = kind
+        .record_size(PxbspVersion::V5)
+        .expect("transcoded lump has a resident record size") as usize;
+    source / source_size * resident_size
+}
+
+fn transcode_record(
+    kind: PxbspLumpKind,
+    version: PxbspVersion,
+    source: &[u8],
+    output: &mut [u8],
+) -> bool {
     match kind {
         PxbspLumpKind::Planes => {
             output.copy_from_slice(&source[..Plane::SIZE]);
@@ -655,11 +674,35 @@ fn compact_legacy_record(kind: PxbspLumpKind, source: &[u8], output: &mut [u8]) 
             output[8..10].copy_from_slice(&source[18..20]);
             output[10..14].copy_from_slice(&source[22..26]);
         }
-        PxbspLumpKind::Nodes => output.copy_from_slice(&source[..6]),
+        PxbspLumpKind::Nodes => match version {
+            PxbspVersion::V1 => {
+                output[..6].copy_from_slice(&source[..6]);
+                for axis in 0..3 {
+                    let min =
+                        i16::from_le_bytes(source[6 + axis * 2..8 + axis * 2].try_into().unwrap());
+                    let max = i16::from_le_bytes(
+                        source[12 + axis * 2..14 + axis * 2].try_into().unwrap(),
+                    );
+                    output[6 + axis] = encode_node_bound_min(min) as u8;
+                    output[9 + axis] = encode_node_bound_max(max) as u8;
+                }
+                output[12..16].copy_from_slice(&source[30..34]);
+            }
+            PxbspVersion::V4 => {
+                output[..6].copy_from_slice(source);
+                output[6..].fill(0);
+            }
+            PxbspVersion::V5 => return false,
+        },
         PxbspLumpKind::Models => output.copy_from_slice(&source[..32]),
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+fn compact_legacy_record(kind: PxbspLumpKind, source: &[u8], output: &mut [u8]) -> bool {
+    transcode_record(kind, PxbspVersion::V1, source, output)
 }
 
 const fn valid_leaf_contents(contents: i16) -> bool {
@@ -671,12 +714,12 @@ pub(crate) mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::Vec3I16;
     use crate::pxbsp::{
         PxbspEntity, PXBSP_DIRECTORY_ENTRY_BYTES, PXBSP_ENTITY_TABLE_HEADER_BYTES,
         PXBSP_HEADER_BYTES, PXBSP_MAGIC, PXBSP_VERSION,
     };
     use crate::SliceReader;
+    use crate::Vec3I16;
 
     fn push_i16(output: &mut Vec<u8>, value: i16) {
         output.extend_from_slice(&value.to_le_bytes());
@@ -754,6 +797,14 @@ pub(crate) mod tests {
         push_u16(&mut node, 0);
         push_i16(&mut node, -2);
         push_i16(&mut node, -1);
+        for value in [-8, -4, -2] {
+            node.push(encode_node_bound_min(value) as u8);
+        }
+        for value in [16, 12, 10] {
+            node.push(encode_node_bound_max(value) as u8);
+        }
+        push_u16(&mut node, 0);
+        push_u16(&mut node, 1);
         lumps[PxbspLumpKind::Nodes as usize] = node;
 
         let mut clipnode = Vec::with_capacity(ClipNode::SIZE);
@@ -835,14 +886,29 @@ pub(crate) mod tests {
 
         legacy[PxbspLumpKind::Nodes as usize].clear();
         for node in compact[PxbspLumpKind::Nodes as usize].chunks_exact(Node::SIZE) {
-            legacy[PxbspLumpKind::Nodes as usize].extend_from_slice(node);
-            legacy[PxbspLumpKind::Nodes as usize].extend_from_slice(&[0; 28]);
+            let output = &mut legacy[PxbspLumpKind::Nodes as usize];
+            let decoded = Node::decode(node);
+            output.extend_from_slice(&node[..6]);
+            for value in [decoded.mins.x, decoded.mins.y, decoded.mins.z] {
+                push_i16(output, value);
+            }
+            for value in [decoded.maxs.x, decoded.maxs.y, decoded.maxs.z] {
+                push_i16(output, value);
+            }
+            output.extend_from_slice(&[0; 12]);
+            output.extend_from_slice(&node[12..16]);
         }
 
         legacy[PxbspLumpKind::Models as usize].clear();
         for model in compact[PxbspLumpKind::Models as usize].chunks_exact(BrushModel::SIZE) {
             legacy[PxbspLumpKind::Models as usize].extend_from_slice(model);
         }
+        legacy
+    }
+
+    fn v4_lumps() -> [Vec<u8>; PXBSP_LUMP_COUNT] {
+        let mut legacy = valid_lumps();
+        legacy[PxbspLumpKind::Nodes as usize].truncate(6);
         legacy
     }
 
@@ -890,7 +956,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn owned_load_transcodes_legacy_v1_records_to_compact_views() {
+    fn owned_load_transcodes_legacy_v1_records_without_losing_node_ranges() {
         let bytes = write_file_version(&legacy_lumps(), crate::pxbsp::PXBSP_VERSION_V1);
         let map = load(&bytes).expect("legacy resident map");
         assert_eq!(map.planes().len(), 1);
@@ -901,15 +967,41 @@ pub(crate) mod tests {
         assert_eq!(leaf.maxs, Vec3I16::default());
         let node = map.nodes().get(0).expect("node");
         assert_eq!(node.children, [-2, -1]);
-        assert_eq!(node.mins, Vec3I16::default());
-        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(
+            node.mins,
+            Vec3I16 {
+                x: -8,
+                y: -8,
+                z: -8
+            }
+        );
+        assert_eq!(
+            node.maxs,
+            Vec3I16 {
+                x: 16,
+                y: 16,
+                z: 16
+            }
+        );
         assert_eq!(node.surface_mins, Vec3I16::default());
         assert_eq!(node.surface_maxs, Vec3I16::default());
         assert_eq!(node.first_face, 0);
-        assert_eq!(node.face_count, 0);
+        assert_eq!(node.face_count, 1);
         let model = map.brush_models().get(0).expect("model");
         assert_eq!(model.origin, Vec3I16::default());
         assert!(map.resident_bytes() < bytes.len());
+    }
+
+    #[test]
+    fn owned_load_expands_v4_nodes_with_zeroed_missing_metadata() {
+        let bytes = write_file_version(&v4_lumps(), crate::pxbsp::PXBSP_VERSION_V4);
+        let map = load(&bytes).expect("v4 resident map");
+        let node = map.nodes().get(0).expect("node");
+        assert_eq!(node.children, [-2, -1]);
+        assert_eq!(node.mins, Vec3I16::default());
+        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(node.first_face, 0);
+        assert_eq!(node.face_count, 0);
     }
 
     #[test]
@@ -1070,6 +1162,20 @@ pub(crate) mod tests {
         lumps[PxbspLumpKind::Materials as usize].clear();
         let error = load(&write_file(&lumps)).expect_err("bad map");
         assert_eq!(error, PxbspMapLoadError::BadFace(0));
+    }
+
+    #[test]
+    fn rejects_node_bounds_and_face_ranges_outside_the_render_tables() {
+        let mut lumps = valid_lumps();
+        lumps[PxbspLumpKind::Nodes as usize][12..14].copy_from_slice(&1u16.to_le_bytes());
+        let error = load(&write_file(&lumps)).expect_err("bad node face range");
+        assert_eq!(error, PxbspMapLoadError::BadNode(0));
+
+        let mut lumps = valid_lumps();
+        lumps[PxbspLumpKind::Nodes as usize][6] = 1;
+        lumps[PxbspLumpKind::Nodes as usize][9] = 0;
+        let error = load(&write_file(&lumps)).expect_err("bad node bounds");
+        assert_eq!(error, PxbspMapLoadError::BadNode(0));
     }
 
     #[test]
