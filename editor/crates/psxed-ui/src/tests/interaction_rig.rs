@@ -277,7 +277,6 @@ impl MouseRig {
             alt,
         );
     }
-
 }
 
 /// The full interaction matrix on one cube: select each element kind
@@ -1307,7 +1306,10 @@ fn period_frames_the_brush_selected_through_select() {
         .project
         .active_scene_mut()
         .brushes
-        .push(psxed_project::brush::Brush::cuboid([1024, 0, 0], [1536, 256, 256]));
+        .push(psxed_project::brush::Brush::cuboid(
+            [1024, 0, 0],
+            [1536, 256, 256],
+        ));
     rig.workspace.selected_brushes = vec![0, 1];
     let (center, half) = rig
         .workspace
@@ -1360,8 +1362,7 @@ fn subtract_carves_neighbours_and_deletes_the_cutter() {
         let inside = brush.faces.iter().all(|face| {
             let plane = psxed_project::brush::Plane::from_points(face.points).expect("plane");
             let (normal, distance) = psxed_project::brush_compile::normalized_plane(plane);
-            normal[0] * carved[0] + normal[1] * carved[1] + normal[2] * carved[2] - distance
-                <= 1e-6
+            normal[0] * carved[0] + normal[1] * carved[1] + normal[2] * carved[2] - distance <= 1e-6
         });
         assert!(!inside, "carved volume must be empty");
     }
@@ -1398,10 +1399,7 @@ fn top_face_index(brush: &psxed_project::brush::Brush) -> usize {
         .expect("top face")
 }
 
-fn applied_face_uvs(
-    brush: &psxed_project::brush::Brush,
-    face_index: usize,
-) -> Vec<[f64; 2]> {
+fn applied_face_uvs(brush: &psxed_project::brush::Brush, face_index: usize) -> Vec<[f64; 2]> {
     use psxed_project::brush::{paraxial_uv, Plane, BRUSH_UV_UNITS_PER_TEXEL};
     let solved = brush.solve();
     let polygon = solved.polygons[face_index].as_ref().expect("polygon");
@@ -1427,14 +1425,21 @@ fn uv_align_justifies_fits_and_flips_in_place() {
     rig.workspace.selected_brush = Some(0);
     rig.workspace.selected_brushes = vec![0];
     rig.workspace.selected_brush_face = Some(face);
-    rig.workspace.project.active_scene_mut().brushes[0].faces[face].uv.offset_texels = [37, -12];
+    rig.workspace.project.active_scene_mut().brushes[0].faces[face]
+        .uv
+        .offset_texels = [37, -12];
 
-    rig.workspace.justify_selected_face_uv(crate::workspace::tools::UvAlign::Left);
+    rig.workspace
+        .justify_selected_face_uv(crate::workspace::tools::UvAlign::Left);
     let applied = applied_face_uvs(&rig.workspace.project.active_scene().brushes[0], face);
     let min_u = applied.iter().map(|uv| uv[0]).fold(f64::MAX, f64::min);
-    assert!(min_u.abs() <= 0.51, "justify left pins the seam, got {min_u}");
+    assert!(
+        min_u.abs() <= 0.51,
+        "justify left pins the seam, got {min_u}"
+    );
 
-    rig.workspace.justify_selected_face_uv(crate::workspace::tools::UvAlign::Fit);
+    rig.workspace
+        .justify_selected_face_uv(crate::workspace::tools::UvAlign::Fit);
     let applied = applied_face_uvs(&rig.workspace.project.active_scene().brushes[0], face);
     for axis in 0..2 {
         let min = applied.iter().map(|uv| uv[axis]).fold(f64::MAX, f64::min);
@@ -1482,7 +1487,8 @@ fn alt_click_paints_the_selected_faces_attributes() {
         face.material = Some(material);
         face.uv.offset_texels = [11, 7];
     }
-    rig.workspace.set_brush_edit_mode(crate::BrushEditMode::Face);
+    rig.workspace
+        .set_brush_edit_mode(crate::BrushEditMode::Face);
     rig.workspace.selected_brush = Some(0);
     rig.workspace.selected_brushes = vec![0];
     rig.workspace.selected_brush_face = Some(source_face);
@@ -1509,7 +1515,10 @@ fn alt_click_paints_the_selected_faces_attributes() {
         .faces
         .iter()
         .any(|face| face.material == Some(material) && face.uv.offset_texels == [11, 7]);
-    assert!(painted, "alt-click paints material and UV onto the hit face");
+    assert!(
+        painted,
+        "alt-click paints material and UV onto the hit face"
+    );
     assert_eq!(
         rig.workspace.selected_brush,
         Some(0),
@@ -1617,7 +1626,11 @@ fn arrows_nudge_duplicate_and_repeat_build_a_staircase() {
     // Camera at (1400,1200,-1400) faces +z dominantly: Up nudges +z.
     rig.key(center, egui::Key::ArrowUp);
     let solved = rig.workspace.project.active_scene().brushes[0].solve();
-    assert_eq!(solved.min[2].round() as i32, 64, "arrow nudges one grid step");
+    assert_eq!(
+        solved.min[2].round() as i32,
+        64,
+        "arrow nudges one grid step"
+    );
 
     // Re-click to reset the repeat chain: the staircase should replay
     // only the duplicate-and-lift sequence, not the probe nudge above.
@@ -1650,7 +1663,11 @@ fn arrows_nudge_duplicate_and_repeat_build_a_staircase() {
         2,
         "shift+arrow duplicates"
     );
-    assert_eq!(rig.workspace.selected_brush, Some(1), "the copy is selected");
+    assert_eq!(
+        rig.workspace.selected_brush,
+        Some(1),
+        "the copy is selected"
+    );
     let copy = rig.workspace.project.active_scene().brushes[1].solve();
     assert_eq!(copy.min[2].round() as i32, 128, "the copy moved one step");
 

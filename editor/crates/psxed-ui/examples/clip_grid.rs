@@ -95,7 +95,8 @@ fn main() {
                 show_collision_guides: false,
                 show_bones: false,
             };
-            if let Some(img) = render_import_model_preview_with_options(&model, &bytes, &atlas, opts)
+            if let Some(img) =
+                render_import_model_preview_with_options(&model, &bytes, &atlas, opts)
             {
                 save_ppm(&img, &format!("{out_dir}/{stem}_{step}.ppm"));
             }

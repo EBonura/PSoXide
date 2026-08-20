@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use psxed_project::quake_bsp29::strip_quake_bsp29_geometry;
 use psxed_project::quake_map_import::{import_quake_map_geometry_scaled, QUAKE_TO_EDITOR_SCALE};
 use psxed_project::{
-    CharacterAnimationAction, GeneratedMaterialTexture, MaterialResource, MaterialTextureMode,
-    NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, Scene, Transform3,
+    CharacterAnimationAction, MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData,
+    ResourceId, Scene, Transform3,
 };
 
 const DEFAULT_OUTPUT_NAME: &str = "quake-e1m1-geometry";
 const SOURCE_REPOSITORY: &str = "https://github.com/fzwoch/quake_map_source";
 const SOURCE_REVISION: &str = "27abebaa3886bb0e3156cce3a604673d22b243f8";
 const BSP_GEOMETRY_RELATIVE: &str = "assets/geometry/e1m1-topology.bsp29geom";
+const TEMP_GEOMETRY_TEXTURE_RELATIVE: &str = "assets/textures/brick_1a_v2.psxt";
 // A full 16x import exceeds the PXBSP 32,767-face limit after mandatory
 // near-plane surface subdivision. E1M1 and both actors are uniformly reduced
 // to one quarter of that canonical scale, preserving their proportions while
@@ -82,20 +83,17 @@ fn main() {
         }
     }
 
-    let mut grey = MaterialResource::opaque(None);
-    grey.texture_mode = MaterialTextureMode::Generated;
-    grey.generated = GeneratedMaterialTexture {
-        size: 64,
-        base_color: [78, 82, 88],
-        noise_enabled: true,
-        noise_color: [122, 128, 136],
-        ..GeneratedMaterialTexture::default()
-    };
-    let grey = project.add_resource("E1M1 Geometry Grey", ResourceData::Material(grey));
+    let geometry_material = project.add_resource(
+        "E1M1 Temporary Brick",
+        ResourceData::Material(MaterialResource::opaque(Some(
+            TEMP_GEOMETRY_TEXTURE_RELATIVE.to_string(),
+        ))),
+    );
 
     let map_source = std::fs::read_to_string(&map_path).expect("read E1M1 map source");
-    let geometry = import_quake_map_geometry_scaled(&map_source, Some(grey), E1M1_QUAKE_SCALE)
-        .unwrap_or_else(|error| panic!("E1M1 geometry import failed: {error}"));
+    let geometry =
+        import_quake_map_geometry_scaled(&map_source, Some(geometry_material), E1M1_QUAKE_SCALE)
+            .unwrap_or_else(|error| panic!("E1M1 geometry import failed: {error}"));
     assert_eq!(
         geometry.stats.skipped_invalid_brushes, 0,
         "E1M1 import must not silently lose invalid brushes"
@@ -411,7 +409,7 @@ fn write_provenance(
     writeln!(text).unwrap();
     writeln!(
         text,
-        "No Quake texture names, texture pixels, lightmaps, gameplay entities, triggers, monsters, items, model assets, or audio are included. PSoXide's generated grey material is assigned to every imported face. The stripped BSP sidecar retains only planes, vertices, faces, nodes, leaves, mark-surfaces, edges, visibility, and world-model bounds needed to reuse E1M1's partition/PVS."
+        "No Quake texture names, texture pixels, lightmaps, gameplay entities, triggers, monsters, items, model assets, or audio are included. PSoXide's temporary 4bpp BRICK_1A material is assigned to every imported face. The stripped BSP sidecar retains only planes, vertices, faces, nodes, leaves, mark-surfaces, edges, visibility, and world-model bounds needed to reuse E1M1's partition/PVS."
     )
     .unwrap();
     std::fs::write(output_dir.join("SOURCE.md"), text).expect("write source provenance");

@@ -673,8 +673,8 @@ fn opening_bsp_project_preserves_a_custom_camera_exactly() {
 
 #[test]
 fn opening_tracked_starter_preserves_its_authored_interior_camera() {
-    let fixture_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../archive/fixtures/brush-first-playable");
     let authored = ProjectDocument::load_from_path(fixture_dir.join("project.ron"))
         .unwrap()
         .editor_camera;
@@ -2371,8 +2371,8 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
 
 #[test]
 fn one_click_play_and_rebuild_recook_the_persisted_bsp_mode() {
-    let fixture_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/brush-first-playable");
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../archive/fixtures/brush-first-playable");
     let project = ProjectDocument::load_from_path(fixture_dir.join("project.ron")).unwrap();
     let output = test_temp_dir("bsp-mode-replay-output");
     let _ = std::fs::remove_dir_all(&output);
@@ -3186,8 +3186,7 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
     for (name, grip_translation, hitboxes) in [
         ("Sword1 Light", [0, -25370, 0], 1),
         ("Sword1 Heavy", [0, -26320, 0], 0),
-    ]
-    {
+    ] {
         assert!(STARTER_WEAPON_NAMES.contains(&name));
         let weapon = resource_by_name(name, |data| matches!(data, ResourceData::Weapon(_)));
         let ResourceData::Weapon(weapon) = &weapon.data else {
@@ -3264,9 +3263,7 @@ fn write_souls_slice_canonical_tape(dir: &Path) {
     // verified combat fixture (37-tick tail, co-prime with the enemy's
     // 45-tick attack cadence).
     const COMBO_PRESSES: [usize; 2] = [1250, 1390];
-    const HEAVY_PRESSES: [usize; 7] = [
-        1320, 1450, 1487, 1524, 1561, 1598, 1635,
-    ];
+    const HEAVY_PRESSES: [usize; 7] = [1320, 1450, 1487, 1524, 1561, 1598, 1635];
 
     let mut tape = String::with_capacity(FRAME_COUNT * 32);
     use std::fmt::Write as _;
@@ -3379,8 +3376,8 @@ fn write_souls_slice_negative_tape(dir: &Path) {
 /// whichever machine happened to save it.
 #[test]
 fn tracked_souls_slice_opens_clean_in_the_editor_and_cooks_without_errors() {
-    let dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../archive/fixtures/souls-bsp-vertical-slice");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../archive/fixtures/souls-bsp-vertical-slice");
     let mut workspace = EditorWorkspace::open_directory(&dir).expect("open the tracked slice");
     assert!(
         !workspace.is_dirty(),
@@ -3635,15 +3632,16 @@ fn souls_slice_project_is_authored_through_production_commands() {
         .expect("starter character sync");
     workspace.mark_dirty();
 
-    let resource_id = |workspace: &EditorWorkspace, name: &str, wants: fn(&ResourceData) -> bool| {
-        workspace
-            .project()
-            .resources
-            .iter()
-            .find(|resource| resource.name == name && wants(&resource.data))
-            .unwrap_or_else(|| panic!("missing resource '{name}'"))
-            .id
-    };
+    let resource_id =
+        |workspace: &EditorWorkspace, name: &str, wants: fn(&ResourceData) -> bool| {
+            workspace
+                .project()
+                .resources
+                .iter()
+                .find(|resource| resource.name == name && wants(&resource.data))
+                .unwrap_or_else(|| panic!("missing resource '{name}'"))
+                .id
+        };
     let cobbles = resource_id(&workspace, "Courtyard Cobbles", |data| {
         matches!(data, ResourceData::Material(_))
     });
@@ -3688,9 +3686,9 @@ fn souls_slice_project_is_authored_through_production_commands() {
     workspace.set_orthographic_view(OrthographicView::Top);
     workspace.set_active_tool_cycle_value((ViewTool::Brush, None));
     let author_box = |workspace: &mut EditorWorkspace,
-                          material: ResourceId,
-                          mins: [i32; 3],
-                          maxs: [i32; 3]|
+                      material: ResourceId,
+                      mins: [i32; 3],
+                      maxs: [i32; 3]|
      -> usize {
         workspace.brush_material = Some(material);
         workspace.orthographic_focus[1] = mins[1] as f32;
@@ -3722,7 +3720,12 @@ fn souls_slice_project_is_authored_through_production_commands() {
     // PVS-suppressed until the player rounds it.
     author_box(&mut workspace, brick, [5120, 256, 256], [5184, 1792, 1280]);
     let door_brush = author_box(&mut workspace, brick, [4064, 256, 1280], [4128, 1024, 1792]);
-    let lava_brush = author_box(&mut workspace, cobbles, [4800, 256, 2048], [5824, 512, 2816]);
+    let lava_brush = author_box(
+        &mut workspace,
+        cobbles,
+        [4800, 256, 2048],
+        [5824, 512, 2816],
+    );
     // Sealed crypt: the cooked visibility model is portal-component
     // granular, so nothing reachable through the doorway can ever be
     // PVS-suppressed; this hollowed box is its own sealed visibility
@@ -4015,7 +4018,10 @@ fn souls_slice_project_is_authored_through_production_commands() {
         kind_count(|kind| matches!(kind, NodeKind::PointLight { .. })),
         2
     );
-    assert_eq!(kind_count(|kind| matches!(kind, NodeKind::BoxProp { .. })), 1);
+    assert_eq!(
+        kind_count(|kind| matches!(kind, NodeKind::BoxProp { .. })),
+        1
+    );
     assert_eq!(
         kind_count(|kind| matches!(kind, NodeKind::ArchProp { .. })),
         1
@@ -4031,7 +4037,13 @@ fn souls_slice_project_is_authored_through_production_commands() {
         1
     );
     assert_eq!(
-        kind_count(|kind| matches!(kind, NodeKind::Equipment { weapon: Some(_), .. })),
+        kind_count(|kind| matches!(
+            kind,
+            NodeKind::Equipment {
+                weapon: Some(_),
+                ..
+            }
+        )),
         2
     );
     assert_eq!(
@@ -4104,7 +4116,11 @@ fn souls_slice_project_is_authored_through_production_commands() {
         1,
         "exactly one PLAYER-flagged equipment record"
     );
-    assert_eq!(package.interactables.len(), 1, "the checkpoint interactable");
+    assert_eq!(
+        package.interactables.len(),
+        1,
+        "the checkpoint interactable"
+    );
     assert!(
         package.logic.len() >= 3,
         "trigger + paired checkpoint + door records"

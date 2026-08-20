@@ -329,9 +329,11 @@ fn delete_targeted(
             ResourceData::AnimationClip(c) => vec![c.psxanim_path.as_str()],
             _ => Vec::new(),
         };
-        paths
-            .iter()
-            .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix.as_str())))
+        paths.iter().any(|path| {
+            prefixes
+                .iter()
+                .any(|prefix| path.starts_with(prefix.as_str()))
+        })
     };
     let doomed: Vec<ResourceId> = project
         .resources
@@ -367,7 +369,9 @@ fn delete_targeted(
         let root = project_dir.join(prefix.trim_end_matches('/'));
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir() {

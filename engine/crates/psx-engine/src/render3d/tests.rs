@@ -1824,6 +1824,10 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
         rotation: Mat3I16::IDENTITY,
         translation: Vec3I32::new(10, -6, 900),
     };
+    let second_primary = JointViewTransform {
+        rotation: Mat3I16::rotate_y(37),
+        translation: Vec3I32::new(-35, 19, 860),
+    };
     let yaw90 = Mat3I16 {
         m: [[0, 0, 4096], [0, 4096, 0], [-4096, 0, 0]],
     };
@@ -1856,12 +1860,17 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
 
     // Expected: the per-vertex slow path with the primary joint loaded,
     // exactly as the model pass guarantees before each blended vertex.
-    scene::load_rotation(&primary.rotation);
-    scene::load_translation(primary.translation);
     let expected: [ProjectedVertex; SEAM_VERTS] = core::array::from_fn(|i| {
+        let part_primary = if i < BLENDED_VERTEX_CHUNK / 2 {
+            primary
+        } else {
+            second_primary
+        };
+        scene::load_rotation(&part_primary.rotation);
+        scene::load_translation(part_primary.translation);
         project_blended_textured_model_vertex(
             vertices[i],
-            primary,
+            part_primary,
             &joint_view_transforms,
             projection,
         )
@@ -1875,12 +1884,26 @@ fn blended_chunk_flush_matches_per_vertex_slow_path() {
     scene::load_translation(primary.translation);
     let indices: [u16; SEAM_VERTS] = core::array::from_fn(|i| i as u16);
     for chunk in indices.chunks(BLENDED_VERTEX_CHUNK) {
+        let mut primary_views = [ViewVertex::ZERO; BLENDED_VERTEX_CHUNK];
+        for (slot, &vertex_index) in chunk.iter().enumerate() {
+            let part_primary = if usize::from(vertex_index) < BLENDED_VERTEX_CHUNK / 2 {
+                primary
+            } else {
+                second_primary
+            };
+            scene::load_rotation(&part_primary.rotation);
+            scene::load_translation(part_primary.translation);
+            let transformed =
+                scene::transform_vertex_scheduled(vertices[usize::from(vertex_index)].position);
+            primary_views[slot] = ViewVertex::new(transformed.x, transformed.y, transformed.z);
+        }
         unsafe {
             flush_blended_model_vertex_chunk(
                 chunk.as_ptr(),
+                primary_views.as_mut_ptr(),
                 chunk.len(),
                 &vertices,
-                primary,
+                second_primary,
                 &joint_view_transforms,
                 projection,
                 near_z,

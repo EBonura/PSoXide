@@ -10,10 +10,10 @@ use core::fmt;
 use psx_math::int32::mul_q12_i32;
 
 use crate::{
-    AliasModelTable, BrushModel, ClipNode, CookedRecord, Face, IndexedVertexCorner,
-    IndexedVertexPosition, Leaf, LumpKind, LumpRange, MapEntity, Node, Plane, PsbError, PsbIndex,
-    PsbVersion, ReadAt, RecordSlice, TextureInfo, Vec3I32, Vertex, INDEXED_VERTEX_HEADER_BYTES,
-    INDEXED_VERTEX_MAGIC, LUMP_COUNT,
+    encode_node_bound_max, encode_node_bound_min, AliasModelTable, BrushModel, ClipNode,
+    CookedRecord, Face, IndexedVertexCorner, IndexedVertexPosition, Leaf, LumpKind, LumpRange,
+    MapEntity, Node, Plane, PsbError, PsbIndex, PsbVersion, ReadAt, RecordSlice, TextureInfo,
+    Vec3I32, Vertex, INDEXED_VERTEX_HEADER_BYTES, INDEXED_VERTEX_MAGIC, LUMP_COUNT,
 };
 
 /// Texture atlas location used by the original XBSP cooker.
@@ -94,7 +94,8 @@ fn indexed_vertices_with_layout(
 
 fn validate_indexed_vertices(bytes: &[u8]) -> Option<(u16, u16)> {
     let (corner_count, position_count, position_offset) = indexed_vertex_layout(bytes)?;
-    let indexed = indexed_vertices_with_layout(bytes, corner_count, position_count, position_offset);
+    let indexed =
+        indexed_vertices_with_layout(bytes, corner_count, position_count, position_offset);
     if indexed
         .corners
         .iter()
@@ -230,25 +231,26 @@ impl ResidentMap {
             let source = index.lump(kind);
             let resident_len = resident_lump_len(&index, kind);
             let end = destination + resident_len;
-            if index.version() == PsbVersion::LegacyV1 && is_compact_lump(kind) {
-                let legacy_size =
-                    kind.record_size(PsbVersion::LegacyV1)
-                        .expect("compacted lump has fixed v1 records") as usize;
-                let compact_size =
-                    kind.record_size(PsbVersion::IndexedV5)
-                        .expect("compacted lump has fixed compact records") as usize;
-                for record_index in 0..source.len as usize / legacy_size {
+            if requires_transcode(index.version(), kind) {
+                let source_size = kind
+                    .record_size(index.version())
+                    .expect("transcoded lump has fixed source records")
+                    as usize;
+                let resident_size =
+                    resident_record_size(kind).expect("transcoded lump has fixed resident records");
+                for record_index in 0..source.len as usize / source_size {
                     let mut legacy = [0u8; 34];
-                    let offset = source.offset + (record_index * legacy_size) as u32;
-                    if let Err(error) = reader.read_exact_at(offset, &mut legacy[..legacy_size]) {
+                    let offset = source.offset + (record_index * source_size) as u32;
+                    if let Err(error) = reader.read_exact_at(offset, &mut legacy[..source_size]) {
                         self.clear_loaded_state();
                         return Err(MapLoadError::Read(error));
                     }
-                    let start = destination + record_index * compact_size;
-                    if !compact_legacy_record(
+                    let start = destination + record_index * resident_size;
+                    if !transcode_record(
                         kind,
-                        &legacy[..legacy_size],
-                        &mut self.bytes[start..start + compact_size],
+                        index.version(),
+                        &legacy[..source_size],
+                        &mut self.bytes[start..start + resident_size],
                     ) {
                         self.clear_loaded_state();
                         return Err(MapLoadError::LegacyRecord {
@@ -527,7 +529,12 @@ impl ResidentMap {
                     (-1i32 - child as i32) as usize >= leaves.len()
                 }
             });
-            if node.plane as usize >= planes.len() || bad_child {
+            let bad_bounds =
+                node.mins.x > node.maxs.x || node.mins.y > node.maxs.y || node.mins.z > node.maxs.z;
+            let bad_face_range = usize::from(node.first_face)
+                .saturating_add(usize::from(node.face_count))
+                > faces.len();
+            if node.plane as usize >= planes.len() || bad_child || bad_bounds || bad_face_range {
                 return Err(MapLoadError::BadNode(index));
             }
         }
@@ -596,21 +603,36 @@ const fn is_compact_lump(kind: LumpKind) -> bool {
     )
 }
 
-fn resident_lump_len(index: &PsbIndex, kind: LumpKind) -> usize {
-    let source = index.lump(kind).len as usize;
-    if index.version() != PsbVersion::LegacyV1 || !is_compact_lump(kind) {
-        return source;
-    }
-    let legacy = kind
-        .record_size(PsbVersion::LegacyV1)
-        .expect("compacted lump has a legacy record size") as usize;
-    let compact = kind
-        .record_size(PsbVersion::IndexedV5)
-        .expect("compacted lump has a compact record size") as usize;
-    source / legacy * compact
+const fn requires_transcode(version: PsbVersion, kind: LumpKind) -> bool {
+    (matches!(version, PsbVersion::LegacyV1) && is_compact_lump(kind))
+        || (matches!(version, PsbVersion::IndexedV5) && matches!(kind, LumpKind::Nodes))
 }
 
-fn compact_legacy_record(kind: LumpKind, source: &[u8], output: &mut [u8]) -> bool {
+const fn resident_record_size(kind: LumpKind) -> Option<usize> {
+    if matches!(kind, LumpKind::Nodes) {
+        Some(Node::SIZE)
+    } else {
+        match kind.record_size(PsbVersion::IndexedV5) {
+            Some(size) => Some(size as usize),
+            None => None,
+        }
+    }
+}
+
+fn resident_lump_len(index: &PsbIndex, kind: LumpKind) -> usize {
+    let source = index.lump(kind).len as usize;
+    if !requires_transcode(index.version(), kind) {
+        return source;
+    }
+    let source_size = kind
+        .record_size(index.version())
+        .expect("transcoded lump has a source record size") as usize;
+    let resident_size =
+        resident_record_size(kind).expect("transcoded lump has a resident record size");
+    source / source_size * resident_size
+}
+
+fn transcode_record(kind: LumpKind, version: PsbVersion, source: &[u8], output: &mut [u8]) -> bool {
     match kind {
         LumpKind::Planes => output.copy_from_slice(&source[..Plane::SIZE]),
         LumpKind::Faces => {
@@ -649,11 +671,34 @@ fn compact_legacy_record(kind: LumpKind, source: &[u8], output: &mut [u8]) -> bo
             output[8..10].copy_from_slice(&source[18..20]);
             output[10..14].copy_from_slice(&source[22..26]);
         }
-        LumpKind::Nodes => output.copy_from_slice(&source[..6]),
+        LumpKind::Nodes => match version {
+            PsbVersion::LegacyV1 => {
+                output[..6].copy_from_slice(&source[..6]);
+                for axis in 0..3 {
+                    let min =
+                        i16::from_le_bytes(source[6 + axis * 2..8 + axis * 2].try_into().unwrap());
+                    let max = i16::from_le_bytes(
+                        source[12 + axis * 2..14 + axis * 2].try_into().unwrap(),
+                    );
+                    output[6 + axis] = encode_node_bound_min(min) as u8;
+                    output[9 + axis] = encode_node_bound_max(max) as u8;
+                }
+                output[12..16].copy_from_slice(&source[30..34]);
+            }
+            PsbVersion::IndexedV5 => {
+                output[..6].copy_from_slice(source);
+                output[6..].fill(0);
+            }
+        },
         LumpKind::Models => output.copy_from_slice(&source[..32]),
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+fn compact_legacy_record(kind: LumpKind, source: &[u8], output: &mut [u8]) -> bool {
+    transcode_record(kind, PsbVersion::LegacyV1, source, output)
 }
 
 const fn valid_leaf_contents(contents: i16) -> bool {
@@ -722,18 +767,37 @@ mod tests {
         node[0..2].copy_from_slice(&7u16.to_le_bytes());
         node[2..4].copy_from_slice(&(-2i16).to_le_bytes());
         node[4..6].copy_from_slice(&3i16.to_le_bytes());
-        node[6..34].fill(0x5a);
+        for (offset, value) in [(6, -8i16), (8, -4), (10, -2), (12, 16), (14, 12), (16, 10)] {
+            node[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        node[18..30].fill(0x5a);
+        node[30..32].copy_from_slice(&11u16.to_le_bytes());
+        node[32..34].copy_from_slice(&3u16.to_le_bytes());
         let mut compact = [0u8; Node::SIZE];
         assert!(compact_legacy_record(LumpKind::Nodes, &node, &mut compact));
         let node = Node::decode(&compact);
         assert_eq!(node.plane, 7);
         assert_eq!(node.children, [-2, 3]);
-        assert_eq!(node.mins, Vec3I16::default());
-        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(
+            node.mins,
+            Vec3I16 {
+                x: -8,
+                y: -8,
+                z: -8
+            }
+        );
+        assert_eq!(
+            node.maxs,
+            Vec3I16 {
+                x: 16,
+                y: 16,
+                z: 16
+            }
+        );
         assert_eq!(node.surface_mins, Vec3I16::default());
         assert_eq!(node.surface_maxs, Vec3I16::default());
-        assert_eq!(node.first_face, 0);
-        assert_eq!(node.face_count, 0);
+        assert_eq!(node.first_face, 11);
+        assert_eq!(node.face_count, 3);
 
         let mut model = [0u8; 32];
         model[0..12].fill(1);
@@ -754,6 +818,28 @@ mod tests {
                 z: 0x5a5a
             }
         );
+    }
+
+    #[test]
+    fn indexed_psb_nodes_expand_without_inventing_render_metadata() {
+        let mut source = [0u8; 6];
+        source[0..2].copy_from_slice(&7u16.to_le_bytes());
+        source[2..4].copy_from_slice(&(-2i16).to_le_bytes());
+        source[4..6].copy_from_slice(&3i16.to_le_bytes());
+        let mut resident = [0xffu8; Node::SIZE];
+        assert!(transcode_record(
+            LumpKind::Nodes,
+            PsbVersion::IndexedV5,
+            &source,
+            &mut resident,
+        ));
+        let node = Node::decode(&resident);
+        assert_eq!(node.plane, 7);
+        assert_eq!(node.children, [-2, 3]);
+        assert_eq!(node.mins, Vec3I16::default());
+        assert_eq!(node.maxs, Vec3I16::default());
+        assert_eq!(node.first_face, 0);
+        assert_eq!(node.face_count, 0);
     }
 
     #[test]

@@ -2,7 +2,8 @@ use super::*;
 
 #[test]
 fn collect_entity_bounds_covers_starter_scene_entities() {
-    let workspace = EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+    let workspace =
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let bounds = workspace.collect_entity_bounds(workspace.active_room_id());
     assert!(
         !bounds.is_empty(),
@@ -374,7 +375,10 @@ fn inline_character_controller_edit_undoes_with_entity_selected() {
     let before = workspace.project.clone();
     let history_epoch = workspace.history.epoch();
 
-    let NodeKind::CharacterController { settings: Some(settings), .. } = &mut workspace
+    let NodeKind::CharacterController {
+        settings: Some(settings),
+        ..
+    } = &mut workspace
         .project
         .active_scene_mut()
         .node_mut(controller)
@@ -388,7 +392,10 @@ fn inline_character_controller_edit_undoes_with_entity_selected() {
     workspace.do_undo();
 
     assert_eq!(workspace.selection.selected_node, entity);
-    let NodeKind::CharacterController { settings: Some(settings), .. } = &workspace
+    let NodeKind::CharacterController {
+        settings: Some(settings),
+        ..
+    } = &workspace
         .project
         .active_scene()
         .node(controller)
@@ -1030,7 +1037,9 @@ fn dropping_player_profile_applies_camera_preset_and_replaces_player_source() {
         .iter()
         .find_map(|child| match child.kind {
             NodeKind::CharacterController {
-                player: true, settings, ..
+                player: true,
+                settings,
+                ..
             } => Some(settings),
             _ => None,
         })
@@ -1167,7 +1176,8 @@ fn character_controller_player_toggle_demotes_existing_player_source() {
 
 #[test]
 fn pick_entity_bound_returns_node_when_ray_hits_centre() {
-    let workspace = EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+    let workspace =
+        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
     let bounds = workspace.collect_entity_bounds(workspace.active_room_id());
     let target = bounds
         .iter()

@@ -493,10 +493,7 @@ fn main() {
 /// Named explicitly for an enemy, since an enemy's own combat clips resolve
 /// off ITS animation set, not the player's. Without a name this keeps the old
 /// behaviour and finds the player.
-fn find_target(
-    project: &ProjectDocument,
-    name: Option<&str>,
-) -> (String, ResourceId, ResourceId) {
+fn find_target(project: &ProjectDocument, name: Option<&str>) -> (String, ResourceId, ResourceId) {
     let Some(name) = name else {
         return find_player(project);
     };

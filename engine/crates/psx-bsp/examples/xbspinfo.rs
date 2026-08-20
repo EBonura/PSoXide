@@ -9,9 +9,10 @@
 //! cargo run -p psx-bsp --example xbspinfo -- WORLD.PAK
 //! ```
 
+use psx_bsp::pxbsp::PXBSP_MAGIC;
+use psx_bsp::pxbsp_resident::PxbspResidentMap;
 use psx_bsp::{
-    CookedRecord, LumpKind, Node, PsbIndex, SliceReader, LUMP_HEADER_BYTES, PSB3_MAGIC,
-    PSB_HEADER_BYTES, PSB_MAGIC,
+    LumpKind, PsbIndex, SliceReader, LUMP_HEADER_BYTES, PSB3_MAGIC, PSB_HEADER_BYTES, PSB_MAGIC,
 };
 
 const PAK_MAGIC: &[u8; 8] = b"PSOXWPAK";
@@ -34,7 +35,18 @@ fn main() {
             }
         };
 
-        if bytes.len() >= PAK_MAGIC.len() && &bytes[..PAK_MAGIC.len()] == PAK_MAGIC {
+        if bytes.get(..4) == Some(&PXBSP_MAGIC.to_le_bytes()) {
+            match inspect_pxbsp(&bytes) {
+                Ok(summary) => {
+                    println!("{path}:");
+                    print!("{summary}");
+                }
+                Err(err) => {
+                    eprintln!("{path}: {err}");
+                    failures += 1;
+                }
+            }
+        } else if bytes.len() >= PAK_MAGIC.len() && &bytes[..PAK_MAGIC.len()] == PAK_MAGIC {
             match inspect_pack(path, &bytes) {
                 Ok(maps) => println!("{path}: {maps} map chunk(s) parsed"),
                 Err(err) => {
@@ -60,6 +72,20 @@ fn main() {
         eprintln!("{failures} input(s) failed");
         std::process::exit(1);
     }
+}
+
+/// Validate one resident PXBSP using the same zero-copy path as the guest.
+fn inspect_pxbsp(bytes: &[u8]) -> Result<String, String> {
+    let leaked: &'static [u8] = Box::leak(bytes.to_vec().into_boxed_slice());
+    let map = PxbspResidentMap::from_static(0, leaked).map_err(|error| format!("{error:?}"))?;
+    Ok(format!(
+        "  PXBSP resident validation: ok\n  vertices: {}\n  faces: {}\n  leaves: {}\n  nodes: {}\n  models: {}\n",
+        map.vertices().len(),
+        map.faces().len(),
+        map.leaves().len(),
+        map.nodes().len(),
+        map.brush_models().len(),
+    ))
 }
 
 /// Walk a PSOXWPAK world pack: verify every chunk's checksum, decompress the
@@ -183,11 +209,12 @@ fn walk(bytes: &[u8], index: &PsbIndex) -> Result<(), String> {
     let node_bytes = lump(LumpKind::Nodes);
     let node_count = node_bytes.len() / node_size;
     for (i, record) in node_bytes.chunks_exact(node_size).enumerate() {
-        let node = Node::decode(&record[..Node::SIZE]);
-        if u32::from(node.plane) >= planes {
-            return Err(format!("node {i}: plane {} out of range", node.plane));
+        let plane = u16::from_le_bytes(record[0..2].try_into().unwrap());
+        if u32::from(plane) >= planes {
+            return Err(format!("node {i}: plane {plane} out of range"));
         }
-        for child in node.children {
+        for offset in [2usize, 4] {
+            let child = i16::from_le_bytes(record[offset..offset + 2].try_into().unwrap());
             let ok = if child < 0 {
                 u32::from((-child - 1) as u16) < leaves
             } else {

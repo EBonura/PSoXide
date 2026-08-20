@@ -3583,6 +3583,33 @@ fn run_real_egui_workspace_click_on_label(workspace: &mut EditorWorkspace, label
     let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 3.0 / 60.0, vec![]);
 }
 
+/// Open a searchable picker by its current label, then choose one visible
+/// option from the popup. Both clicks travel through full workspace frames.
+fn run_real_egui_workspace_select_picker_option(
+    workspace: &mut EditorWorkspace,
+    current_label: &str,
+    option_label: &str,
+) {
+    let (ctx, viewport) = real_egui_workspace_ctx("workspace-picker-option");
+    let picker = locate_unique_label(&ctx, workspace, &viewport, current_label);
+    let (press, release) = press_release(picker);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 1.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 2.0 / 60.0, release);
+
+    let frame = real_egui_workspace_frame(&ctx, workspace, &viewport, 3.0 / 60.0, vec![]);
+    let found = text_shape_centers(&frame.shapes, option_label);
+    assert_eq!(
+        found.len(),
+        1,
+        "picker option {option_label:?} must be visible exactly once, saw {found:?}"
+    );
+    let option = found[0];
+    let (press, release) = press_release(option);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 4.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 5.0 / 60.0, release);
+    let _ = real_egui_workspace_frame(&ctx, workspace, &viewport, 6.0 / 60.0, vec![]);
+}
+
 /// Click the DragValue whose current galley text is `label`, type `entry`,
 /// and commit with Enter.
 fn run_real_egui_type_into_drag_value(workspace: &mut EditorWorkspace, label: &str, entry: &str) {
@@ -3676,6 +3703,99 @@ fn apply_to_face_button_paints_only_the_selected_face_and_undoes_once() {
         workspace.project.active_scene().brushes[0].faces[2].material,
         Some(moss)
     );
+}
+
+/// Regression: choosing a different material in the brush face Inspector
+/// applies immediately. The Apply button is not required as a second step.
+#[test]
+fn inspector_material_picker_assigns_the_selected_brush_face_via_real_egui() {
+    let mut project = ProjectDocument::new("face inspector material picker");
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let moss = project.add_resource(
+        "Moss",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    for face in &mut brush.faces {
+        face.material = Some(stone);
+    }
+    project.active_scene_mut().brushes.push(brush);
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("inspector-face-picker"), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.resources_open = false;
+    workspace.replace_brush_selection(0, Some(2));
+
+    run_real_egui_workspace_select_picker_option(&mut workspace, "Stone", "Moss");
+
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[2].material,
+        Some(moss)
+    );
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .enumerate()
+        .all(|(index, face)| index == 2 || face.material == Some(stone)));
+    assert_eq!(workspace.selected_brush, Some(0));
+    assert_eq!(workspace.selected_brush_face, Some(2));
+
+    workspace.do_undo();
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .all(|face| face.material == Some(stone)));
+}
+
+/// Regression: a plain click on a Material card applies to the selected BSP
+/// brush face instead of merely changing resource selection.
+#[test]
+fn resource_browser_material_card_assigns_the_selected_brush_face_via_real_egui() {
+    let mut project = ProjectDocument::new("face resource browser material");
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let moss = project.add_resource(
+        "Moss",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    for face in &mut brush.faces {
+        face.material = Some(stone);
+    }
+    project.active_scene_mut().brushes.push(brush);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("resource-face-card"), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.inspector_open = false;
+    workspace.resources_open = true;
+    workspace.replace_brush_selection(0, Some(2));
+
+    run_real_egui_workspace_click_on_label(&mut workspace, "Moss");
+
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].faces[2].material,
+        Some(moss)
+    );
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .enumerate()
+        .all(|(index, face)| index == 2 || face.material == Some(stone)));
+    assert_eq!(workspace.selected_brush, Some(0));
+    assert_eq!(workspace.selected_brush_face, Some(2));
+    assert_eq!(workspace.selection.selected_resource, Some(moss));
+
+    workspace.do_undo();
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .all(|face| face.material == Some(stone)));
 }
 
 #[test]

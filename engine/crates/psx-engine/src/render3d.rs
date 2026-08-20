@@ -3475,21 +3475,23 @@ const BLENDED_VERTEX_CHUNK: usize = 32;
 /// swaps the GTE rotation/translation three times per vertex: secondary
 /// joint, identity for the RTPS wrapper, primary restore. Blended
 /// vertices cluster at joint seams, so deferring them into a chunk
-/// amortizes those control-register loads: phase 1 transforms every
-/// chunk vertex while the caller's primary joint is still loaded, phase
-/// 2 reloads a secondary joint only when the seam's `joint1` changes and
-/// lerps in place, phase 3 projects the whole chunk under one
-/// identity/zero load, and phase 4 restores the caller's primary state.
+/// amortizes those control-register loads. The caller has already captured
+/// each vertex's primary-joint transform while that part's matrix was live;
+/// phase 1 reloads a secondary joint only when the seam's `joint1` changes
+/// and lerps in place, phase 2 projects the whole chunk under one
+/// identity/zero load, and phase 3 restores the caller's primary state.
 /// The per-vertex arithmetic is identical to the slow path, so frames
 /// stay bit-exact.
 ///
 /// Caller guarantees `chunk_ptr` addresses at least `chunk_len` initialized
-/// `u16`s, every referenced index is in range for `vertices` and
-/// `projected_vertices`, belongs to the part whose joint is `primary`, and
-/// passed [`model_vertex_uses_cpu_blend`].
+/// `u16`s, `view_blend_ptr` addresses the same number of initialized primary
+/// view-space values, every referenced index is in range for `vertices` and
+/// `projected_vertices`, and every vertex passed
+/// [`model_vertex_uses_cpu_blend`].
 #[cfg(not(feature = "vert-debug"))]
 unsafe fn flush_blended_model_vertex_chunk(
     chunk_ptr: *const u16,
+    view_blend_ptr: *mut ViewVertex,
     chunk_len: usize,
     vertices: &[ModelVertex],
     primary: JointViewTransform,
@@ -3505,24 +3507,9 @@ unsafe fn flush_blended_model_vertex_chunk(
     max_y: &mut i16,
 ) {
     let chunk_len = chunk_len.min(BLENDED_VERTEX_CHUNK);
-    let mut view_blend = [ViewVertex::ZERO; BLENDED_VERTEX_CHUNK];
-    // Phase 1: primary-joint transforms while the caller's state is live.
-    let mut slot = 0usize;
-    while slot < chunk_len {
-        // SAFETY: the caller guarantees every chunk index is valid for the
-        // model vertex and projected-vertex slices; `slot < chunk_len` and
-        // the local array is capped to `BLENDED_VERTEX_CHUNK` above.
-        let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
-        let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
-        let a = scene::transform_vertex_scheduled(vertex.position);
-        unsafe {
-            *view_blend.get_unchecked_mut(slot) = ViewVertex::new(a.x, a.y, a.z);
-        }
-        slot += 1;
-    }
-    // Phase 2: secondary transforms, reloading only on joint1 change.
+    // Phase 1: secondary transforms, reloading only on joint1 change.
     let mut loaded_joint1 = u16::MAX;
-    slot = 0;
+    let mut slot = 0usize;
     while slot < chunk_len {
         let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
@@ -3534,19 +3521,19 @@ unsafe fn flush_blended_model_vertex_chunk(
         }
         let b = scene::transform_vertex_scheduled(vertex.position);
         unsafe {
-            let blend = view_blend.get_unchecked_mut(slot);
+            let blend = &mut *view_blend_ptr.add(slot);
             *blend = lerp_view_vertex(*blend, ViewVertex::new(b.x, b.y, b.z), vertex.blend);
         }
         slot += 1;
     }
-    // Phase 3: one identity/zero load projects the whole chunk.
+    // Phase 2: one identity/zero load projects the whole chunk.
     scene::load_rotation(&Mat3I16::IDENTITY);
     scene::load_translation(Vec3I32::ZERO);
     slot = 0;
     while slot < chunk_len {
         let vertex_index = unsafe { *chunk_ptr.add(slot) as usize };
         let projected = project_gte_view_vertex_identity_loaded(
-            unsafe { *view_blend.get_unchecked(slot) },
+            unsafe { *view_blend_ptr.add(slot) },
             projection,
         );
         *all_in_front &= projected_model_vertex_in_front(projected, near_z);
@@ -3557,7 +3544,7 @@ unsafe fn flush_blended_model_vertex_chunk(
         }
         slot += 1;
     }
-    // Phase 4: restore the caller's primary joint state.
+    // Phase 3: restore the caller's primary joint state.
     scene::load_rotation(&primary.rotation);
     scene::load_translation(primary.translation);
 }

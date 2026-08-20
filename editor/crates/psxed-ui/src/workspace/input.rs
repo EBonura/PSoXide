@@ -28,7 +28,6 @@ impl EditorWorkspace {
         self.last_cook_errors.clear();
     }
 
-
     /// Select the concrete authoring object attached to a typed cook
     /// diagnostic. Returns `false` when the target is stale so the caller can
     /// fall back to the legacy world-grid diagnostic mapper.

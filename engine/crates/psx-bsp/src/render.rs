@@ -40,6 +40,33 @@ pub const DEFAULT_PACKET_WORDS: usize = 0x30000 / core::mem::size_of::<u32>();
 // ponytail: these fixed arrays match the first XBSP format and PS1 budget;
 // the PXBSP cook reports them and region paging removes the global ceilings.
 const MAX_FACE_COUNT: usize = 32_767;
+/// Initial PXBSP face-chain storage. Typical leaf PVS sets are far smaller
+/// than the whole map (E1M1 is 484/5,724); vectors may still grow for denser
+/// maps without permanently reserving two complete face tables on PS1.
+const PXBSP_INITIAL_FACE_CHAIN_CAPACITY: usize = 512;
+const PXBSP_NODE_POSTORDER: u32 = 1 << 31;
+
+#[inline]
+fn packed_face_state(states: &[u8], index: usize) -> u8 {
+    (states[index >> 2] >> ((index & 3) << 1)) & 3
+}
+
+#[inline]
+fn set_packed_face_state(states: &mut [u8], index: usize, state: u8) {
+    let shift = (index & 3) << 1;
+    let byte = &mut states[index >> 2];
+    *byte = (*byte & !(3 << shift)) | ((state & 3) << shift);
+}
+
+#[inline]
+fn packed_bit(bits: &[u8], index: usize) -> bool {
+    bits[index >> 3] & (1 << (index & 7)) != 0
+}
+
+#[inline]
+fn set_packed_bit(bits: &mut [u8], index: usize) {
+    bits[index >> 3] |= 1 << (index & 7);
+}
 const BATCH_MAX_VERTICES: usize = 39;
 const BATCH_MAX_SURFACES: usize = 13;
 const SUBDIVISION_SCRATCH_VERTICES: usize = 12;
@@ -130,17 +157,17 @@ enum PxbspFaceSelection {
 }
 
 impl PxbspFaceSelection {
-    fn range(self, face_count: usize) -> (usize, usize) {
+    fn range(self, face_count: usize, visible_face_count: usize) -> (usize, usize) {
         match self {
-            Self::VisibleWorld => (0, face_count),
+            Self::VisibleWorld => (0, visible_face_count),
             Self::ModelRange { first, end } => (first.min(face_count), end.min(face_count)),
         }
     }
 
-    fn includes(self, face: usize, visible_faces: &[u8]) -> bool {
+    fn face_index(self, index: usize, visible_faces: &[u16]) -> usize {
         match self {
-            Self::VisibleWorld => visible_faces.get(face).copied() == Some(1),
-            Self::ModelRange { .. } => true,
+            Self::VisibleWorld => visible_faces[index] as usize,
+            Self::ModelRange { .. } => index,
         }
     }
 }
@@ -302,6 +329,23 @@ impl FrustumPlanes {
             + plane.1
     }
 
+    /// True when the whole axis-aligned box lies outside any clip plane.
+    /// Testing the vertex farthest along each plane normal makes this a
+    /// conservative hierarchical reject; intersecting nodes still reach the
+    /// exact polygon clip below.
+    fn aabb_outside(&self, mins: Vec3I16, maxs: Vec3I16) -> bool {
+        let mins = [mins.x, mins.y, mins.z];
+        let maxs = [maxs.x, maxs.y, maxs.z];
+        self.planes.iter().any(|plane| {
+            let positive = [
+                if plane.0[0] >= 0 { maxs[0] } else { mins[0] },
+                if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
+                if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
+            ];
+            Self::distance(plane, positive) < 0
+        })
+    }
+
     /// Clip a convex polygon in place. Returns the vertex count after
     /// clipping (0 when nothing remains). `vertices` must have room for
     /// `count + 5` records; `scratch` the same.
@@ -401,6 +445,22 @@ fn isqrt_i64(value: i64) -> i64 {
 pub struct Renderer {
     frame: u32,
     face_visible: Vec<u8>,
+    /// Two-bit PXBSP face state: 0 hidden, 1 PVS fallback, 2 node-owned PVS.
+    pxbsp_face_state: Vec<u8>,
+    pxbsp_face_count: usize,
+    /// Sorted, unique PVS face chain for PXBSP worlds. Quake-PSX builds the
+    /// same kind of surface chain during BSP traversal; retaining it across
+    /// frames avoids scanning the complete face table while the view leaf is
+    /// unchanged. `pxbsp_face_state` remains the packed deduplication table.
+    visible_pxbsp_faces: Vec<u16>,
+    /// Per-frame subset left after hierarchical node-frustum rejection.
+    frame_pxbsp_faces: Vec<u16>,
+    /// Cached PVS reachability for the compact PXBSP render tree.
+    pxbsp_node_visible: Vec<u8>,
+    pxbsp_node_discovered: Vec<u8>,
+    pxbsp_node_count: usize,
+    pxbsp_node_stack: Vec<u32>,
+    pxbsp_node_metadata_valid: bool,
     visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
     cached_visibility: Option<(u32, usize)>,
@@ -431,7 +491,23 @@ impl Renderer {
     /// this world renderer. Sizing the face marks to the cooked map avoids
     /// reserving the legacy 32K-face XBSP ceiling on the PS1 heap.
     pub fn new_pxbsp(face_count: usize) -> Self {
-        Self::with_capacities(face_count, 0, 0)
+        Self::new_pxbsp_with_nodes(face_count, 0)
+    }
+
+    /// Construct PXBSP scratch with the render-tree capacity known up front,
+    /// avoiding heap growth on the first PVS rebuild during gameplay.
+    pub fn new_pxbsp_with_nodes(face_count: usize, node_count: usize) -> Self {
+        let mut renderer = Self::with_capacities(0, 0, 0);
+        let chain_capacity = face_count.min(PXBSP_INITIAL_FACE_CHAIN_CAPACITY);
+        renderer.pxbsp_face_state = vec![0; face_count.div_ceil(4)];
+        renderer.pxbsp_face_count = face_count;
+        renderer.visible_pxbsp_faces = Vec::with_capacity(chain_capacity);
+        renderer.frame_pxbsp_faces = Vec::with_capacity(chain_capacity);
+        renderer.pxbsp_node_visible = vec![0; node_count.div_ceil(8)];
+        renderer.pxbsp_node_discovered = vec![0; node_count.div_ceil(8)];
+        renderer.pxbsp_node_count = node_count;
+        renderer.pxbsp_node_stack = Vec::with_capacity(node_count.min(128));
+        renderer
     }
 
     fn with_capacities(
@@ -444,6 +520,15 @@ impl Renderer {
         Self {
             frame: 0,
             face_visible: vec![0; face_count],
+            pxbsp_face_state: Vec::new(),
+            pxbsp_face_count: 0,
+            visible_pxbsp_faces: Vec::new(),
+            frame_pxbsp_faces: Vec::new(),
+            pxbsp_node_visible: Vec::new(),
+            pxbsp_node_discovered: Vec::new(),
+            pxbsp_node_count: 0,
+            pxbsp_node_stack: Vec::new(),
+            pxbsp_node_metadata_valid: false,
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_visibility: None,
@@ -666,7 +751,9 @@ impl Renderer {
 
         let frustum =
             FrustumPlanes::from_view(&view.rotation, view.translation, self.view_projection);
-        let frame = if self.mark_visible_pxbsp_faces(map, camera.origin) {
+        let frame = if self.mark_visible_pxbsp_faces(map, camera.origin)
+            && self.select_frame_pxbsp_faces(map, camera.origin, &frustum)
+        {
             self.draw_pxbsp_faces(
                 map,
                 camera.origin,
@@ -767,11 +854,9 @@ impl Renderer {
 
         let faces = map.faces();
         let map_materials = map.materials();
-        let (first_face, face_end) = selection.range(faces.len());
-        for face_index in first_face..face_end {
-            if !selection.includes(face_index, &self.face_visible) {
-                continue;
-            }
+        let (first_face, face_end) = selection.range(faces.len(), self.frame_pxbsp_faces.len());
+        for selection_index in first_face..face_end {
+            let face_index = selection.face_index(selection_index, &self.frame_pxbsp_faces);
             let face = unsafe { faces.get_unchecked(face_index) };
             let material_index = face.texture as usize;
             let material = unsafe { map_materials.get_unchecked(material_index) };
@@ -1202,24 +1287,28 @@ impl Renderer {
     fn mark_visible_pxbsp_faces(&mut self, map: &PxbspResidentMap, point: Vec3I32) -> bool {
         self.cached_visibility = None;
         let faces = map.faces();
-        if faces.len() > self.face_visible.len() {
+        if faces.len() != self.pxbsp_face_count {
             self.cached_pxbsp_visibility = None;
+            self.visible_pxbsp_faces.clear();
             return false;
         }
         let Some(leaf_index) = map.point_leaf_index(point) else {
             self.cached_pxbsp_visibility = None;
+            self.visible_pxbsp_faces.clear();
             self.visible_leaf_count = 0;
             return false;
         };
         if leaf_index == 0 {
             self.cached_pxbsp_visibility = None;
+            self.visible_pxbsp_faces.clear();
             self.visible_leaf_count = 0;
             return false;
         }
         if self.cached_pxbsp_visibility == Some((map.generation(), leaf_index)) {
             return true;
         }
-        self.face_visible[..faces.len()].fill(0);
+        self.pxbsp_face_state.fill(0);
+        self.visible_pxbsp_faces.clear();
         let leaf = map.leaves().get(leaf_index).expect("validated leaf");
         if leaf.visibility_offset < 0 {
             self.cached_pxbsp_visibility = None;
@@ -1259,11 +1348,168 @@ impl Renderer {
             let end = start + leaf.mark_surface_count as usize;
             for mark_index in start..end {
                 let face = marks.get(mark_index).expect("validated mark surface") as usize;
-                self.face_visible[face] = 1;
+                if packed_face_state(&self.pxbsp_face_state, face) == 0 {
+                    set_packed_face_state(&mut self.pxbsp_face_state, face, 1);
+                    self.visible_pxbsp_faces.push(face as u16);
+                }
             }
         }
+        // The former full-table scan visited faces in ascending source order.
+        // Preserve that exact order so batching and equal-depth packet ties do
+        // not change while replacing the scan with the compact chain.
+        self.visible_pxbsp_faces.sort_unstable();
         self.visible_leaf_count = visible_leaves;
+        self.rebuild_pxbsp_node_visibility(map);
         self.cached_pxbsp_visibility = Some((map.generation(), leaf_index));
+        true
+    }
+
+    /// Rebuild the Quake-style PVS stamp for render nodes. This runs only
+    /// when the camera enters a different leaf; per-frame traversal can then
+    /// skip every branch that cannot lead to a PVS-visible leaf.
+    fn rebuild_pxbsp_node_visibility(&mut self, map: &PxbspResidentMap) {
+        let nodes = map.nodes();
+        if nodes.len() != self.pxbsp_node_count {
+            self.pxbsp_node_metadata_valid = false;
+            return;
+        }
+        self.pxbsp_node_visible.fill(0);
+        self.pxbsp_node_discovered.fill(0);
+        self.pxbsp_node_stack.clear();
+
+        let root = map
+            .brush_models()
+            .get(0)
+            .expect("validated world model")
+            .head_nodes[0];
+        if root < 0 || root as usize >= nodes.len() {
+            self.pxbsp_node_metadata_valid = false;
+            return;
+        }
+
+        // Explicit tagged postorder avoids guest recursion and needs only a
+        // depth-sized stack. The same walk upgrades state 1 PVS faces to state
+        // 2 when a world node owns them, leaving staticized func_* faces at 1.
+        let mut owns_faces = false;
+        self.pxbsp_node_stack.push(root as u32);
+        while let Some(entry) = self.pxbsp_node_stack.pop() {
+            let index = (entry & !PXBSP_NODE_POSTORDER) as usize;
+            let node = nodes.get(index).expect("validated node traversal");
+            if entry & PXBSP_NODE_POSTORDER != 0 {
+                let visible = node.children.into_iter().any(|child| {
+                    if child >= 0 {
+                        packed_bit(&self.pxbsp_node_visible, child as usize)
+                    } else {
+                        let leaf = (-1i32 - child as i32) as usize;
+                        self.pxbsp_leaf_visible(leaf)
+                    }
+                });
+                if visible {
+                    set_packed_bit(&mut self.pxbsp_node_visible, index);
+                }
+                continue;
+            }
+
+            if packed_bit(&self.pxbsp_node_discovered, index) {
+                continue;
+            }
+            set_packed_bit(&mut self.pxbsp_node_discovered, index);
+            self.pxbsp_node_stack.push(entry | PXBSP_NODE_POSTORDER);
+            for child in node.children {
+                if child >= 0 {
+                    self.pxbsp_node_stack.push(child as u32);
+                }
+            }
+
+            let start = node.first_face as usize;
+            let end = start + node.face_count as usize;
+            owns_faces |= node.face_count != 0;
+            for face in start..end {
+                if packed_face_state(&self.pxbsp_face_state, face) == 1 {
+                    set_packed_face_state(&mut self.pxbsp_face_state, face, 2);
+                }
+            }
+        }
+        self.pxbsp_node_metadata_valid = owns_faces;
+    }
+
+    fn pxbsp_leaf_visible(&self, leaf_index: usize) -> bool {
+        if leaf_index == 0 || leaf_index > self.visible_leaf_count {
+            return false;
+        }
+        let visible_index = leaf_index - 1;
+        self.visibility[visible_index >> 3] & (1 << (visible_index & 7)) != 0
+    }
+
+    /// Select only PVS-stamped node faces whose subtree AABB intersects the
+    /// current frustum. Exact per-polygon clipping remains in the draw path.
+    fn select_frame_pxbsp_faces(
+        &mut self,
+        map: &PxbspResidentMap,
+        camera_origin: Vec3I32,
+        frustum: &FrustumPlanes,
+    ) -> bool {
+        self.frame_pxbsp_faces.clear();
+        if !self.pxbsp_node_metadata_valid {
+            self.frame_pxbsp_faces
+                .extend_from_slice(&self.visible_pxbsp_faces);
+            return true;
+        }
+
+        let nodes = map.nodes();
+        let planes = map.planes();
+        let root = map
+            .brush_models()
+            .get(0)
+            .expect("validated world model")
+            .head_nodes[0];
+        if root < 0 || root as usize >= nodes.len() {
+            return false;
+        }
+
+        self.pxbsp_node_stack.clear();
+        self.pxbsp_node_stack.push(root as u32);
+        while let Some(node_index) = self.pxbsp_node_stack.pop() {
+            let index = node_index as usize;
+            if !packed_bit(&self.pxbsp_node_visible, index) {
+                continue;
+            }
+            let node = nodes.get(index).expect("validated node traversal");
+            if frustum.aabb_outside(node.mins, node.maxs) {
+                continue;
+            }
+
+            let plane = planes
+                .get(node.plane as usize)
+                .expect("validated node plane");
+            let behind = plane_distance(plane, camera_origin) < 0;
+            let near = node.children[behind as usize];
+            let far = node.children[usize::from(!behind)];
+            if far >= 0 {
+                self.pxbsp_node_stack.push(far as u32);
+            }
+            if near >= 0 {
+                self.pxbsp_node_stack.push(near as u32);
+            }
+
+            let start = node.first_face as usize;
+            let end = start + node.face_count as usize;
+            for face in start..end {
+                if packed_face_state(&self.pxbsp_face_state, face) != 0 {
+                    self.frame_pxbsp_faces.push(face as u16);
+                }
+            }
+        }
+
+        // Imported func_* brushes are deliberately staticized into leaf mark
+        // lists and do not belong to the original world-node face ranges.
+        for &face in &self.visible_pxbsp_faces {
+            if packed_face_state(&self.pxbsp_face_state, face as usize) == 1 {
+                self.frame_pxbsp_faces.push(face);
+            }
+        }
+        self.frame_pxbsp_faces.sort_unstable();
+        self.frame_pxbsp_faces.dedup();
         true
     }
 }
@@ -1776,6 +2022,10 @@ mod tests {
             vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
         }
         lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
         lumps[PxbspLumpKind::Materials as usize][7] = material_blend::SUBTRACT;
         let bytes = write_file(&lumps);
         let mut map = PxbspResidentMap::with_capacity(bytes.len());
@@ -1798,10 +2048,11 @@ mod tests {
             texture_size: [64; 2],
         };
         let mut packets = [0u32; 512];
-        let mut renderer = Renderer::new_pxbsp(map.faces().len());
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
         assert_eq!(map.point_leaf_index(camera.origin), Some(1));
         assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
-        assert_eq!(renderer.face_visible[0], 1);
+        assert_eq!(packed_face_state(&renderer.pxbsp_face_state, 0), 2);
+        assert_eq!(renderer.visible_pxbsp_faces, [0]);
         assert!(front_facing_pxbsp(
             &map,
             map.faces().get(0).expect("face"),
@@ -1822,7 +2073,7 @@ mod tests {
             &mut packets,
         );
 
-        assert_eq!(renderer.face_visible[0], 1);
+        assert_eq!(packed_face_state(&renderer.pxbsp_face_state, 0), 2);
         assert_eq!(frame.stats.visible_faces, 1);
         assert_eq!(frame.stats.unresolved_material_faces, 0);
         assert!(frame.stats.packets > 0);
@@ -1847,11 +2098,31 @@ mod tests {
     }
 
     #[test]
-    fn pxbsp_renderer_allocates_only_world_face_marks() {
-        let renderer = Renderer::new_pxbsp(37);
-        assert_eq!(renderer.face_visible.len(), 37);
+    fn pxbsp_renderer_allocates_exact_world_scratch() {
+        let renderer = Renderer::new_pxbsp_with_nodes(37, 11);
+        assert!(renderer.face_visible.is_empty());
+        assert_eq!(renderer.pxbsp_face_count, 37);
+        assert_eq!(renderer.pxbsp_face_state.len(), 10);
+        assert_eq!(renderer.visible_pxbsp_faces.len(), 0);
+        assert!(renderer.visible_pxbsp_faces.capacity() >= 37);
+        assert_eq!(renderer.frame_pxbsp_faces.len(), 0);
+        assert!(renderer.frame_pxbsp_faces.capacity() >= 37);
+        assert_eq!(renderer.pxbsp_node_visible.len(), 2);
+        assert_eq!(renderer.pxbsp_node_discovered.len(), 2);
         assert!(renderer.alias_projected.is_empty());
         assert_eq!(renderer.visible_entity_indices.capacity(), 0);
+    }
+
+    #[test]
+    fn pxbsp_leaf_visibility_keeps_sparse_high_index_pvs_bits() {
+        let mut renderer = Renderer::new_pxbsp_with_nodes(0, 0);
+        renderer.visible_leaf_count = 100;
+        renderer.visibility.fill(0);
+        set_packed_bit(&mut renderer.visibility, 99);
+
+        assert!(!renderer.pxbsp_leaf_visible(1));
+        assert!(renderer.pxbsp_leaf_visible(100));
+        assert!(!renderer.pxbsp_leaf_visible(101));
     }
 
     #[test]
@@ -2005,5 +2276,34 @@ mod frustum_tests {
                 v.position
             );
         }
+    }
+
+    #[test]
+    fn node_aabb_rejection_is_conservative_for_the_cornered_camera() {
+        let (planes, _) = planes_for([37, 70, 273], 1024, 100);
+        assert!(!planes.aabb_outside(
+            Vec3I16 {
+                x: 16,
+                y: 0,
+                z: 100,
+            },
+            Vec3I16 {
+                x: 200,
+                y: 192,
+                z: 130,
+            },
+        ));
+        assert!(planes.aabb_outside(
+            Vec3I16 {
+                x: 16,
+                y: 0,
+                z: 320,
+            },
+            Vec3I16 {
+                x: 200,
+                y: 192,
+                z: 340,
+            },
+        ));
     }
 }
