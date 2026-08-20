@@ -992,7 +992,9 @@ impl EditorWorkspace {
                 // Resolve the same way the cook does, so the overlay draws the
                 // capsule the game will actually use.
                 NodeKind::CharacterController {
-                    character, settings, ..
+                    character,
+                    settings,
+                    ..
                 } => settings.or_else(|| {
                     character
                         .and_then(|id| self.project.resource(id))

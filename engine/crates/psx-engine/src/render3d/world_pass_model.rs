@@ -567,6 +567,22 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         let parts = &geometry.parts[..model_part_count as usize];
         let vertices = &geometry.vertices[..model_vertex_count];
+        // Carry seam vertices across part boundaries. Their primary-joint
+        // contribution is captured while each part's matrix is live; a full
+        // chunk can then amortize secondary-joint and projection-state loads
+        // across the whole model instead of flushing every small part.
+        #[cfg(not(feature = "vert-debug"))]
+        let mut blended_chunk = MaybeUninit::<[u16; BLENDED_VERTEX_CHUNK]>::uninit();
+        #[cfg(not(feature = "vert-debug"))]
+        let blended_chunk_ptr = blended_chunk.as_mut_ptr().cast::<u16>();
+        #[cfg(not(feature = "vert-debug"))]
+        let mut blended_view_chunk = MaybeUninit::<[ViewVertex; BLENDED_VERTEX_CHUNK]>::uninit();
+        #[cfg(not(feature = "vert-debug"))]
+        let blended_view_chunk_ptr = blended_view_chunk.as_mut_ptr().cast::<ViewVertex>();
+        #[cfg(not(feature = "vert-debug"))]
+        let mut blended_len = 0usize;
+        #[cfg(not(feature = "vert-debug"))]
+        let mut blended_restore_primary = JointViewTransform::default();
         let mut part_index = 0u16;
         while part_index < model_part_count {
             let part = parts[part_index as usize];
@@ -578,6 +594,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 continue;
             }
             let primary = joint_view_transforms[primary_joint];
+            #[cfg(not(feature = "vert-debug"))]
+            {
+                blended_restore_primary = primary;
+            }
             super::player_vert_debug::set_primary_joint(primary_joint as u8);
 
             scene::load_rotation(&primary.rotation);
@@ -587,17 +607,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let part_end = global_index
                 .saturating_add(part.vertex_count() as usize)
                 .min(project_count);
-            // Blended vertices (joint seams) are deferred into a chunk and
-            // flushed in joint-grouped phases so the GTE matrix swaps
-            // amortize (see flush_blended_model_vertex_chunk). The
-            // vert-debug probe build keeps the per-vertex path so the
-            // explosion probe observes every intermediate stage.
-            #[cfg(not(feature = "vert-debug"))]
-            let mut blended_chunk = MaybeUninit::<[u16; BLENDED_VERTEX_CHUNK]>::uninit();
-            #[cfg(not(feature = "vert-debug"))]
-            let blended_chunk_ptr = blended_chunk.as_mut_ptr().cast::<u16>();
-            #[cfg(not(feature = "vert-debug"))]
-            let mut blended_len = 0usize;
             while global_index < part_end {
                 if blend_vertices
                     && model_vertex_uses_cpu_blend(vertices[global_index], joint_count)
@@ -628,12 +637,21 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     }
                     #[cfg(not(feature = "vert-debug"))]
                     {
+                        let vertex = vertices[global_index];
+                        let primary_view = scene::transform_vertex_scheduled(vertex.position);
                         // SAFETY: `blended_len` is reset at the fixed capacity
-                        // below and incremented once per write.
+                        // below and incremented once after both writes.
                         unsafe {
                             blended_chunk_ptr
                                 .add(blended_len)
                                 .write(global_index as u16);
+                            blended_view_chunk_ptr
+                                .add(blended_len)
+                                .write(ViewVertex::new(
+                                    primary_view.x,
+                                    primary_view.y,
+                                    primary_view.z,
+                                ));
                         }
                         blended_len += 1;
                         if blended_len == BLENDED_VERTEX_CHUNK {
@@ -643,6 +661,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             unsafe {
                                 flush_blended_model_vertex_chunk(
                                     blended_chunk_ptr,
+                                    blended_view_chunk_ptr,
                                     blended_len,
                                     vertices,
                                     primary,
@@ -736,31 +755,32 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     global_index += 1;
                 }
             }
-            #[cfg(not(feature = "vert-debug"))]
-            if blended_len > 0 {
-                // SAFETY: only entries written by the blended-vertex branch
-                // contribute to `blended_len`.
-                unsafe {
-                    flush_blended_model_vertex_chunk(
-                        blended_chunk_ptr,
-                        blended_len,
-                        vertices,
-                        primary,
-                        joint_view_transforms,
-                        gte_projection,
-                        near_z,
-                        projected_vertices,
-                        &mut all_projected_vertices_in_front,
-                        &mut all_projected_vertices_inside_hw_bounds,
-                        &mut projected_min_x,
-                        &mut projected_max_x,
-                        &mut projected_min_y,
-                        &mut projected_max_y,
-                    );
-                }
-            }
-
             part_index += 1;
+        }
+        #[cfg(not(feature = "vert-debug"))]
+        if blended_len > 0 {
+            // SAFETY: only entries written by the blended-vertex branch
+            // contribute to `blended_len`, and every entry has a matching
+            // primary-joint view-space value.
+            unsafe {
+                flush_blended_model_vertex_chunk(
+                    blended_chunk_ptr,
+                    blended_view_chunk_ptr,
+                    blended_len,
+                    vertices,
+                    blended_restore_primary,
+                    joint_view_transforms,
+                    gte_projection,
+                    near_z,
+                    projected_vertices,
+                    &mut all_projected_vertices_in_front,
+                    &mut all_projected_vertices_inside_hw_bounds,
+                    &mut projected_min_x,
+                    &mut projected_max_x,
+                    &mut projected_min_y,
+                    &mut projected_max_y,
+                );
+            }
         }
         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         // EXPLOSION PROBE (diagnostic): for the skinned player model, surface

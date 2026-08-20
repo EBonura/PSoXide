@@ -2774,9 +2774,10 @@
         ),
         /*[95]*/ (
             id: (5022),
-            name: "E1M1 Geometry Grey",
+            name: "E1M1 Temporary Brick",
             data: Material((
-                texture_mode: Generated,
+                texture_mode: SimpleImage,
+                psxt_path: Some("assets/textures/brick_1a_v2.psxt"),
                 blend_mode: Opaque,
                 tint: (128, 128, 128),
                 generated: (size: 64, base_color: (78, 82, 88), noise_enabled: true, noise_color: (122, 128, 136), noise: (seed: 1, feature_size: 24, octaves: 3, contrast: 176), noise_uv: (scale_u_q8: 256, scale_v_q8: 256, offset_u: 0, offset_v: 0, rotation_quarters: 0)),

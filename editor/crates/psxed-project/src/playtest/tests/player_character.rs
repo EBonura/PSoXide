@@ -215,7 +215,11 @@ fn player_character_controller_settings_drive_cooked_character() {
     let controller_id = player_controller_component_id(&project);
     let scene = project.active_scene_mut();
     let controller = scene.node_mut(controller_id).unwrap();
-    let NodeKind::CharacterController { settings: Some(settings), .. } = &mut controller.kind else {
+    let NodeKind::CharacterController {
+        settings: Some(settings),
+        ..
+    } = &mut controller.kind
+    else {
         panic!("starter player controller must be a Character Controller");
     };
     settings.walk_speed = 61;
@@ -247,7 +251,9 @@ fn a_controller_without_an_override_follows_its_character() {
         let scene = project.active_scene_mut();
         let controller = scene.node_mut(controller_id).unwrap();
         let NodeKind::CharacterController {
-            character, settings, ..
+            character,
+            settings,
+            ..
         } = &mut controller.kind
         else {
             panic!("starter player controller must be a Character Controller");
@@ -272,7 +278,11 @@ fn a_controller_without_an_override_follows_its_character() {
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let cooked = &package.expect("package").characters[0];
-    assert_eq!(cooked.walk_speed, 61 << 8, "type's speed must reach the cook");
+    assert_eq!(
+        cooked.walk_speed,
+        61 << 8,
+        "type's speed must reach the cook"
+    );
     assert_eq!(cooked.radius, 200);
 
     // Editing the type again moves the already-placed controller with it.
@@ -351,7 +361,9 @@ fn an_override_still_beats_the_character() {
     let character_id = {
         let scene = project.active_scene_mut();
         let NodeKind::CharacterController {
-            character, settings, ..
+            character,
+            settings,
+            ..
         } = &mut scene.node_mut(controller_id).unwrap().kind
         else {
             panic!("Character Controller");
@@ -782,7 +794,11 @@ fn character_controller_with_zero_radius_fails_validation() {
     let mut project = project_with_one_room();
     let controller_id = player_controller_component_id(&project);
     if let Some(node) = project.active_scene_mut().node_mut(controller_id) {
-        if let NodeKind::CharacterController { settings: Some(settings), .. } = &mut node.kind {
+        if let NodeKind::CharacterController {
+            settings: Some(settings),
+            ..
+        } = &mut node.kind
+        {
             settings.radius = 0;
         }
     }

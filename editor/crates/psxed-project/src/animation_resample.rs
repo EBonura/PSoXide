@@ -51,11 +51,19 @@ fn blend(a: &JointPose, b: &JointPose, numerator: i32, denominator: i32) -> Join
     translation.x = mix(a.translation.x, b.translation.x);
     translation.y = mix(a.translation.y, b.translation.y);
     translation.z = mix(a.translation.z, b.translation.z);
-    JointPose { matrix, translation }
+    JointPose {
+        matrix,
+        translation,
+    }
 }
 
 /// Sample the source clip at a fractional frame position.
-fn sample_at(animation: &Animation<'_>, position: i64, scale: i64, joint: u16) -> Option<JointPose> {
+fn sample_at(
+    animation: &Animation<'_>,
+    position: i64,
+    scale: i64,
+    joint: u16,
+) -> Option<JointPose> {
     let last = animation.frame_count().saturating_sub(1);
     let whole = (position / scale) as u16;
     if whole >= last {
@@ -135,7 +143,8 @@ pub fn chosen_rate_hz(animation: &Animation<'_>, budget_degrees: u8) -> u16 {
     // Walk down from just under the authored rate and keep the cheapest that
     // holds. Rates are small, so this is a handful of passes.
     for candidate in 1..source_hz {
-        if frames_at_rate(animation.frame_count(), source_hz, candidate) >= animation.frame_count() {
+        if frames_at_rate(animation.frame_count(), source_hz, candidate) >= animation.frame_count()
+        {
             continue;
         }
         if worst_error_q12(animation, candidate) <= limit {
@@ -172,7 +181,11 @@ pub fn resample_animation_bytes(animation: &Animation<'_>, target_hz: u16) -> Op
         for joint in 0..joints {
             let pose = sample_at(animation, frame as i64 * span, scale, joint)?;
             for value in [pose.translation.x, pose.translation.y, pose.translation.z] {
-                max_abs = max_abs.max(if value == i32::MIN { i32::MAX } else { value.abs() });
+                max_abs = max_abs.max(if value == i32::MIN {
+                    i32::MAX
+                } else {
+                    value.abs()
+                });
             }
             poses.push(pose);
         }
@@ -185,7 +198,9 @@ pub fn resample_animation_bytes(animation: &Animation<'_>, target_hz: u16) -> Op
         shift += 1;
     }
 
-    Some(write_flat_clip(joints, out_frames, target_hz, shift, &poses))
+    Some(write_flat_clip(
+        joints, out_frames, target_hz, shift, &poses,
+    ))
 }
 
 /// Write a flat v2 clip blob. The caller's normal compaction pass picks the
@@ -319,11 +334,7 @@ pub fn live_frame_range(animation: &Animation<'_>, still_percent: u8) -> (u16, u
 const MIN_TRIMMED_FRAMES: u16 = 4;
 
 /// Rewrite a clip keeping only frames `first..=last`, at the same rate.
-pub fn trim_animation_bytes(
-    animation: &Animation<'_>,
-    first: u16,
-    last: u16,
-) -> Option<Vec<u8>> {
+pub fn trim_animation_bytes(animation: &Animation<'_>, first: u16, last: u16) -> Option<Vec<u8>> {
     if first == 0 && last + 1 >= animation.frame_count() {
         return None;
     }
@@ -335,7 +346,11 @@ pub fn trim_animation_bytes(
         for joint in 0..joints {
             let pose = animation.pose(frame, joint)?;
             for value in [pose.translation.x, pose.translation.y, pose.translation.z] {
-                max_abs = max_abs.max(if value == i32::MIN { i32::MAX } else { value.abs() });
+                max_abs = max_abs.max(if value == i32::MIN {
+                    i32::MAX
+                } else {
+                    value.abs()
+                });
             }
             poses.push(pose);
         }
@@ -413,7 +428,11 @@ mod tests {
     /// Alternates every frame, the shape linear interpolation cannot follow.
     fn oscillating_clip(frames: u16, joints: u16, hz: u16, amplitude: i16) -> Vec<u8> {
         clip_from(frames, joints, hz, move |frame| {
-            if frame % 2 == 0 { 4096 } else { 4096 - amplitude }
+            if frame % 2 == 0 {
+                4096
+            } else {
+                4096 - amplitude
+            }
         })
     }
 
@@ -464,7 +483,9 @@ mod tests {
         let first_in = animation.pose(0, 0).expect("pose");
         let first_out = out.pose(0, 0).expect("pose");
         assert_eq!(first_out.matrix, first_in.matrix);
-        let last_in = animation.pose(animation.frame_count() - 1, 0).expect("pose");
+        let last_in = animation
+            .pose(animation.frame_count() - 1, 0)
+            .expect("pose");
         let last_out = out.pose(out.frame_count() - 1, 0).expect("pose");
         assert_eq!(last_out.matrix, last_in.matrix);
     }
@@ -514,7 +535,13 @@ mod tests {
             40,
             3,
             12,
-            |frame| if frame == 0 || frame == 39 { 4096 } else { 4096 - 200 },
+            |frame| {
+                if frame == 0 || frame == 39 {
+                    4096
+                } else {
+                    4096 - 200
+                }
+            },
             |_| 0,
         );
         let animation = Animation::from_bytes(&bytes).expect("clip");
@@ -557,6 +584,3 @@ mod tests {
         }
     }
 }
-
-
-

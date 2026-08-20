@@ -98,17 +98,19 @@ impl EditorWorkspace {
             }
             ui.menu_button("Replace uses", |ui| {
                 ui.set_min_width(220.0);
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for (id, name) in &material_options {
-                        if *id == focused {
-                            continue;
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for (id, name) in &material_options {
+                            if *id == focused {
+                                continue;
+                            }
+                            if ui.button(name).clicked() {
+                                self.replace_material_uses(focused, *id);
+                                ui.close_menu();
+                            }
                         }
-                        if ui.button(name).clicked() {
-                            self.replace_material_uses(focused, *id);
-                            ui.close_menu();
-                        }
-                    }
-                });
+                    });
             })
             .response
             .on_hover_text("Swap every brush-face use of this material for another");

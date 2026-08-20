@@ -274,9 +274,7 @@ impl EditorWorkspace {
                                     BrushEditMode::Face => egui::CursorIcon::ResizeHorizontal,
                                     BrushEditMode::Edge
                                     | BrushEditMode::Vertex
-                                    | BrushEditMode::Clip => {
-                                        egui::CursorIcon::Crosshair
-                                    }
+                                    | BrushEditMode::Clip => egui::CursorIcon::Crosshair,
                                 });
                             }
                             if response.hovered() {
@@ -609,7 +607,9 @@ impl EditorWorkspace {
                         .speed(1.0)
                         .range(1..=256),
                 )
-                .on_hover_text("Grid snap step, world units. All brush and entity drags snap to it.");
+                .on_hover_text(
+                    "Grid snap step, world units. All brush and entity drags snap to it.",
+                );
             }
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),

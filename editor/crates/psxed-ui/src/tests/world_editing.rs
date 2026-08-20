@@ -625,7 +625,10 @@ fn node_gizmo_moves_bsp_entity_in_world_units() {
     project
         .active_scene_mut()
         .brushes
-        .push(psxed_project::brush::Brush::cuboid([0, 0, 0], [256, 256, 256]));
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [256, 256, 256],
+        ));
     let entity = project
         .active_scene_mut()
         .add_node(NodeId::ROOT, "Entity", NodeKind::Entity);

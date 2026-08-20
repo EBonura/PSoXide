@@ -1064,7 +1064,10 @@ pub(crate) fn register_model_for_instance(
             Err(error) => {
                 report.error_at(
                     PlaytestValidationTarget::Resource(model_resource_id),
-                    format!("Model '{}' normalised atlas parse failed: {error:?}", resource.name),
+                    format!(
+                        "Model '{}' normalised atlas parse failed: {error:?}",
+                        resource.name
+                    ),
                 );
                 return None;
             }
@@ -1229,8 +1232,11 @@ pub(crate) fn register_model_for_instance(
         let label = format!("{} / {}", resource.name, clip.name);
         // Trim BEFORE resampling so the rate is chosen against real motion
         // rather than against a stretch of stillness that is about to go.
-        let animation_bytes =
-            trim_still_ends(animation_bytes, project.animation_trim_still_percent, &label);
+        let animation_bytes = trim_still_ends(
+            animation_bytes,
+            project.animation_trim_still_percent,
+            &label,
+        );
         let animation_bytes = resample_under_budget(
             animation_bytes,
             project.animation_error_budget_degrees,
@@ -1464,7 +1470,8 @@ fn resample_under_budget(bytes: Vec<u8>, budget_degrees: u8, label: &str) -> Vec
     if target_hz >= source_hz {
         return bytes;
     }
-    let Some(resampled) = crate::animation_resample::resample_animation_bytes(&animation, target_hz)
+    let Some(resampled) =
+        crate::animation_resample::resample_animation_bytes(&animation, target_hz)
     else {
         return bytes;
     };
@@ -1483,8 +1490,10 @@ fn resample_under_budget(bytes: Vec<u8>, budget_degrees: u8, label: &str) -> Vec
     // to a different spot over a minute of walking. Watch this column on
     // locomotion clips, where it matters, rather than on an idle, where it
     // does not.
-    let source_ms = 1000 * (animation.frame_count().saturating_sub(1)) as u32 / source_hz.max(1) as u32;
-    let target_ms = 1000 * (parsed.frame_count().saturating_sub(1)) as u32 / target_hz.max(1) as u32;
+    let source_ms =
+        1000 * (animation.frame_count().saturating_sub(1)) as u32 / source_hz.max(1) as u32;
+    let target_ms =
+        1000 * (parsed.frame_count().saturating_sub(1)) as u32 / target_hz.max(1) as u32;
     println!(
         "[cook] resampled {label}: {source_hz} -> {target_hz} Hz, {} -> {} frames, \
          {} -> {} B, {source_ms} -> {target_ms} ms ({:+.1}%)",

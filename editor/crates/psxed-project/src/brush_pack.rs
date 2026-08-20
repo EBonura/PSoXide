@@ -7,7 +7,9 @@ use crate::brush_compile::{
 use crate::brush_portal::CompiledPortal;
 use crate::ResourceId;
 
-use psx_bsp::{FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_TWO_SIDED};
+use psx_bsp::{
+    encode_node_bound_max, encode_node_bound_min, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_TWO_SIDED,
+};
 
 const CONTENTS_SOLID: i16 = psx_bsp::collision::CONTENTS_SOLID;
 const FULLBRIGHT_RGB: u32 = 0x00ff_ffff;
@@ -173,6 +175,7 @@ pub fn pack_bsp_geometry(
         )?;
     }
 
+    let node_bounds = node_render_bounds(bsp);
     let mut nodes = Vec::new();
     for (node_index, node) in bsp.nodes.iter().enumerate() {
         push_u16(&mut nodes, node_plane_indices[node_index] as u16);
@@ -185,6 +188,15 @@ pub fn pack_bsp_geometry(
         }
         push_i16(&mut nodes, children[0]);
         push_i16(&mut nodes, children[1]);
+        let (mins, maxs) = node_bounds[node_index].packed();
+        for value in mins {
+            nodes.push(encode_node_bound_min(value) as u8);
+        }
+        for value in maxs {
+            nodes.push(encode_node_bound_max(value) as u8);
+        }
+        push_u16(&mut nodes, node.first_surface as u16);
+        push_u16(&mut nodes, node.surface_count as u16);
     }
 
     let root_node = match bsp.root {
@@ -246,6 +258,18 @@ fn validate_limits(bsp: &CompiledSurfaceBsp) -> Result<(), BrushPackError> {
             leaf.mark_surfaces.len(),
             u16::MAX as usize,
         )?;
+    }
+    for node in &bsp.nodes {
+        let end = node.first_surface.saturating_add(node.surface_count);
+        limit("node first face", node.first_surface, u16::MAX as usize)?;
+        limit("node faces", node.surface_count, u16::MAX as usize)?;
+        if end > bsp.surfaces.len() {
+            return Err(BrushPackError::LimitExceeded {
+                kind: "node face range",
+                count: end,
+                max: bsp.surfaces.len(),
+            });
+        }
     }
     let mark_surfaces = bsp
         .leaves
@@ -485,6 +509,21 @@ fn surface_bounds(surfaces: &[CompiledSurface]) -> ([i16; 3], [i16; 3]) {
     Bounds::from_surfaces(surfaces).packed()
 }
 
+fn node_render_bounds(bsp: &CompiledSurfaceBsp) -> Vec<Bounds> {
+    let mut output = vec![Bounds::empty(); bsp.nodes.len()];
+    for (index, node) in bsp.nodes.iter().enumerate().rev() {
+        let end = node.first_surface + node.surface_count;
+        let mut bounds = Bounds::from_surfaces(&bsp.surfaces[node.first_surface..end]);
+        for child in [node.front, node.back] {
+            if let BspChild::Node(child) = child {
+                bounds.include_bounds(output[child]);
+            }
+        }
+        output[index] = bounds;
+    }
+    output
+}
+
 #[derive(Clone, Copy)]
 struct Bounds {
     min: [f64; 3],
@@ -514,6 +553,14 @@ impl Bounds {
             self.min[axis] = self.min[axis].min(value);
             self.max[axis] = self.max[axis].max(value);
         }
+    }
+
+    fn include_bounds(&mut self, other: Self) {
+        if !other.min[0].is_finite() {
+            return;
+        }
+        self.include(other.min);
+        self.include(other.max);
     }
 
     fn packed(self) -> ([i16; 3], [i16; 3]) {
@@ -657,6 +704,24 @@ mod tests {
         assert_eq!(vertices.len(), 24);
         assert_eq!(faces.len(), bsp.surfaces.len());
         assert_eq!(nodes.len(), bsp.nodes.len());
+        for (index, source) in bsp.nodes.iter().enumerate() {
+            let node = nodes.get(index).expect("node");
+            assert_eq!(usize::from(node.first_face), source.first_surface);
+            assert_eq!(usize::from(node.face_count), source.surface_count);
+            assert!(node.mins.x <= node.maxs.x);
+            assert!(node.mins.y <= node.maxs.y);
+            assert!(node.mins.z <= node.maxs.z);
+        }
+        let BspChild::Node(root) = bsp.root else {
+            panic!("cuboid has a render root");
+        };
+        let root = nodes.get(root).expect("root node");
+        for axis in 0..3 {
+            let mins = [root.mins.x, root.mins.y, root.mins.z];
+            let maxs = [root.maxs.x, root.maxs.y, root.maxs.z];
+            assert!(mins[axis] <= packed.mins[axis]);
+            assert!(maxs[axis] >= packed.maxs[axis]);
+        }
         assert_eq!(leaves.get(0).expect("solid leaf").contents, CONTENTS_SOLID);
         assert!(planes.len() <= bsp.nodes.len() + bsp.surfaces.len());
         assert_eq!(packed.mins, [0, 0, 0]);

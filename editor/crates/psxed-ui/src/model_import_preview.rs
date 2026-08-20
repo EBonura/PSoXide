@@ -306,10 +306,10 @@ pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
         || !sockets.is_empty()
         || selected_joint.is_some()
     {
-            estimated_joint_points(&model, &joint_transforms, camera)
-        } else {
-            Vec::new()
-        };
+        estimated_joint_points(&model, &joint_transforms, camera)
+    } else {
+        Vec::new()
+    };
 
     let mut projected = vec![None; model.vertex_count() as usize];
     for part_index in 0..model.part_count() {
@@ -1306,7 +1306,9 @@ fn draw_equipped_weapon_overlay(
     joint_transforms: &[JointWorldTransform],
 ) -> Option<()> {
     let weapon_model = Model::from_bytes(weapon.model_bytes).ok()?;
-    let joint = joint_transforms.get(weapon.socket_joint as usize).copied()?;
+    let joint = joint_transforms
+        .get(weapon.socket_joint as usize)
+        .copied()?;
     let mut pose = animation.pose_looped_q12(frame_q12, weapon.socket_joint)?;
     if let Some(delta) = root_delta {
         apply_root_motion_delta(&mut pose, delta);
@@ -1670,13 +1672,11 @@ mod tests {
     #[test]
     fn socket_markers_draw_over_the_wraith_preview() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let model = std::fs::read(
-            std::env::var("DUMP_MODEL").unwrap_or_else(|_| {
-                root.join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl")
-                    .to_string_lossy()
-                    .into_owned()
-            }),
-        )
+        let model = std::fs::read(std::env::var("DUMP_MODEL").unwrap_or_else(|_| {
+            root.join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl")
+                .to_string_lossy()
+                .into_owned()
+        }))
         .expect("tracked model fixture");
         let clip = std::fs::read(std::env::var("DUMP_CLIP").unwrap_or_else(|_| {
             root.join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim")
@@ -1739,8 +1739,7 @@ mod tests {
         // Optional visual-inspection dump, same convention as
         // dump_preview_for_inspection.
         if let Ok(path) = std::env::var("DUMP_SOCKET_PREVIEW") {
-            let mut out =
-                format!("P6\n{} {}\n255\n", marked.size[0], marked.size[1]).into_bytes();
+            let mut out = format!("P6\n{} {}\n255\n", marked.size[0], marked.size[1]).into_bytes();
             for pixel in &marked.pixels {
                 out.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
             }

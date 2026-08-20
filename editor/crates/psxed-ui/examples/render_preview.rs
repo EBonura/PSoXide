@@ -68,7 +68,10 @@ fn main() {
     let time_seconds = a.next().and_then(|value| value.parse().ok()).unwrap_or(0.5);
     // Framing height: the auto-frame is sized for a ~1700-unit humanoid, so a
     // prop needs its own or it renders as a speck.
-    let world_height = a.next().and_then(|value| value.parse().ok()).unwrap_or(1700);
+    let world_height = a
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1700);
     let out_prefix = a.next().unwrap_or_else(|| String::from("/tmp/preview"));
 
     for (yi, &yaw) in [0u16, 1024, 2048, 3072].iter().enumerate() {

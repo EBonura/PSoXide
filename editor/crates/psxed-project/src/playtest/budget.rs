@@ -468,7 +468,7 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
 
 fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
     match version {
-        PxbspVersion::V4 => {
+        PxbspVersion::V4 | PxbspVersion::V5 => {
             RecordSlice::<Face>::new(bytes)?
                 .iter()
                 .try_fold(0usize, |total, face| {
@@ -503,10 +503,8 @@ fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
 /// Per-project primitive arena capacity the generated manifest publishes for
 /// this cooked package.
 pub fn cooked_manifest_packet_capacity(package: &PlaytestPackage) -> usize {
-    let capacity = derived_packet_capacity(cooked_packet_count(
-        package,
-        cooked_bsp_packets(package),
-    ));
+    let capacity =
+        derived_packet_capacity(cooked_packet_count(package, cooked_bsp_packets(package)));
     if matches!(package.world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
         capacity.min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING)
     } else {
@@ -1033,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_v3_budget_decodes_face_counts_and_leaf_stride() {
+    fn current_pxbsp_budget_decodes_face_counts_and_leaf_stride() {
         let project = ProjectDocument::from_ron_str(include_str!(
             "../../../../archive/fixtures/brush-open-courtyard/project.ron"
         ))
@@ -1047,7 +1045,7 @@ mod tests {
             panic!("tracked fixture must cook PXBSP");
         };
         let index = PxbspIndex::read(&mut SliceReader::new(&world.bytes)).expect("PXBSP index");
-        assert_eq!(index.version(), PxbspVersion::V4);
+        assert_eq!(index.version(), PxbspVersion::V5);
         let faces = index.lump(PxbspLumpKind::Faces);
         assert_eq!(faces.len % Face::SIZE as u32, 0);
         let face_bytes = &world.bytes[faces.offset as usize..faces.end() as usize];
@@ -1058,7 +1056,7 @@ mod tests {
         // the count and inflated wildly); every packet total stays bounded
         // by three triangles per face and the worst-leaf sizing never
         // exceeds the map total.
-        let total = pxbsp_face_packets(PxbspVersion::V4, face_bytes).expect("compact faces");
+        let total = pxbsp_face_packets(PxbspVersion::V5, face_bytes).expect("compact faces");
         assert!(
             total >= face_count && total <= face_count * 3,
             "{total} for {face_count} faces"
@@ -1074,7 +1072,7 @@ mod tests {
             cooked_packet_count(&package, worst_leaf)
         );
         let leaves = index.lump(PxbspLumpKind::Leaves).len as usize
-            / PxbspLumpKind::Leaves.record_size(PxbspVersion::V4).unwrap() as usize;
+            / PxbspLumpKind::Leaves.record_size(PxbspVersion::V5).unwrap() as usize;
         assert_eq!(budget.pvs_row_bytes, leaves.saturating_sub(1).div_ceil(8));
     }
 }
