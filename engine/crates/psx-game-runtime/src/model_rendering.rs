@@ -492,6 +492,9 @@ fn decode_model_render_faces(
     face_cursor: &mut usize,
 ) -> Option<usize> {
     let face_count = model.face_count() as usize;
+    if model.vertex_count() > 0x4000 {
+        return None;
+    }
     if face_count > u16::MAX as usize || face_pool.len().saturating_sub(*face_cursor) < face_count {
         return None;
     }
@@ -508,7 +511,7 @@ fn decode_model_render_faces(
         {
             return None;
         }
-        face_pool[*face_cursor + i] = TexturedModelRenderFace::new(
+        face_pool[*face_cursor + i] = TexturedModelRenderFace::new_with_palette_bank(
             [
                 face.corners[0].vertex_index,
                 face.corners[1].vertex_index,
@@ -519,6 +522,7 @@ fn decode_model_render_faces(
                 clamp_model_render_uv(face.corners[1].uv, max_u, max_v),
                 clamp_model_render_uv(face.corners[2].uv, max_u, max_v),
             ],
+            model.face_palette_bank(i as u16)?,
         );
         i += 1;
     }

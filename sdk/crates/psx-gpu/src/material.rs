@@ -198,6 +198,12 @@ impl TexturedPacketMaterial {
     pub const fn is_translucent(self) -> bool {
         self.color_command_word & (1 << 25) != 0
     }
+
+    /// Return packet words selecting a consecutive 16-entry 4bpp CLUT bank.
+    pub const fn with_clut_bank(mut self, bank: u8) -> Self {
+        self.clut_high_word = self.clut_high_word.wrapping_add(((bank & 3) as u32) << 16);
+        self
+    }
 }
 
 /// Prepacked material words for textured Gouraud triangle packets.
@@ -291,6 +297,12 @@ impl TextureMaterial {
     /// Return a copy using `tint`.
     pub const fn with_tint(mut self, tint: (u8, u8, u8)) -> Self {
         self.tint = tint;
+        self
+    }
+
+    /// Return a copy selecting a consecutive 16-entry 4bpp CLUT bank.
+    pub const fn with_clut_bank(mut self, bank: u8) -> Self {
+        self.clut_word = self.clut_word.wrapping_add((bank & 3) as u16);
         self
     }
 

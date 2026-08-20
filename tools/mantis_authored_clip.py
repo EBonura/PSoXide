@@ -1,7 +1,8 @@
 """Author a clip on the Rust Mantis rig from hand-written key poses.
 
     blender -b --python tools/mantis_authored_clip.py -- \
-        <normalised mantis glb> <clip name> <out.glb> [--fps 12]
+        <normalised mantis glb> <clip name> <out.glb> \
+        [--variant legacy|sentinel|claw_check|minimal|grounded_sentinel] [--fps N]
 
 Why this exists. Generated motion is a human doing a human thing, and no amount
 of retiming makes it read as a machine: the pose language is wrong before the
@@ -118,6 +119,134 @@ TIMELINE: list[tuple[str, int]] = [
     ("guard", 9),
 ]
 
+# Cheaper studies keep the lower body completely at rest and move only the
+# sensor assembly (plus one optional claw check). The shipped legacy take
+# rotates the legs asymmetrically and changes the whole upper-body silhouette;
+# in game that reads as a damaged walk cycle rather than an idle.
+STUDY_GUARD: dict[str, tuple[float, float, float]] = {
+    "Spine2": (4, 0, 0),
+    "Neck": (2, 0, 0),
+    "Head": (0, 0, 0),
+    "LeftArm": (0, 0, 76),
+    "LeftForeArm": (0, 0, 84),
+    "RightArm": (0, 0, 72),
+    "RightForeArm": (0, 0, 78),
+}
+
+
+def study_pose(**changes: tuple[float, float, float]) -> dict[str, tuple[float, float, float]]:
+    pose = STUDY_GUARD.copy()
+    pose.update(changes)
+    return pose
+
+
+VARIANTS: dict[
+    str,
+    tuple[
+        dict[str, dict[str, tuple[float, float, float]]],
+        list[tuple[str, int]],
+        int,
+    ],
+] = {
+    "sentinel": (
+        {
+            "guard": study_pose(),
+            "scan_left": study_pose(Neck=(2, -16, 0), Head=(0, -24, 0)),
+            "scan_right": study_pose(Neck=(2, 18, 0), Head=(0, 28, 0)),
+        },
+        [
+            ("guard", 9),
+            ("scan_left", 2),
+            ("guard", 5),
+            ("scan_right", 2),
+            ("guard", 5),
+        ],
+        10,
+    ),
+    "claw_check": (
+        {
+            "guard": study_pose(),
+            "scan": study_pose(Neck=(2, -18, 0), Head=(0, -26, 0)),
+            "claw": study_pose(
+                Neck=(2, -6, 5),
+                Head=(2, -10, 8),
+                LeftArm=(0, 0, 68),
+                LeftForeArm=(0, 0, 96),
+            ),
+        },
+        [
+            ("guard", 8),
+            ("scan", 2),
+            ("guard", 4),
+            ("claw", 2),
+            ("guard", 4),
+        ],
+        10,
+    ),
+    "minimal": (
+        {
+            "guard": study_pose(),
+            "sensor_tick": study_pose(Neck=(2, 10, 4), Head=(0, 18, 7)),
+        },
+        [("guard", 8), ("sensor_tick", 2), ("guard", 5)],
+        8,
+    ),
+    "grounded_sentinel": (
+        {
+            "guard": {
+                "Spine2": (6, 0, 0),
+                "Neck": (4, 0, 0),
+                "Head": (2, 0, 0),
+                "LeftArm": (0, 0, 62),
+                "LeftForeArm": (0, 0, 68),
+                "RightArm": (0, 0, 56),
+                "RightForeArm": (0, 0, 52),
+            },
+            "scan_left": {
+                "Spine2": (6, 0, 0),
+                "Neck": (4, -16, 0),
+                "Head": (2, -24, 0),
+                "LeftArm": (0, 0, 62),
+                "LeftForeArm": (0, 0, 68),
+                "RightArm": (0, 0, 56),
+                "RightForeArm": (0, 0, 52),
+            },
+            "scan_right": {
+                "Spine2": (6, 0, 0),
+                "Neck": (4, 18, 0),
+                "Head": (2, 28, 0),
+                "LeftArm": (0, 0, 62),
+                "LeftForeArm": (0, 0, 68),
+                "RightArm": (0, 0, 56),
+                "RightForeArm": (0, 0, 52),
+            },
+        },
+        [
+            ("guard", 8),
+            ("scan_left", 2),
+            ("guard", 4),
+            ("scan_right", 2),
+            ("guard", 4),
+        ],
+        10,
+    ),
+}
+
+
+def select_variant(name: str) -> int:
+    """Select a study in-place and return its intended sample rate."""
+    if name == "legacy":
+        return 12
+    if name not in VARIANTS:
+        choices = ", ".join(["legacy", *VARIANTS])
+        raise ValueError(f"unknown variant {name!r}; expected one of: {choices}")
+    poses, timeline, fps = VARIANTS[name]
+    POSES.clear()
+    POSES.update(poses)
+    TIMELINE.clear()
+    TIMELINE.extend(timeline)
+    return fps
+
 
 def load_rig(path: str) -> bpy.types.Object:
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -191,6 +320,8 @@ def probe_tables(bones: list[str], degrees: float) -> None:
 def main() -> None:
     argv = sys.argv[sys.argv.index("--") + 1 :]
     model, clip_name, out = argv[0], argv[1], argv[2]
+    variant = argv[argv.index("--variant") + 1] if "--variant" in argv else "legacy"
+    default_fps = select_variant(variant)
     if "--probe" in argv:
         probe_tables(argv[argv.index("--probe") + 1].split(","), 55.0)
 
@@ -201,7 +332,9 @@ def main() -> None:
     # Author at the rate the clip cooks at. Blender defaults to 24, and the
     # import bakes at 12, so every hold written here would be halved and the
     # one-frame snaps would land between samples and smear.
-    scene.render.fps = int(argv[argv.index("--fps") + 1]) if "--fps" in argv else 12
+    scene.render.fps = (
+        int(argv[argv.index("--fps") + 1]) if "--fps" in argv else default_fps
+    )
 
     bpy.ops.object.select_all(action="DESELECT")
     rig.select_set(True)
@@ -223,7 +356,10 @@ def main() -> None:
     if "FINISHED" not in result:
         raise RuntimeError(f"GLB export failed: {out}")
     beats = " -> ".join(f"{p}({h})" for p, h in TIMELINE)
-    print(f"AUTHORED {clip_name}: {last} frames, {beats} -> {out}")
+    print(
+        f"AUTHORED {clip_name}/{variant}: {last} frames @ {scene.render.fps} Hz, "
+        f"{beats} -> {out}"
+    )
 
 
 main()

@@ -422,17 +422,19 @@ fn div_i16_in_place(bytes: &mut [u8], offset: usize) {
 /// Rescale a cooked `.psxmdl` blob to engine units by dividing every
 /// vertex position (model-local i16) by [`WORLD_UNIT_DIVISOR`]. The
 /// header's `local_to_world_q12` is deliberately left alone (see the
-/// module docs). Blobs that do not lay out as a v4 model are left
+/// module docs). Blobs that do not lay out as a supported v4/v5 model are left
 /// untouched; the cook's parse step reports them.
 pub fn scale_model_blob_to_engine_units(bytes: &mut [u8]) {
     use psxed_format::model::{
-        JointRecord, MaterialRecord, ModelHeader, PartRecord, MAGIC, VERSION, VERTEX_RECORD_SIZE,
+        JointRecord, MaterialRecord, ModelHeader, PartRecord, LEGACY_VERSION, MAGIC, VERSION,
+        VERTEX_RECORD_SIZE,
     };
     let payload = psxed_format::AssetHeader::SIZE;
-    if bytes.len() < payload + ModelHeader::SIZE
-        || bytes[..4] != MAGIC
-        || read_u16(bytes, 4) != VERSION
-    {
+    if bytes.len() < payload + ModelHeader::SIZE || bytes[..4] != MAGIC {
+        return;
+    }
+    let version = read_u16(bytes, 4);
+    if version != LEGACY_VERSION && version != VERSION {
         return;
     }
     let header = &bytes[payload..payload + ModelHeader::SIZE];
@@ -551,14 +553,19 @@ mod tests {
             }
             payload.extend_from_slice(&[0xFF, 0]);
         }
-        let mut blob = asset(b"PSMD", 4, &payload);
-        scale_model_blob_to_engine_units(&mut blob);
-        let model = psx_asset::Model::from_bytes(&blob).expect("still parses");
-        assert_eq!(model.local_to_world_q12(), 64);
-        let v0 = model.vertex(0).unwrap().position;
-        let v1 = model.vertex(1).unwrap().position;
-        assert_eq!((v0.x, v0.y, v0.z), (-2000, 4, 1));
-        assert_eq!((v1.x, v1.y, v1.z), (256, -256, 0));
+        for version in [
+            psxed_format::model::LEGACY_VERSION,
+            psxed_format::model::VERSION,
+        ] {
+            let mut blob = asset(b"PSMD", version, &payload);
+            scale_model_blob_to_engine_units(&mut blob);
+            let model = psx_asset::Model::from_bytes(&blob).expect("still parses");
+            assert_eq!(model.local_to_world_q12(), 64);
+            let v0 = model.vertex(0).unwrap().position;
+            let v1 = model.vertex(1).unwrap().position;
+            assert_eq!((v0.x, v0.y, v0.z), (-2000, 4, 1));
+            assert_eq!((v1.x, v1.y, v1.z), (256, -256, 0));
+        }
     }
 
     fn animation_poses(version: u16, shift: u16, translations: &[[i32; 3]]) -> Vec<u8> {
