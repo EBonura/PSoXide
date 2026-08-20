@@ -408,9 +408,7 @@ impl CharacterAnimationAction {
                 Some(AnimationRole::Walk)
             }
             Self::RunWindup | Self::RunWinddown | Self::RunWinddownAlt => Some(AnimationRole::Run),
-            Self::WalkBackward
-            | Self::StrafeLeft
-            | Self::StrafeRight => None,
+            Self::WalkBackward | Self::StrafeLeft | Self::StrafeRight => None,
             // No role hint on purpose: a vertical level binds only when it is
             // authored, so an axis can ship one clip at a time without the
             // other levels quietly adopting some other Attack-role clip.

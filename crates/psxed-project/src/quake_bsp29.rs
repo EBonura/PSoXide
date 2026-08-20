@@ -6,11 +6,14 @@
 //! leaves and visibility for a practical PSX playtest cook. Texture, lighting,
 //! entity and gameplay lumps are deliberately discarded.
 
-use crate::brush_compile::pack_normalized_plane;
 use crate::brush_collision_hulls::CompiledCollisionHulls;
+use crate::brush_compile::pack_normalized_plane;
 use crate::brush_pack::PackedBspGeometry;
 use crate::ResourceId;
-use psx_bsp::{FACE_BACKSIDE, FACE_BAKED_LIGHT};
+use psx_bsp::{
+    encode_node_bound_max, encode_node_bound_min, CookedRecord, Node, FACE_BACKSIDE,
+    FACE_BAKED_LIGHT,
+};
 use std::fmt;
 
 const BSP29_VERSION: i32 = 29;
@@ -183,19 +186,35 @@ pub fn import_quake_bsp29_geometry(
     }
 
     let source_nodes = lump(bytes, lumps[NODES]);
-    let mut nodes = Vec::with_capacity(source_nodes.len() / 4);
+    let mut nodes = Vec::with_capacity(source_nodes.len() / 24 * Node::SIZE);
     for (index, source) in source_nodes.chunks_exact(24).enumerate() {
         let plane = nonnegative_i32(i32_at(source, 0)?, "node plane")?;
         if plane >= plane_flipped.len() {
             return Err(error(format!("BSP29 node {index} has an invalid plane")));
         }
+        let first_face = usize::from(u16_at(source, 20)?);
+        let node_face_count = usize::from(u16_at(source, 22)?);
+        if first_face.saturating_add(node_face_count) > face_count {
+            return Err(error(format!(
+                "BSP29 node {index} face range is out of bounds"
+            )));
+        }
         let mut children = [i16_at(source, 4)?, i16_at(source, 6)?];
         if plane_flipped[plane] {
             children.swap(0, 1);
         }
+        let (mins, maxs) = transformed_node_bounds(source, scale)?;
         nodes.extend_from_slice(&(plane as u16).to_le_bytes());
         nodes.extend_from_slice(&children[0].to_le_bytes());
         nodes.extend_from_slice(&children[1].to_le_bytes());
+        for value in mins {
+            nodes.push(encode_node_bound_min(value) as u8);
+        }
+        for value in maxs {
+            nodes.push(encode_node_bound_max(value) as u8);
+        }
+        nodes.extend_from_slice(&(first_face as u16).to_le_bytes());
+        nodes.extend_from_slice(&(node_face_count as u16).to_le_bytes());
     }
 
     let model = lump(bytes, lumps[MODELS])
@@ -502,20 +521,60 @@ fn transformed_model_bounds(
 ) -> Result<([i16; 3], [i16; 3]), QuakeBsp29Error> {
     let source_min = [f32_at(model, 0)?, f32_at(model, 4)?, f32_at(model, 8)?];
     let source_max = [f32_at(model, 12)?, f32_at(model, 16)?, f32_at(model, 20)?];
+    transformed_bounds(source_min, source_max, scale)
+}
+
+fn transformed_node_bounds(
+    node: &[u8],
+    scale: f64,
+) -> Result<([i16; 3], [i16; 3]), QuakeBsp29Error> {
+    let source_min = [
+        f32::from(i16_at(node, 8)?),
+        f32::from(i16_at(node, 10)?),
+        f32::from(i16_at(node, 12)?),
+    ];
+    let source_max = [
+        f32::from(i16_at(node, 14)?),
+        f32::from(i16_at(node, 16)?),
+        f32::from(i16_at(node, 18)?),
+    ];
+    transformed_bounds(source_min, source_max, scale)
+}
+
+fn transformed_bounds(
+    source_min: [f32; 3],
+    source_max: [f32; 3],
+    scale: f64,
+) -> Result<([i16; 3], [i16; 3]), QuakeBsp29Error> {
     let transformed = [
-        transform_position([source_min[0], source_min[1], source_min[2]], scale)?,
-        transform_position([source_max[0], source_max[1], source_max[2]], scale)?,
+        [
+            f64::from(source_min[0]) * scale,
+            f64::from(source_min[2]) * scale,
+            -f64::from(source_min[1]) * scale,
+        ],
+        [
+            f64::from(source_max[0]) * scale,
+            f64::from(source_max[2]) * scale,
+            -f64::from(source_max[1]) * scale,
+        ],
     ];
-    let mins = [
-        transformed[0][0].min(transformed[1][0]),
-        transformed[0][1].min(transformed[1][1]),
-        transformed[0][2].min(transformed[1][2]),
-    ];
-    let maxs = [
-        transformed[0][0].max(transformed[1][0]),
-        transformed[0][1].max(transformed[1][1]),
-        transformed[0][2].max(transformed[1][2]),
-    ];
+    let mut mins = [0i16; 3];
+    let mut maxs = [0i16; 3];
+    for axis in 0..3 {
+        let min = transformed[0][axis].min(transformed[1][axis]).floor();
+        let max = transformed[0][axis].max(transformed[1][axis]).ceil();
+        if !min.is_finite()
+            || !max.is_finite()
+            || min < f64::from(i16::MIN)
+            || max > f64::from(i16::MAX)
+        {
+            return Err(error(format!(
+                "BSP29 bounds axis {axis} is out of i16 range"
+            )));
+        }
+        mins[axis] = min as i16;
+        maxs[axis] = max as i16;
+    }
     Ok((mins, maxs))
 }
 
@@ -579,5 +638,31 @@ mod tests {
         let mut header = vec![0; HEADER_BYTES];
         header[..4].copy_from_slice(&28i32.to_le_bytes());
         assert!(strip_quake_bsp29_geometry(&header).is_err());
+    }
+
+    #[test]
+    fn node_bounds_are_scaled_and_reoriented_to_y_up() {
+        let mut node = [0u8; 24];
+        for (offset, value) in [
+            (8, -10i16),
+            (10, -20),
+            (12, -30),
+            (14, 40),
+            (16, 50),
+            (18, 60),
+        ] {
+            node[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let (mins, maxs) = transformed_node_bounds(&node, 4.0).expect("node bounds");
+        assert_eq!(mins, [-40, -120, -200]);
+        assert_eq!(maxs, [160, 240, 80]);
+    }
+
+    #[test]
+    fn node_bounds_round_outward_at_fractional_scales() {
+        let (mins, maxs) = transformed_bounds([-3.0, -5.0, -7.0], [2.0, 6.0, 8.0], 0.25)
+            .expect("fractional bounds");
+        assert_eq!(mins, [-1, -2, -2]);
+        assert_eq!(maxs, [1, 2, 2]);
     }
 }

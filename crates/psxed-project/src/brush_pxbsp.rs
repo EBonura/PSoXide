@@ -9,7 +9,7 @@ use psx_bsp::pxbsp::{
     PXBSP_ENTITY_TABLE_HEADER_BYTES, PXBSP_HEADER_BYTES, PXBSP_LUMP_COUNT, PXBSP_MAGIC,
     PXBSP_VERSION,
 };
-use psx_bsp::{CookedRecord, Plane};
+use psx_bsp::{decode_node_bound_max, decode_node_bound_min, CookedRecord, Node, Plane};
 
 const WORLD_COLLISION_HULLS: usize = 3;
 const VERTEX_BYTES: usize = 12;
@@ -17,7 +17,7 @@ const PLANE_BYTES: usize = Plane::SIZE;
 const FACE_BYTES: usize = 10;
 const MARK_SURFACE_BYTES: usize = 2;
 const LEAF_BYTES: usize = 14;
-const NODE_BYTES: usize = 6;
+const NODE_BYTES: usize = Node::SIZE;
 const CLIPNODE_BYTES: usize = 6;
 
 /// Entity base plus its class-specific, bounded payload.
@@ -275,6 +275,20 @@ fn validate_geometry_records(geometry: &PackedBspGeometry) -> Result<(), PxbspBu
             return Err(PxbspBuildError::MisalignedRecords(name));
         }
     }
+    let face_count = geometry.faces.len() / FACE_BYTES;
+    for node in geometry.nodes.chunks_exact(NODE_BYTES) {
+        let first_face = usize::from(read_u16(node, 12));
+        let node_face_count = usize::from(read_u16(node, 14));
+        if first_face.saturating_add(node_face_count) > face_count {
+            return Err(PxbspBuildError::InvalidReference("node faces"));
+        }
+        if (0..3).any(|axis| {
+            decode_node_bound_min(node[6 + axis] as i8)
+                > decode_node_bound_max(node[9 + axis] as i8)
+        }) {
+            return Err(PxbspBuildError::InvalidReference("node bounds"));
+        }
+    }
     Ok(())
 }
 
@@ -448,10 +462,20 @@ fn append_geometry(
             node_count,
             leaf_count,
         )?;
+        let first_face = usize::from(read_u16(node, 12));
+        let node_face_count = usize::from(read_u16(node, 14));
+        if first_face.saturating_add(node_face_count) > face_count {
+            return Err(PxbspBuildError::InvalidReference("node faces"));
+        }
+        let first_face = face_base
+            .checked_add(first_face)
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or(PxbspBuildError::InvalidReference("node faces"))?;
         let mut remapped = node.to_vec();
         remapped[0..2].copy_from_slice(&plane.to_le_bytes());
         remapped[2..4].copy_from_slice(&front.to_le_bytes());
         remapped[4..6].copy_from_slice(&back.to_le_bytes());
+        remapped[12..14].copy_from_slice(&first_face.to_le_bytes());
         output.nodes.extend_from_slice(&remapped);
     }
 
@@ -1024,6 +1048,16 @@ mod tests {
                 .into_iter()
                 .any(|child| child < 0 && (-1i32 - child as i32) as usize >= world_leaf_count)
         }));
+        assert!(map
+            .nodes()
+            .iter()
+            .skip(world_node_count)
+            .filter(|node| node.face_count > 0)
+            .all(|node| {
+                let first = usize::from(node.first_face);
+                let end = first + usize::from(node.face_count);
+                first >= world_face_count && end <= world_face_count + door_face_count
+            }));
 
         let door_hull = CollisionHull::new(map.planes(), map.clip_nodes(), door.head_nodes[1]);
         let trace = trace(

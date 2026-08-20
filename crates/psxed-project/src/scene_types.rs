@@ -631,7 +631,6 @@ pub struct PortalGeometry {
     pub vertices: [[i32; 3]; 4],
 }
 
-
 /// Write an override as the bare struct older projects already used, so the
 /// on-disk shape never changed and a file stays readable by both. `None` is
 /// skipped entirely, which is what marks a placement as following its type.

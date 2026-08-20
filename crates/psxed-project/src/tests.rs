@@ -1672,9 +1672,18 @@ fn embedded_default_project_ron_deserializes() {
         (CharacterAnimationAction::LightAttack, "light_attack"),
         (CharacterAnimationAction::HeavyAttack, "heavy_attack"),
         (CharacterAnimationAction::ComboAttack, "combo_attack"),
-        (CharacterAnimationAction::VertLightAttack, "vert_light_attack"),
-        (CharacterAnimationAction::VertHeavyAttack, "vert_heavy_attack"),
-        (CharacterAnimationAction::VertComboAttack, "vert_combo_attack"),
+        (
+            CharacterAnimationAction::VertLightAttack,
+            "vert_light_attack",
+        ),
+        (
+            CharacterAnimationAction::VertHeavyAttack,
+            "vert_heavy_attack",
+        ),
+        (
+            CharacterAnimationAction::VertComboAttack,
+            "vert_combo_attack",
+        ),
         (CharacterAnimationAction::HitReact, "hit_react"),
     ] {
         let clip = animation_set
@@ -1685,7 +1694,10 @@ fn embedded_default_project_ron_deserializes() {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("starter {action:?} clip resource missing"));
-        assert_eq!(clip.psxanim_path, format!("assets/animations/gen/{stem}.psxanim"));
+        assert_eq!(
+            clip.psxanim_path,
+            format!("assets/animations/gen/{stem}.psxanim")
+        );
     }
     for (action, stem) in [
         (CharacterAnimationAction::Idle, "aletha_idle"),
