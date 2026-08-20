@@ -24,6 +24,12 @@ pub const PLAYTEST_PACKET_LIMIT: usize = 1536;
 /// Largest packet arena the runtime may be asked to instantiate. Content
 /// whose envelope exceeds this must be restructured, not silently degraded.
 pub const PLAYTEST_PACKET_CAPACITY_CEILING: usize = 4096;
+/// Resident PXBSP shares RAM with the complete topology and collision image.
+/// Its renderer writes tagged packets directly and therefore cannot afford the
+/// grid renderer's 4K packet scratch on a 2 MB machine. The worst-view cook
+/// estimate remains visible as a warning, while the runtime keeps a bounded
+/// arena and degrades by dropping over-cap geometry instead of failing to link.
+pub const PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING: usize = PLAYTEST_PACKET_LIMIT;
 
 /// Per-project primitive arena capacity for a cooked packet envelope:
 /// the envelope rounded up to a 64-packet step, floored at the baseline
@@ -371,6 +377,11 @@ pub fn cooked_playtest_budgets(
         .saturating_add(usize::from(bsp_bytes != 0));
     let vram_asset_slots = texture_assets.len();
     let packet_count = cooked_packet_count(package, bsp_packets);
+    let packet_limit = if matches!(package.world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
+        derived_packet_capacity(packet_count).min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING)
+    } else {
+        derived_packet_capacity(packet_count)
+    };
     let mut report = PlaytestBudgetReport {
         stage: PlaytestBudgetStage::Cooked,
         mode: package.bsp_cook_mode,
@@ -384,7 +395,7 @@ pub fn cooked_playtest_budgets(
         vram_bytes,
         vram_asset_slots,
         packet_count,
-        packet_limit: derived_packet_capacity(packet_count),
+        packet_limit,
         resident_asset_bytes: audit_resident_assets(package).total_bytes,
         issues: Vec::new(),
     };
@@ -492,7 +503,15 @@ fn cooked_packet_count(package: &PlaytestPackage, bsp_packets: usize) -> usize {
 /// Per-project primitive arena capacity the generated manifest publishes for
 /// this cooked package.
 pub fn cooked_manifest_packet_capacity(package: &PlaytestPackage) -> usize {
-    derived_packet_capacity(cooked_packet_count(package, cooked_bsp_packets(package)))
+    let capacity = derived_packet_capacity(cooked_packet_count(
+        package,
+        cooked_bsp_packets(package),
+    ));
+    if matches!(package.world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
+        capacity.min(PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING)
+    } else {
+        capacity
+    }
 }
 
 fn authored_texture_paths(project: &ProjectDocument) -> BTreeSet<String> {
@@ -668,7 +687,8 @@ impl ResidentAssetAudit {
     /// number the linker sees. Judging raw bytes would under-report by up to a
     /// page and disagree with the guest build.
     pub fn resident_pages(&self) -> usize {
-        self.total_bytes.div_ceil(PLAYTEST_RESIDENT_ASSET_PAGE_BYTES)
+        self.total_bytes
+            .div_ceil(PLAYTEST_RESIDENT_ASSET_PAGE_BYTES)
     }
 
     /// Over the ceiling, so the cook must refuse.
@@ -760,7 +780,11 @@ pub fn audit_resident_assets(package: &PlaytestPackage) -> ResidentAssetAudit {
             kind: asset.kind,
         })
         .collect();
-    entries.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.filename.cmp(&b.filename)));
+    entries.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
     ResidentAssetAudit {
         total_bytes: entries.iter().map(|entry| entry.bytes).sum(),
         cap_bytes: PLAYTEST_RESIDENT_ASSET_BYTES,
@@ -889,7 +913,12 @@ mod tests {
     #[test]
     fn resident_audit_groups_clips_under_their_model_and_ignores_streamed_assets() {
         let mut assets = vec![
-            resident_asset(PlaytestAssetKind::ModelMesh, "Aletha", "aletha/mesh.psxmdl", 4_000),
+            resident_asset(
+                PlaytestAssetKind::ModelMesh,
+                "Aletha",
+                "aletha/mesh.psxmdl",
+                4_000,
+            ),
             resident_asset(
                 PlaytestAssetKind::Texture,
                 "Aletha atlas",
@@ -1030,11 +1059,20 @@ mod tests {
         // by three triangles per face and the worst-leaf sizing never
         // exceeds the map total.
         let total = pxbsp_face_packets(PxbspVersion::V4, face_bytes).expect("compact faces");
-        assert!(total >= face_count && total <= face_count * 3, "{total} for {face_count} faces");
+        assert!(
+            total >= face_count && total <= face_count * 3,
+            "{total} for {face_count} faces"
+        );
         let worst_leaf = cooked_bsp_packets(&package);
-        assert!(worst_leaf > 0 && worst_leaf <= total, "{worst_leaf} vs {total}");
+        assert!(
+            worst_leaf > 0 && worst_leaf <= total,
+            "{worst_leaf} vs {total}"
+        );
         let budget = cooked_playtest_budgets(&project, &package);
-        assert_eq!(budget.packet_count, cooked_packet_count(&package, worst_leaf));
+        assert_eq!(
+            budget.packet_count,
+            cooked_packet_count(&package, worst_leaf)
+        );
         let leaves = index.lump(PxbspLumpKind::Leaves).len as usize
             / PxbspLumpKind::Leaves.record_size(PxbspVersion::V4).unwrap() as usize;
         assert_eq!(budget.pvs_row_bytes, leaves.saturating_sub(1).div_ceil(8));

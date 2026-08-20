@@ -353,9 +353,11 @@ pub fn compile_csg_surfaces(brushes: &[Brush]) -> Vec<CompiledSurface> {
 
 /// Recursively partition exterior CSG polygons into a render BSP.
 ///
-/// Splitter selection minimizes polygon splits first and tree imbalance
-/// second. Input order is the final tie breaker, so identical inputs
-/// always produce identical node, leaf and surface ordering.
+/// Splitter selection exhaustively minimizes polygon splits first and tree
+/// imbalance second. Classification is allocation-free, avoiding the fragment
+/// allocation storm that made exhaustive selection unusable on full Quake
+/// maps. Input order is the final tie breaker, so identical inputs always
+/// produce identical node, leaf and surface ordering.
 pub fn build_surface_bsp(surfaces: &[CompiledSurface]) -> CompiledSurfaceBsp {
     let mut bsp = CompiledSurfaceBsp {
         root: BspChild::Leaf(0),
@@ -482,19 +484,18 @@ fn build_surface_bsp_branch(
 }
 
 fn choose_splitter(surfaces: &[CompiledSurface]) -> usize {
-    surfaces
-        .iter()
-        .enumerate()
-        .map(|(candidate, surface)| {
+    (0..surfaces.len())
+        .map(|candidate| {
+            let surface = &surfaces[candidate];
             let mut front = 0usize;
             let mut back = 0usize;
             let mut splits = 0usize;
             for classified in surfaces {
-                match split_polygon(&classified.vertices, surface.plane) {
-                    PolygonSplit::Front(_) => front += 1,
-                    PolygonSplit::Back(_) => back += 1,
-                    PolygonSplit::Coplanar => {}
-                    PolygonSplit::Split { .. } => {
+                match classify_polygon(&classified.vertices, surface.plane) {
+                    PolygonSide::Front => front += 1,
+                    PolygonSide::Back => back += 1,
+                    PolygonSide::Coplanar => {}
+                    PolygonSide::Split => {
                         front += 1;
                         back += 1;
                         splits += 1;
@@ -502,7 +503,8 @@ fn choose_splitter(surfaces: &[CompiledSurface]) -> usize {
                 }
             }
             let imbalance = front.abs_diff(back);
-            ((splits, imbalance, candidate), candidate)
+            let score = (splits, imbalance, candidate);
+            (score, candidate)
         })
         .min_by_key(|(score, _)| *score)
         .map(|(_, candidate)| candidate)
@@ -544,6 +546,37 @@ pub(crate) enum PolygonSplit {
         front: Vec<[f64; 3]>,
         back: Vec<[f64; 3]>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolygonSide {
+    Front,
+    Back,
+    Coplanar,
+    Split,
+}
+
+/// Classify without constructing either child polygon. Splitter selection
+/// calls this for every candidate/surface pair, so keeping that hot scan
+/// allocation-free matters much more than the final one-time partition.
+fn classify_polygon(vertices: &[[f64; 3]], plane: Plane) -> PolygonSide {
+    let (normal, distance) = normalized_plane(plane);
+    let mut has_front = false;
+    let mut has_back = false;
+    for vertex in vertices {
+        let signed_distance = dot(normal, *vertex) - distance;
+        has_front |= signed_distance > CSG_EPSILON;
+        has_back |= signed_distance < -CSG_EPSILON;
+        if has_front && has_back {
+            return PolygonSide::Split;
+        }
+    }
+    match (has_front, has_back) {
+        (true, false) => PolygonSide::Front,
+        (false, true) => PolygonSide::Back,
+        (false, false) => PolygonSide::Coplanar,
+        (true, true) => unreachable!("split polygons return from the scan"),
+    }
 }
 
 pub(crate) fn split_polygon(vertices: &[[f64; 3]], plane: Plane) -> PolygonSplit {
@@ -1039,6 +1072,66 @@ mod tests {
             Brush::cuboid([64, 64, 64], [192, 192, 192]),
         ]);
         assert_eq!(build_surface_bsp(&surfaces), build_surface_bsp(&surfaces));
+    }
+
+    #[test]
+    fn allocation_free_polygon_classifier_matches_split_results() {
+        let plane = Plane::from_points([[0, 0, 0], [0, 1, 0], [0, 0, 1]]).unwrap();
+        for (vertices, expected) in [
+            (
+                vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]],
+                PolygonSide::Front,
+            ),
+            (
+                vec![[-1.0, 0.0, 0.0], [-1.0, 0.0, 1.0], [-1.0, 1.0, 0.0]],
+                PolygonSide::Back,
+            ),
+            (
+                vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                PolygonSide::Coplanar,
+            ),
+            (
+                vec![[-1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]],
+                PolygonSide::Split,
+            ),
+        ] {
+            assert_eq!(classify_polygon(&vertices, plane), expected);
+            let actual = match split_polygon(&vertices, plane) {
+                PolygonSplit::Front(_) => PolygonSide::Front,
+                PolygonSplit::Back(_) => PolygonSide::Back,
+                PolygonSplit::Coplanar => PolygonSide::Coplanar,
+                PolygonSplit::Split { .. } => PolygonSide::Split,
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn large_branch_splitter_chooses_a_balanced_parallel_plane() {
+        let surfaces: Vec<_> = (0..600)
+            .map(|index| {
+                let x = index as i32 * 16;
+                CompiledSurface {
+                    plane: Plane::from_points([[x, 0, 0], [x, 1, 0], [x, 0, 1]]).unwrap(),
+                    vertices: vec![
+                        [f64::from(x), 0.0, 0.0],
+                        [f64::from(x), 1.0, 0.0],
+                        [f64::from(x), 1.0, 1.0],
+                        [f64::from(x), 0.0, 1.0],
+                    ],
+                    material: None,
+                    uv: FaceUv::default(),
+                    contents: BrushContents::Solid,
+                    source_brush: index,
+                    source_face: 0,
+                }
+            })
+            .collect();
+        let splitter = choose_splitter(&surfaces);
+        assert!(
+            (280..=320).contains(&splitter),
+            "large branch chose unbalanced plane {splitter}"
+        );
     }
 
     #[test]

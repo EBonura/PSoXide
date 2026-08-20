@@ -315,6 +315,7 @@ impl Selection {
 pub(crate) enum MaterialTarget {
     Face(FaceRef),
     Triangle(HorizontalTriangleRef),
+    BrushFace { brush: usize, face: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
