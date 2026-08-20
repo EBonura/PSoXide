@@ -109,9 +109,11 @@ pub struct Graphics {
     /// preview pass never touches the filesystem.
     #[cfg(feature = "editor")]
     editor_assets: crate::editor_assets::EditorAssets,
-    /// Host-drawn editor overlay lines from the last preview build.
+    /// Reusable command-log and host-overlay storage for the editable preview.
+    /// Keeping both vectors here removes per-frame heap growth while orbiting
+    /// large brush maps.
     #[cfg(feature = "editor")]
-    editor_overlay_lines: Vec<psxed_ui::EditorViewportOverlayLine>,
+    editor_preview_frame: crate::editor_preview::EditorPreviewFrame,
 }
 
 impl Graphics {
@@ -220,7 +222,7 @@ impl Graphics {
             #[cfg(feature = "editor")]
             editor_assets: crate::editor_assets::EditorAssets::new(),
             #[cfg(feature = "editor")]
-            editor_overlay_lines: Vec::new(),
+            editor_preview_frame: crate::editor_preview::EditorPreviewFrame::default(),
         }
     }
 
@@ -262,7 +264,7 @@ impl Graphics {
     /// Host-drawn overlay lines from the latest editor preview pass.
     #[cfg(feature = "editor")]
     pub fn editor_overlay_lines(&self) -> &[psxed_ui::EditorViewportOverlayLine] {
-        &self.editor_overlay_lines
+        &self.editor_preview_frame.overlay_lines
     }
 
     /// Render one frame of the editor preview through the second
@@ -307,7 +309,8 @@ impl Graphics {
         self.editor_textures.refresh(project, project_root);
         self.editor_textures.refresh_models(project, project_root);
         self.editor_assets.refresh(project, project_root);
-        let mut frame = crate::editor_preview::build_phase1_frame(
+        let reusable_frame = std::mem::take(&mut self.editor_preview_frame);
+        self.editor_preview_frame = crate::editor_preview::build_phase1_frame_reusing(
             project,
             camera,
             preview_fog,
@@ -332,19 +335,19 @@ impl Graphics {
             hovered_entity_node,
             &self.editor_textures,
             &self.editor_assets,
+            reusable_frame,
         );
         if show_grid {
             crate::editor_preview::prepend_bsp_surface_grid_overlay(
                 project,
                 camera,
                 grid_units,
-                &mut frame.overlay_lines,
+                &mut self.editor_preview_frame.overlay_lines,
             );
         }
-        self.editor_overlay_lines = frame.overlay_lines;
         self.editor_hw_renderer.render_frame(
             &self.editor_gpu_stub,
-            &frame.cmd_log,
+            &self.editor_preview_frame.cmd_log,
             self.editor_textures.vram_words(),
         );
     }

@@ -468,6 +468,120 @@ pub struct DisplayArea {
     pub bpp24: bool,
 }
 
+/// Number of words reserved inside a command-log entry before uncommon long
+/// commands (VRAM uploads and polylines) spill to the heap. The largest normal
+/// polygon command is twelve words, so ordinary scene rendering allocates only
+/// the command-entry table rather than one `Vec` per primitive.
+pub const GPU_CMD_FIFO_INLINE_WORDS: usize = 12;
+
+/// Compact owned GP0 command words used by [`GpuCmdLogEntry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuCmdFifo {
+    /// Fixed storage for normal draw and state commands.
+    Inline {
+        /// Number of initialized entries in `words`.
+        len: u8,
+        /// Inline command payload.
+        words: [u32; GPU_CMD_FIFO_INLINE_WORDS],
+    },
+    /// Overflow storage for uploads and arbitrarily long polylines.
+    Heap(Vec<u32>),
+}
+
+impl GpuCmdFifo {
+    /// Empty inline FIFO.
+    pub const fn new() -> Self {
+        Self::Inline {
+            len: 0,
+            words: [0; GPU_CMD_FIFO_INLINE_WORDS],
+        }
+    }
+
+    /// Copy an already-decoded command into inline storage when possible.
+    pub fn from_slice(words: &[u32]) -> Self {
+        if words.len() <= GPU_CMD_FIFO_INLINE_WORDS {
+            let mut inline = [0; GPU_CMD_FIFO_INLINE_WORDS];
+            inline[..words.len()].copy_from_slice(words);
+            Self::Inline {
+                len: words.len() as u8,
+                words: inline,
+            }
+        } else {
+            Self::Heap(words.to_vec())
+        }
+    }
+
+    /// Append one word, spilling existing inline data only when full.
+    pub fn push(&mut self, word: u32) {
+        match self {
+            Self::Inline { len, words } if usize::from(*len) < words.len() => {
+                words[usize::from(*len)] = word;
+                *len += 1;
+            }
+            Self::Inline { len, words } => {
+                let mut heap = Vec::with_capacity(words.len() * 2);
+                heap.extend_from_slice(&words[..usize::from(*len)]);
+                heap.push(word);
+                *self = Self::Heap(heap);
+            }
+            Self::Heap(words) => words.push(word),
+        }
+    }
+
+    /// Borrow the initialized command words.
+    pub fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::Inline { len, words } => &words[..usize::from(*len)],
+            Self::Heap(words) => words,
+        }
+    }
+}
+
+impl Default for GpuCmdFifo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<Vec<u32>> for GpuCmdFifo {
+    fn from(words: Vec<u32>) -> Self {
+        if words.len() <= GPU_CMD_FIFO_INLINE_WORDS {
+            Self::from_slice(&words)
+        } else {
+            Self::Heap(words)
+        }
+    }
+}
+
+impl core::ops::Deref for GpuCmdFifo {
+    type Target = [u32];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a GpuCmdFifo {
+    type Item = &'a u32;
+    type IntoIter = core::slice::Iter<'a, u32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl PartialEq<Vec<u32>> for GpuCmdFifo {
+    fn eq(&self, other: &Vec<u32>) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl PartialEq<GpuCmdFifo> for Vec<u32> {
+    fn eq(&self, other: &GpuCmdFifo) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
 /// One captured GP0 packet in the pixel-tracer's command log.
 /// `index` matches the value stored in [`Gpu::pixel_owner`] for every
 /// pixel this packet plotted, so `pixel_owner[y*W+x]` → look up the
@@ -485,7 +599,7 @@ pub struct GpuCmdLogEntry {
     /// slices (3..=12 words). CPU→VRAM uploads append their payload
     /// words after the 3-word setup so downstream renderers can mirror
     /// direct image transfers such as FMV frames.
-    pub fifo: Vec<u32>,
+    pub fifo: GpuCmdFifo,
 }
 
 /// Expected total word count for a GP0 command starting with `opcode`.
@@ -1929,7 +2043,7 @@ impl Gpu {
             self.cmd_log.push(GpuCmdLogEntry {
                 index,
                 opcode: op as u8,
-                fifo: vec![word],
+                fifo: GpuCmdFifo::from_slice(&[word]),
             });
         }
         match op {
@@ -2091,7 +2205,7 @@ impl Gpu {
             self.cmd_log.push(GpuCmdLogEntry {
                 index,
                 opcode: op as u8,
-                fifo: self.gp0_fifo.clone(),
+                fifo: GpuCmdFifo::from_slice(&self.gp0_fifo),
             });
         }
         match op {

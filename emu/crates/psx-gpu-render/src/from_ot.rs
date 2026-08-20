@@ -15,7 +15,7 @@
 
 use core::ptr;
 
-use emulator_core::gpu::{gp0_command_word_count, GpuCmdLogEntry};
+use emulator_core::gpu::{gp0_command_word_count, GpuCmdFifo, GpuCmdLogEntry};
 use psx_gpu::ot::OrderingTable;
 
 /// Walk `ot` in DMA submission order and produce one
@@ -35,26 +35,53 @@ use psx_gpu::ot::OrderingTable;
 /// chains must too.
 pub unsafe fn build_cmd_log<const N: usize>(ot: &OrderingTable<N>) -> Vec<GpuCmdLogEntry> {
     let mut log = Vec::new();
+    // SAFETY: forwarded from this function's contract.
+    unsafe { build_cmd_log_into(ot, &mut log) };
+    log
+}
+
+/// Rebuild an existing command log from an ordering table while retaining its
+/// allocation. The editor uses this for its per-frame preview; callers that do
+/// not retain a frame can use [`build_cmd_log`] instead.
+///
+/// # Safety
+/// Same packet-lifetime and address-window contract as [`build_cmd_log`].
+pub unsafe fn build_cmd_log_into<const N: usize>(
+    ot: &OrderingTable<N>,
+    log: &mut Vec<GpuCmdLogEntry>,
+) {
+    log.clear();
     let mut command_index = 0u32;
     // SAFETY: contract above forwards directly to iter_packets.
     let iter = unsafe { ot.iter_packets() };
     for (packet_ptr, words) in iter {
-        let mut packet = Vec::with_capacity(words as usize);
-        for offset in 1..=(words as usize) {
+        let words = words as usize;
+        let mut offset = 0usize;
+        while offset < words {
             // SAFETY: packet[1..=words] is alive per the iter contract;
             // each word is u32-aligned because OT primitives are u32
             // aligned by `repr(C, align(4))`.
-            let word = unsafe { ptr::read_volatile(packet_ptr.add(offset)) };
-            packet.push(word);
-        }
-
-        let mut offset = 0usize;
-        while offset < packet.len() {
-            let opcode = ((packet[offset] >> 24) & 0xFF) as u8;
-            let command_words = gp0_command_word_count(opcode)
-                .max(1)
-                .min(packet.len() - offset);
-            let fifo = packet[offset..offset + command_words].to_vec();
+            let first = unsafe { ptr::read_volatile(packet_ptr.add(offset + 1)) };
+            let opcode = ((first >> 24) & 0xFF) as u8;
+            let command_words = gp0_command_word_count(opcode).max(1).min(words - offset);
+            let mut inline_words = [0; emulator_core::gpu::GPU_CMD_FIFO_INLINE_WORDS];
+            let fifo = if command_words <= inline_words.len() {
+                for (command_offset, word) in inline_words[..command_words].iter_mut().enumerate() {
+                    // SAFETY: bounded by the checked packet word count above.
+                    *word =
+                        unsafe { ptr::read_volatile(packet_ptr.add(offset + command_offset + 1)) };
+                }
+                GpuCmdFifo::from_slice(&inline_words[..command_words])
+            } else {
+                let mut words = Vec::with_capacity(command_words);
+                for command_offset in 0..command_words {
+                    // SAFETY: bounded by the checked packet word count above.
+                    words.push(unsafe {
+                        ptr::read_volatile(packet_ptr.add(offset + command_offset + 1))
+                    });
+                }
+                GpuCmdFifo::from(words)
+            };
             log.push(GpuCmdLogEntry {
                 index: command_index,
                 opcode,
@@ -64,7 +91,6 @@ pub unsafe fn build_cmd_log<const N: usize>(ot: &OrderingTable<N>) -> Vec<GpuCmd
             offset += command_words;
         }
     }
-    log
 }
 
 #[cfg(test)]
@@ -150,5 +176,30 @@ mod tests {
         assert_eq!(log[1].opcode, 0x24);
         assert_eq!(log[1].fifo.len(), 7);
         assert_eq!(log[1].index, 1);
+    }
+
+    #[test]
+    fn build_cmd_log_into_reuses_the_output_allocation() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let mut packet: [u32; 2] = [0, 0xE100_0000];
+        unsafe {
+            ot.insert(1, packet.as_mut_ptr(), 1);
+        }
+
+        let mut log = Vec::with_capacity(32);
+        log.push(GpuCmdLogEntry {
+            index: 99,
+            opcode: 0xFF,
+            fifo: vec![0xFFFF_FFFF].into(),
+        });
+        let allocation = log.as_ptr();
+        unsafe { build_cmd_log_into(&ot, &mut log) };
+
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.as_ptr(), allocation);
+        assert_eq!(log[0].index, 0);
+        assert_eq!(log[0].opcode, 0xE1);
+        assert_eq!(log[0].fifo.as_slice(), &[0xE100_0000]);
     }
 }

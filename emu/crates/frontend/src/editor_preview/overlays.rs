@@ -14,6 +14,38 @@ const BSP_SURFACE_GRID_MAJOR_RGBA: (u8, u8, u8, u8) = (218, 232, 238, 104);
 const BSP_SURFACE_GRID_MINOR_WIDTH: f32 = 0.65;
 const BSP_SURFACE_GRID_MAJOR_WIDTH: f32 = 0.9;
 const GRID_INTERSECTION_EPSILON: f64 = 1.0 / 4096.0;
+const GRID_INTERSECTION_CAP: usize = 8;
+
+struct GridIntersections {
+    points: [[f64; 3]; GRID_INTERSECTION_CAP],
+    len: usize,
+}
+
+impl GridIntersections {
+    const fn new() -> Self {
+        Self {
+            points: [[0.0; 3]; GRID_INTERSECTION_CAP],
+            len: 0,
+        }
+    }
+
+    fn as_slice(&self) -> &[[f64; 3]] {
+        &self.points[..self.len]
+    }
+
+    fn push_unique(&mut self, candidate: [f64; 3]) {
+        if self.len >= self.points.len()
+            || self.as_slice().iter().any(|point| {
+                squared_distance_f64(*point, candidate)
+                    <= GRID_INTERSECTION_EPSILON * GRID_INTERSECTION_EPSILON
+            })
+        {
+            return;
+        }
+        self.points[self.len] = candidate;
+        self.len += 1;
+    }
+}
 
 /// Prepend a TrenchBroom-style world grid projected onto visible BSP brush
 /// faces. Grid strokes are host-composited, translucent, and painted before
@@ -365,32 +397,30 @@ fn clip_grid_line_to_polygon(
     axis: usize,
     coordinate: f64,
 ) -> Option<([f64; 3], [f64; 3])> {
-    let mut intersections = Vec::with_capacity(polygon.len().min(8));
+    let mut intersections = GridIntersections::new();
     for edge_index in 0..polygon.len() {
         let a = polygon[edge_index];
         let b = polygon[(edge_index + 1) % polygon.len()];
         let da = a[axis] - coordinate;
         let db = b[axis] - coordinate;
         if da.abs() <= GRID_INTERSECTION_EPSILON {
-            push_unique_point(&mut intersections, a);
+            intersections.push_unique(a);
         }
         if db.abs() <= GRID_INTERSECTION_EPSILON {
-            push_unique_point(&mut intersections, b);
+            intersections.push_unique(b);
         }
         if (da < -GRID_INTERSECTION_EPSILON && db > GRID_INTERSECTION_EPSILON)
             || (da > GRID_INTERSECTION_EPSILON && db < -GRID_INTERSECTION_EPSILON)
         {
             let t = da / (da - db);
-            push_unique_point(
-                &mut intersections,
-                [
-                    a[0] + (b[0] - a[0]) * t,
-                    a[1] + (b[1] - a[1]) * t,
-                    a[2] + (b[2] - a[2]) * t,
-                ],
-            );
+            intersections.push_unique([
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ]);
         }
     }
+    let intersections = intersections.as_slice();
     if intersections.len() < 2 {
         return None;
     }
@@ -407,15 +437,6 @@ fn clip_grid_line_to_polygon(
     }
     (farthest_distance > GRID_INTERSECTION_EPSILON * GRID_INTERSECTION_EPSILON)
         .then(|| (intersections[farthest.0], intersections[farthest.1]))
-}
-
-fn push_unique_point(points: &mut Vec<[f64; 3]>, candidate: [f64; 3]) {
-    if points.iter().all(|point| {
-        squared_distance_f64(*point, candidate)
-            > GRID_INTERSECTION_EPSILON * GRID_INTERSECTION_EPSILON
-    }) {
-        points.push(candidate);
-    }
 }
 
 fn squared_distance_f64(a: [f64; 3], b: [f64; 3]) -> f64 {

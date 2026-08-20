@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn command_fifo_keeps_normal_packets_inline() {
+    let words: Vec<u32> = (0..GPU_CMD_FIFO_INLINE_WORDS as u32).collect();
+    let fifo = GpuCmdFifo::from_slice(&words);
+
+    assert!(matches!(fifo, GpuCmdFifo::Inline { .. }));
+    assert_eq!(fifo.as_slice(), words);
+}
+
+#[test]
+fn command_fifo_spills_without_losing_word_order() {
+    let mut fifo = GpuCmdFifo::new();
+    for word in 0..=GPU_CMD_FIFO_INLINE_WORDS as u32 {
+        fifo.push(word);
+    }
+
+    assert!(matches!(fifo, GpuCmdFifo::Heap(_)));
+    assert_eq!(
+        fifo.as_slice(),
+        &(0..=GPU_CMD_FIFO_INLINE_WORDS as u32).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn command_fifo_constructs_long_packets_on_the_heap() {
+    let words: Vec<u32> = (0..GPU_CMD_FIFO_INLINE_WORDS as u32 + 1).collect();
+    let fifo = GpuCmdFifo::from_slice(&words);
+
+    assert!(matches!(fifo, GpuCmdFifo::Heap(_)));
+    assert_eq!(fifo.as_slice(), words);
+}
+
+#[test]
 fn read_status_ready_bits_follow_command_pipeline() {
     let mut gpu = Gpu::new();
     let idle = gpu.read32(GP1_ADDR).unwrap();
