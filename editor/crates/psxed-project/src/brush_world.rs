@@ -149,6 +149,14 @@ pub enum BrushWorldCookError {
         material: Option<ResourceId>,
         error: String,
     },
+    Bsp29GeometryRead {
+        path: String,
+        error: String,
+    },
+    Bsp29Geometry {
+        path: String,
+        error: String,
+    },
     /// Submodel table overflowed while compiling this mover's brush model.
     ModelIndexOverflow(NodeId),
     /// Texture asset table overflowed while interning this material's texture.
@@ -240,6 +248,12 @@ impl fmt::Display for BrushWorldCookError {
                 Some(material) => write!(formatter, "material {material:?} is invalid: {error}"),
                 None => write!(formatter, "default brush texture is invalid: {error}"),
             },
+            Self::Bsp29GeometryRead { path, error } => {
+                write!(formatter, "could not read BSP29 geometry sidecar {path}: {error}")
+            }
+            Self::Bsp29Geometry { path, error } => {
+                write!(formatter, "BSP29 geometry sidecar {path} is invalid: {error}")
+            }
             Self::ModelIndexOverflow(node) => {
                 write!(formatter, "PXBSP model index exceeds u16 at node {node:?}")
             }
@@ -290,23 +304,23 @@ fn authored_body_hulls(project: &ProjectDocument) -> [CookedBodyHull; 2] {
     for node in scene.nodes() {
         match &node.kind {
             NodeKind::CharacterController {
-                character, settings, ..
+                character,
+                settings,
+                ..
             } => {
                 // No override means the body comes from the Character, the
                 // same resolution the cook does. Missing both leaves the hull
                 // to the other authored bodies.
-                let body = settings
-                    .map(|s| (s.radius, s.height))
-                    .or_else(|| {
-                        character
-                            .and_then(|id| project.resource(id))
-                            .and_then(|resource| match &resource.data {
-                                ResourceData::Character(character) => {
-                                    Some((character.radius, character.height))
-                                }
-                                _ => None,
-                            })
-                    });
+                let body = settings.map(|s| (s.radius, s.height)).or_else(|| {
+                    character
+                        .and_then(|id| project.resource(id))
+                        .and_then(|resource| match &resource.data {
+                            ResourceData::Character(character) => {
+                                Some((character.radius, character.height))
+                            }
+                            _ => None,
+                        })
+                });
                 if let Some((radius, height)) = body {
                     if radius > 0 && height > 0 {
                         bodies.push((i32::from(radius), i32::from(height)));
@@ -481,17 +495,48 @@ pub fn compile_brush_world(
     let (lights, light_nodes) = scene_lights(scene);
     let material_tints = material_tints(project);
     let texture_dims = brush_texture_dims(project, scene, &options);
-    let (world_geometry, world_collision) = compile_model(
-        &static_brushes,
-        &all_brushes,
-        &lights,
-        &light_nodes,
-        &material_tints,
-        &texture_dims,
-        options.mode,
-        options.ambient,
-        &collision_hulls,
-    )?;
+    let (world_geometry, world_collision) = if let Some(relative) = &project.bsp29_geometry_path {
+        let path = Path::new(relative);
+        if path.is_absolute() {
+            return Err(BrushWorldCookError::Bsp29Geometry {
+                path: relative.clone(),
+                error: "path must be relative to the project directory".to_string(),
+            });
+        }
+        let source_path = options.project_root.join(path);
+        let bytes = std::fs::read(&source_path).map_err(|error| {
+            BrushWorldCookError::Bsp29GeometryRead {
+                path: relative.clone(),
+                error: error.to_string(),
+            }
+        })?;
+        let material = static_brushes
+            .iter()
+            .flat_map(|brush| &brush.faces)
+            .find_map(|face| face.material);
+        crate::quake_bsp29::import_quake_bsp29_world(
+            &bytes,
+            f64::from(project.bsp29_geometry_scale)
+                / f64::from(crate::units::WORLD_UNIT_DIVISOR),
+            material,
+        )
+        .map_err(|error| BrushWorldCookError::Bsp29Geometry {
+            path: relative.clone(),
+            error: error.to_string(),
+        })?
+    } else {
+        compile_model(
+            &static_brushes,
+            &all_brushes,
+            &lights,
+            &light_nodes,
+            &material_tints,
+            &texture_dims,
+            options.mode,
+            options.ambient,
+            &collision_hulls,
+        )?
+    };
     let collision_planes = RecordSlice::<Plane>::new(&world_collision.planes)
         .ok_or(BrushWorldCookError::InvalidWorldTree)?;
     let collision_nodes = RecordSlice::<ClipNode>::new(&world_collision.clipnodes)

@@ -415,6 +415,17 @@ pub struct ProjectDocument {
     /// in the project keeps GUI and CLI cooks on one deterministic policy.
     #[serde(default)]
     pub bsp_cook_mode: crate::brush_world::BrushWorldCookMode,
+    /// Optional textureless BSP29 topology/PVS sidecar used to accelerate
+    /// full-map playtest cooks while the editable `.map` brushes remain the
+    /// editor authority. Relative to the project directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bsp29_geometry_path: Option<String>,
+    /// Integer coordinate multiplier paired with `bsp29_geometry_path`.
+    #[serde(
+        default = "default_bsp29_geometry_scale",
+        skip_serializing_if = "is_default_bsp29_geometry_scale"
+    )]
+    pub bsp29_geometry_scale: i32,
     /// Worst-case joint rotation error, in whole degrees, that the cook may
     /// introduce by resampling animation clips to a lower rate. `0` disables
     /// resampling and cooks every clip at its authored rate.
@@ -542,11 +553,18 @@ pub enum BootTarget {
     UiScene(UiSceneId),
 }
 
-
 /// Serde predicate: leave a default budget out of the file so projects that do
 /// not resample stay byte-identical to what they were before the knob existed.
 fn is_zero_u8(value: &u8) -> bool {
     *value == 0
+}
+
+const fn default_bsp29_geometry_scale() -> i32 {
+    16
+}
+
+fn is_default_bsp29_geometry_scale(value: &i32) -> bool {
+    *value == default_bsp29_geometry_scale()
 }
 
 impl ProjectDocument {
@@ -567,6 +585,8 @@ impl ProjectDocument {
             animation_error_budget_degrees: 0,
             animation_trim_still_percent: 0,
             bsp_cook_mode: crate::brush_world::BrushWorldCookMode::default(),
+            bsp29_geometry_path: None,
+            bsp29_geometry_scale: default_bsp29_geometry_scale(),
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
             runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
             runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),

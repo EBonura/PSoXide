@@ -220,6 +220,8 @@ fn brush_world_validation_target(
         //   cook-side index into the merged slot table rather than a resource.
         BrushWorldCookError::EmptyStaticWorld
         | BrushWorldCookError::InvalidWorldTree
+        | BrushWorldCookError::Bsp29GeometryRead { .. }
+        | BrushWorldCookError::Bsp29Geometry { .. }
         | BrushWorldCookError::InvalidTexture { material: None, .. }
         | BrushWorldCookError::TextureAssetOverflow { material: None }
         | BrushWorldCookError::Pack(_)
