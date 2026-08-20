@@ -3,8 +3,8 @@
 //! Cooked UI scenes are rendered by the engine's
 //! [`psx_engine::ui::draw_scene`]; this module only supplies the two
 //! project-specific resolvers (texture upload lookup, gameplay value
-//! bindings) plus the legacy fallback HUD and a couple of one-off
-//! prompts the playtest still draws directly.
+//! bindings) plus a couple of one-off prompts the playtest still draws
+//! directly.
 
 use super::*;
 use psx_engine::ui::{self, UiTextureSlot};
@@ -12,13 +12,6 @@ use psx_gpu::draw_quad_flat;
 use psx_level::{LevelUiNodeRecord, LevelUiValueBinding};
 
 const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
-const HUD_X: i16 = 18;
-const HUD_Y: i16 = 16;
-const HEALTH_BAR_W: i16 = 120;
-const HEALTH_BAR_H: i16 = 8;
-const STAMINA_BAR_W: i16 = 96;
-const STAMINA_BAR_H: i16 = 5;
-const HUD_BAR_GAP: i16 = 5;
 
 pub(crate) fn draw_player_hud(
     nodes: &[LevelUiNodeRecord],
@@ -31,6 +24,9 @@ pub(crate) fn draw_player_hud(
     stamina_q12: i32,
     stamina_max_q12: i32,
 ) {
+    if nodes.is_empty() || hud_count == 0 {
+        return;
+    }
     // Real player HP (the combat slice) scaled onto the HUD's Q12
     // bar convention; a zero max (pre-init) reads as a full bar so
     // hand-rolled manifests keep their old look.
@@ -39,11 +35,6 @@ pub(crate) fn draw_player_hud(
     } else {
         (i32::from(health) * PLAYER_HEALTH_MAX_Q12) / i32::from(health_max)
     };
-    if nodes.is_empty() || hud_count == 0 {
-        draw_legacy_player_hud(health_q12, stamina_q12, stamina_max_q12);
-        return;
-    }
-
     // Image nodes name an AssetId; resolve it through the example's
     // asset table + VRAM residency manager into the words the engine
     // renderer needs. Skips the image when the texture is missing or
@@ -95,29 +86,6 @@ pub(crate) fn draw_player_hud(
         &[],
         &|_option_id| 0,
         &|_| true,
-    );
-}
-
-fn draw_legacy_player_hud(health_q12: i32, stamina_q12: i32, stamina_max_q12: i32) {
-    draw_status_bar(
-        HUD_X,
-        HUD_Y,
-        HEALTH_BAR_W,
-        HEALTH_BAR_H,
-        health_q12,
-        PLAYER_HEALTH_MAX_Q12,
-        (94, 16, 24),
-        (30, 26, 28),
-    );
-    draw_status_bar(
-        HUD_X,
-        HUD_Y + HEALTH_BAR_H + HUD_BAR_GAP,
-        STAMINA_BAR_W,
-        STAMINA_BAR_H,
-        stamina_q12,
-        stamina_max_q12,
-        (44, 98, 48),
-        (30, 26, 28),
     );
 }
 
@@ -545,28 +513,6 @@ impl DbgLine {
     }
 }
 
-fn draw_status_bar(
-    x: i16,
-    y: i16,
-    width: i16,
-    height: i16,
-    value: i32,
-    max_value: i32,
-    fill: (u8, u8, u8),
-    background: (u8, u8, u8),
-) {
-    draw_rect(x - 1, y - 1, width + 2, height + 2, (12, 14, 18));
-    draw_rect(x, y, width, height, background);
-
-    let fill_width = status_fill_width(width, value, max_value);
-    if fill_width > 0 {
-        draw_rect(x, y, fill_width, height, fill);
-        if height > 3 {
-            draw_rect(x, y, fill_width, 1, brighten(fill));
-        }
-    }
-}
-
 fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
     if width <= 0 || height <= 0 {
         return;
@@ -582,20 +528,4 @@ fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
         color.1,
         color.2,
     );
-}
-
-fn status_fill_width(width: i16, value: i32, max_value: i32) -> i16 {
-    if width <= 0 || max_value <= 0 {
-        return 0;
-    }
-    let clamped = value.clamp(0, max_value);
-    ((width as i32).saturating_mul(clamped) / max_value) as i16
-}
-
-fn brighten(color: (u8, u8, u8)) -> (u8, u8, u8) {
-    (
-        color.0.saturating_add(34),
-        color.1.saturating_add(34),
-        color.2.saturating_add(34),
-    )
 }

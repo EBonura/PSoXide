@@ -1019,6 +1019,16 @@ impl ProjectDocument {
                 count += node_kind_reference_count(&node.kind, id);
             }
         }
+        for scene in &self.ui_scenes {
+            for node in scene.nodes() {
+                count += match &node.kind {
+                    UiNodeKind::Image { texture, .. } | UiNodeKind::Bar { texture, .. } => {
+                        option_resource_reference_count(*texture, id)
+                    }
+                    _ => 0,
+                };
+            }
+        }
         count
     }
 
@@ -1255,16 +1265,32 @@ impl ProjectDocument {
                 count += clear_node_kind_references(&mut node.kind, id);
             }
         }
+        for scene in &mut self.ui_scenes {
+            for node in scene.nodes_mut() {
+                count += match &mut node.kind {
+                    UiNodeKind::Image { texture, .. } | UiNodeKind::Bar { texture, .. } => {
+                        clear_option_resource(texture, id)
+                    }
+                    _ => 0,
+                };
+            }
+        }
         count
     }
 
-    /// Material resources as `(id, name)` pairs for inspector combo boxes.
+    /// World-surface material resources as `(id, name)` pairs for inspector
+    /// combo boxes. Project-local 2D UI textures live under `assets/ui/` and
+    /// stay available to UI texture pickers without polluting room paint
+    /// menus or prefab material remapping.
     pub fn material_options(&self) -> Vec<(ResourceId, String)> {
         self.resources
             .iter()
             .filter_map(|resource| match &resource.data {
-                ResourceData::Material(_)
-                    if !resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) =>
+                ResourceData::Material(material)
+                    if !resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX)
+                        && !material.psxt_path.as_deref().is_some_and(|path| {
+                            path.starts_with("assets/ui/") || path.starts_with("assets\\ui\\")
+                        }) =>
                 {
                     Some((resource.id, resource.name.clone()))
                 }
@@ -1383,8 +1409,11 @@ impl ProjectDocument {
         }
         for scene in &self.ui_scenes {
             for node in scene.nodes() {
-                if let UiNodeKind::Image { texture, .. } = &node.kind {
-                    note(*texture, &mut directly_referenced);
+                match &node.kind {
+                    UiNodeKind::Image { texture, .. } | UiNodeKind::Bar { texture, .. } => {
+                        note(*texture, &mut directly_referenced);
+                    }
+                    _ => {}
                 }
             }
         }

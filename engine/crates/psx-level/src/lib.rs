@@ -2587,8 +2587,8 @@ pub enum LevelUiAction {
     },
 }
 
-/// Sentinel meaning "this node binds to no project option". Stored in
-/// [`LevelUiNodeRecord::option`] for every non-`Slider` node.
+/// Sentinel meaning "this node binds to no project option". Sprite-strip
+/// `Bar` nodes use the same compact field for their frame count instead.
 pub const UI_OPTION_NONE: u16 = u16::MAX;
 
 /// Sentinel meaning "this UI node has no cooked SFX cue range".
@@ -2698,7 +2698,8 @@ pub struct LevelUiNodeRecord {
     pub value: LevelUiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: LevelUiValueBinding,
-    /// Texture asset for `Image`, or `AssetId(u16::MAX)`.
+    /// Texture asset for `Image` or a sprite-strip `Bar`, or
+    /// `AssetId(u16::MAX)`.
     pub texture_asset: AssetId,
     /// Animated vertex-colour preset for `Image`.
     pub image_effect: LevelUiImageEffect,
@@ -2708,7 +2709,8 @@ pub struct LevelUiNodeRecord {
     pub tag: &'static str,
     /// Action fired by a `Button`. Ignored by other kinds.
     pub action: LevelUiAction,
-    /// Project option a `Slider` binds to, or [`UI_OPTION_NONE`].
+    /// Project option a `Slider` binds to; sprite-strip frame count for a
+    /// textured `Bar`; otherwise [`UI_OPTION_NONE`].
     pub option: u16,
     /// Clockwise visual rotation around this node's centre, in degrees.
     pub rotation_degrees: i16,

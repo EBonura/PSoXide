@@ -113,6 +113,48 @@ fn starter_project_validates_and_cooks() {
 }
 
 #[test]
+fn default_health_gauge_cooks_as_one_resident_seven_frame_texture() {
+    let project = ProjectDocument::starter();
+    let mut texture_asset_for_resource = HashMap::new();
+    let mut assets = Vec::new();
+    let mut used_ui_source_paths = Vec::new();
+    let mut report = PlaytestValidationReport::default();
+    let (nodes, _paints, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+        &project,
+        &crate::default_project_dir(),
+        &mut texture_asset_for_resource,
+        &mut assets,
+        &mut used_ui_source_paths,
+        &mut report,
+    );
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let gauge = nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.kind,
+                UiNodeKind::Bar {
+                    value: UiValueBinding::PlayerHealth,
+                    ..
+                }
+            )
+        })
+        .expect("health gauge cooked");
+    assert_eq!(gauge.option, 7);
+    assert_eq!((gauge.width, gauge.height), (106, 29));
+    let asset_index = gauge.texture_asset.expect("gauge has texture asset");
+    let asset = &assets[asset_index];
+    assert_eq!(asset.streamed_class, StreamedClass::None);
+    let texture = psx_asset::Texture::from_bytes(&asset.bytes).expect("parse gauge atlas");
+    assert_eq!((texture.width(), texture.height()), (106, 203));
+    assert_eq!(texture.depth(), TextureDepth::Bit4);
+    assert_eq!(texture.clut_entries(), 16);
+    assert!(used_ui_source_paths
+        .iter()
+        .any(|path| path.ends_with("assets/ui/health_bar_clean_slim.psxt")));
+}
+
+#[test]
 fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
     let mut project = ProjectDocument::new("ui");
     let scene = project.active_ui_scene_mut().expect("default ui scene");

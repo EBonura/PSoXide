@@ -1349,6 +1349,8 @@ impl EditorWorkspace {
                 rect,
                 value,
                 max,
+                texture,
+                frame_count,
                 fill,
                 fill_gradient,
                 background,
@@ -1368,7 +1370,25 @@ impl EditorWorkspace {
                     "Appearance",
                     true,
                     |ui| {
-                        changed |= color_editor(ui, "Fill", fill);
+                        changed |= ui_texture_resource_picker(
+                            ui,
+                            "Sprite strip",
+                            texture,
+                            &texture_options,
+                        );
+                        let mut frames = u16::from(*frame_count);
+                        if drag_u16(ui, "Strip frames", &mut frames, 0, 32) {
+                            *frame_count = frames as u8;
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(
+                                "Vertical frames run empty to full; 0/1 uses the solid bar.",
+                            )
+                            .color(STUDIO_TEXT_WEAK)
+                            .small(),
+                        );
+                        changed |= color_editor(ui, "Fill / tint", fill);
                         changed |=
                             draw_ui_gradient_editor(ui, "Fill Gradient", fill, fill_gradient);
                         changed |= color_editor(ui, "Background", background);

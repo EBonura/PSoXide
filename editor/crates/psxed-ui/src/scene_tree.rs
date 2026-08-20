@@ -1537,6 +1537,8 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 rect: UiRect::new(24, 42, 96, 8),
                 value: UiValueBinding::ConstantQ12(4096),
                 max: UiValueBinding::ConstantQ12(4096),
+                texture: None,
+                frame_count: 0,
                 fill: [72, 136, 96],
                 fill_gradient: None,
                 background: [30, 26, 28],
