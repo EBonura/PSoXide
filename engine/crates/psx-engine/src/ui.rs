@@ -453,13 +453,17 @@ pub fn draw_scene(
             LevelUiNodeKind::Bar => {
                 let max_q12 = value(node.max).max(1);
                 let value_q12 = value(node.value).clamp(0, max_q12);
-                draw_status_bar(
-                    resolved,
-                    value_q12,
-                    max_q12,
-                    shape_paint(node.color, node.color_paint, paints),
-                    shape_paint(node.background, node.background_paint, paints),
-                );
+                if node.texture_asset.0 != u16::MAX && node.option >= 2 {
+                    draw_sprite_bar(node, resolved, value_q12, max_q12, textures);
+                } else {
+                    draw_status_bar(
+                        resolved,
+                        value_q12,
+                        max_q12,
+                        shape_paint(node.color, node.color_paint, paints),
+                        shape_paint(node.background, node.background_paint, paints),
+                    );
+                }
             }
             LevelUiNodeKind::Button => {
                 draw_button(node_font(fonts, node.font), node, resolved, paints);
@@ -775,8 +779,9 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        diamond_quad, font_index, font_tint, image_effect_vertex_colors, image_effect_verts,
-        node_absolute_rect, scale_u16_q8, selected_label_text,
+        bar_frame_index, bar_frame_v_range, diamond_quad, font_index, font_tint,
+        image_effect_vertex_colors, image_effect_verts, node_absolute_rect, scale_u16_q8,
+        selected_label_text,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiImageEffect, LevelUiNodeKind,
@@ -840,6 +845,18 @@ mod tests {
         // No fonts uploaded: text is skipped entirely.
         assert_eq!(font_index(0, 0), None);
         assert_eq!(font_index(0, 7), None);
+    }
+
+    #[test]
+    fn sprite_bar_frame_mapping_reaches_empty_and_full_terminal_frames() {
+        assert_eq!(bar_frame_index(0, 4096, 7), 0);
+        assert_eq!(bar_frame_index(1, 4096, 7), 1);
+        assert_eq!(bar_frame_index(2048, 4096, 7), 3);
+        assert_eq!(bar_frame_index(4095, 4096, 7), 6);
+        assert_eq!(bar_frame_index(4096, 4096, 7), 6);
+        assert_eq!(bar_frame_index(8192, 4096, 7), 6);
+        assert_eq!(bar_frame_v_range(203, 7, 0), Some((0, 28)));
+        assert_eq!(bar_frame_v_range(203, 7, 6), Some((174, 202)));
     }
 
     #[test]
@@ -1569,6 +1586,54 @@ fn draw_status_bar(
             );
         }
     }
+}
+
+fn draw_sprite_bar(
+    node: &LevelUiNodeRecord,
+    resolved: UiResolvedNode,
+    value: i32,
+    max_value: i32,
+    textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
+) {
+    let Some(slot) = textures(node.texture_asset) else {
+        return;
+    };
+    let frame_count = node.option.min(u16::from(u8::MAX)) as u8;
+    let frame = bar_frame_index(value, max_value, frame_count);
+    let Some((v0, v1)) = bar_frame_v_range(slot.texture_height, frame_count, frame) else {
+        return;
+    };
+    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb(node.color))
+        .with_texture_window(slot.texture_window);
+    let u1 = texture_size_u8(slot.texture_width).saturating_sub(1);
+    draw_quad_textured_material(
+        resolved.verts,
+        [(0, v0), (u1, v0), (0, v1), (u1, v1)],
+        material,
+    );
+}
+
+fn bar_frame_index(value: i32, max_value: i32, frame_count: u8) -> u8 {
+    if max_value <= 0 || frame_count < 2 || value <= 0 {
+        return 0;
+    }
+    let last = i64::from(frame_count - 1);
+    let value = i64::from(value.min(max_value));
+    let max_value = i64::from(max_value);
+    ((value * last + max_value - 1) / max_value).min(last) as u8
+}
+
+fn bar_frame_v_range(texture_height: u16, frame_count: u8, frame: u8) -> Option<(u8, u8)> {
+    if frame_count < 2 || frame >= frame_count || texture_height % u16::from(frame_count) != 0 {
+        return None;
+    }
+    let frame_height = texture_height / u16::from(frame_count);
+    if frame_height == 0 {
+        return None;
+    }
+    let v0 = u16::from(frame).checked_mul(frame_height)?;
+    let v1 = v0.checked_add(frame_height)?.checked_sub(1)?;
+    Some((u8::try_from(v0).ok()?, u8::try_from(v1).ok()?))
 }
 
 fn status_fill_width(width: i16, value: i32, max_value: i32) -> i16 {

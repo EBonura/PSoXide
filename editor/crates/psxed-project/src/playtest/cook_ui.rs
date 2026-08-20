@@ -61,6 +61,7 @@ pub(crate) fn cook_ui_nodes(
     let mut cdda_tracks: Vec<PlaytestCddaTrack> = Vec::new();
     let mut cdda_track_for_wav: HashMap<String, u8> = HashMap::new();
     let mut ui_image_texture_for_path: HashMap<String, CookedUiImageTexture> = HashMap::new();
+    let mut ui_bar_texture_for_path: HashMap<String, usize> = HashMap::new();
 
     for scene in &project.ui_scenes {
         let node_first = ui_nodes.len().min(u16::MAX as usize) as u16;
@@ -73,6 +74,7 @@ pub(crate) fn cook_ui_nodes(
             assets,
             report,
             &mut ui_image_texture_for_path,
+            &mut ui_bar_texture_for_path,
             &mut cdda_tracks,
             &mut cdda_track_for_wav,
             &mut ui_sfx_samples,
@@ -98,6 +100,7 @@ pub(crate) fn cook_ui_nodes(
     used_ui_source_paths.extend(ui_sfx_sample_for_wav.keys().cloned());
     used_ui_source_paths.extend(cdda_track_for_wav.keys().cloned());
     used_ui_source_paths.extend(ui_image_texture_for_path.keys().cloned());
+    used_ui_source_paths.extend(ui_bar_texture_for_path.keys().cloned());
     used_ui_source_paths.sort();
     used_ui_source_paths.dedup();
 
@@ -199,6 +202,7 @@ pub(crate) fn cook_ui_scene_nodes(
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
     ui_image_texture_for_path: &mut HashMap<String, CookedUiImageTexture>,
+    ui_bar_texture_for_path: &mut HashMap<String, usize>,
     cdda_tracks: &mut Vec<PlaytestCddaTrack>,
     cdda_track_for_wav: &mut HashMap<String, u8>,
     ui_sfx_samples: &mut Vec<PlaytestUiSfxSample>,
@@ -242,6 +246,40 @@ pub(crate) fn cook_ui_scene_nodes(
                 out,
             );
             continue;
+        }
+
+        if let UiNodeKind::Bar {
+            rect,
+            value,
+            max,
+            texture: Some(texture),
+            frame_count,
+            fill,
+            background,
+            ..
+        } = &node.kind
+        {
+            if *frame_count >= 2
+                && cook_ui_sprite_bar_node(
+                    node,
+                    parent,
+                    rect,
+                    *value,
+                    *max,
+                    *texture,
+                    *frame_count,
+                    *fill,
+                    *background,
+                    project,
+                    project_root,
+                    ui_bar_texture_for_path,
+                    assets,
+                    report,
+                    out,
+                )
+            {
+                continue;
+            }
         }
 
         let (
@@ -399,6 +437,8 @@ pub(crate) fn cook_ui_scene_nodes(
                 rect,
                 value,
                 max,
+                texture: _,
+                frame_count: _,
                 fill,
                 fill_gradient,
                 background,
@@ -626,6 +666,156 @@ pub(crate) fn cook_ui_scene_nodes(
             letter_spacing,
         });
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cook_ui_sprite_bar_node(
+    node: &crate::UiNode,
+    parent: Option<u16>,
+    rect: &UiRect,
+    value: UiValueBinding,
+    max: UiValueBinding,
+    texture: ResourceId,
+    frame_count: u8,
+    tint: [u8; 3],
+    background: [u8; 3],
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+    out: &mut Vec<PlaytestUiNode>,
+) -> bool {
+    let Some(texture_asset) = cook_ui_bar_texture_asset(
+        project,
+        project_root,
+        texture,
+        rect,
+        frame_count,
+        &format!("UI bar '{}'", node.name),
+        texture_for_path,
+        assets,
+        report,
+    ) else {
+        return false;
+    };
+    out.push(PlaytestUiNode {
+        parent,
+        kind: node.kind.clone(),
+        x: rect.x,
+        y: rect.y,
+        width: rect.width.max(1),
+        height: rect.height.max(1),
+        color: tint,
+        background,
+        accent: [0, 0, 0],
+        color_paint: None,
+        background_paint: None,
+        accent_paint: None,
+        value,
+        max,
+        texture_asset: Some(texture_asset),
+        image_effect: UiImageEffect::None,
+        text: String::new(),
+        tag: String::new(),
+        action: PlaytestUiAction::default(),
+        // Bar nodes do not otherwise use `option`; storing the frame count
+        // there keeps the compact runtime record unchanged.
+        option: u16::from(frame_count),
+        rotation_degrees: rect.rotation_degrees,
+        flags: ui_node_flags(rect.anchor, UiTextAlign::Left, false)
+            | ui_rect_transform_flags(*rect)
+            | ui_visibility_flags(node.visible_when),
+        sfx_first: psx_level::UI_SFX_NONE,
+        sfx_count: 0,
+        font: 0,
+        font_scale: default_ui_font_scale(),
+        letter_spacing: default_ui_letter_spacing(),
+    });
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cook_ui_bar_texture_asset(
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_id: ResourceId,
+    rect: &UiRect,
+    frame_count: u8,
+    context: &str,
+    texture_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<usize> {
+    let Some(texture_resource) = find_resource(project, texture_id) else {
+        report.warn(format!(
+            "{context}: texture resource #{} is missing; using solid bar",
+            texture_id.raw()
+        ));
+        return None;
+    };
+    let (texture_key, bytes) = match material_texture_bytes(project, texture_resource, project_root)
+    {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            report.warn(format!(
+                "{context}: material '{}' has no texture; using solid bar",
+                texture_resource.name
+            ));
+            return None;
+        }
+        Err(message) => {
+            report.warn(format!("{context}: {message}; using solid bar"));
+            return None;
+        }
+    };
+    let texture = match psx_asset::Texture::from_bytes(&bytes) {
+        Ok(texture) => texture,
+        Err(error) => {
+            report.warn(format!(
+                "{context}: texture '{}' parse failed: {error:?}; using solid bar",
+                texture_resource.name
+            ));
+            return None;
+        }
+    };
+    let expected_width = rect.width.max(1);
+    let expected_height = rect
+        .height
+        .max(1)
+        .checked_mul(u16::from(frame_count))
+        .unwrap_or(u16::MAX);
+    if texture.depth() != TextureDepth::Bit4
+        || texture.clut_entries() != 16
+        || texture.width() != expected_width
+        || texture.height() != expected_height
+        || texture.width() > u16::from(u8::MAX)
+        || texture.height() > u16::from(u8::MAX)
+    {
+        report.warn(format!(
+            "{context}: texture '{}' must be one 4bpp/16-colour vertical strip of {frame_count} frames at {expected_width}x{} (got {}x{}); using solid bar",
+            texture_resource.name,
+            rect.height.max(1),
+            texture.width(),
+            texture.height()
+        ));
+        return None;
+    }
+    if let Some(&asset) = texture_for_path.get(&texture_key) {
+        return Some(asset);
+    }
+    let asset = assets.len();
+    assets.push(PlaytestAsset {
+        kind: PlaytestAssetKind::Texture,
+        bytes,
+        filename: format!("ui_bar_{:04}.psxt", texture_id.raw()),
+        source_label: texture_resource.name.clone(),
+        // HUD textures must remain available during gameplay; menu UI-image
+        // streaming slots are intentionally released when gameplay begins.
+        streamed_class: StreamedClass::None,
+    });
+    texture_for_path.insert(texture_key, asset);
+    Some(asset)
 }
 
 #[allow(clippy::too_many_arguments)]

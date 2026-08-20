@@ -2354,13 +2354,15 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
         material_paths,
         [
             "assets/textures/courtyard_cobbles.psxt",
-            "assets/textures/courtyard_brick.psxt"
+            "assets/textures/courtyard_brick.psxt",
+            "assets/ui/health_bar_clean_slim.psxt"
         ]
     );
     let template = psxed_project::new_project_template_dir();
     for relative in [
         "assets/textures/courtyard_cobbles.psxt",
         "assets/textures/courtyard_brick.psxt",
+        "assets/ui/health_bar_clean_slim.psxt",
     ] {
         assert_eq!(
             std::fs::read(target.join(relative)).unwrap(),

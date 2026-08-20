@@ -2101,28 +2101,145 @@ fn new_project_seeds_hud_ui_scene() {
             height: 240
         })
     ));
-    assert!(ui_scene.nodes().iter().any(|node| {
-        node.name == "Health Bar"
-            && matches!(
-                node.kind,
+    assert_eq!(ui_scene.nodes().len(), 1);
+    assert!(project.resources.is_empty());
+}
+
+#[test]
+fn ui_bar_frame_mapping_keeps_zero_empty_and_max_completely_full() {
+    assert_eq!(ui_bar_frame_index(0, 4096, 7), 0);
+    assert_eq!(ui_bar_frame_index(1, 4096, 7), 1);
+    assert_eq!(ui_bar_frame_index(2048, 4096, 7), 3);
+    assert_eq!(ui_bar_frame_index(4095, 4096, 7), 6);
+    assert_eq!(ui_bar_frame_index(4096, 4096, 7), 6);
+}
+
+#[test]
+fn deleting_a_sprite_bar_material_clears_the_ui_reference() {
+    let mut project = ProjectDocument::new("ui resource deletion");
+    let texture = project.add_resource(
+        "Gauge",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let scene = project.active_ui_scene_mut().expect("HUD");
+    let gauge = scene.add_node(
+        scene.root,
+        "Gauge",
+        UiNodeKind::Bar {
+            rect: UiRect::new(0, 0, 106, 29),
+            value: UiValueBinding::PlayerHealth,
+            max: UiValueBinding::PlayerHealthMax,
+            texture: Some(texture),
+            frame_count: 7,
+            fill: [128, 128, 128],
+            fill_gradient: None,
+            background: [0, 0, 0],
+            background_gradient: None,
+        },
+    );
+    assert_eq!(project.resource_reference_count(texture), 1);
+    let report = project.delete_resource(texture).expect("resource deleted");
+    assert_eq!(report.cleared_references, 1);
+    assert!(matches!(
+        project
+            .active_ui_scene()
+            .and_then(|scene| scene.node(gauge))
+            .map(|node| &node.kind),
+        Some(UiNodeKind::Bar { texture: None, .. })
+    ));
+}
+
+#[test]
+fn tracked_projects_use_the_segmented_health_gauge_without_a_stamina_bar() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let project_dirs = [
+        manifest.join("../../projects/default"),
+        manifest.join("../../projects/mantis"),
+        manifest.join("../../projects/quake-e1m1-geometry"),
+        manifest.join("../../projects/tech-demo"),
+        manifest.join("../../samples/cortex_v1"),
+        manifest.join("../../archive/fixtures/brush-open-courtyard"),
+    ];
+    for project_dir in project_dirs {
+        let project_path = project_dir.join("project.ron");
+        let project = ProjectDocument::load_from_path(&project_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+        let hud = project
+            .ui_scenes
+            .iter()
+            .find(|scene| scene.name == "HUD")
+            .unwrap_or_else(|| panic!("{} has no HUD", project_path.display()));
+        let gauges = hud
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.kind {
                 UiNodeKind::Bar {
                     value: UiValueBinding::PlayerHealth,
                     max: UiValueBinding::PlayerHealthMax,
+                    texture: Some(texture),
+                    frame_count: DEFAULT_HEALTH_BAR_FRAME_COUNT,
+                    rect,
                     ..
-                }
-            )
-    }));
-    assert!(ui_scene.nodes().iter().any(|node| {
-        node.name == "Stamina Bar"
-            && matches!(
+                } => Some((*texture, *rect)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(gauges.len(), 1, "{}", project_path.display());
+        assert_eq!((gauges[0].1.width, gauges[0].1.height), (106, 29));
+        assert!(!hud.nodes().iter().any(|node| {
+            matches!(
                 node.kind,
                 UiNodeKind::Bar {
                     value: UiValueBinding::PlayerStamina,
-                    max: UiValueBinding::PlayerStaminaMax,
                     ..
                 }
             )
-    }));
+        }));
+        let material = match &project
+            .resource(gauges[0].0)
+            .unwrap_or_else(|| panic!("{} has no gauge material", project_path.display()))
+            .data
+        {
+            ResourceData::Material(material) => material,
+            _ => panic!(
+                "{} gauge resource is not a material",
+                project_path.display()
+            ),
+        };
+        let texture_path = project_dir.join(
+            material
+                .psxt_path
+                .as_deref()
+                .expect("gauge material has a texture path"),
+        );
+        let stats = crate::texture_import::texture_stats_from_bytes(
+            &std::fs::read(&texture_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", texture_path.display())),
+        )
+        .unwrap_or_else(|error| panic!("{}: {error}", texture_path.display()));
+        assert_eq!((stats.width, stats.height), (106, 203));
+        assert_eq!((stats.depth, stats.clut_entries), (4, 16));
+        assert!(stats.index_zero_transparent);
+    }
+
+    let cortex =
+        ProjectDocument::load_from_path(&manifest.join("../../samples/cortex_v1/project.ron"))
+            .expect("load cortex sample");
+    assert!(cortex
+        .ui_scenes
+        .iter()
+        .flat_map(UiScene::nodes)
+        .any(|node| {
+            matches!(
+                node.kind,
+                UiNodeKind::Bar {
+                    value: UiValueBinding::LoadingProgress,
+                    texture: None,
+                    frame_count: 0,
+                    ..
+                }
+            )
+        }));
 }
 
 #[test]
