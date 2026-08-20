@@ -156,6 +156,58 @@ fn preview_clip_distance(
     }
 }
 
+/// Conservative brush-level frustum test. A brush is rejected only when all
+/// eight corners of its world-space AABB are outside the same clip plane, so a
+/// visible face can never be lost. This avoids projecting and clipping every
+/// subdivided face in distant E1M1 brushes during camera navigation.
+pub(crate) fn preview_brush_bounds_visible(
+    camera: psx_engine::WorldCamera,
+    bounds: PreviewBrushBounds,
+) -> bool {
+    // Fixed-point world-to-view uses two rounded Q12 stages. Keep several
+    // screen pixels of distance slack so a rounding difference at an AABB
+    // interior point cannot turn a boundary-touching brush into a rejection.
+    const CULL_DISTANCE_MARGIN: i64 = 1024;
+    let coordinate = |value: f64, round_down: bool| -> Option<i32> {
+        if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+            return None;
+        }
+        Some(if round_down {
+            value.floor() as i32
+        } else {
+            value.ceil() as i32
+        })
+    };
+    let (Some(min_x), Some(min_y), Some(min_z)) = (
+        coordinate(bounds.min[0], true),
+        coordinate(bounds.min[1], true),
+        coordinate(bounds.min[2], true),
+    ) else {
+        return true;
+    };
+    let (Some(max_x), Some(max_y), Some(max_z)) = (
+        coordinate(bounds.max[0], false),
+        coordinate(bounds.max[1], false),
+        coordinate(bounds.max[2], false),
+    ) else {
+        return true;
+    };
+    let min = [min_x, min_y, min_z];
+    let max = [max_x, max_y, max_z];
+    let corners = core::array::from_fn::<_, 8, _>(|corner| {
+        camera.view_vertex(psx_engine::WorldVertex::new(
+            if corner & 1 == 0 { min[0] } else { max[0] },
+            if corner & 2 == 0 { min[1] } else { max[1] },
+            if corner & 4 == 0 { min[2] } else { max[2] },
+        ))
+    });
+    (0..5).all(|plane| {
+        corners.iter().any(|corner| {
+            preview_clip_distance(camera.projection, plane, *corner) >= -CULL_DISTANCE_MARGIN
+        })
+    })
+}
+
 fn interpolate_preview_clip_vertex(
     a: PreviewClipVertex,
     b: PreviewClipVertex,

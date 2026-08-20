@@ -1230,6 +1230,36 @@ fn brush_polygon_clip_rejects_a_wholly_offscreen_face() {
 }
 
 #[test]
+fn brush_bounds_cull_only_wholly_outside_a_frustum_plane() {
+    let camera = setup_gte_for_camera(ViewportCameraState {
+        mode: ViewportCameraMode::Free,
+        yaw_q12: 0,
+        pitch_q12: 0,
+        radius: 1024,
+        target: [0, 0, 0],
+        position: [0, 0, 0],
+    });
+    let bounds = |min, max| super::PreviewBrushBounds { min, max };
+
+    assert!(super::preview_brush_bounds_visible(
+        camera,
+        bounds([-16.0, -16.0, -128.0], [16.0, 16.0, -64.0])
+    ));
+    assert!(super::preview_brush_bounds_visible(
+        camera,
+        bounds([-16.0, -16.0, -96.0], [16.0, 16.0, -16.0])
+    ));
+    assert!(!super::preview_brush_bounds_visible(
+        camera,
+        bounds([-16.0, -16.0, 64.0], [16.0, 16.0, 128.0])
+    ));
+    assert!(!super::preview_brush_bounds_visible(
+        camera,
+        bounds([1_000.0, -16.0, -96.0], [1_064.0, 16.0, -64.0])
+    ));
+}
+
+#[test]
 fn textured_preview_uses_authored_material_tint() {
     let mut project = ProjectDocument::new("test");
     let mut material = MaterialResource::opaque(Some("brick.psxt".to_string()));
@@ -2418,8 +2448,9 @@ fn benchmark_e1m1_brush_navigation() {
     };
     let build = |camera,
                  textures: &crate::editor_textures::EditorTextures,
-                 assets: &crate::editor_assets::EditorAssets| {
-        super::build_phase1_frame(
+                 assets: &crate::editor_assets::EditorAssets,
+                 output| {
+        super::build_phase1_frame_reusing(
             &project,
             camera,
             true,
@@ -2444,14 +2475,58 @@ fn benchmark_e1m1_brush_navigation() {
             None,
             &textures,
             &assets,
+            output,
         )
     };
 
     // Exclude one-time scratch allocation and cold cache population. Camera
     // navigation is the steady-state interaction this benchmark protects.
-    let mut warm = build(camera(0), &textures, &assets);
-    super::prepend_bsp_surface_grid_overlay(&project, camera(0), 64, &mut warm.overlay_lines);
-    std::hint::black_box((warm.cmd_log.len(), warm.overlay_lines.len()));
+    let mut output = build(
+        camera(0),
+        &textures,
+        &assets,
+        super::EditorPreviewFrame::default(),
+    );
+    super::prepend_bsp_surface_grid_overlay(&project, camera(0), 64, &mut output.overlay_lines);
+    std::hint::black_box((output.cmd_log.len(), output.overlay_lines.len()));
+
+    // Prove that conservative brush-AABB rejection removes only polygons that
+    // exact clipping would discard. Compare every GP0 word at every camera in
+    // the timed route before collecting performance samples.
+    for sample in 0..FRAMES {
+        let world_camera = super::setup_gte_for_camera(camera(sample + 1));
+        let brush_log = |cull_brush_bounds| {
+            let mut scratch = super::preview_scratch()
+                .lock()
+                .expect("editor preview scratch mutex");
+            scratch.used = 0;
+            scratch.tex_used = 0;
+            scratch.ot.clear();
+            super::walk_brushes_with_culling(
+                &project,
+                &textures,
+                world_camera,
+                &hidden,
+                &mut scratch,
+                cull_brush_bounds,
+            );
+            unsafe { psx_gpu_render::build_cmd_log(&scratch.ot) }
+        };
+        let uncullled = brush_log(false);
+        let culled = brush_log(true);
+        assert_eq!(
+            uncullled.len(),
+            culled.len(),
+            "brush culling changed command count at camera {sample}"
+        );
+        for (command, (unculled, culled)) in uncullled.iter().zip(&culled).enumerate() {
+            assert_eq!(
+                (unculled.opcode, unculled.fifo.as_slice()),
+                (culled.opcode, culled.fifo.as_slice()),
+                "brush culling changed GP0 command {command} at camera {sample}"
+            );
+        }
+    }
 
     let mut uncached_overlay_ns = Vec::with_capacity(FRAMES);
     let mut cached_overlay_ns = Vec::with_capacity(FRAMES);
@@ -2509,7 +2584,8 @@ fn benchmark_e1m1_brush_navigation() {
         let stage = std::time::Instant::now();
         let stage_alloc = preview_test_alloc_snapshot();
         let frame_camera = camera(frame + 1);
-        let mut output = build(frame_camera, &textures, &assets);
+        let reusable_output = std::mem::take(&mut output);
+        output = build(frame_camera, &textures, &assets, reusable_output);
         let stage_after = preview_test_alloc_snapshot();
         build_alloc.0 += stage_after.0 - stage_alloc.0;
         build_alloc.1 += stage_after.1 - stage_alloc.1;

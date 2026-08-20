@@ -304,6 +304,7 @@ impl PreviewScratch {
 }
 
 /// Render data for one editable 3D preview frame.
+#[derive(Default)]
 pub struct EditorPreviewFrame {
     /// PSX-style command log for the scene itself.
     pub cmd_log: Vec<GpuCmdLogEntry>,
@@ -356,6 +357,66 @@ pub fn build_phase1_frame(
     hovered_entity_node: Option<psxed_project::NodeId>,
     textures: &EditorTextures,
     assets: &crate::editor_assets::EditorAssets,
+) -> EditorPreviewFrame {
+    build_phase1_frame_reusing(
+        project,
+        camera,
+        preview_fog,
+        preview_backface_wireframe,
+        preview_bounds,
+        show_grid,
+        show_portals,
+        show_lights,
+        hidden_scene_nodes,
+        active_room,
+        active_floor,
+        selected,
+        character_motion,
+        hovered_primitive,
+        selected_primitive,
+        selected_primitives,
+        validation_issue_primitives,
+        selected_bounds,
+        selected_sector_faces,
+        paint_target_preview,
+        entity_bounds,
+        hovered_entity_node,
+        textures,
+        assets,
+        EditorPreviewFrame::default(),
+    )
+}
+
+/// Build a preview frame while retaining the output vectors from a previous
+/// frame. The live editor uses this path to avoid reallocating the command log
+/// and overlay storage during camera navigation.
+#[allow(clippy::too_many_arguments)]
+pub fn build_phase1_frame_reusing(
+    project: &ProjectDocument,
+    camera: ViewportCameraState,
+    preview_fog: bool,
+    preview_backface_wireframe: bool,
+    preview_bounds: bool,
+    show_grid: bool,
+    show_portals: bool,
+    show_lights: bool,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    active_room: Option<psxed_project::NodeId>,
+    active_floor: usize,
+    selected: psxed_project::NodeId,
+    character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
+    hovered_primitive: Option<psxed_ui::Selection>,
+    selected_primitive: Option<psxed_ui::Selection>,
+    selected_primitives: &[psxed_ui::Selection],
+    validation_issue_primitives: &[psxed_ui::Selection],
+    selected_bounds: Option<([f32; 3], [f32; 3])>,
+    selected_sector_faces: &[psxed_ui::FaceRef],
+    paint_target_preview: Option<psxed_ui::PaintTargetPreview>,
+    entity_bounds: &[psxed_ui::EntityBounds],
+    hovered_entity_node: Option<psxed_project::NodeId>,
+    textures: &EditorTextures,
+    assets: &crate::editor_assets::EditorAssets,
+    mut output: EditorPreviewFrame,
 ) -> EditorPreviewFrame {
     let visible_rooms = preview_room_grids(
         project,
@@ -682,11 +743,13 @@ pub fn build_phase1_frame(
     // while the OT is walked. `PreviewScratch` is 16 MB-aligned so the
     // OT's 24-bit packet links reconstruct addresses inside the same
     // host address window.
-    let cmd_log = unsafe { psx_gpu_render::build_cmd_log(&scratch.ot) };
-    EditorPreviewFrame {
-        cmd_log,
-        overlay_lines: scratch.overlay_lines.clone(),
-    }
+    // SAFETY: the mutex guard keeps every OT packet alive while it is walked.
+    unsafe { psx_gpu_render::build_cmd_log_into(&scratch.ot, &mut output.cmd_log) };
+    output.overlay_lines.clear();
+    output
+        .overlay_lines
+        .extend_from_slice(&scratch.overlay_lines);
+    output
 }
 
 fn component_children<'a>(
@@ -1298,9 +1361,16 @@ struct PreviewSolvedFace {
     verts: Vec<[f64; 3]>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreviewBrushBounds {
+    min: [f64; 3],
+    max: [f64; 3],
+}
+
 struct PreviewSolvedBrush {
     faces: Vec<PreviewSolvedFace>,
     all_planes: Vec<psxed_project::brush::Plane>,
+    bounds: Option<PreviewBrushBounds>,
     pickable: bool,
 }
 
@@ -1339,6 +1409,13 @@ fn rebuild_solved_brushes(project: &ProjectDocument) -> Vec<PreviewSolvedBrush> 
         .map(|brush| {
             let solved = brush.solve();
             let pickable = solved.is_valid() && solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT);
+            let bounds =
+                solved
+                    .within_extent(BRUSH_EDIT_EXTENT_LIMIT)
+                    .then_some(PreviewBrushBounds {
+                        min: solved.min,
+                        max: solved.max,
+                    });
             let faces = solved
                 .polygons
                 .into_iter()
@@ -1361,6 +1438,7 @@ fn rebuild_solved_brushes(project: &ProjectDocument) -> Vec<PreviewSolvedBrush> 
             PreviewSolvedBrush {
                 faces,
                 all_planes,
+                bounds,
                 pickable,
             }
         })
@@ -1410,6 +1488,11 @@ struct PreviewLitFace {
     patches: Vec<(Vec<[f64; 3]>, Vec<(u8, u8, u8)>)>,
 }
 
+struct PreviewLitBrush {
+    bounds: Option<PreviewBrushBounds>,
+    faces: Vec<PreviewLitFace>,
+}
+
 /// Lit brush geometry reused across frames: solving, subdividing and
 /// shadow-baking the whole scene costs milliseconds, and it only
 /// changes when a brush, light, or material tint does. The key hashes
@@ -1417,7 +1500,7 @@ struct PreviewLitFace {
 /// the bake and pays only projection.
 struct PreviewLitCache {
     key: Option<u64>,
-    brushes: Vec<Vec<PreviewLitFace>>,
+    brushes: Vec<PreviewLitBrush>,
 }
 
 static LIT_CACHE: OnceLock<Mutex<PreviewLitCache>> = OnceLock::new();
@@ -1466,7 +1549,7 @@ fn rebuild_lit_brushes(
     project: &ProjectDocument,
     textures: &EditorTextures,
     lights: &[psxed_project::brush_light::BrushPointLight],
-) -> Vec<Vec<PreviewLitFace>> {
+) -> Vec<PreviewLitBrush> {
     // Shadow occluders mirror the cook's set (every solid brush), with
     // one editor-only guard: mid-edit damaged/unbounded brushes are
     // skipped, otherwise an infinite wedge occludes every segment and
@@ -1482,8 +1565,9 @@ fn rebuild_lit_brushes(
         brushes
             .iter()
             .zip(solved_brushes)
-            .map(|(brush, solved)| {
-                solved
+            .map(|(brush, solved)| PreviewLitBrush {
+                bounds: solved.bounds,
+                faces: solved
                     .faces
                     .iter()
                     .filter_map(|solved_face| {
@@ -1536,7 +1620,7 @@ fn rebuild_lit_brushes(
                             patches,
                         })
                     })
-                    .collect()
+                    .collect(),
             })
             .collect()
     })
@@ -1648,6 +1732,17 @@ fn walk_brushes(
     hidden_scene_nodes: &HashSet<NodeId>,
     scratch: &mut PreviewScratch,
 ) {
+    walk_brushes_with_culling(project, textures, camera, hidden_scene_nodes, scratch, true);
+}
+
+fn walk_brushes_with_culling(
+    project: &ProjectDocument,
+    textures: &EditorTextures,
+    camera: psx_engine::WorldCamera,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    scratch: &mut PreviewScratch,
+    cull_brush_bounds: bool,
+) {
     // Live light preview: per-VERTEX analytic point lighting with the
     // exact Release-bake formula (lambert + linear falloff, shadow
     // segments against solid brushes, tint-modulated) and its ambient
@@ -1655,16 +1750,37 @@ fn walk_brushes(
     // historic unlit shading is kept, so lightless maps don't go dark.
     let lights = collect_bsp_preview_bake_lights(project, hidden_scene_nodes);
     if lights.is_empty() {
-        with_cached_solved_brush_faces(project, |brush_index, face_index, plane, verts| {
-            if !scratch.geometry_full() {
-                let face = &project.active_scene().brushes[brush_index].faces[face_index];
-                let shade = face_shade(
-                    project,
-                    face.material,
-                    brush_fallback_color(face_index),
-                    textures,
-                );
-                emit_brush_patch(scratch, camera, &plane, &face.uv, shade, verts, None);
+        with_cached_solved_brushes(project, |solved_brushes| {
+            for (brush, solved) in project.active_scene().brushes.iter().zip(solved_brushes) {
+                if scratch.geometry_full() {
+                    break;
+                }
+                if cull_brush_bounds
+                    && solved
+                        .bounds
+                        .is_some_and(|bounds| !preview_brush_bounds_visible(camera, bounds))
+                {
+                    continue;
+                }
+                for solved_face in &solved.faces {
+                    let face_index = solved_face.face_index;
+                    let face = &brush.faces[face_index];
+                    let shade = face_shade(
+                        project,
+                        face.material,
+                        brush_fallback_color(face_index),
+                        textures,
+                    );
+                    emit_brush_patch(
+                        scratch,
+                        camera,
+                        &solved_face.plane,
+                        &face.uv,
+                        shade,
+                        &solved_face.verts,
+                        None,
+                    );
+                }
             }
         });
         return;
@@ -1681,11 +1797,18 @@ fn walk_brushes(
         cache.brushes = rebuild_lit_brushes(project, textures, &lights);
         cache.key = Some(key);
     }
-    for (brush, lit_faces) in project.active_scene().brushes.iter().zip(&cache.brushes) {
+    for (brush, lit_brush) in project.active_scene().brushes.iter().zip(&cache.brushes) {
         if scratch.geometry_full() {
             break;
         }
-        for lit_face in lit_faces {
+        if cull_brush_bounds
+            && lit_brush
+                .bounds
+                .is_some_and(|bounds| !preview_brush_bounds_visible(camera, bounds))
+        {
+            continue;
+        }
+        for lit_face in &lit_brush.faces {
             let Some(face) = brush.faces.get(lit_face.face_index) else {
                 continue;
             };

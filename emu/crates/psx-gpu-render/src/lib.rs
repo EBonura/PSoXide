@@ -67,7 +67,7 @@ pub(crate) mod vram;
 // The whole external API: the Enhanced renderer (HwRenderer +
 // ScaleMode below), the Accurate/oracle backend, the OT-to-cmd_log
 // bridge the editor preview uses, and the VRAM dimensions.
-pub use from_ot::build_cmd_log;
+pub use from_ot::{build_cmd_log, build_cmd_log_into};
 pub use replay::ComputeBackend;
 pub use target::{VRAM_HEIGHT, VRAM_WIDTH};
 pub use translator::Translator;
@@ -275,14 +275,18 @@ impl HwRenderer {
 
         let frame = self.translator.translate_with_wireframe(cmd_log, wireframe);
         if frame.total() > 0 {
-            let vertices = frame.vertices.to_vec();
-            let runs = frame.runs.to_vec();
             self.pipeline.upload_vertices(
                 &self.device,
                 &self.queue,
-                bytemuck::cast_slice(&vertices),
+                bytemuck::cast_slice(frame.vertices),
             );
-            self.draw_runs(&runs);
+            Self::draw_runs(
+                &self.device,
+                &self.queue,
+                &self.pipeline,
+                &self.target,
+                frame.runs,
+            );
         }
     }
 
@@ -326,17 +330,21 @@ impl HwRenderer {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    fn draw_runs(&mut self, runs: &[DrawRun]) {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("psx-hw-renderer-encoder"),
-            });
+    fn draw_runs(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &HwPipeline,
+        target: &RenderTarget,
+        runs: &[DrawRun],
+    ) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("psx-hw-renderer-encoder"),
+        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("psx-hw-renderer-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.target.view(),
+                    view: target.view(),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // PSX VRAM is persistent -- never clear.
@@ -348,11 +356,11 @@ impl HwRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_bind_group(0, self.pipeline.bind_group(), &[]);
-            pass.set_vertex_buffer(0, self.pipeline.vertex_buffer().slice(..));
+            pass.set_bind_group(0, pipeline.bind_group(), &[]);
+            pass.set_vertex_buffer(0, pipeline.vertex_buffer().slice(..));
 
-            let scale = self.target.scale();
-            let (target_w, target_h) = self.target.size();
+            let scale = target.scale();
+            let (target_w, target_h) = target.size();
             for run in runs {
                 if run.count == 0 || run.clip[0] > run.clip[2] || run.clip[1] > run.clip[3] {
                     continue;
@@ -365,12 +373,12 @@ impl HwRenderer {
                     continue;
                 }
                 pass.set_scissor_rect(x, y, right - x, bottom - y);
-                pass.set_pipeline(self.pipeline.pipeline(run.kind));
-                pass.set_blend_constant(self.pipeline.blend_constant(run.kind));
+                pass.set_pipeline(pipeline.pipeline(run.kind));
+                pass.set_blend_constant(pipeline.blend_constant(run.kind));
                 pass.draw(run.start..(run.start + run.count), 0..1);
             }
         }
-        self.queue.submit(Some(encoder.finish()));
+        queue.submit(Some(encoder.finish()));
     }
 
     fn mirror_vram_image_op(&mut self, entry: &GpuCmdLogEntry, vram_words: &[u16]) {
@@ -1219,7 +1227,7 @@ mod tests {
                 batch.push(GpuCmdLogEntry {
                     index: 0,
                     opcode,
-                    fifo,
+                    fifo: fifo.into(),
                 });
             }
             batches.push(batch);
@@ -1253,17 +1261,17 @@ mod tests {
                 GpuCmdLogEntry {
                     index: 0,
                     opcode: 0xE3,
-                    fifo: vec![0xE300_0000],
+                    fifo: vec![0xE300_0000].into(),
                 },
                 GpuCmdLogEntry {
                     index: 1,
                     opcode: 0xE4,
-                    fifo: vec![0xE400_0000 | (239 << 10) | 319],
+                    fifo: vec![0xE400_0000 | (239 << 10) | 319].into(),
                 },
                 GpuCmdLogEntry {
                     index: 2,
                     opcode: 0xE5,
-                    fifo: vec![0xE500_0000],
+                    fifo: vec![0xE500_0000].into(),
                 },
                 GpuCmdLogEntry {
                     index: 3,
@@ -1274,7 +1282,8 @@ mod tests {
                         (200 << 16) | 24,
                         (216 << 16) | 8,
                         (216 << 16) | 24,
-                    ],
+                    ]
+                    .into(),
                 },
             ];
             renderer.render_frame(&gpu, &env_and_quad, &vram_words);
@@ -1448,17 +1457,17 @@ mod tests {
                 GpuCmdLogEntry {
                     index: 0,
                     opcode: 0xE3,
-                    fifo: vec![0xE300_0000 | (base_y << 10)],
+                    fifo: vec![0xE300_0000 | (base_y << 10)].into(),
                 },
                 GpuCmdLogEntry {
                     index: 1,
                     opcode: 0xE4,
-                    fifo: vec![0xE400_0000 | ((base_y + 239) << 10) | 319],
+                    fifo: vec![0xE400_0000 | ((base_y + 239) << 10) | 319].into(),
                 },
                 GpuCmdLogEntry {
                     index: 2,
                     opcode: 0xE5,
-                    fifo: vec![e5],
+                    fifo: vec![e5].into(),
                 },
                 // Quad spanning y=-40..60, x=0..100: top edge off-screen.
                 GpuCmdLogEntry {
@@ -1470,7 +1479,8 @@ mod tests {
                         (neg40 << 16) | 100,
                         (60 << 16),
                         (60 << 16) | 100,
-                    ],
+                    ]
+                    .into(),
                 },
             ];
             renderer.render_frame(&gpu, &log, &vram_words);
@@ -1605,17 +1615,17 @@ mod tests {
             GpuCmdLogEntry {
                 index: 0,
                 opcode: 0xE3,
-                fifo: vec![0xE300_0000],
+                fifo: vec![0xE300_0000].into(),
             },
             GpuCmdLogEntry {
                 index: 1,
                 opcode: 0xE4,
-                fifo: vec![0xE400_0000 | (239 << 10) | 319],
+                fifo: vec![0xE400_0000 | (239 << 10) | 319].into(),
             },
             GpuCmdLogEntry {
                 index: 2,
                 opcode: 0xE5,
-                fifo: vec![0xE500_0000],
+                fifo: vec![0xE500_0000].into(),
             },
             GpuCmdLogEntry {
                 index: 3,
@@ -1626,7 +1636,8 @@ mod tests {
                     (8 << 16) | 24,
                     (24 << 16) | 8,
                     (24 << 16) | 24,
-                ],
+                ]
+                .into(),
             },
         ];
         renderer.render_frame(&gpu, &log, &vram_words);
@@ -1656,7 +1667,8 @@ mod tests {
                 (8 << 16) | 24,
                 (24 << 16) | 8,
                 (24 << 16) | 24,
-            ],
+            ]
+            .into(),
         }];
         renderer.render_frame(&gpu, &quad, &vram_words);
         assert_eq!(
@@ -1685,17 +1697,17 @@ mod tests {
                 GpuCmdLogEntry {
                     index: 0,
                     opcode: 0xE3,
-                    fifo: vec![0xE300_0000 | (page_y << 10)],
+                    fifo: vec![0xE300_0000 | (page_y << 10)].into(),
                 },
                 GpuCmdLogEntry {
                     index: 1,
                     opcode: 0xE4,
-                    fifo: vec![0xE400_0000 | ((page_y + 239) << 10) | 319],
+                    fifo: vec![0xE400_0000 | ((page_y + 239) << 10) | 319].into(),
                 },
                 GpuCmdLogEntry {
                     index: 2,
                     opcode: 0xE5,
-                    fifo: vec![0xE500_0000 | (page_y << 11)],
+                    fifo: vec![0xE500_0000 | (page_y << 11)].into(),
                 },
             ];
             renderer.render_frame(&gpu, &env, &vram_words);
@@ -1709,7 +1721,8 @@ mod tests {
                     (8 << 16) | 24,
                     (24 << 16) | 8,
                     (24 << 16) | 24,
-                ],
+                ]
+                .into(),
             }];
             renderer.render_frame(&gpu, &quad, &vram_words);
             let px = pixel_block(&renderer, 10, page_y + 10);
@@ -1731,7 +1744,7 @@ mod tests {
         let log = [GpuCmdLogEntry {
             index: 0,
             opcode: 0x02,
-            fifo: vec![0x0210_2030, 0, (8 << 16) | 8],
+            fifo: vec![0x0210_2030, 0, (8 << 16) | 8].into(),
         }];
         let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
         renderer.render_frame(&Gpu::new(), &log, &vram_words);

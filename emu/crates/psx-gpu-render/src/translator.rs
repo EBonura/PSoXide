@@ -995,7 +995,7 @@ mod tests {
         GpuCmdLogEntry {
             index: 0,
             opcode,
-            fifo,
+            fifo: fifo.into(),
         }
     }
 
