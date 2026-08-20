@@ -998,6 +998,39 @@ impl<
         )
     }
 
+    /// Upload one Quake layered-sky pair into a dedicated room texture page.
+    ///
+    /// The source is two square power-of-two layers side by side (normally
+    /// 256x128: masked foreground then opaque background). Unlike ordinary
+    /// room materials it deliberately preserves transparent palette index
+    /// zero, and unlike a texture-window allocation it may occupy the full
+    /// 256-texel tpage width.
+    pub fn ensure_layered_sky_texture_uploaded(
+        &mut self,
+        layout: VramLayout,
+        asset_id: AssetId,
+        asset_bytes: &[u8],
+    ) -> Option<VramSlot> {
+        let texture = Texture::from_bytes(asset_bytes).ok()?;
+        let width = texture.width();
+        let height = texture.height();
+        if texture.clut_entries() != 16
+            || width != height.saturating_mul(2)
+            || !(16..=256).contains(&width)
+            || !(8..=128).contains(&height)
+            || !width.is_power_of_two()
+            || !height.is_power_of_two()
+        {
+            return None;
+        }
+        self.ensure_large_ui_texture_uploaded_with_clut_mode(
+            layout,
+            asset_id,
+            asset_bytes,
+            VramSlotClutMode::TransparentZero,
+        )
+    }
+
     /// Upload a UI texture, stepping the upload queue a bounded number of
     /// times (through `resolve`, see [`Self::step_uploads`]) so menu
     /// images resolve within the calling frame.

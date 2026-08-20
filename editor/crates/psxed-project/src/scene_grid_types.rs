@@ -750,10 +750,10 @@ pub struct MaterialResource {
     /// Which side(s) of faces using this material should render.
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
-    /// Quake-style layered sky material: the atlas holds foreground
-    /// (masked, left) and background (right) tiles side by side and
-    /// the runtime renders sky-flagged brush faces as two scrolling
-    /// layers, quake-psx style.
+    /// Quake-style layered sky material: the atlas holds a masked foreground
+    /// tile on the left and a solid background tile on the right. Brush faces
+    /// define apertures; the runtime projects both scrolling layers from the
+    /// camera view direction rather than attaching UVs to those faces.
     #[serde(default)]
     pub layered_sky: bool,
     /// Stable identity of the recipe currently exposed to preview and cooking.

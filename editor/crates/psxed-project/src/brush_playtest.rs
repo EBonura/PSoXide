@@ -1,6 +1,7 @@
 //! Embedded-Play PXBSP constants and regression coverage.
 
 pub const BRUSH_WORLD_FILENAME: &str = "brush_world.pxbsp";
+pub const BRUSH_LEAK_FILENAME: &str = "brush_world.pts";
 
 #[cfg(test)]
 mod tests {
@@ -37,13 +38,12 @@ mod tests {
         let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
             panic!("brush project selected the grid provider");
         };
-        // Extent subdivision preserves surface order and this room's
-        // faces are all under one 2048-unit patch, so the packed world
-        // matches the pre-subdivision geometry; the byte pin moved when
-        // exact per-leaf marks replaced the conservative split-path
-        // lists (fewer mark entries, same surfaces), and again when the
-        // structural lumps went to the compact PXBSP v4 records.
-        assert_eq!(world.bytes.len(), 9_724);
+        // Exact wire-size pin for the shared brush pipeline. PXBSP v5 keeps
+        // compact bounded render nodes, leaf-owned render surfaces do not
+        // duplicate node-face ranges, Quake outside fill removes surfaces
+        // seen only by the unreachable exterior, and hull 0 reuses the
+        // classified render BSP instead of storing a second point clip tree.
+        assert_eq!(world.bytes.len(), 4_308);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);
@@ -549,7 +549,8 @@ mod tests {
             assert_eq!(
                 open.position,
                 RoomPoint::new(end.x, 4, end.z),
-                "world-only path is clear"
+                "world-only path is clear: radius={radius} height={height} hulls={:?} step={open:?}",
+                world.body_hulls,
             );
             let blocked = pxbsp_body_step(
                 &map,

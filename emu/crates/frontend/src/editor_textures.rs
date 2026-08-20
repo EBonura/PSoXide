@@ -653,8 +653,8 @@ impl EditorTextures {
         let bytes = std::fs::read(abs).ok()?;
         let texture = Texture::from_bytes(&bytes).ok()?;
         let depth_bits = match texture.clut_entries() {
-            16 => 0u16,  // GP0 tpage depth code: 4bpp
-            256 => 1u16, // GP0 tpage depth code: 8bpp
+            16 | 32 | 48 | 64 => 0u16, // One to four 4bpp palette banks.
+            256 => 1u16,               // GP0 tpage depth code: 8bpp
             _ => return None,
         };
         let halfwords_per_row = texture.halfwords_per_row();
@@ -1663,9 +1663,23 @@ mod tests {
     }
 
     fn write_test_indexed_psxt(width: u16, height: u16, depth: u8) -> PathBuf {
-        let (texels_per_halfword, clut_entries) = match depth {
-            4 => (4u16, 16u16),
-            8 => (2u16, 256u16),
+        let clut_entries = match depth {
+            4 => 16,
+            8 => 256,
+            _ => panic!("unsupported test depth"),
+        };
+        write_test_indexed_psxt_with_clut_entries(width, height, depth, clut_entries)
+    }
+
+    fn write_test_indexed_psxt_with_clut_entries(
+        width: u16,
+        height: u16,
+        depth: u8,
+        clut_entries: u16,
+    ) -> PathBuf {
+        let texels_per_halfword = match depth {
+            4 => 4u16,
+            8 => 2u16,
             _ => panic!("unsupported test depth"),
         };
         let halfwords_per_row = width.div_ceil(texels_per_halfword);
@@ -1693,7 +1707,7 @@ mod tests {
         }
 
         let path = std::env::temp_dir().join(format!(
-            "psoxide-editor-model-atlas-{}-{width}x{height}-{depth}bpp.psxt",
+            "psoxide-editor-model-atlas-{}-{width}x{height}-{depth}bpp-{clut_entries}clut.psxt",
             std::process::id(),
         ));
         std::fs::write(&path, bytes).expect("write temporary PSXT");
@@ -1913,6 +1927,22 @@ mod tests {
     }
 
     #[test]
+    fn model_atlas_upload_accepts_four_4bpp_palette_banks() {
+        let path = write_test_indexed_psxt_with_clut_entries(128, 128, 4, 64);
+        let bytes = std::fs::read(&path).expect("read four-bank Mantis atlas");
+        let texture = psx_asset::Texture::from_bytes(&bytes).expect("parse Mantis atlas");
+        assert_eq!(texture.clut_entries(), 64);
+
+        let mut textures = EditorTextures::new();
+        let slot = textures
+            .upload_model_atlas_psxt(&path)
+            .expect("four-bank 4bpp model atlas should upload");
+        assert_eq!((slot.tpage_word >> 7) & 0x3, 0, "tpage must stay 4bpp");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn editor_shadow_texture_survives_room_material_refresh() {
         let mut textures = EditorTextures::new();
         let shadow_tex_idx =
@@ -2091,5 +2121,4 @@ mod tests {
             "room CLUT must survive the model refresh"
         );
     }
-
 }

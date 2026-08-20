@@ -286,6 +286,7 @@ impl Graphics {
         preview_backface_wireframe: bool,
         preview_bounds: bool,
         show_grid: bool,
+        grid_units: u16,
         show_portals: bool,
         show_lights: bool,
         hidden_scene_nodes: &std::collections::HashSet<psxed_project::NodeId>,
@@ -306,7 +307,7 @@ impl Graphics {
         self.editor_textures.refresh(project, project_root);
         self.editor_textures.refresh_models(project, project_root);
         self.editor_assets.refresh(project, project_root);
-        let frame = crate::editor_preview::build_phase1_frame(
+        let mut frame = crate::editor_preview::build_phase1_frame(
             project,
             camera,
             preview_fog,
@@ -332,6 +333,14 @@ impl Graphics {
             &self.editor_textures,
             &self.editor_assets,
         );
+        if show_grid {
+            crate::editor_preview::prepend_bsp_surface_grid_overlay(
+                project,
+                camera,
+                grid_units,
+                &mut frame.overlay_lines,
+            );
+        }
         self.editor_overlay_lines = frame.overlay_lines;
         self.editor_hw_renderer.render_frame(
             &self.editor_gpu_stub,

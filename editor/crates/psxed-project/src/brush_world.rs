@@ -7,12 +7,20 @@ use crate::brush::{Brush, BrushContents, BRUSH_UV_UNITS_PER_TEXEL};
 use crate::brush_collision_hulls::{
     compile_collision_hulls, CollisionHullBounds, CollisionHullCompileError, CompiledCollisionHulls,
 };
-use crate::brush_compile::{build_surface_bsp, compile_csg_surfaces, subdivide_surfaces_to_extent};
+use crate::brush_compile::{
+    build_surface_bsp, compile_authored_surfaces, compile_csg_surfaces, pack_normalized_plane,
+    replace_bsp_render_surfaces, subdivide_surfaces_to_budget,
+};
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
 };
-use crate::brush_pack::{pack_bsp_geometry, BrushPackError, BspLighting, PackedBspGeometry};
-use crate::brush_portal::{classify_bsp_leaves, portalize_surface_bsp};
+use crate::brush_pack::{
+    pack_bsp_geometry_with_visibility, BrushPackError, BspLighting, BspVisibility,
+    PackedBspGeometry,
+};
+use crate::brush_portal::{
+    classify_bsp_leaves, fill_outside_bsp_leaves, portalize_surface_bsp, OutsideFillResult,
+};
 use crate::brush_pxbsp::{
     build_pxbsp_with_submodels, pxbsp_material_slots, CompiledPxbsp, PxbspBuildError,
     PxbspEntityInput, PxbspMapPayloads, PxbspSubmodel,
@@ -44,6 +52,11 @@ const DEBUG_BODY_HEIGHT: i32 = 4;
 const LEGACY_BIG_HULL_RADIUS: i32 = 2;
 const LEGACY_BIG_HULL_HEIGHT: i32 = 6;
 const DEFAULT_LIGHT_RADIUS_UNITS: f64 = 1024.0;
+// A resident PS1 level must share 2 MiB with code, runtime state, models, and
+// packet arenas. The wire format permits 32,767 faces, but that theoretical
+// index limit is not a viable embedded-world memory budget: four baked-light
+// vertices plus the face record already cost about 58 bytes per quad.
+const MAX_RESIDENT_WORLD_FACES: usize = 6 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum BrushWorldCookMode {
@@ -85,7 +98,7 @@ pub struct CompiledBrushTexture {
     pub asset_id: u16,
     pub key: String,
     pub bytes: Vec<u8>,
-    pub size: [u8; 2],
+    pub size: [u16; 2],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +120,8 @@ pub struct CompiledBrushWorld {
     pub movers: Vec<CompiledBrushMover>,
     /// Exact body envelopes used to compile PXBSP collision hulls one and two.
     pub body_hulls: [CookedBodyHull; 2],
+    /// Quake-style pointfile path when the occupied world reaches outside.
+    pub leak_path: Vec<[i32; 3]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,14 +162,6 @@ pub enum BrushWorldCookError {
     },
     InvalidTexture {
         material: Option<ResourceId>,
-        error: String,
-    },
-    Bsp29GeometryRead {
-        path: String,
-        error: String,
-    },
-    Bsp29Geometry {
-        path: String,
         error: String,
     },
     /// Submodel table overflowed while compiling this mover's brush model.
@@ -248,12 +255,6 @@ impl fmt::Display for BrushWorldCookError {
                 Some(material) => write!(formatter, "material {material:?} is invalid: {error}"),
                 None => write!(formatter, "default brush texture is invalid: {error}"),
             },
-            Self::Bsp29GeometryRead { path, error } => {
-                write!(formatter, "could not read BSP29 geometry sidecar {path}: {error}")
-            }
-            Self::Bsp29Geometry { path, error } => {
-                write!(formatter, "BSP29 geometry sidecar {path} is invalid: {error}")
-            }
             Self::ModelIndexOverflow(node) => {
                 write!(formatter, "PXBSP model index exceeds u16 at node {node:?}")
             }
@@ -495,48 +496,46 @@ pub fn compile_brush_world(
     let (lights, light_nodes) = scene_lights(scene);
     let material_tints = material_tints(project);
     let texture_dims = brush_texture_dims(project, scene, &options);
-    let (world_geometry, world_collision) = if let Some(relative) = &project.bsp29_geometry_path {
-        let path = Path::new(relative);
-        if path.is_absolute() {
-            return Err(BrushWorldCookError::Bsp29Geometry {
-                path: relative.clone(),
-                error: "path must be relative to the project directory".to_string(),
-            });
-        }
-        let source_path = options.project_root.join(path);
-        let bytes = std::fs::read(&source_path).map_err(|error| {
-            BrushWorldCookError::Bsp29GeometryRead {
-                path: relative.clone(),
-                error: error.to_string(),
-            }
-        })?;
-        let material = static_brushes
-            .iter()
-            .flat_map(|brush| &brush.faces)
-            .find_map(|face| face.material);
-        crate::quake_bsp29::import_quake_bsp29_world(
-            &bytes,
-            f64::from(project.bsp29_geometry_scale)
-                / f64::from(crate::units::WORLD_UNIT_DIVISOR),
-            material,
-        )
-        .map_err(|error| BrushWorldCookError::Bsp29Geometry {
-            path: relative.clone(),
-            error: error.to_string(),
-        })?
-    } else {
-        compile_model(
-            &static_brushes,
-            &all_brushes,
-            &lights,
-            &light_nodes,
-            &material_tints,
-            &texture_dims,
-            options.mode,
-            options.ambient,
-            &collision_hulls,
-        )?
-    };
+    let occupant_points: Vec<_> = scene
+        .nodes()
+        .iter()
+        .filter(|node| match node.kind {
+            NodeKind::SpawnPoint { player: true, .. } => true,
+            NodeKind::Entity => node.children.iter().any(|&child| {
+                scene.node(child).is_some_and(|child| {
+                    matches!(
+                        child.kind,
+                        NodeKind::CharacterController { player: true, .. }
+                    )
+                })
+            }),
+            _ => false,
+        })
+        .map(|node| {
+            let mut point = node.transform.translation.map(f64::from);
+            // Player transforms use a feet pivot, while Quake's outside fill
+            // needs an occupant point strictly inside an empty leaf. A spawn
+            // resting exactly on a floor plane descends to the solid/back
+            // child (`d > 0` is Quake's front-side rule), so sample one world
+            // unit inside the authored body instead of misclassifying a
+            // sealed map as having no occupants.
+            point[1] += 1.0;
+            point
+        })
+        .filter(|point| point.iter().all(|value| value.is_finite()))
+        .collect();
+    let (world_geometry, world_collision, leak_path) = compile_model(
+        &static_brushes,
+        &all_brushes,
+        &occupant_points,
+        &lights,
+        &light_nodes,
+        &material_tints,
+        &texture_dims,
+        options.mode,
+        options.ambient,
+        &collision_hulls,
+    )?;
     let collision_planes = RecordSlice::<Plane>::new(&world_collision.planes)
         .ok_or(BrushWorldCookError::InvalidWorldTree)?;
     let collision_nodes = RecordSlice::<ClipNode>::new(&world_collision.clipnodes)
@@ -578,9 +577,10 @@ pub fn compile_brush_world(
         let local_brushes = translate_brushes(&bound, origin);
         let local_occluders = translate_brushes(&all_brushes, origin);
         let local_lights = translate_lights(&lights, origin);
-        let (geometry, collision) = compile_model(
+        let (geometry, collision, _) = compile_model(
             &local_brushes,
             &local_occluders,
+            &[],
             &local_lights,
             &light_nodes,
             &material_tints,
@@ -724,12 +724,14 @@ pub fn compile_brush_world(
         textures,
         movers,
         body_hulls,
+        leak_path,
     })
 }
 
 fn compile_model(
     brushes: &[Brush],
     light_occluders: &[Brush],
+    occupant_points: &[[f64; 3]],
     lights: &[BrushPointLight],
     light_nodes: &[NodeId],
     material_tints: &[BrushMaterialTint],
@@ -737,11 +739,24 @@ fn compile_model(
     mode: BrushWorldCookMode,
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
-) -> Result<(PackedBspGeometry, CompiledCollisionHulls), BrushWorldCookError> {
-    let surfaces = compile_csg_surfaces(brushes);
-    // qbsp parity: EVERY face is capped to SURFACE_EXTENT_UNITS before
-    // the BSP build, lights or not, exactly like id's qbsp splits faces
-    // to its lightmap surface extents. Small faces are what make the
+) -> Result<(PackedBspGeometry, CompiledCollisionHulls, Vec<[i32; 3]>), BrushWorldCookError> {
+    let csg_surfaces = compile_csg_surfaces(brushes);
+    let authored_surfaces = compile_authored_surfaces(brushes);
+    let (topology_surfaces, render_surfaces) = if csg_surfaces.len() <= i16::MAX as usize {
+        let render = if authored_surfaces.len() < csg_surfaces.len() {
+            authored_surfaces
+        } else {
+            csg_surfaces.clone()
+        };
+        (csg_surfaces, render)
+    } else {
+        (authored_surfaces.clone(), authored_surfaces)
+    };
+    // qbsp parity: EVERY final face is capped to SURFACE_EXTENT_UNITS,
+    // lights or not. Build exact leaves from the unsplit CSG surfaces, then
+    // keep the PS1-sized render surfaces as single-owner records referenced
+    // by leaf marks; partition fragments are visibility construction data,
+    // not additional draw geometry. Small final faces are what make the
     // runtime's GTE emitter safe at the eye plane (a crossing triangle
     // saturates wider than the GPU's 1023px draw limit and is skipped
     // as a sub-face-sized hole instead of rasterizing as a screen-wide
@@ -750,17 +765,67 @@ fn compile_model(
     // light-gated LIGHT_SUBDIVISION_UNITS pass: the cap is finer than
     // the light grid was, so lit and lightless scenes now share one
     // subdivision rule.
-    let surfaces = subdivide_surfaces_to_extent(surfaces, ENGINE_SURFACE_EXTENT_UNITS);
-    let mut bsp = build_surface_bsp(&surfaces);
+    let mut bsp = build_surface_bsp(&topology_surfaces);
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);
+    let mut leak_path = Vec::new();
+    let exact_vis_ready = match fill_outside_bsp_leaves(&mut bsp, &portals, occupant_points) {
+        OutsideFillResult::Filled(filled) => {
+            if filled > 0 {
+                eprintln!("[brush-qbsp] filled {filled} unreachable exterior leaves");
+            }
+            true
+        }
+        OutsideFillResult::Leaked(path) => {
+            leak_path = path
+                .into_iter()
+                .map(|point| {
+                    point.map(|coordinate| {
+                        coordinate
+                            .round()
+                            .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                            as i32
+                    })
+                })
+                .collect();
+            eprintln!(
+                "[brush-qbsp] leak from {:?}: occupied leaf reaches the exterior through {} pointfile points; preserving conservative PVS",
+                leak_path.first().copied().unwrap_or([0; 3]),
+                leak_path.len(),
+            );
+            false
+        }
+        OutsideFillResult::NoOccupants => false,
+    };
+    let light_spheres: Vec<_> = lights
+        .iter()
+        .map(|light| (light.position, light.radius))
+        .collect();
+    let render_surfaces = subdivide_surfaces_to_budget(
+        &render_surfaces,
+        ENGINE_SURFACE_EXTENT_UNITS,
+        MAX_RESIDENT_WORLD_FACES,
+        &light_spheres,
+    );
+    replace_bsp_render_surfaces(&mut bsp, render_surfaces);
+    let visibility = match mode {
+        BrushWorldCookMode::Draft => BspVisibility::PortalComponents,
+        BrushWorldCookMode::Release if exact_vis_ready => BspVisibility::PortalFlow,
+        BrushWorldCookMode::Release => BspVisibility::PortalComponents,
+    };
     // Lighting bakes in BOTH modes so lights always interact with
     // brushes out of the box: Draft skips only the occlusion (shadow)
     // tests, the expensive part; Release adds shadows. A scene with no
     // lights at all keeps the historic fullbright look instead of
     // dropping to bare ambient.
     let geometry = if lights.is_empty() {
-        pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, texture_dims)?
+        pack_bsp_geometry_with_visibility(
+            &bsp,
+            &portals,
+            BspLighting::Fullbright,
+            visibility,
+            texture_dims,
+        )?
     } else {
         let occluders: &[Brush] = match mode {
             BrushWorldCookMode::Draft => &[],
@@ -776,10 +841,53 @@ fn compile_model(
                 },
                 error,
             })?;
-        pack_bsp_geometry(&bsp, &portals, BspLighting::Baked(&lighting), texture_dims)?
+        pack_bsp_geometry_with_visibility(
+            &bsp,
+            &portals,
+            BspLighting::Baked(&lighting),
+            visibility,
+            texture_dims,
+        )?
     };
-    let collision = compile_collision_hulls(brushes, collision_hulls)?;
-    Ok((geometry, collision))
+    let collision = compile_runtime_collision_hulls(brushes, collision_hulls)?;
+    Ok((geometry, collision, leak_path))
+}
+
+fn compile_runtime_collision_hulls(
+    brushes: &[Brush],
+    hulls: &[CollisionHullBounds; 3],
+) -> Result<CompiledCollisionHulls, CollisionHullCompileError> {
+    // Quake hull 0 is the classified render BSP itself. Do not duplicate the
+    // entire point tree in clipnodes merely to satisfy the four-head model
+    // record: the runtime never reads collision head zero. Keep one valid
+    // empty sentinel head for format validation, followed by the two actual
+    // box-expanded body hulls.
+    let mut collision = compile_collision_hulls(brushes, &hulls[1..])?;
+    let plane = if collision.planes.is_empty() {
+        let (record, _) = pack_normalized_plane([1.0, 0.0, 0.0], 0.0)
+            .ok_or(CollisionHullCompileError::InvalidPlane(None))?;
+        collision.planes.extend_from_slice(&record);
+        0i16
+    } else {
+        0i16
+    };
+    let node = collision.clipnodes.len() / 6;
+    if node > i16::MAX as usize {
+        return Err(CollisionHullCompileError::LimitExceeded {
+            kind: "clipnodes",
+            count: node + 1,
+            max: i16::MAX as usize + 1,
+        });
+    }
+    collision.clipnodes.extend_from_slice(&plane.to_le_bytes());
+    collision
+        .clipnodes
+        .extend_from_slice(&psx_bsp::collision::CONTENTS_EMPTY.to_le_bytes());
+    collision
+        .clipnodes
+        .extend_from_slice(&psx_bsp::collision::CONTENTS_EMPTY.to_le_bytes());
+    collision.head_nodes.insert(0, node as i16);
+    Ok(collision)
 }
 
 fn validate_mover_transform(
@@ -1044,8 +1152,14 @@ fn resolve_materials(
                 )
             }
         };
-        let (texture_asset, texture_size) =
-            intern_texture(&mut textures, options.texture_asset_base, slot, key, bytes)?;
+        let (texture_asset, texture_size) = intern_texture(
+            &mut textures,
+            options.texture_asset_base,
+            slot,
+            key,
+            bytes,
+            layered_sky,
+        )?;
         materials.push(pack_material(
             texture_asset,
             texture_size,
@@ -1066,7 +1180,39 @@ fn intern_texture(
     material: Option<ResourceId>,
     key: String,
     bytes: Vec<u8>,
-) -> Result<(u16, [u8; 2]), BrushWorldCookError> {
+    layered_sky: bool,
+) -> Result<(u16, [u16; 2]), BrushWorldCookError> {
+    let parsed = psx_asset::Texture::from_bytes(&bytes).map_err(|error| {
+        BrushWorldCookError::InvalidTexture {
+            material,
+            error: format!("invalid PSXT: {error:?}"),
+        }
+    })?;
+    let width = parsed.width();
+    let height = parsed.height();
+    let valid_size = if layered_sky {
+        width == height.saturating_mul(2)
+            && (16..=256).contains(&width)
+            && (8..=128).contains(&height)
+            && width.is_power_of_two()
+            && height.is_power_of_two()
+    } else {
+        (8..=128).contains(&width)
+            && (8..=128).contains(&height)
+            && width.is_power_of_two()
+            && height.is_power_of_two()
+    };
+    if parsed.depth() != Depth::Bit4 || !valid_size {
+        let expected = if layered_sky {
+            "two square 4bpp layers side by side (16x8..256x128)"
+        } else {
+            "4bpp power-of-two 8..128"
+        };
+        return Err(BrushWorldCookError::InvalidTexture {
+            material,
+            error: format!("brush texture must be {expected}, got {width}x{height}"),
+        });
+    }
     if let Some(existing) = textures.iter().find(|texture| texture.key == key) {
         if existing.bytes != bytes {
             return Err(BrushWorldCookError::InvalidTexture {
@@ -1076,31 +1222,12 @@ fn intern_texture(
         }
         return Ok((existing.asset_id, existing.size));
     }
-    let parsed = psx_asset::Texture::from_bytes(&bytes).map_err(|error| {
-        BrushWorldCookError::InvalidTexture {
-            material,
-            error: format!("invalid PSXT: {error:?}"),
-        }
-    })?;
-    let width = parsed.width();
-    let height = parsed.height();
-    if parsed.depth() != Depth::Bit4
-        || !(8..=128).contains(&width)
-        || !(8..=128).contains(&height)
-        || !width.is_power_of_two()
-        || !height.is_power_of_two()
-    {
-        return Err(BrushWorldCookError::InvalidTexture {
-            material,
-            error: format!("brush texture must be 4bpp power-of-two 8..128, got {width}x{height}"),
-        });
-    }
     let index = u16::try_from(textures.len())
         .map_err(|_| BrushWorldCookError::TextureAssetOverflow { material })?;
     let asset_id = base
         .checked_add(index)
         .ok_or(BrushWorldCookError::TextureAssetOverflow { material })?;
-    let size = [width as u8, height as u8];
+    let size = [width, height];
     textures.push(CompiledBrushTexture {
         asset_id,
         key,
@@ -1112,7 +1239,7 @@ fn intern_texture(
 
 fn pack_material(
     texture_asset: u16,
-    texture_size: [u8; 2],
+    texture_size: [u16; 2],
     tint: [u8; 3],
     blend: PsxBlendMode,
     sidedness: MaterialFaceSidedness,
@@ -1151,8 +1278,8 @@ fn pack_material(
         }
         MaterialAnimationMode::Flipbook => {
             let flipbook = animation.flipbook.normalized();
-            if !texture_size[0].is_multiple_of(flipbook.columns)
-                || !texture_size[1].is_multiple_of(flipbook.rows)
+            if !texture_size[0].is_multiple_of(u16::from(flipbook.columns))
+                || !texture_size[1].is_multiple_of(u16::from(flipbook.rows))
             {
                 return Err(BrushWorldCookError::InvalidTexture {
                     material,
@@ -1219,6 +1346,44 @@ mod tests {
             wait_ticks: 0,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn layered_sky_accepts_full_quake_pair_but_ordinary_material_does_not() {
+        let pixels = vec![1; 256 * 128];
+        let bytes = psxed_tex::encode_indexed_psxt(
+            256,
+            128,
+            Depth::Bit4,
+            &pixels,
+            &[[0, 0, 0], [96, 128, 192]],
+            true,
+        )
+        .expect("Quake sky pair");
+        let mut textures = Vec::new();
+        let (asset, size) = intern_texture(
+            &mut textures,
+            70,
+            Some(ResourceId(9)),
+            "sky-pair".to_string(),
+            bytes.clone(),
+            true,
+        )
+        .expect("layered sky texture");
+        assert_eq!(asset, 70);
+        assert_eq!(size, [256, 128]);
+        assert_eq!(textures[0].size, [256, 128]);
+
+        let error = intern_texture(
+            &mut Vec::new(),
+            70,
+            Some(ResourceId(9)),
+            "ordinary".to_string(),
+            bytes,
+            false,
+        )
+        .expect_err("ordinary brush texture exceeds its packet UV window");
+        assert!(error.to_string().contains("4bpp power-of-two 8..128"));
     }
 
     fn authored_project() -> ProjectDocument {
@@ -1467,12 +1632,11 @@ mod tests {
         );
     }
 
-    /// Hull 0 is served from the render BSP at runtime (Quake's hull 0);
-    /// the cooked per-brush clipnode chain stays the reference. Point
-    /// contents must agree everywhere inside the world, for the world
-    /// model and for a mover model.
+    /// Hull 0 is served from the render BSP at runtime (Quake's hull 0), so
+    /// the clipnode table carries only a one-node empty format sentinel in
+    /// that slot instead of duplicating every brush plane.
     #[test]
-    fn render_bsp_point_hull_matches_the_cooked_clipnode_chain() {
+    fn runtime_point_hull_uses_render_bsp_without_a_duplicate_clip_tree() {
         let compiled = authored_world(BrushWorldCookMode::Draft);
         let mut map = PxbspResidentMap::with_capacity(compiled.pxbsp.bytes.len());
         map.load(9, &mut SliceReader::new(&compiled.pxbsp.bytes))
@@ -1482,7 +1646,27 @@ mod tests {
             let render = map
                 .model_collision_hull(model_index, 0)
                 .expect("render-served point hull");
-            let chain = psx_bsp::collision::CollisionHull::new(
+            if model_index == 0 {
+                assert_eq!(
+                    render.point_contents(Vec3I32 {
+                        x: 512 * 4096,
+                        y: 256 * 4096,
+                        z: 512 * 4096,
+                    }),
+                    Some(psx_bsp::collision::CONTENTS_EMPTY),
+                    "sealed room cavity"
+                );
+                assert_eq!(
+                    render.point_contents(Vec3I32 {
+                        x: 512 * 4096,
+                        y: 32 * 4096,
+                        z: 512 * 4096,
+                    }),
+                    Some(psx_bsp::collision::CONTENTS_SOLID),
+                    "sealed room floor"
+                );
+            }
+            let sentinel = psx_bsp::collision::CollisionHull::new(
                 map.planes(),
                 map.clip_nodes(),
                 model.head_nodes[1],
@@ -1499,12 +1683,11 @@ mod tests {
                             y: y * 4096,
                             z: z * 4096,
                         };
-                        let expected = chain.point_contents(point);
                         assert_eq!(
-                            render.point_contents(point),
-                            expected,
-                            "model {model_index} contents at ({x}, {y}, {z})"
+                            sentinel.point_contents(point),
+                            Some(psx_bsp::collision::CONTENTS_EMPTY)
                         );
+                        let expected = render.point_contents(point);
                         checked += 1;
                         if expected == Some(psx_bsp::collision::CONTENTS_SOLID) {
                             solid += 1;
@@ -1515,10 +1698,13 @@ mod tests {
                 }
                 y += 8;
             }
-            assert!(
-                checked > 100 && solid > 0,
-                "model {model_index}: {checked} points, {solid} solid"
-            );
+            assert!(checked > 100, "model {model_index}: {checked} points");
+            if model_index > 0 {
+                assert!(
+                    solid > 0,
+                    "submodel {model_index}: {checked} points, {solid} solid"
+                );
+            }
         }
     }
 

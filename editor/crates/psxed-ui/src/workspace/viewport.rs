@@ -1080,11 +1080,17 @@ impl EditorWorkspace {
     }
 
     /// Whether the Grid toolbar toggle is currently on. In 2D this
-    /// controls the editor's world-grid overlay; in 3D the frontend
-    /// uses it to gate the streaming chunk-boundary overlay so the
-    /// same button hides both grid-style affordances at once.
+    /// controls the editor's world grid; in 3D the frontend uses it
+    /// for BSP surface grids and legacy streaming chunk boundaries.
     pub fn show_grid_enabled(&self) -> bool {
         self.show_grid
+    }
+
+    /// Current world-space grid interval. Brush surface grids use the
+    /// same live value as snapping and the orthographic BSP grid, so
+    /// changing the toolbar value updates every viewport consistently.
+    pub fn grid_snap_units(&self) -> u16 {
+        self.snap_units.max(1)
     }
 
     pub fn show_portals_enabled(&self) -> bool {

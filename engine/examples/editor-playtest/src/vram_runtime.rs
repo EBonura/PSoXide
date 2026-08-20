@@ -240,6 +240,15 @@ pub(super) fn ensure_room_texture_uploaded(
     vram_arena().ensure_room_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
 }
 
+/// Upload a Quake two-layer sky pair, preserving transparent palette index
+/// zero and allowing the source to span a complete 256-texel tpage.
+pub(super) fn ensure_layered_sky_texture_uploaded(
+    asset_id: AssetId,
+    asset_bytes: &[u8],
+) -> Option<VramSlot> {
+    vram_arena().ensure_layered_sky_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
+}
+
 /// Queue (or resolve) the room-owned reflection probe. The active-room window
 /// calls this for the current and warm adjacent rooms, so a portal crossing
 /// only switches the selected resident slot.
