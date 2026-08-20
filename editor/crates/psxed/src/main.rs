@@ -40,7 +40,7 @@
 //!
 //! Options:
 //!   --texture-size WxH    Target texture dimensions (default 128x128).
-//!   --texture-depth 4|8|15  Target texture depth (default 8).
+//!   --texture-depth 4|8|15  Target texture depth (default 4).
 //!   --anim-fps N          Fixed animation sample rate (default 15).
 //!   --world-height N      Suggested engine/world height (default 1024).
 //!   --center-animation-root
@@ -387,7 +387,7 @@ GLB-MODEL SUBCOMMAND:
     psxed glb-model <input.glb|input.gltf|input.fbx> --out-dir <directory>
                           [--name asset_name]
                           [--texture-size WxH]     (default 128x128)
-                          [--texture-depth 4|8|15] (default 8)
+                          [--texture-depth 4|8|15] (default 4)
                           [--anim-fps N]           (default 15)
                           [--world-height N]       (default 1024)
                           [--center-animation-root]
@@ -575,7 +575,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     let mut name: Option<String> = None;
     let mut texture_width: u16 = 128;
     let mut texture_height: u16 = 128;
-    let mut texture_depth = psxed_format::texture::Depth::Bit8;
+    let mut texture_depth = psxed_format::texture::Depth::Bit4;
     let mut animation_fps: u16 = 15;
     let mut world_height: u16 = 1024;
     let mut normalize_root_translation = false;

@@ -11,6 +11,7 @@ description = "PNG/JPG → PSXT texture cooker for PSoXide's content pipeline. C
 # psxed-gltf → psxed-project → emu frontend).
 [dependencies]
 psxed-format = { path = "../psxed-format" }
+psx-asset = { path = "../../../sdk/crates/psx-asset" }
 # Only widely-used PSX-era source formats. JPG + PNG covers 99% of
 # sources; BMP / TGA round out the rest. Default `image` features
 # are heavier than we need, so we pin the codecs explicitly.

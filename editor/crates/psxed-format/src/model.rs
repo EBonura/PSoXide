@@ -44,6 +44,10 @@
 //!   Face table: face_count × 12 bytes
 //!     three corners, each:
 //!       vertex_index: u16 LE, u: u8, v: u8
+//!
+//!   Optional face palette-bank table: ceil(face_count / 4) bytes
+//!     present when `flags::FACE_PALETTE_BANKS` is set in VERSION 5+
+//!     four two-bit bank indices per byte, least-significant face first
 //! ```
 //!
 //! Skinning is a hybrid model. Each part still owns one rigid bone
@@ -55,17 +59,21 @@
 //! of opening into chunky gaps. `blend == 0` opts a vertex out of the
 //! slow path entirely. VERSION 4 stores each skinned point once and
 //! moves UVs onto face corners, so seams no longer need duplicate
-//! vertices or a runtime weld pass. Model-local coordinates are
-//! deliberately allowed to use a much denser scale than world/grid
-//! coordinates; the header's `local_to_world_q12` is the content
-//! pipeline's suggested conversion for previews and simple runtime
-//! draw paths.
+//! vertices or a runtime weld pass. VERSION 5 optionally assigns one
+//! of four 4bpp CLUT banks to each face without enlarging the face
+//! record. Model-local coordinates are deliberately allowed to use a
+//! much denser scale than world/grid coordinates; the header's
+//! `local_to_world_q12` is the content pipeline's suggested conversion
+//! for previews and simple runtime draw paths.
 
 /// ASCII magic identifying the `.psxmdl` model format.
 pub const MAGIC: [u8; 4] = *b"PSMD";
 
 /// Current model format revision.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
+
+/// Last model revision without the optional face palette-bank table.
+pub const LEGACY_VERSION: u16 = 4;
 
 /// Sentinel parent/joint value used when a record has no joint.
 pub const NO_JOINT: u16 = u16::MAX;
@@ -102,6 +110,11 @@ pub mod flags {
     /// picks `CullMode::None` instead of the default `Back` so every
     /// face draws regardless of its normal direction.
     pub const DOUBLE_SIDED: u16 = 1 << 4;
+    /// A packed two-bit palette-bank selector follows the face table.
+    ///
+    /// Four face selectors are stored per byte. Each selector chooses one of
+    /// four consecutive 16-entry CLUTs in the model atlas.
+    pub const FACE_PALETTE_BANKS: u16 = 1 << 5;
 }
 
 /// Byte layout of the model payload header.
@@ -261,3 +274,8 @@ pub const VERTEX_RECORD_SIZE: usize = 8;
 
 /// Size of one face record in bytes.
 pub const FACE_RECORD_SIZE: usize = 12;
+
+/// Bytes needed for four packed two-bit palette-bank selectors per byte.
+pub const fn face_palette_bank_bytes(face_count: u16) -> usize {
+    (face_count as usize).div_ceil(4)
+}

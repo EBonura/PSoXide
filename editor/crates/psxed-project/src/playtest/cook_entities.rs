@@ -1011,7 +1011,7 @@ pub(crate) fn register_model_for_instance(
     // Atlas asset (optional).
     let texture_asset_index = if let Some(tex_path) = &model.texture_path {
         let abs = resolve_path(tex_path, project_root);
-        let bytes = match std::fs::read(&abs) {
+        let mut bytes = match std::fs::read(&abs) {
             Ok(b) => b,
             Err(e) => {
                 report.error_at(
@@ -1031,14 +1031,65 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
-        // The runtime model-atlas region accepts both native indexed formats.
-        // Reject direct-colour or malformed palettes loudly at cook time.
-        if !matches!(parsed_atlas.clut_entries(), 16 | 256) {
-            report.error_at(PlaytestValidationTarget::Resource(model_resource_id), format!(
-                "Model '{}' atlas must be 4bpp (16-entry CLUT) or 8bpp (256-entry CLUT); found {} entries",
+        let source_depth = parsed_atlas.depth();
+        // Shipping content standardises every texture on 4bpp. New imports use
+        // that default, while legacy projects and archived fixtures are
+        // normalised here so they remain cookable without putting 8/15bpp data
+        // on a disc.
+        if source_depth != psxed_format::texture::Depth::Bit4 {
+            let source_bytes = bytes.len();
+            bytes = match psxed_tex::requantize_psxt_to_4bpp(&bytes) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    report.error_at(
+                        PlaytestValidationTarget::Resource(model_resource_id),
+                        format!(
+                            "Model '{}' atlas could not be normalised from {}bpp to 4bpp: {error}",
+                            resource.name, source_depth as u8,
+                        ),
+                    );
+                    return None;
+                }
+            };
+            eprintln!(
+                "[cook] normalised model atlas '{}' from {}bpp to 4bpp ({} -> {} B)",
                 resource.name,
-                parsed_atlas.clut_entries(),
-            ));
+                source_depth as u8,
+                source_bytes,
+                bytes.len(),
+            );
+        }
+        let parsed_atlas = match psx_asset::Texture::from_bytes(&bytes) {
+            Ok(texture) => texture,
+            Err(error) => {
+                report.error_at(
+                    PlaytestValidationTarget::Resource(model_resource_id),
+                    format!("Model '{}' normalised atlas parse failed: {error:?}", resource.name),
+                );
+                return None;
+            }
+        };
+        let clut_entries = parsed_atlas.clut_entries();
+        if !(16..=64).contains(&clut_entries) || !clut_entries.is_multiple_of(16) {
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' 4bpp atlas must have one to four 16-entry CLUT banks; found {} entries",
+                    resource.name, clut_entries,
+                ),
+            );
+            return None;
+        }
+        let atlas_bank_count = (clut_entries / 16) as u8;
+        let model_bank_count = parsed_model.palette_bank_count();
+        if atlas_bank_count != model_bank_count {
+            report.error_at(
+                PlaytestValidationTarget::Resource(model_resource_id),
+                format!(
+                    "Model '{}' references {} palette bank(s), but its atlas contains {}",
+                    resource.name, model_bank_count, atlas_bank_count,
+                ),
+            );
             return None;
         }
         // Models sharing one atlas (the sword pair reuses a single .psxt)

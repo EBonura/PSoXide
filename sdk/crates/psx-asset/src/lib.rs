@@ -335,6 +335,7 @@ pub struct Model<'a> {
     parts: &'a [u8],
     vertices: &'a [u8],
     faces: &'a [u8],
+    face_palette_banks: Option<&'a [u8]>,
     joint_count: u16,
     material_count: u16,
     part_count: u16,
@@ -350,8 +351,8 @@ impl<'a> Model<'a> {
     /// Parse a cooked `.psxmdl` blob.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::model::{
-            JointRecord, MaterialRecord, ModelHeader, PartRecord, FACE_RECORD_SIZE, MAGIC, VERSION,
-            VERTEX_RECORD_SIZE,
+            JointRecord, MaterialRecord, ModelHeader, PartRecord, FACE_RECORD_SIZE, LEGACY_VERSION,
+            MAGIC, VERSION, VERTEX_RECORD_SIZE,
         };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -362,7 +363,7 @@ impl<'a> Model<'a> {
             return Err(ParseError::WrongMagic);
         }
         let version = read_u16(bytes, 4);
-        if version != VERSION {
+        if version != LEGACY_VERSION && version != VERSION {
             return Err(ParseError::UnsupportedVersion(version));
         }
         let flags = read_u16(bytes, 6);
@@ -406,6 +407,18 @@ impl<'a> Model<'a> {
         let face_bytes = checked_table_bytes(face_count, FACE_RECORD_SIZE)?;
         let faces = take_table(bytes, &mut off, face_bytes)?;
 
+        let has_face_palette_banks =
+            flags & psxed_format::model::flags::FACE_PALETTE_BANKS != 0;
+        if version == LEGACY_VERSION && has_face_palette_banks {
+            return Err(ParseError::InvalidModelLayout);
+        }
+        let face_palette_banks = if has_face_palette_banks {
+            let bytes_needed = psxed_format::model::face_palette_bank_bytes(face_count);
+            Some(take_table(bytes, &mut off, bytes_needed)?)
+        } else {
+            None
+        };
+
         if off != bytes.len() {
             return Err(ParseError::InvalidModelLayout);
         }
@@ -418,6 +431,7 @@ impl<'a> Model<'a> {
             parts,
             vertices,
             faces,
+            face_palette_banks,
             joint_count,
             material_count,
             part_count,
@@ -620,6 +634,33 @@ impl<'a> Model<'a> {
                 },
             ],
         })
+    }
+
+    /// 4bpp CLUT bank selected by a model face.
+    ///
+    /// Legacy and ordinary single-palette models return bank zero. `None`
+    /// means the face index is outside the model.
+    #[inline]
+    pub fn face_palette_bank(&self, index: u16) -> Option<u8> {
+        if index >= self.face_count {
+            return None;
+        }
+        let Some(packed) = self.face_palette_banks else {
+            return Some(0);
+        };
+        let byte = *packed.get(index as usize / 4)?;
+        Some((byte >> ((index as usize & 3) * 2)) & 3)
+    }
+
+    /// Number of consecutive 16-entry CLUT banks referenced by this model.
+    pub fn palette_bank_count(&self) -> u8 {
+        let mut highest = 0u8;
+        let mut index = 0u16;
+        while index < self.face_count {
+            highest = highest.max(self.face_palette_bank(index).unwrap_or(0));
+            index += 1;
+        }
+        highest + 1
     }
 }
 

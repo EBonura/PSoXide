@@ -435,6 +435,9 @@ pub struct TexturedModelRenderFace {
     pub corner_words: [u32; 3],
 }
 
+const MODEL_RENDER_VERTEX_INDEX_MASK: u16 = 0x3fff;
+const MODEL_RENDER_PALETTE_BANK_SHIFT: u16 = 14;
+
 /// Wrapped offset applied to model UVs for an independently moving texture
 /// layer. PS1 polygon UVs are bytes, so addition naturally wraps at 256.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -531,9 +534,24 @@ impl TexturedModelRenderFace {
 
     /// Build a predecoded face from canonical `(u, v)` pairs.
     pub const fn new(vertex_indices: [u16; 3], uvs: [(u8, u8); 3]) -> Self {
+        Self::new_with_palette_bank(vertex_indices, uvs, 0)
+    }
+
+    /// Build a predecoded face with a two-bit 4bpp CLUT-bank selector.
+    ///
+    /// The selector occupies the otherwise unused high two bits of corner
+    /// zero's runtime vertex index. Cooked model vertices are limited to
+    /// 14-bit indices when palette banks are used.
+    pub const fn new_with_palette_bank(
+        vertex_indices: [u16; 3],
+        uvs: [(u8, u8); 3],
+        palette_bank: u8,
+    ) -> Self {
+        let first = (vertex_indices[0] & MODEL_RENDER_VERTEX_INDEX_MASK)
+            | (((palette_bank as u16) & 3) << MODEL_RENDER_PALETTE_BANK_SHIFT);
         Self {
             corner_words: [
-                (vertex_indices[0] as u32) | ((model_uv_word(uvs[0]) as u32) << 16),
+                (first as u32) | ((model_uv_word(uvs[0]) as u32) << 16),
                 (vertex_indices[1] as u32) | ((model_uv_word(uvs[1]) as u32) << 16),
                 (vertex_indices[2] as u32) | ((model_uv_word(uvs[2]) as u32) << 16),
             ],
@@ -543,10 +561,15 @@ impl TexturedModelRenderFace {
     /// Projected-vertex indices for the triangle corners.
     pub const fn vertex_indices(self) -> [u16; 3] {
         [
-            self.corner_words[0] as u16,
-            self.corner_words[1] as u16,
-            self.corner_words[2] as u16,
+            self.corner_words[0] as u16 & MODEL_RENDER_VERTEX_INDEX_MASK,
+            self.corner_words[1] as u16 & MODEL_RENDER_VERTEX_INDEX_MASK,
+            self.corner_words[2] as u16 & MODEL_RENDER_VERTEX_INDEX_MASK,
         ]
+    }
+
+    /// Two-bit 4bpp CLUT bank selected by this face.
+    pub const fn palette_bank(self) -> u8 {
+        ((self.corner_words[0] as u16 >> MODEL_RENDER_PALETTE_BANK_SHIFT) & 3) as u8
     }
 
     /// Packed packet UV words for the triangle corners.

@@ -861,6 +861,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         faces,
                         packet_material,
                         authored_uv_offset.unwrap_or_default(),
+                        true,
                         options,
                         &mut stats,
                         &mut faces_considered,
@@ -872,6 +873,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         faces,
                         packet_material,
                         authored_uv_offset.unwrap_or_default(),
+                        true,
                         options,
                         &mut stats,
                         &mut faces_considered,
@@ -884,6 +886,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     faces,
                     packet_material,
                     authored_uv_offset.unwrap_or_default(),
+                    true,
                     material,
                     options,
                     &mut stats,
@@ -896,6 +899,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     faces,
                     packet_material,
                     authored_uv_offset.unwrap_or_default(),
+                    true,
                     material,
                     options,
                     &mut stats,
@@ -928,14 +932,17 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices,
                     options.model_uv_mapping,
                 );
+                let palette_bank = face.palette_bank();
+                let face_packet_material = packet_material.with_clut_bank(palette_bank);
+                let face_material = material.with_clut_bank(palette_bank);
                 let overflow = if packed_back_average_in_front_faces {
                     self.submit_predecoded_model_face_packed_back_average_in_front_fast(
                         triangles,
                         projected_vertices,
                         project_count,
                         face,
-                        packet_material,
-                        material,
+                        face_packet_material,
+                        face_material,
                         options,
                         &mut stats,
                     )
@@ -945,8 +952,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         projected_vertices,
                         project_count,
                         face,
-                        packet_material,
-                        material,
+                        face_packet_material,
+                        face_material,
                         options,
                         &mut stats,
                     )
@@ -958,8 +965,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         face,
                         all_projected_vertices_in_front,
                         near_z,
-                        packet_material,
-                        material,
+                        face_packet_material,
+                        face_material,
                         options,
                         &mut stats,
                     )
@@ -971,8 +978,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         face,
                         all_projected_vertices_in_front,
                         near_z,
-                        packet_material,
-                        material,
+                        face_packet_material,
+                        face_material,
                         options,
                         &mut stats,
                     )
@@ -1080,6 +1087,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             faces,
                             packet_material,
                             ModelUvOffset::ZERO,
+                            false,
                             options,
                             &mut stats,
                             &mut faces_considered,
@@ -1091,6 +1099,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             faces,
                             packet_material,
                             ModelUvOffset::ZERO,
+                            false,
                             options,
                             &mut stats,
                             &mut faces_considered,
@@ -1103,6 +1112,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             faces,
                             packet_material,
                             ModelUvOffset::ZERO,
+                            false,
                             material,
                             options,
                             &mut stats,
@@ -1115,6 +1125,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             faces,
                             packet_material,
                             ModelUvOffset::ZERO,
+                            false,
                             material,
                             options,
                             &mut stats,
@@ -1254,10 +1265,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut face_index = 0usize;
         while face_index < faces.len() {
             let face = faces[face_index];
-            let [corner_a, corner_b, corner_c] = face.corner_words;
-            let ia = corner_a as u16 as usize;
-            let ib = corner_b as u16 as usize;
-            let ic = corner_c as u16 as usize;
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
             let projected = unsafe {
                 // SAFETY: model faces are validated against the model vertex
                 // count during decode, and this path is entered only after the
@@ -1289,7 +1300,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
                     positions,
                     face.uv_words(),
-                    base_material,
+                    base_material.with_clut_bank(face.palette_bank()),
                 ))
             };
             let base_triangle = base_triangle as *mut TriTextured as *mut u32;
@@ -1365,6 +1376,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         faces: &[TexturedModelRenderFace],
         packet_material: TexturedPacketMaterial,
         uv_offset: ModelUvOffset,
+        palette_banks: bool,
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
         faces_considered: &mut u32,
@@ -1381,6 +1393,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 faces,
                 packet_material,
                 uv_offset,
+                palette_banks,
                 options,
                 stats,
                 faces_considered,
@@ -1395,10 +1408,15 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut face_index = 0usize;
         while face_index < faces.len() {
             let face = faces[face_index];
-            let [corner_a, corner_b, corner_c] = face.corner_words;
-            let ia = corner_a as u16 as usize;
-            let ib = corner_b as u16 as usize;
-            let ic = corner_c as u16 as usize;
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
             let projected = unsafe {
                 // SAFETY: model faces are validated against the model vertex count
                 // once while decoding. This extent-safe batch is reachable only
@@ -1488,6 +1506,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         faces: &[TexturedModelRenderFace],
         packet_material: TexturedPacketMaterial,
         uv_offset: ModelUvOffset,
+        palette_banks: bool,
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
         faces_considered: &mut u32,
@@ -1504,10 +1523,15 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut face_index = 0usize;
         while face_index < faces.len() {
             let face = faces[face_index];
-            let [corner_a, corner_b, corner_c] = face.corner_words;
-            let ia = corner_a as u16 as usize;
-            let ib = corner_b as u16 as usize;
-            let ic = corner_c as u16 as usize;
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
             let projected = unsafe {
                 // SAFETY: decoded faces were validated against the completely
                 // projected model vertex slice before entering this batch.
@@ -1583,6 +1607,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         faces: &[TexturedModelRenderFace],
         packet_material: TexturedPacketMaterial,
         uv_offset: ModelUvOffset,
+        palette_banks: bool,
         material: TextureMaterial,
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
@@ -1600,10 +1625,20 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         while face_index < faces.len() {
             *faces_considered = faces_considered.wrapping_add(1);
             let face = faces[face_index].with_uv_offset(uv_offset);
-            let [corner_a, corner_b, corner_c] = face.corner_words;
-            let ia = corner_a as u16 as usize;
-            let ib = corner_b as u16 as usize;
-            let ic = corner_c as u16 as usize;
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(face.palette_bank())
+            } else {
+                packet_material
+            };
+            let material = if palette_banks {
+                material.with_clut_bank(face.palette_bank())
+            } else {
+                material
+            };
+            let [ia, ib, ic] = face.vertex_indices();
+            let ia = ia as usize;
+            let ib = ib as usize;
+            let ic = ic as usize;
             if ia >= projected_vertices.len()
                 || ib >= projected_vertices.len()
                 || ic >= projected_vertices.len()
@@ -1736,10 +1771,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
     ) -> bool {
-        let [corner_a, corner_b, corner_c] = face.corner_words;
-        let ia = corner_a as u16 as usize;
-        let ib = corner_b as u16 as usize;
-        let ic = corner_c as u16 as usize;
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
         if ia >= project_count || ib >= project_count || ic >= project_count {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
@@ -1803,10 +1838,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
     ) -> bool {
-        let [corner_a, corner_b, corner_c] = face.corner_words;
-        let ia = corner_a as u16 as usize;
-        let ib = corner_b as u16 as usize;
-        let ic = corner_c as u16 as usize;
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
         if ia >= project_count || ib >= project_count || ic >= project_count {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
@@ -1872,10 +1907,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
     ) -> bool {
-        let [corner_a, corner_b, corner_c] = face.corner_words;
-        let ia = corner_a as u16 as usize;
-        let ib = corner_b as u16 as usize;
-        let ic = corner_c as u16 as usize;
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
         if ia >= project_count || ib >= project_count || ic >= project_count {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
@@ -1948,10 +1983,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
     ) -> bool {
-        let [corner_a, corner_b, corner_c] = face.corner_words;
-        let ia = corner_a as u16 as usize;
-        let ib = corner_b as u16 as usize;
-        let ic = corner_c as u16 as usize;
+        let [ia, ib, ic] = face.vertex_indices();
+        let ia = ia as usize;
+        let ib = ib as usize;
+        let ic = ic as usize;
         if ia >= project_count || ib >= project_count || ic >= project_count {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;

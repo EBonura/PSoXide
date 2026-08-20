@@ -547,7 +547,7 @@ impl Default for RigidModelConfig {
         Self {
             texture_width: 128,
             texture_height: 128,
-            texture_depth: psxed_format::texture::Depth::Bit8,
+            texture_depth: psxed_format::texture::Depth::Bit4,
             animation_fps: 15,
             world_height: DEFAULT_MODEL_WORLD_HEIGHT,
             normalize_root_translation: false,

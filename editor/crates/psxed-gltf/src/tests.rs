@@ -370,8 +370,8 @@ fn native_model_imports_static_glb_triangle_with_bind_pose_and_atlas() {
     assert_eq!(animation.frame_count(), 1);
 
     let texture = psx_asset::Texture::from_bytes(package.texture.as_deref().unwrap()).unwrap();
-    assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit8);
-    assert_eq!(texture.clut_entries(), 256);
+    assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
+    assert_eq!(texture.clut_entries(), 16);
     assert_eq!(
         package.report.clip_frames,
         vec![("bind_pose".to_string(), 1)]
