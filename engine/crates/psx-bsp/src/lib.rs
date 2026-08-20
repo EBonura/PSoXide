@@ -132,7 +132,10 @@ impl LumpKind {
             }),
             Self::Nodes => Some(match version {
                 PsbVersion::LegacyV1 => 34,
-                PsbVersion::IndexedV5 => Node::SIZE as u32,
+                // PSB5 predates resident render bounds and stores only the
+                // splitter plane plus two children. `ResidentMap` expands
+                // those records into the current semantic node layout.
+                PsbVersion::IndexedV5 => 6,
             }),
             Self::ClipNodes => Some(6),
             Self::Models => Some(match version {
@@ -704,8 +707,8 @@ pub struct Node {
     pub plane: u16,
     /// Negative values encode `-(leaf + 1)`.
     pub children: [i16; 2],
-    /// Legacy semantic bounds/range retained for the proven MIPS ABI.
-    /// Compact v3 omits these unused fields and decodes them as zero.
+    /// Conservative Y-up render bounds in the model's local coordinate
+    /// space. PXBSP v5 stores these explicitly for Quake-style node culling.
     pub mins: Vec3I16,
     pub maxs: Vec3I16,
     pub surface_mins: Vec3I16,
@@ -714,24 +717,78 @@ pub struct Node {
     pub face_count: u16,
 }
 
+/// World units represented by one signed PXBSP v5 node-bound code. Values
+/// outside the finite i8 range expand to the corresponding i16 extreme, so
+/// large maps remain conservatively culled while ordinary brush worlds keep
+/// bounds tight enough for hierarchical frustum classification.
+pub const NODE_BOUND_GRID: i16 = 8;
+const NODE_BOUND_GRID_SHIFT: u32 = NODE_BOUND_GRID.trailing_zeros();
+
+/// Quantize a node minimum outward toward negative infinity.
+pub const fn encode_node_bound_min(value: i16) -> i8 {
+    let units = (value as i32) >> NODE_BOUND_GRID_SHIFT;
+    if units < i8::MIN as i32 {
+        i8::MIN
+    } else {
+        units as i8
+    }
+}
+
+/// Quantize a node maximum outward toward positive infinity.
+pub const fn encode_node_bound_max(value: i16) -> i8 {
+    let units = ((value as i32) + (NODE_BOUND_GRID as i32 - 1)) >> NODE_BOUND_GRID_SHIFT;
+    if units > i8::MAX as i32 {
+        i8::MAX
+    } else {
+        units as i8
+    }
+}
+
+/// Expand a quantized node minimum into model-local world units.
+pub const fn decode_node_bound_min(code: i8) -> i16 {
+    if code == i8::MIN {
+        i16::MIN
+    } else {
+        (code as i16) << NODE_BOUND_GRID_SHIFT
+    }
+}
+
+/// Expand a quantized node maximum into model-local world units.
+pub const fn decode_node_bound_max(code: i8) -> i16 {
+    if code == i8::MAX {
+        i16::MAX
+    } else {
+        (code as i16) << NODE_BOUND_GRID_SHIFT
+    }
+}
+
 impl CookedRecord for Node {
-    const SIZE: usize = 6;
+    /// PXBSP v5 node: plane/children (6), quantized bounds (6), face range (4).
+    const SIZE: usize = 16;
 
     fn decode(bytes: &[u8]) -> Self {
         Self {
             plane: u16_at(bytes, 0),
             children: [i16_at(bytes, 2), i16_at(bytes, 4)],
-            mins: Vec3I16::default(),
-            maxs: Vec3I16::default(),
+            mins: Vec3I16 {
+                x: decode_node_bound_min(bytes[6] as i8),
+                y: decode_node_bound_min(bytes[7] as i8),
+                z: decode_node_bound_min(bytes[8] as i8),
+            },
+            maxs: Vec3I16 {
+                x: decode_node_bound_max(bytes[9] as i8),
+                y: decode_node_bound_max(bytes[10] as i8),
+                z: decode_node_bound_max(bytes[11] as i8),
+            },
             surface_mins: Vec3I16::default(),
             surface_maxs: Vec3I16::default(),
-            first_face: 0,
-            face_count: 0,
+            first_face: u16_at(bytes, 12),
+            face_count: u16_at(bytes, 14),
         }
     }
 }
 
-/// Native view of the compact six-byte render-tree node wire record.
+/// Native view of the PXBSP v5 render-tree node wire record.
 ///
 /// The public [`Node`] retains its proven legacy aggregate layout for MIPS
 /// callers. Traversal-only consumers can borrow this narrow representation
@@ -741,13 +798,18 @@ impl CookedRecord for Node {
 pub struct CompactNode {
     pub plane: u16,
     pub children: [i16; 2],
+    /// Signed eight-world-unit grid codes; use the node-bound decode helpers.
+    pub mins: [i8; 3],
+    pub maxs: [i8; 3],
+    pub first_face: u16,
+    pub face_count: u16,
 }
 
-const _: [(); 6] = [(); core::mem::size_of::<CompactNode>()];
+const _: [(); 16] = [(); core::mem::size_of::<CompactNode>()];
 const _: [(); 2] = [(); core::mem::align_of::<CompactNode>()];
 
 impl<'a> RecordSlice<'a, Node> {
-    /// Borrow validated compact node records without reconstructing the
+    /// Borrow validated v5 node records without reconstructing the larger
     /// legacy semantic aggregate on every tree step.
     #[cfg(target_endian = "little")]
     pub fn as_native_compact_nodes(self) -> Option<&'a [CompactNode]> {
@@ -759,7 +821,9 @@ impl<'a> RecordSlice<'a, Node> {
         {
             return None;
         }
-        Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<CompactNode>(), self.len()) })
+        Some(unsafe {
+            core::slice::from_raw_parts(bytes.as_ptr().cast::<CompactNode>(), self.len())
+        })
     }
 }
 
@@ -1560,7 +1624,7 @@ mod tests {
         assert_eq!(Plane::SIZE, 14);
         assert_eq!(Face::SIZE, 10);
         assert_eq!(Leaf::SIZE, 14);
-        assert_eq!(Node::SIZE, 6);
+        assert_eq!(Node::SIZE, 16);
         assert_eq!(BrushModel::SIZE, 32);
 
         // These are semantic Rust values returned by RecordSlice::get on the
@@ -1604,7 +1668,14 @@ mod tests {
         model_bytes[16..18].copy_from_slice(&96i16.to_le_bytes());
         model_bytes[30..32].copy_from_slice(&7u16.to_le_bytes());
         let model = BrushModel::decode(&model_bytes);
-        assert_eq!(model.origin, Vec3I16 { x: 128, y: 16, z: 96 });
+        assert_eq!(
+            model.origin,
+            Vec3I16 {
+                x: 128,
+                y: 16,
+                z: 96
+            }
+        );
         assert_eq!(model.face_count, 7);
     }
 
@@ -1666,10 +1737,72 @@ mod tests {
         bytes[0..2].copy_from_slice(&7u16.to_le_bytes());
         bytes[2..4].copy_from_slice(&3i16.to_le_bytes());
         bytes[4..6].copy_from_slice(&(-5i16).to_le_bytes());
+        bytes[6..9].copy_from_slice(&[-128i8 as u8, -2i8 as u8, 3]);
+        bytes[9..12].copy_from_slice(&[0, 4, 127]);
+        bytes[12..14].copy_from_slice(&11u16.to_le_bytes());
+        bytes[14..16].copy_from_slice(&3u16.to_le_bytes());
 
         let node = RecordSlice::<Node>::new(&bytes).unwrap().get(0).unwrap();
         assert_eq!(node.plane, 7);
         assert_eq!(node.children, [3, -5]);
+        assert_eq!(
+            node.mins,
+            Vec3I16 {
+                x: i16::MIN,
+                y: -16,
+                z: 24
+            }
+        );
+        assert_eq!(
+            node.maxs,
+            Vec3I16 {
+                x: 0,
+                y: 32,
+                z: i16::MAX
+            }
+        );
+        assert_eq!(node.first_face, 11);
+        assert_eq!(node.face_count, 3);
+    }
+
+    #[test]
+    fn node_bound_quantization_is_conservative_across_the_i16_domain() {
+        for value in [
+            i16::MIN,
+            -32_767,
+            -1_025,
+            -1_024,
+            -1_017,
+            -1_016,
+            -257,
+            -256,
+            -255,
+            -9,
+            -8,
+            -7,
+            -1,
+            0,
+            1,
+            7,
+            8,
+            9,
+            255,
+            256,
+            257,
+            1_008,
+            1_009,
+            1_016,
+            32_512,
+            32_513,
+            i16::MAX,
+        ] {
+            let decoded_min = decode_node_bound_min(encode_node_bound_min(value));
+            let decoded_max = decode_node_bound_max(encode_node_bound_max(value));
+            assert!(decoded_min <= value, "min {decoded_min} excludes {value}");
+            assert!(decoded_max >= value, "max {decoded_max} excludes {value}");
+        }
+        assert_eq!(decode_node_bound_min(i8::MIN), i16::MIN);
+        assert_eq!(decode_node_bound_max(i8::MAX), i16::MAX);
     }
 
     #[test]

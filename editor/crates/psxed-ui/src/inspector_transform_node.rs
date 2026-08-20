@@ -1431,10 +1431,7 @@ pub(crate) fn node_gizmo_translation(
                     translation[index] = if world_units {
                         snap_world_units_component(translation[index], world_quantum)
                     } else {
-                        snap_node_transform_component_to_world_step(
-                            translation[index],
-                            sector_size,
-                        )
+                        snap_node_transform_component_to_world_step(translation[index], sector_size)
                     };
                 }
                 _ => {}
@@ -1473,10 +1470,7 @@ pub(crate) fn node_gizmo_plane_translation(
                     translation[index] = if world_units {
                         snap_world_units_component(translation[index], world_quantum)
                     } else {
-                        snap_node_transform_component_to_world_step(
-                            translation[index],
-                            sector_size,
-                        )
+                        snap_node_transform_component_to_world_step(translation[index], sector_size)
                     };
                 }
             }

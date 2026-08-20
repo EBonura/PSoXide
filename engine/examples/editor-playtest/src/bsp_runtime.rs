@@ -138,6 +138,7 @@ pub(super) struct BspRuntime {
 
 impl BspRuntime {
     pub(super) fn load_manifest() -> Result<Self, BspRuntimeInitError> {
+        crate::game_trace("editor-playtest: bsp manifest begin");
         if PXBSP_WORLD.is_empty() {
             return Err(BspRuntimeInitError::EmptyWorld);
         }
@@ -152,10 +153,12 @@ impl BspRuntime {
 
         let map =
             PxbspResidentMap::from_static(0, PXBSP_WORLD).map_err(BspRuntimeInitError::Map)?;
+        crate::game_trace("editor-playtest: bsp map ok");
         let mut doors = BrushDoorSet::EMPTY;
         doors
             .init_from_map(&map)
             .map_err(BspRuntimeInitError::Doors)?;
+        crate::game_trace("editor-playtest: bsp doors ok");
         if doors.len() != PXBSP_MOVER_MODEL_INDICES.len() {
             return Err(BspRuntimeInitError::MoverCount {
                 cooked: PXBSP_MOVER_MODEL_INDICES.len(),
@@ -208,7 +211,9 @@ impl BspRuntime {
         if material_count == 0 {
             return Err(BspRuntimeInitError::NoMaterials);
         }
-        let mut renderer = Renderer::new_pxbsp(map.faces().len());
+        crate::game_trace("editor-playtest: bsp renderer begin");
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        crate::game_trace("editor-playtest: bsp renderer ok");
         // The frustum clip must match the projection this example renders
         // with (H and screen half-extents), or it clips too much or too little.
         renderer.set_view_projection(psx_bsp::render::ViewProjection {
@@ -217,6 +222,7 @@ impl BspRuntime {
             half_height: i32::from(PROJECTION.screen_y),
             ..psx_bsp::render::ViewProjection::DEFAULT
         });
+        crate::game_trace("editor-playtest: bsp runtime assemble");
         Ok(Self {
             map,
             renderer,

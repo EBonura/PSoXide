@@ -254,6 +254,7 @@ impl Playtest {
     }
 
     pub(super) fn init_gameplay(&mut self) {
+        crate::game_trace("editor-playtest: gameplay init begin");
         self.shadow_material = upload_shadow_texture();
         self.particle_material = upload_particle_texture();
         self.bsp = if generated::PLAYTEST_USES_PXBSP {
@@ -267,9 +268,11 @@ impl Playtest {
         if self.bsp.is_some() {
             self.current_ambient_rgb = PXBSP_AMBIENT_RGB;
         }
+        crate::game_trace("editor-playtest: gameplay bsp ok");
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
+            crate::game_trace("editor-playtest: gameplay empty");
             return;
         };
 

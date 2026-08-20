@@ -190,7 +190,7 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         engine(PLAYER_RADIUS),
         engine(PLAYER_HEIGHT),
     )
-        .expect("cooked player body hull");
+    .expect("cooked player body hull");
     assert_eq!(
         hull_index, 1,
         "Aletha should use the tight cooked body hull"
@@ -250,7 +250,11 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         5248,
         9280,
     );
-    assert_eq!(position.y, engine(COURT_FLOOR), "lower ascent reaches court height");
+    assert_eq!(
+        position.y,
+        engine(COURT_FLOOR),
+        "lower ascent reaches court height"
+    );
     // Visit the first checkpoint landmark, then prove the first gate blocks
     // in its closed state and clears at its translated open endpoint.
     position = walk_axis_aligned(
@@ -356,7 +360,11 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         11200,
         7040,
     );
-    assert_eq!(position.y, engine(RELAY_FLOOR), "side escape reaches relay height");
+    assert_eq!(
+        position.y,
+        engine(RELAY_FLOOR),
+        "side escape reaches relay height"
+    );
     position = walk_axis_aligned(
         &map,
         hull_index,
@@ -411,7 +419,11 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         7168,
         9200,
     );
-    assert_eq!(position.y, engine(COURT_FLOOR), "shortcut climbs to arrival court");
+    assert_eq!(
+        position.y,
+        engine(COURT_FLOOR),
+        "shortcut climbs to arrival court"
+    );
     position = walk_axis_aligned(
         &map,
         hull_index,
@@ -421,7 +433,11 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         7168,
         8400,
     );
-    assert_eq!(position.y, engine(RELAY_FLOOR), "shortcut returns to relay height");
+    assert_eq!(
+        position.y,
+        engine(RELAY_FLOOR),
+        "shortcut returns to relay height"
+    );
 
     // Equipment hall, all five upper risers, the aligned rail opening and the
     // four supported 512-unit drops back into the same physical arena.
@@ -461,7 +477,11 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         19000,
         6912,
     );
-    assert_eq!(position.y, engine(4096), "upper ascent reaches rampart height");
+    assert_eq!(
+        position.y,
+        engine(4096),
+        "upper ascent reaches rampart height"
+    );
     position = walk_axis_aligned(
         &map,
         hull_index,
@@ -542,7 +562,11 @@ fn prove_cooked_player_hull_route(world: &psxed_project::playtest::PlaytestPxbsp
         21000,
         11904,
     );
-    assert_eq!(position.y, engine(2816), "cliff route reaches its fourth stage");
+    assert_eq!(
+        position.y,
+        engine(2816),
+        "cliff route reaches its fourth stage"
+    );
 }
 
 fn resource_id(

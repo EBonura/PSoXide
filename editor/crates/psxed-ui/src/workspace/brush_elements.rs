@@ -43,9 +43,10 @@ pub(crate) fn unique_vertices(solved: &SolvedBrush) -> Vec<[f64; 3]> {
         .flatten()
         .flat_map(|polygon| polygon.verts.iter().copied())
     {
-        if vertices.iter().any(|seen| {
-            (0..3).all(|axis| (seen[axis] - vertex[axis]).abs() <= ELEMENT_EPSILON)
-        }) {
+        if vertices
+            .iter()
+            .any(|seen| (0..3).all(|axis| (seen[axis] - vertex[axis]).abs() <= ELEMENT_EPSILON))
+        {
             continue;
         }
         vertices.push(vertex);

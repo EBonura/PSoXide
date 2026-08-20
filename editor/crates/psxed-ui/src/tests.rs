@@ -33,9 +33,9 @@ fn play_chunk_debug_map_follows_player_layer_then_editor_layer() {
 
 mod ashen_sanctum;
 mod brush_tools;
-mod interaction_rig;
 mod entity_resources;
 mod geometry_resources;
+mod interaction_rig;
 mod layer_authoring;
 mod orthographic_brush;
 mod placement_painting;

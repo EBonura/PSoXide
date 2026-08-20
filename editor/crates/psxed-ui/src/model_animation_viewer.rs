@@ -490,9 +490,8 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
             icons::label(icons::MAP_PIN, "Sockets"),
         );
         let clicked = response.clicked();
-        response.on_hover_text(
-            "Visually place weapon/attachment sockets on the selected model's rig",
-        );
+        response
+            .on_hover_text("Visually place weapon/attachment sockets on the selected model's rig");
         if clicked && state.show_attachment_sockets {
             state.show_combat_capsules = false;
             state.show_pose_corrections = false;
@@ -526,12 +525,13 @@ pub(crate) fn draw_model_animation_viewer(
     });
 
     let material_layer = preview_material_layer_cached(project, project_root, state);
-    let character_material = material_layer.as_ref().map(|(atlas, motion)| {
-        model_import_preview::PreviewMaterialLayer {
-            atlas,
-            motion: *motion,
-        }
-    });
+    let character_material =
+        material_layer.as_ref().map(
+            |(atlas, motion)| model_import_preview::PreviewMaterialLayer {
+                atlas,
+                motion: *motion,
+            },
+        );
     let character_id = state.selected_character.filter(|id| {
         project
             .resource(*id)
@@ -623,13 +623,9 @@ pub(crate) fn draw_model_animation_viewer(
         .and_then(|_| state.preview_weapon)
         .and_then(|weapon_id| project.resource(weapon_id))
         .and_then(|resource| match &resource.data {
-            ResourceData::Weapon(weapon) => weapon.model.map(|model_id| {
-                (
-                    model_id,
-                    weapon.grip.translation,
-                    weapon.grip.rotation_q12,
-                )
-            }),
+            ResourceData::Weapon(weapon) => weapon
+                .model
+                .map(|model_id| (model_id, weapon.grip.translation, weapon.grip.rotation_q12)),
             _ => None,
         })
         .zip(sockets.get(state.selected_attachment_socket).cloned());
@@ -2471,8 +2467,7 @@ fn draw_attachment_socket_editor(
                 .with_width(176.0)
                 .with_search_hint("Search sockets…"),
         ) {
-            state.selected_attachment_socket =
-                selected.unwrap_or(state.selected_attachment_socket);
+            state.selected_attachment_socket = selected.unwrap_or(state.selected_attachment_socket);
         }
     });
 
