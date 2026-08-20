@@ -972,7 +972,7 @@ mod tests {
             },
         );
         let end_y = trace.end.y as f64 / 4096.0;
-        assert!((63.0..64.1).contains(&end_y));
+        assert!((63.0..64.1).contains(&end_y), "end_y={end_y}");
     }
 
     #[test]

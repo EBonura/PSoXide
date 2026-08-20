@@ -220,8 +220,6 @@ fn brush_world_validation_target(
         //   cook-side index into the merged slot table rather than a resource.
         BrushWorldCookError::EmptyStaticWorld
         | BrushWorldCookError::InvalidWorldTree
-        | BrushWorldCookError::Bsp29GeometryRead { .. }
-        | BrushWorldCookError::Bsp29Geometry { .. }
         | BrushWorldCookError::InvalidTexture { material: None, .. }
         | BrushWorldCookError::TextureAssetOverflow { material: None }
         | BrushWorldCookError::Pack(_)
@@ -1096,6 +1094,20 @@ pub fn build_package(
                 streamed_class: StreamedClass::None,
             });
         }
+        if !compiled.leak_path.is_empty() {
+            report.warn(format!(
+                "BSP leak reaches the infinite exterior through {} pointfile points; Release keeps conservative PVS and writes {}",
+                compiled.leak_path.len(),
+                crate::brush_playtest::BRUSH_LEAK_FILENAME,
+            ));
+        }
+        let authored_leak_path: Vec<_> = compiled
+            .leak_path
+            .iter()
+            .map(|point| {
+                point.map(|coordinate| coordinate.saturating_mul(crate::units::WORLD_UNIT_DIVISOR))
+            })
+            .collect();
         // PXBSP rooms use the same authored panorama and gameplay-transient
         // lifetime as grid rooms. Register it after the brush textures so
         // enabling or disabling a sky cannot renumber PXBSP material assets
@@ -1124,6 +1136,7 @@ pub fn build_package(
                     model_index: mover.model_index,
                 })
                 .collect(),
+            leak_path: authored_leak_path,
         });
     }
 

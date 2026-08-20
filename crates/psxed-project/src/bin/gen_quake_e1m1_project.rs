@@ -3,7 +3,6 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use psxed_project::quake_bsp29::strip_quake_bsp29_geometry;
 use psxed_project::quake_map_import::{import_quake_map_geometry_scaled, QUAKE_TO_EDITOR_SCALE};
 use psxed_project::{
     CharacterAnimationAction, MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData,
@@ -13,13 +12,13 @@ use psxed_project::{
 const DEFAULT_OUTPUT_NAME: &str = "quake-e1m1-geometry";
 const SOURCE_REPOSITORY: &str = "https://github.com/fzwoch/quake_map_source";
 const SOURCE_REVISION: &str = "27abebaa3886bb0e3156cce3a604673d22b243f8";
-const BSP_GEOMETRY_RELATIVE: &str = "assets/geometry/e1m1-topology.bsp29geom";
 const TEMP_GEOMETRY_TEXTURE_RELATIVE: &str = "assets/textures/brick_1a_v2.psxt";
-// A full 16x import exceeds the PXBSP 32,767-face limit after mandatory
-// near-plane surface subdivision. E1M1 and both actors are uniformly reduced
-// to one quarter of that canonical scale, preserving their proportions while
-// keeping the complete level inside PSX coordinate and geometry budgets.
-const E1M1_QUAKE_SCALE: i32 = 4;
+// Keep imported Quake geometry at the editor's canonical 16:1 authored scale.
+const E1M1_QUAKE_SCALE: i32 = QUAKE_TO_EDITOR_SCALE;
+// Empty floor in E1M1's first large room, expressed in Quake X/Y/Z. The
+// authored info_player_start is correct for Quake's first-person camera but
+// lives in a narrow lift alcove that collapses PSoXide's third-person arm.
+const TEST_PLAYER_QUAKE_POSITION: [i32; 3] = [480, 192, 0];
 
 fn main() {
     let mut args = std::env::args_os().skip(1);
@@ -44,15 +43,15 @@ fn main() {
     let donor_source =
         std::fs::read_to_string(donor_dir.join("project.ron")).expect("read default project donor");
     let mut project = ProjectDocument::from_ron_str(&donor_source).expect("parse default donor");
-    let player_components = scaled_components(clone_components(&project, "Aletha"));
-    let enemy_components = scaled_components(clone_components(&project, "Rust Mantis"));
+    let mut player_components = scaled_components(clone_components(&project, "Aletha"));
+    let mut enemy_components = scaled_components(clone_components(&project, "Rust Mantis"));
     retain_locomotion_resources(&mut project);
+    repair_preview_animator_clip(&project, &mut player_components);
+    repair_preview_animator_clip(&project, &mut enemy_components);
 
     project.name = "Quake E1M1 Geometry Benchmark".to_string();
     project.set_world_format(psxed_project::ProjectWorldFormat::Bsp);
-    project.bsp_cook_mode = psxed_project::brush_world::BrushWorldCookMode::Draft;
-    project.bsp29_geometry_path = Some(BSP_GEOMETRY_RELATIVE.to_string());
-    project.bsp29_geometry_scale = E1M1_QUAKE_SCALE;
+    project.bsp_cook_mode = psxed_project::brush_world::BrushWorldCookMode::Release;
     project.boot = psxed_project::BootTarget::Gameplay;
     let blank = ProjectDocument::new("blank scene");
     project.scenes = blank.scenes;
@@ -98,27 +97,32 @@ fn main() {
         geometry.stats.skipped_invalid_brushes, 0,
         "E1M1 import must not silently lose invalid brushes"
     );
-    let mut player_start = geometry
+    let _source_player_start = geometry
         .player_start
         .expect("E1M1 map must contain info_player_start");
-    // Quake's player origin is 24 units above the feet. PSoXide entity hosts
-    // use a feet pivot, with one editor unit of lift to avoid exact contact.
-    player_start[1] -= 24 * E1M1_QUAKE_SCALE;
-    player_start[1] += 1;
+    let [quake_x, quake_y, quake_z] = TEST_PLAYER_QUAKE_POSITION;
+    let player_start = [
+        quake_x * E1M1_QUAKE_SCALE,
+        quake_z * E1M1_QUAKE_SCALE,
+        -quake_y * E1M1_QUAKE_SCALE,
+    ];
     let enemy_start = [
-        player_start[0],
+        player_start[0] + 64 * E1M1_QUAKE_SCALE,
         player_start[1],
-        player_start[2] - 64 * E1M1_QUAKE_SCALE,
+        player_start[2],
     ];
 
     project.editor_camera.orbit_target = [
         player_start[0],
-        player_start[1] + 32 * E1M1_QUAKE_SCALE,
-        player_start[2] - 32 * E1M1_QUAKE_SCALE,
+        player_start[1] + 30 * E1M1_QUAKE_SCALE,
+        player_start[2] - 40 * E1M1_QUAKE_SCALE,
     ];
-    project.editor_camera.orbit_radius = 1024;
+    // Keep the saved preview camera inside the starting corridor. The older
+    // diagonal orbit landed on the surrounding wall at canonical scale and
+    // occluded both character previews when the project was first opened.
+    project.editor_camera.orbit_radius = 1984;
     project.editor_camera.orbit_yaw_q12 = 3584;
-    project.editor_camera.orbit_pitch_q12 = 3584;
+    project.editor_camera.orbit_pitch_q12 = 0;
     project.editor_viewport.orthographic_focus =
         project.editor_camera.orbit_target.map(|v| v as f32);
 
@@ -159,20 +163,6 @@ fn main() {
 
     std::fs::create_dir_all(&output_dir).expect("create E1M1 project directory");
     copy_dir_recursive(&donor_dir.join("assets"), &output_dir.join("assets"));
-    let bsp_path = map_path
-        .parent()
-        .expect("map source parent")
-        .join("bsp")
-        .join("e1m1.bsp");
-    let stripped_bsp =
-        strip_quake_bsp29_geometry(&std::fs::read(&bsp_path).unwrap_or_else(|error| {
-            panic!("read compiled E1M1 BSP at {}: {error}", bsp_path.display())
-        }))
-        .unwrap_or_else(|error| panic!("strip E1M1 BSP topology: {error}"));
-    let bsp_output = output_dir.join(BSP_GEOMETRY_RELATIVE);
-    std::fs::create_dir_all(bsp_output.parent().expect("BSP output parent"))
-        .expect("create BSP geometry directory");
-    std::fs::write(&bsp_output, stripped_bsp).expect("write stripped BSP topology");
     let project_path = output_dir.join("project.ron");
     project
         .save_to_path(&project_path)
@@ -264,6 +254,48 @@ fn scaled_components(components: Vec<(String, NodeKind)>) -> Vec<(String, NodeKi
         .into_iter()
         .map(|(name, kind)| (name, scale_component(kind)))
         .collect()
+}
+
+fn repair_preview_animator_clip(project: &ProjectDocument, components: &mut [(String, NodeKind)]) {
+    let model_id = components.iter().find_map(|(_, kind)| match kind {
+        NodeKind::ModelRenderer {
+            model: Some(model), ..
+        } => Some(*model),
+        _ => None,
+    });
+    let character_id = components.iter().find_map(|(_, kind)| match kind {
+        NodeKind::CharacterController {
+            character: Some(character),
+            ..
+        } => Some(*character),
+        _ => None,
+    });
+    let resolved = model_id
+        .zip(character_id)
+        .and_then(|(model_id, character_id)| {
+            let character = project.resource(character_id).and_then(|resource| {
+                if let ResourceData::Character(character) = &resource.data {
+                    Some(character)
+                } else {
+                    None
+                }
+            })?;
+            let model = project.resource(model_id).and_then(|resource| {
+                if let ResourceData::Model(model) = &resource.data {
+                    Some(model)
+                } else {
+                    None
+                }
+            })?;
+            psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
+                project, character, model_id, model,
+            )
+        });
+    for (_, kind) in components {
+        if let NodeKind::Animator { clip, .. } = kind {
+            *clip = resolved;
+        }
+    }
 }
 
 fn scale_component(kind: NodeKind) -> NodeKind {
@@ -398,18 +430,14 @@ fn write_provenance(
     writeln!(text, "- Quake coordinate scale: {E1M1_QUAKE_SCALE}x").unwrap();
     writeln!(
         text,
-        "- Actor visual/controller scale: 0.25x canonical PSoXide"
+        "- Actor visual/controller scale: 1.0x canonical PSoXide"
     )
     .unwrap();
-    writeln!(
-        text,
-        "- Runtime BSP topology/PVS: textureless geometry-only derivative of the released `bsp/e1m1.bsp`"
-    )
-    .unwrap();
+    writeln!(text, "- Runtime geometry: cooked from the editable brushes through PSoXide's standard BSP pipeline").unwrap();
     writeln!(text).unwrap();
     writeln!(
         text,
-        "No Quake texture names, texture pixels, lightmaps, gameplay entities, triggers, monsters, items, model assets, or audio are included. PSoXide's temporary 4bpp BRICK_1A material is assigned to every imported face. The stripped BSP sidecar retains only planes, vertices, faces, nodes, leaves, mark-surfaces, edges, visibility, and world-model bounds needed to reuse E1M1's partition/PVS."
+        "No Quake texture names, texture pixels, lightmaps, gameplay entities, triggers, monsters, items, model assets, or audio are included. PSoXide's temporary 4bpp BRICK_1A material is assigned to every imported face. Runtime geometry, collision, visibility, and editor-light shading are all cooked from the editable brushes."
     )
     .unwrap();
     std::fs::write(output_dir.join("SOURCE.md"), text).expect("write source provenance");
