@@ -3808,7 +3808,7 @@ impl EditorWorkspace {
         };
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     fn focus_scene_node_for_debug(&mut self, selector: &str) -> bool {
         let selector = selector.trim();
         if selector.is_empty() {

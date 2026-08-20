@@ -1,15 +1,16 @@
 use super::{
     animated_material_quad_uvs, euler_rotation_q12, face_side_visible,
-    horizontal_triangle_world_points, light_face, material_blend_mode, material_sized_uvs,
-    material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
-    preview_player_reference, preview_projected_triangle_hw_safe, preview_scratch,
-    preview_shadow_radius, preview_static_model_reference, preview_vertices_in_front, push_clear,
-    push_tri, push_tri_colors, push_wall_face, room_depth_slot, rotate_image_prop_local,
-    setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline, valid_preview_clip,
-    wall_material_sidedness_for_edge, wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot,
-    PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
-    PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
-    PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS,
+    horizontal_triangle_world_points, light_face, material_blend_mode, material_color,
+    material_sized_uvs, material_texture_tint, node_room_local_origin, preview_lights,
+    preview_model_reference, preview_player_reference, preview_projected_triangle_hw_safe,
+    preview_scratch, preview_shadow_radius, preview_static_model_reference,
+    preview_vertices_in_front, push_clear, push_tri, push_tri_colors, push_wall_face,
+    room_depth_slot, rotate_image_prop_local, setup_gte_for_camera, shadow_depth_slot,
+    should_draw_culled_face_outline, valid_preview_clip, wall_material_sidedness_for_edge,
+    wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
+    GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
+    PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
+    PREVIEW_WALL_UVS,
 };
 use psx_engine::{Mat3I16, PointLightSample, WorldVertex};
 use psx_gpu::material::BlendMode;
@@ -91,6 +92,22 @@ fn flat_sided(r: u8, g: u8, b: u8, sidedness: MaterialFaceSidedness) -> FaceShad
     FaceShade::Flat {
         rgb: (r, g, b),
         sidedness,
+    }
+}
+
+#[test]
+fn material_role_color_matching_is_ascii_case_insensitive() {
+    let mut project = ProjectDocument::new("material role colors");
+    let fallback = (1, 2, 3);
+    for (name, expected) in [
+        ("Castle BRICK Trim", (0xC8, 0x70, 0x40)),
+        ("mIxEd StOnE", (0xB6, 0xAC, 0x96)),
+        ("GLASS inset", (0x70, 0xA8, 0xC0)),
+        ("Dark WoOd", (0x90, 0x60, 0x40)),
+        ("METAL plate", (0x90, 0x96, 0x9A)),
+    ] {
+        let id = project.add_resource(name, ResourceData::Material(MaterialResource::opaque(None)));
+        assert_eq!(material_color(&project, Some(id), fallback), expected);
     }
 }
 
@@ -2528,6 +2545,61 @@ fn benchmark_e1m1_brush_navigation() {
         }
     }
 
+    // Split the dominant BSP path from the rest of the preview build so an
+    // optimization cannot hide behind aggregate frame timing. Warm both the
+    // solved/lit caches and the reusable command-log capacity first.
+    let mut brush_cmd_log = Vec::new();
+    {
+        let mut scratch = super::preview_scratch()
+            .lock()
+            .expect("editor preview scratch mutex");
+        scratch.used = 0;
+        scratch.tex_used = 0;
+        scratch.ot.clear();
+        super::walk_brushes(
+            &project,
+            &textures,
+            super::setup_gte_for_camera(camera(1)),
+            &hidden,
+            &mut scratch,
+        );
+        unsafe { psx_gpu_render::build_cmd_log_into(&scratch.ot, &mut brush_cmd_log) };
+    }
+    let mut brush_walk_ns = Vec::with_capacity(FRAMES);
+    let mut brush_decode_ns = Vec::with_capacity(FRAMES);
+    let mut brush_walk_alloc = (0_u64, 0_u64);
+    let mut brush_decode_alloc = (0_u64, 0_u64);
+    for sample in 0..FRAMES {
+        let mut scratch = super::preview_scratch()
+            .lock()
+            .expect("editor preview scratch mutex");
+        scratch.used = 0;
+        scratch.tex_used = 0;
+        scratch.ot.clear();
+        let before = preview_test_alloc_snapshot();
+        let started = std::time::Instant::now();
+        super::walk_brushes(
+            &project,
+            &textures,
+            super::setup_gte_for_camera(camera(sample + 1)),
+            &hidden,
+            &mut scratch,
+        );
+        brush_walk_ns.push(started.elapsed().as_nanos() as u64);
+        let after = preview_test_alloc_snapshot();
+        brush_walk_alloc.0 += after.0 - before.0;
+        brush_walk_alloc.1 += after.1 - before.1;
+
+        let before = preview_test_alloc_snapshot();
+        let started = std::time::Instant::now();
+        unsafe { psx_gpu_render::build_cmd_log_into(&scratch.ot, &mut brush_cmd_log) };
+        brush_decode_ns.push(started.elapsed().as_nanos() as u64);
+        let after = preview_test_alloc_snapshot();
+        brush_decode_alloc.0 += after.0 - before.0;
+        brush_decode_alloc.1 += after.1 - before.1;
+        std::hint::black_box(brush_cmd_log.len());
+    }
+
     let mut uncached_overlay_ns = Vec::with_capacity(FRAMES);
     let mut cached_overlay_ns = Vec::with_capacity(FRAMES);
     let mut uncached_overlay_alloc = (0_u64, 0_u64);
@@ -2620,8 +2692,10 @@ fn benchmark_e1m1_brush_navigation() {
     let overlay_median_ns = percentile(&mut overlay_ns, 50);
     let uncached_overlay_median_ns = percentile(&mut uncached_overlay_ns, 50);
     let cached_overlay_median_ns = percentile(&mut cached_overlay_ns, 50);
+    let brush_walk_median_ns = percentile(&mut brush_walk_ns, 50);
+    let brush_decode_median_ns = percentile(&mut brush_decode_ns, 50);
     println!(
-        "E1M1 editor navigation: brushes={} lights={} frames={} median_ms={:.3} p95_ms={:.3} refresh_median_ms={:.3} build_median_ms={:.3} overlay_median_ms={:.3} alloc_calls_per_frame={:.1} alloc_bytes_per_frame={:.1} refresh_alloc_per_frame={:.1}/{:.1} build_alloc_per_frame={:.1}/{:.1} overlay_alloc_per_frame={:.1}/{:.1} grid_ab_uncached_cached_ms={:.3}/{:.3} grid_ab_uncached_cached_alloc={:.1}/{:.1}:{:.1}/{:.1} emitted={emitted:?}",
+        "E1M1 editor navigation: brushes={} lights={} frames={} median_ms={:.3} p95_ms={:.3} refresh_median_ms={:.3} build_median_ms={:.3} overlay_median_ms={:.3} brush_walk_median_ms={:.3} brush_decode_median_ms={:.3} alloc_calls_per_frame={:.1} alloc_bytes_per_frame={:.1} refresh_alloc_per_frame={:.1}/{:.1} build_alloc_per_frame={:.1}/{:.1} overlay_alloc_per_frame={:.1}/{:.1} brush_walk_alloc_per_frame={:.1}/{:.1} brush_decode_alloc_per_frame={:.1}/{:.1} grid_ab_uncached_cached_ms={:.3}/{:.3} grid_ab_uncached_cached_alloc={:.1}/{:.1}:{:.1}/{:.1} emitted={emitted:?}",
         project.active_scene().brushes.len(),
         preview_light_count,
         FRAMES,
@@ -2630,6 +2704,8 @@ fn benchmark_e1m1_brush_navigation() {
         refresh_median_ns as f64 / 1_000_000.0,
         build_median_ns as f64 / 1_000_000.0,
         overlay_median_ns as f64 / 1_000_000.0,
+        brush_walk_median_ns as f64 / 1_000_000.0,
+        brush_decode_median_ns as f64 / 1_000_000.0,
         alloc_calls as f64 / FRAMES as f64,
         alloc_bytes as f64 / FRAMES as f64,
         refresh_alloc.0 as f64 / FRAMES as f64,
@@ -2638,6 +2714,10 @@ fn benchmark_e1m1_brush_navigation() {
         build_alloc.1 as f64 / FRAMES as f64,
         overlay_alloc.0 as f64 / FRAMES as f64,
         overlay_alloc.1 as f64 / FRAMES as f64,
+        brush_walk_alloc.0 as f64 / FRAMES as f64,
+        brush_walk_alloc.1 as f64 / FRAMES as f64,
+        brush_decode_alloc.0 as f64 / FRAMES as f64,
+        brush_decode_alloc.1 as f64 / FRAMES as f64,
         uncached_overlay_median_ns as f64 / 1_000_000.0,
         cached_overlay_median_ns as f64 / 1_000_000.0,
         uncached_overlay_alloc.0 as f64 / FRAMES as f64,
