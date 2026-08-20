@@ -674,7 +674,11 @@ impl<T> PrimitiveSink<T> for PrimitiveArena<'_, T> {
     }
 }
 
-const PRIMITIVE_PACKET_SLOT_WORDS: usize = {
+/// Backing words in one mixed primitive-arena slot.
+///
+/// Retained raw packet producers use this to convert a tightly packed stream
+/// into the same capacity unit used by [`PrimitivePacketScratch`].
+pub const PRIMITIVE_PACKET_SLOT_WORDS: usize = {
     // Slots must hold the largest packet that shares the arena. The
     // textured-Gouraud quad (14 words) is wider than the triangle
     // (11 words); a single quad replaces two triangles, so widening the

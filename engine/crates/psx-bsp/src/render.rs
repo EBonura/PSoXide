@@ -29,6 +29,7 @@ use crate::pxbsp::{
 };
 use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
+use crate::sky::{submit_view_ray_layered_sky, VIEW_RAY_SKY_PACKET_WORDS};
 use crate::{
     Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_BAKED_UV,
     FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID, TEXTURE_NULL, TEXTURE_SKY,
@@ -43,7 +44,6 @@ const MAX_FACE_COUNT: usize = 32_767;
 /// Initial PXBSP face-chain storage. Typical leaf PVS sets are far smaller
 /// than the whole map (E1M1 is 484/5,724); vectors may still grow for denser
 /// maps without permanently reserving two complete face tables on PS1.
-const PXBSP_INITIAL_FACE_CHAIN_CAPACITY: usize = 512;
 const PXBSP_NODE_POSTORDER: u32 = 1 << 31;
 
 #[inline]
@@ -461,6 +461,9 @@ pub struct Renderer {
     pxbsp_node_count: usize,
     pxbsp_node_stack: Vec<u32>,
     pxbsp_node_metadata_valid: bool,
+    /// Node ranges are empty, so visible faces are gathered from the marked
+    /// leaves reached by the bounds traversal instead of node-owned ranges.
+    pxbsp_node_leaf_marks: bool,
     visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
     cached_visibility: Option<(u32, usize)>,
@@ -498,7 +501,11 @@ impl Renderer {
     /// avoiding heap growth on the first PVS rebuild during gameplay.
     pub fn new_pxbsp_with_nodes(face_count: usize, node_count: usize) -> Self {
         let mut renderer = Self::with_capacities(0, 0, 0);
-        let chain_capacity = face_count.min(PXBSP_INITIAL_FACE_CHAIN_CAPACITY);
+        // These chains are persistent world scratch. Allocate their exact
+        // upper bound once: a first full-level PVS can exceed a small starter
+        // capacity, and repeated Vec growth leaks peak space from the PS1's
+        // bump-style boot heap before the first frame is presented.
+        let chain_capacity = face_count;
         renderer.pxbsp_face_state = vec![0; face_count.div_ceil(4)];
         renderer.pxbsp_face_count = face_count;
         renderer.visible_pxbsp_faces = Vec::with_capacity(chain_capacity);
@@ -529,6 +536,7 @@ impl Renderer {
             pxbsp_node_count: 0,
             pxbsp_node_stack: Vec::new(),
             pxbsp_node_metadata_valid: false,
+            pxbsp_node_leaf_marks: false,
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_visibility: None,
@@ -761,6 +769,7 @@ impl Renderer {
                 materials,
                 material_tick,
                 PxbspFaceSelection::VisibleWorld,
+                Some(view),
                 packet_storage,
             )
         } else {
@@ -820,6 +829,7 @@ impl Renderer {
                 first: first_face,
                 end: face_end,
             },
+            None,
             packet_storage,
         );
         self.frame = self.frame.wrapping_add(1);
@@ -834,6 +844,7 @@ impl Renderer {
         materials: &[Option<PxbspTextureBinding>],
         material_tick: u32,
         selection: PxbspFaceSelection,
+        sky_view: Option<ViewTransform>,
         packet_storage: &mut [u32],
     ) -> RenderFrame {
         let start = packet_storage.as_mut_ptr();
@@ -851,6 +862,7 @@ impl Renderer {
         let mut batch_vertex_count = 0usize;
         let mut batch_surface_count = 0usize;
         let mut batch_worst_words = 0usize;
+        let mut layered_sky_binding = None;
 
         let faces = map.faces();
         let map_materials = map.materials();
@@ -891,6 +903,17 @@ impl Renderer {
                 // clip for one batch, which a face this size never is).
                 continue;
             }
+            if material.flags & crate::pxbsp::material_flags::LAYERED_SKY != 0 {
+                if sky_view.is_some() {
+                    if let Some(selected) = layered_sky_binding {
+                        debug_assert_eq!(selected, binding);
+                    } else {
+                        layered_sky_binding = Some(binding);
+                    }
+                }
+                stats.visible_faces = stats.visible_faces.saturating_add(1);
+                continue;
+            }
             let face_worst_words = (vertex_count - 2) * WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE;
             if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
                 || batch_surface_count == BATCH_MAX_SURFACES
@@ -922,55 +945,6 @@ impl Renderer {
                 break;
             }
 
-            if material.flags & crate::pxbsp::material_flags::LAYERED_SKY != 0 {
-                // quake-psx layered sky: the atlas holds a masked
-                // foreground tile (left) and a solid background tile
-                // (right); the same fan is emitted twice with per-layer
-                // texture windows and scroll speeds. Background is
-                // staged second so the tagged-stream prepend draws it
-                // first; foreground black texels stay transparent.
-                if batch_surface_count + 2 > BATCH_MAX_SURFACES
-                    || !packet_capacity(next, end, batch_worst_words + face_worst_words * 2)
-                {
-                    if batch_surface_count != 0 {
-                        stats.surface_batches = stats.surface_batches.saturating_add(1);
-                    }
-                    let submitted = unsafe {
-                        flush_windowed_batch(
-                            &mut batch_vertices,
-                            batch_vertex_count,
-                            &batch_surfaces,
-                            batch_surface_count,
-                            next,
-                        )
-                    };
-                    next = submitted.next_packet;
-                    stats.packets = stats.packets.wrapping_add(submitted.packets);
-                    stats.hardware_triangles = stats
-                        .hardware_triangles
-                        .wrapping_add(submitted.hardware_triangles);
-                    batch_vertex_count = 0;
-                    batch_surface_count = 0;
-                    batch_worst_words = 0;
-                }
-                let layers = layered_sky_batch_surfaces(
-                    binding,
-                    state,
-                    batch_vertex_count as u16,
-                    vertex_count as u16,
-                    material_tick,
-                );
-                batch_surfaces[batch_surface_count] = layers[0];
-                batch_surfaces[batch_surface_count + 1] = layers[1];
-                batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count]
-                    .copy_from_slice(&face_vertices[..vertex_count]);
-                batch_vertex_count += vertex_count;
-                batch_surface_count += 2;
-                batch_worst_words += face_worst_words * 2;
-                stats.visible_faces = stats.visible_faces.saturating_add(1);
-                previous_advance_marker(&mut stats);
-                continue;
-            }
             batch_surfaces[batch_surface_count] = ClassicAffineWindowedBatchSurface {
                 first_vertex: batch_vertex_count as u16,
                 vertex_count: vertex_count as u16,
@@ -1008,6 +982,49 @@ impl Renderer {
         stats.hardware_triangles = stats
             .hardware_triangles
             .wrapping_add(submitted.hardware_triangles);
+
+        // Sky faces are apertures, not textured polygons. Append one bounded
+        // view-ray lattice after the world stream; equal-slot OT prepending
+        // then executes it first, behind every opaque world packet.
+        if let (Some(binding), Some(view)) = (layered_sky_binding, sky_view) {
+            if packet_capacity(next, end, VIEW_RAY_SKY_PACKET_WORDS) {
+                let half_width = self.view_projection.half_width.max(1);
+                let half_height = self.view_projection.half_height.max(1);
+                let screen_size = [
+                    half_width.saturating_mul(2).min(i32::from(i16::MAX)) as i16,
+                    half_height.saturating_mul(2).min(i32::from(i16::MAX)) as i16,
+                ];
+                let screen_center = [
+                    half_width.min(i32::from(i16::MAX)) as i16,
+                    half_height.min(i32::from(i16::MAX)) as i16,
+                ];
+                let projection = self
+                    .view_projection
+                    .focal_length
+                    .clamp(1, i32::from(i16::MAX)) as i16;
+                let submitted = unsafe {
+                    submit_view_ray_layered_sky(
+                        binding.texture_page,
+                        binding.clut,
+                        binding.uv_origin,
+                        binding.texture_size,
+                        view.rotation,
+                        screen_size,
+                        screen_center,
+                        projection,
+                        material_tick,
+                        next,
+                    )
+                };
+                next = submitted.next_packet;
+                stats.packets = stats.packets.wrapping_add(submitted.packets);
+                stats.hardware_triangles = stats
+                    .hardware_triangles
+                    .wrapping_add(submitted.hardware_triangles);
+            } else {
+                stats.packet_overflow_avoided = true;
+            }
+        }
 
         let packet_words = unsafe { next.offset_from(start) as usize };
         RenderFrame {
@@ -1371,6 +1388,7 @@ impl Renderer {
         let nodes = map.nodes();
         if nodes.len() != self.pxbsp_node_count {
             self.pxbsp_node_metadata_valid = false;
+            self.pxbsp_node_leaf_marks = false;
             return;
         }
         self.pxbsp_node_visible.fill(0);
@@ -1384,6 +1402,7 @@ impl Renderer {
             .head_nodes[0];
         if root < 0 || root as usize >= nodes.len() {
             self.pxbsp_node_metadata_valid = false;
+            self.pxbsp_node_leaf_marks = false;
             return;
         }
 
@@ -1430,7 +1449,8 @@ impl Renderer {
                 }
             }
         }
-        self.pxbsp_node_metadata_valid = owns_faces;
+        self.pxbsp_node_metadata_valid = true;
+        self.pxbsp_node_leaf_marks = !owns_faces;
     }
 
     fn pxbsp_leaf_visible(&self, leaf_index: usize) -> bool {
@@ -1485,11 +1505,27 @@ impl Renderer {
             let behind = plane_distance(plane, camera_origin) < 0;
             let near = node.children[behind as usize];
             let far = node.children[usize::from(!behind)];
-            if far >= 0 {
-                self.pxbsp_node_stack.push(far as u32);
-            }
-            if near >= 0 {
-                self.pxbsp_node_stack.push(near as u32);
+            for child in [far, near] {
+                if child >= 0 {
+                    self.pxbsp_node_stack.push(child as u32);
+                } else if self.pxbsp_node_leaf_marks {
+                    let leaf_index = (-1i32 - child as i32) as usize;
+                    if !self.pxbsp_leaf_visible(leaf_index) {
+                        continue;
+                    }
+                    let leaf = map.leaves().get(leaf_index).expect("validated node leaf");
+                    let start = leaf.first_mark_surface as usize;
+                    let end = start + leaf.mark_surface_count as usize;
+                    for mark_index in start..end {
+                        let face =
+                            map.mark_surfaces()
+                                .get(mark_index)
+                                .expect("validated leaf mark") as usize;
+                        if packed_face_state(&self.pxbsp_face_state, face) != 0 {
+                            self.frame_pxbsp_faces.push(face as u16);
+                        }
+                    }
+                }
             }
 
             let start = node.first_face as usize;
@@ -1501,11 +1537,13 @@ impl Renderer {
             }
         }
 
-        // Imported func_* brushes are deliberately staticized into leaf mark
-        // lists and do not belong to the original world-node face ranges.
-        for &face in &self.visible_pxbsp_faces {
-            if packed_face_state(&self.pxbsp_face_state, face as usize) == 1 {
-                self.frame_pxbsp_faces.push(face);
+        if !self.pxbsp_node_leaf_marks {
+            // Imported func_* brushes are deliberately staticized into leaf
+            // mark lists and do not belong to world-node face ranges.
+            for &face in &self.visible_pxbsp_faces {
+                if packed_face_state(&self.pxbsp_face_state, face as usize) == 1 {
+                    self.frame_pxbsp_faces.push(face);
+                }
             }
         }
         self.frame_pxbsp_faces.sort_unstable();
@@ -1638,62 +1676,6 @@ struct PxbspMaterialState {
     color_command_word: u32,
     uv_offset: [u8; 2],
 }
-/// Placeholder for loop-position bookkeeping in the sky branch; the
-/// per-face loop advances `face_index` in the `for` header, so nothing
-/// extra is needed. Kept as a named no-op for readability.
-#[inline(always)]
-fn previous_advance_marker(_stats: &mut RenderStats) {}
-
-/// quake-psx layered sky layers for one fan: masked foreground (left
-/// half of the atlas) and solid background (right half), each a
-/// power-of-two texture window with its own scroll offset. Scroll
-/// rates mirror quake-psx (foreground 8s, background 16s full cycles
-/// at 60 material ticks per second).
-fn layered_sky_batch_surfaces(
-    binding: PxbspTextureBinding,
-    state: PxbspMaterialState,
-    first_vertex: u16,
-    vertex_count: u16,
-    material_tick: u32,
-) -> [ClassicAffineWindowedBatchSurface; 2] {
-    const SKY_FOREGROUND_CYCLE_SECONDS: u32 = 8;
-    const SKY_BACKGROUND_CYCLE_SECONDS: u32 = 16;
-    const MATERIAL_TICKS_PER_SECOND: u32 = 60;
-    let width = (binding.texture_size[0] / 2).clamp(8, 128);
-    let height = binding.texture_size[1].clamp(8, 128);
-    let foreground_window =
-        TextureWindow::power_of_two_tile(binding.uv_origin[0], binding.uv_origin[1], width, height)
-            .word();
-    let background_window = TextureWindow::power_of_two_tile(
-        binding.uv_origin[0].wrapping_add(width),
-        binding.uv_origin[1],
-        width,
-        height,
-    )
-    .word();
-    let scroll = |cycle_seconds: u32| {
-        ((u64::from(material_tick) * u64::from(width)
-            / u64::from(MATERIAL_TICKS_PER_SECOND * cycle_seconds))
-            & 0xff) as u8
-    };
-    let layer = |window: u32, scroll: u8| ClassicAffineWindowedBatchSurface {
-        first_vertex,
-        vertex_count,
-        tpage: state.texture_page,
-        clut: binding.clut,
-        uv_offset: [scroll, scroll],
-        texture_window_word: window,
-        color_command_word: state.color_command_word,
-    };
-    // Foreground staged first: tagged packets prepend at equal OT
-    // depth, so the background executes first and the masked
-    // foreground draws over it.
-    [
-        layer(foreground_window, scroll(SKY_FOREGROUND_CYCLE_SECONDS)),
-        layer(background_window, scroll(SKY_BACKGROUND_CYCLE_SECONDS)),
-    ]
-}
-
 fn pxbsp_material_state(
     material: PxbspMaterial,
     binding: PxbspTextureBinding,
@@ -2098,6 +2080,67 @@ mod tests {
     }
 
     #[test]
+    fn layered_sky_face_selects_one_constant_cost_view_background() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
+        lumps[PxbspLumpKind::Materials as usize][2..4]
+            .copy_from_slice(&material_flags::LAYERED_SKY.to_le_bytes());
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(10, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            // Runtime bindings describe one square half of the 256x128 pair.
+            texture_size: [128; 2],
+        };
+        let mut packets = [0u32; VIEW_RAY_SKY_PACKET_WORDS];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[Some(binding)],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.stats.visible_faces, 1);
+        assert_eq!(frame.stats.unresolved_material_faces, 0);
+        assert!(!frame.stats.packet_overflow_avoided);
+        assert_eq!(frame.stats.packets, 243);
+        assert_eq!(frame.stats.hardware_triangles, 480);
+        assert_eq!(frame.packet_words, VIEW_RAY_SKY_PACKET_WORDS);
+        assert_eq!(packets[0] >> 24, 1, "first packet is the window reset");
+        assert_eq!(packets[2] >> 24, 9, "sky follows with a textured quad");
+    }
+
+    #[test]
     fn pxbsp_renderer_allocates_exact_world_scratch() {
         let renderer = Renderer::new_pxbsp_with_nodes(37, 11);
         assert!(renderer.face_visible.is_empty());
@@ -2123,6 +2166,38 @@ mod tests {
         assert!(!renderer.pxbsp_leaf_visible(1));
         assert!(renderer.pxbsp_leaf_visible(100));
         assert!(!renderer.pxbsp_leaf_visible(101));
+    }
+
+    #[test]
+    fn zero_face_nodes_collect_visible_leaf_marks_through_bounds() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        // Standard editable-brush maps keep render faces in leaf marks; BSP
+        // nodes remain spatial partitions and deliberately own no face range.
+        lumps[PxbspLumpKind::Nodes as usize][12..16].fill(0);
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(9, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
+        assert_eq!(packed_face_state(&renderer.pxbsp_face_state, 0), 1);
+        assert!(renderer.pxbsp_node_metadata_valid);
+        assert!(renderer.pxbsp_node_leaf_marks);
+
+        let view = load_pxbsp_view(camera);
+        let frustum =
+            FrustumPlanes::from_view(&view.rotation, view.translation, renderer.view_projection);
+        assert!(renderer.select_frame_pxbsp_faces(&map, camera.origin, &frustum));
+        assert_eq!(renderer.frame_pxbsp_faces, [0]);
     }
 
     #[test]
