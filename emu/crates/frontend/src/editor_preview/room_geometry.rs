@@ -1095,16 +1095,20 @@ pub(super) fn material_color(
     let Some(resource) = project.resource(id) else {
         return fallback;
     };
-    let name = resource.name.to_ascii_lowercase();
-    if name.contains("brick") {
+    let name = resource.name.as_bytes();
+    let contains = |needle: &[u8]| {
+        name.windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+    };
+    if contains(b"brick") {
         (0xC8, 0x70, 0x40)
-    } else if name.contains("floor") || name.contains("stone") {
+    } else if contains(b"floor") || contains(b"stone") {
         (0xB6, 0xAC, 0x96)
-    } else if name.contains("glass") {
+    } else if contains(b"glass") {
         (0x70, 0xA8, 0xC0)
-    } else if name.contains("wood") {
+    } else if contains(b"wood") {
         (0x90, 0x60, 0x40)
-    } else if name.contains("metal") {
+    } else if contains(b"metal") {
         (0x90, 0x96, 0x9A)
     } else if let ResourceData::Material(mat) = &resource.data {
         // Author actually tinted the material away from neutral -- use
