@@ -8,6 +8,52 @@
 
 use super::*;
 
+struct BrushPickSolvedCache {
+    key: Option<u64>,
+    brushes: Vec<psxed_project::brush::SolvedBrush>,
+}
+
+static BRUSH_PICK_SOLVED_CACHE: std::sync::OnceLock<std::sync::Mutex<BrushPickSolvedCache>> =
+    std::sync::OnceLock::new();
+
+fn brush_pick_geometry_key(project: &ProjectDocument) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let brushes = &project.active_scene().brushes;
+    brushes.len().hash(&mut hasher);
+    for brush in brushes {
+        brush.faces.len().hash(&mut hasher);
+        for face in &brush.faces {
+            face.points.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn with_cached_brush_pick_solves<R>(
+    project: &ProjectDocument,
+    visit: impl FnOnce(&[psxed_project::brush::SolvedBrush]) -> R,
+) -> R {
+    let key = brush_pick_geometry_key(project);
+    let cache = BRUSH_PICK_SOLVED_CACHE.get_or_init(|| {
+        std::sync::Mutex::new(BrushPickSolvedCache {
+            key: None,
+            brushes: Vec::new(),
+        })
+    });
+    let mut cache = cache.lock().expect("brush pick solved cache");
+    if cache.key != Some(key) {
+        cache.brushes = project
+            .active_scene()
+            .brushes
+            .iter()
+            .map(psxed_project::brush::Brush::solve)
+            .collect();
+        cache.key = Some(key);
+    }
+    visit(&cache.brushes)
+}
+
 /// Pre-resolved pointer context for one frame of 3D-viewport input. All
 /// fields are `Copy` snapshots so tools take `&mut EditorWorkspace` freely.
 #[derive(Clone, Copy)]
@@ -512,48 +558,51 @@ impl EditorWorkspace {
         let camera = self.viewport_3d_camera();
         let origin = camera.basis().position;
         let mut hits = Vec::<(f32, usize, usize, [f32; 3])>::new();
-        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            let solved = brush.solve();
-            if !solved.is_valid() {
-                continue;
-            }
-            let mut best: Option<(f32, usize, [f32; 3])> = None;
-            for (face, polygon) in solved.polygons.iter().enumerate() {
-                let Some(polygon) = polygon else { continue };
-                let projected = polygon
-                    .verts
-                    .iter()
-                    .copied()
-                    .map(|point| self.project_brush_point_3d(rect, point))
-                    .collect::<Option<Vec<_>>>();
-                let Some(projected) = projected else {
-                    continue;
-                };
-                if !point_in_polygon_2d(pointer, &projected)
-                    && distance_to_polygon_edges_2d(pointer, &projected) > BRUSH_SCREEN_PICK_RADIUS
-                {
+        let mut projected = Vec::with_capacity(16);
+        with_cached_brush_pick_solves(&self.project, |solved_brushes| {
+            for (index, solved) in solved_brushes.iter().enumerate() {
+                if !solved.is_valid() {
                     continue;
                 }
-                let count = polygon.verts.len() as f32;
-                let center: [f32; 3] = std::array::from_fn(|axis| {
-                    polygon
-                        .verts
-                        .iter()
-                        .map(|point| point[axis] as f32)
-                        .sum::<f32>()
-                        / count
-                });
-                let distance = distance3_f32(origin, center);
-                if best.is_none_or(|(best_distance, best_face, _)| {
-                    distance < best_distance || (distance == best_distance && face < best_face)
-                }) {
-                    best = Some((distance, face, center));
+                let mut best: Option<(f32, usize, [f32; 3])> = None;
+                for (face, polygon) in solved.polygons.iter().enumerate() {
+                    let Some(polygon) = polygon else { continue };
+                    projected.clear();
+                    for &point in &polygon.verts {
+                        let Some(point) = self.project_brush_point_3d(rect, point) else {
+                            projected.clear();
+                            break;
+                        };
+                        projected.push(point);
+                    }
+                    if projected.len() != polygon.verts.len()
+                        || (!point_in_polygon_2d(pointer, &projected)
+                            && distance_to_polygon_edges_2d(pointer, &projected)
+                                > BRUSH_SCREEN_PICK_RADIUS)
+                    {
+                        continue;
+                    }
+                    let count = polygon.verts.len() as f32;
+                    let center: [f32; 3] = std::array::from_fn(|axis| {
+                        polygon
+                            .verts
+                            .iter()
+                            .map(|point| point[axis] as f32)
+                            .sum::<f32>()
+                            / count
+                    });
+                    let distance = distance3_f32(origin, center);
+                    if best.is_none_or(|(best_distance, best_face, _)| {
+                        distance < best_distance || (distance == best_distance && face < best_face)
+                    }) {
+                        best = Some((distance, face, center));
+                    }
+                }
+                if let Some((distance, face, center)) = best {
+                    hits.push((distance, index, face, center));
                 }
             }
-            if let Some((distance, face, center)) = best {
-                hits.push((distance, index, face, center));
-            }
-        }
+        });
         hits.sort_by(|a, b| {
             a.0.total_cmp(&b.0)
                 .then_with(|| a.1.cmp(&b.1))
