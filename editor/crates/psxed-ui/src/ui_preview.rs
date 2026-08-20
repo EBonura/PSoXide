@@ -343,8 +343,11 @@ pub(crate) fn draw_ui_scene_preview(
                 );
             }
             UiNodeKind::Bar {
+                rect,
                 value,
                 max,
+                texture,
+                frame_count,
                 fill,
                 fill_gradient,
                 background,
@@ -355,13 +358,41 @@ pub(crate) fn draw_ui_scene_preview(
                 else {
                     continue;
                 };
+                let max_q12 = ui_binding_preview_q12(*max).max(1);
+                let value_q12 = ui_binding_preview_q12(*value).clamp(0, max_q12);
+                if *frame_count >= 2 {
+                    if let Some(thumb) = texture
+                        .and_then(|id| project.resource(id).map(|resource| resource.id))
+                        .and_then(|id| texture_thumbs.get(&id))
+                    {
+                        let frame_index =
+                            psxed_project::ui_bar_frame_index(value_q12, max_q12, *frame_count)
+                                as f32;
+                        let frames = f32::from(*frame_count);
+                        let uv = Rect::from_min_max(
+                            Pos2::new(0.0, frame_index / frames),
+                            Pos2::new(1.0, (frame_index + 1.0) / frames),
+                        );
+                        let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
+                        draw_ui_preview_image(
+                            painter,
+                            thumb.handle.id(),
+                            preview.quad,
+                            uv,
+                            *fill,
+                            UiImageEffect::None,
+                            frame,
+                            absolute,
+                            false,
+                        );
+                        continue;
+                    }
+                }
                 draw_ui_preview_quad_paint(
                     painter,
                     preview.quad,
                     ui_preview_paint(*background, *background_gradient),
                 );
-                let max_q12 = ui_binding_preview_q12(*max).max(1);
-                let value_q12 = ui_binding_preview_q12(*value).clamp(0, max_q12);
                 let fill_w = preview.width * (value_q12 as f32 / max_q12 as f32);
                 if fill_w > 0.0 {
                     draw_ui_preview_quad_paint(

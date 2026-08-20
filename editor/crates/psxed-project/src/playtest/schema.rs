@@ -1154,7 +1154,7 @@ pub struct PlaytestUiNode {
     pub value: UiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: UiValueBinding,
-    /// Texture asset index for `Image`, or `None`.
+    /// Texture asset index for `Image` or a sprite-strip `Bar`, or `None`.
     pub texture_asset: Option<usize>,
     /// Animated image vertex-colour effect preset.
     pub image_effect: crate::UiImageEffect,
@@ -1164,7 +1164,8 @@ pub struct PlaytestUiNode {
     pub tag: String,
     /// Action fired by a `Button`. Ignored by other kinds.
     pub action: PlaytestUiAction,
-    /// Project option a `Slider` binds to, or [`psx_level::UI_OPTION_NONE`].
+    /// Project option a `Slider` binds to; sprite-strip frame count for a
+    /// textured `Bar`; otherwise [`psx_level::UI_OPTION_NONE`].
     pub option: u16,
     /// Clockwise visual rotation around this node's centre, in degrees.
     pub rotation_degrees: i16,
