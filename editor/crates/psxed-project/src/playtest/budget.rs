@@ -2,10 +2,14 @@ use std::collections::BTreeSet;
 use std::mem::size_of;
 use std::path::Path;
 
-use psx_bsp::pxbsp::{PxbspIndex, PxbspLumpKind, PxbspVersion};
-use psx_bsp::{
-    BrushModel, ClipNode, CookedRecord, Face, Leaf, Node, Plane, RecordSlice, SliceReader, Vertex,
-};
+#[cfg(test)]
+use psx_bsp::pxbsp::PxbspVersion;
+use psx_bsp::pxbsp::{material_flags, PxbspIndex, PxbspLumpKind};
+use psx_bsp::sky::VIEW_RAY_SKY_PACKET_WORDS;
+#[cfg(test)]
+use psx_bsp::RecordSlice;
+use psx_bsp::{BrushModel, ClipNode, CookedRecord, Face, Leaf, Node, Plane, SliceReader, Vertex};
+use psx_engine::PRIMITIVE_PACKET_SLOT_WORDS;
 
 use super::{
     playtest_performance_envelope, streamed_room_chunk_memory_report, PlaytestAssetKind,
@@ -30,6 +34,12 @@ pub const PLAYTEST_PACKET_CAPACITY_CEILING: usize = 4096;
 /// estimate remains visible as a warning, while the runtime keeps a bounded
 /// arena and degrades by dropping over-cap geometry instead of failing to link.
 pub const PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING: usize = PLAYTEST_PACKET_LIMIT;
+
+/// Primitive-arena slots reserved when any Quake layered-sky aperture is
+/// visible. The retained renderer emits one tightly packed, constant-cost
+/// view-ray background instead of drawing the source sky polygons.
+const VIEW_RAY_SKY_PACKET_SLOTS: usize =
+    VIEW_RAY_SKY_PACKET_WORDS.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
 
 /// Per-project primitive arena capacity for a cooked packet envelope:
 /// the envelope rounded up to a 64-packet step, floored at the baseline
@@ -326,7 +336,6 @@ pub fn cooked_playtest_budgets(
             let visibility = index.lump(PxbspLumpKind::Visibility);
             let vertices = index.lump(PxbspLumpKind::Vertices);
             let leaves = index.lump(PxbspLumpKind::Leaves);
-            let faces = index.lump(PxbspLumpKind::Faces);
             pvs_bytes = visibility.len as usize;
             let leaf_size = PxbspLumpKind::Leaves
                 .record_size(index.version())
@@ -335,11 +344,7 @@ pub fn cooked_playtest_budgets(
                 .saturating_sub(1)
                 .div_ceil(8);
             light_bytes = light_bytes.saturating_add(vertices.len as usize / Vertex::SIZE * 3);
-            let face_start = faces.offset as usize;
-            let face_end = faces.end() as usize;
-            if let Some(face_bytes) = world.bytes.get(face_start..face_end) {
-                bsp_packets = pxbsp_face_packets(index.version(), face_bytes).unwrap_or(0);
-            }
+            bsp_packets = cooked_bsp_packets(package);
         }
     }
 
@@ -414,12 +419,26 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
         return 0;
     }
     let faces = map.faces();
-    let triangles_of = |surface: usize| -> usize {
-        faces.get(surface).map_or(0, |face| {
-            (face.vertex_count.max(0) as usize).saturating_sub(2)
-        })
+    let materials = map.materials();
+    let is_layered_sky = |surface: usize| -> bool {
+        faces
+            .get(surface)
+            .and_then(|face| materials.get(face.texture as usize))
+            .is_some_and(|material| material.flags & material_flags::LAYERED_SKY != 0)
     };
-    let total: usize = (0..faces.len()).map(triangles_of).sum();
+    let packet_slots_of = |surface: usize| -> usize {
+        if is_layered_sky(surface) {
+            0
+        } else {
+            faces.get(surface).map_or(0, |face| {
+                (face.vertex_count.max(0) as usize).saturating_sub(2)
+            })
+        }
+    };
+    let mut total: usize = (0..faces.len()).map(packet_slots_of).sum();
+    if (0..faces.len()).any(is_layered_sky) {
+        total = total.saturating_add(VIEW_RAY_SKY_PACKET_SLOTS);
+    }
     // The packet arena only ever holds ONE frame's draw, and a frame
     // draws the PVS of one leaf, not the whole map. Size from the worst
     // leaf's deduped visible-surface triangles; the map total (which
@@ -438,7 +457,8 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
         for flag in seen.iter_mut() {
             *flag = false;
         }
-        let mut frame_triangles = 0usize;
+        let mut frame_packet_slots = 0usize;
+        let mut frame_has_layered_sky = false;
         for bit in 0..visible_leaves {
             if row[bit / 8] & (1 << (bit % 8)) == 0 {
                 continue;
@@ -453,11 +473,16 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
                 };
                 if surface < seen.len() && !seen[surface] {
                     seen[surface] = true;
-                    frame_triangles = frame_triangles.saturating_add(triangles_of(surface));
+                    frame_has_layered_sky |= is_layered_sky(surface);
+                    frame_packet_slots =
+                        frame_packet_slots.saturating_add(packet_slots_of(surface));
                 }
             }
         }
-        worst = worst.max(frame_triangles);
+        if frame_has_layered_sky {
+            frame_packet_slots = frame_packet_slots.saturating_add(VIEW_RAY_SKY_PACKET_SLOTS);
+        }
+        worst = worst.max(frame_packet_slots);
     }
     if worst == 0 {
         total
@@ -466,6 +491,7 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
     }
 }
 
+#[cfg(test)]
 fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
     match version {
         PxbspVersion::V4 | PxbspVersion::V5 => {
@@ -873,6 +899,8 @@ mod tests {
             derived_packet_capacity(9999),
             PLAYTEST_PACKET_CAPACITY_CEILING
         );
+        assert_eq!(PRIMITIVE_PACKET_SLOT_WORDS, 14);
+        assert_eq!(VIEW_RAY_SKY_PACKET_SLOTS, 172);
     }
 
     /// A resident payload as the cook emits it: model clips carry

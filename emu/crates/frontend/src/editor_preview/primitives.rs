@@ -14,6 +14,187 @@ type SplitPreviewTri = (
     [(u8, u8, u8); 3],
 );
 
+const PREVIEW_CLIP_EDGE_MARGIN: i32 = 16;
+const PREVIEW_CLIP_ATTR_ONE: i64 = 1 << 16;
+/// Keep the editor on the cooked PXBSP face contract. Exact clipping can add
+/// at most one vertex per frustum plane.
+pub(crate) const PREVIEW_FACE_VERTEX_CAP: usize = 39;
+const PREVIEW_CLIP_VERTEX_CAP: usize = PREVIEW_FACE_VERTEX_CAP + 5;
+
+/// Camera-space brush vertex carried through the editor's exact frustum clip.
+/// UV and colour attributes stay Q16 until the clipped polygon is projected so
+/// a near/side-plane intersection cannot tear a textured or Gouraud edge.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreviewClipVertex {
+    pub(crate) view: psx_engine::ViewVertex,
+    uv_q16: [i64; 2],
+    color_q16: [i64; 3],
+}
+
+pub(crate) const EMPTY_PREVIEW_CLIP_VERTEX: PreviewClipVertex = PreviewClipVertex {
+    view: psx_engine::ViewVertex::ZERO,
+    uv_q16: [0; 2],
+    color_q16: [0; 3],
+};
+
+pub(crate) struct PreviewClippedPolygon {
+    vertices: [PreviewClipVertex; PREVIEW_CLIP_VERTEX_CAP],
+    len: usize,
+}
+
+impl PreviewClippedPolygon {
+    pub(crate) fn as_slice(&self) -> &[PreviewClipVertex] {
+        &self.vertices[..self.len]
+    }
+}
+
+impl PreviewClipVertex {
+    pub(crate) fn new(view: psx_engine::ViewVertex, uv: [f64; 2], color: (u8, u8, u8)) -> Self {
+        Self {
+            view,
+            uv_q16: [
+                (uv[0] * PREVIEW_CLIP_ATTR_ONE as f64).round() as i64,
+                (uv[1] * PREVIEW_CLIP_ATTR_ONE as f64).round() as i64,
+            ],
+            color_q16: [
+                i64::from(color.0) << 16,
+                i64::from(color.1) << 16,
+                i64::from(color.2) << 16,
+            ],
+        }
+    }
+
+    pub(crate) fn projected(
+        self,
+        projection: psx_engine::WorldProjection,
+    ) -> Option<(psx_gte::scene::Projected, (u8, u8), (u8, u8, u8))> {
+        let projected = projection.project_view(self.view)?;
+        let uv_component = |value: i64| ((value >> 16).rem_euclid(256)) as u8;
+        let color_component = |value: i64| (value >> 16).clamp(0, 255) as u8;
+        Some((
+            preview_projected_from_engine(projected),
+            (uv_component(self.uv_q16[0]), uv_component(self.uv_q16[1])),
+            (
+                color_component(self.color_q16[0]),
+                color_component(self.color_q16[1]),
+                color_component(self.color_q16[2]),
+            ),
+        ))
+    }
+}
+
+/// Clip a convex brush polygon against the same near and guarded screen-edge
+/// planes used by the runtime PXBSP renderer. The previous editor path asked
+/// `project_world_quad` to project each fan triangle and therefore dropped a
+/// partially visible triangle when any corner crossed the near plane. It also
+/// clamped wholly off-screen triangles into the GPU guard band, producing
+/// screen-sized wedges and exhausting the preview packet arena on E1M1.
+pub(crate) fn clip_preview_brush_polygon(
+    projection: psx_engine::WorldProjection,
+    vertices: &[PreviewClipVertex],
+) -> PreviewClippedPolygon {
+    let mut clipped = PreviewClippedPolygon {
+        vertices: [EMPTY_PREVIEW_CLIP_VERTEX; PREVIEW_CLIP_VERTEX_CAP],
+        len: 0,
+    };
+    if vertices.len() < 3 || vertices.len() > PREVIEW_FACE_VERTEX_CAP {
+        return clipped;
+    }
+    clipped.vertices[..vertices.len()].copy_from_slice(vertices);
+    clipped.len = vertices.len();
+    let mut output = [EMPTY_PREVIEW_CLIP_VERTEX; PREVIEW_CLIP_VERTEX_CAP];
+    for plane in 0..5 {
+        if clipped.len < 3 {
+            clipped.len = 0;
+            return clipped;
+        }
+        let mut output_len = 0;
+        let input = &clipped.vertices[..clipped.len];
+        let mut previous = input[input.len() - 1];
+        let mut previous_distance = preview_clip_distance(projection, plane, previous.view);
+        for &current in input {
+            let current_distance = preview_clip_distance(projection, plane, current.view);
+            if (previous_distance >= 0) != (current_distance >= 0) {
+                output[output_len] = interpolate_preview_clip_vertex(
+                    previous,
+                    current,
+                    previous_distance,
+                    current_distance,
+                );
+                output_len += 1;
+            }
+            if current_distance >= 0 {
+                output[output_len] = current;
+                output_len += 1;
+            }
+            previous = current;
+            previous_distance = current_distance;
+        }
+        clipped.vertices[..output_len].copy_from_slice(&output[..output_len]);
+        clipped.len = output_len;
+    }
+    if clipped.len < 3 {
+        clipped.len = 0;
+    }
+    clipped
+}
+
+fn preview_clip_distance(
+    projection: psx_engine::WorldProjection,
+    plane: usize,
+    view: psx_engine::ViewVertex,
+) -> i64 {
+    let x_limit = SCREEN_CX + PREVIEW_CLIP_EDGE_MARGIN;
+    let y_limit = SCREEN_CY + PREVIEW_CLIP_EDGE_MARGIN;
+    let focal = projection.focal_length.max(1);
+    match plane {
+        0 => i64::from(view.z) - i64::from(projection.near_z),
+        1 => i64::from(x_limit) * i64::from(view.z) + i64::from(focal) * i64::from(view.x),
+        2 => i64::from(x_limit) * i64::from(view.z) - i64::from(focal) * i64::from(view.x),
+        3 => i64::from(y_limit) * i64::from(view.z) + i64::from(focal) * i64::from(view.y),
+        _ => i64::from(y_limit) * i64::from(view.z) - i64::from(focal) * i64::from(view.y),
+    }
+}
+
+fn interpolate_preview_clip_vertex(
+    a: PreviewClipVertex,
+    b: PreviewClipVertex,
+    a_distance: i64,
+    b_distance: i64,
+) -> PreviewClipVertex {
+    let denominator = a_distance - b_distance;
+    debug_assert_ne!(denominator, 0);
+    let numerator = a_distance << 16;
+    let mut t_q16 = numerator / denominator;
+    // When A is outside, round the intersection toward the inside B endpoint.
+    // Together with truncating the component interpolation toward A, this
+    // keeps the quantized point on the accepted side of the plane.
+    if a_distance < 0 && numerator % denominator != 0 {
+        t_q16 += 1;
+    }
+    let t_q16 = t_q16.clamp(0, PREVIEW_CLIP_ATTR_ONE);
+    let lerp = |x: i64, y: i64| x + ((y - x) * t_q16) / PREVIEW_CLIP_ATTR_ONE;
+    PreviewClipVertex {
+        view: psx_engine::ViewVertex::new(
+            lerp(i64::from(a.view.x), i64::from(b.view.x))
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            lerp(i64::from(a.view.y), i64::from(b.view.y))
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            lerp(i64::from(a.view.z), i64::from(b.view.z))
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        ),
+        uv_q16: [
+            lerp(a.uv_q16[0], b.uv_q16[0]),
+            lerp(a.uv_q16[1], b.uv_q16[1]),
+        ],
+        color_q16: [
+            lerp(a.color_q16[0], b.color_q16[0]),
+            lerp(a.color_q16[1], b.color_q16[1]),
+            lerp(a.color_q16[2], b.color_q16[2]),
+        ],
+    }
+}
+
 /// Per-face emit with one uniform colour: routes to the Gouraud or
 /// textured pool based on `shade`, packing UVs only when textured.
 pub(crate) fn emit_face_tri(

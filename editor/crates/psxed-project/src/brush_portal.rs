@@ -6,6 +6,9 @@ use crate::brush_compile::{
 };
 
 const PORTAL_NUDGE: f64 = 1.0 / 1024.0;
+/// Original QBSP `SIDESPACE`: padding between brush bounds and the six
+/// headnode portals that face the global outside node.
+const HEADNODE_SIDE_SPACE: f64 = 24.0;
 
 /// One convex opening shared by two terminal BSP cells.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,9 +29,57 @@ struct Halfspace {
 /// Generate exact leaf-to-leaf portal fragments for a surface BSP.
 pub fn portalize_surface_bsp(bsp: &CompiledSurfaceBsp) -> Vec<CompiledPortal> {
     let mut portals = Vec::new();
-    let mut constraints = Vec::new();
+    let mut constraints = headnode_constraints(bsp);
     portalize_branch(bsp.root, bsp, &mut constraints, &mut portals);
     portals
+}
+
+fn headnode_bounds(bsp: &CompiledSurfaceBsp) -> Option<([f64; 3], [f64; 3])> {
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    for vertex in bsp.surfaces.iter().flat_map(|surface| &surface.vertices) {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(vertex[axis]);
+            maximum[axis] = maximum[axis].max(vertex[axis]);
+        }
+    }
+    if minimum
+        .into_iter()
+        .chain(maximum)
+        .any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    Some((
+        minimum.map(|value| value.floor() - HEADNODE_SIDE_SPACE),
+        maximum.map(|value| value.ceil() + HEADNODE_SIDE_SPACE),
+    ))
+}
+
+fn headnode_constraints(bsp: &CompiledSurfaceBsp) -> Vec<Halfspace> {
+    let Some((minimum, maximum)) = headnode_bounds(bsp) else {
+        return Vec::new();
+    };
+    let mut constraints = Vec::with_capacity(6);
+    for axis in 0..3 {
+        let mut normal = [0; 3];
+        normal[axis] = 1;
+        constraints.push(Halfspace {
+            plane: Plane {
+                normal,
+                dist: minimum[axis] as i64,
+            },
+            keep_front: true,
+        });
+        constraints.push(Halfspace {
+            plane: Plane {
+                normal,
+                dist: maximum[axis] as i64,
+            },
+            keep_front: false,
+        });
+    }
+    constraints
 }
 
 fn portalize_branch(
@@ -222,6 +273,233 @@ pub fn classify_bsp_leaves(
     }
 }
 
+/// Quake QBSP outside fill: preserve the portal-connected cells occupied by
+/// authored entities, then turn the unreachable infinite exterior into solid.
+///
+#[derive(Clone, Debug, PartialEq)]
+pub enum OutsideFillResult {
+    Filled(usize),
+    /// Portal-centroid pointfile from one occupant to the infinite exterior.
+    Leaked(Vec<[f64; 3]>),
+    NoOccupants,
+}
+
+pub fn fill_outside_bsp_leaves(
+    bsp: &mut CompiledSurfaceBsp,
+    portals: &[CompiledPortal],
+    occupant_points: &[[f64; 3]],
+) -> OutsideFillResult {
+    let occupants: Vec<_> = occupant_points
+        .iter()
+        .enumerate()
+        .map(|(point_index, &point)| (point_index, point_leaf_index(bsp, point)))
+        .filter(|&(_, leaf)| bsp.leaves[leaf].contents.is_visible())
+        .collect();
+    if occupants.is_empty() {
+        return OutsideFillResult::NoOccupants;
+    }
+    let occupant_leaves: Vec<_> = occupants.iter().map(|&(_, leaf)| leaf).collect();
+
+    let mut adjacency = vec![Vec::new(); bsp.leaves.len()];
+    for (portal_index, portal) in portals.iter().enumerate() {
+        if bsp.leaves[portal.front_leaf].contents.is_visible()
+            && bsp.leaves[portal.back_leaf].contents.is_visible()
+        {
+            adjacency[portal.front_leaf].push((portal.back_leaf, portal_index));
+            adjacency[portal.back_leaf].push((portal.front_leaf, portal_index));
+        }
+    }
+    let occupied = flood_leaves(&adjacency, &occupant_leaves);
+
+    let outside_leaf_points = headnode_outside_leaf_points(bsp);
+    let exterior_leaves: Vec<_> = outside_leaf_points
+        .iter()
+        .filter_map(|&(leaf, _)| bsp.leaves[leaf].contents.is_visible().then_some(leaf))
+        .collect();
+    if exterior_leaves.is_empty() {
+        return OutsideFillResult::NoOccupants;
+    }
+    if let Some((exterior_leaf, exterior_point)) = outside_leaf_points
+        .iter()
+        .copied()
+        .find(|(leaf, _)| occupied[*leaf] && bsp.leaves[*leaf].contents.is_visible())
+    {
+        let path = leak_path(
+            &adjacency,
+            portals,
+            &occupants,
+            occupant_points,
+            exterior_leaf,
+            exterior_point,
+        );
+        return OutsideFillResult::Leaked(path);
+    }
+
+    let exterior = flood_leaves(&adjacency, &exterior_leaves);
+    let mut filled = 0;
+    for (leaf, is_exterior) in bsp.leaves.iter_mut().zip(exterior) {
+        if is_exterior && leaf.contents.is_visible() {
+            leaf.contents = BspLeafContents::Solid;
+            filled += 1;
+        }
+    }
+    OutsideFillResult::Filled(filled)
+}
+
+/// Route the six padded headnode faces through the BSP and retain one point on
+/// every terminal leaf they touch. In original QBSP these are actual portals
+/// linked to `outside_node`; the compact host representation keeps the same
+/// boundary seeds without adding a fake runtime leaf.
+fn headnode_outside_leaf_points(bsp: &CompiledSurfaceBsp) -> Vec<(usize, [f64; 3])> {
+    let Some((minimum, maximum)) = headnode_bounds(bsp) else {
+        return Vec::new();
+    };
+    let mut output = Vec::new();
+    for axis in 0..3 {
+        let other = [(axis + 1) % 3, (axis + 2) % 3];
+        for side in 0..2 {
+            let mut polygon = Vec::with_capacity(4);
+            for [a, b] in [[0, 0], [1, 0], [1, 1], [0, 1]] {
+                let mut point = [0.0; 3];
+                point[axis] = if side == 0 {
+                    minimum[axis]
+                } else {
+                    maximum[axis]
+                };
+                point[other[0]] = if a == 0 {
+                    minimum[other[0]]
+                } else {
+                    maximum[other[0]]
+                };
+                point[other[1]] = if b == 0 {
+                    minimum[other[1]]
+                } else {
+                    maximum[other[1]]
+                };
+                polygon.push(point);
+            }
+            route_headnode_face(bsp.root, polygon, bsp, &mut output);
+        }
+    }
+    output
+}
+
+fn route_headnode_face(
+    child: BspChild,
+    polygon: Vec<[f64; 3]>,
+    bsp: &CompiledSurfaceBsp,
+    output: &mut Vec<(usize, [f64; 3])>,
+) {
+    if polygon.len() < 3 {
+        return;
+    }
+    match child {
+        BspChild::Leaf(leaf) => {
+            if output.iter().any(|&(known, _)| known == leaf) {
+                return;
+            }
+            let count = polygon.len() as f64;
+            output.push((
+                leaf,
+                scale(polygon.into_iter().fold([0.0; 3], add), 1.0 / count),
+            ));
+        }
+        BspChild::Node(index) => {
+            let node = &bsp.nodes[index];
+            match split_polygon(&polygon, node.plane) {
+                PolygonSplit::Front(front) => route_headnode_face(node.front, front, bsp, output),
+                PolygonSplit::Back(back) => route_headnode_face(node.back, back, bsp, output),
+                PolygonSplit::Split { front, back } => {
+                    route_headnode_face(node.front, front, bsp, output);
+                    route_headnode_face(node.back, back, bsp, output);
+                }
+                PolygonSplit::Coplanar => {
+                    route_headnode_face(node.front, polygon.clone(), bsp, output);
+                    route_headnode_face(node.back, polygon, bsp, output);
+                }
+            }
+        }
+    }
+}
+
+fn flood_leaves(adjacency: &[Vec<(usize, usize)>], starts: &[usize]) -> Vec<bool> {
+    let mut reached = vec![false; adjacency.len()];
+    let mut pending = std::collections::VecDeque::new();
+    for &leaf in starts {
+        if !reached[leaf] {
+            reached[leaf] = true;
+            pending.push_back(leaf);
+        }
+    }
+    while let Some(leaf) = pending.pop_front() {
+        for &(adjacent, _) in &adjacency[leaf] {
+            if !reached[adjacent] {
+                reached[adjacent] = true;
+                pending.push_back(adjacent);
+            }
+        }
+    }
+    reached
+}
+
+/// Reconstruct Quake's pointfile shape: entity point, one centroid per portal
+/// crossed, then a point known to live in the infinite outside leaf.
+fn leak_path(
+    adjacency: &[Vec<(usize, usize)>],
+    portals: &[CompiledPortal],
+    occupants: &[(usize, usize)],
+    occupant_points: &[[f64; 3]],
+    exterior_leaf: usize,
+    exterior_point: [f64; 3],
+) -> Vec<[f64; 3]> {
+    let mut parent = vec![None; adjacency.len()];
+    let mut root = vec![None; adjacency.len()];
+    let mut pending = std::collections::VecDeque::new();
+    for &(occupant_index, leaf) in occupants {
+        if root[leaf].is_none() {
+            root[leaf] = Some(occupant_index);
+            pending.push_back(leaf);
+        }
+    }
+    while let Some(leaf) = pending.pop_front() {
+        if leaf == exterior_leaf {
+            break;
+        }
+        for &(adjacent, portal) in &adjacency[leaf] {
+            if root[adjacent].is_none() {
+                root[adjacent] = root[leaf];
+                parent[adjacent] = Some((leaf, portal));
+                pending.push_back(adjacent);
+            }
+        }
+    }
+
+    let Some(occupant_index) = root[exterior_leaf] else {
+        return vec![exterior_point];
+    };
+    let mut portal_path = Vec::new();
+    let mut leaf = exterior_leaf;
+    while let Some((previous, portal)) = parent[leaf] {
+        portal_path.push(portal);
+        leaf = previous;
+    }
+    portal_path.reverse();
+
+    let mut path = Vec::with_capacity(portal_path.len() + 2);
+    path.push(occupant_points[occupant_index]);
+    for portal in portal_path {
+        let vertices = &portals[portal].vertices;
+        if !vertices.is_empty() {
+            path.push(scale(
+                vertices.iter().copied().fold([0.0; 3], add),
+                1.0 / vertices.len() as f64,
+            ));
+        }
+    }
+    path.push(exterior_point);
+    path
+}
+
 fn leaf_sample(leaf_index: usize, portals: &[CompiledPortal]) -> Option<[f64; 3]> {
     let portal = portals
         .iter()
@@ -382,6 +660,65 @@ mod tests {
         assert_eq!(bsp.leaves[wall].contents, BspLeafContents::Solid);
         assert_eq!(bsp.leaves[exterior].contents, BspLeafContents::Empty);
         assert!(!empty_path_exists(&bsp, &portals, cavity, exterior));
+    }
+
+    #[test]
+    fn outside_fill_solids_only_the_unoccupied_exterior() {
+        let brushes = Brush::cuboid([0, 0, 0], [1024, 512, 1024])
+            .hollow(64)
+            .expect("hollow room");
+        let (mut bsp, portals) = compiled(&brushes);
+        let cavity = point_leaf_index(&bsp, [512.0, 256.0, 512.0]);
+        let exterior = point_leaf_index(&bsp, [-128.0, 256.0, 512.0]);
+
+        let OutsideFillResult::Filled(filled) =
+            fill_outside_bsp_leaves(&mut bsp, &portals, &[[512.0, 256.0, 512.0]])
+        else {
+            panic!("sealed room must fill");
+        };
+
+        assert!(filled > 0);
+        assert_eq!(bsp.leaves[cavity].contents, BspLeafContents::Empty);
+        assert_eq!(bsp.leaves[exterior].contents, BspLeafContents::Solid);
+    }
+
+    #[test]
+    fn outside_fill_preserves_a_leaking_world_for_diagnostics() {
+        let mut brushes = Brush::cuboid([0, 0, 0], [1024, 512, 1024])
+            .hollow(64)
+            .expect("hollow room");
+        brushes.pop().expect("remove one wall");
+        let (mut bsp, portals) = compiled(&brushes);
+        let contents_before: Vec<_> = bsp.leaves.iter().map(|leaf| leaf.contents).collect();
+
+        let OutsideFillResult::Leaked(path) =
+            fill_outside_bsp_leaves(&mut bsp, &portals, &[[512.0, 256.0, 512.0]])
+        else {
+            panic!("open room must report its pointfile");
+        };
+        assert!(path.len() >= 3, "entity, portal and exterior points");
+        assert_eq!(path[0], [512.0, 256.0, 512.0]);
+        let exterior = path.last().expect("exterior");
+        assert!(
+            [
+                exterior[0] + 24.0,
+                exterior[0] - 1048.0,
+                exterior[1] + 24.0,
+                exterior[1] - 536.0,
+                exterior[2] + 24.0,
+                exterior[2] - 1048.0,
+            ]
+            .into_iter()
+            .any(|distance| distance.abs() < 1.0e-6),
+            "pointfile must end on one padded headnode face: {exterior:?}"
+        );
+        assert_eq!(
+            bsp.leaves
+                .iter()
+                .map(|leaf| leaf.contents)
+                .collect::<Vec<_>>(),
+            contents_before
+        );
     }
 
     #[test]

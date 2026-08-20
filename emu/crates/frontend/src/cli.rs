@@ -2852,7 +2852,7 @@ fn headless_editor_viewport_image(
     let mut assets = crate::editor_assets::EditorAssets::new();
     assets.refresh(project, project_root);
     let hidden = HashSet::new();
-    let frame = crate::editor_preview::build_phase1_frame(
+    let mut frame = crate::editor_preview::build_phase1_frame(
         project,
         editor.viewport_3d_camera(),
         visibility.preview_fog,
@@ -2878,6 +2878,14 @@ fn headless_editor_viewport_image(
         &textures,
         &assets,
     );
+    if visibility.show_grid {
+        crate::editor_preview::prepend_bsp_surface_grid_overlay(
+            project,
+            editor.viewport_3d_camera(),
+            project.editor_viewport.snap_units,
+            &mut frame.overlay_lines,
+        );
+    }
 
     let (device, queue) = headless_wgpu_device()?;
     let mut renderer = psx_gpu_render::HwRenderer::new_headless(device, queue);

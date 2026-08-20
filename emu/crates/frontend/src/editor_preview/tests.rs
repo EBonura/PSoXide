@@ -5,7 +5,7 @@ use super::{
     preview_player_reference, preview_projected_triangle_hw_safe, preview_scratch,
     preview_shadow_radius, preview_static_model_reference, preview_vertices_in_front, push_clear,
     push_tri, push_tri_colors, push_wall_face, room_depth_slot, rotate_image_prop_local,
-    setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline,
+    setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline, valid_preview_clip,
     wall_material_sidedness_for_edge, wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot,
     PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
     PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
@@ -20,6 +20,65 @@ use psxed_project::{
     MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, WorldGrid,
 };
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
+
+#[cfg(feature = "editor-preview-benchmark")]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(feature = "editor-preview-benchmark")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(feature = "editor-preview-benchmark")]
+struct PreviewTestAllocator;
+
+#[cfg(feature = "editor-preview-benchmark")]
+static PREVIEW_TEST_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "editor-preview-benchmark")]
+static PREVIEW_TEST_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "editor-preview-benchmark")]
+#[global_allocator]
+static PREVIEW_TEST_ALLOCATOR: PreviewTestAllocator = PreviewTestAllocator;
+
+#[cfg(feature = "editor-preview-benchmark")]
+unsafe impl GlobalAlloc for PreviewTestAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            PREVIEW_TEST_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            PREVIEW_TEST_ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            PREVIEW_TEST_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            PREVIEW_TEST_ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !ptr.is_null() {
+            PREVIEW_TEST_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            PREVIEW_TEST_ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        }
+        ptr
+    }
+}
+
+#[cfg(feature = "editor-preview-benchmark")]
+fn preview_test_alloc_snapshot() -> (u64, u64) {
+    (
+        PREVIEW_TEST_ALLOC_CALLS.load(Ordering::Relaxed),
+        PREVIEW_TEST_ALLOC_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 fn flat(r: u8, g: u8, b: u8) -> FaceShade {
     FaceShade::Flat {
@@ -1121,6 +1180,56 @@ fn projected(sx: i16, sy: i16) -> Projected {
 }
 
 #[test]
+fn brush_polygon_clip_keeps_a_near_plane_crossing() {
+    let projection = psx_engine::WorldProjection::new(160, 120, 320, 32);
+    let vertices = [
+        super::PreviewClipVertex::new(
+            psx_engine::ViewVertex::new(-16, 0, 16),
+            [0.0, 0.0],
+            (0, 0, 0),
+        ),
+        super::PreviewClipVertex::new(
+            psx_engine::ViewVertex::new(16, 0, 64),
+            [64.0, 0.0],
+            (64, 0, 0),
+        ),
+        super::PreviewClipVertex::new(
+            psx_engine::ViewVertex::new(0, 16, 64),
+            [0.0, 64.0],
+            (0, 64, 0),
+        ),
+    ];
+
+    let clipped = super::clip_preview_brush_polygon(projection, &vertices);
+    let clipped = clipped.as_slice();
+
+    assert_eq!(
+        clipped.len(),
+        4,
+        "one crossing corner becomes two intersections"
+    );
+    assert!(clipped.iter().all(|vertex| vertex.view.z >= 32));
+    assert!(clipped
+        .iter()
+        .all(|vertex| vertex.projected(projection).is_some()));
+}
+
+#[test]
+fn brush_polygon_clip_rejects_a_wholly_offscreen_face() {
+    let projection = psx_engine::WorldProjection::new(160, 120, 320, 32);
+    let vertices = [
+        psx_engine::ViewVertex::new(1000, -16, 64),
+        psx_engine::ViewVertex::new(1024, 16, 64),
+        psx_engine::ViewVertex::new(1048, -16, 64),
+    ]
+    .map(|view| super::PreviewClipVertex::new(view, [0.0; 2], (0x80, 0x80, 0x80)));
+
+    assert!(super::clip_preview_brush_polygon(projection, &vertices)
+        .as_slice()
+        .is_empty());
+}
+
+#[test]
 fn textured_preview_uses_authored_material_tint() {
     let mut project = ProjectDocument::new("test");
     let mut material = MaterialResource::opaque(Some("brick.psxt".to_string()));
@@ -1450,6 +1559,24 @@ fn component_model_reference_reads_renderer_and_animator_children() {
     assert!(reference.autoplay);
     assert_eq!(reference.renderer_node, Some(renderer));
     assert_eq!(reference.animator_node, Some(animator));
+}
+
+#[test]
+fn stale_animator_clip_falls_back_without_hiding_model() {
+    assert_eq!(valid_preview_clip(3, 4), Some(3));
+    assert_eq!(valid_preview_clip(10, 4), Some(0));
+    assert_eq!(valid_preview_clip(0, 0), None);
+}
+
+#[test]
+fn model_preview_capacity_is_independent_from_full_world_geometry() {
+    assert!(super::preview_model_triangle_capacity_available(0));
+    assert!(super::preview_model_triangle_capacity_available(
+        super::TRI_CAP - 1
+    ));
+    assert!(!super::preview_model_triangle_capacity_available(
+        super::TRI_CAP
+    ));
 }
 
 #[test]
@@ -2215,4 +2342,231 @@ fn lit_preview_key_tracks_exactly_its_inputs() {
         .uv
         .offset_texels = [7, 3];
     assert_eq!(base, super::lit_preview_key(&uv_only, &textures, &lights));
+}
+
+#[test]
+fn solved_brush_cache_key_tracks_only_solve_inputs() {
+    let mut project = ProjectDocument::new("solved-brush-key");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [512, 256, 512],
+        ));
+    let base = super::solved_brush_geometry_key(&project);
+
+    let mut moved = project.clone();
+    moved.active_scene_mut().brushes[0].faces[0].points[0][0] += 16;
+    assert_ne!(base, super::solved_brush_geometry_key(&moved));
+
+    let mut added = project.clone();
+    added
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [1024, 0, 0],
+            [1536, 256, 512],
+        ));
+    assert_ne!(base, super::solved_brush_geometry_key(&added));
+
+    let mut uv_only = project.clone();
+    uv_only.active_scene_mut().brushes[0].faces[0]
+        .uv
+        .offset_texels = [7, 3];
+    assert_eq!(base, super::solved_brush_geometry_key(&uv_only));
+}
+
+/// Real-project navigation microbenchmark. Run explicitly with:
+/// `cargo test -p frontend --release --features editor-preview-benchmark benchmark_e1m1_brush_navigation -- --ignored --nocapture --test-threads=1`.
+///
+/// It keeps the complete CPU-side preview build used by the editor while
+/// orbiting/panning: resource refresh, world/model projection, command-log
+/// extraction, and the BSP surface-grid overlay.
+#[test]
+#[cfg(feature = "editor-preview-benchmark")]
+#[ignore = "developer performance benchmark over local editable E1M1"]
+fn benchmark_e1m1_brush_navigation() {
+    const FRAMES: usize = 15;
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let project_root = repo_root.join("editor/projects/quake-e1m1-geometry");
+    let project =
+        ProjectDocument::load_from_path(project_root.join("project.ron")).expect("E1M1 loads");
+    assert!(
+        project.active_scene().brushes.len() >= 1_200,
+        "benchmark must remain the full editable E1M1 import"
+    );
+    let hidden = std::collections::HashSet::new();
+    let preview_light_count =
+        super::room_geometry::collect_bsp_preview_bake_lights(&project, &hidden).len();
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+    textures.refresh_models(&project, &project_root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &project_root);
+
+    let camera = |frame: usize| ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 320_u16.wrapping_add((frame as u16).wrapping_mul(7)),
+        pitch_q12: 300,
+        radius: 8_192,
+        target: [2_048, 512, 2_048],
+        position: [0, 0, 0],
+    };
+    let build = |camera,
+                 textures: &crate::editor_textures::EditorTextures,
+                 assets: &crate::editor_assets::EditorAssets| {
+        super::build_phase1_frame(
+            &project,
+            camera,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            &hidden,
+            None,
+            0,
+            NodeId::ROOT,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &textures,
+            &assets,
+        )
+    };
+
+    // Exclude one-time scratch allocation and cold cache population. Camera
+    // navigation is the steady-state interaction this benchmark protects.
+    let mut warm = build(camera(0), &textures, &assets);
+    super::prepend_bsp_surface_grid_overlay(&project, camera(0), 64, &mut warm.overlay_lines);
+    std::hint::black_box((warm.cmd_log.len(), warm.overlay_lines.len()));
+
+    let mut uncached_overlay_ns = Vec::with_capacity(FRAMES);
+    let mut cached_overlay_ns = Vec::with_capacity(FRAMES);
+    let mut uncached_overlay_alloc = (0_u64, 0_u64);
+    let mut cached_overlay_alloc = (0_u64, 0_u64);
+    for sample in 0..FRAMES {
+        let world_camera = super::setup_gte_for_camera(camera(sample + 1));
+        let mut uncached = Vec::new();
+        let before = preview_test_alloc_snapshot();
+        let started = std::time::Instant::now();
+        super::overlays::prepend_bsp_surface_grid_overlay_uncached(
+            &project,
+            world_camera,
+            64,
+            &mut uncached,
+        );
+        uncached_overlay_ns.push(started.elapsed().as_nanos() as u64);
+        let after = preview_test_alloc_snapshot();
+        uncached_overlay_alloc.0 += after.0 - before.0;
+        uncached_overlay_alloc.1 += after.1 - before.1;
+
+        let mut cached = Vec::new();
+        let before = preview_test_alloc_snapshot();
+        let started = std::time::Instant::now();
+        super::overlays::prepend_bsp_surface_grid_overlay(&project, world_camera, 64, &mut cached);
+        cached_overlay_ns.push(started.elapsed().as_nanos() as u64);
+        let after = preview_test_alloc_snapshot();
+        cached_overlay_alloc.0 += after.0 - before.0;
+        cached_overlay_alloc.1 += after.1 - before.1;
+        assert_eq!(uncached, cached, "cache must not change grid output");
+    }
+
+    let mut frame_ns = Vec::with_capacity(FRAMES);
+    let mut refresh_ns = Vec::with_capacity(FRAMES);
+    let mut build_ns = Vec::with_capacity(FRAMES);
+    let mut overlay_ns = Vec::with_capacity(FRAMES);
+    let mut alloc_calls = 0_u64;
+    let mut alloc_bytes = 0_u64;
+    let mut refresh_alloc = (0_u64, 0_u64);
+    let mut build_alloc = (0_u64, 0_u64);
+    let mut overlay_alloc = (0_u64, 0_u64);
+    let mut emitted = Vec::with_capacity(FRAMES);
+    for frame in 0..FRAMES {
+        let before_alloc = preview_test_alloc_snapshot();
+        let started = std::time::Instant::now();
+        let stage = std::time::Instant::now();
+        let stage_alloc = preview_test_alloc_snapshot();
+        textures.refresh(&project, &project_root);
+        textures.refresh_models(&project, &project_root);
+        assets.refresh(&project, &project_root);
+        let stage_after = preview_test_alloc_snapshot();
+        refresh_alloc.0 += stage_after.0 - stage_alloc.0;
+        refresh_alloc.1 += stage_after.1 - stage_alloc.1;
+        refresh_ns.push(stage.elapsed().as_nanos() as u64);
+        let stage = std::time::Instant::now();
+        let stage_alloc = preview_test_alloc_snapshot();
+        let frame_camera = camera(frame + 1);
+        let mut output = build(frame_camera, &textures, &assets);
+        let stage_after = preview_test_alloc_snapshot();
+        build_alloc.0 += stage_after.0 - stage_alloc.0;
+        build_alloc.1 += stage_after.1 - stage_alloc.1;
+        build_ns.push(stage.elapsed().as_nanos() as u64);
+        let stage = std::time::Instant::now();
+        let stage_alloc = preview_test_alloc_snapshot();
+        super::prepend_bsp_surface_grid_overlay(
+            &project,
+            frame_camera,
+            64,
+            &mut output.overlay_lines,
+        );
+        let stage_after = preview_test_alloc_snapshot();
+        overlay_alloc.0 += stage_after.0 - stage_alloc.0;
+        overlay_alloc.1 += stage_after.1 - stage_alloc.1;
+        overlay_ns.push(stage.elapsed().as_nanos() as u64);
+        frame_ns.push(started.elapsed().as_nanos() as u64);
+        let after_alloc = preview_test_alloc_snapshot();
+        alloc_calls += after_alloc.0 - before_alloc.0;
+        alloc_bytes += after_alloc.1 - before_alloc.1;
+        emitted.push((output.cmd_log.len(), output.overlay_lines.len()));
+        std::hint::black_box((output.cmd_log.len(), output.overlay_lines.len()));
+    }
+    let percentile = |samples: &mut Vec<u64>, percent: usize| {
+        samples.sort_unstable();
+        samples[(samples.len() * percent).div_ceil(100) - 1]
+    };
+    let median_ns = percentile(&mut frame_ns, 50);
+    let p95_ns = percentile(&mut frame_ns, 95);
+    let refresh_median_ns = percentile(&mut refresh_ns, 50);
+    let build_median_ns = percentile(&mut build_ns, 50);
+    let overlay_median_ns = percentile(&mut overlay_ns, 50);
+    let uncached_overlay_median_ns = percentile(&mut uncached_overlay_ns, 50);
+    let cached_overlay_median_ns = percentile(&mut cached_overlay_ns, 50);
+    println!(
+        "E1M1 editor navigation: brushes={} lights={} frames={} median_ms={:.3} p95_ms={:.3} refresh_median_ms={:.3} build_median_ms={:.3} overlay_median_ms={:.3} alloc_calls_per_frame={:.1} alloc_bytes_per_frame={:.1} refresh_alloc_per_frame={:.1}/{:.1} build_alloc_per_frame={:.1}/{:.1} overlay_alloc_per_frame={:.1}/{:.1} grid_ab_uncached_cached_ms={:.3}/{:.3} grid_ab_uncached_cached_alloc={:.1}/{:.1}:{:.1}/{:.1} emitted={emitted:?}",
+        project.active_scene().brushes.len(),
+        preview_light_count,
+        FRAMES,
+        median_ns as f64 / 1_000_000.0,
+        p95_ns as f64 / 1_000_000.0,
+        refresh_median_ns as f64 / 1_000_000.0,
+        build_median_ns as f64 / 1_000_000.0,
+        overlay_median_ns as f64 / 1_000_000.0,
+        alloc_calls as f64 / FRAMES as f64,
+        alloc_bytes as f64 / FRAMES as f64,
+        refresh_alloc.0 as f64 / FRAMES as f64,
+        refresh_alloc.1 as f64 / FRAMES as f64,
+        build_alloc.0 as f64 / FRAMES as f64,
+        build_alloc.1 as f64 / FRAMES as f64,
+        overlay_alloc.0 as f64 / FRAMES as f64,
+        overlay_alloc.1 as f64 / FRAMES as f64,
+        uncached_overlay_median_ns as f64 / 1_000_000.0,
+        cached_overlay_median_ns as f64 / 1_000_000.0,
+        uncached_overlay_alloc.0 as f64 / FRAMES as f64,
+        uncached_overlay_alloc.1 as f64 / FRAMES as f64,
+        cached_overlay_alloc.0 as f64 / FRAMES as f64,
+        cached_overlay_alloc.1 as f64 / FRAMES as f64,
+    );
 }

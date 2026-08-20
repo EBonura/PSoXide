@@ -20,6 +20,7 @@ pub mod pxbsp;
 pub mod pxbsp_resident;
 pub mod render;
 pub mod resident;
+pub mod sky;
 
 use core::fmt;
 use core::marker::PhantomData;

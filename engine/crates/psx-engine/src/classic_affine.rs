@@ -191,8 +191,8 @@ pub unsafe fn materialize_classic_affine_indexed_vertices(
         // with the retained word-source path, initialize only the first three
         // words and avoid eight bytes of dead stores per visible corner.
         let destination_words = unsafe { destination.add(index).cast::<u32>() };
-        let position_xy = u32::from(position.position[0] as u16)
-            | (u32::from(position.position[1] as u16) << 16);
+        let position_xy =
+            u32::from(position.position[0] as u16) | (u32::from(position.position[1] as u16) << 16);
         let position_z_uv = u32::from(position.position[2] as u16)
             | (u32::from(uv[0]) << 16)
             | (u32::from(uv[1]) << 24);

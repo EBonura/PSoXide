@@ -8,6 +8,14 @@ use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValu
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 const CD_SECTOR_BYTES: usize = 2048;
 
+fn remove_optional_file(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Refuse a package whose cooked room chunks cannot fit the runtime's per-room
 /// CD slot.
 ///
@@ -102,13 +110,24 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     purge_models_dir(&models_dir)?;
 
     let pxbsp_path = generated_dir.join(crate::brush_playtest::BRUSH_WORLD_FILENAME);
+    let brush_leak_path = generated_dir.join(crate::brush_playtest::BRUSH_LEAK_FILENAME);
     match &package.world_geometry {
-        PlaytestWorldGeometry::Grid => match std::fs::remove_file(&pxbsp_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        },
-        PlaytestWorldGeometry::Pxbsp(world) => std::fs::write(&pxbsp_path, &world.bytes)?,
+        PlaytestWorldGeometry::Grid => {
+            remove_optional_file(&pxbsp_path)?;
+            remove_optional_file(&brush_leak_path)?;
+        }
+        PlaytestWorldGeometry::Pxbsp(world) => {
+            std::fs::write(&pxbsp_path, &world.bytes)?;
+            if world.leak_path.is_empty() {
+                remove_optional_file(&brush_leak_path)?;
+            } else {
+                let mut pointfile = String::new();
+                for &[x, y, z] in &world.leak_path {
+                    writeln!(pointfile, "{x} {y} {z}").expect("writing to String cannot fail");
+                }
+                std::fs::write(&brush_leak_path, pointfile)?;
+            }
+        }
     }
 
     for asset in &package.assets {

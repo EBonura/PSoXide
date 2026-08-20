@@ -13,7 +13,7 @@ use psx_bsp::collision_provider::{
     select_body_hull, valid_pxbsp_body_hulls, PxbspCollisionModel, PxbspCollisionProvider,
 };
 use psx_bsp::mover::{BrushDoorSet, BrushDoorSetError};
-use psx_bsp::pxbsp::PXBSP_MAX_VISIBILITY_BYTES;
+use psx_bsp::pxbsp::{material_flags, PXBSP_MAX_VISIBILITY_BYTES};
 use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, Vec3I32};
@@ -30,7 +30,10 @@ use psx_level::{find_asset_of_kind, AssetId, AssetKind};
 use crate::generated::{
     ASSETS, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS, PXBSP_WORLD,
 };
-use crate::{ensure_room_texture_uploaded, find_room_texture_vram_slot, PROJECTION};
+use crate::{
+    ensure_layered_sky_texture_uploaded, ensure_room_texture_uploaded, find_room_texture_vram_slot,
+    PROJECTION,
+};
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
 pub(super) const BSP_POINT_HULL_INDEX: usize = 0;
@@ -314,6 +317,7 @@ impl BspRuntime {
         let mut ready = true;
         for (index, material) in self.map.materials().iter().enumerate() {
             let asset_id = AssetId(material.texture_asset);
+            let layered_sky = material.flags & material_flags::LAYERED_SKY != 0;
             let slot = match find_room_texture_vram_slot(asset_id) {
                 Some(slot) => Some(slot),
                 None => {
@@ -329,7 +333,11 @@ impl BspRuntime {
                         "PXBSP texture asset {} has no baked bytes; streamed BSP textures are not implemented",
                         material.texture_asset
                     );
-                    ensure_room_texture_uploaded(asset_id, asset.bytes)
+                    if layered_sky {
+                        ensure_layered_sky_texture_uploaded(asset_id, asset.bytes)
+                    } else {
+                        ensure_room_texture_uploaded(asset_id, asset.bytes)
+                    }
                 }
             };
             let Some(slot) = slot else {
@@ -342,8 +350,18 @@ impl BspRuntime {
                 ready = false;
                 continue;
             }
-            let width = u8::try_from(slot.texture_width)
-                .expect("PXBSP texture width exceeds the packet UV contract");
+            let width = if layered_sky {
+                assert_eq!(
+                    slot.texture_width,
+                    slot.texture_height.saturating_mul(2),
+                    "PXBSP layered sky must contain two square side-by-side layers"
+                );
+                u8::try_from(slot.texture_width / 2)
+                    .expect("PXBSP layered-sky layer width exceeds the packet UV contract")
+            } else {
+                u8::try_from(slot.texture_width)
+                    .expect("PXBSP texture width exceeds the packet UV contract")
+            };
             let height = u8::try_from(slot.texture_height)
                 .expect("PXBSP texture height exceeds the packet UV contract");
             self.materials[index] = Some(PxbspTextureBinding {

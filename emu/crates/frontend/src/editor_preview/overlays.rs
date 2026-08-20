@@ -2,6 +2,430 @@
 
 use super::*;
 
+/// Surface-grid work is editor-only but still runs during camera navigation,
+/// so keep both the per-face density and total host stroke count bounded.
+/// Coarser lines stay on the authored grid by increasing the interval in
+/// power-of-two multiples instead of inventing an unrelated spacing.
+const BSP_SURFACE_GRID_LINES_PER_AXIS: usize = 24;
+const BSP_SURFACE_GRID_SEGMENT_CAP: usize = 2_048;
+const BSP_SURFACE_GRID_MAJOR_EVERY: i64 = 8;
+const BSP_SURFACE_GRID_MINOR_RGBA: (u8, u8, u8, u8) = (176, 208, 220, 68);
+const BSP_SURFACE_GRID_MAJOR_RGBA: (u8, u8, u8, u8) = (218, 232, 238, 104);
+const BSP_SURFACE_GRID_MINOR_WIDTH: f32 = 0.65;
+const BSP_SURFACE_GRID_MAJOR_WIDTH: f32 = 0.9;
+const GRID_INTERSECTION_EPSILON: f64 = 1.0 / 4096.0;
+
+/// Prepend a TrenchBroom-style world grid projected onto visible BSP brush
+/// faces. Grid strokes are host-composited, translucent, and painted before
+/// selection affordances, preserving both the material preview and the
+/// stronger hover/selection outlines.
+pub(super) fn prepend_bsp_surface_grid_overlay(
+    project: &ProjectDocument,
+    camera: psx_engine::WorldCamera,
+    grid_units: u16,
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    if project.active_scene().brushes.is_empty() {
+        return;
+    }
+
+    let step = f64::from(grid_units.max(1));
+    let mut candidate_count = 0u64;
+    with_cached_solved_brush_faces(project, |_, _, plane, verts| {
+        if let Some(ranges) = surface_grid_face_ranges(
+            verts,
+            plane.normal.map(|component| component as f64),
+            camera,
+            step,
+        ) {
+            candidate_count = candidate_count.saturating_add(
+                ranges
+                    .iter()
+                    .map(|(_, range)| grid_index_count(*range))
+                    .sum::<u64>(),
+            );
+        }
+    });
+
+    let mut grid_lines = Vec::new();
+    let mut candidate_ordinal = 0u64;
+    with_cached_solved_brush_faces(project, |_, _, plane, verts| {
+        append_bsp_surface_grid_face(
+            verts,
+            plane.normal.map(|component| component as f64),
+            camera,
+            step,
+            candidate_count,
+            &mut candidate_ordinal,
+            &mut grid_lines,
+        );
+    });
+    if grid_lines.is_empty() {
+        return;
+    }
+    grid_lines.append(overlay_lines);
+    *overlay_lines = grid_lines;
+}
+
+/// Pre-cache behavior retained only for a strict real-project performance
+/// comparison. It deliberately repeats the convex solve inside the overlay
+/// pass; production must use `prepend_bsp_surface_grid_overlay` above.
+#[cfg(all(test, feature = "editor-preview-benchmark"))]
+pub(super) fn prepend_bsp_surface_grid_overlay_uncached(
+    project: &ProjectDocument,
+    camera: psx_engine::WorldCamera,
+    grid_units: u16,
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    if project.active_scene().brushes.is_empty() {
+        return;
+    }
+
+    let step = f64::from(grid_units.max(1));
+    let mut candidate_count = 0u64;
+    for brush in &project.active_scene().brushes {
+        let solved = brush.solve();
+        for (face_index, polygon) in solved.polygons.iter().enumerate() {
+            let Some(polygon) = polygon else { continue };
+            let Some(face) = brush.faces.get(face_index) else {
+                continue;
+            };
+            let Some(plane) = psxed_project::brush::Plane::from_points(face.points) else {
+                continue;
+            };
+            if let Some(ranges) = surface_grid_face_ranges(
+                &polygon.verts,
+                plane.normal.map(|component| component as f64),
+                camera,
+                step,
+            ) {
+                candidate_count = candidate_count.saturating_add(
+                    ranges
+                        .iter()
+                        .map(|(_, range)| grid_index_count(*range))
+                        .sum::<u64>(),
+                );
+            }
+        }
+    }
+
+    let mut grid_lines = Vec::new();
+    let mut candidate_ordinal = 0u64;
+    for brush in &project.active_scene().brushes {
+        let solved = brush.solve();
+        for (face_index, polygon) in solved.polygons.iter().enumerate() {
+            let Some(polygon) = polygon else { continue };
+            let Some(face) = brush.faces.get(face_index) else {
+                continue;
+            };
+            let Some(plane) = psxed_project::brush::Plane::from_points(face.points) else {
+                continue;
+            };
+            append_bsp_surface_grid_face(
+                &polygon.verts,
+                plane.normal.map(|component| component as f64),
+                camera,
+                step,
+                candidate_count,
+                &mut candidate_ordinal,
+                &mut grid_lines,
+            );
+        }
+    }
+    if grid_lines.is_empty() {
+        return;
+    }
+    grid_lines.append(overlay_lines);
+    *overlay_lines = grid_lines;
+}
+
+fn append_bsp_surface_grid_face(
+    polygon: &[[f64; 3]],
+    normal: [f64; 3],
+    camera: psx_engine::WorldCamera,
+    step: f64,
+    candidate_count: u64,
+    candidate_ordinal: &mut u64,
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    let Some(ranges) = surface_grid_face_ranges(polygon, normal, camera, step) else {
+        return;
+    };
+    for (axis, (first, last, stride)) in ranges {
+        let mut index = first;
+        while index <= last {
+            let ordinal = *candidate_ordinal;
+            *candidate_ordinal = candidate_ordinal.saturating_add(1);
+            if grid_candidate_selected(ordinal, candidate_count) {
+                if let Some((a, b)) = clip_grid_line_to_polygon(polygon, axis, index as f64 * step)
+                {
+                    append_projected_grid_segment(camera, a, b, index, overlay_lines);
+                }
+            }
+            let Some(next) = index.checked_add(stride) else {
+                break;
+            };
+            index = next;
+        }
+    }
+}
+
+fn surface_grid_face_ranges(
+    polygon: &[[f64; 3]],
+    normal: [f64; 3],
+    camera: psx_engine::WorldCamera,
+    step: f64,
+) -> Option<[(usize, (i64, i64, i64)); 2]> {
+    if polygon.len() < 3 || !surface_grid_face_maybe_visible(polygon, normal, camera) {
+        return None;
+    }
+    let axes = match dominant_normal_axis(normal) {
+        0 => [1, 2],
+        1 => [0, 2],
+        _ => [0, 1],
+    };
+    Some([
+        (axes[0], grid_index_range(polygon, axes[0], step)),
+        (axes[1], grid_index_range(polygon, axes[1], step)),
+    ])
+}
+
+fn surface_grid_face_maybe_visible(
+    polygon: &[[f64; 3]],
+    normal: [f64; 3],
+    camera: psx_engine::WorldCamera,
+) -> bool {
+    let camera_position = [
+        f64::from(camera.position.x),
+        f64::from(camera.position.y),
+        f64::from(camera.position.z),
+    ];
+    let camera_side = dot3_f64(
+        normal,
+        [
+            camera_position[0] - polygon[0][0],
+            camera_position[1] - polygon[0][1],
+            camera_position[2] - polygon[0][2],
+        ],
+    );
+    // Brush face points are CCW from outside. Only the material-visible side
+    // gets a grid; otherwise lines from rear/interior planes would wash over
+    // the actual surface preview because host overlays do not have a Z buffer.
+    if !camera_side.is_finite() || camera_side <= GRID_INTERSECTION_EPSILON {
+        return false;
+    }
+    const SAFE_COORD_LIMIT: f64 = 500_000.0;
+    if polygon
+        .iter()
+        .flatten()
+        .any(|value| !value.is_finite() || value.abs() > SAFE_COORD_LIMIT)
+    {
+        return false;
+    }
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    let mut any_projected = false;
+    for point in polygon {
+        let point = psx_engine::WorldVertex::new(
+            point[0].round() as i32,
+            point[1].round() as i32,
+            point[2].round() as i32,
+        );
+        if let Some(projected) = camera.project_world(point) {
+            any_projected = true;
+            let x = f32::from(projected.sx);
+            let y = f32::from(projected.sy);
+            bounds[0] = bounds[0].min(x);
+            bounds[1] = bounds[1].min(y);
+            bounds[2] = bounds[2].max(x);
+            bounds[3] = bounds[3].max(y);
+        }
+    }
+    const SCREEN_MARGIN: f32 = 8.0;
+    any_projected
+        && bounds[2] >= -SCREEN_MARGIN
+        && bounds[0] <= SCREEN_W as f32 + SCREEN_MARGIN
+        && bounds[3] >= -SCREEN_MARGIN
+        && bounds[1] <= SCREEN_H as f32 + SCREEN_MARGIN
+}
+
+fn grid_index_count((first, last, stride): (i64, i64, i64)) -> u64 {
+    if first > last || stride <= 0 {
+        0
+    } else {
+        (last.saturating_sub(first) / stride).saturating_add(1) as u64
+    }
+}
+
+fn grid_candidate_selected(ordinal: u64, candidate_count: u64) -> bool {
+    if candidate_count <= BSP_SURFACE_GRID_SEGMENT_CAP as u64 {
+        return true;
+    }
+    let cap = BSP_SURFACE_GRID_SEGMENT_CAP as u128;
+    let total = candidate_count as u128;
+    ((ordinal as u128 + 1) * cap) / total > (ordinal as u128 * cap) / total
+}
+
+fn append_projected_grid_segment(
+    camera: psx_engine::WorldCamera,
+    a: [f64; 3],
+    b: [f64; 3],
+    grid_index: i64,
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    const SAFE_COORD_LIMIT: f64 = 500_000.0;
+    if [a, b]
+        .iter()
+        .flatten()
+        .any(|value| !value.is_finite() || value.abs() > SAFE_COORD_LIMIT)
+    {
+        return;
+    }
+    let world_vertex = |point: [f64; 3]| {
+        psx_engine::WorldVertex::new(
+            point[0].round() as i32,
+            point[1].round() as i32,
+            point[2].round() as i32,
+        )
+    };
+    let Some(a) = camera.project_world(world_vertex(a)) else {
+        return;
+    };
+    let Some(b) = camera.project_world(world_vertex(b)) else {
+        return;
+    };
+    let a = egui::pos2(f32::from(a.sx), f32::from(a.sy));
+    let b = egui::pos2(f32::from(b.sx), f32::from(b.sy));
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    if dx * dx + dy * dy < 2.25 {
+        return;
+    }
+    let major = grid_index.rem_euclid(BSP_SURFACE_GRID_MAJOR_EVERY) == 0;
+    let rgba = if major {
+        BSP_SURFACE_GRID_MAJOR_RGBA
+    } else {
+        BSP_SURFACE_GRID_MINOR_RGBA
+    };
+    overlay_lines.push(psxed_ui::EditorViewportOverlayLine::new(
+        a,
+        b,
+        egui::Color32::from_rgba_unmultiplied(rgba.0, rgba.1, rgba.2, rgba.3),
+        if major {
+            BSP_SURFACE_GRID_MAJOR_WIDTH
+        } else {
+            BSP_SURFACE_GRID_MINOR_WIDTH
+        },
+    ));
+}
+
+fn dominant_normal_axis(normal: [f64; 3]) -> usize {
+    let absolute = normal.map(f64::abs);
+    if absolute[1] > absolute[0] && absolute[1] >= absolute[2] {
+        1
+    } else if absolute[2] > absolute[0] && absolute[2] > absolute[1] {
+        2
+    } else {
+        0
+    }
+}
+
+fn grid_index_range(polygon: &[[f64; 3]], axis: usize, step: f64) -> (i64, i64, i64) {
+    let (min, max) = polygon
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), vertex| {
+            (min.min(vertex[axis]), max.max(vertex[axis]))
+        });
+    if !min.is_finite() || !max.is_finite() || step <= 0.0 {
+        return (1, 0, 1);
+    }
+    let first = (min / step).ceil() as i64;
+    let last = (max / step).floor() as i64;
+    if first > last {
+        return (1, 0, 1);
+    }
+    let count = last.saturating_sub(first).saturating_add(1) as u64;
+    let required = count
+        .div_ceil(BSP_SURFACE_GRID_LINES_PER_AXIS as u64)
+        .max(1);
+    let stride = required.next_power_of_two().min(i64::MAX as u64) as i64;
+    let aligned_first = first.div_euclid(stride) + i64::from(first.rem_euclid(stride) != 0);
+    (aligned_first.saturating_mul(stride), last, stride)
+}
+
+/// Intersect one world-axis grid plane with a convex brush polygon. Edge
+/// crossings are used rather than a texture-space basis so the result stays
+/// anchored to global world coordinates on axis-aligned and sloped faces.
+fn clip_grid_line_to_polygon(
+    polygon: &[[f64; 3]],
+    axis: usize,
+    coordinate: f64,
+) -> Option<([f64; 3], [f64; 3])> {
+    let mut intersections = Vec::with_capacity(polygon.len().min(8));
+    for edge_index in 0..polygon.len() {
+        let a = polygon[edge_index];
+        let b = polygon[(edge_index + 1) % polygon.len()];
+        let da = a[axis] - coordinate;
+        let db = b[axis] - coordinate;
+        if da.abs() <= GRID_INTERSECTION_EPSILON {
+            push_unique_point(&mut intersections, a);
+        }
+        if db.abs() <= GRID_INTERSECTION_EPSILON {
+            push_unique_point(&mut intersections, b);
+        }
+        if (da < -GRID_INTERSECTION_EPSILON && db > GRID_INTERSECTION_EPSILON)
+            || (da > GRID_INTERSECTION_EPSILON && db < -GRID_INTERSECTION_EPSILON)
+        {
+            let t = da / (da - db);
+            push_unique_point(
+                &mut intersections,
+                [
+                    a[0] + (b[0] - a[0]) * t,
+                    a[1] + (b[1] - a[1]) * t,
+                    a[2] + (b[2] - a[2]) * t,
+                ],
+            );
+        }
+    }
+    if intersections.len() < 2 {
+        return None;
+    }
+    let mut farthest = (0, 1);
+    let mut farthest_distance = squared_distance_f64(intersections[0], intersections[1]);
+    for a in 0..intersections.len() {
+        for b in (a + 1)..intersections.len() {
+            let distance = squared_distance_f64(intersections[a], intersections[b]);
+            if distance > farthest_distance {
+                farthest = (a, b);
+                farthest_distance = distance;
+            }
+        }
+    }
+    (farthest_distance > GRID_INTERSECTION_EPSILON * GRID_INTERSECTION_EPSILON)
+        .then(|| (intersections[farthest.0], intersections[farthest.1]))
+}
+
+fn push_unique_point(points: &mut Vec<[f64; 3]>, candidate: [f64; 3]) {
+    if points.iter().all(|point| {
+        squared_distance_f64(*point, candidate)
+            > GRID_INTERSECTION_EPSILON * GRID_INTERSECTION_EPSILON
+    }) {
+        points.push(candidate);
+    }
+}
+
+fn squared_distance_f64(a: [f64; 3], b: [f64; 3]) -> f64 {
+    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
+}
+
+fn dot3_f64(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
 /// Draw a horizontal radius ring plus a bulb icon for every
 /// PointLight in the scene. The bulb
 /// replaces the old coloured square marker so lights read as editor
@@ -1114,4 +1538,99 @@ pub(super) fn bright_overlay_color(rgb: (u8, u8, u8)) -> egui::Color32 {
         (c + ((255 - c) * 3 / 5)).min(255) as u8
     };
     egui::Color32::from_rgb(lift(rgb.0), lift(rgb.1), lift(rgb.2))
+}
+
+#[cfg(test)]
+mod surface_grid_tests {
+    use super::*;
+
+    #[test]
+    fn brush_grid_line_clips_to_convex_face_edges() {
+        let polygon = [
+            [-32.0, -16.0, 0.0],
+            [32.0, -16.0, 0.0],
+            [32.0, 16.0, 0.0],
+            [-32.0, 16.0, 0.0],
+        ];
+        let (a, b) = clip_grid_line_to_polygon(&polygon, 0, 0.0).expect("center grid line");
+        assert_eq!(a[0], 0.0);
+        assert_eq!(b[0], 0.0);
+        assert_eq!([a[1].min(b[1]), a[1].max(b[1])], [-16.0, 16.0]);
+    }
+
+    #[test]
+    fn brush_grid_line_handles_a_line_coincident_with_an_edge() {
+        let polygon = [
+            [-32.0, -16.0, 0.0],
+            [32.0, -16.0, 0.0],
+            [32.0, 16.0, 0.0],
+            [-32.0, 16.0, 0.0],
+        ];
+        let (a, b) = clip_grid_line_to_polygon(&polygon, 1, -16.0).expect("bottom grid edge");
+        assert_eq!(a[1], -16.0);
+        assert_eq!(b[1], -16.0);
+        assert_eq!([a[0].min(b[0]), a[0].max(b[0])], [-32.0, 32.0]);
+    }
+
+    #[test]
+    fn dense_surface_grid_coarsens_on_power_of_two_grid_multiples() {
+        let polygon = [
+            [-1024.0, -64.0, 0.0],
+            [1024.0, -64.0, 0.0],
+            [1024.0, 64.0, 0.0],
+            [-1024.0, 64.0, 0.0],
+        ];
+        let (first, last, stride) = grid_index_range(&polygon, 0, 16.0);
+        assert_eq!((first, last, stride), (-64, 64, 8));
+        assert_eq!(first.rem_euclid(stride), 0);
+        assert!(((last - first) / stride + 1) as usize <= BSP_SURFACE_GRID_LINES_PER_AXIS);
+    }
+
+    #[test]
+    fn global_grid_cap_samples_evenly_across_all_candidates() {
+        let total = 10_000u64;
+        let selected: Vec<_> = (0..total)
+            .filter(|ordinal| grid_candidate_selected(*ordinal, total))
+            .collect();
+        assert_eq!(selected.len(), BSP_SURFACE_GRID_SEGMENT_CAP);
+        assert!(selected[0] < total / 100);
+        assert!(selected[selected.len() - 1] > total * 99 / 100);
+    }
+
+    #[test]
+    fn dominant_axis_is_the_face_projection_axis() {
+        assert_eq!(dominant_normal_axis([8.0, 2.0, 1.0]), 0);
+        assert_eq!(dominant_normal_axis([1.0, -9.0, 2.0]), 1);
+        assert_eq!(dominant_normal_axis([1.0, 2.0, -10.0]), 2);
+    }
+
+    #[test]
+    fn brush_surface_overlay_tracks_grid_interval_and_stays_translucent() {
+        let mut project = ProjectDocument::new("surface grid");
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [-64, -64, -64],
+                [64, 64, 64],
+            ));
+        let projection = psx_engine::WorldProjection::new(160, 120, 320, 32);
+        let camera = psx_engine::WorldCamera::orbit(
+            projection,
+            psx_engine::WorldVertex::ZERO,
+            512,
+            psx_engine::Angle::from_q12(0),
+            psx_engine::Angle::from_q12(0),
+        );
+
+        let mut fine = Vec::new();
+        prepend_bsp_surface_grid_overlay(&project, camera, 16, &mut fine);
+        let mut coarse = Vec::new();
+        prepend_bsp_surface_grid_overlay(&project, camera, 32, &mut coarse);
+
+        assert!(!fine.is_empty());
+        assert!(coarse.len() < fine.len());
+        assert!(fine.iter().all(|line| line.color.a() < u8::MAX));
+        assert!(fine.len() <= BSP_SURFACE_GRID_SEGMENT_CAP);
+    }
 }
