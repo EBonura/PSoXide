@@ -1,5 +1,7 @@
 use super::*;
 
+const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
+
 impl Scene for Playtest {
     fn render_submission(&self) -> RenderSubmission {
         RenderSubmission::Queued
@@ -35,6 +37,21 @@ impl Scene for Playtest {
             texture_width: slot.texture_width,
             texture_height: slot.texture_height,
         })
+    }
+
+    fn ui_value(&self, binding: LevelUiValueBinding) -> Option<i32> {
+        match binding {
+            LevelUiValueBinding::PlayerHealth => Some(if self.player_health_max == 0 {
+                PLAYER_HEALTH_MAX_Q12
+            } else {
+                (i32::from(self.player_health) * PLAYER_HEALTH_MAX_Q12)
+                    / i32::from(self.player_health_max)
+            }),
+            LevelUiValueBinding::PlayerHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
+            LevelUiValueBinding::PlayerStamina => Some(self.motor.stamina_q12()),
+            LevelUiValueBinding::PlayerStaminaMax => Some(self.motor_config().stamina_max_q12),
+            _ => None,
+        }
     }
 
     /// Gameplay and each UI scene use distinct resource-set keys so the flow
@@ -1296,26 +1313,6 @@ impl Scene for Playtest {
         }
 
         if self.character.is_some() {
-            // The shared UI_NODES pool now holds front-end menu scenes too, so
-            // draw only the HUD scene's slice as the in-game overlay.
-            let (hud_first, hud_count) = hud_scene_range();
-            let font_table = [
-                self.ui_fonts[0].as_ref(),
-                self.ui_fonts[1].as_ref(),
-                self.ui_fonts[2].as_ref(),
-                self.ui_fonts[3].as_ref(),
-            ];
-            draw_player_hud(
-                UI_NODES,
-                hud_first,
-                hud_count,
-                &font_table,
-                (overlay_tick.as_u32() & 0xffff) as u16,
-                self.player_health,
-                self.player_health_max,
-                self.motor.stamina_q12(),
-                self.motor_config().stamina_max_q12,
-            );
             // EXPLOSION PROBE (diagnostic): overlay the player's skinned-vertex
             // capture pages. Feature-gated -- probe builds only, never the
             // shipping game or perf-measurement builds.
