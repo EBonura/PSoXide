@@ -1096,7 +1096,7 @@ pub fn build_package(
         }
         if !compiled.leak_path.is_empty() {
             report.warn(format!(
-                "BSP leak reaches the infinite exterior through {} pointfile points; Release keeps conservative PVS and writes {}",
+                "BSP leak reaches the infinite exterior through {} pointfile points; portal PVS includes the opening and writes {}",
                 compiled.leak_path.len(),
                 crate::brush_playtest::BRUSH_LEAK_FILENAME,
             ));

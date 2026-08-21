@@ -1736,6 +1736,78 @@ fn embedded_default_project_ron_deserializes() {
 }
 
 #[test]
+fn default_project_catalogues_tank_boss_without_instantiating_it() {
+    let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+    let tank_resource = project
+        .resources
+        .iter()
+        .find(|resource| resource.name == "Tank Boss")
+        .expect("default project catalogues the future heavy enemy");
+    let ResourceData::Character(tank) = &tank_resource.data else {
+        panic!("Tank Boss is a Character resource");
+    };
+    assert_eq!(tank.spawn_role, CharacterSpawnRole::Enemy);
+
+    let model_id = tank.model.expect("Tank Boss character owns a model");
+    let model_resource = project.resource(model_id).expect("Tank Boss model exists");
+    let ResourceData::Model(model) = &model_resource.data else {
+        panic!("Tank Boss model binding points at a Model resource");
+    };
+    assert_eq!(model_resource.name, "Tank Boss Model");
+    assert!(default_project_dir().join(&model.model_path).is_file());
+    assert!(model
+        .texture_path
+        .as_ref()
+        .is_some_and(|path| default_project_dir().join(path).is_file()));
+
+    let animation_set_id = tank
+        .animation_set
+        .expect("Tank Boss keeps its future animation-set binding");
+    let animation_set = project
+        .resource(animation_set_id)
+        .expect("Tank Boss animation set exists");
+    let ResourceData::AnimationSet(animation_set) = &animation_set.data else {
+        panic!("Tank Boss animation binding points at an Animation Set");
+    };
+    assert_eq!(
+        animation_set.clips.len(),
+        1,
+        "only the safe rest pose ships"
+    );
+    let rest_pose = project
+        .resource(animation_set.clips[0])
+        .expect("Tank Boss rest pose exists");
+    assert!(matches!(rest_pose.data, ResourceData::AnimationClip(_)));
+
+    for scene in &project.scenes {
+        for node in scene.nodes() {
+            let references_character = matches!(
+                &node.kind,
+                NodeKind::CharacterController {
+                    character: Some(id),
+                    ..
+                } | NodeKind::SpawnPoint {
+                    character: Some(id),
+                    ..
+                } if *id == tank_resource.id
+            );
+            let references_model = matches!(
+                &node.kind,
+                NodeKind::MeshInstance {
+                    mesh: Some(id), ..
+                } | NodeKind::ModelRenderer {
+                    model: Some(id), ..
+                } if *id == model_id
+            );
+            assert!(
+                !references_character && !references_model,
+                "Tank Boss stays available in the catalogue but out of the demo scene"
+            );
+        }
+    }
+}
+
+#[test]
 fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
     fn replace_first_world_payload(source: &str) -> String {
         let start = source

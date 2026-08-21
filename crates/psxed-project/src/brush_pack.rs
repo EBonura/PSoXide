@@ -5,7 +5,7 @@ use crate::brush_compile::{
     pack_plane, BspChild, BspLeafContents, CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_portal::CompiledPortal;
-use crate::brush_vis::quake_portal_flow_rows;
+use crate::brush_vis::{quake_portal_fast_rows, quake_portal_flow_rows};
 use crate::ResourceId;
 
 use psx_bsp::{
@@ -32,6 +32,8 @@ pub enum BspVisibility {
     /// Fast, conservative connectivity rows for interactive editor cooks.
     #[default]
     PortalComponents,
+    /// Quake-style base-portal `mightsee` rows, equivalent to fast VIS.
+    PortalFast,
     /// Original Quake-style directed portal/separator flow for release cooks.
     PortalFlow,
 }
@@ -184,6 +186,9 @@ pub fn pack_bsp_geometry_with_visibility(
         BspVisibility::PortalComponents => {
             portal_component_visibility(bsp, portals, &leaf_mapping, visible_leaves)
         }
+        BspVisibility::PortalFast => {
+            portal_fast_visibility(bsp, portals, &leaf_mapping, visible_leaves)
+        }
         BspVisibility::PortalFlow => {
             portal_flow_visibility(bsp, portals, &leaf_mapping, visible_leaves)
         }
@@ -261,6 +266,23 @@ fn portal_flow_visibility(
     visible_leaves: usize,
 ) -> (Vec<u8>, Vec<i32>) {
     let rows = quake_portal_flow_rows(bsp, portals, leaf_mapping, visible_leaves);
+    pack_visibility_rows(bsp, rows)
+}
+
+fn portal_fast_visibility(
+    bsp: &CompiledSurfaceBsp,
+    portals: &[CompiledPortal],
+    leaf_mapping: &[i16],
+    visible_leaves: usize,
+) -> (Vec<u8>, Vec<i32>) {
+    let rows = quake_portal_fast_rows(bsp, portals, leaf_mapping, visible_leaves);
+    pack_visibility_rows(bsp, rows)
+}
+
+fn pack_visibility_rows(
+    bsp: &CompiledSurfaceBsp,
+    rows: Vec<Option<Vec<u8>>>,
+) -> (Vec<u8>, Vec<i32>) {
     let mut visibility = Vec::new();
     let mut offsets = vec![-1; bsp.leaves.len()];
     let mut interned = std::collections::HashMap::<Vec<u8>, i32>::new();
