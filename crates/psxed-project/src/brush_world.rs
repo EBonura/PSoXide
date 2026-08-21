@@ -743,10 +743,18 @@ fn compile_model(
     let csg_surfaces = compile_csg_surfaces(brushes);
     let authored_surfaces = compile_authored_surfaces(brushes);
     let (topology_surfaces, render_surfaces) = if csg_surfaces.len() <= i16::MAX as usize {
-        let render = if authored_surfaces.len() < csg_surfaces.len() {
-            authored_surfaces
-        } else {
+        // Keep the actual union boundary whenever it fits the resident face
+        // budget, even if retaining each authored face would be marginally
+        // smaller. Authored polygons can cross into an overlapping brush; a
+        // PS1 painter's algorithm then has no valid whole-triangle order and
+        // produces diagonal wedges around trims, arches, and pillars. The
+        // authored fallback exists only for large maps where CSG fragmentation
+        // itself exceeds the resident budget. CSG remains preferable above
+        // that threshold too when it is already the smaller representation.
+        let render = if prefer_csg_render_surfaces(csg_surfaces.len(), authored_surfaces.len()) {
             csg_surfaces.clone()
+        } else {
+            authored_surfaces
         };
         (csg_surfaces, render)
     } else {
@@ -851,6 +859,10 @@ fn compile_model(
     };
     let collision = compile_runtime_collision_hulls(brushes, collision_hulls)?;
     Ok((geometry, collision, leak_path))
+}
+
+fn prefer_csg_render_surfaces(csg_count: usize, authored_count: usize) -> bool {
+    csg_count <= MAX_RESIDENT_WORLD_FACES || csg_count <= authored_count
 }
 
 fn compile_runtime_collision_hulls(
@@ -1346,6 +1358,14 @@ mod tests {
             wait_ticks: 0,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn csg_render_surfaces_win_until_fragmentation_exceeds_the_resident_budget() {
+        assert!(prefer_csg_render_surfaces(494, 449));
+        assert!(prefer_csg_render_surfaces(MAX_RESIDENT_WORLD_FACES, 32));
+        assert!(prefer_csg_render_surfaces(8_000, 9_000));
+        assert!(!prefer_csg_render_surfaces(8_000, 6_000));
     }
 
     #[test]
