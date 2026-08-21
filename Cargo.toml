@@ -157,3 +157,16 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.psx-gte-core]
 opt-level = 3
+
+# The desktop editor's full-map preview also lives in workspace crates, so the
+# wildcard above does not reach it. At opt-level 0 E1M1 navigation spends over
+# 45 ms per frame in `make run`, while the same path is under 4 ms in release.
+# Keep debug assertions and incremental compilation, but compile the three
+# host editor crates with enough optimisation for the development executable
+# to remain interactive on production-sized levels.
+[profile.dev.package.frontend]
+opt-level = 2
+[profile.dev.package.psxed-ui]
+opt-level = 2
+[profile.dev.package.psxed-project]
+opt-level = 2
