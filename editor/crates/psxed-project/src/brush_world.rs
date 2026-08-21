@@ -524,7 +524,7 @@ pub fn compile_brush_world(
         })
         .filter(|point| point.iter().all(|value| value.is_finite()))
         .collect();
-    let (world_geometry, world_collision, leak_path) = compile_model(
+    let (mut world_geometry, world_collision, leak_path) = compile_model(
         &static_brushes,
         &all_brushes,
         &occupant_points,
@@ -704,7 +704,19 @@ pub fn compile_brush_world(
     }
 
     let slots = pxbsp_material_slots(&world_geometry, &submodels);
-    let (materials, textures) = resolve_materials(project, &slots, &options)?;
+    let page_texture_dims = page_local_texture_dims(
+        project,
+        &slots,
+        &world_geometry,
+        &submodels,
+        &texture_dims,
+        options.project_root,
+    );
+    mark_page_local_faces(&mut world_geometry, &page_texture_dims);
+    for submodel in &mut submodels {
+        mark_page_local_faces(&mut submodel.geometry, &page_texture_dims);
+    }
+    let (materials, textures) = resolve_materials(project, &slots, &options, &page_texture_dims)?;
     let pxbsp = build_pxbsp_with_submodels(
         world_geometry,
         world_collision,
@@ -1132,15 +1144,209 @@ fn brush_texture_dims(
     dims
 }
 
+const PAGE_LOCAL_PROMOTION_BUDGET_BYTES: usize = 2 * 1024;
+const PAGE_LOCAL_PROMOTION_MIN_FACE_GAIN: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
+struct PageLocalPromotion {
+    material: Option<ResourceId>,
+    target: [u16; 2],
+    extra_bytes: usize,
+    face_gain: usize,
+    order: usize,
+}
+
+/// Pick repeated 4bpp texture extents for materials where the saved packet
+/// state materially outweighs the extra VRAM. This mirrors Quake's
+/// cooker-owned page-local surface contract without stretching or changing
+/// texels: every promoted image is tiled from the original source.
+fn page_local_texture_dims(
+    project: &ProjectDocument,
+    slots: &[Option<ResourceId>],
+    world: &PackedBspGeometry,
+    submodels: &[PxbspSubmodel],
+    source_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
+    project_root: &Path,
+) -> std::collections::HashMap<Option<ResourceId>, [u16; 2]> {
+    let mut output = source_dims.clone();
+    let mut candidates = Vec::new();
+    for (order, &material) in slots.iter().enumerate() {
+        let Some(material_id) = material else {
+            continue;
+        };
+        let Some(resource) = project.resource(material_id) else {
+            continue;
+        };
+        let ResourceData::Material(material_data) = &resource.data else {
+            continue;
+        };
+        if material_data.blend_mode != PsxBlendMode::Opaque
+            || material_data.animation.mode != MaterialAnimationMode::Static
+            || material_data.layered_sky
+        {
+            continue;
+        }
+        let Some(&source) = source_dims.get(&material) else {
+            continue;
+        };
+        let Ok(Some((_, source_bytes))) =
+            resolve_material_texture_psxt(project, material_id, project_root)
+        else {
+            continue;
+        };
+        let Ok(source_texture) = psx_asset::Texture::from_bytes(&source_bytes) else {
+            continue;
+        };
+        if source_texture.depth() != Depth::Bit4
+            || [source_texture.width(), source_texture.height()] != source
+        {
+            continue;
+        }
+        let mut requirements = Vec::new();
+        collect_face_uv_requirements(world, material, &mut requirements);
+        for submodel in submodels {
+            collect_face_uv_requirements(&submodel.geometry, material, &mut requirements);
+        }
+        let Some((target, face_gain, extra_bytes)) =
+            best_page_local_promotion(source, &requirements)
+        else {
+            continue;
+        };
+        if face_gain >= PAGE_LOCAL_PROMOTION_MIN_FACE_GAIN {
+            candidates.push(PageLocalPromotion {
+                material,
+                target,
+                extra_bytes,
+                face_gain,
+                order,
+            });
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        let left_score = left.face_gain as u64 * right.extra_bytes as u64;
+        let right_score = right.face_gain as u64 * left.extra_bytes as u64;
+        right_score
+            .cmp(&left_score)
+            .then_with(|| left.order.cmp(&right.order))
+    });
+    let mut remaining = PAGE_LOCAL_PROMOTION_BUDGET_BYTES;
+    for candidate in candidates {
+        if candidate.extra_bytes > remaining {
+            continue;
+        }
+        output.insert(candidate.material, candidate.target);
+        remaining -= candidate.extra_bytes;
+    }
+    output
+}
+
+fn collect_face_uv_requirements(
+    geometry: &PackedBspGeometry,
+    material: Option<ResourceId>,
+    output: &mut Vec<[u16; 2]>,
+) {
+    for face in geometry.faces.chunks_exact(10) {
+        let texture = u16::from_le_bytes([face[4], face[5]]) as usize;
+        if geometry.material_slots.get(texture).copied() != Some(material) {
+            continue;
+        }
+        let first_vertex = u16::from_le_bytes([face[2], face[3]]) as usize;
+        let vertex_count = face[7] as usize;
+        let mut required = [1u16; 2];
+        for vertex in geometry
+            .vertices
+            .chunks_exact(12)
+            .skip(first_vertex)
+            .take(vertex_count)
+        {
+            required[0] = required[0].max(u16::from(vertex[6]) + 1);
+            required[1] = required[1].max(u16::from(vertex[7]) + 1);
+        }
+        output.push(required);
+    }
+}
+
+fn best_page_local_promotion(
+    source: [u16; 2],
+    requirements: &[[u16; 2]],
+) -> Option<([u16; 2], usize, usize)> {
+    let baseline = requirements
+        .iter()
+        .filter(|required| required[0] <= source[0] && required[1] <= source[1])
+        .count();
+    let source_area = usize::from(source[0]) * usize::from(source[1]);
+    let mut best: Option<([u16; 2], usize, usize)> = None;
+    let mut width = source[0];
+    while width <= 128 {
+        let mut height = source[1];
+        while height <= 128 {
+            let eligible = requirements
+                .iter()
+                .filter(|required| required[0] <= width && required[1] <= height)
+                .count();
+            let area = usize::from(width) * usize::from(height);
+            let face_gain = eligible.saturating_sub(baseline);
+            let extra_bytes = area.saturating_sub(source_area) / 2;
+            if face_gain != 0 && extra_bytes != 0 {
+                let replace = best.is_none_or(|(_, best_gain, best_extra)| {
+                    let score = face_gain as u64 * best_extra as u64;
+                    let best_score = best_gain as u64 * extra_bytes as u64;
+                    score > best_score || (score == best_score && face_gain > best_gain)
+                });
+                if replace {
+                    best = Some(([width, height], face_gain, extra_bytes));
+                }
+            }
+            let Some(next_height) = height.checked_mul(2).filter(|&value| value <= 128) else {
+                break;
+            };
+            height = next_height;
+        }
+        let Some(next_width) = width.checked_mul(2).filter(|&value| value <= 128) else {
+            break;
+        };
+        width = next_width;
+    }
+    best
+}
+
+fn mark_page_local_faces(
+    geometry: &mut PackedBspGeometry,
+    texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
+) {
+    for face in geometry.faces.chunks_exact_mut(10) {
+        let texture = u16::from_le_bytes([face[4], face[5]]) as usize;
+        let Some(material) = geometry.material_slots.get(texture).copied() else {
+            continue;
+        };
+        let Some(&dims) = texture_dims.get(&material) else {
+            continue;
+        };
+        let first_vertex = u16::from_le_bytes([face[2], face[3]]) as usize;
+        let vertex_count = face[7] as usize;
+        let page_local = geometry
+            .vertices
+            .chunks_exact(12)
+            .skip(first_vertex)
+            .take(vertex_count)
+            .all(|vertex| u16::from(vertex[6]) < dims[0] && u16::from(vertex[7]) < dims[1]);
+        if page_local {
+            face[6] |= psx_bsp::FACE_PAGE_LOCAL_UV as u8;
+        }
+    }
+}
+
 fn resolve_materials(
     project: &ProjectDocument,
     slots: &[Option<ResourceId>],
     options: &BrushWorldCookOptions<'_>,
+    page_texture_dims: &std::collections::HashMap<Option<ResourceId>, [u16; 2]>,
 ) -> Result<(Vec<PxbspMaterial>, Vec<CompiledBrushTexture>), BrushWorldCookError> {
     let mut textures = Vec::new();
     let mut materials = Vec::with_capacity(slots.len());
     for &slot in slots {
-        let (key, bytes, tint, blend, sidedness, animation, layered_sky) = match slot {
+        let (mut key, mut bytes, tint, blend, sidedness, animation, layered_sky) = match slot {
             None => (
                 "@brush-flat-white".to_string(),
                 flat_white_psxt(),
@@ -1175,6 +1381,24 @@ fn resolve_materials(
                 )
             }
         };
+        if let Some(&target) = page_texture_dims.get(&slot) {
+            let parsed = psx_asset::Texture::from_bytes(&bytes).map_err(|error| {
+                BrushWorldCookError::InvalidTexture {
+                    material: slot,
+                    error: format!("invalid PSXT before page-local promotion: {error:?}"),
+                }
+            })?;
+            let source = [parsed.width(), parsed.height()];
+            if target != source {
+                bytes = tile_4bpp_texture(&bytes, target).map_err(|error| {
+                    BrushWorldCookError::InvalidTexture {
+                        material: slot,
+                        error,
+                    }
+                })?;
+                key = format!("{key}#page{}x{}", target[0], target[1]);
+            }
+        }
         let (texture_asset, texture_size) = intern_texture(
             &mut textures,
             options.texture_asset_base,
@@ -1195,6 +1419,57 @@ fn resolve_materials(
         )?);
     }
     Ok((materials, textures))
+}
+
+fn tile_4bpp_texture(bytes: &[u8], target: [u16; 2]) -> Result<Vec<u8>, String> {
+    let texture = psx_asset::Texture::from_bytes(bytes)
+        .map_err(|error| format!("invalid source PSXT: {error:?}"))?;
+    let source = [texture.width(), texture.height()];
+    if texture.depth() != Depth::Bit4
+        || target[0] < source[0]
+        || target[1] < source[1]
+        || target[0] > 128
+        || target[1] > 128
+        || !target[0].is_multiple_of(source[0])
+        || !target[1].is_multiple_of(source[1])
+    {
+        return Err(format!(
+            "page-local promotion requires a repeated 4bpp source, got {}x{} -> {}x{}",
+            source[0], source[1], target[0], target[1]
+        ));
+    }
+    if target == source {
+        return Ok(bytes.to_vec());
+    }
+
+    let header_bytes = psxed_format::AssetHeader::SIZE + psxed_format::texture::TextureHeader::SIZE;
+    if bytes.len() < header_bytes {
+        return Err("truncated PSXT header".to_string());
+    }
+    let source_row_bytes = usize::from(texture.halfwords_per_row()) * 2;
+    let target_row_bytes = usize::from(target[0]) / 2;
+    if texture.pixel_bytes().len() != source_row_bytes * usize::from(source[1]) {
+        return Err("4bpp PSXT pixel rows are not tightly packed".to_string());
+    }
+    let mut pixels = Vec::with_capacity(target_row_bytes * usize::from(target[1]));
+    for target_y in 0..usize::from(target[1]) {
+        let source_y = target_y % usize::from(source[1]);
+        let row_start = source_y * source_row_bytes;
+        let row = &texture.pixel_bytes()[row_start..row_start + source_row_bytes];
+        for _ in 0..usize::from(target[0] / source[0]) {
+            pixels.extend_from_slice(row);
+        }
+    }
+
+    let mut output = bytes[..header_bytes].to_vec();
+    output[14..16].copy_from_slice(&target[0].to_le_bytes());
+    output[16..18].copy_from_slice(&target[1].to_le_bytes());
+    output[20..24].copy_from_slice(&(pixels.len() as u32).to_le_bytes());
+    output.extend_from_slice(&pixels);
+    output.extend_from_slice(texture.clut_bytes());
+    let payload_len = output.len() - psxed_format::AssetHeader::SIZE;
+    output[8..12].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    Ok(output)
 }
 
 fn intern_texture(
@@ -1349,6 +1624,49 @@ fn flat_white_psxt() -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::{brush::BrushContents, MaterialResource, Transform3};
+
+    #[test]
+    fn repeated_page_texture_preserves_every_source_texel_and_clut() {
+        let indices = (0..64).map(|index| (index % 16) as u8).collect::<Vec<_>>();
+        let palette = (0..16)
+            .map(|index| [index * 11, 255 - index * 7, index * 3])
+            .collect::<Vec<_>>();
+        let source = psxed_tex::encode_indexed_psxt(8, 8, Depth::Bit4, &indices, &palette, true)
+            .expect("source texture");
+        let promoted = tile_4bpp_texture(&source, [32, 16]).expect("repeated texture");
+        let source = psx_asset::Texture::from_bytes(&source).expect("source parses");
+        let promoted = psx_asset::Texture::from_bytes(&promoted).expect("promoted parses");
+
+        assert_eq!((promoted.width(), promoted.height()), (32, 16));
+        assert_eq!(promoted.clut_bytes(), source.clut_bytes());
+        assert_eq!(promoted.flags(), source.flags());
+        let source_row_bytes = usize::from(source.halfwords_per_row()) * 2;
+        let promoted_row_bytes = usize::from(promoted.halfwords_per_row()) * 2;
+        for (row_index, row) in promoted
+            .pixel_bytes()
+            .chunks_exact(promoted_row_bytes)
+            .enumerate()
+        {
+            let source_y = row_index % usize::from(source.height());
+            let source_row = &source.pixel_bytes()
+                [source_y * source_row_bytes..(source_y + 1) * source_row_bytes];
+            assert!(row
+                .chunks_exact(source_row_bytes)
+                .all(|copy| copy == source_row));
+        }
+    }
+
+    #[test]
+    fn page_texture_promotion_maximizes_faces_saved_per_extra_byte() {
+        let mut requirements = vec![[20, 20]; 10];
+        requirements.extend(vec![[60, 60]; 40]);
+        requirements.extend(vec![[100, 100]; 80]);
+        let (target, gain, extra_bytes) =
+            best_page_local_promotion([32, 32], &requirements).expect("promotion");
+        assert_eq!(target, [64, 64]);
+        assert_eq!(gain, 40);
+        assert_eq!(extra_bytes, (64 * 64 - 32 * 32) / 2);
+    }
     use psx_bsp::mover::BrushDoorSet;
     use psx_bsp::pxbsp::{entity_class, entity_flags, PxbspBrushDoor};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;

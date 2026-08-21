@@ -299,6 +299,34 @@ pub struct ClassicAffineWindowedBatchSurface {
     pub color_command_word: u32,
 }
 
+/// One PXBSP fan whose packet shape is selected per surface.
+///
+/// Cooker-proven page-local UVs use compact GP0(34h/3Ch) packets. Tiled,
+/// animated, translucent, and other exceptional materials retain the
+/// self-contained GP0(E2) selector and reset used by the windowed path.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassicAffineMixedBatchSurface {
+    /// First vertex in the batch vertex array.
+    pub first_vertex: u16,
+    /// Number of vertices in this convex fan.
+    pub vertex_count: u16,
+    /// Texture-page word used by this surface.
+    pub tpage: u16,
+    /// CLUT word used by this surface.
+    pub clut: u16,
+    /// Wrapping U/V offset used only by the windowed packet shape.
+    pub uv_offset: [u8; 2],
+    /// Non-zero selects compact packets without GP0(E2).
+    pub compact: u8,
+    /// Explicit alignment padding kept deterministic across targets.
+    pub _padding: u8,
+    /// Fully encoded GP0(E2) command used by windowed packets.
+    pub texture_window_word: u32,
+    /// GP0 textured-Gouraud triangle command in the high byte.
+    pub color_command_word: u32,
+}
+
 /// Fixed topology and packet bounds for classic affine submission.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ClassicAffineProfile {
@@ -580,6 +608,16 @@ impl PacketWriter {
         attributes: [&ClassicAffineVertex; 3],
         otz: u16,
     ) {
+        if classic_tri_screen_clipped(
+            [
+                projected[0].screen,
+                projected[1].screen,
+                projected[2].screen,
+            ],
+            self.profile,
+        ) {
+            return;
+        }
         debug_assert!(attributes
             .iter()
             .all(|vertex| vertex.color & 0xff00_0000 == 0));
@@ -620,6 +658,17 @@ impl PacketWriter {
         attributes: [&ClassicAffineVertex; 4],
         otz: u16,
     ) {
+        if classic_quad_screen_clipped(
+            [
+                projected[0].screen,
+                projected[1].screen,
+                projected[2].screen,
+                projected[3].screen,
+            ],
+            self.profile,
+        ) {
+            return;
+        }
         debug_assert!(attributes
             .iter()
             .all(|vertex| vertex.color & 0xff00_0000 == 0));
@@ -784,6 +833,16 @@ impl<const RESTORE_WINDOW: bool> AffinePacketWriter for WindowedPacketWriter<RES
         attributes: [&ClassicAffineVertex; 3],
         otz: u16,
     ) {
+        if classic_tri_screen_clipped(
+            [
+                projected[0].screen,
+                projected[1].screen,
+                projected[2].screen,
+            ],
+            self.profile,
+        ) {
+            return;
+        }
         debug_assert!(attributes
             .iter()
             .all(|vertex| vertex.color & 0xff00_0000 == 0));
@@ -833,6 +892,17 @@ impl<const RESTORE_WINDOW: bool> AffinePacketWriter for WindowedPacketWriter<RES
         attributes: [&ClassicAffineVertex; 4],
         otz: u16,
     ) {
+        if classic_quad_screen_clipped(
+            [
+                projected[0].screen,
+                projected[1].screen,
+                projected[2].screen,
+                projected[3].screen,
+            ],
+            self.profile,
+        ) {
+            return;
+        }
         debug_assert!(attributes
             .iter()
             .all(|vertex| vertex.color & 0xff00_0000 == 0));
@@ -1735,6 +1805,133 @@ pub unsafe fn submit_classic_affine_scoped_windowed_batch(
     }
 }
 
+/// Project and submit a batch that mixes compact page-local and scoped
+/// windowed PXBSP surfaces without flushing between packet shapes.
+///
+/// # Safety
+/// The vertex, descriptor, scratch-tail, output-capacity, and lifetime
+/// contract matches [`submit_classic_affine_batch`]. Windowed descriptors
+/// must carry a valid GP0(E2) command; compact descriptors ignore it.
+pub unsafe fn submit_classic_affine_mixed_batch(
+    vertices: *mut ClassicAffineVertex,
+    vertex_count: usize,
+    surfaces: *const ClassicAffineMixedBatchSurface,
+    surface_count: usize,
+    output: *mut u32,
+    profile: ClassicAffineProfile,
+) -> ClassicAffineSubmit {
+    if vertices.is_null()
+        || surfaces.is_null()
+        || output.is_null()
+        || vertex_count == 0
+        || surface_count == 0
+    {
+        return ClassicAffineSubmit {
+            next_packet: output,
+            packets: 0,
+            hardware_triangles: 0,
+        };
+    }
+
+    let mut vertex = 0usize;
+    while vertex + 2 < vertex_count {
+        unsafe { project_three_consecutive(vertices.add(vertex)) };
+        vertex += 3;
+    }
+    while vertex < vertex_count {
+        unsafe { project_one(vertices.add(vertex)) };
+        vertex += 1;
+    }
+
+    let generated = unsafe { vertices.add(vertex_count) };
+    let mut next = output;
+    let mut packets = 0u32;
+    let mut hardware_triangles = 0u32;
+    let surface_end = unsafe { surfaces.add(surface_count) };
+    let mut surface_ptr = surfaces;
+    while surface_ptr != surface_end {
+        let surface = unsafe { ptr::read(surface_ptr) };
+        let submitted = if surface.compact != 0 {
+            let run_output = next;
+            let mut writer = PacketWriter {
+                next,
+                packets: 0,
+                clut_high_word: 0,
+                tpage_high_word: 0,
+                profile,
+            };
+            while surface_ptr != surface_end {
+                let surface = unsafe { ptr::read(surface_ptr) };
+                if surface.compact == 0 {
+                    break;
+                }
+                let first_vertex = surface.first_vertex as usize;
+                let surface_vertices = surface.vertex_count as usize;
+                debug_assert!(surface_vertices >= 3);
+                debug_assert!(first_vertex + surface_vertices <= vertex_count);
+                writer.tpage_high_word = (surface.tpage as u32) << 16;
+                writer.clut_high_word = (surface.clut as u32) << 16;
+                unsafe {
+                    submit_classic_affine_projected_fan_into_writer(
+                        vertices.add(first_vertex),
+                        surface_vertices,
+                        generated,
+                        &mut writer,
+                    );
+                }
+                surface_ptr = unsafe { surface_ptr.add(1) };
+            }
+            unsafe { writer.finish(run_output) }
+        } else {
+            let run_output = next;
+            let mut writer = WindowedPacketWriter::<true> {
+                next,
+                packets: 0,
+                clut_high_word: 0,
+                tpage_high_word: 0,
+                uv_offset: [0; 2],
+                texture_window_word: 0,
+                color_command_word: 0x3400_0000,
+                profile,
+            };
+            while surface_ptr != surface_end {
+                let surface = unsafe { ptr::read(surface_ptr) };
+                if surface.compact != 0 {
+                    break;
+                }
+                let first_vertex = surface.first_vertex as usize;
+                let surface_vertices = surface.vertex_count as usize;
+                debug_assert!(surface_vertices >= 3);
+                debug_assert!(first_vertex + surface_vertices <= vertex_count);
+                writer.tpage_high_word = (surface.tpage as u32) << 16;
+                writer.clut_high_word = (surface.clut as u32) << 16;
+                writer.uv_offset = surface.uv_offset;
+                writer.texture_window_word = surface.texture_window_word;
+                writer.color_command_word = surface.color_command_word;
+                unsafe {
+                    submit_classic_affine_projected_fan_into_writer(
+                        vertices.add(first_vertex),
+                        surface_vertices,
+                        generated,
+                        &mut writer,
+                    );
+                }
+                surface_ptr = unsafe { surface_ptr.add(1) };
+            }
+            unsafe { writer.finish(run_output) }
+        };
+        next = submitted.next_packet;
+        packets = packets.wrapping_add(submitted.packets);
+        hardware_triangles = hardware_triangles.wrapping_add(submitted.hardware_triangles);
+    }
+
+    ClassicAffineSubmit {
+        next_packet: next,
+        packets,
+        hardware_triangles,
+    }
+}
+
 unsafe fn submit_classic_affine_windowed_batch_impl<const RESTORE_WINDOW: bool>(
     vertices: *mut ClassicAffineVertex,
     vertex_count: usize,
@@ -2203,26 +2400,24 @@ fn classic_clip_code(screen: [i16; 2], profile: ClassicAffineProfile) -> u8 {
 
 #[inline(always)]
 fn classic_tri_screen_clipped(screens: [[i16; 2]; 3], profile: ClassicAffineProfile) -> bool {
-    let code = |screen: [i16; 2]| {
-        let mut result = 0u8;
-        if screen[0] < 0 {
-            result |= 1;
-        }
-        if screen[0] >= profile.screen_width - 1 {
-            result |= 2;
-        }
-        if screen[1] < 0 {
-            result |= 4;
-        }
-        if screen[1] >= profile.screen_height - 1 {
-            result |= 8;
-        }
-        result
-    };
-    let c0 = code(screens[0]);
-    let c1 = code(screens[1]);
-    let c2 = code(screens[2]);
+    let c0 = classic_clip_code(screens[0], profile);
+    let c1 = classic_clip_code(screens[1], profile);
+    let c2 = classic_clip_code(screens[2], profile);
     (c0 & c1) != 0 && (c1 & c2) != 0 && (c2 & c0) != 0
+}
+
+#[inline(always)]
+fn classic_quad_screen_clipped(screens: [[i16; 2]; 4], profile: ClassicAffineProfile) -> bool {
+    let c0 = classic_clip_code(screens[0], profile);
+    let c1 = classic_clip_code(screens[1], profile);
+    let c2 = classic_clip_code(screens[2], profile);
+    let c3 = classic_clip_code(screens[3], profile);
+    (c0 & c1) != 0
+        && (c1 & c2) != 0
+        && (c2 & c3) != 0
+        && (c3 & c0) != 0
+        && (c0 & c2) != 0
+        && (c1 & c3) != 0
 }
 
 #[cfg(test)]
@@ -2679,6 +2874,84 @@ mod tests {
     }
 
     #[test]
+    fn mixed_batch_keeps_compact_and_windowed_packets_in_one_projection_run() {
+        psx_gte::host::reset();
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(160);
+        scene::set_avsz_weights(0x155, 0x100);
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::ZERO);
+
+        let mut vertices = [ClassicAffineVertex::default(); 6 + EXTRA_VERTICES];
+        for (index, position) in [
+            [-80, -40, 1000],
+            [0, 40, 1000],
+            [80, -40, 1000],
+            [-60, -20, 900],
+            [0, 60, 900],
+            [60, -20, 900],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            vertices[index] = ClassicAffineVertex {
+                position,
+                uv: [index as u8, index as u8],
+                color: 0x0080_8080,
+                ..ClassicAffineVertex::default()
+            };
+        }
+        let window = 0xe200_1234;
+        let surfaces = [
+            ClassicAffineMixedBatchSurface {
+                first_vertex: 0,
+                vertex_count: 3,
+                tpage: 0x0105,
+                clut: 0x1234,
+                compact: 1,
+                ..ClassicAffineMixedBatchSurface::default()
+            },
+            ClassicAffineMixedBatchSurface {
+                first_vertex: 3,
+                vertex_count: 3,
+                tpage: 0x0105,
+                clut: 0x1234,
+                texture_window_word: window,
+                color_command_word: 0x3400_0000,
+                ..ClassicAffineMixedBatchSurface::default()
+            },
+        ];
+        let mut packets = [0u32; 64];
+        let profile = ClassicAffineProfile {
+            subdivide_once_at: 0,
+            subdivide_twice_at: 0,
+            ..ClassicAffineProfile::QUAKE_REFERENCE
+        };
+        let submit = unsafe {
+            submit_classic_affine_mixed_batch(
+                vertices.as_mut_ptr(),
+                6,
+                surfaces.as_ptr(),
+                surfaces.len(),
+                packets.as_mut_ptr(),
+                profile,
+            )
+        };
+
+        assert_eq!((submit.packets, submit.hardware_triangles), (2, 2));
+        assert_eq!(
+            unsafe { submit.next_packet.offset_from(packets.as_ptr()) },
+            22
+        );
+        assert_eq!(packets[0] >> 24, 9);
+        assert_eq!(packets[1] >> 24, 0x34);
+        assert_eq!(packets[10] >> 24, 11);
+        assert_eq!(packets[11], window);
+        assert_eq!(packets[12] >> 24, 0x34);
+        assert_eq!(packets[21], TextureWindow::NONE.word());
+    }
+
+    #[test]
     fn windowed_writer_preserves_translucent_material_command() {
         let vertices = [
             ClassicAffineVertex {
@@ -2730,6 +3003,44 @@ mod tests {
                 .cast::<QuadTexturedGouraud>()
         };
         assert_eq!(quad.color0_cmd, 0x3e11_2233);
+    }
+
+    #[test]
+    fn projected_packet_writers_reject_wholly_offscreen_primitives() {
+        let mut vertices = [ClassicAffineVertex::default(); 4];
+        for (index, screen) in [[-20, 20], [-10, 80], [-1, 140], [-30, 200]]
+            .into_iter()
+            .enumerate()
+        {
+            vertices[index].screen = screen;
+            vertices[index].color = 0x0080_8080;
+        }
+        let mut storage = [0u32; 64];
+        let output = storage.as_mut_ptr();
+        let mut writer = WindowedPacketWriter::<true> {
+            next: output,
+            packets: 0,
+            clut_high_word: 0x1234_0000,
+            tpage_high_word: 0x0567_0000,
+            uv_offset: [0; 2],
+            texture_window_word: 0xe200_0000,
+            color_command_word: 0x3400_0000,
+            profile: ClassicAffineProfile::QUAKE_REFERENCE,
+        };
+        unsafe {
+            writer.emit_tri(
+                [&vertices[0], &vertices[1], &vertices[2]],
+                [&vertices[0], &vertices[1], &vertices[2]],
+                7,
+            );
+            writer.emit_quad(
+                [&vertices[0], &vertices[1], &vertices[2], &vertices[3]],
+                [&vertices[0], &vertices[1], &vertices[2], &vertices[3]],
+                9,
+            );
+        }
+        assert_eq!(writer.packets, 0);
+        assert_eq!(writer.next, output);
     }
 
     #[test]
