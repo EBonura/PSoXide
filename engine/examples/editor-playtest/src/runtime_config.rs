@@ -360,17 +360,19 @@ pub(super) fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
 pub(super) fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
     record.visibility_radius.max(1)
 }
-/// Per-frame projected scratch for one generated room surface cache.
+/// Per-frame projected scratch for one generated grid-room surface cache.
 /// Rooms that exceed this vertex budget fall back to the uncached draw.
-pub(super) const MAX_CACHED_ROOM_VERTICES: usize = 4096;
+/// A PXBSP project never enters that renderer, so retain only a sentinel
+/// element instead of charging the PS1 RAM budget for dead grid scratch.
+pub(super) const MAX_CACHED_ROOM_VERTICES: usize = if cfg!(playtest_pxbsp) { 1 } else { 4096 };
 
 /// Prebuilt room-quad pool sizing: slots for recently drawn rooms and
 /// the per-room quad capacity. 8 slots cover the at-most-6 rooms a
 /// frame draws (visible_chunk_limit) with reuse headroom, so a slot
 /// claimed this frame can never be stolen within the same frame.
 /// Surfaces beyond the cap fall back to the per-frame arena path.
-pub(super) const PREBUILT_ROOM_QUAD_SLOTS: usize = 8;
-pub(super) const PREBUILT_ROOM_QUAD_CAP: usize = 256;
+pub(super) const PREBUILT_ROOM_QUAD_SLOTS: usize = if cfg!(playtest_pxbsp) { 1 } else { 8 };
+pub(super) const PREBUILT_ROOM_QUAD_CAP: usize = if cfg!(playtest_pxbsp) { 1 } else { 256 };
 
 /// Per-frame packet budget sizing the primitive arena and world command list.
 /// The cooked manifest derives this per project from its conservative packet

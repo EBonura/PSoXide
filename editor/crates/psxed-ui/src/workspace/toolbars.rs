@@ -247,7 +247,9 @@ impl EditorWorkspace {
                                 self.snap_units,
                                 orthographic_view,
                             );
+                            self.draw_bsp_leak_path_2d(&painter, transform, orthographic_view);
                             draw_axes_gizmo(&painter, rect, orthographic_view);
+                            self.draw_bsp_leak_notice(&painter, rect);
                             return;
                         }
                         let brush_edit_active = matches!(self.active_tool, ViewTool::Brush)
@@ -417,7 +419,9 @@ impl EditorWorkspace {
                                 .flatten(),
                         );
                         self.draw_brush_footprints_2d(&painter, transform);
+                        self.draw_bsp_leak_path_2d(&painter, transform, orthographic_view);
                         draw_axes_gizmo(&painter, rect, orthographic_view);
+                        self.draw_bsp_leak_notice(&painter, rect);
                         if resource_drop_hovered || prefab_drop_hovered {
                             painter.rect_stroke(
                                 rect.shrink(2.0),
@@ -1427,6 +1431,14 @@ impl EditorWorkspace {
                     "Brush wireframes",
                     &mut self.show_brush_wireframes,
                 );
+                if !self.last_bsp_leak_path.is_empty() {
+                    changed |= visibility_menu_row(
+                        ui,
+                        "bsp-leak-path",
+                        "Leak path (last build)",
+                        &mut self.show_bsp_leak_path,
+                    );
+                }
             });
         if changed {
             self.persist_editor_visibility_state();
@@ -1435,7 +1447,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_camera_group_menu(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(148.0);
+        ui.set_min_width(238.0);
         for mode in [ViewportCameraMode::Orbit, ViewportCameraMode::Free] {
             if toolbar_menu_choice(
                 ui,
@@ -1443,7 +1455,36 @@ impl EditorWorkspace {
                 self.camera_rig.mode == mode,
             ) {
                 self.set_viewport_3d_camera_mode(mode);
-                self.status = format!("Camera: {}", viewport_camera_mode_label(mode));
+                self.status = match mode {
+                    ViewportCameraMode::Orbit => "Camera: Orbit (RMB/MMB drag; Shift pans)".into(),
+                    ViewportCameraMode::Free => {
+                        "Camera: Free (WASD, Shift faster, RMB/MMB look)".into()
+                    }
+                };
+            }
+        }
+        ui.add_space(3.0);
+        ui.label(
+            RichText::new("Free: WASD fly · Shift faster\nRMB/MMB drag look · wheel forward/back")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        if !self.last_bsp_leak_path.is_empty() {
+            ui.separator();
+            let next = self.bsp_leak_cursor.min(self.last_bsp_leak_path.len() - 1) + 1;
+            if ui
+                .button(icons::label(
+                    icons::FOCUS,
+                    &format!(
+                        "Follow leak path ({next}/{})",
+                        self.last_bsp_leak_path.len()
+                    ),
+                ))
+                .on_hover_text("Move the Free camera to this point and look toward the next one")
+                .clicked()
+            {
+                self.follow_next_bsp_leak_point();
+                ui.close_menu();
             }
         }
         ui.separator();
@@ -1535,6 +1576,7 @@ impl EditorWorkspace {
             || !self.preview_fog
             || !self.preview_backface_wireframe
             || !self.preview_bounds
+            || (!self.last_bsp_leak_path.is_empty() && !self.show_bsp_leak_path)
     }
 
     /// Toolbar combobox for the active brush material. Selecting

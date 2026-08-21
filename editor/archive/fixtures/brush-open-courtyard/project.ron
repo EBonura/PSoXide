@@ -86,7 +86,7 @@
                 margin: 1,
                 corner_len: 8,
             ),
-            next_node_id: 4,
+            next_node_id: 3,
             nodes: [
                 /*[0]*/ (id: (1), parent: None, children: [(2)], name: "HUD", kind: Canvas(width: 320, height: 240), visible_when: Always),
                 /*[1]*/ (id: (2), parent: Some((1)), children: [], name: "Health Gauge", kind: Bar(rect: (x: 14, y: 12, width: 106, height: 29, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), value: PlayerHealth, max: PlayerHealthMax, texture: Some((3)), frame_count: 7, fill: (128, 128, 128), fill_gradient: None, background: (0, 0, 0), background_gradient: None), visible_when: Always),

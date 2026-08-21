@@ -497,12 +497,11 @@ fn mouse_face_mode_additively_selects_exact_faces_across_brushes() {
     rig.shift_click(second);
     assert_eq!(rig.workspace.selected_brush_faces.len(), 2);
     assert!(rig.workspace.selected_brush_faces.contains(&first_pair));
-    assert!(
-        rig.workspace
-            .selected_brush_faces
-            .iter()
-            .any(|(brush, _)| *brush == 1)
-    );
+    assert!(rig
+        .workspace
+        .selected_brush_faces
+        .iter()
+        .any(|(brush, _)| *brush == 1));
     let targets = rig.workspace.selected_brush_material_targets();
     assert_eq!(targets.len(), 2, "only the two selected faces are targets");
     assert!(targets.contains(&MaterialTarget::BrushFace {

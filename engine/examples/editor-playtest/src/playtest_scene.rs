@@ -104,6 +104,14 @@ impl Scene for Playtest {
             // (see `gameplay_epoch` in main.rs).
             self.gameplay_epoch_set = false;
             self.clear_actor_pose_snapshots();
+            #[cfg(feature = "cd-stream-bench")]
+            {
+                self.unload_runtime_models();
+                self.gameplay_asset_arena_active = false;
+                // Re-establish valid empty UI-cache metadata over the union
+                // before the incoming front-end scene begins streaming.
+                retire_menu_ui_cache();
+            }
         }
         #[cfg(feature = "cd-stream-bench")]
         if state.has_gameplay() {
@@ -190,16 +198,22 @@ impl Scene for Playtest {
     fn prepare_loading_assets(&mut self, scene: u16) {
         #[cfg(feature = "cd-stream-bench")]
         {
-            let loading_images_ready = menu_ui_cache_ready() && load_ui_images_for_scene(scene);
+            if self.gameplay_asset_arena_active {
+                return;
+            }
+            let loading_images_ready = scene == psx_level::UI_SCENE_NONE
+                || (menu_ui_cache_ready() && load_ui_images_for_scene(scene));
             // The loading images are now in VRAM; this is the overlay
-            // handoff point (`MenuGameplayOverlay`): gameplay room draws
-            // own the cache's RAM from here. Claims are reset so any
+            // handoff point (`FrontEndGameplayOverlay`): gameplay assets and
+            // room draws own the cache's RAM from here. Claims are reset so any
             // rooms built before the handoff (menu-time bootstrap)
             // refill their quads instead of trusting bytes the menu
             // preload may have overwritten.
             if loading_images_ready {
                 retire_menu_ui_cache();
+                persistent_assets_arena_mut().reset_for_scene_load();
                 prebuilt_quads_arena().reset_claims();
+                self.gameplay_asset_arena_active = true;
                 self.prewarm_active_room_window_quads();
             }
         }

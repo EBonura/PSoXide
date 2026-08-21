@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+const PXBSP_MANIFEST_FLAG: &str = "pub const PLAYTEST_USES_PXBSP: bool = true;";
+
 fn main() {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -17,6 +19,19 @@ fn main() {
     } else {
         placeholder_manifest
     };
+    println!("cargo:rustc-check-cfg=cfg(playtest_pxbsp)");
+    let manifest = std::fs::read_to_string(&selected).unwrap_or_else(|error| {
+        panic!(
+            "failed to read selected playtest manifest {}: {error}",
+            selected.display()
+        )
+    });
+    if manifest
+        .lines()
+        .any(|line| line.trim() == PXBSP_MANIFEST_FLAG)
+    {
+        println!("cargo:rustc-cfg=playtest_pxbsp");
+    }
     println!(
         "cargo:rustc-env=PSXED_PLAYTEST_MANIFEST={}",
         selected.display()

@@ -72,6 +72,10 @@ pub(crate) fn quake_portal_flow_rows(
         .collect();
     let mut order: Vec<usize> = (0..directed.len()).collect();
     order.sort_by_key(|&portal| bit_count(&mightsee[portal]));
+    let mut order_rank = vec![0usize; directed.len()];
+    for (rank, &portal) in order.iter().enumerate() {
+        order_rank[portal] = rank;
+    }
 
     let worker_count = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
@@ -89,11 +93,12 @@ pub(crate) fn quake_portal_flow_rows(
     let completed_portals = AtomicUsize::new(0);
     let status: Vec<_> = (0..directed.len()).map(|_| AtomicU8::new(0)).collect();
     let portal_visibility: Vec<_> = (0..directed.len()).map(|_| OnceLock::new()).collect();
-    // Quake's VIS worker queue marks in-flight portals as `stat_working`:
-    // flows completed earlier may contribute their exact visbits, while other
-    // jobs conservatively contribute `mightsee`. An atomic queue reproduces
-    // that rule while allowing each worker to claim the next least-complex
-    // portal as soon as it finishes, with no slow-portal batch barrier.
+    // Quake's VIS worker queue lets earlier flows contribute their exact
+    // visbits while later flows conservatively contribute `mightsee`. The
+    // original completion-time check makes the result depend on thread
+    // scheduling. Rank every portal in the deterministic least-complex order
+    // and wait only for lower ranks. Dependencies remain acyclic, workers can
+    // still overlap independent flows, and unchanged cooks remain byte exact.
     std::thread::scope(|scope| {
         for _ in 0..worker_count {
             let directed = &directed;
@@ -102,6 +107,7 @@ pub(crate) fn quake_portal_flow_rows(
             let portal_visibility = &portal_visibility;
             let status = &status;
             let order = &order;
+            let order_rank = &order_rank;
             let next_portal = &next_portal;
             let completed_portals = &completed_portals;
             scope.spawn(move || loop {
@@ -117,6 +123,7 @@ pub(crate) fn quake_portal_flow_rows(
                     mightsee,
                     portal_visibility,
                     status,
+                    order_rank,
                     visible_leaves,
                     word_count,
                 );
@@ -161,15 +168,57 @@ pub(crate) fn quake_portal_flow_rows(
     // Visibility is physically reciprocal. Quake's directed flows normally
     // arrive at that result independently; explicitly closing the relation
     // prevents floating-point tie direction from creating a false negative.
-    for left in 0..visible_leaves {
-        for right in left + 1..visible_leaves {
+    close_reciprocal_visibility(&mut rows);
+    runtime_visibility_rows(&rows, leaf_mapping, visible_leaves)
+}
+
+/// Build Quake's conservative `mightsee`/fast-vis rows without the expensive
+/// separator-flow refinement. Every exact portal-flow bit remains present;
+/// impossible portal directions are still rejected, making this a useful
+/// interactive-cook fallback for BSPs too large for full VIS.
+pub(crate) fn quake_portal_fast_rows(
+    bsp: &CompiledSurfaceBsp,
+    portals: &[CompiledPortal],
+    leaf_mapping: &[i16],
+    visible_leaves: usize,
+) -> Vec<Option<Vec<u8>>> {
+    let directed = directed_open_portals(bsp, portals, leaf_mapping);
+    let mut outgoing = vec![Vec::new(); visible_leaves];
+    for (index, portal) in directed.iter().enumerate() {
+        outgoing[portal.from_leaf].push(index);
+    }
+    let word_count = visible_leaves.div_ceil(64);
+    let mightsee: Vec<Vec<u64>> = directed
+        .iter()
+        .map(|portal| base_portal_visibility(portal, &directed, &outgoing, word_count))
+        .collect();
+    let mut rows = vec![vec![0u64; word_count]; visible_leaves];
+    for leaf in 0..visible_leaves {
+        set_bit(&mut rows[leaf], leaf);
+        for &portal in &outgoing[leaf] {
+            union_bits(&mut rows[leaf], &mightsee[portal]);
+        }
+    }
+    close_reciprocal_visibility(&mut rows);
+    runtime_visibility_rows(&rows, leaf_mapping, visible_leaves)
+}
+
+fn close_reciprocal_visibility(rows: &mut [Vec<u64>]) {
+    for left in 0..rows.len() {
+        for right in left + 1..rows.len() {
             if bit_is_set(&rows[left], right) || bit_is_set(&rows[right], left) {
                 set_bit(&mut rows[left], right);
                 set_bit(&mut rows[right], left);
             }
         }
     }
+}
 
+fn runtime_visibility_rows(
+    rows: &[Vec<u64>],
+    leaf_mapping: &[i16],
+    visible_leaves: usize,
+) -> Vec<Option<Vec<u8>>> {
     let row_bytes = visible_leaves.div_ceil(8);
     leaf_mapping
         .iter()
@@ -195,6 +244,7 @@ fn flow_portal(
     mightsee: &[Vec<u64>],
     portal_visibility: &[OnceLock<Vec<u64>>],
     status: &[AtomicU8],
+    order_rank: &[usize],
     visible_leaves: usize,
     word_count: usize,
 ) -> Vec<u64> {
@@ -216,6 +266,8 @@ fn flow_portal(
         mightsee,
         portal_visibility,
         status,
+        order_rank,
+        order_rank[portal_index],
         &mut leaf_visibility,
         &mut path,
     );
@@ -300,6 +352,8 @@ fn recursive_leaf_flow(
     mightsee: &[Vec<u64>],
     portal_visibility: &[OnceLock<Vec<u64>>],
     status: &[AtomicU8],
+    order_rank: &[usize],
+    current_rank: usize,
     leaf_visibility: &mut [u64],
     path: &mut [bool],
 ) {
@@ -314,7 +368,10 @@ fn recursive_leaf_flow(
         if path[portal.to_leaf] || !bit_is_set(&previous.mightsee, portal.to_leaf) {
             continue;
         }
-        let test = if status[portal_index].load(Ordering::Acquire) == 2 {
+        let test = if order_rank[portal_index] < current_rank {
+            while status[portal_index].load(Ordering::Acquire) != 2 {
+                std::thread::yield_now();
+            }
             portal_visibility[portal_index]
                 .get()
                 .expect("done portal must have published visbits")
@@ -349,6 +406,8 @@ fn recursive_leaf_flow(
                 mightsee,
                 portal_visibility,
                 status,
+                order_rank,
+                current_rank,
                 leaf_visibility,
                 path,
             );
@@ -393,6 +452,8 @@ fn recursive_leaf_flow(
             mightsee,
             portal_visibility,
             status,
+            order_rank,
+            current_rank,
             leaf_visibility,
             path,
         );
@@ -651,6 +712,32 @@ mod tests {
         assert!(row_bit(&rows, 0, 2));
         assert!(!row_bit(&rows, 0, 3));
         assert!(!row_bit(&rows, 3, 0));
+    }
+
+    #[test]
+    fn fast_vis_is_a_conservative_superset_of_separator_flow() {
+        let bsp = empty_bsp(4);
+        let portals = vec![
+            x_portal(0, 1, 0),
+            x_portal(1, 2, 10),
+            y_portal(2, 3, 10, [9.0, 11.0]),
+        ];
+        let mapping = [1, 2, 3, 4];
+        let exact = quake_portal_flow_rows(&bsp, &portals, &mapping, 4);
+        let fast = quake_portal_fast_rows(&bsp, &portals, &mapping, 4);
+        for from in 0..4 {
+            for to in 0..4 {
+                assert!(
+                    !row_bit(&exact, from, to) || row_bit(&fast, from, to),
+                    "fast VIS dropped exact bit {from}->{to}"
+                );
+                assert_eq!(
+                    row_bit(&fast, from, to),
+                    row_bit(&fast, to, from),
+                    "fast VIS must remain reciprocal"
+                );
+            }
+        }
     }
 
     #[test]

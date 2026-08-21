@@ -496,7 +496,6 @@ pub(crate) fn distance3_f32(a: [f32; 3], b: [f32; 3]) -> f32 {
     dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt()
 }
 
-#[cfg(test)]
 pub(crate) fn camera_angles_to_look_at(position: [i32; 3], target: [i32; 3]) -> Option<(u16, u16)> {
     let dx = (target[0] - position[0]) as f32;
     let dy = (target[1] - position[1]) as f32;
@@ -513,12 +512,10 @@ pub(crate) fn camera_angles_to_look_at(position: [i32; 3], target: [i32; 3]) -> 
     Some((yaw, pitch))
 }
 
-#[cfg(test)]
 pub(crate) fn q12_from_radians(radians: f32) -> u16 {
     ((radians * (4096.0 / std::f32::consts::TAU)).round() as i32).rem_euclid(4096) as u16
 }
 
-#[cfg(test)]
 pub(crate) fn q12_signed_from_radians(radians: f32) -> i32 {
     (radians * (4096.0 / std::f32::consts::TAU)).round() as i32
 }

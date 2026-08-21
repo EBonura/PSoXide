@@ -777,12 +777,11 @@ fn compile_model(
     let portals = portalize_surface_bsp(&bsp);
     classify_bsp_leaves(&mut bsp, &portals, brushes);
     let mut leak_path = Vec::new();
-    let exact_vis_ready = match fill_outside_bsp_leaves(&mut bsp, &portals, occupant_points) {
+    match fill_outside_bsp_leaves(&mut bsp, &portals, occupant_points) {
         OutsideFillResult::Filled(filled) => {
             if filled > 0 {
                 eprintln!("[brush-qbsp] filled {filled} unreachable exterior leaves");
             }
-            true
         }
         OutsideFillResult::Leaked(path) => {
             leak_path = path
@@ -797,14 +796,13 @@ fn compile_model(
                 })
                 .collect();
             eprintln!(
-                "[brush-qbsp] leak from {:?}: occupied leaf reaches the exterior through {} pointfile points; preserving conservative PVS",
+                "[brush-qbsp] leak from {:?}: occupied leaf reaches the exterior through {} pointfile points; retaining portal PVS through the opening",
                 leak_path.first().copied().unwrap_or([0; 3]),
                 leak_path.len(),
             );
-            false
         }
-        OutsideFillResult::NoOccupants => false,
-    };
+        OutsideFillResult::NoOccupants => {}
+    }
     let light_spheres: Vec<_> = lights
         .iter()
         .map(|light| (light.position, light.radius))
@@ -816,10 +814,23 @@ fn compile_model(
         &light_spheres,
     );
     replace_bsp_render_surfaces(&mut bsp, render_surfaces);
+    // Small editor BSPs can afford the same separator-flow VIS used by a
+    // release cook. Larger interactive cooks retain Quake's conservative
+    // base-portal `mightsee` stage instead of collapsing the entire connected
+    // world to one all-visible row. A leak remains a real opening in the
+    // portal graph, so both paths stay conservative while still rejecting
+    // geometry that cannot be seen through that opening.
+    let visible_leaf_count = bsp
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.contents.is_visible())
+        .count();
     let visibility = match mode {
-        BrushWorldCookMode::Draft => BspVisibility::PortalComponents,
-        BrushWorldCookMode::Release if exact_vis_ready => BspVisibility::PortalFlow,
-        BrushWorldCookMode::Release => BspVisibility::PortalComponents,
+        BrushWorldCookMode::Draft if visible_leaf_count <= 512 && portals.len() <= 10_000 => {
+            BspVisibility::PortalFlow
+        }
+        BrushWorldCookMode::Draft => BspVisibility::PortalFast,
+        BrushWorldCookMode::Release => BspVisibility::PortalFlow,
     };
     // Lighting bakes in BOTH modes so lights always interact with
     // brushes out of the box: Draft skips only the occlusion (shadow)

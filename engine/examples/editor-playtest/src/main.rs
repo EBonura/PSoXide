@@ -514,6 +514,9 @@ struct Playtest {
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Persistent model bytes are resident and the parsed runtime tables are valid.
     runtime_models_loaded: bool,
+    /// The front-end/gameplay RAM union currently belongs to gameplay. False
+    /// while menu/loading images own it, and reset on every gameplay exit.
+    gameplay_asset_arena_active: bool,
     /// Last world-ready condition set reported by `trace_world_ready_conditions`,
     /// OR'd with a seen bit so the zeroed initial value cannot be mistaken for
     /// "all conditions false, already reported".

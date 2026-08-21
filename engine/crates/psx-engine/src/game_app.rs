@@ -1207,6 +1207,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
 
     fn finish_loading_transition(&mut self, ctx: &mut Ctx) {
         if self.cursor.loading_is_inited() {
+            // This is the generic front-end -> gameplay asset handoff. It runs
+            // after the target resource set and gameplay scene are initialised,
+            // but before the first world-streaming tick can overwrite the RAM
+            // cache that supplied an authored loading screen.
+            self.gameplay.prepare_loading_assets(self.loading_scene);
             let world_ready = self.gameplay.loading_update(ctx);
             // Feed the authored loading scene's bound progress bar.
             // Once the world is ready the bar pins full while the
@@ -1727,9 +1732,6 @@ impl<'a, S: Scene> GameApp<'a, S> {
             // be momentarily unavailable while the world's textures
             // stream in, and already-resident images short-circuit,
             // so the steady-state cost is one slot lookup per image.
-            if self.cursor.loading_is_inited() {
-                self.gameplay.prepare_loading_assets(self.loading_scene);
-            }
             let scene = self.loading_scene;
             self.render_ui_scene(scene, ctx);
             return;
@@ -2012,6 +2014,7 @@ mod tests {
         last_option_value: i32,
         enters: u32,
         exits: u32,
+        loading_prepares: u32,
         enter_ran_before_init: bool,
         /// When `Some`, returned as the resource key for every state (a shared
         /// set); when `None`, the trait default (`state.id`) applies.
@@ -2044,6 +2047,9 @@ mod tests {
         }
         fn on_exit_state(&mut self, _state: SceneStateRef, _ctx: &mut Ctx) {
             self.exits += 1;
+        }
+        fn prepare_loading_assets(&mut self, _scene: u16) {
+            self.loading_prepares += 1;
         }
         fn state_resource_key(&self, state: SceneStateRef) -> u32 {
             self.shared_resource_key.unwrap_or(state.id as u32)
@@ -2139,6 +2145,11 @@ mod tests {
         );
         assert_eq!(app.gameplay.inits, 0, "loading defers gameplay init");
         complete_loading(&mut app, &mut ctx);
+
+        assert!(
+            app.gameplay.loading_prepares > 0,
+            "built-in loading path prepares the target asset set"
+        );
 
         app.update(&mut ctx);
         app.render(&mut ctx);

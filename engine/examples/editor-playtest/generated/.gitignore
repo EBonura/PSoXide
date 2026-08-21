@@ -8,6 +8,7 @@
 level_manifest.cooked.rs
 brush_manifest.cooked.rs
 brush_world.pxbsp
+brush_world.pts
 brush_textures/*.psxt
 cdda_tracks.txt
 world_pack_order.txt
