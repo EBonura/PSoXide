@@ -9,10 +9,10 @@ use alloc::vec::Vec;
 
 use psx_engine::{
     compose_classic_alias_transform, materialize_classic_affine_word_vertices,
-    submit_classic_affine_batch, submit_classic_affine_scoped_windowed_batch,
+    submit_classic_affine_batch, submit_classic_affine_mixed_batch,
     submit_classic_affine_scoped_windowed_fan, submit_classic_alias_model,
-    ClassicAffineBatchSurface, ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex,
-    ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
+    ClassicAffineBatchSurface, ClassicAffineMixedBatchSurface, ClassicAffineProfile,
+    ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWordSourceVertex, ClassicAliasFace,
     ClassicAliasProjectedVertex, ClassicAliasVertex,
 };
 use psx_gpu::material::TextureWindow;
@@ -32,7 +32,8 @@ use crate::resident::ResidentMap;
 use crate::sky::{submit_view_ray_layered_sky, VIEW_RAY_SKY_PACKET_WORDS};
 use crate::{
     Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_BAKED_UV,
-    FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID, TEXTURE_NULL, TEXTURE_SKY,
+    FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID, TEXTURE_NULL,
+    TEXTURE_SKY,
 };
 
 /// Packet storage used by the original renderer's double-buffered arenas.
@@ -130,6 +131,9 @@ pub struct PxbspTextureBinding {
     pub clut: u16,
     pub texture_window_word: u32,
     pub uv_origin: [u8; 2],
+    /// Direct page-local origin of the texture allocation. Cooker-proven
+    /// faces add this to their UVs and use packets without GP0(E2).
+    pub page_uv_origin: [u8; 2],
     pub texture_size: [u8; 2],
 }
 
@@ -426,13 +430,29 @@ impl FrustumPlanes {
         self.clip_polygon_buffers_inner(vertices, count, scratch, false)
     }
 
-    fn clip_polygon_buffers_after_outside_reject(
+    /// Preserve the one exact clip Quake's projected path cannot replace:
+    /// vertices at or behind the eye plane must be intersected before GTE
+    /// projection. Side boundaries are handled by projected screen outcodes
+    /// and the GPU draw area after the earlier whole-face reject.
+    fn clip_polygon_near_buffers_after_outside_reject(
         &self,
         vertices: &mut [ClassicAffineVertex],
         count: usize,
         scratch: &mut [ClassicAffineVertex],
     ) -> (usize, bool) {
-        self.clip_polygon_buffers_inner(vertices, count, scratch, true)
+        let near = &self.planes[0];
+        if vertices[..count]
+            .iter()
+            .all(|vertex| Self::distance(near, vertex.position) >= 0)
+        {
+            return (count, false);
+        }
+        let count = clip_polygon_plane(near, &vertices[..count], scratch);
+        if count < 3 {
+            (0, false)
+        } else {
+            (count, true)
+        }
     }
 
     fn clip_polygon_buffers_inner(
@@ -986,7 +1006,7 @@ impl Renderer {
 
         let mut batch_vertices =
             [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES];
-        let mut batch_surfaces = [ClassicAffineWindowedBatchSurface::default(); BATCH_MAX_SURFACES];
+        let mut batch_surfaces = [ClassicAffineMixedBatchSurface::default(); BATCH_MAX_SURFACES];
         // One face at a time is materialized here, frustum-clipped, then
         // copied into the batch (a clip adds at most one vertex per plane).
         let mut face_vertices = [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + 8];
@@ -1033,14 +1053,22 @@ impl Renderer {
                 continue;
             }
             let state = pxbsp_material_state(material, binding, material_tick);
+            let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
+                && material.blend_mode == material_blend::OPAQUE
+                && material.animation_kind == crate::pxbsp::material_animation::STATIC
+                && material.flags & crate::pxbsp::material_flags::LAYERED_SKY == 0;
             self.materialize_pxbsp_face(
                 map,
                 face,
-                state.uv_offset,
+                if compact_surface {
+                    state.page_uv_offset
+                } else {
+                    state.uv_offset
+                },
                 &mut face_vertices[..source_count],
             );
             let (vertex_count, clipped_in_scratch) = frustum
-                .clip_polygon_buffers_after_outside_reject(
+                .clip_polygon_near_buffers_after_outside_reject(
                     &mut face_vertices,
                     source_count,
                     &mut clip_scratch,
@@ -1061,7 +1089,12 @@ impl Renderer {
                 stats.visible_faces = stats.visible_faces.saturating_add(1);
                 continue;
             }
-            let face_worst_words = (vertex_count - 2) * WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE;
+            let face_worst_words = (vertex_count - 2)
+                * if compact_surface {
+                    WORST_PACKET_WORDS_PER_TRIANGLE
+                } else {
+                    WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE
+                };
             if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
                 || batch_surface_count == BATCH_MAX_SURFACES
                 || !packet_capacity(next, end, batch_worst_words + face_worst_words)
@@ -1070,7 +1103,7 @@ impl Renderer {
                     stats.surface_batches = stats.surface_batches.saturating_add(1);
                 }
                 let submitted = unsafe {
-                    flush_windowed_batch(
+                    flush_pxbsp_batch(
                         &mut batch_vertices,
                         batch_vertex_count,
                         &batch_surfaces,
@@ -1092,15 +1125,16 @@ impl Renderer {
                 break;
             }
 
-            batch_surfaces[batch_surface_count] = ClassicAffineWindowedBatchSurface {
+            batch_surfaces[batch_surface_count] = ClassicAffineMixedBatchSurface {
                 first_vertex: batch_vertex_count as u16,
                 vertex_count: vertex_count as u16,
                 tpage: state.texture_page,
                 clut: binding.clut,
                 // PXBSP vertices are materialized with the resolved layer
-                // offset below, so the shared packet writer must not apply it
-                // a second time.
+                // offset above, so the shared writer applies no second offset.
                 uv_offset: [0; 2],
+                compact: u8::from(compact_surface),
+                _padding: 0,
                 texture_window_word: binding.texture_window_word,
                 color_command_word: state.color_command_word,
             };
@@ -1121,7 +1155,7 @@ impl Renderer {
             stats.surface_batches = stats.surface_batches.saturating_add(1);
         }
         let submitted = unsafe {
-            flush_windowed_batch(
+            flush_pxbsp_batch(
                 &mut batch_vertices,
                 batch_vertex_count,
                 &batch_surfaces,
@@ -1894,6 +1928,7 @@ struct PxbspMaterialState {
     texture_page: u16,
     color_command_word: u32,
     uv_offset: [u8; 2],
+    page_uv_offset: [u8; 2],
 }
 fn pxbsp_material_state(
     material: PxbspMaterial,
@@ -1917,12 +1952,17 @@ fn pxbsp_material_state(
         .animation()
         .expect("resident PXBSP material was validated");
     let animated = pxbsp_animation_offset(animation, binding.texture_size, tick);
+    let uv_offset = [
+        binding.uv_origin[0].wrapping_add(animated[0]),
+        binding.uv_origin[1].wrapping_add(animated[1]),
+    ];
     PxbspMaterialState {
         texture_page,
         color_command_word,
-        uv_offset: [
-            binding.uv_origin[0].wrapping_add(animated[0]),
-            binding.uv_origin[1].wrapping_add(animated[1]),
+        uv_offset,
+        page_uv_offset: [
+            uv_offset[0].wrapping_add(binding.page_uv_origin[0]),
+            uv_offset[1].wrapping_add(binding.page_uv_origin[1]),
         ],
     }
 }
@@ -2013,10 +2053,10 @@ unsafe fn flush_batch(
     }
 }
 
-unsafe fn flush_windowed_batch(
+unsafe fn flush_pxbsp_batch(
     vertices: &mut [ClassicAffineVertex],
     vertex_count: usize,
-    surfaces: &[ClassicAffineWindowedBatchSurface],
+    surfaces: &[ClassicAffineMixedBatchSurface],
     surface_count: usize,
     output: *mut u32,
 ) -> ClassicAffineSubmit {
@@ -2028,7 +2068,7 @@ unsafe fn flush_windowed_batch(
         };
     }
     unsafe {
-        submit_classic_affine_scoped_windowed_batch(
+        submit_classic_affine_mixed_batch(
             vertices.as_mut_ptr(),
             vertex_count,
             surfaces.as_ptr(),
@@ -2170,12 +2210,14 @@ mod tests {
             clut: 0x4567,
             texture_window_word: 0xe200_0000,
             uv_origin: [8, 16],
+            page_uv_origin: [32, 64],
             texture_size: [64, 32],
         };
         let state = pxbsp_material_state(material, binding, 60);
         assert_eq!((state.texture_page >> 5) & 3, 2);
         assert_eq!(state.color_command_word, 0x3600_0000);
         assert_eq!(state.uv_offset, [16, 24]);
+        assert_eq!(state.page_uv_offset, [48, 88]);
     }
 
     #[test]
@@ -2246,6 +2288,7 @@ mod tests {
             clut: 0x1234,
             texture_window_word: 0xe200_0000,
             uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
             texture_size: [64; 2],
         };
         let mut packets = [0u32; 512];
@@ -2303,6 +2346,90 @@ mod tests {
     }
 
     #[test]
+    fn draws_cooker_proven_page_local_face_without_texture_window_packets() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for (position, uv) in [
+            ([64i16, -16, -16], [1u8, 2]),
+            ([64, 16, -16], [9, 2]),
+            ([64, 0, 16], [1, 10]),
+        ] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[uv[0], uv[1], 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        lumps[PxbspLumpKind::Faces as usize][6] = FACE_PAGE_LOCAL_UV as u8;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(11, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            page_uv_origin: [32, 64],
+            texture_size: [64; 2],
+        };
+        let mut packets = [0u32; 512];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[Some(binding)],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.stats.visible_faces, 1);
+        assert!(frame.stats.packets > 0);
+        let mut offset = 0usize;
+        let mut packet_count = 0u32;
+        while offset < frame.packet_words {
+            let data_words = (packets[offset] >> 24) as usize;
+            let uv_offsets: &[usize] = match data_words {
+                9 => {
+                    assert_eq!(packets[offset + 1] >> 24, 0x34);
+                    &[3, 6, 9]
+                }
+                12 => {
+                    assert_eq!(packets[offset + 1] >> 24, 0x3c);
+                    &[3, 6, 9, 12]
+                }
+                _ => panic!("unexpected compact packet length {data_words}"),
+            };
+            assert_ne!(packets[offset + 1], binding.texture_window_word);
+            for &uv_offset in uv_offsets {
+                let uv_word = packets[offset + uv_offset];
+                assert!((32..96).contains(&((uv_word & 0xff) as u8)));
+                assert!((64..128).contains(&(((uv_word >> 8) & 0xff) as u8)));
+            }
+            offset += data_words + 1;
+            packet_count += 1;
+        }
+        assert_eq!(offset, frame.packet_words);
+        assert_eq!(packet_count, frame.stats.packets);
+    }
+
+    #[test]
     fn layered_sky_face_selects_one_constant_cost_view_background() {
         configure_projection();
         let mut lumps = valid_lumps();
@@ -2338,6 +2465,7 @@ mod tests {
             clut: 0x1234,
             texture_window_word: 0xe200_0000,
             uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
             // Runtime bindings describe one square half of the 256x128 pair.
             texture_size: [128; 2],
         };
@@ -2465,6 +2593,7 @@ mod tests {
             clut: 0x1234,
             texture_window_word: 0xe200_0000,
             uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
             texture_size: [64; 2],
         };
         let mut packets = [0u32; 512];
