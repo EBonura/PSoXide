@@ -277,6 +277,10 @@ impl Default for UiRect {
 /// renderer, keeping old project RON compact and backwards compatible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiShapeStyle {
+    /// Blend the shape fill with the framebuffer using the PS1 GPU's native
+    /// average mode: `(background + fill) / 2`. The border remains opaque.
+    #[serde(default)]
+    pub semi_transparent_fill: bool,
     /// Size of each enabled 45-degree corner cut in canvas pixels.
     #[serde(default)]
     pub corner_cut: u8,
@@ -316,6 +320,7 @@ impl UiShapeStyle {
 impl Default for UiShapeStyle {
     fn default() -> Self {
         Self {
+            semi_transparent_fill: false,
             corner_cut: 0,
             cut_top_left: false,
             cut_top_right: false,

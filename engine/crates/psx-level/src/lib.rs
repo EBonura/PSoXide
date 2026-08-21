@@ -2600,6 +2600,8 @@ pub mod ui_shape {
     pub const MARKER: u16 = 1 << 15;
     /// Fill is skipped; an enabled border still draws.
     pub const TRANSPARENT: u16 = 1 << 13;
+    /// Fill uses the PS1 GPU's `(background + foreground) / 2` blend mode.
+    pub const SEMI_TRANSPARENT_FILL: u16 = 1 << 14;
     /// Low four bits select TL, TR, BR, BL corner cuts respectively.
     pub const CORNER_MASK: u16 = 0x000f;
     /// First bit of the six-bit cut-size field.
@@ -2621,7 +2623,13 @@ pub mod ui_shape {
     pub const BOTTOM_LEFT: u8 = 1 << 3;
 
     /// Pack an authored shape treatment into the shared option field.
-    pub const fn encode(corners: u8, cut: u8, border: u8, transparent: bool) -> u16 {
+    pub const fn encode(
+        corners: u8,
+        cut: u8,
+        border: u8,
+        transparent: bool,
+        semi_transparent_fill: bool,
+    ) -> u16 {
         let cut = if cut > 63 { 63 } else { cut };
         let border = if border > 7 { 7 } else { border };
         MARKER
@@ -2629,6 +2637,11 @@ pub mod ui_shape {
             | ((cut as u16) << CUT_SHIFT)
             | ((border as u16) << BORDER_SHIFT)
             | if transparent { TRANSPARENT } else { 0 }
+            | if semi_transparent_fill {
+                SEMI_TRANSPARENT_FILL
+            } else {
+                0
+            }
     }
 
     /// Whether `option` contains a shape style rather than a project option.
@@ -2654,6 +2667,11 @@ pub mod ui_shape {
     /// Decode whether the fill is transparent.
     pub const fn transparent(option: u16) -> bool {
         option & TRANSPARENT != 0
+    }
+
+    /// Decode whether the fill uses native half blending.
+    pub const fn semi_transparent_fill(option: u16) -> bool {
+        option & SEMI_TRANSPARENT_FILL != 0
     }
 }
 
