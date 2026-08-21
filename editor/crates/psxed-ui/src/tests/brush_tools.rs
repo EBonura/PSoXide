@@ -4789,6 +4789,78 @@ fn texture_lock_is_reachable_from_the_inspector_in_both_tools() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The UV canvas lives inside the Inspector ScrollArea. A wheel gesture over
+/// it belongs exclusively to canvas zoom; allowing the parent to observe the
+/// same delta makes every zoom also throw the numeric controls up or down.
+#[test]
+fn uv_canvas_wheel_zooms_without_scrolling_the_inspector() {
+    fn uv_canvas_rect(shapes: &[egui::epaint::ClippedShape]) -> Option<Rect> {
+        fn find(shape: &egui::Shape) -> Option<Rect> {
+            match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == egui::Color32::from_gray(18)
+                        && (160.0..=340.0).contains(&rect.rect.width())
+                        && (160.0..=260.0).contains(&rect.rect.height()) =>
+                {
+                    Some(rect.rect)
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+                _ => None,
+            }
+        }
+        shapes.iter().find_map(|shape| find(&shape.shape))
+    }
+
+    let template = psxed_project::new_project_template_dir();
+    let dir = test_temp_dir("uv-canvas-wheel-ownership");
+    crate::starter_catalogue::copy_dir_recursive(&template, &dir).unwrap();
+    let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Brush;
+    workspace.replace_brush_selection(0, Some(0));
+
+    let (ctx, viewport) = real_egui_workspace_ctx("uv-canvas-wheel-ownership");
+    let before = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 0.0, vec![]);
+    let canvas = uv_canvas_rect(&before.shapes).expect("selected face draws the UV canvas");
+    let heading_before = text_shape_center(&before.shapes, "Texture Coordinates")
+        .expect("UV heading is visible before zoom");
+    let zoom_before = workspace
+        .brush_uv_canvas_view
+        .expect("canvas view was fitted")
+        .pixels_per_texel;
+
+    let after = real_egui_workspace_frame(
+        &ctx,
+        &mut workspace,
+        &viewport,
+        1.0 / 60.0,
+        vec![
+            egui::Event::PointerMoved(canvas.center()),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -96.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    let heading_after = text_shape_center(&after.shapes, "Texture Coordinates")
+        .expect("UV heading remains visible after zoom");
+    let zoom_after = workspace
+        .brush_uv_canvas_view
+        .expect("canvas view survives zoom")
+        .pixels_per_texel;
+    assert_ne!(
+        zoom_before, zoom_after,
+        "wheel must still zoom the UV canvas"
+    );
+    assert!(
+        (heading_after.y - heading_before.y).abs() < 0.1,
+        "UV wheel leaked into the Inspector scroll: {heading_before:?} -> {heading_after:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Drive one held Inspector interaction frame by frame, the way a DragValue
 /// does, and report the worst anchor drift plus the mapping it ends on.
 fn drag_uv(

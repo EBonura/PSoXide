@@ -630,6 +630,123 @@ fn bsp_preview_lights_use_world_units_and_sector_scaled_radius() {
 }
 
 #[test]
+fn idle_light_keeps_its_bulb_but_hides_the_room_spanning_radius_ring() {
+    let mut project = ProjectDocument::new("idle-light-gizmo");
+    let light = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Light",
+        NodeKind::PointLight {
+            color: [255, 240, 200],
+            intensity: 1.0,
+            radius: 8.0,
+        },
+    );
+    project
+        .active_scene_mut()
+        .node_mut(light)
+        .expect("light")
+        .transform
+        .translation = [0.0, 0.0, -1024.0];
+    let camera = setup_gte_for_camera(ViewportCameraState {
+        mode: ViewportCameraMode::Free,
+        yaw_q12: 0,
+        pitch_q12: 0,
+        radius: 1024,
+        target: [0; 3],
+        position: [0; 3],
+    });
+    let hidden = HashSet::new();
+    let mut scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
+
+    scratch.overlay_lines.clear();
+    super::walk_roomless_light_gizmos(&project, camera, &hidden, NodeId::ROOT, None, &mut scratch);
+    let idle_lines = scratch.overlay_lines.len();
+    assert!(idle_lines > 0, "idle light keeps its compact bulb icon");
+
+    scratch.overlay_lines.clear();
+    super::walk_roomless_light_gizmos(&project, camera, &hidden, light, None, &mut scratch);
+    assert!(
+        scratch.overlay_lines.len() > idle_lines,
+        "selecting the light reveals its clipped attenuation ring and halo"
+    );
+}
+
+#[test]
+fn quake_units_arena_saved_camera_has_preview_headroom_and_compact_idle_guides() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let project_root = repo_root.join("editor/projects/default");
+    let project =
+        ProjectDocument::load_from_path(project_root.join("project.ron")).expect("arena loads");
+    assert_eq!(project.name, "Quake Units Arena");
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+    textures.refresh_models(&project, &project_root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &project_root);
+    let frame = super::build_phase1_frame(
+        &project,
+        ViewportCameraState {
+            mode: ViewportCameraMode::Orbit,
+            yaw_q12: 6557,
+            pitch_q12: 68,
+            radius: 1874,
+            target: [10743, 1507, -5450],
+            position: [0; 3],
+        },
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        &HashSet::new(),
+        None,
+        0,
+        NodeId::ROOT,
+        None,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        None,
+        &textures,
+        &assets,
+    );
+    let longest_guide = frame
+        .overlay_lines
+        .iter()
+        .map(|line| line.a.distance(line.b))
+        .fold(0.0_f32, f32::max);
+    assert!(
+        longest_guide < 32.0,
+        "an idle arena guide spans the viewport: {longest_guide}"
+    );
+    let scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
+    assert!(
+        scratch.tex_used < super::TRI_CAP && scratch.used < super::TRI_CAP,
+        "arena exhausted preview packets: textured={} flat={} cap={}",
+        scratch.tex_used,
+        scratch.used,
+        super::TRI_CAP
+    );
+    println!(
+        "arena preview: textured={} flat={} commands={} guides={} longest={longest_guide:.2}",
+        scratch.tex_used,
+        scratch.used,
+        frame.cmd_log.len(),
+        frame.overlay_lines.len()
+    );
+}
+
+#[test]
 fn legacy_textured_scene_is_fully_replaced_by_bsp_only_and_empty_scenes() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let legacy_root = repo_root.join("editor/samples/cortex_v1");
@@ -1245,6 +1362,50 @@ fn brush_polygon_clip_rejects_a_wholly_offscreen_face() {
     assert!(super::clip_preview_brush_polygon(projection, &vertices)
         .as_slice()
         .is_empty());
+}
+
+#[test]
+fn oversized_light_ring_is_clipped_before_it_becomes_a_viewport_slash() {
+    // The saved Quake Units Arena camera and authored light radius that
+    // exposed this: one ring edge crossed the camera plane, then endpoint
+    // projection saturated it to almost the complete i16 screen range.
+    let camera = setup_gte_for_camera(ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 6557,
+        pitch_q12: 68,
+        radius: 1874,
+        target: [10743, 1507, -5450],
+        position: [0, 0, 0],
+    });
+    let mut scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
+    scratch.overlay_lines.clear();
+    super::push_horizontal_ring(
+        &mut scratch,
+        camera,
+        [10880, 896, -4224],
+        12006,
+        16,
+        super::FaceOutlineStyle {
+            rgb: (255, 246, 224),
+            thickness_px: 1.0,
+        },
+    );
+
+    assert!(
+        !scratch.overlay_lines.is_empty(),
+        "visible ring arcs remain"
+    );
+    assert!(
+        scratch.overlay_lines.iter().all(|line| {
+            [line.a, line.b].iter().all(|point| {
+                (-16.0..=336.0).contains(&point.x) && (-16.0..=256.0).contains(&point.y)
+            })
+        }),
+        "every guide endpoint must stay inside the preview frustum guard: {:?}",
+        scratch.overlay_lines
+    );
 }
 
 #[test]
@@ -1955,9 +2116,36 @@ fn culled_room_face_outline_respects_preview_toggle() {
 fn preview_depth_slots_share_world_geometry_band() {
     assert_eq!(room_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
     assert_eq!(room_depth_slot(u32::MAX), PREVIEW_GEOMETRY_SLOT_MAX);
+    assert_ne!(
+        room_depth_slot(1024),
+        room_depth_slot(1028),
+        "four-unit depth separation must not collapse adjacent brush trims"
+    );
     assert!(shadow_depth_slot(2048) < room_depth_slot(2048));
     assert_eq!(shadow_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
     assert_eq!(PREVIEW_SHADOW_DEPTH_BIAS, 128);
+}
+
+#[test]
+fn one_brush_surface_keeps_all_fan_triangles_in_one_depth_slot() {
+    let vertex = |z| {
+        super::PreviewClipVertex::new(
+            psx_engine::ViewVertex::new(0, 0, z),
+            [0.0; 2],
+            (128, 128, 128),
+        )
+    };
+    let surface = [vertex(800), vertex(1200), vertex(2400), vertex(2800)];
+    let first_fan_slot = room_depth_slot((800 + 1200 + 2400) / 3);
+    let second_fan_slot = room_depth_slot((800 + 2400 + 2800) / 3);
+    assert_ne!(
+        first_fan_slot, second_fan_slot,
+        "the historic per-triangle sort must expose this regression fixture"
+    );
+    assert_eq!(
+        super::clipped_surface_depth_slot(&surface),
+        room_depth_slot((800 + 1200 + 2400 + 2800) / 4)
+    );
 }
 
 #[test]
@@ -2370,26 +2558,36 @@ fn lit_preview_key_tracks_exactly_its_inputs() {
     let textures = crate::editor_textures::EditorTextures::new();
     let hidden = std::collections::HashSet::new();
     let lights = super::room_geometry::collect_bsp_preview_bake_lights(&project, &hidden);
-    let base = super::lit_preview_key(&project, &textures, &lights);
+    let hidden = HashSet::new();
+    let base = super::lit_preview_key(&project, &textures, &lights, &hidden);
     assert_eq!(
         base,
-        super::lit_preview_key(&project, &textures, &lights),
+        super::lit_preview_key(&project, &textures, &lights, &hidden),
         "same inputs must reuse the cached bake"
     );
     // A moved light invalidates.
     let mut moved = lights.clone();
     moved[0].position[0] += 64.0;
-    assert_ne!(base, super::lit_preview_key(&project, &textures, &moved));
+    assert_ne!(
+        base,
+        super::lit_preview_key(&project, &textures, &moved, &hidden)
+    );
     // A moved brush corner invalidates.
     let mut edited = project.clone();
     edited.active_scene_mut().brushes[0].faces[0].points[0][0] += 16;
-    assert_ne!(base, super::lit_preview_key(&edited, &textures, &lights));
+    assert_ne!(
+        base,
+        super::lit_preview_key(&edited, &textures, &lights, &hidden)
+    );
     // A face UV change does NOT: it never feeds the bake.
     let mut uv_only = project.clone();
     uv_only.active_scene_mut().brushes[0].faces[0]
         .uv
         .offset_texels = [7, 3];
-    assert_eq!(base, super::lit_preview_key(&uv_only, &textures, &lights));
+    assert_eq!(
+        base,
+        super::lit_preview_key(&uv_only, &textures, &lights, &hidden)
+    );
 }
 
 #[test]
@@ -2423,6 +2621,63 @@ fn solved_brush_cache_key_tracks_only_solve_inputs() {
         .uv
         .offset_texels = [7, 3];
     assert_eq!(base, super::solved_brush_geometry_key(&uv_only));
+}
+
+#[test]
+fn preview_csg_removes_overlap_interiors_and_respects_hidden_groups() {
+    let mut project = ProjectDocument::new("preview-csg");
+    let group = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Overlap", NodeKind::Group);
+    let first = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    let mut second = psxed_project::brush::Brush::cuboid([64, 0, 0], [192, 128, 128]);
+    second.group = Some(group);
+    project.active_scene_mut().brushes = vec![first, second];
+
+    let visible_key = super::csg_surface_key(&project, &HashSet::new());
+    super::with_cached_csg_surfaces(&project, &HashSet::new(), |surfaces| {
+        assert!(!surfaces.is_empty());
+        for cached in surfaces {
+            let vertices = &cached.surface.vertices;
+            let on_union_boundary = [
+                (0, 0.0),
+                (0, 192.0),
+                (1, 0.0),
+                (1, 128.0),
+                (2, 0.0),
+                (2, 128.0),
+            ]
+            .into_iter()
+            .any(|(axis, plane)| {
+                vertices
+                    .iter()
+                    .all(|vertex| (vertex[axis] - plane).abs() < 0.0001)
+            });
+            assert!(
+                on_union_boundary,
+                "interior overlap face survived editor CSG: {vertices:?}"
+            );
+        }
+    });
+
+    let hidden = HashSet::from([group]);
+    assert_ne!(visible_key, super::csg_surface_key(&project, &hidden));
+    super::with_cached_csg_surfaces(&project, &hidden, |surfaces| {
+        assert_eq!(surfaces.len(), 6, "only the first cuboid remains visible");
+        assert!(surfaces
+            .iter()
+            .all(|surface| surface.surface.source_brush == 0));
+    });
+
+    let mut uv_only = project.clone();
+    uv_only.active_scene_mut().brushes[0].faces[0]
+        .uv
+        .offset_texels = [13, -7];
+    assert_eq!(
+        visible_key,
+        super::csg_surface_key(&uv_only, &HashSet::new()),
+        "UV edits reuse topology while rendering live source metadata"
+    );
 }
 
 /// Real-project navigation microbenchmark. Run explicitly with:
@@ -2709,9 +2964,12 @@ fn benchmark_e1m1_brush_navigation() {
     let cached_overlay_median_ns = percentile(&mut cached_overlay_ns, 50);
     let brush_walk_median_ns = percentile(&mut brush_walk_ns, 50);
     let brush_decode_median_ns = percentile(&mut brush_decode_ns, 50);
+    let csg_surface_count =
+        super::with_cached_csg_surfaces(&project, &hidden, |surfaces| surfaces.len());
     println!(
-        "E1M1 editor navigation: brushes={} lights={} frames={} median_ms={:.3} p95_ms={:.3} refresh_median_ms={:.3} build_median_ms={:.3} overlay_median_ms={:.3} brush_walk_median_ms={:.3} brush_decode_median_ms={:.3} alloc_calls_per_frame={:.1} alloc_bytes_per_frame={:.1} refresh_alloc_per_frame={:.1}/{:.1} build_alloc_per_frame={:.1}/{:.1} overlay_alloc_per_frame={:.1}/{:.1} brush_walk_alloc_per_frame={:.1}/{:.1} brush_decode_alloc_per_frame={:.1}/{:.1} grid_ab_uncached_cached_ms={:.3}/{:.3} grid_ab_uncached_cached_alloc={:.1}/{:.1}:{:.1}/{:.1} emitted={emitted:?}",
+        "E1M1 editor navigation: brushes={} csg_surfaces={} lights={} frames={} median_ms={:.3} p95_ms={:.3} refresh_median_ms={:.3} build_median_ms={:.3} overlay_median_ms={:.3} brush_walk_median_ms={:.3} brush_decode_median_ms={:.3} alloc_calls_per_frame={:.1} alloc_bytes_per_frame={:.1} refresh_alloc_per_frame={:.1}/{:.1} build_alloc_per_frame={:.1}/{:.1} overlay_alloc_per_frame={:.1}/{:.1} brush_walk_alloc_per_frame={:.1}/{:.1} brush_decode_alloc_per_frame={:.1}/{:.1} grid_ab_uncached_cached_ms={:.3}/{:.3} grid_ab_uncached_cached_alloc={:.1}/{:.1}:{:.1}/{:.1} emitted={emitted:?}",
         project.active_scene().brushes.len(),
+        csg_surface_count,
         preview_light_count,
         FRAMES,
         median_ns as f64 / 1_000_000.0,
