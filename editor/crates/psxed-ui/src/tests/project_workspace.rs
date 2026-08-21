@@ -6,6 +6,78 @@ fn save_watch_project(dir: &Path, project: &ProjectDocument) {
 }
 
 #[test]
+fn brush_geometry_clipboard_survives_project_switch_and_rebinds_materials_by_name() {
+    let source_dir = test_temp_dir("brush-clipboard-source");
+    let destination_dir = test_temp_dir("brush-clipboard-destination");
+
+    let mut source = ProjectDocument::new("clipboard source");
+    let source_material = source.add_resource(
+        "Shared Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut source_brush = psxed_project::brush::Brush::cuboid([64, 0, 96], [320, 256, 352]);
+    source_brush.faces[0].material = Some(source_material);
+    source_brush.mover = Some(NodeId::ROOT);
+    source.active_scene_mut().brushes.push(source_brush.clone());
+    save_watch_project(&source_dir, &source);
+
+    let mut destination = ProjectDocument::new("clipboard destination");
+    destination.add_resource(
+        "Unrelated Material",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let destination_material = destination.add_resource(
+        "Shared Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    assert_ne!(source_material, destination_material);
+    save_watch_project(&destination_dir, &destination);
+
+    let mut workspace = EditorWorkspace::open_directory(&source_dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Brush;
+    workspace.replace_brush_selection(0, None);
+    assert!(workspace.copy_current_geometry());
+    assert!(workspace.portable_geometry_clipboard.is_some());
+
+    workspace.switch_project(&destination_dir).unwrap();
+    assert!(
+        workspace.portable_geometry_clipboard.is_some(),
+        "switching projects must preserve the in-process clipboard"
+    );
+    assert!(workspace.paste_current_geometry());
+
+    let pasted = &workspace.project.active_scene().brushes;
+    assert_eq!(pasted.len(), 1);
+    assert_eq!(pasted[0].faces[0].material, Some(destination_material));
+    assert_eq!(
+        pasted[0].mover, None,
+        "source NodeIds must never cross projects"
+    );
+    assert_eq!(
+        pasted[0]
+            .faces
+            .iter()
+            .map(|face| face.points)
+            .collect::<Vec<_>>(),
+        source_brush
+            .faces
+            .iter()
+            .map(|face| face.points)
+            .collect::<Vec<_>>(),
+        "brush geometry must be byte-identical"
+    );
+    assert_eq!(workspace.selected_brush_set(), vec![0]);
+    assert!(workspace.status.contains("Door binding"));
+
+    workspace.do_undo();
+    assert!(workspace.project.active_scene().brushes.is_empty());
+
+    let _ = std::fs::remove_dir_all(source_dir);
+    let _ = std::fs::remove_dir_all(destination_dir);
+}
+
+#[test]
 fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
     let dir = test_temp_dir("project-watch-conflict");
     let project = ProjectDocument::new("watch baseline");

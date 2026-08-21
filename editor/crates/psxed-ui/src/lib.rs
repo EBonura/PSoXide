@@ -501,6 +501,10 @@ pub struct EditorWorkspace {
     /// lets Escape cancel without dirtying the document and lets
     /// click commit one clean undo step.
     floating_geometry: Option<FloatingGeometryPlacement>,
+    /// Project-portable Room-workspace clipboard. Unlike Duplicate, this owns
+    /// material names rather than trusting project-local resource ids, so it
+    /// deliberately survives switching or creating projects.
+    portable_geometry_clipboard: Option<PortableGeometryClipboard>,
     /// Name typed into the Prefabs menu for the next "Save Selection".
     prefab_name: String,
     /// Shared editor-library prefabs, cached outside project data. Refreshed
@@ -1470,6 +1474,25 @@ struct GeometryClipboard {
     extra_floors: Vec<psxed_project::PrefabFloor>,
     /// Lights the piece carries. Empty for Duplicate.
     lights: Vec<psxed_project::PrefabLight>,
+}
+
+#[derive(Debug, Clone)]
+enum PortableGeometryClipboard {
+    Brushes(BrushGeometryClipboard),
+    World(psxed_project::Prefab),
+}
+
+#[derive(Debug, Clone)]
+struct BrushGeometryClipboard {
+    brushes: Vec<psxed_project::brush::Brush>,
+    /// Position of the source primary brush within `brushes`.
+    primary: usize,
+    /// Source resource id -> material display name. Resource ids are local to
+    /// one project; paste resolves these names against the destination.
+    materials: BTreeMap<u64, String>,
+    /// Door bindings are intentionally stripped because their NodeIds cannot
+    /// safely address another project. Kept only for an honest paste status.
+    stripped_movers: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -3044,6 +3067,7 @@ impl EditorWorkspace {
             validation_issue_rooms: HashSet::new(),
             last_cook_errors: Vec::new(),
             floating_geometry: None,
+            portable_geometry_clipboard: None,
             prefab_name: String::new(),
             prefab_library,
             paint_target_preview: None,
@@ -3620,6 +3644,7 @@ impl EditorWorkspace {
         opened.frame_viewport();
         opened.mark_dirty();
         opened.save()?;
+        opened.portable_geometry_clipboard = self.portable_geometry_clipboard.clone();
         opened.retire_egui_textures(self.drain_live_egui_textures());
         *self = opened;
         self.status = format!("Created {}", short_path(&self.project_dir));
@@ -3631,6 +3656,7 @@ impl EditorWorkspace {
     fn switch_project(&mut self, dir: impl Into<PathBuf>) -> Result<(), String> {
         let target = dir.into();
         let mut opened = Self::open_directory(&target)?;
+        opened.portable_geometry_clipboard = self.portable_geometry_clipboard.clone();
         opened.retire_egui_textures(self.drain_live_egui_textures());
         *self = opened;
         Ok(())

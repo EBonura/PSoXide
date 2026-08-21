@@ -2556,6 +2556,63 @@ fn a_stamped_prefab_brings_its_light_along() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn world_geometry_clipboard_rebinds_materials_in_another_project() {
+    let mut source = ProjectDocument::new("world-clipboard-source");
+    let source_material = source.add_resource(
+        "Portable Brick",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut source_grid = WorldGrid::empty(1, 1, 1024);
+    source_grid.set_floor(0, 0, 0, Some(source_material));
+    let source_room = source.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Source Room",
+        NodeKind::Section { grid: source_grid },
+    );
+    let mut source_workspace =
+        EditorWorkspace::with_project(test_temp_dir("world-clipboard-source"), source);
+    source_workspace.select_sector((source_room, 0, 0), egui::Modifiers::NONE);
+    assert!(source_workspace.copy_current_geometry());
+    let portable = source_workspace
+        .portable_geometry_clipboard
+        .clone()
+        .expect("copy populated the portable clipboard");
+
+    let mut destination = ProjectDocument::new("world-clipboard-destination");
+    destination.add_resource(
+        "Unrelated",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let destination_material = destination.add_resource(
+        "Portable Brick",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    assert_ne!(source_material, destination_material);
+    let destination_room = destination.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Destination Room",
+        NodeKind::Section {
+            grid: WorldGrid::empty(2, 2, 1024),
+        },
+    );
+    let mut destination_workspace =
+        EditorWorkspace::with_project(test_temp_dir("world-clipboard-destination"), destination);
+    destination_workspace.replace_node_selection(destination_room);
+    destination_workspace.portable_geometry_clipboard = Some(portable);
+    assert!(destination_workspace.paste_current_geometry());
+    assert!(destination_workspace.floating_geometry.is_some());
+    assert!(destination_workspace.update_floating_geometry_origin([1, 1]));
+    assert!(destination_workspace.commit_floating_geometry());
+
+    let floor = destination_workspace
+        .room_grid_view(destination_room)
+        .and_then(|grid| grid.sector(1, 1))
+        .and_then(|sector| sector.floor.as_ref())
+        .expect("pasted floor exists");
+    assert_eq!(floor.material, Some(destination_material));
+}
+
 /// The shared library is cached as editor state and must never create project
 /// resources. Refreshing updates that cache without dirtying `project.ron`.
 #[test]
