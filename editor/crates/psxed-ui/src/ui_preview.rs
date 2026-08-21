@@ -235,13 +235,26 @@ pub(crate) fn draw_ui_scene_preview(
                 }
             }
             UiNodeKind::Rect {
-                color, gradient, ..
+                color,
+                gradient,
+                transparent,
+                shape,
+                ..
             } => {
                 if let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size) {
-                    draw_ui_preview_quad_paint(
+                    draw_ui_preview_shape(
                         painter,
-                        preview.quad,
-                        ui_preview_paint(*color, *gradient),
+                        preview,
+                        (!*transparent).then(|| ui_preview_paint(*color, *gradient)),
+                        shape.and_then(|style| {
+                            (style.border_width != 0).then(|| {
+                                (
+                                    ui_preview_paint(style.border_color, style.border_gradient),
+                                    style.border_width,
+                                )
+                            })
+                        }),
+                        *shape,
                     );
                 }
             }
@@ -413,19 +426,27 @@ pub(crate) fn draw_ui_scene_preview(
                 text_color,
                 text_gradient,
                 transparent,
+                shape,
                 ..
             } => {
                 let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size)
                 else {
                     continue;
                 };
-                if !*transparent {
-                    draw_ui_preview_quad_paint(
-                        painter,
-                        preview.quad,
-                        ui_preview_paint(*color, *background_gradient),
-                    );
-                }
+                draw_ui_preview_shape(
+                    painter,
+                    preview,
+                    (!*transparent).then(|| ui_preview_paint(*color, *background_gradient)),
+                    shape.and_then(|style| {
+                        (style.border_width != 0).then(|| {
+                            (
+                                ui_preview_paint(style.border_color, style.border_gradient),
+                                style.border_width,
+                            )
+                        })
+                    }),
+                    *shape,
+                );
                 let base_scale = preview.transform.y_scale().clamp(1.0, 8.0);
                 let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
                 let texture = ui_preview_font_texture(font_textures, *font);
@@ -556,6 +577,154 @@ pub(crate) fn draw_ui_preview_quad_paint(
             Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
             preview_gradient_vertex_colors(from, to, direction),
         ),
+    }
+}
+
+/// Draw a convex clipped-corner panel with independent fill and inset border.
+/// Geometry is authored in PS1 pixels, then transformed through the same
+/// affine used by every other 2D preview node.
+pub(crate) fn draw_ui_preview_shape(
+    painter: &egui::Painter,
+    preview: UiPreviewNode,
+    fill: Option<UiPreviewPaint>,
+    border: Option<(UiPreviewPaint, u8)>,
+    style: Option<UiShapeStyle>,
+) {
+    let style = style.unwrap_or_default();
+    let corners = style.corner_mask();
+    let cut = f32::from(style.corner_cut)
+        .min(preview.width * 0.5)
+        .min(preview.height * 0.5);
+    let outer = ui_preview_shape_points(preview.width, preview.height, cut, corners, 0.0);
+    if let Some(fill) = fill {
+        draw_ui_preview_convex_paint(painter, preview, &outer, fill);
+    }
+
+    let Some((paint, authored_width)) = border else {
+        return;
+    };
+    let border_width = f32::from(authored_width)
+        .min(preview.width * 0.5)
+        .min(preview.height * 0.5);
+    if border_width <= 0.0 {
+        return;
+    }
+    if preview.width <= border_width * 2.0 || preview.height <= border_width * 2.0 {
+        draw_ui_preview_convex_paint(painter, preview, &outer, paint);
+        return;
+    }
+    let inner_cut = cut
+        .min((preview.width - border_width * 2.0) * 0.5)
+        .min((preview.height - border_width * 2.0) * 0.5);
+    let inner = ui_preview_shape_points(
+        preview.width,
+        preview.height,
+        inner_cut,
+        corners,
+        border_width,
+    );
+    let mut mesh = egui::Mesh::with_texture(egui::TextureId::default());
+    for index in 0..outer.len() {
+        let next = (index + 1) % outer.len();
+        let base = mesh.vertices.len() as u32;
+        for local in [outer[index], outer[next], inner[index], inner[next]] {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: preview.transform.point(local.x, local.y),
+                uv: Pos2::ZERO,
+                color: ui_preview_paint_at(paint, local.x, local.y, preview.width, preview.height),
+            });
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base + 1, base + 2, base + 3);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn ui_preview_shape_points(
+    width: f32,
+    height: f32,
+    cut: f32,
+    corners: u8,
+    inset: f32,
+) -> Vec<Pos2> {
+    let left = inset;
+    let top = inset;
+    let right = (width - inset).max(left);
+    let bottom = (height - inset).max(top);
+    let mut points = Vec::with_capacity(8);
+    if corners & 1 != 0 {
+        points.push(Pos2::new((left + cut).min(right), top));
+    } else {
+        points.push(Pos2::new(left, top));
+    }
+    if corners & 2 != 0 {
+        points.push(Pos2::new((right - cut).max(left), top));
+        points.push(Pos2::new(right, (top + cut).min(bottom)));
+    } else {
+        points.push(Pos2::new(right, top));
+    }
+    if corners & 4 != 0 {
+        points.push(Pos2::new(right, (bottom - cut).max(top)));
+        points.push(Pos2::new((right - cut).max(left), bottom));
+    } else {
+        points.push(Pos2::new(right, bottom));
+    }
+    if corners & 8 != 0 {
+        points.push(Pos2::new((left + cut).min(right), bottom));
+        points.push(Pos2::new(left, (bottom - cut).max(top)));
+    } else {
+        points.push(Pos2::new(left, bottom));
+    }
+    if corners & 1 != 0 {
+        points.push(Pos2::new(left, (top + cut).min(bottom)));
+    }
+    points
+}
+
+fn draw_ui_preview_convex_paint(
+    painter: &egui::Painter,
+    preview: UiPreviewNode,
+    local_points: &[Pos2],
+    paint: UiPreviewPaint,
+) {
+    if local_points.len() < 3 {
+        return;
+    }
+    let mut mesh = egui::Mesh::with_texture(egui::TextureId::default());
+    for local in local_points {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: preview.transform.point(local.x, local.y),
+            uv: Pos2::ZERO,
+            color: ui_preview_paint_at(paint, local.x, local.y, preview.width, preview.height),
+        });
+    }
+    for index in 1..local_points.len() - 1 {
+        mesh.add_triangle(0, index as u32, index as u32 + 1);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn ui_preview_paint_at(paint: UiPreviewPaint, x: f32, y: f32, width: f32, height: f32) -> Color32 {
+    match paint {
+        UiPreviewPaint::Solid(color) => color,
+        UiPreviewPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => {
+            let t = match direction {
+                UiGradientDirection::Horizontal => x / width.max(1.0),
+                UiGradientDirection::Vertical => y / height.max(1.0),
+            }
+            .clamp(0.0, 1.0);
+            let mix =
+                |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+            Color32::from_rgb(
+                mix(from.r(), to.r()),
+                mix(from.g(), to.g()),
+                mix(from.b(), to.b()),
+            )
+        }
     }
 }
 

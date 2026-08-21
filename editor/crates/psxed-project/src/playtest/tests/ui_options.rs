@@ -307,6 +307,8 @@ fn ui_gradient_roles_cook_to_paint_table_refs() {
                 [80, 90, 100],
                 crate::UiGradientDirection::Horizontal,
             )),
+            transparent: false,
+            shape: None,
         },
     );
 
@@ -334,6 +336,109 @@ fn ui_gradient_roles_cook_to_paint_table_refs() {
     assert_eq!(rect.color_paint, Some(0));
     assert_eq!(rect.background_paint, None);
     assert_eq!(rect.accent_paint, None);
+}
+
+#[test]
+fn clipped_transparent_rect_cooks_border_and_compact_shape_style() {
+    let mut project = ProjectDocument::new("ui-shape");
+    let scene = project.active_ui_scene_mut().expect("default ui scene");
+    scene.add_node(
+        scene.root,
+        "Cut Panel",
+        UiNodeKind::Rect {
+            rect: UiRect::new(12, 18, 100, 30),
+            color: [8, 10, 12],
+            gradient: None,
+            transparent: true,
+            shape: Some(crate::UiShapeStyle {
+                corner_cut: 6,
+                cut_top_left: true,
+                cut_top_right: false,
+                cut_bottom_right: true,
+                cut_bottom_left: false,
+                border_width: 2,
+                border_color: [18, 92, 110],
+                border_gradient: Some(crate::UiGradient::new(
+                    [70, 120, 126],
+                    crate::UiGradientDirection::Horizontal,
+                )),
+            }),
+        },
+    );
+    scene.add_node(
+        scene.root,
+        "Play",
+        UiNodeKind::Button {
+            rect: UiRect::new(24, 80, 72, 18),
+            label: "PLAY".to_string(),
+            align: UiTextAlign::Center,
+            font: crate::UiFontChoice::Basic,
+            font_scale: crate::default_ui_font_scale(),
+            letter_spacing: crate::default_ui_letter_spacing(),
+            color: [8, 10, 12],
+            background_gradient: None,
+            text_color: [90, 120, 126],
+            text_gradient: None,
+            transparent: false,
+            shape: Some(crate::UiShapeStyle {
+                corner_cut: 6,
+                cut_top_left: true,
+                cut_top_right: false,
+                cut_bottom_right: true,
+                cut_bottom_left: false,
+                border_width: 2,
+                border_color: [18, 92, 110],
+                border_gradient: Some(crate::UiGradient::new(
+                    [70, 120, 126],
+                    crate::UiGradientDirection::Horizontal,
+                )),
+            }),
+            action: UiAction::Back,
+            sfx: crate::UiSfxBindings::default(),
+        },
+    );
+
+    let mut texture_asset_for_resource = HashMap::new();
+    let mut assets = Vec::new();
+    let mut report = PlaytestValidationReport::default();
+    let (nodes, paints, _scenes, _samples, _cues, _flow, _tracks) = cook_ui_nodes(
+        &project,
+        Path::new("."),
+        &mut texture_asset_for_resource,
+        &mut assets,
+        &mut Vec::new(),
+        &mut report,
+    );
+
+    assert!(report.is_ok(), "warnings/errors: {:?}", report);
+    let panel = nodes
+        .iter()
+        .find(|node| matches!(node.kind, UiNodeKind::Rect { .. }))
+        .expect("styled rect cooked");
+    assert!(psx_level::ui_shape::is_encoded(panel.option));
+    assert_eq!(
+        psx_level::ui_shape::corners(panel.option),
+        psx_level::ui_shape::TOP_LEFT | psx_level::ui_shape::BOTTOM_RIGHT
+    );
+    assert_eq!(psx_level::ui_shape::cut(panel.option), 6);
+    assert_eq!(psx_level::ui_shape::border(panel.option), 2);
+    assert!(psx_level::ui_shape::transparent(panel.option));
+    assert_eq!(panel.background, [18, 92, 110]);
+    assert_eq!(panel.background_paint, Some(0));
+    assert_eq!(paints[0].from, [18, 92, 110]);
+    assert_eq!(paints[0].to, [70, 120, 126]);
+
+    let button = nodes
+        .iter()
+        .find(|node| matches!(node.kind, UiNodeKind::Button { .. }))
+        .expect("styled button cooked");
+    assert!(psx_level::ui_shape::is_encoded(button.option));
+    assert_eq!(psx_level::ui_shape::corners(button.option), 0b0101);
+    assert_eq!(psx_level::ui_shape::cut(button.option), 6);
+    assert_eq!(psx_level::ui_shape::border(button.option), 2);
+    assert!(!psx_level::ui_shape::transparent(button.option));
+    assert_eq!(button.background, [18, 92, 110]);
+    assert_eq!(button.background_paint, Some(0));
 }
 
 #[test]
@@ -517,6 +622,7 @@ fn button_and_slider_cook_action_colours_and_option_binding() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            shape: None,
             action: UiAction::GotoScene(target_scene),
             sfx: crate::UiSfxBindings::default(),
         },
@@ -601,6 +707,7 @@ fn button_sfx_cooks_wav_to_sample_and_cue_range() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            shape: None,
             action: UiAction::Back,
             sfx: crate::UiSfxBindings {
                 activate: vec![UiSfxCue {
@@ -662,6 +769,7 @@ fn button_set_option_and_back_actions_lower_to_runtime_ids() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            shape: None,
             action: UiAction::SetOption { option, delta: 2 },
             sfx: crate::UiSfxBindings::default(),
         },
@@ -681,6 +789,7 @@ fn button_set_option_and_back_actions_lower_to_runtime_ids() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            shape: None,
             action: UiAction::Back,
             sfx: crate::UiSfxBindings::default(),
         },
