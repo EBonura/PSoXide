@@ -29,6 +29,7 @@ dependencies = [
  "psx-math",
  "psx-pad",
  "psx-rt",
+ "psx-settings",
  "psx-sfx",
  "psx-spu",
  "psx-telemetry",
@@ -115,6 +116,13 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+]
+
+[[package]]
+name = "psx-settings"
+version = "0.1.0"
+dependencies = [
+ "psx-pad",
 ]
 
 [[package]]
