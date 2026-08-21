@@ -135,7 +135,6 @@ impl EditorWorkspace {
                 | Interaction::PrimitiveGrid(_)
                 | Interaction::PrimitiveGizmo(_)
                 | Interaction::NodeGizmo(_)
-                | Interaction::Node(_)
                 | Interaction::BoxSelect3d(_)
         );
         let pointer_target = if select_tool && select_drag_active {
@@ -169,7 +168,7 @@ impl EditorWorkspace {
                     || (self.brush_edit_mode == BrushEditMode::Move && over_brush)
                 {
                     ui.ctx().set_cursor_icon(match self.brush_edit_mode {
-                        BrushEditMode::Move => egui::CursorIcon::Grab,
+                        BrushEditMode::Move => egui::CursorIcon::PointingHand,
                         BrushEditMode::Face => egui::CursorIcon::ResizeVertical,
                         BrushEditMode::Edge | BrushEditMode::Vertex | BrushEditMode::Clip => {
                             egui::CursorIcon::Crosshair

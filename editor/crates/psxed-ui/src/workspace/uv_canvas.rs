@@ -258,31 +258,18 @@ impl EditorWorkspace {
         if stale || response.double_clicked() {
             self.brush_uv_canvas_view = Some(fit_view(index, face_index, &polygon, rect));
         }
-        let mut view = self.brush_uv_canvas_view.expect("seeded above");
+        let view = self.brush_uv_canvas_view.expect("seeded above");
 
-        // Scroll zoom about the hovered texel.
+        // The canvas is nested inside the Inspector's vertical ScrollArea.
+        // A wheel gesture over this dense editing surface should do nothing:
+        // zooming the UVs by accident is just as disruptive as letting the
+        // parent Inspector jump. Consume both egui wheel representations so
+        // neither the canvas nor its parent reacts to the gesture.
         if response.hovered() {
-            // The canvas is nested inside the Inspector's vertical
-            // ScrollArea. Take ownership of the smoothed wheel delta before
-            // that parent closes its content UI; otherwise the same gesture
-            // zooms the UVs and scrolls the whole Inspector at once. Clear
-            // both axes because egui intentionally folds horizontal wheel
-            // input into the only enabled direction for a vertical area.
-            let scroll = ui.input_mut(|input| {
-                let scroll = input.smooth_scroll_delta.y;
+            ui.input_mut(|input| {
+                input.raw_scroll_delta = Vec2::ZERO;
                 input.smooth_scroll_delta = Vec2::ZERO;
-                scroll
             });
-            if scroll.abs() > 0.1 {
-                if let Some(pointer) = response.hover_pos() {
-                    let before = screen_to_texel(&view, rect, pointer);
-                    view.pixels_per_texel =
-                        (view.pixels_per_texel * 1.0035_f32.powf(scroll)).clamp(0.05, 64.0);
-                    let after = screen_to_texel(&view, rect, pointer);
-                    view.center[0] -= (after[0] - before[0]) as f32;
-                    view.center[1] -= (after[1] - before[1]) as f32;
-                }
-            }
         }
         self.brush_uv_canvas_view = Some(view);
 

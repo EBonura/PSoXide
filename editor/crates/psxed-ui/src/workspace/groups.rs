@@ -420,6 +420,9 @@ impl EditorWorkspace {
             moved_brushes.dedup();
             self.selected_brush = moved_brushes.first().copied();
             self.selected_brushes = moved_brushes;
+            self.selected_brush_face = None;
+            self.selected_brush_faces.clear();
+            self.selected_brush_elements.clear();
             self.clear_node_selection_state();
         } else if !moved_nodes.is_empty() {
             self.selection.selected_node = moved_nodes[0];

@@ -3256,7 +3256,27 @@ impl EditorWorkspace {
         if brushes.is_empty() {
             return Vec::new();
         }
-        if brushes.len() == 1 {
+        if self.brush_edit_mode == BrushEditMode::Face {
+            return self
+                .selected_brush_faces
+                .iter()
+                .copied()
+                .filter(|(brush, face)| {
+                    self.project
+                        .active_scene()
+                        .brushes
+                        .get(*brush)
+                        .and_then(|brush| brush.faces.get(*face))
+                        .is_some()
+                })
+                .map(|(brush, face)| MaterialTarget::BrushFace { brush, face })
+                .collect();
+        }
+        // Brush/Move mode is an object selection even though picking retains
+        // the hit face for cycling and Inspector context. Never let that
+        // implementation detail silently turn a brush material assignment
+        // into a one-face edit.
+        if brushes.len() == 1 && self.brush_edit_mode != BrushEditMode::Move {
             let brush = brushes[0];
             let mut faces: Vec<usize> = self
                 .selected_brush_elements

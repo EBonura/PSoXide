@@ -1050,6 +1050,8 @@ impl EditorWorkspace {
         }
         .or_else(|| self.selected_brushes.first().copied());
         self.selected_brush_face = None;
+        self.selected_brush_faces.clear();
+        self.selected_brush_elements.clear();
         self.clear_node_selection_state();
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
@@ -1198,6 +1200,8 @@ impl EditorWorkspace {
         }
         .or_else(|| self.selected_brushes.first().copied());
         self.selected_brush_face = None;
+        self.selected_brush_faces.clear();
+        self.selected_brush_elements.clear();
         self.clear_node_selection_state();
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();

@@ -154,18 +154,14 @@ impl ViewportTool3d for SelectTool {
                 }
             }
         }
-        // Reshape handles (Resize/Edge/Vertex) stick out past the brush
+        // Reshape handles (Face/Edge/Vertex) stick out past the brush
         // silhouette, so a handle hit forwards to the Brush gestures even
-        // when the pick ray misses the solid itself; whole-brush Move still
-        // requires pressing on the brush body.
+        // when the pick ray misses the solid itself. Whole objects never
+        // start moving from their body: select first, then grab the gizmo.
         if !additive
             && ws.selected_brush.is_some()
-            && (ws.pick_brush_handle_3d(frame.rect, pointer).is_some()
-                || (ws.brush_edit_mode == BrushEditMode::Move
-                    && matches!(
-                        frame.pointer_target,
-                        Some(Viewport3dPointerTarget::Brush { .. })
-                    )))
+            && ws.brush_edit_mode != BrushEditMode::Move
+            && ws.pick_brush_handle_3d(frame.rect, pointer).is_some()
         {
             BrushTool.primary_pressed(ws, frame);
             return;
@@ -176,11 +172,6 @@ impl ViewportTool3d for SelectTool {
             }
             Some(Viewport3dPointerTarget::NodeGizmo(handle)) => {
                 ws.begin_node_gizmo_handle_drag(handle, frame.rect, pointer);
-            }
-            Some(Viewport3dPointerTarget::Entity(hit))
-                if ws.transform_gizmo_mode == TransformGizmoMode::Move =>
-            {
-                ws.begin_node_drag(hit, frame.rect);
             }
             Some(Viewport3dPointerTarget::Entity(_)) => {}
             Some(Viewport3dPointerTarget::Brush { .. }) if additive => {
@@ -216,11 +207,6 @@ impl ViewportTool3d for SelectTool {
             Interaction::NodeGizmo(_) => {
                 if let Some(p) = frame.pointer_interact {
                     ws.update_node_gizmo_drag(frame.rect, p, frame.modifiers.shift);
-                }
-            }
-            Interaction::Node(_) => {
-                if let Some(p) = frame.pointer_interact {
-                    ws.update_node_drag(frame.rect, p, frame.modifiers.shift);
                 }
             }
             Interaction::PrimitiveGrid(_) => {
@@ -261,7 +247,6 @@ impl ViewportTool3d for SelectTool {
         match ws.interaction {
             Interaction::PrimitiveGizmo(_) => ws.end_primitive_gizmo_drag(),
             Interaction::NodeGizmo(_) => ws.end_node_gizmo_drag(),
-            Interaction::Node(_) => ws.end_node_drag(),
             Interaction::PrimitiveGrid(_) => ws.end_primitive_grid_drag(),
             Interaction::BoxSelect3d(_) => ws.end_viewport_3d_box_select(),
             _ => ws.end_primitive_drag(),
@@ -318,11 +303,13 @@ impl ViewportTool3d for SelectTool {
                     ws.select_brush_with_group_semantics(brush, Some(face), frame.modifiers, false);
                     return;
                 }
-                // Face mode selects the face under the cursor as an
-                // element from the FIRST click (the UV-editing entry).
-                // Deliberately the NEAREST face, not the click-through
+                // Face and Edge mode can jump directly between brushes.
+                // Deliberately use the NEAREST face, not the click-through
                 // cycle: cycling made repeat clicks land on back faces.
-                if ws.brush_edit_mode == BrushEditMode::Face {
+                if matches!(
+                    ws.brush_edit_mode,
+                    BrushEditMode::Face | BrushEditMode::Edge
+                ) {
                     let (brush, face) = frame
                         .pointer_interact
                         .or(frame.pointer_hover)
@@ -331,20 +318,24 @@ impl ViewportTool3d for SelectTool {
                         })
                         .map(|(brush, face, _)| (brush, face))
                         .unwrap_or((brush, face));
-                    // Alt+click paints the clicked face with the selected
-                    // face's material and UV instead of selecting it.
-                    if frame.modifiers.alt && ws.apply_face_attributes_to(brush, face) {
+                    // Alt+click remains the Face-mode attribute eyedropper.
+                    if ws.brush_edit_mode == BrushEditMode::Face
+                        && frame.modifiers.alt
+                        && ws.apply_face_attributes_to(brush, face)
+                    {
                         return;
                     }
-                    if ws.selected_brush != Some(brush) {
-                        ws.clear_node_selection_state();
-                        ws.clear_resource_selection_state();
-                        ws.clear_primitive_selection_state();
-                        ws.clear_sector_selection();
-                        ws.replace_brush_selection(brush, Some(face));
+                    if let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) {
+                        if ws.select_brush_element_from_3d_hit(
+                            brush,
+                            face,
+                            frame.rect,
+                            pointer,
+                            frame.modifiers,
+                        ) {
+                            return;
+                        }
                     }
-                    ws.apply_brush_element_selection(BrushElement::Face(face), frame.modifiers);
-                    return;
                 }
                 ws.select_brush_with_group_semantics(brush, Some(face), frame.modifiers, false);
                 ws.status = format!("Selected BSP brush {}", brush + 1);
@@ -641,21 +632,6 @@ impl EditorWorkspace {
         hits.get(next).copied()
     }
 
-    fn pick_brush_face_for_move_3d(
-        &self,
-        rect: egui::Rect,
-        pointer: egui::Pos2,
-    ) -> Option<(usize, usize, [f32; 3])> {
-        let hits = self.brush_face_hits_for_selection_3d(rect, pointer);
-        self.selected_brush
-            .and_then(|selected| {
-                hits.iter()
-                    .find(|(index, _, _)| *index == selected)
-                    .copied()
-            })
-            .or_else(|| hits.first().copied())
-    }
-
     /// Nearest brush face under the pointer: `(brush_index, face_index)`.
     fn pick_brush_face(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<(usize, usize)> {
         self.pick_brush_face_with_hit(rect, pointer)
@@ -730,12 +706,17 @@ impl EditorWorkspace {
         if self.selected_brush != Some(index) || self.selected_brush_face != face {
             self.clear_uv_edit_transaction();
         }
-        if self.selected_brush != Some(index) {
-            self.selected_brush_elements.clear();
-        }
+        self.selected_brush_elements.clear();
+        self.selected_brush_faces.clear();
         self.selected_brush = Some(index);
         self.selected_brushes = vec![index];
         self.selected_brush_face = face;
+        if self.brush_edit_mode == BrushEditMode::Face {
+            if let Some(face) = face {
+                self.selected_brush_faces.push((index, face));
+                self.selected_brush_elements.push(BrushElement::Face(face));
+            }
+        }
     }
 
     /// Any deliberate selection change invalidates the drill anchor,
@@ -752,7 +733,83 @@ impl EditorWorkspace {
         self.selected_brush = None;
         self.selected_brushes.clear();
         self.selected_brush_face = None;
+        self.selected_brush_faces.clear();
         self.selected_brush_elements.clear();
+    }
+
+    /// Face-mode selection owns a document-wide set of `(brush, face)`
+    /// pairs. The legacy element list remains a primary-brush projection so
+    /// the face Inspector and existing single-brush gizmo code keep working.
+    fn apply_brush_face_selection(
+        &mut self,
+        brush: usize,
+        face: usize,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        if self
+            .project
+            .active_scene()
+            .brushes
+            .get(brush)
+            .and_then(|brush| brush.faces.get(face))
+            .is_none()
+        {
+            return false;
+        }
+
+        let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
+        let old_active = (self.selected_brush, self.selected_brush_face);
+        self.reset_brush_drill();
+        if additive {
+            if let Some(position) = self
+                .selected_brush_faces
+                .iter()
+                .position(|selected| *selected == (brush, face))
+            {
+                self.selected_brush_faces.remove(position);
+            } else {
+                self.selected_brush_faces.push((brush, face));
+            }
+        } else {
+            self.selected_brush_faces.clear();
+            self.selected_brush_faces.push((brush, face));
+        }
+
+        if self.selected_brush_faces.contains(&(brush, face)) {
+            self.selected_brush = Some(brush);
+            self.selected_brush_face = Some(face);
+        } else if let Some(&(brush, face)) = self.selected_brush_faces.last() {
+            self.selected_brush = Some(brush);
+            self.selected_brush_face = Some(face);
+        } else {
+            // Toggling the final face off leaves the owning brush selected,
+            // but with no accidental whole-brush material target.
+            self.selected_brush = Some(brush);
+            self.selected_brush_face = None;
+        }
+
+        self.selected_brushes = self
+            .selected_brush_faces
+            .iter()
+            .map(|(brush, _)| *brush)
+            .collect();
+        self.selected_brushes.sort_unstable();
+        self.selected_brushes.dedup();
+        if self.selected_brushes.is_empty() {
+            self.selected_brushes.push(brush);
+        }
+
+        self.selected_brush_elements = self.selected_brush.map_or_else(Vec::new, |active| {
+            self.selected_brush_faces
+                .iter()
+                .filter_map(|(brush, face)| (*brush == active).then_some(BrushElement::Face(*face)))
+                .collect()
+        });
+        if old_active != (self.selected_brush, self.selected_brush_face) {
+            self.clear_uv_edit_transaction();
+        }
+        self.status = self.brush_element_status();
+        true
     }
 
     /// Click selection for a brush sub-element: plain click replaces the
@@ -764,6 +821,11 @@ impl EditorWorkspace {
         element: BrushElement,
         modifiers: egui::Modifiers,
     ) {
+        if let (BrushElement::Face(face), Some(brush)) = (element, self.selected_brush) {
+            self.apply_brush_face_selection(brush, face, modifiers);
+            return;
+        }
+        self.selected_brush_faces.clear();
         let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
         if additive {
             if let Some(position) = self
@@ -801,7 +863,126 @@ impl EditorWorkspace {
         self.status = self.brush_element_status();
     }
 
+    /// Select the Face/Edge under a hit even when it belongs to a different
+    /// brush. Faces retain their brush identity for additive selection;
+    /// edges remain scoped to the active brush.
+    fn select_brush_element_from_3d_hit(
+        &mut self,
+        brush: usize,
+        face: usize,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        if self.brush_edit_mode == BrushEditMode::Face {
+            if self.selected_brush != Some(brush) {
+                self.clear_node_selection_state();
+                self.clear_resource_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+            }
+            return self.apply_brush_face_selection(brush, face, modifiers);
+        }
+        let element = match self.brush_edit_mode {
+            BrushEditMode::Edge => {
+                let Some(element) = self.pick_brush_face_edge_on_3d(brush, face, rect, pointer)
+                else {
+                    return false;
+                };
+                element
+            }
+            BrushEditMode::Move
+            | BrushEditMode::Face
+            | BrushEditMode::Vertex
+            | BrushEditMode::Clip => return false,
+        };
+        let crossing_brushes = self.selected_brush != Some(brush);
+        if crossing_brushes {
+            if !self.select_brush_with_group_semantics(
+                brush,
+                Some(face),
+                egui::Modifiers::NONE,
+                false,
+            ) {
+                return false;
+            }
+        }
+        self.apply_brush_element_selection(
+            element,
+            if crossing_brushes {
+                egui::Modifiers::NONE
+            } else {
+                modifiers
+            },
+        );
+        true
+    }
+
+    /// Orthographic counterpart of `select_brush_element_from_3d_hit`.
+    /// Face mode can use the solved hit directly; Edge mode switches brush
+    /// first and then resolves the projected edge at the same click point.
+    pub(crate) fn select_brush_element_from_2d_hit(
+        &mut self,
+        brush: usize,
+        face: usize,
+        world: [f32; 2],
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        if !matches!(
+            self.brush_edit_mode,
+            BrushEditMode::Face | BrushEditMode::Edge
+        ) {
+            return false;
+        }
+        if self.brush_edit_mode == BrushEditMode::Face {
+            if self.selected_brush != Some(brush) {
+                self.clear_node_selection_state();
+                self.clear_resource_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+            }
+            return self.apply_brush_face_selection(brush, face, modifiers);
+        }
+        let crossing_brushes = self.selected_brush != Some(brush);
+        if crossing_brushes
+            && !self.select_brush_with_group_semantics(
+                brush,
+                Some(face),
+                egui::Modifiers::NONE,
+                false,
+            )
+        {
+            return false;
+        }
+        let modifiers = if crossing_brushes {
+            egui::Modifiers::NONE
+        } else {
+            modifiers
+        };
+        match self.brush_edit_mode {
+            BrushEditMode::Edge => self.select_brush_elements_2d(world, modifiers),
+            BrushEditMode::Move
+            | BrushEditMode::Face
+            | BrushEditMode::Vertex
+            | BrushEditMode::Clip => false,
+        }
+    }
+
     fn brush_element_status(&self) -> String {
+        if self.brush_edit_mode == BrushEditMode::Face && !self.selected_brush_faces.is_empty() {
+            let faces = self.selected_brush_faces.len();
+            let brushes = self
+                .selected_brush_faces
+                .iter()
+                .map(|(brush, _)| *brush)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            return format!(
+                "Selected {faces} face{} across {brushes} brush{}",
+                if faces == 1 { "" } else { "s" },
+                if brushes == 1 { "" } else { "es" }
+            );
+        }
         let (mut faces, mut edges, mut vertices) = (0usize, 0usize, 0usize);
         for element in &self.selected_brush_elements {
             match element {
@@ -1574,6 +1755,7 @@ impl EditorWorkspace {
     pub(crate) fn toggle_brush_selection(&mut self, index: usize) {
         // Brush-level multi-select moves the primary around; sub-element
         // selection is scoped to one primary and cannot survive that.
+        self.selected_brush_faces.clear();
         self.selected_brush_elements.clear();
         if self.selected_brushes.is_empty() {
             if let Some(primary) = self.selected_brush {
@@ -1597,6 +1779,14 @@ impl EditorWorkspace {
     /// undo/redo or an external document change) and clamp the face.
     pub(crate) fn reconcile_brush_selection(&mut self) {
         let count = self.project.active_scene().brushes.len();
+        self.selected_brush_faces.retain(|(brush, face)| {
+            self.project
+                .active_scene()
+                .brushes
+                .get(*brush)
+                .and_then(|brush| brush.faces.get(*face))
+                .is_some()
+        });
         self.selected_brushes.retain(|index| *index < count);
         if self.selected_brush.is_some_and(|index| index >= count) {
             self.selected_brush = self.selected_brushes.first().copied();
@@ -1616,6 +1806,29 @@ impl EditorWorkspace {
         if self.selected_brush.is_none() {
             self.selected_brushes.clear();
             self.selected_brush_face = None;
+            self.selected_brush_faces.clear();
+        } else if self.brush_edit_mode == BrushEditMode::Face
+            && !self.selected_brush_faces.is_empty()
+        {
+            if !self
+                .selected_brush
+                .zip(self.selected_brush_face)
+                .is_some_and(|pair| self.selected_brush_faces.contains(&pair))
+            {
+                let (brush, face) = *self
+                    .selected_brush_faces
+                    .last()
+                    .expect("non-empty face selection");
+                self.selected_brush = Some(brush);
+                self.selected_brush_face = Some(face);
+            }
+            self.selected_brushes = self
+                .selected_brush_faces
+                .iter()
+                .map(|(brush, _)| *brush)
+                .collect();
+            self.selected_brushes.sort_unstable();
+            self.selected_brushes.dedup();
         }
         self.reconcile_brush_elements();
     }
@@ -1641,6 +1854,8 @@ impl EditorWorkspace {
         scene.brushes[index] = slabs.next().expect("hollow returns six slabs");
         scene.brushes.extend(slabs);
         self.selected_brush_face = None;
+        self.selected_brush_faces.clear();
+        self.selected_brush_elements.clear();
         self.mark_dirty();
     }
 
@@ -2037,7 +2252,8 @@ impl EditorWorkspace {
         // Above the per-face early return on purpose: texture lock applies
         // to the whole brush and has to be reachable with no face selected.
         self.draw_brush_texture_mapping_header(ui);
-        if selection_count > 1 && self.selected_brush_face.is_none() {
+        let whole_brush_material_scope = self.brush_edit_mode == BrushEditMode::Move;
+        if whole_brush_material_scope {
             let targets = self.selected_brush_material_targets();
             let first = targets
                 .first()
@@ -2046,13 +2262,15 @@ impl EditorWorkspace {
                 .iter()
                 .skip(1)
                 .any(|target| self.material_target_value(*target) != first);
-            ui.label(
-                egui::RichText::new(format!(
+            let scope_label = if selection_count == 1 {
+                format!("Material for all {} brush faces", targets.len())
+            } else {
+                format!(
                     "Material for {} faces across {selection_count} brushes",
                     targets.len()
-                ))
-                .strong(),
-            );
+                )
+            };
+            ui.label(egui::RichText::new(scope_label).strong());
             let materials = self.project.material_options();
             let mut selected_material = (!mixed).then_some(first).flatten();
             let selected_label = if mixed {
@@ -2069,7 +2287,7 @@ impl EditorWorkspace {
             };
             let changed = searchable_picker(
                 ui,
-                ui.id().with(("multi-brush-material-picker", index)),
+                ui.id().with(("whole-brush-material-picker", index)),
                 &mut selected_material,
                 selected_label,
                 &materials,
@@ -2085,23 +2303,47 @@ impl EditorWorkspace {
                     self.replace_resource_selection(material);
                 }
                 let updated = self.apply_material_to_selected_brush_surfaces();
-                self.status = format!(
-                    "Assigned material to {updated} faces across {selection_count} brushes"
-                );
+                self.status = if selection_count == 1 {
+                    format!("Assigned material to all {updated} brush faces")
+                } else {
+                    format!("Assigned material to {updated} faces across {selection_count} brushes")
+                };
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Apply current to selection").clicked() {
+                if ui
+                    .button(if selection_count == 1 {
+                        "Apply current to brush"
+                    } else {
+                        "Apply current to selection"
+                    })
+                    .clicked()
+                {
                     let updated = self.apply_material_to_selected_brush_surfaces();
-                    self.status = format!(
-                        "Assigned material to {updated} faces across {selection_count} brushes"
-                    );
+                    self.status = if selection_count == 1 {
+                        format!("Assigned material to all {updated} brush faces")
+                    } else {
+                        format!(
+                            "Assigned material to {updated} faces across {selection_count} brushes"
+                        )
+                    };
                 }
-                if ui.button("Clear selection materials").clicked() {
+                if ui
+                    .button(if selection_count == 1 {
+                        "Clear brush materials"
+                    } else {
+                        "Clear selection materials"
+                    })
+                    .clicked()
+                {
                     self.brush_material = None;
                     let updated = self.apply_material_to_selected_brush_surfaces();
-                    self.status = format!(
-                        "Cleared material from {updated} faces across {selection_count} brushes"
-                    );
+                    self.status = if selection_count == 1 {
+                        format!("Cleared material from all {updated} brush faces")
+                    } else {
+                        format!(
+                            "Cleared material from {updated} faces across {selection_count} brushes"
+                        )
+                    };
                 }
             });
             return;
@@ -2358,6 +2600,8 @@ impl EditorWorkspace {
         self.selected_brush = new_primary.or_else(|| new_selection.last().copied());
         self.selected_brushes = new_selection;
         self.selected_brush_face = None;
+        self.selected_brush_faces.clear();
+        self.selected_brush_elements.clear();
         self.mark_dirty();
         true
     }
@@ -2666,6 +2910,7 @@ impl EditorWorkspace {
         self.selected_brush = indices.first().copied();
         self.selected_brushes = indices.clone();
         self.selected_brush_face = None;
+        self.selected_brush_faces.clear();
         self.selected_brush_elements.clear();
         self.status = format!(
             "Selected {} brush{} using the material",
@@ -4190,7 +4435,7 @@ impl EditorWorkspace {
     ) {
         let view = self.orthographic_view;
         let draw = |brush: &psxed_project::brush::Brush,
-                    selected_face: Option<usize>,
+                    selected_faces: &[usize],
                     stroke: egui::Stroke| {
             let solved = brush.solve();
             if !solved.is_valid() {
@@ -4210,7 +4455,7 @@ impl EditorWorkspace {
                 if points.len() < 2 {
                     continue;
                 }
-                if selected_face == Some(face) && projected_polygon_area(&points).abs() > 0.5 {
+                if selected_faces.contains(&face) && projected_polygon_area(&points).abs() > 0.5 {
                     painter.add(egui::Shape::convex_polygon(
                         points.clone(),
                         Color32::from_rgba_unmultiplied(
@@ -4222,7 +4467,7 @@ impl EditorWorkspace {
                         egui::Stroke::NONE,
                     ));
                 }
-                let face_stroke = if selected_face == Some(face) {
+                let face_stroke = if selected_faces.contains(&face) {
                     egui::Stroke::new(3.0, STUDIO_ACCENT)
                 } else {
                     stroke
@@ -4246,17 +4491,18 @@ impl EditorWorkspace {
             } else {
                 egui::Stroke::new(1.0, brush_contents_outline(brush.contents))
             };
-            // The face highlight follows only the primary selection.
-            draw(
-                brush,
-                (self.selected_brush == Some(index))
-                    .then_some(self.selected_brush_face)
-                    .flatten(),
-                stroke,
-            );
+            let mut selected_faces: Vec<usize> = self
+                .selected_brush_faces
+                .iter()
+                .filter_map(|(brush, face)| (*brush == index).then_some(*face))
+                .collect();
+            if selected_faces.is_empty() && self.selected_brush == Some(index) {
+                selected_faces.extend(self.selected_brush_face);
+            }
+            draw(brush, &selected_faces, stroke);
         }
         if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
-            draw(&preview, None, egui::Stroke::new(1.5, STUDIO_ACCENT));
+            draw(&preview, &[], egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
         for (number, clip_point) in self.brush_clip_points.iter().enumerate() {
             let projected = view.project_f32(clip_point.point.map(|value| value as f32));
@@ -4473,9 +4719,28 @@ impl EditorWorkspace {
                 egui::Stroke::new(1.0, brush_contents_outline(brush.contents))
             };
             draw(brush, stroke);
-            // Emphasize every selected face polygon on the primary brush
-            // (the element set, plus the mirrored single-face state).
-            if self.selected_brush == Some(index) {
+            // Emphasize every selected face polygon, including additive
+            // selections whose owner is not the current primary brush.
+            let mut emphasized: Vec<usize> = self
+                .selected_brush_faces
+                .iter()
+                .filter_map(|(brush, face)| (*brush == index).then_some(*face))
+                .collect();
+            if emphasized.is_empty() && self.selected_brush == Some(index) {
+                emphasized.extend(self.selected_brush_elements.iter().filter_map(|element| {
+                    if let BrushElement::Face(face) = element {
+                        Some(*face)
+                    } else {
+                        None
+                    }
+                }));
+                if let Some(face) = self.selected_brush_face {
+                    if !emphasized.contains(&face) {
+                        emphasized.push(face);
+                    }
+                }
+            }
+            if !emphasized.is_empty() {
                 let solved = brush.solve();
                 let emphasize = |face: usize| {
                     if let Some(Some(polygon)) = solved.polygons.get(face) {
@@ -4503,17 +4768,10 @@ impl EditorWorkspace {
                         }
                     }
                 };
-                let mut emphasized = Vec::new();
-                for element in &self.selected_brush_elements {
-                    if let BrushElement::Face(face) = element {
-                        emphasize(*face);
-                        emphasized.push(*face);
-                    }
-                }
-                if let Some(face) = self.selected_brush_face {
-                    if !emphasized.contains(&face) {
-                        emphasize(face);
-                    }
+                emphasized.sort_unstable();
+                emphasized.dedup();
+                for face in emphasized {
+                    emphasize(face);
                 }
             }
         }
@@ -4894,8 +5152,21 @@ impl EditorWorkspace {
         rect: egui::Rect,
         pointer: egui::Pos2,
     ) -> Option<(usize, BrushHandle3d)> {
-        const HANDLE_RADIUS: f32 = 9.0;
         let index = self.selected_brush?;
+        self.pick_brush_handle_on_3d(index, rect, pointer)
+            .map(|handle| (index, handle))
+    }
+
+    /// Pick a reshape handle on a specific brush. Keeping the indexed form
+    /// separate lets Face/Edge mode switch directly to another brush in one
+    /// click instead of forcing a whole-brush selection click first.
+    fn pick_brush_handle_on_3d(
+        &self,
+        index: usize,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<BrushHandle3d> {
+        const HANDLE_RADIUS: f32 = 9.0;
         let brush = self.project.active_scene().brushes.get(index)?;
         let solved = brush.solve();
         if !solved.is_valid() {
@@ -4949,7 +5220,46 @@ impl EditorWorkspace {
                 }
             }
         }
-        best.map(|(_, handle)| (index, handle))
+        best.map(|(_, handle)| handle)
+    }
+
+    /// Pick anywhere along an edge of the ray-hit face. Unselected brushes do
+    /// not draw midpoint handles, so cross-brush Edge mode must use the
+    /// boundary the author can actually see rather than an invisible handle.
+    fn pick_brush_face_edge_on_3d(
+        &self,
+        index: usize,
+        face: usize,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> Option<BrushElement> {
+        const EDGE_PICK_RADIUS: f64 = 9.0;
+        let brush = self.project.active_scene().brushes.get(index)?;
+        let solved = brush.solve();
+        let polygon = solved.polygons.get(face)?.as_ref()?;
+        let mut best: Option<(f64, BrushElement)> = None;
+        for edge in 0..polygon.verts.len() {
+            let a = polygon.verts[edge];
+            let b = polygon.verts[(edge + 1) % polygon.verts.len()];
+            let (Some(screen_a), Some(screen_b)) = (
+                self.project_brush_point_3d(rect, a),
+                self.project_brush_point_3d(rect, b),
+            ) else {
+                continue;
+            };
+            let distance2 = point_segment_distance2(
+                [f64::from(pointer.x), f64::from(pointer.y)],
+                [f64::from(screen_a.x), f64::from(screen_a.y)],
+                [f64::from(screen_b.x), f64::from(screen_b.y)],
+            );
+            if distance2 <= EDGE_PICK_RADIUS * EDGE_PICK_RADIUS
+                && best.is_none_or(|(best_distance2, _)| distance2 < best_distance2)
+            {
+                let (a, b) = brush_elements::edge_element_key(a, b);
+                best = Some((distance2, BrushElement::Edge(a, b)));
+            }
+        }
+        best.map(|(_, element)| element)
     }
 
     fn camera_plane_point(
@@ -5117,37 +5427,21 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact else {
             return;
         };
-        // Plain press follows the visible brush edit mode. Shift remains a
-        // compatible whole-selection move shortcut, but is no longer the
-        // only discoverable way to move a brush.
-        if frame.modifiers.shift || ws.brush_edit_mode == BrushEditMode::Move {
-            if let Some((index, _, _)) = ws.pick_brush_face_for_move_3d(frame.rect, pointer) {
-                let others = ws.brush_move_others(index);
-                let base = ws.project.active_scene().brushes[index].clone();
-                let press_ground = ws
-                    .brush_ground_point_raw(frame.rect, pointer)
-                    .unwrap_or([0.0; 3]);
-                if others.is_empty() {
-                    ws.replace_brush_selection(index, ws.selected_brush_face);
-                } else {
-                    ws.selected_brush = Some(index);
-                }
-                ws.brush_move = Some(BrushMove {
-                    index,
-                    base,
-                    others,
-                    press_ground,
-                    applied: [0; 3],
-                });
-                return;
-            }
+        // Whole brushes use the transform gizmo exclusively. In the Brush
+        // authoring tool, dragging empty space still creates a new brush.
+        if ws.brush_edit_mode == BrushEditMode::Move {
             if ws.active_tool == ViewTool::Brush {
-                if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
-                    ws.brush_drag = Some(BrushDrag {
-                        anchor: point,
-                        current: point,
-                        view: OrthographicView::Top,
-                    });
+                if ws
+                    .pick_brush_face_nearest_for_selection_3d(frame.rect, pointer)
+                    .is_none()
+                {
+                    if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
+                        ws.brush_drag = Some(BrushDrag {
+                            anchor: point,
+                            current: point,
+                            view: OrthographicView::Top,
+                        });
+                    }
                 }
             }
             return;
@@ -5348,20 +5642,23 @@ impl ViewportTool3d for BrushTool {
                     ws.select_brush_with_group_semantics(index, Some(face), frame.modifiers, false);
                     return;
                 }
-                if ws.brush_edit_mode == BrushEditMode::Face {
+                if matches!(
+                    ws.brush_edit_mode,
+                    BrushEditMode::Face | BrushEditMode::Edge
+                ) {
                     let (index, face) = ws
                         .pick_brush_face_nearest_for_selection_3d(frame.rect, pointer)
                         .map(|(brush, face, _)| (brush, face))
                         .unwrap_or((index, face));
-                    if ws.selected_brush != Some(index) {
-                        ws.clear_node_selection_state();
-                        ws.clear_resource_selection_state();
-                        ws.clear_primitive_selection_state();
-                        ws.clear_sector_selection();
-                        ws.replace_brush_selection(index, Some(face));
+                    if ws.select_brush_element_from_3d_hit(
+                        index,
+                        face,
+                        frame.rect,
+                        pointer,
+                        frame.modifiers,
+                    ) {
+                        return;
                     }
-                    ws.apply_brush_element_selection(BrushElement::Face(face), frame.modifiers);
-                    return;
                 }
                 ws.select_brush_with_group_semantics(index, Some(face), frame.modifiers, false);
             }
