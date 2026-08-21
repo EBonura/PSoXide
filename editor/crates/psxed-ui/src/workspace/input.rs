@@ -1118,6 +1118,7 @@ impl EditorWorkspace {
         self.preview_fog = show_all;
         self.preview_backface_wireframe = show_all;
         self.preview_bounds = show_all;
+        self.show_bsp_leak_path = show_all;
         self.persist_editor_visibility_state();
         self.status = if show_all {
             "Visibility: all shown".to_string()
@@ -1133,8 +1134,10 @@ impl EditorWorkspace {
         let mode = cycle_value(VALUES, self.camera_rig.mode, reverse);
         self.set_viewport_3d_camera_mode(mode);
         self.status = match mode {
-            ViewportCameraMode::Orbit => "Camera: Orbit".to_string(),
-            ViewportCameraMode::Free => "Camera: Free".to_string(),
+            ViewportCameraMode::Orbit => "Camera: Orbit (RMB/MMB drag; Shift pans)".to_string(),
+            ViewportCameraMode::Free => {
+                "Camera: Free (WASD, Shift faster, RMB/MMB look)".to_string()
+            }
         };
     }
 

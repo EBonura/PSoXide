@@ -302,6 +302,22 @@ impl Playtest {
         self.sort_weapon_faces_hilt_first();
     }
 
+    /// Drop every parsed view into the scene-lifetime gameplay asset arena.
+    /// Call before handing those bytes back to the front-end UI cache.
+    pub(super) fn unload_runtime_models(&mut self) {
+        for model in self.models.iter_mut() {
+            *model = None;
+        }
+        for clip in self.clips.iter_mut() {
+            *clip = None;
+        }
+        self.model_face_count = 0;
+        self.model_part_count = 0;
+        self.model_vertex_count = 0;
+        self.runtime_models_loaded = false;
+        self.clear_actor_pose_snapshots();
+    }
+
     /// Order every weapon model's faces along its blade, hilt first.
     ///
     /// This is what makes the materialise effect cheap: with the faces in this

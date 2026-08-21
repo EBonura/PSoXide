@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use psxed_project::brush::Brush;
 use psxed_project::{
-    MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, Transform3,
+    MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, SceneWorldLayer, Transform3,
+    UiNodeKind, UiRect, UiValueBinding, DEFAULT_HEALTH_BAR_FRAME_COUNT,
     NEW_PROJECT_COURTYARD_CENTER, NEW_PROJECT_COURTYARD_INTERIOR_SIZE,
     NEW_PROJECT_COURTYARD_OUTER_SIZE, NEW_PROJECT_COURTYARD_WALL_THICKNESS,
 };
@@ -14,6 +15,7 @@ const FLOOR_SOURCE: &str = "courtyard_cobbles.psxt";
 const WALL_SOURCE: &str = "courtyard_brick.psxt";
 const FLOOR_RELATIVE: &str = "assets/textures/courtyard_cobbles.psxt";
 const WALL_RELATIVE: &str = "assets/textures/courtyard_brick.psxt";
+const HEALTH_GAUGE_RELATIVE: &str = "assets/ui/health_bar_clean_slim.psxt";
 
 #[derive(Debug, PartialEq, Eq)]
 enum GeneratorAction {
@@ -44,6 +46,7 @@ fn generate(output_dir: &Path) {
     std::fs::create_dir_all(output_dir).expect("create open courtyard project directory");
     copy_texture(output_dir, FLOOR_SOURCE, FLOOR_RELATIVE);
     copy_texture(output_dir, WALL_SOURCE, WALL_RELATIVE);
+    copy_project_asset(output_dir, HEALTH_GAUGE_RELATIVE);
 
     let mut project = ProjectDocument::new("Open Courtyard Starter");
     project.editor_camera.orbit_yaw_q12 = 3584;
@@ -62,6 +65,38 @@ fn generate(output_dir: &Path) {
         "Courtyard Brick",
         ResourceData::Material(MaterialResource::opaque(Some(WALL_RELATIVE.to_string()))),
     );
+    let health_gauge = project.add_resource(
+        "Default Health Gauge",
+        ResourceData::Material(MaterialResource::opaque(Some(
+            HEALTH_GAUGE_RELATIVE.to_string(),
+        ))),
+    );
+
+    let hud_id = {
+        let hud = project.active_ui_scene_mut().expect("default HUD scene");
+        hud.add_node(
+            hud.root,
+            "Health Gauge",
+            UiNodeKind::Bar {
+                rect: UiRect::new(14, 12, 106, 29),
+                value: UiValueBinding::PlayerHealth,
+                max: UiValueBinding::PlayerHealthMax,
+                texture: Some(health_gauge),
+                frame_count: DEFAULT_HEALTH_BAR_FRAME_COUNT,
+                fill: [128, 128, 128],
+                fill_gradient: None,
+                background: [0, 0, 0],
+                background_gradient: None,
+            },
+        );
+        hud.id
+    };
+    project
+        .scene_states
+        .iter_mut()
+        .find(|state| state.world == SceneWorldLayer::Gameplay)
+        .expect("default gameplay state")
+        .ui_scene = Some(hud_id);
 
     let scene = project.active_scene_mut();
     // The four walls enclose an exact 16384 x 16384 usable interior. Their
@@ -167,6 +202,25 @@ fn copy_texture(output_dir: &Path, source_name: &str, destination_relative: &str
     });
 }
 
+fn copy_project_asset(output_dir: &Path, relative: &str) {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("projects")
+        .join("default")
+        .join(relative);
+    let destination = output_dir.join(relative);
+    std::fs::create_dir_all(destination.parent().expect("asset parent"))
+        .expect("create asset directory");
+    std::fs::copy(&source, &destination).unwrap_or_else(|error| {
+        panic!(
+            "copy starter asset {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    });
+}
+
 fn paint(brush: &mut Brush, material: psxed_project::ResourceId) {
     for face in &mut brush.faces {
         face.material = Some(material);
@@ -211,7 +265,12 @@ mod tests {
             .join("archive")
             .join("fixtures")
             .join("brush-open-courtyard");
-        for relative in [FLOOR_RELATIVE, WALL_RELATIVE, "project.ron"] {
+        for relative in [
+            FLOOR_RELATIVE,
+            WALL_RELATIVE,
+            HEALTH_GAUGE_RELATIVE,
+            "project.ron",
+        ] {
             assert_eq!(
                 std::fs::read(generated.join(relative)).unwrap(),
                 std::fs::read(tracked.join(relative)).unwrap(),
