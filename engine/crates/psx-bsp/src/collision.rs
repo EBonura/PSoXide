@@ -298,6 +298,40 @@ impl PlaneRecords<'_> {
             Self::Decoded(records) => records.get(index).copied(),
         }
     }
+
+    /// Distance to one splitter without reconstructing fields that axial
+    /// planes never consume. Quake's hull walker loads only the authored axis
+    /// and distance for plane kinds zero through two; preserve that hot-path
+    /// property for packed PXBSP records while retaining the full decoder for
+    /// the uncommon non-axial case and for returned contact planes.
+    #[inline(always)]
+    fn distance(self, index: usize, point: Vec3I32) -> Option<i32> {
+        match self {
+            Self::Packed(records) => {
+                let bytes = records.record_bytes(index)?;
+                let distance = i32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
+                let kind = i32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+                let dot = match kind {
+                    0 => point.x,
+                    1 => point.y,
+                    2 => point.z,
+                    _ => {
+                        let x = i16::from_le_bytes([bytes[0], bytes[1]]) as i32;
+                        let y = i16::from_le_bytes([bytes[2], bytes[3]]) as i32;
+                        let z = i16::from_le_bytes([bytes[4], bytes[5]]) as i32;
+                        mul_q12_i32_wide(point.x, x)
+                            .wrapping_add(mul_q12_i32_wide(point.y, y))
+                            .wrapping_add(mul_q12_i32_wide(point.z, z))
+                    }
+                };
+                Some(dot.wrapping_sub(distance))
+            }
+            Self::Decoded(records) => records
+                .get(index)
+                .copied()
+                .map(|plane| plane_distance(plane, point)),
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -432,11 +466,14 @@ impl<'a> CollisionHull<'a> {
                 let Some(node) = self.nodes.get(node_index as usize) else {
                     return false;
                 };
-                let Some(plane) = self.planes.get(node.plane as usize) else {
+                let Some(start_distance) = self.planes.distance(node.plane as usize, segment_start)
+                else {
                     return false;
                 };
-                let start_distance = plane_distance(plane, segment_start);
-                let end_distance = plane_distance(plane, segment_end);
+                let Some(end_distance) = self.planes.distance(node.plane as usize, segment_end)
+                else {
+                    return false;
+                };
 
                 if start_distance >= 0 && end_distance >= 0 {
                     node_index = node.children[0];
@@ -559,8 +596,8 @@ impl<'a> CollisionHull<'a> {
             }
             descent_budget -= 1;
             let node = self.nodes.get(node_index as usize)?;
-            let plane = self.planes.get(node.plane as usize)?;
-            node_index = node.children[(plane_distance(plane, *point) < 0) as usize];
+            let distance = self.planes.distance(node.plane as usize, *point)?;
+            node_index = node.children[(distance < 0) as usize];
         }
         self.nodes.contents(node_index)
     }
