@@ -24,11 +24,12 @@
 
 extern crate psx_rt;
 
-use psx_engine::{button, sfx, App, Config, Ctx, Scene, SimTick};
+use psx_engine::{button, sfx, App, Config, Ctx, MicrogameAction, MicrogameShell, Scene, SimTick};
 use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
+use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
@@ -135,6 +136,9 @@ const PARTICLE_GRAVITY: i16 = 1;
 const SHAKE_FRAMES_ON_HIT: u8 = 6;
 const SHIP_FLASH_FRAMES: u8 = 10;
 
+const SETTINGS_FILE: &str = "BESLES-00000INVADER1";
+const SETTINGS_TITLE: &str = "PSoXide Invaders";
+
 // ----------------------------------------------------------------------
 // Scene state
 // ----------------------------------------------------------------------
@@ -184,6 +188,7 @@ struct Invaders {
     ship_flash_frames: u8,
     particles: ParticlePool<MAX_PARTICLES>,
     font: Option<FontAtlas>,
+    shell: MicrogameShell<3>,
 }
 
 impl Invaders {
@@ -209,6 +214,7 @@ impl Invaders {
             ship_flash_frames: 0,
             particles: ParticlePool::new(),
             font: None,
+            shell: MicrogameShell::new(Profile::new(psx_engine::ActionMap::new([]))),
         }
     }
 
@@ -222,12 +228,12 @@ impl Invaders {
         self.grid_offset_x = 0;
         self.grid_offset_y = (self.wave as i16).saturating_sub(1) * MARCH_STEP_DOWN;
         self.march_direction = 1;
-        self.march_frames_until_step = MOVE_INTERVAL_INITIAL;
-        self.march_tempo =
-            MOVE_INTERVAL_INITIAL.saturating_sub((self.wave as u16).saturating_sub(1) * 4);
+        let initial_tempo = [48, MOVE_INTERVAL_INITIAL, 28][self.shell.difficulty().min(2)];
+        self.march_frames_until_step = initial_tempo;
+        self.march_tempo = initial_tempo.saturating_sub((self.wave as u16).saturating_sub(1) * 4);
         if full {
             self.score = 0;
-            self.lives = 3;
+            self.lives = [5, 3, 2][self.shell.difficulty().min(2)];
             self.wave = 1;
         }
         self.player_bullet = Bullet::dead();
@@ -465,6 +471,22 @@ impl Invaders {
             }
         }
     }
+
+    fn apply_shell_settings(&self) {
+        let volume = Volume::linear(self.shell.profile().sfx_volume as u16, 100);
+        spu::set_main_volume(volume, volume);
+    }
+
+    fn persist_shell(&mut self) {
+        if !self.shell.take_dirty() {
+            return;
+        }
+        self.apply_shell_settings();
+        if psx_settings::save_slot_one(SETTINGS_FILE, SETTINGS_TITLE, self.shell.profile()).is_err()
+        {
+            self.shell.mark_dirty();
+        }
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -502,11 +524,28 @@ impl Scene for Invaders {
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
         game_trace("invaders: font ok");
 
+        if let Ok(profile) = psx_settings::load_slot_one(SETTINGS_FILE) {
+            self.shell.set_profile(profile);
+        }
+        self.apply_shell_settings();
+
         self.reset_wave(true);
         game_trace("invaders: init ok");
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        match self.shell.update(ctx) {
+            MicrogameAction::Start | MicrogameAction::Restart => {
+                self.wave = 1;
+                self.reset_wave(true);
+                self.persist_shell();
+            }
+            MicrogameAction::ReturnToTitle => self.persist_shell(),
+            MicrogameAction::None | MicrogameAction::Resume => {}
+        }
+        if !self.shell.is_playing() {
+            return;
+        }
         if self.ship_flash_frames > 0 {
             self.ship_flash_frames -= 1;
         }
@@ -514,10 +553,6 @@ impl Scene for Invaders {
 
         match self.phase {
             Phase::Lost => {
-                if ctx.is_held(button::START) {
-                    self.wave = 1;
-                    self.reset_wave(true);
-                }
                 return;
             }
             Phase::Serve => {
@@ -540,6 +575,11 @@ impl Scene for Invaders {
         self.resolve_player_bullet();
         self.resolve_enemy_bombs();
         self.check_invasion();
+        if self.phase == Phase::Lost {
+            self.shell.finish(self.score as u32);
+            self.persist_shell();
+            return;
+        }
         if self.aliens_left == 0 {
             self.wave = self.wave.saturating_add(1);
             self.reset_wave(false);
@@ -672,17 +712,10 @@ impl Invaders {
                     (200, 200, 200),
                 );
             }
-            Phase::Lost => {
-                font.draw_text((SCREEN_W - 8 * 9) / 2, 100, "GAME OVER", (255, 120, 120));
-                font.draw_text(
-                    (SCREEN_W - 8 * 17) / 2,
-                    130,
-                    "START to restart",
-                    (180, 180, 200),
-                );
-            }
+            Phase::Lost => {}
             Phase::Playing => {}
         }
+        self.shell.draw(font, "INVADERS");
     }
 }
 
