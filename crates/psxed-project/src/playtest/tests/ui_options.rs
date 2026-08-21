@@ -351,6 +351,7 @@ fn clipped_transparent_rect_cooks_border_and_compact_shape_style() {
             gradient: None,
             transparent: true,
             shape: Some(crate::UiShapeStyle {
+                semi_transparent_fill: false,
                 corner_cut: 6,
                 cut_top_left: true,
                 cut_top_right: false,
@@ -381,6 +382,7 @@ fn clipped_transparent_rect_cooks_border_and_compact_shape_style() {
             text_gradient: None,
             transparent: false,
             shape: Some(crate::UiShapeStyle {
+                semi_transparent_fill: true,
                 corner_cut: 6,
                 cut_top_left: true,
                 cut_top_right: false,
@@ -437,6 +439,7 @@ fn clipped_transparent_rect_cooks_border_and_compact_shape_style() {
     assert_eq!(psx_level::ui_shape::cut(button.option), 6);
     assert_eq!(psx_level::ui_shape::border(button.option), 2);
     assert!(!psx_level::ui_shape::transparent(button.option));
+    assert!(psx_level::ui_shape::semi_transparent_fill(button.option));
     assert_eq!(button.background, [18, 92, 110]);
     assert_eq!(button.background_paint, Some(0));
 }
