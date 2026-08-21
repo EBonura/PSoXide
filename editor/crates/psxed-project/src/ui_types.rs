@@ -272,6 +272,67 @@ impl Default for UiRect {
     }
 }
 
+/// Optional non-rectangular treatment shared by authored `Rect` and `Button`
+/// nodes. A missing style preserves the legacy four-cornered, borderless
+/// renderer, keeping old project RON compact and backwards compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiShapeStyle {
+    /// Size of each enabled 45-degree corner cut in canvas pixels.
+    #[serde(default)]
+    pub corner_cut: u8,
+    /// Cut the upper-left corner.
+    #[serde(default)]
+    pub cut_top_left: bool,
+    /// Cut the upper-right corner.
+    #[serde(default)]
+    pub cut_top_right: bool,
+    /// Cut the lower-right corner.
+    #[serde(default)]
+    pub cut_bottom_right: bool,
+    /// Cut the lower-left corner.
+    #[serde(default)]
+    pub cut_bottom_left: bool,
+    /// Inset border thickness in canvas pixels. Zero disables the border.
+    #[serde(default)]
+    pub border_width: u8,
+    /// Border colour.
+    #[serde(default = "default_ui_shape_border_color")]
+    pub border_color: [u8; 3],
+    /// Optional border gradient ending colour/direction.
+    #[serde(default)]
+    pub border_gradient: Option<UiGradient>,
+}
+
+impl UiShapeStyle {
+    /// Runtime/editor bitmask in clockwise order: TL, TR, BR, BL.
+    pub const fn corner_mask(self) -> u8 {
+        (self.cut_top_left as u8)
+            | ((self.cut_top_right as u8) << 1)
+            | ((self.cut_bottom_right as u8) << 2)
+            | ((self.cut_bottom_left as u8) << 3)
+    }
+}
+
+impl Default for UiShapeStyle {
+    fn default() -> Self {
+        Self {
+            corner_cut: 0,
+            cut_top_left: false,
+            cut_top_right: false,
+            cut_bottom_right: false,
+            cut_bottom_left: false,
+            border_width: 0,
+            border_color: default_ui_shape_border_color(),
+            border_gradient: None,
+        }
+    }
+}
+
+/// Neutral border colour used when a shape style is first enabled.
+pub const fn default_ui_shape_border_color() -> [u8; 3] {
+    [88, 104, 120]
+}
+
 /// Runtime value a UI element can bind to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiValueBinding {
@@ -1031,7 +1092,7 @@ pub enum UiNodeKind {
         /// Group bounds in canvas pixels.
         rect: UiRect,
     },
-    /// Solid screen-space rectangle.
+    /// Screen-space rectangle with optional clipped corners and border.
     Rect {
         /// Rectangle bounds in canvas pixels.
         rect: UiRect,
@@ -1040,6 +1101,12 @@ pub enum UiNodeKind {
         /// Optional fill gradient ending colour/direction.
         #[serde(default)]
         gradient: Option<UiGradient>,
+        /// Skip the fill while retaining the optional border.
+        #[serde(default)]
+        transparent: bool,
+        /// Optional clipped-corner and border treatment.
+        #[serde(default)]
+        shape: Option<UiShapeStyle>,
     },
     /// Text label drawn with the runtime font atlas.
     Label {
@@ -1127,7 +1194,7 @@ pub enum UiNodeKind {
         #[serde(default)]
         background_gradient: Option<UiGradient>,
     },
-    /// Interactive button: a filled rectangle with a centered label
+    /// Interactive button: a shape-backed rectangle with a centered label
     /// that fires `action` when activated. Runtime activation is a
     /// later step.
     Button {
@@ -1167,6 +1234,9 @@ pub enum UiNodeKind {
         /// Transparent background: skip the fill and draw only the label.
         #[serde(default)]
         transparent: bool,
+        /// Optional clipped-corner and border treatment.
+        #[serde(default)]
+        shape: Option<UiShapeStyle>,
         /// Action fired on activation.
         #[serde(default)]
         action: UiAction,

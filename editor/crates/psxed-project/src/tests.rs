@@ -2470,6 +2470,8 @@ fn duplicate_ui_scene_deep_copies_after_source_with_fresh_id() {
             rect: UiRect::new(1, 2, 3, 4),
             color: [9, 9, 9],
             gradient: None,
+            transparent: false,
+            shape: None,
         },
     );
     let source_id = project.ui_scenes[source_index].id;

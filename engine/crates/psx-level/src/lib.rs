@@ -2446,7 +2446,7 @@ pub enum LevelUiNodeKind {
     Canvas,
     /// Organizational group.
     Group,
-    /// Solid rectangle.
+    /// Rectangle with optional clipped corners, border, and transparent fill.
     Rect,
     /// Text label.
     Label,
@@ -2454,7 +2454,7 @@ pub enum LevelUiNodeKind {
     Image,
     /// Horizontal value bar.
     Bar,
-    /// Interactive button: a filled rect with a centered label that
+    /// Interactive button: a shape-backed rect with a centered label that
     /// fires a [`LevelUiAction`] when activated. Activation handling
     /// is a later step; cooking and rendering land now.
     Button,
@@ -2591,6 +2591,72 @@ pub enum LevelUiAction {
 /// `Bar` nodes use the same compact field for their frame count instead.
 pub const UI_OPTION_NONE: u16 = u16::MAX;
 
+/// Compact clipped-corner/border style stored in
+/// [`LevelUiNodeRecord::option`] for `Rect` and `Button` nodes. The marker
+/// leaves legacy `UI_OPTION_NONE` records untouched and avoids growing every
+/// cooked UI node for a feature used by only shape-backed nodes.
+pub mod ui_shape {
+    /// Encoded style is present. `UI_OPTION_NONE` remains the no-style sentinel.
+    pub const MARKER: u16 = 1 << 15;
+    /// Fill is skipped; an enabled border still draws.
+    pub const TRANSPARENT: u16 = 1 << 13;
+    /// Low four bits select TL, TR, BR, BL corner cuts respectively.
+    pub const CORNER_MASK: u16 = 0x000f;
+    /// First bit of the six-bit cut-size field.
+    pub const CUT_SHIFT: u16 = 4;
+    /// Six-bit 45-degree cut size (0..=63 pixels).
+    pub const CUT_MASK: u16 = 0x03f0;
+    /// First bit of the three-bit border-width field.
+    pub const BORDER_SHIFT: u16 = 10;
+    /// Three-bit inset border width (0..=7 pixels).
+    pub const BORDER_MASK: u16 = 0x1c00;
+
+    /// Upper-left corner selector.
+    pub const TOP_LEFT: u8 = 1 << 0;
+    /// Upper-right corner selector.
+    pub const TOP_RIGHT: u8 = 1 << 1;
+    /// Lower-right corner selector.
+    pub const BOTTOM_RIGHT: u8 = 1 << 2;
+    /// Lower-left corner selector.
+    pub const BOTTOM_LEFT: u8 = 1 << 3;
+
+    /// Pack an authored shape treatment into the shared option field.
+    pub const fn encode(corners: u8, cut: u8, border: u8, transparent: bool) -> u16 {
+        let cut = if cut > 63 { 63 } else { cut };
+        let border = if border > 7 { 7 } else { border };
+        MARKER
+            | (corners as u16 & CORNER_MASK)
+            | ((cut as u16) << CUT_SHIFT)
+            | ((border as u16) << BORDER_SHIFT)
+            | if transparent { TRANSPARENT } else { 0 }
+    }
+
+    /// Whether `option` contains a shape style rather than a project option.
+    pub const fn is_encoded(option: u16) -> bool {
+        option != super::UI_OPTION_NONE && option & MARKER != 0
+    }
+
+    /// Decode the four-bit corner selector.
+    pub const fn corners(option: u16) -> u8 {
+        (option & CORNER_MASK) as u8
+    }
+
+    /// Decode the 45-degree cut size in pixels.
+    pub const fn cut(option: u16) -> u8 {
+        ((option & CUT_MASK) >> CUT_SHIFT) as u8
+    }
+
+    /// Decode the inset border width in pixels.
+    pub const fn border(option: u16) -> u8 {
+        ((option & BORDER_MASK) >> BORDER_SHIFT) as u8
+    }
+
+    /// Decode whether the fill is transparent.
+    pub const fn transparent(option: u16) -> bool {
+        option & TRANSPARENT != 0
+    }
+}
+
 /// Sentinel meaning "this UI node has no cooked SFX cue range".
 pub const UI_SFX_NONE: u16 = u16::MAX;
 
@@ -2710,7 +2776,8 @@ pub struct LevelUiNodeRecord {
     /// Action fired by a `Button`. Ignored by other kinds.
     pub action: LevelUiAction,
     /// Project option a `Slider` binds to; sprite-strip frame count for a
-    /// textured `Bar`; otherwise [`UI_OPTION_NONE`].
+    /// textured `Bar`; compact [`ui_shape`] style for `Rect`/`Button`;
+    /// otherwise [`UI_OPTION_NONE`].
     pub option: u16,
     /// Clockwise visual rotation around this node's centre, in degrees.
     pub rotation_degrees: i16,
