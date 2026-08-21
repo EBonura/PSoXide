@@ -34,11 +34,11 @@
 use psx_font::FontAtlas;
 use psx_gpu::{
     draw_quad_flat, draw_quad_textured_gouraud_material, draw_quad_textured_material,
-    draw_tri_gouraud,
+    draw_tri_flat, draw_tri_gouraud,
     material::{TextureMaterial, TextureWindow},
 };
 use psx_level::{
-    ui_node_flags, AssetId, LevelOptionDef, LevelUiFocusEffect, LevelUiFocusStyle,
+    ui_node_flags, ui_shape, AssetId, LevelOptionDef, LevelUiFocusEffect, LevelUiFocusStyle,
     LevelUiGradientDirection, LevelUiImageEffect, LevelUiNodeKind, LevelUiNodeRecord,
     LevelUiPaintRecord, LevelUiValueBinding, NavRect, UI_OPTION_NONE, UI_PAINT_NONE,
 };
@@ -430,10 +430,7 @@ pub fn draw_scene(
             | LevelUiNodeKind::Music
             | LevelUiNodeKind::Timer => {}
             LevelUiNodeKind::Rect => {
-                draw_quad_paint(
-                    resolved.verts,
-                    shape_paint(node.color, node.color_paint, paints),
-                );
+                draw_shape_node(node, resolved, paints);
             }
             LevelUiNodeKind::Label => {
                 if let Some(font) = node_font(fonts, node.font) {
@@ -781,7 +778,7 @@ mod tests {
     use super::{
         bar_frame_index, bar_frame_v_range, diamond_quad, font_index, font_tint,
         image_effect_vertex_colors, image_effect_verts, node_absolute_rect, scale_u16_q8,
-        selected_label_text,
+        selected_label_text, shape_config, shape_polygon,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiImageEffect, LevelUiNodeKind,
@@ -857,6 +854,45 @@ mod tests {
         assert_eq!(bar_frame_index(8192, 4096, 7), 6);
         assert_eq!(bar_frame_v_range(203, 7, 0), Some((0, 28)));
         assert_eq!(bar_frame_v_range(203, 7, 6), Some((174, 202)));
+    }
+
+    #[test]
+    fn clipped_shape_decodes_and_builds_the_expected_six_vertex_outline() {
+        let mut nodes = [
+            ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                10,
+                20,
+                100,
+                30,
+            ),
+        ];
+        nodes[1].option = psx_level::ui_shape::encode(
+            psx_level::ui_shape::TOP_LEFT | psx_level::ui_shape::BOTTOM_RIGHT,
+            6,
+            2,
+            true,
+        );
+        let resolved = super::node_resolved(&nodes, 1).expect("resolved shape");
+        let config = shape_config(&nodes[1]);
+        assert_eq!(config.corners, 0b0101);
+        assert_eq!(config.cut, 6);
+        assert_eq!(config.border, 2);
+        assert!(config.transparent);
+
+        let outer = shape_polygon(resolved, config.corners, config.cut, 0);
+        assert_eq!(outer.len, 6);
+        let expected_outer = [(6, 0), (100, 0), (100, 24), (94, 30), (0, 30), (0, 6)];
+        for (vertex, expected) in outer.vertices[..outer.len].iter().zip(expected_outer) {
+            assert_eq!(vertex.local, expected);
+        }
+        let inner = shape_polygon(resolved, config.corners, config.cut, 2);
+        let expected_inner = [(8, 2), (98, 2), (98, 22), (92, 28), (2, 28), (2, 8)];
+        for (vertex, expected) in inner.vertices[..inner.len].iter().zip(expected_inner) {
+            assert_eq!(vertex.local, expected);
+        }
     }
 
     #[test]
@@ -1654,9 +1690,9 @@ fn draw_button(
     resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
 ) {
-    if node.flags & ui_node_flags::BUTTON_TRANSPARENT == 0 {
+    let config = draw_shape_node(node, resolved, paints);
+    if !config.transparent && config.corners == 0 && config.border == 0 {
         let fill = shape_paint(node.color, node.color_paint, paints);
-        draw_quad_paint(resolved.verts, fill);
         if resolved.height > 3 && fill.is_solid() {
             let color = brighten(fill.from());
             draw_quad_flat(
@@ -1698,6 +1734,227 @@ fn draw_button(
         letter_spacing,
         text_paint(node.accent, node.accent_paint, paints),
     );
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UiShapeConfig {
+    corners: u8,
+    cut: u8,
+    border: u8,
+    transparent: bool,
+}
+
+fn shape_config(node: &LevelUiNodeRecord) -> UiShapeConfig {
+    if ui_shape::is_encoded(node.option) {
+        return UiShapeConfig {
+            corners: ui_shape::corners(node.option),
+            cut: ui_shape::cut(node.option),
+            border: ui_shape::border(node.option),
+            transparent: ui_shape::transparent(node.option)
+                || node.flags & ui_node_flags::BUTTON_TRANSPARENT != 0,
+        };
+    }
+    UiShapeConfig {
+        transparent: node.flags & ui_node_flags::BUTTON_TRANSPARENT != 0,
+        ..UiShapeConfig::default()
+    }
+}
+
+/// Draw the fill and optional inset border shared by Rect and Button nodes.
+/// Legacy nodes stay on the original quad path; styled nodes use a convex
+/// 4..=8 vertex polygon and remain allocation-free on PS1.
+fn draw_shape_node(
+    node: &LevelUiNodeRecord,
+    resolved: UiResolvedNode,
+    paints: &[LevelUiPaintRecord],
+) -> UiShapeConfig {
+    let config = shape_config(node);
+    let fill = shape_paint(node.color, node.color_paint, paints);
+    if config.corners == 0 && config.border == 0 {
+        if !config.transparent {
+            draw_quad_paint(resolved.verts, fill);
+        }
+        return config;
+    }
+
+    let outer = shape_polygon(resolved, config.corners, config.cut, 0);
+    if !config.transparent {
+        draw_shape_polygon(&outer, fill, resolved.width, resolved.height);
+    }
+    if config.border != 0 {
+        draw_shape_border(
+            resolved,
+            outer,
+            config,
+            shape_paint(node.background, node.background_paint, paints),
+        );
+    }
+    config
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UiShapeVertex {
+    local: (i32, i32),
+    screen: (i16, i16),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UiShapePolygon {
+    vertices: [UiShapeVertex; 8],
+    len: usize,
+}
+
+impl UiShapePolygon {
+    fn push(&mut self, transform: UiAffine, x: i32, y: i32) {
+        if self.len >= self.vertices.len() {
+            return;
+        }
+        self.vertices[self.len] = UiShapeVertex {
+            local: (x, y),
+            screen: transform.point(x, y),
+        };
+        self.len += 1;
+    }
+}
+
+fn shape_polygon(
+    resolved: UiResolvedNode,
+    corners: u8,
+    authored_cut: u8,
+    inset: i32,
+) -> UiShapePolygon {
+    let width = i32::from(resolved.width);
+    let height = i32::from(resolved.height);
+    let left = inset.min(width / 2);
+    let top = inset.min(height / 2);
+    let right = width.saturating_sub(inset).max(left);
+    let bottom = height.saturating_sub(inset).max(top);
+    let cut = i32::from(authored_cut)
+        .min((right - left) / 2)
+        .min((bottom - top) / 2);
+    let mut polygon = UiShapePolygon {
+        vertices: [UiShapeVertex::default(); 8],
+        len: 0,
+    };
+    if corners & ui_shape::TOP_LEFT != 0 {
+        polygon.push(resolved.transform, left + cut, top);
+    } else {
+        polygon.push(resolved.transform, left, top);
+    }
+    if corners & ui_shape::TOP_RIGHT != 0 {
+        polygon.push(resolved.transform, right - cut, top);
+        polygon.push(resolved.transform, right, top + cut);
+    } else {
+        polygon.push(resolved.transform, right, top);
+    }
+    if corners & ui_shape::BOTTOM_RIGHT != 0 {
+        polygon.push(resolved.transform, right, bottom - cut);
+        polygon.push(resolved.transform, right - cut, bottom);
+    } else {
+        polygon.push(resolved.transform, right, bottom);
+    }
+    if corners & ui_shape::BOTTOM_LEFT != 0 {
+        polygon.push(resolved.transform, left + cut, bottom);
+        polygon.push(resolved.transform, left, bottom - cut);
+    } else {
+        polygon.push(resolved.transform, left, bottom);
+    }
+    if corners & ui_shape::TOP_LEFT != 0 {
+        polygon.push(resolved.transform, left, top + cut);
+    }
+    polygon
+}
+
+fn draw_shape_polygon(polygon: &UiShapePolygon, paint: UiPaint, width: u16, height: u16) {
+    if polygon.len < 3 {
+        return;
+    }
+    for index in 1..polygon.len - 1 {
+        draw_shape_triangle(
+            [
+                polygon.vertices[0],
+                polygon.vertices[index],
+                polygon.vertices[index + 1],
+            ],
+            paint,
+            width,
+            height,
+        );
+    }
+}
+
+fn draw_shape_border(
+    resolved: UiResolvedNode,
+    outer: UiShapePolygon,
+    config: UiShapeConfig,
+    paint: UiPaint,
+) {
+    let max_border = (resolved.width.min(resolved.height) / 2).max(1);
+    let border = u16::from(config.border).min(max_border) as i32;
+    let inner = shape_polygon(resolved, config.corners, config.cut, border);
+    if inner.len != outer.len
+        || resolved.width <= border as u16 * 2
+        || resolved.height <= border as u16 * 2
+    {
+        draw_shape_polygon(&outer, paint, resolved.width, resolved.height);
+        return;
+    }
+    for index in 0..outer.len {
+        let next = (index + 1) % outer.len;
+        draw_shape_triangle(
+            [
+                outer.vertices[index],
+                outer.vertices[next],
+                inner.vertices[index],
+            ],
+            paint,
+            resolved.width,
+            resolved.height,
+        );
+        draw_shape_triangle(
+            [
+                outer.vertices[next],
+                inner.vertices[index],
+                inner.vertices[next],
+            ],
+            paint,
+            resolved.width,
+            resolved.height,
+        );
+    }
+}
+
+fn draw_shape_triangle(vertices: [UiShapeVertex; 3], paint: UiPaint, width: u16, height: u16) {
+    let screen = [vertices[0].screen, vertices[1].screen, vertices[2].screen];
+    match paint {
+        UiPaint::Solid((r, g, b)) => draw_tri_flat(screen, r, g, b),
+        UiPaint::Gradient { .. } => draw_tri_gouraud(
+            screen,
+            [
+                shape_paint_color(paint, vertices[0].local, width, height),
+                shape_paint_color(paint, vertices[1].local, width, height),
+                shape_paint_color(paint, vertices[2].local, width, height),
+            ],
+        ),
+    }
+}
+
+fn shape_paint_color(paint: UiPaint, local: (i32, i32), width: u16, height: u16) -> (u8, u8, u8) {
+    match paint {
+        UiPaint::Solid(color) => color,
+        UiPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => {
+            let (position, extent) = match direction {
+                LevelUiGradientDirection::Horizontal => (local.0, i32::from(width)),
+                LevelUiGradientDirection::Vertical => (local.1, i32::from(height)),
+            };
+            let t = ((position.clamp(0, extent.max(1)) * 255) / extent.max(1)) as u8;
+            lerp_color(to, from, t)
+        }
+    }
 }
 
 /// Draw a slider: a recessed track, a proportional fill, and a knob
