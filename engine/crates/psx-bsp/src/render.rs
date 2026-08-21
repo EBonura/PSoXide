@@ -423,6 +423,25 @@ impl FrustumPlanes {
         count: usize,
         scratch: &mut [ClassicAffineVertex],
     ) -> (usize, bool) {
+        self.clip_polygon_buffers_inner(vertices, count, scratch, false)
+    }
+
+    fn clip_polygon_buffers_after_outside_reject(
+        &self,
+        vertices: &mut [ClassicAffineVertex],
+        count: usize,
+        scratch: &mut [ClassicAffineVertex],
+    ) -> (usize, bool) {
+        self.clip_polygon_buffers_inner(vertices, count, scratch, true)
+    }
+
+    fn clip_polygon_buffers_inner(
+        &self,
+        vertices: &mut [ClassicAffineVertex],
+        count: usize,
+        scratch: &mut [ClassicAffineVertex],
+        outside_rejected: bool,
+    ) -> (usize, bool) {
         let mut count = count;
         // Most visible world faces are well inside the frustum. Prove that
         // common case with 32-bit math before paying for fifteen i64 products
@@ -433,18 +452,35 @@ impl FrustumPlanes {
         {
             return (count, false);
         }
-        // Trivial accept: every vertex inside every plane (the common case).
+        // Classify once before clipping. Quake-PSX performs the equivalent
+        // screen outcode AND before emitting a brush triangle: if every point
+        // is outside the same boundary, no edge can cross the view. Keeping
+        // this test in exact plane space preserves the polygon clip contract
+        // while avoiding five complete copy/interpolation passes for the many
+        // PVS faces that sit wholly beyond one side of the camera frustum.
         let mut all_inside = true;
-        'planes: for plane in &self.planes {
-            for v in &vertices[..count] {
-                if Self::distance(plane, v.position) < 0 {
+        let mut outside_every_vertex = if outside_rejected {
+            0
+        } else {
+            (1u8 << self.planes.len()) - 1
+        };
+        for vertex in &vertices[..count] {
+            let mut vertex_outside = 0u8;
+            for (plane_index, plane) in self.planes.iter().enumerate() {
+                if Self::distance(plane, vertex.position) < 0 {
                     all_inside = false;
-                    break 'planes;
+                    vertex_outside |= 1 << plane_index;
                 }
+            }
+            if !outside_rejected {
+                outside_every_vertex &= vertex_outside;
             }
         }
         if all_inside {
             return (count, false);
+        }
+        if outside_every_vertex != 0 {
+            return (0, false);
         }
         let mut in_scratch = false;
         for plane in &self.planes {
@@ -993,6 +1029,9 @@ impl Renderer {
                 stats.packet_overflow_avoided = true;
                 break;
             }
+            if self.pxbsp_face_wholly_outside(map, face, frustum) {
+                continue;
+            }
             let state = pxbsp_material_state(material, binding, material_tick);
             self.materialize_pxbsp_face(
                 map,
@@ -1000,8 +1039,12 @@ impl Renderer {
                 state.uv_offset,
                 &mut face_vertices[..source_count],
             );
-            let (vertex_count, clipped_in_scratch) =
-                frustum.clip_polygon_buffers(&mut face_vertices, source_count, &mut clip_scratch);
+            let (vertex_count, clipped_in_scratch) = frustum
+                .clip_polygon_buffers_after_outside_reject(
+                    &mut face_vertices,
+                    source_count,
+                    &mut clip_scratch,
+                );
             if vertex_count == 0 || vertex_count > BATCH_MAX_VERTICES {
                 // Fully outside the frustum (or too many vertices after the
                 // clip for one batch, which a face this size never is).
@@ -1211,6 +1254,37 @@ impl Renderer {
                 vertex.color = normalize_baked_color(vertex.color);
             }
         }
+    }
+
+    fn pxbsp_face_wholly_outside(
+        &self,
+        map: &PxbspResidentMap,
+        face: Face,
+        frustum: &FrustumPlanes,
+    ) -> bool {
+        let first = face.first_vertex as usize;
+        let count = face.vertex_count as usize;
+        let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
+        let source = unsafe {
+            map.vertex_data()
+                .as_ptr()
+                .add(source_offset)
+                .cast::<ClassicAffineWordSourceVertex>()
+        };
+        for plane in &frustum.planes {
+            let mut index = 0usize;
+            while index < count {
+                let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
+                if FrustumPlanes::distance(plane, position) >= 0 {
+                    break;
+                }
+                index += 1;
+            }
+            if index == count {
+                return true;
+            }
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2536,6 +2610,32 @@ mod frustum_tests {
             }
         }
         assert!(accepted > 100, "sample did not exercise the fast path");
+    }
+
+    #[test]
+    fn polygon_wholly_outside_one_plane_is_rejected_before_clipping() {
+        let (planes, _) = planes_for([0, 0, 0], 0, 0);
+        let mut vertices = [vertex([0; 3]); 16];
+        vertices[..4].copy_from_slice(&[
+            vertex([-320, -32, 96]),
+            vertex([-288, -32, 96]),
+            vertex([-288, 32, 96]),
+            vertex([-320, 32, 96]),
+        ]);
+        let mut scratch = [vertex([0; 3]); 16];
+
+        let (count, in_scratch) = planes.clip_polygon_buffers(&mut vertices, 4, &mut scratch);
+
+        assert_eq!(count, 0);
+        assert!(!in_scratch);
+        assert!(
+            planes.planes.iter().any(|plane| {
+                vertices[..4]
+                    .iter()
+                    .all(|vertex| FrustumPlanes::distance(plane, vertex.position) < 0)
+            }),
+            "fixture must sit wholly outside one exact plane"
+        );
     }
 
     #[test]
