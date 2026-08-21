@@ -154,11 +154,10 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         let start = RoomPoint::new(position[0], position[1], position[2]);
         let mut aabbs = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
         if let Some(bsp) = self.bsp.as_deref_mut() {
-            let Some(mut aabb_count) = self.box_props.collect_collision_blockers_checked(
-                BOX_PROPS,
-                room,
-                &mut aabbs,
-            ) else {
+            let Some(mut aabb_count) = self
+                .box_props
+                .collect_collision_blockers_checked(BOX_PROPS, room, &mut aabbs)
+            else {
                 return position;
             };
             let Some(count) =

@@ -407,6 +407,22 @@ impl FrustumPlanes {
         count: usize,
         scratch: &mut [ClassicAffineVertex],
     ) -> usize {
+        let (count, in_scratch) = self.clip_polygon_buffers(vertices, count, scratch);
+        if in_scratch {
+            vertices[..count].copy_from_slice(&scratch[..count]);
+        }
+        count
+    }
+
+    /// Clip while alternating the input/output buffers. Returning which
+    /// buffer owns the result lets the renderer consume it directly instead
+    /// of copying the polygon back after every one of the five planes.
+    fn clip_polygon_buffers(
+        &self,
+        vertices: &mut [ClassicAffineVertex],
+        count: usize,
+        scratch: &mut [ClassicAffineVertex],
+    ) -> (usize, bool) {
         let mut count = count;
         // Most visible world faces are well inside the frustum. Prove that
         // common case with 32-bit math before paying for fifteen i64 products
@@ -415,7 +431,7 @@ impl FrustumPlanes {
             .iter()
             .all(|vertex| self.point_definitely_inside(vertex.position))
         {
-            return count;
+            return (count, false);
         }
         // Trivial accept: every vertex inside every plane (the common case).
         let mut all_inside = true;
@@ -428,40 +444,53 @@ impl FrustumPlanes {
             }
         }
         if all_inside {
-            return count;
+            return (count, false);
         }
+        let mut in_scratch = false;
         for plane in &self.planes {
             if count < 3 {
-                return 0;
+                return (0, false);
             }
-            let mut out = 0usize;
-            let mut prev = vertices[count - 1];
-            let mut prev_d = Self::distance(plane, prev.position);
-            for i in 0..count {
-                let cur = vertices[i];
-                let cur_d = Self::distance(plane, cur.position);
-                if (prev_d >= 0) != (cur_d >= 0) {
-                    // Crossing: interpolate at t = prev_d / (prev_d - cur_d), Q16.
-                    let t = ((prev_d << 16) / (prev_d - cur_d)).clamp(0, 1 << 16);
-                    scratch[out] = lerp_vertex(&prev, &cur, t);
-                    out += 1;
-                }
-                if cur_d >= 0 {
-                    scratch[out] = cur;
-                    out += 1;
-                }
-                prev = cur;
-                prev_d = cur_d;
-            }
-            vertices[..out].copy_from_slice(&scratch[..out]);
-            count = out;
+            count = if in_scratch {
+                clip_polygon_plane(plane, &scratch[..count], vertices)
+            } else {
+                clip_polygon_plane(plane, &vertices[..count], scratch)
+            };
+            in_scratch = !in_scratch;
         }
         if count < 3 {
-            0
+            (0, false)
         } else {
-            count
+            (count, in_scratch)
         }
     }
+}
+
+#[inline(never)]
+fn clip_polygon_plane(
+    plane: &([i32; 3], i64),
+    source: &[ClassicAffineVertex],
+    destination: &mut [ClassicAffineVertex],
+) -> usize {
+    let mut out = 0usize;
+    let mut prev = source[source.len() - 1];
+    let mut prev_d = FrustumPlanes::distance(plane, prev.position);
+    for &cur in source {
+        let cur_d = FrustumPlanes::distance(plane, cur.position);
+        if (prev_d >= 0) != (cur_d >= 0) {
+            // Crossing: interpolate at t = prev_d / (prev_d - cur_d), Q16.
+            let t = ((prev_d << 16) / (prev_d - cur_d)).clamp(0, 1 << 16);
+            destination[out] = lerp_vertex(&prev, &cur, t);
+            out += 1;
+        }
+        if cur_d >= 0 {
+            destination[out] = cur;
+            out += 1;
+        }
+        prev = cur;
+        prev_d = cur_d;
+    }
+    out
 }
 
 fn lerp_vertex(
@@ -971,8 +1000,8 @@ impl Renderer {
                 state.uv_offset,
                 &mut face_vertices[..source_count],
             );
-            let vertex_count =
-                frustum.clip_polygon(&mut face_vertices, source_count, &mut clip_scratch);
+            let (vertex_count, clipped_in_scratch) =
+                frustum.clip_polygon_buffers(&mut face_vertices, source_count, &mut clip_scratch);
             if vertex_count == 0 || vertex_count > BATCH_MAX_VERTICES {
                 // Fully outside the frustum (or too many vertices after the
                 // clip for one batch, which a face this size never is).
@@ -1032,8 +1061,13 @@ impl Renderer {
                 texture_window_word: binding.texture_window_word,
                 color_command_word: state.color_command_word,
             };
-            batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count]
-                .copy_from_slice(&face_vertices[..vertex_count]);
+            batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count].copy_from_slice(
+                if clipped_in_scratch {
+                    &clip_scratch[..vertex_count]
+                } else {
+                    &face_vertices[..vertex_count]
+                },
+            );
             batch_vertex_count += vertex_count;
             batch_surface_count += 1;
             batch_worst_words += face_worst_words;

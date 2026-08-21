@@ -108,25 +108,25 @@ impl Playtest {
     ) -> Option<(&[GridVisibleCell], u16)> {
         self.visible_cells
             .cached_precomputed_visible_cells(
-            world_tables(),
-            PvsTables {
-                visibility_pvs: VISIBILITY_PVS,
-                visibility_pvs_bits: VISIBILITY_PVS_BITS,
-            },
-            VISIBLE_CELL_TUNING,
-            &mut cell_scratch_arena().depths[..],
-            active_slot,
-            room_index,
-            room_width,
-            room_depth,
-            room_sector_size,
-            anchor,
-            room_offset_x,
-            room_offset_z,
-            global_anchor,
-            camera,
-            camera_independent,
-        )
+                world_tables(),
+                PvsTables {
+                    visibility_pvs: VISIBILITY_PVS,
+                    visibility_pvs_bits: VISIBILITY_PVS_BITS,
+                },
+                VISIBLE_CELL_TUNING,
+                &mut cell_scratch_arena().depths[..],
+                active_slot,
+                room_index,
+                room_width,
+                room_depth,
+                room_sector_size,
+                anchor,
+                room_offset_x,
+                room_offset_z,
+                global_anchor,
+                camera,
+                camera_independent,
+            )
             // An empty PVS is never a valid reason to make an active room
             // disappear. Treat corrupt/incomplete data exactly like missing
             // data so the render path takes its existing conservative all-cell
