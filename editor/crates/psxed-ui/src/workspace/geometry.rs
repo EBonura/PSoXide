@@ -389,6 +389,229 @@ impl EditorWorkspace {
         }
     }
 
+    /// Copy BSP brushes or authored cell geometry into a clipboard that can
+    /// survive a project switch. Project-local ids are captured by name (or
+    /// removed, for Door bindings) instead of leaking into the destination.
+    pub(crate) fn copy_current_geometry(&mut self) -> bool {
+        if self.floating_geometry.is_some() {
+            self.status = "Place or cancel the geometry preview first".to_string();
+            return false;
+        }
+
+        let brush_targets = self.selected_brush_set();
+        if !brush_targets.is_empty() {
+            let primary = self
+                .selected_brush
+                .and_then(|selected| brush_targets.iter().position(|index| *index == selected))
+                .unwrap_or(0);
+            let mut materials = BTreeMap::new();
+            let mut stripped_movers = 0usize;
+            let mut brushes = Vec::with_capacity(brush_targets.len());
+            for index in brush_targets {
+                let Some(source) = self.project.active_scene().brushes.get(index) else {
+                    continue;
+                };
+                let mut brush = source.clone();
+                for face in &brush.faces {
+                    if let Some(material) = face.material {
+                        if let Some(name) = self.project.resource_name(material) {
+                            materials.insert(material.raw(), name.to_string());
+                        }
+                    }
+                }
+                stripped_movers += usize::from(brush.mover.take().is_some());
+                brushes.push(brush);
+            }
+            if brushes.is_empty() {
+                self.status = "Selected brushes no longer exist".to_string();
+                return false;
+            }
+            let count = brushes.len();
+            self.portable_geometry_clipboard =
+                Some(PortableGeometryClipboard::Brushes(BrushGeometryClipboard {
+                    brushes,
+                    primary: primary.min(count - 1),
+                    materials,
+                    stripped_movers,
+                }));
+            self.status = format!(
+                "Copied {count} brush{} for cross-project paste{}",
+                if count == 1 { "" } else { "es" },
+                if stripped_movers == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        "; stripped {stripped_movers} project-local Door binding{}",
+                        if stripped_movers == 1 { "" } else { "s" }
+                    )
+                }
+            );
+            return true;
+        }
+
+        let Some(clipboard) = self.copy_selected_geometry() else {
+            return false;
+        };
+        let sector_size = self
+            .room_grid_view(clipboard.source_room)
+            .map_or(DEFAULT_WORLD_SECTOR_SIZE, |grid| grid.sector_size);
+        let mut floors = vec![psxed_project::PrefabFloor {
+            relative_elevation: 0,
+            cells: clipboard.cells,
+        }];
+        floors.extend(clipboard.extra_floors);
+        let mut prefab = psxed_project::Prefab::capture(
+            "Clipboard geometry",
+            sector_size,
+            clipboard.width,
+            clipboard.height,
+            clipboard.mode == GeometryClipboardMode::MergePrimitives,
+            floors,
+            clipboard.source_room,
+            self.active_floor,
+            &self.project,
+        );
+        prefab.lights = clipboard.lights;
+        self.portable_geometry_clipboard = Some(PortableGeometryClipboard::World(prefab));
+        self.status = "Copied world geometry for cross-project paste".to_string();
+        true
+    }
+
+    /// Paste the portable Room-workspace clipboard into the active project.
+    /// Brushes keep world coordinates; cell geometry enters the existing
+    /// floating placement loop at the destination room's current cell.
+    pub(crate) fn paste_current_geometry(&mut self) -> bool {
+        if self.floating_geometry.is_some() {
+            self.status = "Place or cancel the geometry preview first".to_string();
+            return false;
+        }
+        let Some(clipboard) = self.portable_geometry_clipboard.clone() else {
+            self.status = "Copy brush or world geometry first".to_string();
+            return false;
+        };
+        match clipboard {
+            PortableGeometryClipboard::Brushes(clipboard) => self.paste_brush_geometry(clipboard),
+            PortableGeometryClipboard::World(prefab) => self.paste_world_geometry(prefab),
+        }
+    }
+
+    fn paste_brush_geometry(&mut self, clipboard: BrushGeometryClipboard) -> bool {
+        if clipboard.brushes.is_empty() {
+            self.status = "The brush clipboard is empty".to_string();
+            return false;
+        }
+        let destination_materials: BTreeMap<String, ResourceId> = self
+            .project
+            .resources
+            .iter()
+            .filter_map(|resource| {
+                matches!(resource.data, ResourceData::Material(_))
+                    .then_some((resource.name.clone(), resource.id))
+            })
+            .collect();
+        let missing = std::cell::Cell::new(0usize);
+        let mut brushes = clipboard.brushes;
+        for brush in &mut brushes {
+            brush.mover = None;
+            for face in &mut brush.faces {
+                face.material = face.material.and_then(|source| {
+                    let rebound = clipboard
+                        .materials
+                        .get(&source.raw())
+                        .and_then(|name| destination_materials.get(name))
+                        .copied();
+                    if rebound.is_none() {
+                        missing.set(missing.get() + 1);
+                    }
+                    rebound
+                });
+            }
+        }
+
+        self.push_undo();
+        let first = self.project.active_scene().brushes.len();
+        let count = brushes.len();
+        self.project.active_scene_mut().brushes.extend(brushes);
+        let primary = first + clipboard.primary.min(count - 1);
+        self.replace_brush_selection(primary, None);
+        self.selected_brushes = (first..first + count).collect();
+        self.mark_dirty();
+
+        let mut notes = Vec::new();
+        if missing.get() > 0 {
+            notes.push(format!(
+                "{} missing material references cleared",
+                missing.get()
+            ));
+        }
+        if clipboard.stripped_movers > 0 {
+            notes.push(format!(
+                "{} Door binding{} left unbound",
+                clipboard.stripped_movers,
+                if clipboard.stripped_movers == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        self.status = format!(
+            "Pasted {count} brush{}{}",
+            if count == 1 { "" } else { "es" },
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", notes.join("; "))
+            }
+        );
+        true
+    }
+
+    fn paste_world_geometry(&mut self, prefab: psxed_project::Prefab) -> bool {
+        let Some(room) = self.active_room_id() else {
+            self.status = "Select a destination section before pasting geometry".to_string();
+            return false;
+        };
+        let Some(grid) = self.room_grid_view(room) else {
+            self.status = "The destination section has no editable grid".to_string();
+            return false;
+        };
+        let origin = self
+            .selection
+            .selected_sector
+            .map_or(grid.origin, |(sx, sz)| {
+                [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32]
+            });
+        let (mut floors, unbound) = prefab.bound_floors(&self.project, room, self.active_floor);
+        if floors.is_empty() {
+            self.status = "The world-geometry clipboard is empty".to_string();
+            return false;
+        }
+        let cells = floors.remove(0).cells;
+        let lead = if unbound == 0 {
+            "Pasting world geometry".to_string()
+        } else {
+            format!("Pasting world geometry ({unbound} missing material references cleared)")
+        };
+        let clipboard = GeometryClipboard {
+            mode: if prefab.merge_primitives {
+                GeometryClipboardMode::MergePrimitives
+            } else {
+                GeometryClipboardMode::ReplaceCells
+            },
+            source_room: room,
+            source_origin: origin,
+            next_paste_origin: origin,
+            width: prefab.width,
+            height: prefab.height,
+            cells,
+            extra_floors: floors,
+            lights: prefab.lights,
+        };
+        self.begin_floating_geometry(clipboard, &lead);
+        true
+    }
+
     pub(crate) fn selected_geometry_cell_targets(&self) -> GeometryCellTargets {
         let mut targets = Vec::new();
         if !self.selection.selected_sectors.is_empty() {

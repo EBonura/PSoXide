@@ -655,6 +655,12 @@ impl EditorWorkspace {
         let consume_ui_paste = !focus_taken
             && self.active_workspace == WorkspaceView::Ui
             && consume_command_shortcut(ctx, egui::Key::V);
+        let consume_geometry_copy = !focus_taken
+            && self.active_workspace == WorkspaceView::Room
+            && consume_command_shortcut(ctx, egui::Key::C);
+        let consume_geometry_paste = !focus_taken
+            && self.active_workspace == WorkspaceView::Room
+            && consume_command_shortcut(ctx, egui::Key::V);
         let consume_duplicate = if focus_taken || self.active_workspace == WorkspaceView::Ui {
             false
         } else {
@@ -700,6 +706,12 @@ impl EditorWorkspace {
         }
         if consume_ui_paste {
             self.paste_ui_node();
+        }
+        if consume_geometry_copy {
+            self.copy_current_geometry();
+        }
+        if consume_geometry_paste {
+            self.paste_current_geometry();
         }
         self.handle_toolbar_group_shortcuts(ctx);
 
@@ -1770,6 +1782,34 @@ impl EditorWorkspace {
         ui.menu_button("Edit", |ui| {
             let can_node_delete = self.selection.selected_node != NodeId::ROOT;
             let has_geometry_selection = self.has_geometry_selection();
+            if self.active_workspace == WorkspaceView::Room {
+                let can_copy_geometry =
+                    !self.selected_brush_set().is_empty() || has_geometry_selection;
+                if ui
+                    .add_enabled(
+                        can_copy_geometry,
+                        egui::Button::new(menu_label("Copy Geometry", &command_shortcut_text("C"))),
+                    )
+                    .clicked()
+                {
+                    self.copy_current_geometry();
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        self.portable_geometry_clipboard.is_some(),
+                        egui::Button::new(menu_label(
+                            "Paste Geometry",
+                            &command_shortcut_text("V"),
+                        )),
+                    )
+                    .clicked()
+                {
+                    self.paste_current_geometry();
+                    ui.close_menu();
+                }
+                ui.separator();
+            }
             if ui
                 .button(menu_label(
                     "Duplicate Selection",
