@@ -331,6 +331,18 @@ pub(crate) fn prepend_bsp_surface_grid_overlay(
     );
 }
 
+/// Draw the Quake pointfile route from the last successful BSP cook. Kept in
+/// the host overlay layer so the diagnostic stays bright and readable over
+/// every material without changing the PSX-style scene command stream.
+pub(crate) fn append_bsp_leak_path_overlay(
+    camera: ViewportCameraState,
+    leak_path: &[[i32; 3]],
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    let world_camera = setup_gte_for_camera(camera);
+    overlays::append_bsp_leak_path_overlay(world_camera, leak_path, overlay_lines);
+}
+
 /// Build a fresh preview frame rendering the active editor room window
 /// from `camera`'s orbit angles.
 ///

@@ -1,5 +1,7 @@
 use super::*;
 
+const BSP_LEAK_PATH_RGB: (u8, u8, u8) = (72, 236, 126);
+
 #[derive(Clone, Copy)]
 struct CharacterControllerOverlay {
     origin: [f32; 3],
@@ -252,7 +254,9 @@ impl EditorWorkspace {
                 egui::Image::new((viewport_3d.texture, rect.size()))
                     .uv(viewport_3d.uv)
                     .paint_at(ui, rect);
-                Self::draw_viewport_3d_overlay_lines(&ui.painter_at(rect), rect, &viewport_3d);
+                let painter = ui.painter_at(rect);
+                Self::draw_viewport_3d_overlay_lines(&painter, rect, &viewport_3d);
+                self.draw_bsp_leak_notice(&painter, rect);
                 return;
             }
 
@@ -352,6 +356,7 @@ impl EditorWorkspace {
             .paint_at(ui, rect);
         let painter = ui.painter_at(rect);
         Self::draw_viewport_3d_overlay_lines(&painter, rect, &viewport_3d);
+        self.draw_bsp_leak_notice(&painter, rect);
         self.draw_character_behavior_overlay(&painter, rect);
         self.draw_primitive_gizmo(&painter, rect, hovered_primitive_axis);
         self.draw_node_gizmo(&painter, rect, hovered_node_handle);
@@ -425,6 +430,41 @@ impl EditorWorkspace {
         ui.ctx().request_repaint();
     }
 
+    /// Step the editor camera along the pointfile route produced by the last
+    /// BSP cook. Each invocation moves to one point and looks toward the next,
+    /// mirroring TrenchBroom's pointfile navigation rather than merely framing
+    /// the complete (often very large) path from far away.
+    pub(crate) fn follow_next_bsp_leak_point(&mut self) -> bool {
+        let Some(&point) = self.last_bsp_leak_path.get(
+            self.bsp_leak_cursor
+                .min(self.last_bsp_leak_path.len().saturating_sub(1)),
+        ) else {
+            return false;
+        };
+        let index = self
+            .bsp_leak_cursor
+            .min(self.last_bsp_leak_path.len().saturating_sub(1));
+        let look_at = (1..self.last_bsp_leak_path.len())
+            .map(|offset| self.last_bsp_leak_path[(index + offset) % self.last_bsp_leak_path.len()])
+            .find(|candidate| *candidate != point)
+            .unwrap_or([point[0], point[1], point[2].saturating_sub(1)]);
+        let (yaw, pitch) = camera_angles_to_look_at(point, look_at)
+            .unwrap_or((self.camera_rig.free_yaw, self.camera_rig.free_pitch));
+        self.camera_rig.mode = ViewportCameraMode::Free;
+        self.camera_rig.free_position = point;
+        self.camera_rig.free_yaw = yaw;
+        self.camera_rig.free_pitch = pitch;
+        self.camera_rig.free_initialized = true;
+        self.bsp_leak_cursor = (index + 1) % self.last_bsp_leak_path.len();
+        self.persist_editor_camera_state();
+        self.status = format!(
+            "Leak point {}/{}; Camera: Free (WASD, Shift faster, RMB/MMB look)",
+            index + 1,
+            self.last_bsp_leak_path.len()
+        );
+        true
+    }
+
     pub(crate) fn set_viewport_3d_camera_mode(&mut self, mode: ViewportCameraMode) {
         if self.camera_rig.set_mode(mode) {
             self.persist_editor_camera_state();
@@ -453,6 +493,66 @@ impl EditorWorkspace {
                 Stroke::new(line.width, line.color),
             );
         }
+    }
+
+    pub(crate) fn draw_bsp_leak_path_2d(
+        &self,
+        painter: &egui::Painter,
+        transform: ViewportTransform,
+        view: OrthographicView,
+    ) {
+        let path = self.visible_bsp_leak_path();
+        if path.len() < 2 {
+            return;
+        }
+        let color = Color32::from_rgb(
+            BSP_LEAK_PATH_RGB.0,
+            BSP_LEAK_PATH_RGB.1,
+            BSP_LEAK_PATH_RGB.2,
+        );
+        let project = |point: [i32; 3]| {
+            transform.world_to_screen(view.project_f32(point.map(|value| value as f32)))
+        };
+        for points in path.windows(2) {
+            painter.line_segment(
+                [project(points[0]), project(points[1])],
+                Stroke::new(2.25, color),
+            );
+        }
+        painter.circle_filled(project(path[0]), 4.0, color);
+        painter.circle_stroke(project(*path.last().unwrap()), 5.0, Stroke::new(2.0, color));
+    }
+
+    pub(crate) fn draw_bsp_leak_notice(&self, painter: &egui::Painter, rect: Rect) {
+        let point_count = self.visible_bsp_leak_path().len();
+        if point_count == 0 {
+            return;
+        }
+        let notice = Rect::from_center_size(
+            rect.center_top() + Vec2::new(0.0, 20.0),
+            Vec2::new(310.0, 26.0),
+        );
+        painter.rect_filled(notice, 4.0, Color32::from_black_alpha(210));
+        painter.rect_stroke(
+            notice,
+            4.0,
+            Stroke::new(
+                1.25,
+                Color32::from_rgb(
+                    BSP_LEAK_PATH_RGB.0,
+                    BSP_LEAK_PATH_RGB.1,
+                    BSP_LEAK_PATH_RGB.2,
+                ),
+            ),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            notice.center(),
+            Align2::CENTER_CENTER,
+            format!("BSP LEAK · last build · {point_count}-point green path"),
+            FontId::monospace(11.0),
+            Color32::from_rgb(184, 255, 205),
+        );
     }
 
     fn selected_character_controller_overlay(&self) -> Option<CharacterControllerOverlay> {

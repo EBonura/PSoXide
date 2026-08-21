@@ -281,6 +281,31 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         }
     }
 
+    /// Return the arena to its empty scene-entry state without copying or
+    /// clearing the (potentially hundreds of KiB) page storage.
+    ///
+    /// Parsed model/animation views must be dropped before this is called.
+    /// The old payload bytes may remain in `pages`: clearing the allocation
+    /// metadata makes them unreachable, and the next grouped load overwrites
+    /// every range it publishes. This is the cheap handoff used when front-end
+    /// UI images and gameplay assets share one scene-lifetime RAM overlay.
+    pub fn reset_for_scene_load(&mut self) {
+        let mut slot = 0usize;
+        while slot < ASSETS {
+            self.storage.offsets[slot] = 0;
+            self.storage.lengths[slot] = 0;
+            slot += 1;
+        }
+        self.storage.layout_generation = self.storage.layout_generation.wrapping_add(1).max(1);
+        self.job = WorldRoomSlotsReadJob::new();
+        self.asset_count = 0;
+        self.started = false;
+        self.ready = false;
+        self.failed = false;
+        self.failed_asset = ASSET_ID_UNKNOWN;
+        self.failed_reason = 0;
+    }
+
     /// Reserve stable sector runs and arm one grouped pack read.
     pub fn begin(
         &mut self,
@@ -611,6 +636,32 @@ mod tests {
         assert_eq!(storage.bytes_for(1, 3), Some(&[1, 2, 3][..]));
         assert_eq!(storage.bytes_for(3, 5), Some(&[4, 5, 6, 7, 8][..]));
         assert!(!storage.write_chunk_bytes(1, 2, &[9, 9]));
+    }
+
+    #[test]
+    fn scene_reset_drops_allocations_without_clearing_page_storage() {
+        let mut streamer = PersistentAssetStreamer::<1, 4>::new();
+        assert!(streamer.storage.prepare_slot(1, 4));
+        assert!(streamer.storage.write_chunk_bytes(1, 0, &[1, 2, 3, 4]));
+        streamer.started = true;
+        streamer.ready = true;
+        streamer.failed = true;
+        streamer.failed_asset = 1;
+        streamer.failed_reason = ASSET_FAIL_SHORT_READ;
+        let generation = streamer.storage.layout_generation;
+
+        streamer.reset_for_scene_load();
+
+        assert_eq!(streamer.resident_bytes(), 0);
+        assert!(!streamer.started);
+        assert!(!streamer.ready());
+        assert!(!streamer.failed());
+        assert_eq!(streamer.failed_asset(), ASSET_ID_UNKNOWN);
+        assert_eq!(streamer.failed_reason(), 0);
+        assert_ne!(streamer.layout_generation(), generation);
+        // Resetting metadata is enough; avoiding a page-sized clear is what
+        // keeps this transition off the tiny MIPS stack.
+        assert_eq!(streamer.storage.pages[0][0].to_le_bytes(), [1, 2, 3, 4]);
     }
 
     const fn persistent_asset(id: u16, ram_bytes: u32) -> LevelAssetRecord {

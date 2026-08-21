@@ -2887,6 +2887,11 @@ fn headless_editor_viewport_image(
             &mut frame.overlay_lines,
         );
     }
+    crate::editor_preview::append_bsp_leak_path_overlay(
+        editor.viewport_3d_camera(),
+        editor.visible_bsp_leak_path(),
+        &mut frame.overlay_lines,
+    );
 
     let (device, queue) = headless_wgpu_device()?;
     let mut renderer = psx_gpu_render::HwRenderer::new_headless(device, queue);

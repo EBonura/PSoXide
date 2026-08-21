@@ -236,7 +236,13 @@ impl Playtest {
                         streamed_room_is_loading(room),
                     );
                     #[cfg(not(feature = "cd-stream-bench"))]
-                    debug_log_reconcile_room(label, room, active_room_stream_slot(room), true, false);
+                    debug_log_reconcile_room(
+                        label,
+                        room,
+                        active_room_stream_slot(room),
+                        true,
+                        false,
+                    );
                 }
             }
         }

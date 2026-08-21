@@ -6,6 +6,40 @@ fn save_watch_project(dir: &Path, project: &ProjectDocument) {
 }
 
 #[test]
+fn bsp_pointfile_cache_round_trips_and_is_removed_when_sealed() {
+    let dir = test_temp_dir("bsp-pointfile-cache");
+    let points = [[16, 32, 48], [64, 80, 96], [-32, 112, 144]];
+    cache_bsp_leak_path(&dir, &points).expect("cache pointfile");
+    assert_eq!(read_cached_bsp_leak_path(&dir).unwrap(), points);
+    assert!(cached_bsp_leak_path(&dir).is_file());
+
+    cache_bsp_leak_path(&dir, &[]).expect("remove sealed-map pointfile");
+    assert!(read_cached_bsp_leak_path(&dir).unwrap().is_empty());
+    assert!(!cached_bsp_leak_path(&dir).exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn leak_path_navigation_switches_to_free_camera_and_steps_points() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("bsp-pointfile-navigation"),
+        ProjectDocument::new("pointfile navigation"),
+    );
+    workspace.last_bsp_leak_path = vec![[10, 20, 30], [110, 20, 30], [110, 120, 30]];
+    workspace.camera_rig.mode = ViewportCameraMode::Orbit;
+
+    assert!(workspace.follow_next_bsp_leak_point());
+    assert_eq!(workspace.camera_rig.mode, ViewportCameraMode::Free);
+    assert_eq!(workspace.camera_rig.free_position, [10, 20, 30]);
+    assert_eq!(workspace.bsp_leak_cursor, 1);
+    assert!(workspace.status.contains("Leak point 1/3"));
+
+    assert!(workspace.follow_next_bsp_leak_point());
+    assert_eq!(workspace.camera_rig.free_position, [110, 20, 30]);
+    assert_eq!(workspace.bsp_leak_cursor, 2);
+}
+
+#[test]
 fn brush_geometry_clipboard_survives_project_switch_and_rebinds_materials_by_name() {
     let source_dir = test_temp_dir("brush-clipboard-source");
     let destination_dir = test_temp_dir("brush-clipboard-destination");

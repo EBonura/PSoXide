@@ -206,6 +206,69 @@ fn watched_project_signature(path: &Path) -> WatchedProjectSignature {
     }
 }
 
+fn cached_bsp_leak_path(project_dir: &Path) -> PathBuf {
+    project_dir
+        .join("logs")
+        .join(psxed_project::brush_playtest::BRUSH_LEAK_FILENAME)
+}
+
+fn read_cached_bsp_leak_path(project_dir: &Path) -> Result<Vec<[i32; 3]>, String> {
+    let path = cached_bsp_leak_path(project_dir);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    let mut points = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let mut coordinates = line.split_whitespace();
+        let parse = |value: Option<&str>| {
+            value
+                .ok_or(())
+                .and_then(|value| value.parse::<i32>().map_err(|_| ()))
+        };
+        let point = [
+            parse(coordinates.next()),
+            parse(coordinates.next()),
+            parse(coordinates.next()),
+        ];
+        if coordinates.next().is_some() || point.iter().any(Result::is_err) {
+            return Err(format!(
+                "{}:{} is not an X Y Z point",
+                path.display(),
+                line_index + 1
+            ));
+        }
+        points.push([
+            point[0].as_ref().copied().unwrap(),
+            point[1].as_ref().copied().unwrap(),
+            point[2].as_ref().copied().unwrap(),
+        ]);
+    }
+    Ok(points)
+}
+
+fn cache_bsp_leak_path(project_dir: &Path, points: &[[i32; 3]]) -> Result<(), String> {
+    let path = cached_bsp_leak_path(project_dir);
+    if points.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("remove {}: {error}", path.display())),
+        };
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("invalid pointfile path: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    let mut text = String::new();
+    for [x, y, z] in points {
+        writeln!(text, "{x} {y} {z}").expect("writing to String cannot fail");
+    }
+    std::fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
 fn watched_resource_signatures(
     project_dir: &Path,
     project: &ProjectDocument,
@@ -780,6 +843,14 @@ pub struct EditorWorkspace {
     /// Most recent host-side PSX envelope. Before a successful cook this is
     /// the authored estimate; after it, the exact emitted-package report.
     last_playtest_budget: Option<psxed_project::playtest::PlaytestBudgetReport>,
+    /// Quake-style pointfile route from the last successful BSP cook.
+    /// This stays explicitly tied to a cook, like TrenchBroom's pointfile,
+    /// instead of pretending to be a live geometry guess.
+    last_bsp_leak_path: Vec<[i32; 3]>,
+    /// Transient visibility toggle for the last-cook pointfile overlay.
+    show_bsp_leak_path: bool,
+    /// Next point visited by the Camera menu's leak-path navigator.
+    bsp_leak_cursor: usize,
     /// One-shot request emitted by the editor UI for the frontend
     /// to handle. The frontend owns emulator state and build child
     /// processes, so the editor never launches playtest directly.
@@ -3055,6 +3126,8 @@ impl EditorWorkspace {
             .unwrap_or(UiNodeId::ROOT);
         let prefab_library = load_prefab_library().unwrap_or_default();
         let project_watch = ProjectWatchState::capture(&project_dir, &project);
+        let last_bsp_leak_path = read_cached_bsp_leak_path(&project_dir).unwrap_or_default();
+        let cached_bsp_leak_points = last_bsp_leak_path.len();
         Self {
             project,
             project_dir,
@@ -3231,10 +3304,18 @@ impl EditorWorkspace {
                     "Normalized {normalized} legacy brush{}; save to keep",
                     if normalized == 1 { "" } else { "es" },
                 )
+            } else if cached_bsp_leak_points > 0 {
+                format!(
+                    "BSP LEAK in last build: {cached_bsp_leak_points} point{}; green path shown",
+                    if cached_bsp_leak_points == 1 { "" } else { "s" },
+                )
             } else {
                 "Editor ready".to_string()
             },
             last_playtest_budget: None,
+            last_bsp_leak_path,
+            show_bsp_leak_path: true,
+            bsp_leak_cursor: 0,
             pending_playtest_request: None,
         }
     }
@@ -3428,6 +3509,20 @@ impl EditorWorkspace {
         &self.project_dir
     }
 
+    /// Pointfile route emitted by the most recent successful BSP cook.
+    pub fn bsp_leak_path(&self) -> &[[i32; 3]] {
+        &self.last_bsp_leak_path
+    }
+
+    /// Pointfile route that should currently be painted in editor viewports.
+    pub fn visible_bsp_leak_path(&self) -> &[[i32; 3]] {
+        if self.show_bsp_leak_path {
+            &self.last_bsp_leak_path
+        } else {
+            &[]
+        }
+    }
+
     /// True when the project has unsaved edits.
     pub const fn is_dirty(&self) -> bool {
         self.dirty
@@ -3551,6 +3646,10 @@ impl EditorWorkspace {
                 self.resource_delete_confirm = None;
                 self.dirty = dirty;
                 self.project_watch = ProjectWatchState::capture(&self.project_dir, &self.project);
+                self.last_bsp_leak_path =
+                    read_cached_bsp_leak_path(&self.project_dir).unwrap_or_default();
+                self.show_bsp_leak_path = true;
+                self.bsp_leak_cursor = 0;
                 self.status = sync_status
                     .unwrap_or_else(|| format!("Reloaded {}", short_path(&self.project_dir)));
                 self.select_first_room();
@@ -4138,6 +4237,15 @@ impl EditorWorkspace {
         // world geometry, and portal topology that doing this again merely for
         // the status summary makes every Play launch needlessly expensive.
         let (package, report) = psxed_project::playtest::build_package(&project, &self.project_dir);
+        let cooked_bsp_leak_path = package
+            .as_ref()
+            .and_then(|package| match &package.world_geometry {
+                psxed_project::playtest::PlaytestWorldGeometry::Pxbsp(world) => {
+                    Some(world.leak_path.clone())
+                }
+                psxed_project::playtest::PlaytestWorldGeometry::Grid => None,
+            })
+            .unwrap_or_default();
         let summary = package.as_ref().map(|p| PackageSummary {
             rooms: p.rooms.len(),
             assets: p.assets.len(),
@@ -4173,6 +4281,12 @@ impl EditorWorkspace {
                 report.error_messages().join("; ")
             ));
         }
+        self.last_bsp_leak_path = cooked_bsp_leak_path;
+        self.show_bsp_leak_path = true;
+        self.bsp_leak_cursor = 0;
+        if let Err(error) = cache_bsp_leak_path(&self.project_dir, &self.last_bsp_leak_path) {
+            eprintln!("[psxed-ui] could not cache BSP pointfile for editor overlay: {error}");
+        }
         let warning_suffix = if report.warnings.is_empty() {
             String::new()
         } else {
@@ -4180,6 +4294,14 @@ impl EditorWorkspace {
                 " ({} warning{})",
                 report.warnings.len(),
                 if report.warnings.len() == 1 { "" } else { "s" }
+            )
+        };
+        let leak_suffix = if self.last_bsp_leak_path.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; BSP LEAK: {}-point green path shown",
+                self.last_bsp_leak_path.len()
             )
         };
         let counts = summary
@@ -4227,10 +4349,11 @@ impl EditorWorkspace {
             }
         }
         Ok(format!(
-            "Playtest cooked → {}{}{}{}",
+            "Playtest cooked → {}{}{}{}{}",
             dir.display(),
             counts,
             warning_suffix,
+            leak_suffix,
             budget,
         ))
     }

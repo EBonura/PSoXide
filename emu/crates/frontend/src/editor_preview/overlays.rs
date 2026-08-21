@@ -15,6 +15,8 @@ const BSP_SURFACE_GRID_MINOR_WIDTH: f32 = 0.65;
 const BSP_SURFACE_GRID_MAJOR_WIDTH: f32 = 0.9;
 const GRID_INTERSECTION_EPSILON: f64 = 1.0 / 4096.0;
 const GRID_INTERSECTION_CAP: usize = 8;
+const BSP_LEAK_PATH_RGB: (u8, u8, u8) = (72, 236, 126);
+const BSP_LEAK_PATH_WIDTH: f32 = 2.5;
 
 struct GridIntersections {
     points: [[f64; 3]; GRID_INTERSECTION_CAP],
@@ -45,6 +47,90 @@ impl GridIntersections {
         self.points[self.len] = candidate;
         self.len += 1;
     }
+}
+
+/// Append the Quake pointfile route from an occupied leaf to the exterior.
+/// The line is opaque green to match TrenchBroom's pointfile convention and
+/// is near-clipped per segment so walking the camera along it never makes the
+/// whole diagnostic disappear when one endpoint passes behind the viewer.
+pub(super) fn append_bsp_leak_path_overlay(
+    camera: psx_engine::WorldCamera,
+    leak_path: &[[i32; 3]],
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    let color = egui::Color32::from_rgb(
+        BSP_LEAK_PATH_RGB.0,
+        BSP_LEAK_PATH_RGB.1,
+        BSP_LEAK_PATH_RGB.2,
+    );
+    for points in leak_path.windows(2) {
+        let Some((a, b)) = project_clipped_world_segment(camera, points[0], points[1]) else {
+            continue;
+        };
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        if dx * dx + dy * dy < 0.25 {
+            continue;
+        }
+        overlay_lines.push(psxed_ui::EditorViewportOverlayLine::new(
+            a,
+            b,
+            color,
+            BSP_LEAK_PATH_WIDTH,
+        ));
+    }
+}
+
+fn project_clipped_world_segment(
+    camera: psx_engine::WorldCamera,
+    a: [i32; 3],
+    b: [i32; 3],
+) -> Option<(egui::Pos2, egui::Pos2)> {
+    let world = |point: [i32; 3]| psx_engine::WorldVertex::new(point[0], point[1], point[2]);
+    let mut a = camera.view_vertex(world(a));
+    let mut b = camera.view_vertex(world(b));
+    let near = camera.projection.near_z.max(1);
+    if a.z < near && b.z < near {
+        return None;
+    }
+    if a.z < near {
+        a = view_segment_near_intersection(a, b, near)?;
+    } else if b.z < near {
+        b = view_segment_near_intersection(b, a, near)?;
+    }
+    let a = camera.projection.project_view(a)?;
+    let b = camera.projection.project_view(b)?;
+    Some((
+        egui::pos2(f32::from(a.sx), f32::from(a.sy)),
+        egui::pos2(f32::from(b.sx), f32::from(b.sy)),
+    ))
+}
+
+fn view_segment_near_intersection(
+    behind: psx_engine::ViewVertex,
+    front: psx_engine::ViewVertex,
+    near: i32,
+) -> Option<psx_engine::ViewVertex> {
+    let numerator = i64::from(near.saturating_sub(behind.z));
+    let denominator = i64::from(front.z).checked_sub(i64::from(behind.z))?;
+    if denominator <= 0 {
+        return None;
+    }
+    let interpolate = |from: i32, to: i32| {
+        i64::from(from)
+            .saturating_add(
+                i64::from(to)
+                    .saturating_sub(i64::from(from))
+                    .saturating_mul(numerator)
+                    / denominator,
+            )
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    Some(psx_engine::ViewVertex::new(
+        interpolate(behind.x, front.x),
+        interpolate(behind.y, front.y),
+        near,
+    ))
 }
 
 /// Prepend a TrenchBroom-style world grid projected onto visible BSP brush
@@ -1586,6 +1672,32 @@ pub(super) fn bright_overlay_color(rgb: (u8, u8, u8)) -> egui::Color32 {
 #[cfg(test)]
 mod surface_grid_tests {
     use super::*;
+
+    fn leak_test_camera() -> psx_engine::WorldCamera {
+        psx_engine::WorldCamera::orbit(
+            psx_engine::WorldProjection::new(160, 120, 320, 32),
+            psx_engine::WorldVertex::ZERO,
+            512,
+            psx_engine::Angle::from_q12(0),
+            psx_engine::Angle::from_q12(0),
+        )
+    }
+
+    #[test]
+    fn bsp_pointfile_draws_an_opaque_green_segment() {
+        let mut lines = Vec::new();
+        append_bsp_leak_path_overlay(leak_test_camera(), &[[-64, 0, 0], [64, 0, 0]], &mut lines);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].color, egui::Color32::from_rgb(72, 236, 126));
+        assert_eq!(lines[0].width, BSP_LEAK_PATH_WIDTH);
+    }
+
+    #[test]
+    fn bsp_pointfile_near_clips_instead_of_dropping_a_crossing_segment() {
+        let mut lines = Vec::new();
+        append_bsp_leak_path_overlay(leak_test_camera(), &[[0, 0, 600], [64, 0, 0]], &mut lines);
+        assert_eq!(lines.len(), 1);
+    }
 
     #[test]
     fn brush_grid_line_clips_to_convex_face_edges() {

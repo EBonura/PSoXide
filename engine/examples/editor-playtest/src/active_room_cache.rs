@@ -136,8 +136,7 @@ pub(super) fn build_active_room(
     let payload = parse_active_room_payload(slot, index, record)?;
     // A room entering a stream slot cannot inherit that slot's materials: they
     // belong to whichever room held it last.
-    let (materials, material_count, _all_resolved) =
-        build_runtime_room_material_table(record, &[]);
+    let (materials, material_count, _all_resolved) = build_runtime_room_material_table(record, &[]);
     let stream_slot = active_room_stream_slot(index);
     #[cfg(feature = "cd-stream-bench")]
     store_room_materials(stream_slot, materials, material_count);
