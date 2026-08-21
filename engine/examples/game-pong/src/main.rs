@@ -33,10 +33,13 @@
 
 extern crate psx_rt;
 
-use psx_engine::{button, sfx, App, Config, Ctx, Scene};
+use psx_engine::{
+    button, sfx, ActionBinding, ActionMap, App, Config, Ctx, MicrogameAction, MicrogameShell, Scene,
+};
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::RectFlat;
+use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
@@ -65,6 +68,16 @@ const BALL_START_VY: i16 = 1;
 const BALL_MAX_SPEED: i16 = 4;
 
 const WIN_SCORE: u8 = 7;
+
+const SETTINGS_FILE: &str = "BESLES-00000PONG001";
+const SETTINGS_TITLE: &str = "PSoXide Pong";
+
+const ACTION_UP: usize = 0;
+const ACTION_DOWN: usize = 1;
+const PONG_ACTIONS: ActionMap<2> = ActionMap::new([
+    ActionBinding::new(button::UP, 0),
+    ActionBinding::new(button::DOWN, 0),
+]);
 
 // ----------------------------------------------------------------------
 // VRAM layout
@@ -126,10 +139,13 @@ struct Pong {
     winner: u8,
     /// Rotates serve direction after each score.
     serve_dir: i8,
+    rally_hits: u32,
+    two_player: bool,
     /// Font atlas handle, populated in `init`. `Option` because
     /// `FontAtlas` isn't `Default` and we don't have it at struct
     /// construction time.
     font: Option<FontAtlas>,
+    shell: MicrogameShell<3>,
 }
 
 impl Pong {
@@ -145,7 +161,10 @@ impl Pong {
             ball_vy: 0,
             winner: 0,
             serve_dir: 1,
+            rally_hits: 0,
+            two_player: false,
             font: None,
+            shell: MicrogameShell::new(Profile::new(psx_engine::ActionMap::new([]))),
         }
     }
 
@@ -158,6 +177,7 @@ impl Pong {
         self.p2_score = 0;
         self.winner = 0;
         self.serve_dir = 1;
+        self.rally_hits = 0;
         self.reset_ball();
     }
 
@@ -178,6 +198,22 @@ impl Pong {
             self.winner = 2;
         }
         self.reset_ball();
+    }
+
+    fn apply_shell_settings(&self) {
+        let volume = Volume::linear(self.shell.profile().sfx_volume as u16, 100);
+        spu::set_main_volume(volume, volume);
+    }
+
+    fn persist_shell(&mut self) {
+        if !self.shell.take_dirty() {
+            return;
+        }
+        self.apply_shell_settings();
+        if psx_settings::save_slot_one(SETTINGS_FILE, SETTINGS_TITLE, self.shell.profile()).is_err()
+        {
+            self.shell.mark_dirty();
+        }
     }
 }
 
@@ -235,35 +271,58 @@ impl Scene for Pong {
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
 
+        if let Ok(profile) = psx_settings::load_slot_one(SETTINGS_FILE) {
+            self.shell.set_profile(profile);
+        }
+        self.apply_shell_settings();
+
         self.reset_match();
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
-        // Post-match: any START press resets.
-        if self.winner != 0 {
-            if ctx.just_pressed(button::START) {
+        match self.shell.update(ctx) {
+            MicrogameAction::Start | MicrogameAction::Restart => {
                 self.reset_match();
+                self.persist_shell();
             }
+            MicrogameAction::ReturnToTitle => self.persist_shell(),
+            MicrogameAction::None | MicrogameAction::Resume => {}
+        }
+        if !self.shell.is_playing() {
             return;
         }
 
+        ctx.refresh_second_pad();
+        self.two_player = ctx.pad_for(1).is_connected();
+
         // Player paddle follows D-pad (held, so motion is smooth).
-        if ctx.is_held(button::UP) {
+        let p1 = ctx.actions(0, &PONG_ACTIONS);
+        if p1.held(ACTION_UP) {
             self.p1_y -= PADDLE_SPEED;
         }
-        if ctx.is_held(button::DOWN) {
+        if p1.held(ACTION_DOWN) {
             self.p1_y += PADDLE_SPEED;
         }
         clamp_paddle(&mut self.p1_y);
 
-        // AI paddle tracks ball Y with hysteresis so it doesn't
-        // micro-oscillate when aligned.
-        let target = self.ball_y + (BALL_SIZE as i16 / 2);
-        let paddle_mid = self.p2_y + (PADDLE_H as i16 / 2);
-        if target < paddle_mid - AI_HYSTERESIS {
-            self.p2_y -= AI_SPEED;
-        } else if target > paddle_mid + AI_HYSTERESIS {
-            self.p2_y += AI_SPEED;
+        if self.two_player {
+            let p2 = ctx.actions(1, &PONG_ACTIONS);
+            if p2.held(ACTION_UP) {
+                self.p2_y -= PADDLE_SPEED;
+            }
+            if p2.held(ACTION_DOWN) {
+                self.p2_y += PADDLE_SPEED;
+            }
+        } else {
+            // AI speed is the common shell's selected difficulty.
+            let ai_speed = [1, AI_SPEED, 3][self.shell.difficulty().min(2)];
+            let target = self.ball_y + (BALL_SIZE as i16 / 2);
+            let paddle_mid = self.p2_y + (PADDLE_H as i16 / 2);
+            if target < paddle_mid - AI_HYSTERESIS {
+                self.p2_y -= ai_speed;
+            } else if target > paddle_mid + AI_HYSTERESIS {
+                self.p2_y += ai_speed;
+            }
         }
         clamp_paddle(&mut self.p2_y);
 
@@ -293,6 +352,7 @@ impl Scene for Pong {
             self.ball_x = left_face;
             self.ball_vx = bounce_speed(-self.ball_vx);
             self.ball_vy = spin_from_paddle(self.ball_y, self.p1_y, self.ball_vy);
+            self.rally_hits = self.rally_hits.saturating_add(1);
             sfx::play(VOICE_PADDLE);
         }
 
@@ -307,6 +367,7 @@ impl Scene for Pong {
             self.ball_x = right_face - BALL_SIZE as i16;
             self.ball_vx = -bounce_speed(self.ball_vx);
             self.ball_vy = spin_from_paddle(self.ball_y, self.p2_y, self.ball_vy);
+            self.rally_hits = self.rally_hits.saturating_add(1);
             sfx::play(VOICE_PADDLE);
         }
 
@@ -321,6 +382,10 @@ impl Scene for Pong {
             self.serve_dir = 1;
             sfx::play(VOICE_SCORE);
             self.check_win_and_reset();
+        }
+        if self.winner != 0 {
+            self.shell.finish(self.rally_hits);
+            self.persist_shell();
         }
     }
 
@@ -408,26 +473,10 @@ impl Pong {
         font.draw_text(SCREEN_W - 60 - 8, 6, p2.as_str(), (220, 220, 240));
         font.draw_text(24, 6, "P1", (140, 180, 255));
         font.draw_text(SCREEN_W - 24 - 8 * 2, 6, "P2", (255, 180, 140));
-
-        if self.winner != 0 {
-            let msg = if self.winner == 1 {
-                "P1 WINS!"
-            } else {
-                "P2 WINS!"
-            };
-            font.draw_text(
-                (SCREEN_W - 8 * 8) / 2,
-                (SCREEN_H - 16) / 2,
-                msg,
-                (255, 230, 120),
-            );
-            font.draw_text(
-                (SCREEN_W - 17 * 8) / 2,
-                (SCREEN_H - 16) / 2 + 24,
-                "START to play again",
-                (160, 160, 180),
-            );
+        if self.two_player && self.shell.is_playing() {
+            font.draw_text((SCREEN_W - 8 * 7) / 2, 6, "2P MODE", (140, 220, 170));
         }
+        self.shell.draw(font, "PONG");
     }
 }
 
