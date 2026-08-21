@@ -45,6 +45,9 @@ const MAX_FACE_COUNT: usize = 32_767;
 /// than the whole map (E1M1 is 484/5,724); vectors may still grow for denser
 /// maps without permanently reserving two complete face tables on PS1.
 const PXBSP_NODE_POSTORDER: u32 = 1 << 31;
+const PXBSP_FRAME_NODE_BACK: u8 = 1;
+const PXBSP_FRAME_NODE_FRONT: u8 = 2;
+const PXBSP_FRAME_FALLBACK: u8 = 3;
 
 #[inline]
 fn packed_face_state(states: &[u8], index: usize) -> u8 {
@@ -455,6 +458,10 @@ pub struct Renderer {
     visible_pxbsp_faces: Vec<u16>,
     /// Per-frame subset left after hierarchical node-frustum rejection.
     frame_pxbsp_faces: Vec<u16>,
+    /// Two-bit per-face frame selection: 0 hidden, 1/2 node-owned back/front,
+    /// 3 leaf/staticized fallback. The node states retain the camera-side
+    /// result Quake computes once for every coplanar node surface.
+    frame_pxbsp_face_state: Vec<u8>,
     /// Cached PVS reachability for the compact PXBSP render tree.
     pxbsp_node_visible: Vec<u8>,
     pxbsp_node_discovered: Vec<u8>,
@@ -510,6 +517,7 @@ impl Renderer {
         renderer.pxbsp_face_count = face_count;
         renderer.visible_pxbsp_faces = Vec::with_capacity(chain_capacity);
         renderer.frame_pxbsp_faces = Vec::with_capacity(chain_capacity);
+        renderer.frame_pxbsp_face_state = vec![0; face_count.div_ceil(4)];
         renderer.pxbsp_node_visible = vec![0; node_count.div_ceil(8)];
         renderer.pxbsp_node_discovered = vec![0; node_count.div_ceil(8)];
         renderer.pxbsp_node_count = node_count;
@@ -531,6 +539,7 @@ impl Renderer {
             pxbsp_face_count: 0,
             visible_pxbsp_faces: Vec::new(),
             frame_pxbsp_faces: Vec::new(),
+            frame_pxbsp_face_state: Vec::new(),
             pxbsp_node_visible: Vec::new(),
             pxbsp_node_discovered: Vec::new(),
             pxbsp_node_count: 0,
@@ -816,9 +825,9 @@ impl Renderer {
         scene::load_translation(translation);
         let frustum = FrustumPlanes::from_view(&rotation, translation, self.view_projection);
 
-        // ponytail: the first mover slice scans its bounded face range. The
-        // recursive near/far node walker with bounds culling replaces this
-        // together with the world's current PVS-mark scan.
+        // Quake-PSX R_DrawBrushModel also scans the brush model's bounded
+        // surface slice and performs its plane-side test per face. World-node
+        // plane reuse does not apply to this transformed mover path.
         let frame = self.draw_pxbsp_faces(
             map,
             local_camera,
@@ -876,11 +885,19 @@ impl Renderer {
                 stats.unresolved_material_faces = stats.unresolved_material_faces.saturating_add(1);
                 continue;
             };
-            if !pxbsp_face_draws(
-                material,
-                face.flags,
-                front_facing_pxbsp(map, face, camera_origin),
-            ) {
+            let authored_front = match selection {
+                PxbspFaceSelection::VisibleWorld => {
+                    match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
+                        PXBSP_FRAME_NODE_BACK => false,
+                        PXBSP_FRAME_NODE_FRONT => true,
+                        _ => front_facing_pxbsp(map, face, camera_origin),
+                    }
+                }
+                PxbspFaceSelection::ModelRange { .. } => {
+                    front_facing_pxbsp(map, face, camera_origin)
+                }
+            };
+            if !pxbsp_face_draws(material, face.flags, authored_front) {
                 continue;
             }
 
@@ -1469,8 +1486,18 @@ impl Renderer {
         camera_origin: Vec3I32,
         frustum: &FrustumPlanes,
     ) -> bool {
+        for &face in &self.frame_pxbsp_faces {
+            set_packed_face_state(&mut self.frame_pxbsp_face_state, face as usize, 0);
+        }
         self.frame_pxbsp_faces.clear();
         if !self.pxbsp_node_metadata_valid {
+            for &face in &self.visible_pxbsp_faces {
+                set_packed_face_state(
+                    &mut self.frame_pxbsp_face_state,
+                    face as usize,
+                    PXBSP_FRAME_FALLBACK,
+                );
+            }
             self.frame_pxbsp_faces
                 .extend_from_slice(&self.visible_pxbsp_faces);
             return true;
@@ -1522,7 +1549,11 @@ impl Renderer {
                                 .get(mark_index)
                                 .expect("validated leaf mark") as usize;
                         if packed_face_state(&self.pxbsp_face_state, face) != 0 {
-                            self.frame_pxbsp_faces.push(face as u16);
+                            set_packed_face_state(
+                                &mut self.frame_pxbsp_face_state,
+                                face,
+                                PXBSP_FRAME_FALLBACK,
+                            );
                         }
                     }
                 }
@@ -1532,7 +1563,19 @@ impl Renderer {
             let end = start + node.face_count as usize;
             for face in start..end {
                 if packed_face_state(&self.pxbsp_face_state, face) != 0 {
-                    self.frame_pxbsp_faces.push(face as u16);
+                    let authored_front = behind
+                        == (map.faces().get(face).expect("validated node face").flags
+                            & FACE_BACKSIDE
+                            != 0);
+                    set_packed_face_state(
+                        &mut self.frame_pxbsp_face_state,
+                        face,
+                        if authored_front {
+                            PXBSP_FRAME_NODE_FRONT
+                        } else {
+                            PXBSP_FRAME_NODE_BACK
+                        },
+                    );
                 }
             }
         }
@@ -1542,12 +1585,22 @@ impl Renderer {
             // mark lists and do not belong to world-node face ranges.
             for &face in &self.visible_pxbsp_faces {
                 if packed_face_state(&self.pxbsp_face_state, face as usize) == 1 {
-                    self.frame_pxbsp_faces.push(face);
+                    set_packed_face_state(
+                        &mut self.frame_pxbsp_face_state,
+                        face as usize,
+                        PXBSP_FRAME_FALLBACK,
+                    );
                 }
             }
         }
-        self.frame_pxbsp_faces.sort_unstable();
-        self.frame_pxbsp_faces.dedup();
+        // The persistent PVS chain is already sorted and unique. Filtering it
+        // through packed frame marks preserves the established packet order
+        // without Quake's per-frame linked-list rebuild or a comparison sort.
+        for &face in &self.visible_pxbsp_faces {
+            if packed_face_state(&self.frame_pxbsp_face_state, face as usize) != 0 {
+                self.frame_pxbsp_faces.push(face);
+            }
+        }
         true
     }
 }
@@ -2056,6 +2109,10 @@ mod tests {
         );
 
         assert_eq!(packed_face_state(&renderer.pxbsp_face_state, 0), 2);
+        assert_eq!(
+            packed_face_state(&renderer.frame_pxbsp_face_state, 0),
+            PXBSP_FRAME_NODE_FRONT
+        );
         assert_eq!(frame.stats.visible_faces, 1);
         assert_eq!(frame.stats.unresolved_material_faces, 0);
         assert!(frame.stats.packets > 0);
@@ -2150,6 +2207,7 @@ mod tests {
         assert!(renderer.visible_pxbsp_faces.capacity() >= 37);
         assert_eq!(renderer.frame_pxbsp_faces.len(), 0);
         assert!(renderer.frame_pxbsp_faces.capacity() >= 37);
+        assert_eq!(renderer.frame_pxbsp_face_state.len(), 10);
         assert_eq!(renderer.pxbsp_node_visible.len(), 2);
         assert_eq!(renderer.pxbsp_node_discovered.len(), 2);
         assert!(renderer.alias_projected.is_empty());
@@ -2198,6 +2256,10 @@ mod tests {
             FrustumPlanes::from_view(&view.rotation, view.translation, renderer.view_projection);
         assert!(renderer.select_frame_pxbsp_faces(&map, camera.origin, &frustum));
         assert_eq!(renderer.frame_pxbsp_faces, [0]);
+        assert_eq!(
+            packed_face_state(&renderer.frame_pxbsp_face_state, 0),
+            PXBSP_FRAME_FALLBACK
+        );
     }
 
     #[test]
