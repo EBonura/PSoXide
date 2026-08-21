@@ -82,10 +82,11 @@ pub mod world_render;
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
-    commit_body_step, commit_body_step_with_trace_provider, BodyStep,
-    CharacterBlockerTraceProvider, CharacterCollision, CharacterCollisionAabb,
-    CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAction, CharacterMotorAnim,
-    CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
+    commit_body_direction_with_trace_provider, commit_body_step,
+    commit_body_step_with_trace_provider, BodyStep, CharacterBlockerTraceProvider,
+    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
+    CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
+    CharacterMotorInput, CharacterMotorState,
 };
 pub use classic_affine::{
     compose_classic_alias_transform, materialize_classic_affine_indexed_projected_vertices,
