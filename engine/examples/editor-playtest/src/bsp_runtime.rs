@@ -18,12 +18,12 @@ use psx_bsp::pxbsp_resident::{PxbspMapLoadError, PxbspResidentMap};
 use psx_bsp::render::{load_pxbsp_view, Camera, PxbspTextureBinding, Renderer};
 use psx_bsp::{SliceReadError, Vec3I32};
 use psx_engine::{
-    commit_body_step_with_trace_provider, trace_collision, BodyStep, CharacterBlockerTraceProvider,
-    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame,
-    CharacterMotorInput, CharacterMotorState, CollisionQueryError, CollisionTraceQuery,
-    CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig,
-    ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, WorldCamera,
+    commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
+    trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
+    CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
+    CharacterMotorState, CollisionQueryError, CollisionTraceQuery, CollisionTraceShape, OtFrame,
+    PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_level::{find_asset_of_kind, AssetId, AssetKind};
 
@@ -500,6 +500,38 @@ impl BspRuntime {
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
         commit_body_step_with_trace_provider(&mut provider, start, dx, dz, radius, height)
+    }
+
+    /// Probe one Quake-style monster direction without the player's internal
+    /// axis-slide retries. The chase search owns the cardinal alternatives.
+    pub(super) fn commit_body_direction(
+        &mut self,
+        start: RoomPoint,
+        dx: i32,
+        dz: i32,
+        radius: i32,
+        height: i32,
+        blockers: &[CharacterCollisionCylinder],
+        aabb_blockers: &[CharacterCollisionAabb],
+    ) -> Result<BodyStep, CollisionQueryError> {
+        let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
+        let count = self.collision_models(&mut models);
+        let radius = radius.max(0);
+        let height = height.max(1);
+        let shape = CollisionTraceShape::Body { radius, height };
+        let hull_index =
+            select_body_hull(PXBSP_BODY_HULLS, radius, height).ok_or(CollisionQueryError)?;
+        let mut provider = PxbspCollisionProvider::new(
+            &self.map,
+            hull_index,
+            &models[..count],
+            shape,
+            &mut self.trace_scratch,
+        )
+        .expect("validated PXBSP entity collision provider");
+        let mut provider =
+            CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, blockers, aabb_blockers);
+        commit_body_direction_with_trace_provider(&mut provider, start, dx, dz, radius, height)
     }
 
     /// Whether a melee contact segment between two actor positions is free of
