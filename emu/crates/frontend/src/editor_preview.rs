@@ -97,10 +97,9 @@ const MAX_PREVIEW_MODEL_INSTANCES: usize = 8;
 /// editor-playtest also renders here.
 const PREVIEW_JOINT_CAP: usize = 32;
 /// Ordering-table depth -- tradeoff between Z resolution and the
-/// per-frame chain-walk cost. 256 slots is plenty for an orbit-camera
-/// view where the front-to-back range is a small multiple of the
-/// sector size.
-const OT_DEPTH: usize = 256;
+/// per-frame chain-walk cost. Brush-heavy close views need finer buckets than
+/// the original 64-world-unit bands or adjacent trims can swap order.
+const OT_DEPTH: usize = 4096;
 const PREVIEW_GEOMETRY_SLOT_MIN: usize = 1;
 const PREVIEW_CLEAR_SLOT: usize = OT_DEPTH - 1;
 const PREVIEW_SKY_SLOT: usize = OT_DEPTH - 2;
@@ -491,6 +490,7 @@ pub fn build_phase1_frame_reusing(
     if show_lights {
         walk_roomless_light_gizmos(
             project,
+            world_camera,
             hidden_scene_nodes,
             selected,
             hovered_entity_node,
@@ -609,6 +609,7 @@ pub fn build_phase1_frame_reusing(
         if show_lights {
             walk_light_gizmos(
                 project,
+                world_camera,
                 room_id,
                 grid,
                 floor_index,
@@ -1387,7 +1388,6 @@ pub(crate) struct PreviewBrushBounds {
 struct PreviewSolvedBrush {
     faces: Vec<PreviewSolvedFace>,
     all_planes: Vec<psxed_project::brush::Plane>,
-    bounds: Option<PreviewBrushBounds>,
     pickable: bool,
 }
 
@@ -1403,6 +1403,24 @@ struct PreviewSolvedBrushCache {
 
 static SOLVED_BRUSH_CACHE: OnceLock<Mutex<PreviewSolvedBrushCache>> = OnceLock::new();
 
+/// Exterior brush-union surface used by the material preview. Raw editable
+/// brushes may overlap, but submitting every authored face independently is
+/// not renderable with a PS1 painter's algorithm: two faces can exchange
+/// front/back order inside one triangle. The cook already solves that with
+/// union CSG, so the editor caches the same split exterior polygons and keeps
+/// raw solved brushes only for picking, grids, and selection outlines.
+struct PreviewCsgSurface {
+    surface: psxed_project::brush_compile::CompiledSurface,
+    bounds: PreviewBrushBounds,
+}
+
+struct PreviewCsgCache {
+    key: Option<u64>,
+    surfaces: Vec<PreviewCsgSurface>,
+}
+
+static CSG_SURFACE_CACHE: OnceLock<Mutex<PreviewCsgCache>> = OnceLock::new();
+
 fn solved_brush_geometry_key(project: &ProjectDocument) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1417,6 +1435,97 @@ fn solved_brush_geometry_key(project: &ProjectDocument) -> u64 {
     hasher.finish()
 }
 
+fn csg_surface_key(project: &ProjectDocument, hidden_scene_nodes: &HashSet<NodeId>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let scene = project.active_scene();
+    scene.brushes.len().hash(&mut hasher);
+    for brush in &scene.brushes {
+        brush_group_hidden(scene, hidden_scene_nodes, brush).hash(&mut hasher);
+        brush.contents.label().hash(&mut hasher);
+        brush.mover.map(NodeId::raw).hash(&mut hasher);
+        brush.faces.len().hash(&mut hasher);
+        for face in &brush.faces {
+            face.points.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn surface_bounds(vertices: &[[f64; 3]]) -> PreviewBrushBounds {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for vertex in vertices {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(vertex[axis]);
+            max[axis] = max[axis].max(vertex[axis]);
+        }
+    }
+    PreviewBrushBounds { min, max }
+}
+
+fn rebuild_csg_surfaces(
+    project: &ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+) -> Vec<PreviewCsgSurface> {
+    use psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT;
+    let scene = project.active_scene();
+    let mut groups: Vec<(Option<NodeId>, Vec<(usize, psxed_project::brush::Brush)>)> = Vec::new();
+    for (source_index, brush) in scene.brushes.iter().enumerate() {
+        if brush_group_hidden(scene, hidden_scene_nodes, brush) {
+            continue;
+        }
+        let solved = brush.solve();
+        if !solved.is_valid() || !solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT) {
+            continue;
+        }
+        let group = if let Some(group) = groups.iter_mut().find(|entry| entry.0 == brush.mover) {
+            group
+        } else {
+            groups.push((brush.mover, Vec::new()));
+            groups.last_mut().expect("just pushed CSG group")
+        };
+        group.1.push((source_index, brush.clone()));
+    }
+
+    let mut output = Vec::new();
+    for (_, brushes) in groups {
+        let source_indices: Vec<_> = brushes.iter().map(|entry| entry.0).collect();
+        let local_brushes: Vec<_> = brushes.into_iter().map(|entry| entry.1).collect();
+        for mut surface in psxed_project::brush_compile::compile_csg_surfaces(&local_brushes) {
+            let Some(&source_brush) = source_indices.get(surface.source_brush) else {
+                continue;
+            };
+            surface.source_brush = source_brush;
+            output.push(PreviewCsgSurface {
+                bounds: surface_bounds(&surface.vertices),
+                surface,
+            });
+        }
+    }
+    output
+}
+
+fn with_cached_csg_surfaces<R>(
+    project: &ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    visit: impl FnOnce(&[PreviewCsgSurface]) -> R,
+) -> R {
+    let key = csg_surface_key(project, hidden_scene_nodes);
+    let cache = CSG_SURFACE_CACHE.get_or_init(|| {
+        Mutex::new(PreviewCsgCache {
+            key: None,
+            surfaces: Vec::new(),
+        })
+    });
+    let mut cache = cache.lock().expect("preview CSG surface cache");
+    if cache.key != Some(key) {
+        cache.surfaces = rebuild_csg_surfaces(project, hidden_scene_nodes);
+        cache.key = Some(key);
+    }
+    visit(&cache.surfaces)
+}
+
 fn rebuild_solved_brushes(project: &ProjectDocument) -> Vec<PreviewSolvedBrush> {
     use psxed_project::brush::{Plane, BRUSH_EDIT_EXTENT_LIMIT};
     project
@@ -1426,13 +1535,6 @@ fn rebuild_solved_brushes(project: &ProjectDocument) -> Vec<PreviewSolvedBrush> 
         .map(|brush| {
             let solved = brush.solve();
             let pickable = solved.is_valid() && solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT);
-            let bounds =
-                solved
-                    .within_extent(BRUSH_EDIT_EXTENT_LIMIT)
-                    .then_some(PreviewBrushBounds {
-                        min: solved.min,
-                        max: solved.max,
-                    });
             let faces = solved
                 .polygons
                 .into_iter()
@@ -1455,7 +1557,6 @@ fn rebuild_solved_brushes(project: &ProjectDocument) -> Vec<PreviewSolvedBrush> 
             PreviewSolvedBrush {
                 faces,
                 all_planes,
-                bounds,
                 pickable,
             }
         })
@@ -1497,17 +1598,14 @@ pub(super) fn with_cached_solved_brush_faces(
     });
 }
 
-/// Solve + subdivide + shadow-bake output for one authored face.
-struct PreviewLitFace {
-    face_index: usize,
+/// Subdivided + shadow-baked output for one exterior CSG surface.
+struct PreviewLitSurface {
+    source_brush: usize,
+    source_face: usize,
     plane: psxed_project::brush::Plane,
+    bounds: PreviewBrushBounds,
     /// `(patch polygon, per-vertex baked colour)` pairs.
     patches: Vec<(Vec<[f64; 3]>, Vec<(u8, u8, u8)>)>,
-}
-
-struct PreviewLitBrush {
-    bounds: Option<PreviewBrushBounds>,
-    faces: Vec<PreviewLitFace>,
 }
 
 /// Lit brush geometry reused across frames: solving, subdividing and
@@ -1517,7 +1615,7 @@ struct PreviewLitBrush {
 /// the bake and pays only projection.
 struct PreviewLitCache {
     key: Option<u64>,
-    brushes: Vec<PreviewLitBrush>,
+    surfaces: Vec<PreviewLitSurface>,
 }
 
 static LIT_CACHE: OnceLock<Mutex<PreviewLitCache>> = OnceLock::new();
@@ -1530,11 +1628,14 @@ fn lit_preview_key(
     project: &ProjectDocument,
     textures: &EditorTextures,
     lights: &[psxed_project::brush_light::BrushPointLight],
+    hidden_scene_nodes: &HashSet<NodeId>,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for brush in &project.active_scene().brushes {
+        brush_group_hidden(project.active_scene(), hidden_scene_nodes, brush).hash(&mut hasher);
         brush.contents.label().hash(&mut hasher);
+        brush.mover.map(NodeId::raw).hash(&mut hasher);
         brush.faces.len().hash(&mut hasher);
         for (face_index, face) in brush.faces.iter().enumerate() {
             face.points.hash(&mut hasher);
@@ -1562,11 +1663,12 @@ fn lit_preview_key(
     hasher.finish()
 }
 
-fn rebuild_lit_brushes(
+fn rebuild_lit_surfaces(
     project: &ProjectDocument,
     textures: &EditorTextures,
     lights: &[psxed_project::brush_light::BrushPointLight],
-) -> Vec<PreviewLitBrush> {
+    hidden_scene_nodes: &HashSet<NodeId>,
+) -> Vec<PreviewLitSurface> {
     // Shadow occluders mirror the cook's set (every solid brush), with
     // one editor-only guard: mid-edit damaged/unbounded brushes are
     // skipped, otherwise an infinite wedge occludes every segment and
@@ -1579,67 +1681,63 @@ fn rebuild_lit_brushes(
             .filter(|(brush, solved)| brush.contents.is_solid() && solved.pickable)
             .map(|(_, solved)| solved.all_planes.clone())
             .collect();
-        brushes
-            .iter()
-            .zip(solved_brushes)
-            .map(|(brush, solved)| PreviewLitBrush {
-                bounds: solved.bounds,
-                faces: solved
-                    .faces
-                    .iter()
-                    .filter_map(|solved_face| {
-                        let face_index = solved_face.face_index;
-                        let face = brush.faces.get(face_index)?;
-                        let (normal, _) =
-                            psxed_project::brush_compile::normalized_plane(solved_face.plane);
-                        let shade = face_shade(
-                            project,
-                            face.material,
-                            brush_fallback_color(face_index),
-                            textures,
-                        );
-                        let tint = match shade {
-                            FaceShade::Flat { rgb, .. } => [rgb.0, rgb.1, rgb.2],
-                            FaceShade::Textured { tint, .. } => [tint.0, tint.1, tint.2],
-                        };
-                        // The cook subdivides EVERY face to the qbsp-parity
-                        // extent cap (lights or not); the preview must render
-                        // the SAME patches or mid-face light features fall
-                        // between the authored corners and vanish, and the
-                        // preview==cook invariant breaks.
-                        let patches = psxed_project::brush_compile::subdivide_polygon_for_lighting(
-                            solved_face.verts.clone(),
-                            psxed_project::brush_compile::SURFACE_EXTENT_UNITS,
-                            &[([0.0; 3], f64::INFINITY)],
-                        )
-                        .into_iter()
-                        .map(|verts| {
-                            let colors = verts
-                                .iter()
-                                .map(|&vertex| {
-                                    let color = psxed_project::brush_light::lit_point_color(
-                                        vertex,
-                                        normal,
-                                        tint,
-                                        PXBSP_PREVIEW_AMBIENT,
-                                        lights,
-                                        &occluders,
-                                    );
-                                    (color[0], color[1], color[2])
-                                })
-                                .collect();
-                            (verts, colors)
-                        })
-                        .collect();
-                        Some(PreviewLitFace {
-                            face_index,
-                            plane: solved_face.plane,
-                            patches,
-                        })
+        with_cached_csg_surfaces(project, hidden_scene_nodes, |surfaces| {
+            surfaces
+                .iter()
+                .filter_map(|cached| {
+                    let surface = &cached.surface;
+                    let brush = brushes.get(surface.source_brush)?;
+                    let face = brush.faces.get(surface.source_face)?;
+                    let (normal, _) = psxed_project::brush_compile::normalized_plane(surface.plane);
+                    let shade = face_shade(
+                        project,
+                        face.material,
+                        brush_fallback_color(surface.source_face),
+                        textures,
+                    );
+                    let tint = match shade {
+                        FaceShade::Flat { rgb, .. } => [rgb.0, rgb.1, rgb.2],
+                        FaceShade::Textured { tint, .. } => [tint.0, tint.1, tint.2],
+                    };
+                    // The cook subdivides EVERY face to the qbsp-parity
+                    // extent cap (lights or not); the preview must render
+                    // the SAME patches or mid-face light features fall
+                    // between the authored corners and vanish, and the
+                    // preview==cook invariant breaks.
+                    let patches = psxed_project::brush_compile::subdivide_polygon_for_lighting(
+                        surface.vertices.clone(),
+                        psxed_project::brush_compile::SURFACE_EXTENT_UNITS,
+                        &[([0.0; 3], f64::INFINITY)],
+                    )
+                    .into_iter()
+                    .map(|verts| {
+                        let colors = verts
+                            .iter()
+                            .map(|&vertex| {
+                                let color = psxed_project::brush_light::lit_point_color(
+                                    vertex,
+                                    normal,
+                                    tint,
+                                    PXBSP_PREVIEW_AMBIENT,
+                                    lights,
+                                    &occluders,
+                                );
+                                (color[0], color[1], color[2])
+                            })
+                            .collect();
+                        (verts, colors)
                     })
-                    .collect(),
-            })
-            .collect()
+                    .collect();
+                    Some(PreviewLitSurface {
+                        source_brush: surface.source_brush,
+                        source_face: surface.source_face,
+                        plane: surface.plane,
+                        bounds: cached.bounds,
+                        patches,
+                    })
+                })
+                .collect()
+        })
     })
 }
 
@@ -1716,6 +1814,7 @@ fn emit_brush_patch(
     }
     let clipped = clip_preview_brush_polygon(camera.projection, &clip_vertices[..verts.len()]);
     let clipped = clipped.as_slice();
+    let surface_slot = clipped_surface_depth_slot(clipped);
     let Some(anchor) = clipped
         .first()
         .and_then(|vertex| vertex.projected(camera.projection))
@@ -1734,10 +1833,17 @@ fn emit_brush_patch(
         };
         let p = [anchor.0, previous.0, current.0];
         let uvs = [anchor.1, previous.1, current.1];
-        let _ = match colors {
-            Some(_) => emit_face_tri_lit(scratch, p, uvs, shade, [anchor.2, previous.2, current.2]),
-            None => emit_face_tri(scratch, p, uvs, shade),
+        let tri_colors = match colors {
+            Some(_) => [anchor.2, previous.2, current.2],
+            None => {
+                let color = match shade {
+                    FaceShade::Flat { rgb, .. } => rgb,
+                    FaceShade::Textured { tint, .. } => tint,
+                };
+                [color; 3]
+            }
         };
+        let _ = emit_face_tri_lit_at_slot(scratch, p, uvs, shade, tri_colors, surface_slot);
         previous = current;
     }
 }
@@ -1768,91 +1874,81 @@ fn walk_brushes_with_culling(
     let lights = collect_bsp_preview_bake_lights(project, hidden_scene_nodes);
     let scene = project.active_scene();
     if lights.is_empty() {
-        with_cached_solved_brushes(project, |solved_brushes| {
-            for (brush, solved) in project.active_scene().brushes.iter().zip(solved_brushes) {
+        with_cached_csg_surfaces(project, hidden_scene_nodes, |surfaces| {
+            for cached in surfaces {
                 if scratch.geometry_full() {
                     break;
                 }
-                if brush_group_hidden(scene, hidden_scene_nodes, brush) {
+                if cull_brush_bounds && !preview_brush_bounds_visible(camera, cached.bounds) {
                     continue;
                 }
-                if cull_brush_bounds
-                    && solved
-                        .bounds
-                        .is_some_and(|bounds| !preview_brush_bounds_visible(camera, bounds))
-                {
+                let surface = &cached.surface;
+                let Some(brush) = scene.brushes.get(surface.source_brush) else {
                     continue;
-                }
-                for solved_face in &solved.faces {
-                    let face_index = solved_face.face_index;
-                    let face = &brush.faces[face_index];
-                    let shade = face_shade(
-                        project,
-                        face.material,
-                        brush_fallback_color(face_index),
-                        textures,
-                    );
-                    emit_brush_patch(
-                        scratch,
-                        camera,
-                        &solved_face.plane,
-                        &face.uv,
-                        shade,
-                        &solved_face.verts,
-                        None,
-                    );
-                }
+                };
+                let Some(face) = brush.faces.get(surface.source_face) else {
+                    continue;
+                };
+                let shade = face_shade(
+                    project,
+                    face.material,
+                    brush_fallback_color(surface.source_face),
+                    textures,
+                );
+                emit_brush_patch(
+                    scratch,
+                    camera,
+                    &surface.plane,
+                    &face.uv,
+                    shade,
+                    &surface.vertices,
+                    None,
+                );
             }
         });
         return;
     }
-    let key = lit_preview_key(project, textures, &lights);
+    let key = lit_preview_key(project, textures, &lights, hidden_scene_nodes);
     let cache = LIT_CACHE.get_or_init(|| {
         Mutex::new(PreviewLitCache {
             key: None,
-            brushes: Vec::new(),
+            surfaces: Vec::new(),
         })
     });
     let mut cache = cache.lock().expect("preview lit cache");
     if cache.key != Some(key) {
-        cache.brushes = rebuild_lit_brushes(project, textures, &lights);
+        cache.surfaces = rebuild_lit_surfaces(project, textures, &lights, hidden_scene_nodes);
         cache.key = Some(key);
     }
-    for (brush, lit_brush) in project.active_scene().brushes.iter().zip(&cache.brushes) {
+    for lit_surface in &cache.surfaces {
         if scratch.geometry_full() {
             break;
         }
-        if brush_group_hidden(scene, hidden_scene_nodes, brush) {
+        if cull_brush_bounds && !preview_brush_bounds_visible(camera, lit_surface.bounds) {
             continue;
         }
-        if cull_brush_bounds
-            && lit_brush
-                .bounds
-                .is_some_and(|bounds| !preview_brush_bounds_visible(camera, bounds))
-        {
+        let Some(brush) = scene.brushes.get(lit_surface.source_brush) else {
             continue;
-        }
-        for lit_face in &lit_brush.faces {
-            let Some(face) = brush.faces.get(lit_face.face_index) else {
-                continue;
-            };
-            let shade = face_shade(
-                project,
-                face.material,
-                brush_fallback_color(lit_face.face_index),
-                textures,
+        };
+        let Some(face) = brush.faces.get(lit_surface.source_face) else {
+            continue;
+        };
+        let shade = face_shade(
+            project,
+            face.material,
+            brush_fallback_color(lit_surface.source_face),
+            textures,
+        );
+        for (verts, colors) in &lit_surface.patches {
+            emit_brush_patch(
+                scratch,
+                camera,
+                &lit_surface.plane,
+                &face.uv,
+                shade,
+                verts,
+                Some(colors),
             );
-            for (verts, colors) in &lit_face.patches {
-                emit_brush_patch(
-                    scratch,
-                    camera,
-                    &lit_face.plane,
-                    &face.uv,
-                    shade,
-                    verts,
-                    Some(colors),
-                );
-            }
         }
     }
 }

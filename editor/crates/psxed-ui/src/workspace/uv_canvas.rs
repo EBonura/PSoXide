@@ -262,7 +262,17 @@ impl EditorWorkspace {
 
         // Scroll zoom about the hovered texel.
         if response.hovered() {
-            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            // The canvas is nested inside the Inspector's vertical
+            // ScrollArea. Take ownership of the smoothed wheel delta before
+            // that parent closes its content UI; otherwise the same gesture
+            // zooms the UVs and scrolls the whole Inspector at once. Clear
+            // both axes because egui intentionally folds horizontal wheel
+            // input into the only enabled direction for a vertical area.
+            let scroll = ui.input_mut(|input| {
+                let scroll = input.smooth_scroll_delta.y;
+                input.smooth_scroll_delta = Vec2::ZERO;
+                scroll
+            });
             if scroll.abs() > 0.1 {
                 if let Some(pointer) = response.hover_pos() {
                     let before = screen_to_texel(&view, rect, pointer);
