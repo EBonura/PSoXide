@@ -16,6 +16,7 @@ dependencies = [
  "psx-font",
  "psx-gpu",
  "psx-rt",
+ "psx-settings",
  "psx-spu",
  "psx-vram",
 ]
@@ -41,6 +42,7 @@ dependencies = [
  "psx-math",
  "psx-pad",
  "psx-rt",
+ "psx-settings",
  "psx-sfx",
  "psx-spu",
  "psx-telemetry",
@@ -106,6 +108,14 @@ name = "psx-math"
 version = "0.1.0"
 
 [[package]]
+name = "psx-mc"
+version = "0.1.0"
+dependencies = [
+ "psx-hw",
+ "psx-io",
+]
+
+[[package]]
 name = "psx-pad"
 version = "0.1.0"
 dependencies = [
@@ -120,6 +130,14 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+]
+
+[[package]]
+name = "psx-settings"
+version = "0.1.0"
+dependencies = [
+ "psx-mc",
+ "psx-pad",
 ]
 
 [[package]]

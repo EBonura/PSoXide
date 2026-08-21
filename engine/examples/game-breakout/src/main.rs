@@ -28,11 +28,12 @@
 
 extern crate psx_rt;
 
-use psx_engine::{button, sfx, App, Config, Ctx, Scene};
+use psx_engine::{button, sfx, App, Config, Ctx, MicrogameAction, MicrogameShell, Scene};
 use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
+use psx_settings::Profile;
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
@@ -125,6 +126,9 @@ const TRAIL_LEN: usize = 4;
 const SHAKE_FRAMES_ON_BREAK: u8 = 6;
 const PADDLE_FLASH_FRAMES_ON_HIT: u8 = 6;
 
+const SETTINGS_FILE: &str = "BESLES-00000BRKOUT1";
+const SETTINGS_TITLE: &str = "PSoXide Breakout";
+
 // ----------------------------------------------------------------------
 // Scene state
 // ----------------------------------------------------------------------
@@ -156,6 +160,7 @@ struct Breakout {
     trail_head: u8,
     rng: LcgRng,
     font: Option<FontAtlas>,
+    shell: MicrogameShell<3>,
 }
 
 impl Breakout {
@@ -179,6 +184,7 @@ impl Breakout {
             trail_head: 0,
             rng: LcgRng::new(0xBEEF_0042),
             font: None,
+            shell: MicrogameShell::new(Profile::new(psx_engine::ActionMap::new([]))),
         }
     }
 
@@ -186,7 +192,7 @@ impl Breakout {
         self.phase = Phase::Serve;
         self.paddle_x = (SCREEN_W - PADDLE_W as i16) / 2;
         self.score = 0;
-        self.lives = 3;
+        self.lives = [5, 3, 2][self.shell.difficulty().min(2)];
         self.bricks = [true; BRICK_COUNT];
         self.bricks_left = BRICK_COUNT as u16;
         self.serve_wait = 0;
@@ -296,6 +302,22 @@ impl Breakout {
             }
         }
     }
+
+    fn apply_shell_settings(&self) {
+        let volume = Volume::linear(self.shell.profile().sfx_volume as u16, 100);
+        spu::set_main_volume(volume, volume);
+    }
+
+    fn persist_shell(&mut self) {
+        if !self.shell.take_dirty() {
+            return;
+        }
+        self.apply_shell_settings();
+        if psx_settings::save_slot_one(SETTINGS_FILE, SETTINGS_TITLE, self.shell.profile()).is_err()
+        {
+            self.shell.mark_dirty();
+        }
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -329,10 +351,26 @@ impl Scene for Breakout {
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
 
+        if let Ok(profile) = psx_settings::load_slot_one(SETTINGS_FILE) {
+            self.shell.set_profile(profile);
+        }
+        self.apply_shell_settings();
+
         self.reset_match();
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        match self.shell.update(ctx) {
+            MicrogameAction::Start | MicrogameAction::Restart => {
+                self.reset_match();
+                self.persist_shell();
+            }
+            MicrogameAction::ReturnToTitle => self.persist_shell(),
+            MicrogameAction::None | MicrogameAction::Resume => {}
+        }
+        if !self.shell.is_playing() {
+            return;
+        }
         // Effects tick every frame regardless of phase so
         // transitions stay smooth.
         if self.paddle_flash_frames > 0 {
@@ -343,9 +381,6 @@ impl Scene for Breakout {
 
         match self.phase {
             Phase::Won | Phase::Lost => {
-                if ctx.is_held(button::START) {
-                    self.reset_match();
-                }
                 return;
             }
             Phase::Serve => {
@@ -409,6 +444,8 @@ impl Scene for Breakout {
             sfx::play(VOICE_LOSE);
             if self.lives == 0 {
                 self.phase = Phase::Lost;
+                self.shell.finish(self.score as u32);
+                self.persist_shell();
                 return;
             }
             self.phase = Phase::Serve;
@@ -421,6 +458,8 @@ impl Scene for Breakout {
 
         if self.bricks_left == 0 {
             self.phase = Phase::Won;
+            self.shell.finish(self.score as u32);
+            self.persist_shell();
         }
     }
 
@@ -559,26 +598,11 @@ impl Breakout {
                     (200, 200, 200),
                 );
             }
-            Phase::Won => {
-                font.draw_text((SCREEN_W - 8 * 10) / 2, 100, "YOU  WIN!", (255, 220, 120));
-                font.draw_text(
-                    (SCREEN_W - 8 * 17) / 2,
-                    130,
-                    "START to restart",
-                    (180, 180, 200),
-                );
-            }
-            Phase::Lost => {
-                font.draw_text((SCREEN_W - 8 * 10) / 2, 100, "GAME OVER", (255, 120, 120));
-                font.draw_text(
-                    (SCREEN_W - 8 * 17) / 2,
-                    130,
-                    "START to restart",
-                    (180, 180, 200),
-                );
-            }
+            Phase::Won => {}
+            Phase::Lost => {}
             Phase::Playing => {}
         }
+        self.shell.draw(font, "BREAKOUT");
     }
 }
 
