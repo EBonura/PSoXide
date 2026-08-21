@@ -15,7 +15,7 @@
 use psx_font::FontAtlas;
 use psx_gpu::framebuf::FrameBuffer;
 use psx_level::{AssetId, LevelOptionDef, LevelUiValueBinding, LevelWorldLayer};
-use psx_pad::{button, PadState};
+use psx_pad::{button, poll_port2, ActionInput, ActionMap, PadState};
 
 use crate::frames::{SimTick, VideoHz, VisualFrame};
 use crate::ui::UiTextureSlot;
@@ -57,6 +57,11 @@ pub struct Ctx {
     /// to distinguish "newly pressed this frame" from "held across
     /// multiple frames".
     pub pad_prev: PadState,
+    /// Port-2 pad state from the most recent explicit
+    /// [`Ctx::refresh_second_pad`] call.
+    pub pad2: PadState,
+    /// Previous explicit port-2 sample, for edge detection.
+    pub pad2_prev: PadState,
     /// Frame buffer the scene draws into. Immediate scenes receive it cleared
     /// before [`Scene::render`]; queued scenes prepare CPU packets first and
     /// receive the clear immediately before [`Scene::submit_render`].
@@ -79,6 +84,8 @@ impl Ctx {
             video_hz,
             pad,
             pad_prev,
+            pad2: PadState::NONE,
+            pad2_prev: PadState::NONE,
             fb,
             runtime_requests: RuntimeRequests::default(),
         }
@@ -124,6 +131,74 @@ impl Ctx {
     #[inline]
     pub fn just_released(&self, button: u16) -> bool {
         !self.pad.buttons.is_held(button) && self.pad_prev.buttons.is_held(button)
+    }
+
+    /// Poll controller port 2 once, preserving its previous sample.
+    ///
+    /// Port 2 is deliberately opt-in: a single-player game should not pay for
+    /// a second SIO transaction every simulation tick. Multiplayer games call
+    /// this only in the screens and modes that can use a second controller.
+    #[inline]
+    pub fn refresh_second_pad(&mut self) -> PadState {
+        self.pad2_prev = self.pad2;
+        self.pad2 = poll_port2();
+        self.pad2
+    }
+
+    /// Current pad sample for player index 0 or 1. Other indices are
+    /// disconnected.
+    #[inline]
+    pub const fn pad_for(&self, player: usize) -> PadState {
+        match player {
+            0 => self.pad,
+            1 => self.pad2,
+            _ => PadState::NONE,
+        }
+    }
+
+    /// Previous pad sample for player index 0 or 1. Other indices are
+    /// disconnected.
+    #[inline]
+    pub const fn previous_pad_for(&self, player: usize) -> PadState {
+        match player {
+            0 => self.pad_prev,
+            1 => self.pad2_prev,
+            _ => PadState::NONE,
+        }
+    }
+
+    /// Whether `button` is held by one player now.
+    #[inline]
+    pub const fn is_held_for(&self, player: usize, button: u16) -> bool {
+        self.pad_for(player).buttons.is_held(button)
+    }
+
+    /// Whether `button` was newly pressed by one player this tick.
+    #[inline]
+    pub const fn just_pressed_for(&self, player: usize, button: u16) -> bool {
+        self.pad_for(player).buttons.is_held(button)
+            && !self.previous_pad_for(player).buttons.is_held(button)
+    }
+
+    /// Whether `button` was newly released by one player this tick.
+    #[inline]
+    pub const fn just_released_for(&self, player: usize, button: u16) -> bool {
+        !self.pad_for(player).buttons.is_held(button)
+            && self.previous_pad_for(player).buttons.is_held(button)
+    }
+
+    /// Interpret one player's samples through a logical action map.
+    #[inline]
+    pub fn actions<'a, const ACTIONS: usize>(
+        &'a self,
+        player: usize,
+        map: &'a ActionMap<ACTIONS>,
+    ) -> ActionInput<'a, ACTIONS> {
+        match player {
+            0 => map.input(self.pad, self.pad_prev),
+            1 => map.input(self.pad2, self.pad2_prev),
+            _ => map.input(PadState::NONE, PadState::NONE),
+        }
     }
 
     /// Convenience: any D-pad direction currently held.
