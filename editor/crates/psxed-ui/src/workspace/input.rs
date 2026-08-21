@@ -1015,7 +1015,7 @@ impl EditorWorkspace {
             self.selection.hovered_primitive = None;
             if matches!(
                 self.interaction,
-                Interaction::PrimitiveGizmo(_) | Interaction::NodeGizmo(_) | Interaction::Node(_)
+                Interaction::PrimitiveGizmo(_) | Interaction::NodeGizmo(_)
             ) {
                 self.interaction = Interaction::Idle;
             }
@@ -1071,7 +1071,7 @@ impl EditorWorkspace {
         // marquee or UI-canvas stroke alone.
         if matches!(
             self.interaction,
-            Interaction::PrimitiveGizmo(_) | Interaction::NodeGizmo(_) | Interaction::Node(_)
+            Interaction::PrimitiveGizmo(_) | Interaction::NodeGizmo(_)
         ) {
             self.interaction = Interaction::Idle;
         }

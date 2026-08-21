@@ -255,6 +255,29 @@ impl MouseRig {
         );
     }
 
+    pub(crate) fn ctrl_click(&mut self, pos: Pos2) {
+        let ctrl = egui::Modifiers::CTRL;
+        self.pump_with(vec![egui::Event::PointerMoved(pos)], ctrl);
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: ctrl,
+            }],
+            ctrl,
+        );
+        self.pump_with(
+            vec![egui::Event::PointerButton {
+                pos: pos + Vec2::new(1.0, 0.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: ctrl,
+            }],
+            ctrl,
+        );
+    }
+
     pub(crate) fn alt_click(&mut self, pos: Pos2) {
         let alt = egui::Modifiers::ALT;
         self.pump_with(vec![egui::Event::PointerMoved(pos)], alt);
@@ -402,21 +425,116 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
     }
 }
 
-/// Whole-brush Move-mode body drag translates the cube.
+/// Face and Edge mode are not trapped inside the current brush. One click on
+/// another brush switches the sub-element scope and selects the hit there.
 #[test]
-fn mouse_move_mode_body_drag_translates_the_brush() {
+fn mouse_face_and_edge_modes_select_elements_on_another_brush_in_one_click() {
+    for (mode, target) in [
+        (BrushEditMode::Face, [900.0, 256.0, 128.0]),
+        // Deliberately away from the x=900 midpoint handle: cross-brush edge
+        // selection follows the visible segment, not an invisible handle.
+        (BrushEditMode::Edge, [800.0, 256.0, 0.0]),
+    ] {
+        let mut rig = MouseRig::single_cube("rig-cross-brush-elements");
+        rig.workspace
+            .project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [700, 0, 0],
+                [1100, 256, 256],
+            ));
+        rig.workspace.set_brush_edit_mode(mode);
+
+        let first = rig.world_to_screen([256.0, 256.0, 128.0]);
+        rig.click(first);
+        assert_eq!(rig.workspace.selected_brush, Some(0), "{mode:?}");
+
+        rig.click(rig.world_to_screen(target));
+        assert_eq!(
+            rig.workspace.selected_brush,
+            Some(1),
+            "{mode:?}: one element click switches to the other brush"
+        );
+        assert!(
+            rig.workspace
+                .selected_brush_elements
+                .iter()
+                .any(|element| matches!(
+                    (mode, element),
+                    (BrushEditMode::Face, BrushElement::Face(_))
+                        | (BrushEditMode::Edge, BrushElement::Edge(..))
+                )),
+            "{mode:?}: selected the requested element on brush 2"
+        );
+    }
+}
+
+/// Face selection is document-wide: Shift/Ctrl-click toggles exact faces on
+/// other brushes without expanding material edits to every face they own.
+#[test]
+fn mouse_face_mode_additively_selects_exact_faces_across_brushes() {
+    let mut rig = MouseRig::single_cube("rig-cross-brush-face-multiselect");
+    rig.workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [700, 0, 0],
+            [1100, 256, 256],
+        ));
+    rig.workspace.set_brush_edit_mode(BrushEditMode::Face);
+
+    let first = rig.world_to_screen([256.0, 256.0, 128.0]);
+    let second = rig.world_to_screen([900.0, 256.0, 128.0]);
+    rig.click(first);
+    let first_pair = *rig
+        .workspace
+        .selected_brush_faces
+        .first()
+        .expect("first face selected");
+
+    rig.shift_click(second);
+    assert_eq!(rig.workspace.selected_brush_faces.len(), 2);
+    assert!(rig.workspace.selected_brush_faces.contains(&first_pair));
+    assert!(
+        rig.workspace
+            .selected_brush_faces
+            .iter()
+            .any(|(brush, _)| *brush == 1)
+    );
+    let targets = rig.workspace.selected_brush_material_targets();
+    assert_eq!(targets.len(), 2, "only the two selected faces are targets");
+    assert!(targets.contains(&MaterialTarget::BrushFace {
+        brush: first_pair.0,
+        face: first_pair.1,
+    }));
+
+    rig.ctrl_click(first);
+    assert_eq!(rig.workspace.selected_brush_faces.len(), 1);
+    assert!(!rig.workspace.selected_brush_faces.contains(&first_pair));
+    assert_eq!(rig.workspace.selected_brush, Some(1));
+    assert_eq!(rig.workspace.selected_brush_material_targets().len(), 1);
+}
+
+/// Whole-brush bodies select only; transforms require an explicit gizmo grab.
+#[test]
+fn mouse_move_mode_body_drag_is_inert_and_gizmo_translates_the_brush() {
     let mut rig = MouseRig::single_cube("rig-body-drag");
     let base = rig.brush();
     rig.workspace.set_brush_edit_mode(BrushEditMode::Move);
     let body = rig.world_to_screen([256.0, 256.0, 128.0]);
     rig.click(body);
     assert_eq!(rig.workspace.selected_brush, Some(0));
-    // A body point clear of the gizmo arrows (which radiate from the
-    // brush's bounds centre): free drags belong to the body, arrows to
-    // the axis-constrained gizmo.
+    // Use a body point clear of the gizmo arrows (which radiate from the
+    // brush's bounds centre) to prove the body itself is inert.
     let body = rig.world_to_screen([420.0, 256.0, 210.0]);
     rig.drag(body, body + Vec2::new(120.0, 0.0));
-    assert_ne!(rig.brush(), base, "body drag moves the brush");
+    assert_eq!(rig.brush(), base, "body drag must not move the brush");
+
+    let (grab, to) = rig.gizmo_drag_vector(0);
+    rig.drag(grab, to);
+    assert_ne!(rig.brush(), base, "gizmo drag moves the brush");
     let solved = rig.brush().solve();
     assert!(solved.is_valid());
     rig.workspace.do_undo();
@@ -568,10 +686,10 @@ fn mouse_clip_flow_cuts_the_cube() {
     assert_eq!(rig.workspace.project.active_scene().brushes.len(), 1);
 }
 
-/// Entities participate: clicking one selects it (clearing the brush
-/// selection) and a body drag moves it in world units.
+/// Entities use the same select-first rule as brushes: body drags may select
+/// the node on release, but never move it as a hidden shortcut.
 #[test]
-fn mouse_entity_click_and_drag() {
+fn mouse_entity_body_drag_selects_without_moving_it() {
     let mut rig = MouseRig::single_cube("rig-entity");
     let entity =
         rig.workspace
@@ -598,16 +716,6 @@ fn mouse_entity_click_and_drag() {
         f64::from(bound.center[2]),
     ];
     let screen = rig.world_to_screen(center);
-    rig.click(screen);
-    assert_eq!(
-        rig.workspace.selection.selected_node, entity,
-        "entity click selects the node"
-    );
-    assert_eq!(
-        rig.workspace.selected_brush, None,
-        "entity click clears the brush selection"
-    );
-
     let before = rig
         .workspace
         .project
@@ -616,8 +724,11 @@ fn mouse_entity_click_and_drag() {
         .unwrap()
         .transform
         .translation;
+    // A drag that begins on an unselected entity is not a hidden select+move
+    // shortcut. It leaves both the node and the existing brush selection
+    // untouched.
     rig.drag(screen, screen + Vec2::new(80.0, 0.0));
-    let after = rig
+    let after_body_drag = rig
         .workspace
         .project
         .active_scene()
@@ -625,11 +736,14 @@ fn mouse_entity_click_and_drag() {
         .unwrap()
         .transform
         .translation;
-    assert_ne!(before, after, "entity body drag moves it");
-    let delta = ((after[0] - before[0]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
-    assert!(
-        delta > 32.0 && delta < 4096.0,
-        "entity moved a sane world distance, got {delta}"
+    assert_eq!(before, after_body_drag, "entity body drag must be inert");
+    assert_eq!(
+        rig.workspace.selection.selected_node, entity,
+        "releasing the inert body drag may select, but never moves, the node"
+    );
+    assert_eq!(
+        rig.workspace.selected_brush, None,
+        "entity click clears the brush selection"
     );
 }
 
