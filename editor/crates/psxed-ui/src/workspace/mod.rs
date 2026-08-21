@@ -4,6 +4,8 @@ pub(crate) mod brush_elements;
 mod dialogs;
 mod editing;
 mod geometry;
+mod groups;
+pub(crate) use groups::BrushGroupPick;
 mod input;
 mod painting;
 mod panels;

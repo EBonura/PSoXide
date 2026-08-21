@@ -775,6 +775,39 @@ fn numeric_origin_moves_a_multi_selection_and_survives_save_reload() {
 }
 
 #[test]
+fn numeric_size_scales_a_multi_brush_selection_as_one_object() {
+    let mut project = ProjectDocument::new("numeric multi-brush scale");
+    let originals = [
+        psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]),
+        psxed_project::brush::Brush::cuboid([128, 0, 0], [192, 64, 64]),
+    ];
+    project
+        .active_scene_mut()
+        .brushes
+        .extend(originals.iter().cloned());
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("numeric-multi-scale"), project);
+    workspace.replace_brush_selection(0, None);
+    workspace.toggle_brush_selection(1);
+
+    assert_eq!(workspace.selected_brush_origin(), Some([0, 0, 0]));
+    assert_eq!(workspace.selected_brush_size(), Some([192, 64, 64]));
+    workspace.push_undo();
+    assert!(workspace.set_selected_brush_size([384, 128, 64]));
+    assert_eq!(workspace.selected_brush_size(), Some([384, 128, 64]));
+    let first = workspace.project.active_scene().brushes[0].solve();
+    let second = workspace.project.active_scene().brushes[1].solve();
+    assert_eq!((first.min, first.max), ([0.0; 3], [128.0, 128.0, 64.0]));
+    assert_eq!(
+        (second.min, second.max),
+        ([256.0, 0.0, 0.0], [384.0, 128.0, 64.0])
+    );
+
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes, originals);
+}
+
+#[test]
 fn coincident_brushes_cycle_individually_in_every_2d_view_via_real_egui() {
     for view in [
         OrthographicView::Top,
@@ -1467,6 +1500,116 @@ fn element_gizmo_rotates_and_scales_faces_with_the_transform_group() {
         "scaled corner"
     );
     assert!(has_vertex(&workspace, [0.0, 0.0, 0.0]), "floor untouched");
+}
+
+#[test]
+fn whole_brush_gizmo_rotates_and_scales_the_full_multi_selection() {
+    let build = || {
+        let originals = vec![
+            psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]),
+            psxed_project::brush::Brush::cuboid([256, 0, 0], [384, 128, 128]),
+        ];
+        let mut project = ProjectDocument::new("multi-brush rotate scale");
+        project
+            .active_scene_mut()
+            .brushes
+            .extend(originals.iter().cloned());
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("multi-brush-gizmo"), project);
+        workspace.active_tool = ViewTool::Select;
+        workspace.set_brush_edit_mode(BrushEditMode::Move);
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_initialized = true;
+        workspace.camera_rig.free_position = [1200, 900, -1200];
+        let (yaw, pitch) = camera_angles_to_look_at([1200, 900, -1200], [192, 64, 64]).unwrap();
+        workspace.camera_rig.free_yaw = yaw;
+        workspace.camera_rig.free_pitch = pitch;
+        workspace.replace_brush_selection(0, None);
+        workspace.toggle_brush_selection(1);
+        (
+            workspace,
+            originals,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)),
+        )
+    };
+    let tool = tool_impl_3d(ViewTool::Select);
+
+    let (mut workspace, originals, rect) = build();
+    let (pivot, _, _) = workspace.brush_gizmo_context().unwrap();
+    assert_eq!(pivot, [192.0, 64.0, 64.0]);
+    workspace.set_transform_gizmo_mode(TransformGizmoMode::Scale);
+    let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
+    let grab = polyline_grab_point(&polylines[0]);
+    tool.primary_pressed(
+        &mut workspace,
+        &element_click_frame(rect, grab, egui::Modifiers::NONE),
+    );
+    let drag = workspace
+        .brush_element_transform
+        .as_ref()
+        .expect("scale starts");
+    assert_eq!(drag.others.len(), 1, "the second brush rides the gesture");
+    let swept = grab + drag.screen_axis * 128.0;
+    tool.primary_dragged(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
+    tool.primary_released(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
+    let first = workspace.project.active_scene().brushes[0].solve();
+    let second = workspace.project.active_scene().brushes[1].solve();
+    assert_eq!((first.min[0], first.max[0]), (-96.0, 96.0));
+    assert_eq!((second.min[0], second.max[0]), (288.0, 480.0));
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes, originals);
+
+    let (mut workspace, originals, rect) = build();
+    workspace.set_transform_gizmo_mode(TransformGizmoMode::Rotate);
+    let polylines = workspace.brush_element_gizmo_polylines_3d(rect).unwrap();
+    let grab = polyline_grab_point(&polylines[1]);
+    tool.primary_pressed(
+        &mut workspace,
+        &element_click_frame(rect, grab, egui::Modifiers::NONE),
+    );
+    let drag = workspace
+        .brush_element_transform
+        .as_ref()
+        .expect("rotate starts");
+    assert_eq!(drag.others.len(), 1, "the second brush rides the gesture");
+    let radial = grab - drag.center_screen;
+    let swept = drag.center_screen + Vec2::new(-radial.y, radial.x);
+    tool.primary_dragged(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
+    tool.primary_released(
+        &mut workspace,
+        &element_click_frame(rect, swept, egui::Modifiers::NONE),
+    );
+    assert_ne!(workspace.project.active_scene().brushes[0], originals[0]);
+    assert_ne!(workspace.project.active_scene().brushes[1], originals[1]);
+    let centers: Vec<_> = workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .map(|brush| {
+            let solved = brush.solve();
+            [
+                (solved.min[0] + solved.max[0]) * 0.5,
+                (solved.min[1] + solved.max[1]) * 0.5,
+                (solved.min[2] + solved.max[2]) * 0.5,
+            ]
+        })
+        .collect();
+    assert!(centers
+        .iter()
+        .all(|center| (center[0] - 192.0).abs() <= 1.0));
+    assert!((centers[0][2] - centers[1][2]).abs() >= 255.0);
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes, originals);
 }
 
 #[test]
@@ -3931,6 +4074,54 @@ fn selected_brush_face_is_a_resource_browser_material_target() {
         .faces
         .iter()
         .all(|face| face.material == Some(stone)));
+}
+
+#[test]
+fn multi_brush_material_assignment_updates_every_face_in_one_undo_step() {
+    let mut project = ProjectDocument::new("multi-brush material assignment");
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let moss = project.add_resource(
+        "Moss",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    for (min, max) in [([0, 0, 0], [128, 128, 128]), ([256, 0, 0], [384, 128, 128])] {
+        let mut brush = psxed_project::brush::Brush::cuboid(min, max);
+        for face in &mut brush.faces {
+            face.material = Some(stone);
+        }
+        project.active_scene_mut().brushes.push(brush);
+    }
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("multi-brush-material"), project);
+    workspace.replace_brush_selection(0, None);
+    workspace.toggle_brush_selection(1);
+
+    let targets = workspace.selected_brush_material_targets();
+    assert_eq!(targets.len(), 12);
+    assert!(targets.contains(&MaterialTarget::BrushFace { brush: 0, face: 0 }));
+    assert!(targets.contains(&MaterialTarget::BrushFace { brush: 1, face: 5 }));
+    assert_eq!(workspace.assign_selected_faces_material(Some(moss)), 12);
+    assert!(workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .flat_map(|brush| &brush.faces)
+        .all(|face| face.material == Some(moss)));
+
+    workspace.do_undo();
+    assert!(workspace
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .flat_map(|brush| &brush.faces)
+        .all(|face| face.material == Some(stone)));
+    workspace.do_undo();
+    assert_eq!(workspace.status, "Nothing to undo");
 }
 
 /// Face UV offset / rotation / scale numeric edits, typed through the real

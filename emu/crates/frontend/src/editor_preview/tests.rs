@@ -21,6 +21,7 @@ use psxed_project::{
     MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, WorldGrid,
 };
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
+use std::collections::HashSet;
 
 #[cfg(feature = "editor-preview-benchmark")]
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -2504,7 +2505,13 @@ fn benchmark_e1m1_brush_navigation() {
         &assets,
         super::EditorPreviewFrame::default(),
     );
-    super::prepend_bsp_surface_grid_overlay(&project, camera(0), 64, &mut output.overlay_lines);
+    super::prepend_bsp_surface_grid_overlay(
+        &project,
+        camera(0),
+        64,
+        &HashSet::new(),
+        &mut output.overlay_lines,
+    );
     std::hint::black_box((output.cmd_log.len(), output.overlay_lines.len()));
 
     // Prove that conservative brush-AABB rejection removes only polygons that
@@ -2613,6 +2620,7 @@ fn benchmark_e1m1_brush_navigation() {
             &project,
             world_camera,
             64,
+            &HashSet::new(),
             &mut uncached,
         );
         uncached_overlay_ns.push(started.elapsed().as_nanos() as u64);
@@ -2623,7 +2631,13 @@ fn benchmark_e1m1_brush_navigation() {
         let mut cached = Vec::new();
         let before = preview_test_alloc_snapshot();
         let started = std::time::Instant::now();
-        super::overlays::prepend_bsp_surface_grid_overlay(&project, world_camera, 64, &mut cached);
+        super::overlays::prepend_bsp_surface_grid_overlay(
+            &project,
+            world_camera,
+            64,
+            &HashSet::new(),
+            &mut cached,
+        );
         cached_overlay_ns.push(started.elapsed().as_nanos() as u64);
         let after = preview_test_alloc_snapshot();
         cached_overlay_alloc.0 += after.0 - before.0;
@@ -2668,6 +2682,7 @@ fn benchmark_e1m1_brush_navigation() {
             &project,
             frame_camera,
             64,
+            &HashSet::new(),
             &mut output.overlay_lines,
         );
         let stage_after = preview_test_alloc_snapshot();

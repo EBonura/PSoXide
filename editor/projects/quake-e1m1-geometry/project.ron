@@ -2,9 +2,9 @@
     name: "Quake E1M1 Geometry Benchmark",
     editor_camera: (
         mode: Orbit,
-        orbit_yaw_q12: 3584,
-        orbit_pitch_q12: 0,
-        orbit_radius: 1984,
+        orbit_yaw_q12: 4091,
+        orbit_pitch_q12: 4013,
+        orbit_radius: 3800,
         orbit_target: (
             7680,
             480,
@@ -2786,7 +2786,7 @@
                 double_sided: false,
             )),
         ),
-        /*[28]*/ (
+        /*[96]*/ (
             id: (5023),
             name: "Default Health Gauge",
             data: Material((

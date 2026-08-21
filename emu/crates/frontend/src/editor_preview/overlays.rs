@@ -55,6 +55,7 @@ pub(super) fn prepend_bsp_surface_grid_overlay(
     project: &ProjectDocument,
     camera: psx_engine::WorldCamera,
     grid_units: u16,
+    hidden_scene_nodes: &std::collections::HashSet<NodeId>,
     overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
 ) {
     if project.active_scene().brushes.is_empty() {
@@ -63,7 +64,14 @@ pub(super) fn prepend_bsp_surface_grid_overlay(
 
     let step = f64::from(grid_units.max(1));
     let mut candidate_count = 0u64;
-    with_cached_solved_brush_faces(project, |_, _, plane, verts| {
+    let scene = project.active_scene();
+    with_cached_solved_brush_faces(project, |brush_index, _, plane, verts| {
+        let Some(brush) = scene.brushes.get(brush_index) else {
+            return;
+        };
+        if super::brush_group_hidden(scene, hidden_scene_nodes, brush) {
+            return;
+        }
         if let Some(ranges) = surface_grid_face_ranges(
             verts,
             plane.normal.map(|component| component as f64),
@@ -81,7 +89,13 @@ pub(super) fn prepend_bsp_surface_grid_overlay(
 
     let mut grid_lines = Vec::new();
     let mut candidate_ordinal = 0u64;
-    with_cached_solved_brush_faces(project, |_, _, plane, verts| {
+    with_cached_solved_brush_faces(project, |brush_index, _, plane, verts| {
+        let Some(brush) = scene.brushes.get(brush_index) else {
+            return;
+        };
+        if super::brush_group_hidden(scene, hidden_scene_nodes, brush) {
+            return;
+        }
         append_bsp_surface_grid_face(
             verts,
             plane.normal.map(|component| component as f64),
@@ -107,6 +121,7 @@ pub(super) fn prepend_bsp_surface_grid_overlay_uncached(
     project: &ProjectDocument,
     camera: psx_engine::WorldCamera,
     grid_units: u16,
+    hidden_scene_nodes: &std::collections::HashSet<NodeId>,
     overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
 ) {
     if project.active_scene().brushes.is_empty() {
@@ -116,6 +131,9 @@ pub(super) fn prepend_bsp_surface_grid_overlay_uncached(
     let step = f64::from(grid_units.max(1));
     let mut candidate_count = 0u64;
     for brush in &project.active_scene().brushes {
+        if super::brush_group_hidden(project.active_scene(), hidden_scene_nodes, brush) {
+            continue;
+        }
         let solved = brush.solve();
         for (face_index, polygon) in solved.polygons.iter().enumerate() {
             let Some(polygon) = polygon else { continue };
@@ -144,6 +162,9 @@ pub(super) fn prepend_bsp_surface_grid_overlay_uncached(
     let mut grid_lines = Vec::new();
     let mut candidate_ordinal = 0u64;
     for brush in &project.active_scene().brushes {
+        if super::brush_group_hidden(project.active_scene(), hidden_scene_nodes, brush) {
+            continue;
+        }
         let solved = brush.solve();
         for (face_index, polygon) in solved.polygons.iter().enumerate() {
             let Some(polygon) = polygon else { continue };
@@ -1628,13 +1649,13 @@ mod surface_grid_tests {
     #[test]
     fn brush_surface_overlay_tracks_grid_interval_and_stays_translucent() {
         let mut project = ProjectDocument::new("surface grid");
-        project
+        let root = project.active_scene().root;
+        let group = project
             .active_scene_mut()
-            .brushes
-            .push(psxed_project::brush::Brush::cuboid(
-                [-64, -64, -64],
-                [64, 64, 64],
-            ));
+            .add_node(root, "Shell", NodeKind::Group);
+        let mut brush = psxed_project::brush::Brush::cuboid([-64, -64, -64], [64, 64, 64]);
+        brush.group = Some(group);
+        project.active_scene_mut().brushes.push(brush);
         let projection = psx_engine::WorldProjection::new(160, 120, 320, 32);
         let camera = psx_engine::WorldCamera::orbit(
             projection,
@@ -1645,13 +1666,38 @@ mod surface_grid_tests {
         );
 
         let mut fine = Vec::new();
-        prepend_bsp_surface_grid_overlay(&project, camera, 16, &mut fine);
+        prepend_bsp_surface_grid_overlay(
+            &project,
+            camera,
+            16,
+            &std::collections::HashSet::new(),
+            &mut fine,
+        );
         let mut coarse = Vec::new();
-        prepend_bsp_surface_grid_overlay(&project, camera, 32, &mut coarse);
+        prepend_bsp_surface_grid_overlay(
+            &project,
+            camera,
+            32,
+            &std::collections::HashSet::new(),
+            &mut coarse,
+        );
 
         assert!(!fine.is_empty());
         assert!(coarse.len() < fine.len());
         assert!(fine.iter().all(|line| line.color.a() < u8::MAX));
         assert!(fine.len() <= BSP_SURFACE_GRID_SEGMENT_CAP);
+
+        let mut hidden = Vec::new();
+        prepend_bsp_surface_grid_overlay(
+            &project,
+            camera,
+            16,
+            &std::collections::HashSet::from([group]),
+            &mut hidden,
+        );
+        assert!(
+            hidden.is_empty(),
+            "hidden groups must not leave grid ghosts"
+        );
     }
 }
