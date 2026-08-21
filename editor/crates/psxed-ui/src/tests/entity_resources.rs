@@ -602,13 +602,16 @@ fn character_motion_preview_moves_without_mutating_authored_transform_and_tracks
 #[test]
 fn scene_graph_add_menu_is_structure_only() {
     let addable = scene_graph_addable_kinds();
-    assert_eq!(addable.len(), 3);
+    assert_eq!(addable.len(), 4);
     assert!(addable
         .iter()
         .any(|(label, kind)| *label == "Section" && matches!(kind, NodeKind::Section { .. })));
     assert!(addable
         .iter()
         .any(|(label, kind)| *label == "Entity" && matches!(kind, NodeKind::Entity)));
+    assert!(addable
+        .iter()
+        .any(|(label, kind)| *label == "Group" && matches!(kind, NodeKind::Group)));
     assert!(addable
         .iter()
         .any(|(label, kind)| *label == "Folder" && matches!(kind, NodeKind::Node)));

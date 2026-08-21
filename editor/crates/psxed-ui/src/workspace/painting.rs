@@ -3241,8 +3241,24 @@ impl EditorWorkspace {
                 Selection::Edge(_) | Selection::Vertex(_) => {}
             }
         }
-        if let Some(brush) = self.selected_brush {
-            let mut brush_faces: Vec<usize> = self
+        for target in self.selected_brush_material_targets() {
+            push_unique_material_target(&mut targets, target);
+        }
+        targets
+    }
+
+    /// Material surfaces implied by the current brush selection. Explicit
+    /// face elements remain precise for a single brush; selecting whole
+    /// brushes means every face, and a multi-brush selection always behaves
+    /// as one whole-object material target.
+    pub(crate) fn selected_brush_material_targets(&self) -> Vec<MaterialTarget> {
+        let brushes = self.selected_brush_set();
+        if brushes.is_empty() {
+            return Vec::new();
+        }
+        if brushes.len() == 1 {
+            let brush = brushes[0];
+            let mut faces: Vec<usize> = self
                 .selected_brush_elements
                 .iter()
                 .filter_map(|element| match element {
@@ -3250,26 +3266,37 @@ impl EditorWorkspace {
                     BrushElement::Edge(..) | BrushElement::Vertex(_) => None,
                 })
                 .collect();
-            if brush_faces.is_empty() {
-                brush_faces.extend(self.selected_brush_face);
+            if faces.is_empty() {
+                faces.extend(self.selected_brush_face);
             }
-            for face in brush_faces {
-                if self
-                    .project
-                    .active_scene()
-                    .brushes
-                    .get(brush)
-                    .and_then(|brush| brush.faces.get(face))
-                    .is_some()
-                {
-                    push_unique_material_target(
-                        &mut targets,
-                        MaterialTarget::BrushFace { brush, face },
-                    );
-                }
+            if !faces.is_empty() {
+                faces.sort_unstable();
+                faces.dedup();
+                return faces
+                    .into_iter()
+                    .filter(|face| {
+                        self.project
+                            .active_scene()
+                            .brushes
+                            .get(brush)
+                            .and_then(|brush| brush.faces.get(*face))
+                            .is_some()
+                    })
+                    .map(|face| MaterialTarget::BrushFace { brush, face })
+                    .collect();
             }
         }
-        targets
+        let scene = self.project.active_scene();
+        brushes
+            .into_iter()
+            .flat_map(|brush| {
+                let face_count = scene
+                    .brushes
+                    .get(brush)
+                    .map_or(0, |brush| brush.faces.len());
+                (0..face_count).map(move |face| MaterialTarget::BrushFace { brush, face })
+            })
+            .collect()
     }
 
     /// Apply only the UV fields changed in the active face inspector to every

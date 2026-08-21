@@ -1467,6 +1467,7 @@ impl ProjectDocument {
         self.normalize_scene_states();
         for scene in &mut self.scenes {
             scene.normalize_world_root();
+            scene.normalize_brush_groups();
             // CharacterController owns the runtime body dimensions. Older
             // projects also created a sibling capsule Collider, producing two
             // conflicting capsule editors even though the generic Collider is
@@ -1749,6 +1750,7 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
         NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
         NodeKind::Node
+        | NodeKind::Group
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }
@@ -1823,6 +1825,7 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
         NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
         NodeKind::Node
+        | NodeKind::Group
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }

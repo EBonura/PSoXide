@@ -41,6 +41,7 @@ impl EditorWorkspace {
         self.draw_inspector(ctx, camera_preview);
         self.draw_content_browser(ctx);
         self.draw_viewport(ctx, viewport_3d, playtest_status);
+        self.draw_clipboard_notice(ctx);
         self.draw_new_project_dialog(ctx);
         self.draw_delete_project_dialog(ctx);
         self.draw_texture_import_dialog(ctx);

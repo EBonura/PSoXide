@@ -1346,7 +1346,11 @@ pub fn build_package(
             let Some(room_node) = enclosing_room(scene, node) else {
                 if !matches!(
                     node.kind,
-                    NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
+                    NodeKind::Node
+                        | NodeKind::Group
+                        | NodeKind::Node3D
+                        | NodeKind::Entity
+                        | NodeKind::World { .. }
                 ) {
                     report.warn(format!(
                         "{} '{}' has no enclosing Room - dropped",
@@ -2045,6 +2049,7 @@ pub fn build_package(
                 }
             }
             NodeKind::Node
+            | NodeKind::Group
             | NodeKind::Node3D
             | NodeKind::World { .. }
             | NodeKind::Section { .. }

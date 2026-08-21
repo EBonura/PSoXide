@@ -70,9 +70,10 @@ pub(crate) enum NodeTransformInspector {
 
 pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspector {
     match kind {
-        NodeKind::World { .. } | NodeKind::Node | NodeKind::WaterVolume { .. } => {
-            NodeTransformInspector::Hidden
-        }
+        NodeKind::World { .. }
+        | NodeKind::Node
+        | NodeKind::Group
+        | NodeKind::WaterVolume { .. } => NodeTransformInspector::Hidden,
         NodeKind::Section { .. } => NodeTransformInspector::RoomGrid,
         NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } | NodeKind::Logic { .. } => {
             NodeTransformInspector::PositionOnly
@@ -1785,7 +1786,8 @@ pub(crate) fn node_kind_supports_transform_gizmo(
     match mode {
         TransformGizmoMode::Move => matches!(
             kind,
-            NodeKind::Entity
+            NodeKind::Group
+                | NodeKind::Entity
                 | NodeKind::PointLight { .. }
                 | NodeKind::ParticleEmitter { .. }
                 | NodeKind::ImageProp { .. }
@@ -2149,6 +2151,9 @@ pub(crate) fn draw_node_kind_editor(
     match kind {
         NodeKind::Node | NodeKind::Node3D => {
             ui.weak("Organisational transform node");
+        }
+        NodeKind::Group => {
+            ui.weak("Authoring group. Closed groups edit as one object; double-click to edit their contents.");
         }
         NodeKind::Entity => {
             ui.weak("Entity host. Add component children for rendering, collision, interaction, lighting, or logic.");

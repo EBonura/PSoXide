@@ -74,6 +74,7 @@ impl EditorWorkspace {
     ) {
         let (rect, response) =
             allocate_centered_preview_rect(ui, "viewport_3d_canvas", egui::Sense::click_and_drag());
+        surrender_stale_focus_on_viewport_pointer(ui.ctx(), &response);
         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
         let resource_drop_hovered = response.dnd_hover_payload::<ResourceId>().is_some();
         let prefab_drop_hovered = response.dnd_hover_payload::<PrefabDragPayload>().is_some();
@@ -312,7 +313,11 @@ impl EditorWorkspace {
                 tool.primary_released(self, &frame);
             }
             if response.clicked_by(egui::PointerButton::Primary) {
-                tool.primary_clicked(self, &frame);
+                let group_double_click = response.double_clicked_by(egui::PointerButton::Primary)
+                    && self.handle_group_double_click_3d(frame.pointer_target);
+                if !group_double_click {
+                    tool.primary_clicked(self, &frame);
+                }
             }
         } else {
             self.selection.hovered_entity_node = None;

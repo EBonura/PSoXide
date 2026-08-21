@@ -295,6 +295,37 @@ pub(crate) fn consume_command_shortcut(ctx: &egui::Context, key: egui::Key) -> b
     ctx.input_mut(|input| consume_shortcut_once(input, &shortcut))
 }
 
+/// Consume Copy through either a synthetic key event or the platform event
+/// emitted by egui-winit. Native integrations translate Cmd/Ctrl+C into
+/// `Event::Copy` before editor code sees it, so listening for `Key::C` alone
+/// only works in tests that bypass the real window event path.
+pub(crate) fn consume_copy_shortcut(ctx: &egui::Context) -> bool {
+    consume_command_shortcut(ctx, egui::Key::C)
+        || ctx.input_mut(|input| consume_platform_clipboard_event(input, true))
+}
+
+/// Consume Paste through either a synthetic key event or egui-winit's native
+/// `Event::Paste`. The event text belongs to the OS clipboard; PSoXide keeps
+/// its geometry payload internally and uses the event only as shortcut intent.
+pub(crate) fn consume_paste_shortcut(ctx: &egui::Context) -> bool {
+    consume_command_shortcut(ctx, egui::Key::V)
+        || ctx.input_mut(|input| consume_platform_clipboard_event(input, false))
+}
+
+fn consume_platform_clipboard_event(input: &mut egui::InputState, copy: bool) -> bool {
+    let mut triggered = false;
+    input.events.retain(|event| {
+        let matches = if copy {
+            matches!(event, egui::Event::Copy)
+        } else {
+            matches!(event, egui::Event::Paste(_))
+        };
+        triggered |= matches;
+        !matches
+    });
+    triggered
+}
+
 pub(crate) fn consume_command_shift_shortcut(ctx: &egui::Context, key: egui::Key) -> bool {
     let shortcut = command_shift_shortcut(key);
     ctx.input_mut(|input| consume_shortcut_once(input, &shortcut))
@@ -362,6 +393,21 @@ pub(crate) fn menu_label(label: &str, shortcut: &str) -> String {
 
 pub(crate) fn bare_shortcuts_available(focus_taken: bool, modifiers: egui::Modifiers) -> bool {
     !focus_taken && !modifiers.command && !modifiers.ctrl
+}
+
+/// A text field can keep egui keyboard focus after the user has returned to
+/// editing the world. Clear that stale focus on a viewport press so the next
+/// frame's editor shortcuts are routed to the selected geometry.
+pub(crate) fn surrender_stale_focus_on_viewport_pointer(
+    ctx: &egui::Context,
+    response: &egui::Response,
+) {
+    if !response.hovered() || !ctx.input(|input| input.pointer.any_pressed()) {
+        return;
+    }
+    if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+        ctx.memory_mut(|memory| memory.surrender_focus(focused));
+    }
 }
 
 pub(crate) fn cycle_value<T: Copy + PartialEq>(values: &[T], current: T, reverse: bool) -> T {
@@ -833,6 +879,7 @@ pub(crate) fn entity_bound_kind_and_size(
         NodeKind::Section { .. }
         | NodeKind::World { .. }
         | NodeKind::Node
+        | NodeKind::Group
         | NodeKind::Node3D
         | NodeKind::WaterVolume { .. } => None,
         NodeKind::ModelRenderer { .. }
