@@ -1773,6 +1773,49 @@ pub fn commit_body_step_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
     })
 }
 
+/// Collision-check one exact non-player movement direction through a trace
+/// provider. Unlike [`commit_body_step_with_trace_provider`], this does not
+/// retry X-only and Z-only slides after a blocked diagonal. Quake's monster
+/// chase already enumerates those cardinal directions explicitly, so doing the
+/// slide cascade inside every candidate only repeats hull traces.
+pub fn commit_body_direction_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    start: RoomPoint,
+    dx: i32,
+    dz: i32,
+    radius: i32,
+    height: i32,
+) -> Result<BodyStep, CollisionQueryError> {
+    let target = RoomPoint::new(
+        start.x.saturating_add(dx),
+        start.y,
+        start.z.saturating_add(dz),
+    );
+    if target.x == start.x && target.z == start.z {
+        return Ok(BodyStep {
+            position: start,
+            moved: false,
+            blocked: false,
+        });
+    }
+    let shape = CollisionTraceShape::Body {
+        radius: radius.max(0),
+        height: height.max(1),
+    };
+    match trace_body_grounded_stand_position(provider, start, target, shape)? {
+        Some(position) => Ok(BodyStep {
+            position,
+            moved: true,
+            blocked: false,
+        }),
+        None => Ok(BodyStep {
+            position: start,
+            moved: false,
+            blocked: true,
+        }),
+    }
+}
+
 fn trace_body_grounded_stand_position<P: CollisionTraceProvider + ?Sized>(
     provider: &mut P,
     start: RoomPoint,
@@ -3893,6 +3936,23 @@ mod tests {
                 .expect("trace body step");
         assert_eq!(step.position, RoomPoint::new(20, 0, 0));
         assert!(step.moved);
+        assert!(step.blocked);
+    }
+
+    #[test]
+    fn trace_body_direction_rejects_blocked_diagonal_without_axis_slide() {
+        let blockers = [CharacterCollisionCylinder::new(
+            RoomPoint::new(10, 0, 10),
+            2,
+            8,
+        )];
+        let mut world = FlatTraceProvider::new(None);
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        let step =
+            commit_body_direction_with_trace_provider(&mut provider, RoomPoint::ZERO, 20, 20, 2, 8)
+                .expect("trace body direction");
+        assert_eq!(step.position, RoomPoint::ZERO);
+        assert!(!step.moved);
         assert!(step.blocked);
     }
 
