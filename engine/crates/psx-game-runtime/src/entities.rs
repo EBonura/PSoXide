@@ -12,9 +12,13 @@
 //! `walk_speed`/`run_speed` (patrol walks, chase runs), and every step
 //! goes through a [`GameEntityMover`] the owning game backs with the
 //! engine motor's [`commit_body_step`] -- the exact grid-collision
-//! stand/slide/step rules the player uses. Attack CONTACT resolution
-//! is the combat slice (see [`crate::combat`]). Games with retained
-//! actor poses use [`Self::tick_delta_deferred`] to freeze each active
+//! stand/slide/step rules the player uses. Blocked patrol and chase
+//! movement adopts Quake's bounded eight-direction chase search:
+//! persist a working direction, reconsider occasionally, and try the
+//! turnaround last. This gives BSP-aware local routing without a
+//! navmesh, heap allocation, or an unbounded search. Attack CONTACT
+//! resolution is the combat slice (see [`crate::combat`]). Games with
+//! retained actor poses use [`Self::tick_delta_deferred`] to freeze each active
 //! swing's exact attack clip/phase, resolve authored capsules from the
 //! same pose the body and equipment consume, and then latch the hit
 //! through [`Self::connect_deferred_attack`]. The legacy immediate
@@ -139,6 +143,22 @@ const GAME_ENTITY_QUARTER_TURN: u16 = 1024;
 /// Half turn in the engine's 4096-unit yaw representation.
 const GAME_ENTITY_HALF_TURN: u16 = 2048;
 
+/// One eighth turn in the engine's 4096-unit yaw representation.
+const GAME_ENTITY_DIRECTION_STEP: u16 = 512;
+
+/// Mask for the engine's 4096-unit yaw representation.
+const GAME_ENTITY_YAW_MASK: u16 = 4095;
+
+/// Quake's close-enough tolerance when choosing the direct chase axes.
+const GAME_ENTITY_CHASE_AXIS_EPSILON: i32 = 10;
+
+/// Collision directions evaluated in one simulation tick. Quake can scan all
+/// eight immediately because its monster move uses a single cheap hull trace;
+/// PSoXide's player-equivalent body step performs several stand/floor traces.
+/// Spreading the same bounded search across four 30 Hz NPC ticks prevents one
+/// blocked actor from consuming a visual frame.
+const GAME_ENTITY_DIRECTION_PROBES_PER_TICK: u8 = 2;
+
 /// Movement backend the owning game supplies per tick: one
 /// collision-checked walk step for a body cylinder, in the entity's
 /// own room-local space. The reference game backs this with the
@@ -163,6 +183,22 @@ pub trait GameEntityMover {
         radius: i32,
         height: i32,
     ) -> [i32; 3];
+
+    /// Attempt one authored chase direction without inventing a second
+    /// direction through axis sliding. The default preserves existing movers;
+    /// BSP backends override this with Quake-style exact-direction hull motion.
+    fn step_direction(
+        &mut self,
+        entity: usize,
+        room: RoomIndex,
+        position: [i32; 3],
+        dx: i32,
+        dz: i32,
+        radius: i32,
+        height: i32,
+    ) -> [i32; 3] {
+        self.step(entity, room, position, dx, dz, radius, height)
+    }
 }
 
 /// No-clip mover: commits every step verbatim. Host-test shape, and
@@ -432,6 +468,12 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     poise_damage: [u16; MAX_ENTITIES],
     /// Patrol leg: 0 = toward the patrol anchor, 1 = toward spawn.
     patrol_leg: [u8; MAX_ENTITIES],
+    /// Persistent eight-way local movement direction, in PSX yaw units.
+    move_yaw: [u16; MAX_ENTITIES],
+    /// 1 once `move_yaw` has been selected for the current behavior state.
+    move_yaw_valid: [u8; MAX_ENTITIES],
+    /// Directions rejected during the current bounded local search.
+    move_tried: [u8; MAX_ENTITIES],
     /// 1 while the current Attack window already connected (one hit
     /// per swing); cleared on entering Attack.
     attack_hit: [u8; MAX_ENTITIES],
@@ -474,6 +516,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         health: [0; MAX_ENTITIES],
         poise_damage: [0; MAX_ENTITIES],
         patrol_leg: [0; MAX_ENTITIES],
+        move_yaw: [0; MAX_ENTITIES],
+        move_yaw_valid: [0; MAX_ENTITIES],
+        move_tried: [0; MAX_ENTITIES],
         attack_hit: [0; MAX_ENTITIES],
         attack_sequence: [0; MAX_ENTITIES],
         intent: [0; MAX_ENTITIES],
@@ -505,6 +550,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             self.health[index] = record.max_health;
             self.poise_damage[index] = 0;
             self.patrol_leg[index] = 0;
+            self.move_yaw[index] = 0;
+            self.move_yaw_valid[index] = 0;
+            self.move_tried[index] = 0;
             self.state_ticks[index] = 0;
             self.intent[index] = GameEntityIntent::Hold as u8;
             self.attack_cooldown[index] = 0;
@@ -1089,6 +1137,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     ) {
         self.state[index] = state as u8;
         self.state_ticks[index] = 0;
+        self.move_yaw_valid[index] = 0;
+        self.move_tried[index] = 0;
         if state != GameEntityState::Aggro {
             self.set_intent(index, GameEntityIntent::Hold);
         }
@@ -1365,12 +1415,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     }
 
     /// One motor-checked step toward `goal` in XZ at `speed` engine
-    /// units per tick. The step direction quantizes through the same
-    /// Q12 yaw sin/cos the player motor uses, the entity faces its
-    /// movement, and the committed position (full, slid, or held) is
-    /// whatever the mover's collision allows. Returns `true` on
-    /// arrival (within one step of the goal and the final hop
-    /// committed).
+    /// units per tick. Free movement persists one of eight Quake-style
+    /// chase directions. A blocked direction invokes a bounded local
+    /// search over the remaining directions, with the turnaround tried
+    /// last. Returns `true` on arrival (within one step of the goal and
+    /// the final hop committed).
     fn step_toward(
         &mut self,
         record: &LevelGameEntityRecord,
@@ -1385,19 +1434,271 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         if dx == 0 && dz == 0 {
             return true;
         }
-        self.face_toward(index, goal);
         let arriving = dx.abs() <= speed && dz.abs() <= speed;
-        let (step_x, step_z) = if arriving {
-            (dx, dz)
+        if arriving {
+            let position = [self.x[index], self.y[index], self.z[index]];
+            if self.try_exact_step(record, index, dx, dz, mover) {
+                self.move_yaw_valid[index] = 0;
+                self.move_tried[index] = 0;
+                return true;
+            }
+            if self.x[index] != position[0] || self.z[index] != position[2] {
+                return false;
+            }
+        }
+
+        // Quake reconsiders one movement call in four even when its current
+        // direction still works. Derive the choice from entity-local state so
+        // host tests, replays, and console runs make identical decisions.
+        let choice = self.state_ticks[index]
+            .wrapping_mul(37)
+            .wrapping_add((index as u16).wrapping_mul(17));
+        let reconsider = self.move_yaw_valid[index] == 0 || choice & 3 == 1;
+        let mut tried = if reconsider {
+            0
         } else {
-            // The player motor's move shape: yaw -> Q12 sin/cos * speed.
-            let yaw = atan2_q12(dx, dz);
-            let sin = psx_math::sin_q12(yaw);
-            let cos = psx_math::cos_q12(yaw);
-            ((sin * speed) >> 12, (cos * speed) >> 12)
+            self.move_tried[index]
         };
+        let mut probes = 0u8;
+        if !reconsider {
+            let old_yaw = self.move_yaw[index];
+            let old_bit = Self::direction_bit(old_yaw);
+            if tried & old_bit == 0 {
+                tried |= old_bit;
+                probes += 1;
+                if self.step_direction(record, index, old_yaw, speed, mover) {
+                    self.move_tried[index] = 0;
+                    return false;
+                }
+            }
+        }
+
+        self.new_chase_direction(record, index, goal, speed, choice, tried, probes, mover);
+        false
+    }
+
+    /// Try one exact final hop. Arrival should not be forced through the
+    /// eight-way steering grid or it can orbit a goal forever at low speeds.
+    fn try_exact_step(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        dx: i32,
+        dz: i32,
+        mover: &mut impl GameEntityMover,
+    ) -> bool {
         let position = [self.x[index], self.y[index], self.z[index]];
         let committed = mover.step(
+            index,
+            record.room,
+            position,
+            dx,
+            dz,
+            i32::from(record.radius),
+            i32::from(record.height).max(1),
+        );
+        self.commit_step(index, position, committed);
+        committed[0] == position[0].saturating_add(dx)
+            && committed[2] == position[2].saturating_add(dz)
+    }
+
+    /// Quake's `newchasedir` ordering, adapted to deterministic entity-local
+    /// entropy and an eight-bit attempted-direction mask. The mask removes the
+    /// duplicate probes present in the original C routine while preserving its
+    /// preference order. Two probes run now; the remaining directions resume
+    /// on later NPC ticks from the retained mask.
+    #[allow(clippy::too_many_arguments)]
+    fn new_chase_direction(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        goal: [i32; 3],
+        speed: i32,
+        choice: u16,
+        mut tried: u8,
+        mut probes: u8,
+        mover: &mut impl GameEntityMover,
+    ) {
+        let dx = goal[0].saturating_sub(self.x[index]);
+        let dz = goal[2].saturating_sub(self.z[index]);
+        let old_yaw = if self.move_yaw_valid[index] != 0 {
+            self.move_yaw[index] & GAME_ENTITY_YAW_MASK
+        } else {
+            Self::nearest_direction(atan2_q12(dx, dz))
+        };
+        let turnaround = old_yaw.wrapping_add(GAME_ENTITY_HALF_TURN) & GAME_ENTITY_YAW_MASK;
+
+        let x_yaw = if dx > GAME_ENTITY_CHASE_AXIS_EPSILON {
+            Some(GAME_ENTITY_QUARTER_TURN)
+        } else if dx < -GAME_ENTITY_CHASE_AXIS_EPSILON {
+            Some(GAME_ENTITY_QUARTER_TURN.wrapping_mul(3))
+        } else {
+            None
+        };
+        let z_yaw = if dz > GAME_ENTITY_CHASE_AXIS_EPSILON {
+            Some(0)
+        } else if dz < -GAME_ENTITY_CHASE_AXIS_EPSILON {
+            Some(GAME_ENTITY_HALF_TURN)
+        } else {
+            None
+        };
+
+        if let (Some(x_yaw), Some(z_yaw)) = (x_yaw, z_yaw) {
+            let diagonal = match (x_yaw, z_yaw) {
+                (GAME_ENTITY_QUARTER_TURN, 0) => GAME_ENTITY_DIRECTION_STEP,
+                (GAME_ENTITY_QUARTER_TURN, GAME_ENTITY_HALF_TURN) => {
+                    GAME_ENTITY_QUARTER_TURN + GAME_ENTITY_DIRECTION_STEP
+                }
+                (yaw, GAME_ENTITY_HALF_TURN) if yaw == GAME_ENTITY_QUARTER_TURN.wrapping_mul(3) => {
+                    GAME_ENTITY_HALF_TURN + GAME_ENTITY_DIRECTION_STEP
+                }
+                _ => GAME_ENTITY_HALF_TURN + GAME_ENTITY_QUARTER_TURN + GAME_ENTITY_DIRECTION_STEP,
+            };
+            if diagonal != turnaround
+                && self.try_chase_direction(
+                    record,
+                    index,
+                    diagonal,
+                    speed,
+                    &mut tried,
+                    &mut probes,
+                    mover,
+                )
+            {
+                return;
+            }
+        }
+
+        let mut first_axis = x_yaw;
+        let mut second_axis = z_yaw;
+        if choice & 3 != 0 || dz.saturating_abs() > dx.saturating_abs() {
+            core::mem::swap(&mut first_axis, &mut second_axis);
+        }
+        for yaw in [first_axis, second_axis].into_iter().flatten() {
+            if yaw != turnaround
+                && self.try_chase_direction(
+                    record,
+                    index,
+                    yaw,
+                    speed,
+                    &mut tried,
+                    &mut probes,
+                    mover,
+                )
+            {
+                return;
+            }
+        }
+
+        if old_yaw != turnaround
+            && self.try_chase_direction(
+                record,
+                index,
+                old_yaw,
+                speed,
+                &mut tried,
+                &mut probes,
+                mover,
+            )
+        {
+            return;
+        }
+
+        if choice & 4 != 0 {
+            let mut direction = 0u16;
+            while direction < 4096 {
+                if direction != turnaround
+                    && self.try_chase_direction(
+                        record,
+                        index,
+                        direction,
+                        speed,
+                        &mut tried,
+                        &mut probes,
+                        mover,
+                    )
+                {
+                    return;
+                }
+                direction += GAME_ENTITY_DIRECTION_STEP;
+            }
+        } else {
+            let mut direction = 4096u16;
+            while direction != 0 {
+                direction -= GAME_ENTITY_DIRECTION_STEP;
+                if direction != turnaround
+                    && self.try_chase_direction(
+                        record,
+                        index,
+                        direction,
+                        speed,
+                        &mut tried,
+                        &mut probes,
+                        mover,
+                    )
+                {
+                    return;
+                }
+            }
+        }
+
+        if self.try_chase_direction(
+            record,
+            index,
+            turnaround,
+            speed,
+            &mut tried,
+            &mut probes,
+            mover,
+        ) {
+            return;
+        }
+        self.move_yaw[index] = old_yaw;
+        self.move_yaw_valid[index] = 1;
+        self.move_tried[index] = if tried == u8::MAX { 0 } else { tried };
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_chase_direction(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        yaw: u16,
+        speed: i32,
+        tried: &mut u8,
+        probes: &mut u8,
+        mover: &mut impl GameEntityMover,
+    ) -> bool {
+        let bit = Self::direction_bit(yaw);
+        if *tried & bit != 0 || *probes >= GAME_ENTITY_DIRECTION_PROBES_PER_TICK {
+            return false;
+        }
+        *tried |= bit;
+        *probes += 1;
+        if !self.step_direction(record, index, yaw, speed, mover) {
+            return false;
+        }
+        self.move_yaw[index] = yaw & GAME_ENTITY_YAW_MASK;
+        self.move_yaw_valid[index] = 1;
+        self.move_tried[index] = 0;
+        true
+    }
+
+    /// Attempt one quantized direction through the existing collision motor.
+    fn step_direction(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        yaw: u16,
+        speed: i32,
+        mover: &mut impl GameEntityMover,
+    ) -> bool {
+        let sin = psx_math::sin_q12(yaw);
+        let cos = psx_math::cos_q12(yaw);
+        let step_x = Self::q12_step_component(sin, speed);
+        let step_z = Self::q12_step_component(cos, speed);
+        let position = [self.x[index], self.y[index], self.z[index]];
+        let committed = mover.step_direction(
             index,
             record.room,
             position,
@@ -1406,10 +1707,43 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             i32::from(record.radius),
             i32::from(record.height).max(1),
         );
+        let moved = committed[0] != position[0] || committed[2] != position[2];
+        self.commit_step(index, position, committed);
+        moved
+    }
+
+    fn commit_step(&mut self, index: usize, position: [i32; 3], committed: [i32; 3]) {
         self.x[index] = committed[0];
         self.y[index] = committed[1];
         self.z[index] = committed[2];
-        arriving && committed[0] == goal[0] && committed[2] == goal[2]
+        let dx = committed[0].saturating_sub(position[0]);
+        let dz = committed[2].saturating_sub(position[2]);
+        if dx != 0 || dz != 0 {
+            self.yaw[index] = atan2_q12(dx, dz) as i16;
+        }
+    }
+
+    /// Preserve a non-zero component for one-unit low-detail speeds. Quake's
+    /// fixed-point positions retain that fraction; the runtime's integer room
+    /// coordinates need an explicit one-unit step instead.
+    fn q12_step_component(direction_q12: i32, speed: i32) -> i32 {
+        let product = direction_q12.saturating_mul(speed.max(1));
+        let component = product >> 12;
+        if component == 0 && product != 0 {
+            product.signum()
+        } else {
+            component
+        }
+    }
+
+    fn nearest_direction(yaw: u16) -> u16 {
+        ((yaw.wrapping_add(GAME_ENTITY_DIRECTION_STEP / 2) & GAME_ENTITY_YAW_MASK)
+            / GAME_ENTITY_DIRECTION_STEP)
+            * GAME_ENTITY_DIRECTION_STEP
+    }
+
+    fn direction_bit(yaw: u16) -> u8 {
+        1u8 << ((yaw & GAME_ENTITY_YAW_MASK) / GAME_ENTITY_DIRECTION_STEP)
     }
 
     /// Face the XZ direction toward `goal` (PSX angle units, the
@@ -1562,6 +1896,62 @@ mod tests {
             _radius: i32,
             _height: i32,
         ) -> [i32; 3] {
+            position
+        }
+    }
+
+    /// Test collision with one finite wall. It rejects a candidate whose
+    /// endpoint enters the wall and otherwise commits it, matching the
+    /// accept/hold contract the real BSP-backed mover exposes.
+    #[derive(Default)]
+    struct FiniteWallMover {
+        calls: usize,
+    }
+
+    impl GameEntityMover for FiniteWallMover {
+        fn step(
+            &mut self,
+            _entity: usize,
+            _room: RoomIndex,
+            position: [i32; 3],
+            dx: i32,
+            dz: i32,
+            _radius: i32,
+            _height: i32,
+        ) -> [i32; 3] {
+            self.calls += 1;
+            let target = [
+                position[0].saturating_add(dx),
+                position[1],
+                position[2].saturating_add(dz),
+            ];
+            let inside_wall =
+                (1080..=1240).contains(&target[0]) && (900..=1100).contains(&target[2]);
+            if inside_wall {
+                position
+            } else {
+                target
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingBlockedMover {
+        calls: usize,
+    }
+
+    impl GameEntityMover for CountingBlockedMover {
+        fn step(
+            &mut self,
+            _entity: usize,
+            _room: RoomIndex,
+            position: [i32; 3],
+            _dx: i32,
+            _dz: i32,
+            _radius: i32,
+            _height: i32,
+        ) -> [i32; 3] {
+            self.calls += 1;
             position
         }
     }
@@ -1973,6 +2363,81 @@ mod tests {
         // Fully blocked: never arrives, never leaves Patrol, position
         // pinned to spawn -- and no state corruption.
         assert_eq!(entities.state(0), GameEntityState::Patrol);
+        assert_eq!(entities.position(0), [1000, 0, 1000]);
+    }
+
+    #[test]
+    fn quake_chase_search_routes_patrol_around_a_finite_wall() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&PATROL_ENEMY);
+        entities.state[0] = GameEntityState::Patrol as u8;
+        let mut mover = FiniteWallMover::default();
+        let mut left_direct_line = false;
+
+        for _ in 0..160 {
+            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut mover);
+            left_direct_line |= entities.position(0)[2] != PATROL_ENEMY[0].z;
+            if entities.state(0) == GameEntityState::Idle {
+                break;
+            }
+        }
+
+        assert!(
+            left_direct_line,
+            "the blocked entity searches around the wall"
+        );
+        assert_eq!(entities.state(0), GameEntityState::Idle);
+        assert_eq!(
+            entities.position(0),
+            [
+                PATROL_ENEMY[0].patrol_x,
+                PATROL_ENEMY[0].patrol_y,
+                PATROL_ENEMY[0].patrol_z,
+            ]
+        );
+    }
+
+    #[test]
+    fn quake_chase_search_is_deterministic_across_identical_runs() {
+        let mut first = GameEntities::<8>::EMPTY;
+        let mut second = GameEntities::<8>::EMPTY;
+        first.spawn_from_records(&PATROL_ENEMY);
+        second.spawn_from_records(&PATROL_ENEMY);
+        first.state[0] = GameEntityState::Patrol as u8;
+        second.state[0] = GameEntityState::Patrol as u8;
+        let mut first_mover = FiniteWallMover::default();
+        let mut second_mover = FiniteWallMover::default();
+
+        for _ in 0..160 {
+            first.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut first_mover);
+            second.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut second_mover);
+            assert_eq!(first.position(0), second.position(0));
+            assert_eq!(first.yaw(0), second.yaw(0));
+            assert_eq!(first.state(0), second.state(0));
+            assert_eq!(first.move_yaw[0], second.move_yaw[0]);
+            assert_eq!(first.move_yaw_valid[0], second.move_yaw_valid[0]);
+            assert_eq!(first.move_tried[0], second.move_tried[0]);
+        }
+        assert_eq!(first_mover.calls, second_mover.calls);
+    }
+
+    #[test]
+    fn quake_chase_search_probes_each_direction_at_most_once() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&PATROL_ENEMY);
+        entities.state[0] = GameEntityState::Patrol as u8;
+        let mut mover = CountingBlockedMover::default();
+
+        for _ in 0..4 {
+            let before = mover.calls;
+            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut mover);
+            assert!(
+                mover.calls - before <= usize::from(GAME_ENTITY_DIRECTION_PROBES_PER_TICK),
+                "the blocked search stays inside its per-tick probe budget"
+            );
+        }
+
+        assert_eq!(mover.calls, 8, "every eight-way direction is probed once");
         assert_eq!(entities.position(0), [1000, 0, 1000]);
     }
 

@@ -88,8 +88,9 @@ impl SceneEntityMover<'_> {
     }
 }
 
-impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
-    fn step(
+impl SceneEntityMover<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn step_inner(
         &mut self,
         entity: usize,
         room: RoomIndex,
@@ -98,6 +99,7 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         dz: i32,
         radius: i32,
         height: i32,
+        exact_direction: bool,
     ) -> [i32; 3] {
         // Body blockers: other entities' cooked instances at their
         // LIVE positions (self excluded), plus the player's capsule.
@@ -181,8 +183,8 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
                 return position;
             };
             aabb_count += count;
-            let step = bsp
-                .commit_body_step(
+            let step = if exact_direction {
+                bsp.commit_body_direction(
                     start,
                     dx,
                     dz,
@@ -191,7 +193,18 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
                     &cylinders[..cylinder_count],
                     &aabbs[..aabb_count],
                 )
-                .expect("PXBSP entity trace failed");
+            } else {
+                bsp.commit_body_step(
+                    start,
+                    dx,
+                    dz,
+                    radius,
+                    height,
+                    &cylinders[..cylinder_count],
+                    &aabbs[..aabb_count],
+                )
+            }
+            .expect("PXBSP entity trace failed");
             return [step.position.x, step.position.y, step.position.z];
         }
 
@@ -229,6 +242,34 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
         let step =
             psx_engine::character_motor::commit_body_step(collision, start, dx, dz, radius, height);
         [step.position.x, step.position.y, step.position.z]
+    }
+}
+
+impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
+    fn step(
+        &mut self,
+        entity: usize,
+        room: RoomIndex,
+        position: [i32; 3],
+        dx: i32,
+        dz: i32,
+        radius: i32,
+        height: i32,
+    ) -> [i32; 3] {
+        self.step_inner(entity, room, position, dx, dz, radius, height, false)
+    }
+
+    fn step_direction(
+        &mut self,
+        entity: usize,
+        room: RoomIndex,
+        position: [i32; 3],
+        dx: i32,
+        dz: i32,
+        radius: i32,
+        height: i32,
+    ) -> [i32; 3] {
+        self.step_inner(entity, room, position, dx, dz, radius, height, true)
     }
 }
 
