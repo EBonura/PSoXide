@@ -394,6 +394,9 @@ pub const FACE_BAKED_LIGHT: u16 = 4;
 /// PXBSP face override that renders both authored sides regardless of the
 /// shared material's normal sidedness policy.
 pub const FACE_TWO_SIDED: u16 = 8;
+/// Every cooked UV lies inside one copy of the face texture. The runtime may
+/// add the texture's page origin and use compact packets without GP0(E2).
+pub const FACE_PAGE_LOCAL_UV: u16 = 16;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Vec2U8 {
