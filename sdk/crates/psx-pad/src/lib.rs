@@ -385,6 +385,111 @@ impl PadState {
     }
 }
 
+/// One logical game action bound to up to two physical button masks.
+///
+/// A mask may contain more than one button; any held bit activates the
+/// binding. Zero means that binding slot is unused.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionBinding {
+    /// Primary physical button mask.
+    pub primary: u16,
+    /// Optional secondary physical button mask.
+    pub secondary: u16,
+}
+
+impl ActionBinding {
+    /// An action with no physical button assigned.
+    pub const UNBOUND: Self = Self::new(0, 0);
+
+    /// Bind an action to primary and secondary button masks.
+    pub const fn new(primary: u16, secondary: u16) -> Self {
+        Self { primary, secondary }
+    }
+
+    #[inline]
+    const fn mask(self) -> u16 {
+        self.primary | self.secondary
+    }
+}
+
+/// Fixed, allocation-free mapping from game-defined action indices to pads.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ActionMap<const ACTIONS: usize> {
+    bindings: [ActionBinding; ACTIONS],
+}
+
+impl<const ACTIONS: usize> ActionMap<ACTIONS> {
+    /// Construct a map in the same order as the game's action enum.
+    pub const fn new(bindings: [ActionBinding; ACTIONS]) -> Self {
+        Self { bindings }
+    }
+
+    /// Read the complete binding table.
+    pub const fn bindings(&self) -> &[ActionBinding; ACTIONS] {
+        &self.bindings
+    }
+
+    /// Replace one binding. Out-of-range indices are ignored.
+    pub fn set(&mut self, action: usize, binding: ActionBinding) {
+        if let Some(slot) = self.bindings.get_mut(action) {
+            *slot = binding;
+        }
+    }
+
+    /// Read one binding, returning [`ActionBinding::UNBOUND`] out of range.
+    pub const fn binding(&self, action: usize) -> ActionBinding {
+        if action < ACTIONS {
+            self.bindings[action]
+        } else {
+            ActionBinding::UNBOUND
+        }
+    }
+
+    /// Interpret current and previous pad states through this map.
+    pub const fn input<'a>(
+        &'a self,
+        current: PadState,
+        previous: PadState,
+    ) -> ActionInput<'a, ACTIONS> {
+        ActionInput {
+            map: self,
+            current,
+            previous,
+        }
+    }
+}
+
+/// Per-tick logical action view over a pair of pad samples.
+#[derive(Copy, Clone, Debug)]
+pub struct ActionInput<'a, const ACTIONS: usize> {
+    map: &'a ActionMap<ACTIONS>,
+    current: PadState,
+    previous: PadState,
+}
+
+impl<const ACTIONS: usize> ActionInput<'_, ACTIONS> {
+    /// Whether an action is held now.
+    #[inline]
+    pub fn held(self, action: usize) -> bool {
+        let mask = self.map.binding(action).mask();
+        mask != 0 && self.current.buttons.is_held(mask)
+    }
+
+    /// Whether an action transitioned from released to pressed this tick.
+    #[inline]
+    pub fn pressed(self, action: usize) -> bool {
+        let mask = self.map.binding(action).mask();
+        mask != 0 && self.current.buttons.is_held(mask) && !self.previous.buttons.is_held(mask)
+    }
+
+    /// Whether an action transitioned from pressed to released this tick.
+    #[inline]
+    pub fn released(self, action: usize) -> bool {
+        let mask = self.map.binding(action).mask();
+        mask != 0 && !self.current.buttons.is_held(mask) && self.previous.buttons.is_held(mask)
+    }
+}
+
 /// How a transaction paces its bytes across the serial link.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Pacing {
@@ -1153,5 +1258,29 @@ mod tests {
     #[test]
     fn pacing_round_trips() {
         assert_ne!(Pacing::NoAckWait, Pacing::AckWait);
+    }
+
+    #[test]
+    fn action_map_unifies_primary_secondary_and_edges() {
+        let map = ActionMap::new([
+            ActionBinding::new(button::CROSS, button::CIRCLE),
+            ActionBinding::new(button::START, 0),
+        ]);
+        let previous = PadState {
+            buttons: ButtonState::from_bits(button::CROSS),
+            mode: PadMode::Digital,
+            sticks: AnalogSticks::CENTERED,
+            id_low: 0x41,
+        };
+        let current = PadState {
+            buttons: ButtonState::from_bits(button::CIRCLE | button::START),
+            ..previous
+        };
+        let input = map.input(current, previous);
+        assert!(input.held(0));
+        assert!(!input.pressed(0), "the logical action stayed held");
+        assert!(input.pressed(1));
+        assert!(!input.released(0));
+        assert!(!input.held(99));
     }
 }
