@@ -9,7 +9,8 @@ use crate::brush_vis::{quake_portal_fast_rows, quake_portal_flow_rows};
 use crate::ResourceId;
 
 use psx_bsp::{
-    encode_node_bound_max, encode_node_bound_min, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_TWO_SIDED,
+    encode_node_bound_max, encode_node_bound_min, FACE_BACKSIDE, FACE_BAKED_LIGHT,
+    FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED,
 };
 
 const CONTENTS_SOLID: i16 = psx_bsp::collision::CONTENTS_SOLID;
@@ -150,12 +151,21 @@ pub fn pack_bsp_geometry_with_visibility(
                 ])
             })
             .collect();
-        if let Some(dims) = texture_dims.get(&surface.material) {
+        let page_local_uv = if let Some(dims) = texture_dims.get(&surface.material) {
             crate::brush::rebase_texel_uvs(
                 &mut surface_uvs,
                 [f64::from(dims[0].max(1)), f64::from(dims[1].max(1))],
             );
-        }
+            surface_uvs.iter().all(|uv| {
+                uv.iter().zip(dims).all(|(&value, &size)| {
+                    value.is_finite()
+                        && value.round() >= 0.0
+                        && value.round() < f64::from(size.max(1))
+                })
+            })
+        } else {
+            false
+        };
         for (vertex_index, vertex) in surface.vertices.iter().copied().enumerate() {
             pack_vertex(
                 &mut vertices,
@@ -168,6 +178,7 @@ pub fn pack_bsp_geometry_with_visibility(
         }
         push_u16(&mut faces, plane_index as u16);
         let flags = FACE_BAKED_LIGHT
+            | if page_local_uv { FACE_PAGE_LOCAL_UV } else { 0 }
             | if plane_flipped { FACE_BACKSIDE } else { 0 }
             | if surface.contents.is_solid() {
                 0
@@ -789,6 +800,25 @@ mod tests {
                 "rebased face UVs must stay contiguous: span {span:?}"
             );
         }
+    }
+
+    #[test]
+    fn faces_inside_one_texture_copy_are_marked_page_local() {
+        // Offset from a repeat seam so every signed paraxial axis remains
+        // strictly inside one 64x64 copy after whole-repeat rebasing.
+        let brushes = [Brush::cuboid([16, 16, 16], [144, 80, 272])];
+        let surfaces = compile_csg_surfaces(&brushes);
+        let mut bsp = build_surface_bsp(&surfaces);
+        let portals = portalize_surface_bsp(&bsp);
+        classify_bsp_leaves(&mut bsp, &portals, &brushes);
+        let mut dims = std::collections::HashMap::new();
+        dims.insert(None, [64u16, 64u16]);
+        let packed =
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &dims).expect("pack");
+        let faces = RecordSlice::<Face>::new(&packed.faces).expect("faces");
+        assert!(faces
+            .iter()
+            .all(|face| face.flags & FACE_PAGE_LOCAL_UV != 0));
     }
 
     #[test]

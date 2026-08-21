@@ -368,6 +368,7 @@ impl BspRuntime {
                 clut: slot.clut_word,
                 texture_window_word: slot.texture_window.word(),
                 uv_origin: [0, 0],
+                page_uv_origin: slot.texture_window.origin_texels(),
                 texture_size: [width, height],
             });
         }
