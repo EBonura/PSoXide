@@ -1323,7 +1323,7 @@
             id: (2),
             name: "Gameplay",
             world: Gameplay,
-            ui_scene: None,
+            ui_scene: Some((1)),
             ui_input: false,
             pause_world: false,
         ),

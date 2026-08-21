@@ -1,4 +1,5 @@
 use super::*;
+use crate::SceneWorldLayer;
 
 #[test]
 fn tracked_editor_playtest_manifest_is_placeholder() {
@@ -152,6 +153,40 @@ fn default_health_gauge_cooks_as_one_resident_seven_frame_texture() {
     assert!(used_ui_source_paths
         .iter()
         .any(|path| path.ends_with("assets/ui/health_bar_clean_slim.psxt")));
+}
+
+#[test]
+fn tracked_health_gauge_projects_attach_the_hud_to_gameplay() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let project_paths = [
+        manifest.join("../../projects/default/project.ron"),
+        manifest.join("../../projects/mantis/project.ron"),
+        manifest.join("../../projects/quake-e1m1-geometry/project.ron"),
+        manifest.join("../../projects/tech-demo/project.ron"),
+        manifest.join("../../samples/cortex_v1/project.ron"),
+        manifest.join("../../archive/fixtures/brush-open-courtyard/project.ron"),
+    ];
+
+    for project_path in project_paths {
+        let project = ProjectDocument::load_from_path(&project_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+        let hud = project
+            .ui_scenes
+            .iter()
+            .find(|scene| scene.name == "HUD")
+            .unwrap_or_else(|| panic!("{} has no HUD scene", project_path.display()));
+        let gameplay = project
+            .scene_states
+            .iter()
+            .find(|state| state.world == SceneWorldLayer::Gameplay)
+            .unwrap_or_else(|| panic!("{} has no gameplay state", project_path.display()));
+        assert_eq!(
+            gameplay.ui_scene,
+            Some(hud.id),
+            "{} does not activate its HUD during gameplay",
+            project_path.display()
+        );
+    }
 }
 
 #[test]
