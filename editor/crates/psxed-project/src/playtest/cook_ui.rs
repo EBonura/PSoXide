@@ -947,6 +947,7 @@ pub(crate) fn cook_ui_shape_option(shape: Option<UiShapeStyle>, transparent: boo
         style.corner_cut,
         style.border_width,
         transparent,
+        style.semi_transparent_fill,
     )
 }
 

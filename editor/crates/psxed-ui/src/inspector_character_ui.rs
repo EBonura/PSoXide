@@ -1360,6 +1360,12 @@ pub(crate) fn draw_ui_shape_style_editor(
 
     let original = *shape;
     let mut style = shape.unwrap_or_default();
+    ui.add_enabled_ui(filled, |ui| {
+        changed |= ui
+            .checkbox(&mut style.semi_transparent_fill, "Semi-transparent fill")
+            .on_hover_text("PS1 native 50/50 blend with the framebuffer")
+            .changed();
+    });
     ui.separator();
     ui.strong("45-degree corner cuts");
     changed |= inspector_property_row(ui, "Cut size", |ui| {

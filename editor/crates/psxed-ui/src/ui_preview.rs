@@ -591,6 +591,13 @@ pub(crate) fn draw_ui_preview_shape(
     style: Option<UiShapeStyle>,
 ) {
     let style = style.unwrap_or_default();
+    let fill = fill.map(|paint| {
+        if style.semi_transparent_fill {
+            ui_preview_paint_with_alpha(paint, 128)
+        } else {
+            paint
+        }
+    });
     let corners = style.corner_mask();
     let cut = f32::from(style.corner_cut)
         .min(preview.width * 0.5)
@@ -719,12 +726,30 @@ fn ui_preview_paint_at(paint: UiPreviewPaint, x: f32, y: f32, width: f32, height
             .clamp(0.0, 1.0);
             let mix =
                 |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
-            Color32::from_rgb(
+            Color32::from_rgba_unmultiplied(
                 mix(from.r(), to.r()),
                 mix(from.g(), to.g()),
                 mix(from.b(), to.b()),
+                mix(from.a(), to.a()),
             )
         }
+    }
+}
+
+fn ui_preview_paint_with_alpha(paint: UiPreviewPaint, alpha: u8) -> UiPreviewPaint {
+    let with_alpha =
+        |color: Color32| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+    match paint {
+        UiPreviewPaint::Solid(color) => UiPreviewPaint::Solid(with_alpha(color)),
+        UiPreviewPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => UiPreviewPaint::Gradient {
+            from: with_alpha(from),
+            to: with_alpha(to),
+            direction,
+        },
     }
 }
 

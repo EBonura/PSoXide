@@ -33,9 +33,10 @@
 
 use psx_font::FontAtlas;
 use psx_gpu::{
-    draw_quad_flat, draw_quad_textured_gouraud_material, draw_quad_textured_material,
-    draw_tri_flat, draw_tri_gouraud,
-    material::{TextureMaterial, TextureWindow},
+    draw_line_mono, draw_quad_flat, draw_quad_textured_gouraud_material,
+    draw_quad_textured_material, draw_tri_flat, draw_tri_flat_blended, draw_tri_gouraud,
+    draw_tri_gouraud_blended,
+    material::{BlendMode, TextureMaterial, TextureWindow},
 };
 use psx_level::{
     ui_node_flags, ui_shape, AssetId, LevelOptionDef, LevelUiFocusEffect, LevelUiFocusStyle,
@@ -465,7 +466,7 @@ pub fn draw_scene(
             LevelUiNodeKind::Button => {
                 draw_button(node_font(fonts, node.font), node, resolved, paints);
                 if is_focused {
-                    draw_focus_ring(resolved, focus_style, frame);
+                    draw_focus_ring(resolved, focus_style, frame, Some(shape_config(node)));
                 }
             }
             LevelUiNodeKind::Slider => {
@@ -482,7 +483,7 @@ pub fn draw_scene(
                     shape_paint(node.accent, node.accent_paint, paints),
                 );
                 if is_focused {
-                    draw_focus_ring(resolved, focus_style, frame);
+                    draw_focus_ring(resolved, focus_style, frame, None);
                 }
             }
         }
@@ -493,7 +494,12 @@ pub fn draw_scene(
 /// highlight reads regardless of the control's own colours. The
 /// scene's [`LevelUiFocusStyle`] selects the animation; everything
 /// is integer-only flat quads, no allocation.
-fn draw_focus_ring(node: UiResolvedNode, style: &LevelUiFocusStyle, frame: u16) {
+fn draw_focus_ring(
+    node: UiResolvedNode,
+    style: &LevelUiFocusStyle,
+    frame: u16,
+    shape: Option<UiShapeConfig>,
+) {
     let width = node.width as i16;
     let height = node.height as i16;
     if width <= 0 || height <= 0 {
@@ -514,6 +520,12 @@ fn draw_focus_ring(node: UiResolvedNode, style: &LevelUiFocusStyle, frame: u16) 
             draw_focus_corners(node, width, height, thickness, margin, style, frame);
         }
         LevelUiFocusEffect::Tracer => {
+            if let Some(config) = shape {
+                if config.corners != 0 && config.cut != 0 {
+                    draw_focus_shape_tracer(node, thickness, margin, config, style, frame);
+                    return;
+                }
+            }
             draw_focus_tracer(node, width, height, thickness, margin, style, frame);
         }
     }
@@ -649,6 +661,129 @@ fn draw_focus_tracer(
     }
 }
 
+/// Shape-aware tracer for chamfered buttons. Each thickness layer is a
+/// parallel convex outline, and the bright comet is split at polygon
+/// vertices so its head and tail traverse the 45-degree edges instead of
+/// orbiting an invisible rectangle.
+fn draw_focus_shape_tracer(
+    node: UiResolvedNode,
+    thickness: i16,
+    margin: i16,
+    config: UiShapeConfig,
+    style: &LevelUiFocusStyle,
+    frame: u16,
+) {
+    for layer in 0..thickness {
+        let expansion = margin.saturating_add(layer);
+        let polygon = shape_polygon(node, config.corners, config.cut, -i32::from(expansion));
+        draw_shape_outline(&polygon, style.color_b);
+        if style.period == 0 {
+            continue;
+        }
+        let perimeter = shape_perimeter(&polygon);
+        if perimeter <= 0 {
+            continue;
+        }
+        let head = (i32::from(frame % style.period) * perimeter) / i32::from(style.period);
+        let segment_len = (perimeter / 28).max(2);
+        for tail in 0..TRACER_SEGMENTS {
+            let brightness = (255 - tail * 255 / TRACER_SEGMENTS) as u8;
+            let color = lerp_color(style.color_a, style.color_b, brightness);
+            let start = (head - (tail + 1) * segment_len).rem_euclid(perimeter);
+            draw_shape_perimeter_run(&polygon, perimeter, start, segment_len, color);
+        }
+    }
+}
+
+fn draw_shape_outline(polygon: &UiShapePolygon, (r, g, b): (u8, u8, u8)) {
+    if polygon.len < 2 {
+        return;
+    }
+    for index in 0..polygon.len {
+        let next = (index + 1) % polygon.len;
+        let from = polygon.vertices[index].screen;
+        let to = polygon.vertices[next].screen;
+        draw_line_mono(from.0, from.1, to.0, to.1, r, g, b);
+    }
+}
+
+fn shape_edge_len(from: UiShapeVertex, to: UiShapeVertex) -> i32 {
+    let dx = (to.local.0 - from.local.0).abs();
+    let dy = (to.local.1 - from.local.1).abs();
+    dx.max(dy)
+}
+
+fn shape_perimeter(polygon: &UiShapePolygon) -> i32 {
+    let mut perimeter = 0;
+    for index in 0..polygon.len {
+        perimeter += shape_edge_len(
+            polygon.vertices[index],
+            polygon.vertices[(index + 1) % polygon.len],
+        );
+    }
+    perimeter
+}
+
+fn shape_edge_point(
+    from: UiShapeVertex,
+    to: UiShapeVertex,
+    offset: i32,
+    length: i32,
+) -> (i16, i16) {
+    if length <= 0 {
+        return from.screen;
+    }
+    let interpolate = |start: i16, end: i16| {
+        let start = i32::from(start);
+        (start + (i32::from(end) - start) * offset / length) as i16
+    };
+    (
+        interpolate(from.screen.0, to.screen.0),
+        interpolate(from.screen.1, to.screen.1),
+    )
+}
+
+fn draw_shape_perimeter_run(
+    polygon: &UiShapePolygon,
+    perimeter: i32,
+    mut start: i32,
+    mut length: i32,
+    (r, g, b): (u8, u8, u8),
+) {
+    if polygon.len < 2 || perimeter <= 0 {
+        return;
+    }
+    while length > 0 {
+        start = start.rem_euclid(perimeter);
+        let mut edge_start = start;
+        let mut edge_index = 0;
+        let mut edge_length = 0;
+        for index in 0..polygon.len {
+            let candidate = shape_edge_len(
+                polygon.vertices[index],
+                polygon.vertices[(index + 1) % polygon.len],
+            );
+            if edge_start < candidate {
+                edge_index = index;
+                edge_length = candidate;
+                break;
+            }
+            edge_start -= candidate;
+        }
+        if edge_length <= 0 {
+            return;
+        }
+        let run = length.min(edge_length - edge_start);
+        let from_vertex = polygon.vertices[edge_index];
+        let to_vertex = polygon.vertices[(edge_index + 1) % polygon.len];
+        let from = shape_edge_point(from_vertex, to_vertex, edge_start, edge_length);
+        let to = shape_edge_point(from_vertex, to_vertex, edge_start + run, edge_length);
+        draw_line_mono(from.0, from.1, to.0, to.1, r, g, b);
+        start += run;
+        length -= run;
+    }
+}
+
 /// Draw `len` perimeter pixels starting at clockwise offset `start`
 /// along the focus ring band (top edge left-to-right, then right edge
 /// down, bottom right-to-left, left edge up), splitting across edges
@@ -778,7 +913,7 @@ mod tests {
     use super::{
         bar_frame_index, bar_frame_v_range, diamond_quad, font_index, font_tint,
         image_effect_vertex_colors, image_effect_verts, node_absolute_rect, scale_u16_q8,
-        selected_label_text, shape_config, shape_polygon,
+        selected_label_text, shape_config, shape_edge_point, shape_perimeter, shape_polygon,
     };
     use psx_level::{
         ui_node_flags, AssetId, LevelUiAction, LevelUiImageEffect, LevelUiNodeKind,
@@ -874,6 +1009,7 @@ mod tests {
             6,
             2,
             true,
+            true,
         );
         let resolved = super::node_resolved(&nodes, 1).expect("resolved shape");
         let config = shape_config(&nodes[1]);
@@ -881,6 +1017,7 @@ mod tests {
         assert_eq!(config.cut, 6);
         assert_eq!(config.border, 2);
         assert!(config.transparent);
+        assert!(config.semi_transparent_fill);
 
         let outer = shape_polygon(resolved, config.corners, config.cut, 0);
         assert_eq!(outer.len, 6);
@@ -893,6 +1030,37 @@ mod tests {
         for (vertex, expected) in inner.vertices[..inner.len].iter().zip(expected_inner) {
             assert_eq!(vertex.local, expected);
         }
+    }
+
+    #[test]
+    fn chamfered_focus_perimeter_includes_both_diagonal_edges() {
+        let nodes = [
+            ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Button,
+                10,
+                20,
+                100,
+                30,
+            ),
+        ];
+        let resolved = super::node_resolved(&nodes, 1).expect("resolved shape");
+        let polygon = shape_polygon(
+            resolved,
+            psx_level::ui_shape::TOP_LEFT | psx_level::ui_shape::BOTTOM_RIGHT,
+            6,
+            -2,
+        );
+        let expected = [(4, -2), (102, -2), (102, 26), (96, 32), (-2, 32), (-2, 4)];
+        for (vertex, expected) in polygon.vertices[..polygon.len].iter().zip(expected) {
+            assert_eq!(vertex.local, expected);
+        }
+        assert_eq!(shape_perimeter(&polygon), 264);
+        assert_eq!(
+            shape_edge_point(polygon.vertices[2], polygon.vertices[3], 3, 6),
+            (109, 49)
+        );
     }
 
     #[test]
@@ -1742,6 +1910,7 @@ struct UiShapeConfig {
     cut: u8,
     border: u8,
     transparent: bool,
+    semi_transparent_fill: bool,
 }
 
 fn shape_config(node: &LevelUiNodeRecord) -> UiShapeConfig {
@@ -1752,6 +1921,7 @@ fn shape_config(node: &LevelUiNodeRecord) -> UiShapeConfig {
             border: ui_shape::border(node.option),
             transparent: ui_shape::transparent(node.option)
                 || node.flags & ui_node_flags::BUTTON_TRANSPARENT != 0,
+            semi_transparent_fill: ui_shape::semi_transparent_fill(node.option),
         };
     }
     UiShapeConfig {
@@ -1770,7 +1940,7 @@ fn draw_shape_node(
 ) -> UiShapeConfig {
     let config = shape_config(node);
     let fill = shape_paint(node.color, node.color_paint, paints);
-    if config.corners == 0 && config.border == 0 {
+    if config.corners == 0 && config.border == 0 && !config.semi_transparent_fill {
         if !config.transparent {
             draw_quad_paint(resolved.verts, fill);
         }
@@ -1779,7 +1949,13 @@ fn draw_shape_node(
 
     let outer = shape_polygon(resolved, config.corners, config.cut, 0);
     if !config.transparent {
-        draw_shape_polygon(&outer, fill, resolved.width, resolved.height);
+        draw_shape_polygon(
+            &outer,
+            fill,
+            resolved.width,
+            resolved.height,
+            config.semi_transparent_fill,
+        );
     }
     if config.border != 0 {
         draw_shape_border(
@@ -1865,7 +2041,13 @@ fn shape_polygon(
     polygon
 }
 
-fn draw_shape_polygon(polygon: &UiShapePolygon, paint: UiPaint, width: u16, height: u16) {
+fn draw_shape_polygon(
+    polygon: &UiShapePolygon,
+    paint: UiPaint,
+    width: u16,
+    height: u16,
+    blended: bool,
+) {
     if polygon.len < 3 {
         return;
     }
@@ -1879,6 +2061,7 @@ fn draw_shape_polygon(polygon: &UiShapePolygon, paint: UiPaint, width: u16, heig
             paint,
             width,
             height,
+            blended,
         );
     }
 }
@@ -1896,7 +2079,7 @@ fn draw_shape_border(
         || resolved.width <= border as u16 * 2
         || resolved.height <= border as u16 * 2
     {
-        draw_shape_polygon(&outer, paint, resolved.width, resolved.height);
+        draw_shape_polygon(&outer, paint, resolved.width, resolved.height, false);
         return;
     }
     for index in 0..outer.len {
@@ -1910,6 +2093,7 @@ fn draw_shape_border(
             paint,
             resolved.width,
             resolved.height,
+            false,
         );
         draw_shape_triangle(
             [
@@ -1920,22 +2104,39 @@ fn draw_shape_border(
             paint,
             resolved.width,
             resolved.height,
+            false,
         );
     }
 }
 
-fn draw_shape_triangle(vertices: [UiShapeVertex; 3], paint: UiPaint, width: u16, height: u16) {
+fn draw_shape_triangle(
+    vertices: [UiShapeVertex; 3],
+    paint: UiPaint,
+    width: u16,
+    height: u16,
+    blended: bool,
+) {
     let screen = [vertices[0].screen, vertices[1].screen, vertices[2].screen];
     match paint {
-        UiPaint::Solid((r, g, b)) => draw_tri_flat(screen, r, g, b),
-        UiPaint::Gradient { .. } => draw_tri_gouraud(
-            screen,
-            [
+        UiPaint::Solid((r, g, b)) => {
+            if blended {
+                draw_tri_flat_blended(screen, r, g, b, BlendMode::Average);
+            } else {
+                draw_tri_flat(screen, r, g, b);
+            }
+        }
+        UiPaint::Gradient { .. } => {
+            let colors = [
                 shape_paint_color(paint, vertices[0].local, width, height),
                 shape_paint_color(paint, vertices[1].local, width, height),
                 shape_paint_color(paint, vertices[2].local, width, height),
-            ],
-        ),
+            ];
+            if blended {
+                draw_tri_gouraud_blended(screen, colors, BlendMode::Average);
+            } else {
+                draw_tri_gouraud(screen, colors);
+            }
+        }
     }
 }
 
