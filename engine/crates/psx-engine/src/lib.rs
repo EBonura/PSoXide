@@ -64,6 +64,7 @@ mod floor_sample;
 pub mod frames;
 pub mod game_app;
 pub mod lighting;
+pub mod microgame;
 pub mod movement;
 pub mod render;
 pub mod render3d;
@@ -113,6 +114,7 @@ pub use lighting::{
     shade_material_tint_with_lights, shade_tint_with_lights, LightingRgb, MaterialTint,
     PointLightSample, Rgb8, LIGHTING_MAX, LIGHTING_NEUTRAL,
 };
+pub use microgame::{MicrogameAction, MicrogameScreen, MicrogameShell};
 pub use movement::{
     camera_relative_move, camera_relative_move_axes, camera_relative_move_q12,
     horizontal_view_coordinates, yaw_to_point, CameraRelativeMove, InputAxis, InputAxisProfile,
@@ -175,4 +177,6 @@ pub use world_render::{
 /// names.
 pub use psx_pad::button;
 /// Pad-state types re-exported for scenes that need analog stick data.
-pub use psx_pad::{AnalogSticks, Deadzone, PadMode, PadState, STICK_FULL};
+pub use psx_pad::{
+    ActionBinding, ActionInput, ActionMap, AnalogSticks, Deadzone, PadMode, PadState, STICK_FULL,
+};

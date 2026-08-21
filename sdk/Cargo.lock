@@ -141,6 +141,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-settings"
+version = "0.1.0"
+dependencies = [
+ "psx-mc",
+ "psx-pad",
+]
+
+[[package]]
 name = "psx-sfx"
 version = "0.1.0"
 dependencies = [
