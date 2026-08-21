@@ -2916,6 +2916,46 @@ fn duplicate_routes_to_brushes_from_the_select_tool() {
 }
 
 #[test]
+fn room_copy_and_paste_shortcuts_copy_brush_geometry() {
+    let mut harness = ViewportHarness::floored_room("brush_copy_paste_shortcuts", 4);
+    harness.workspace.active_workspace = WorkspaceView::Room;
+    harness.workspace.active_tool = ViewTool::Select;
+    let brush = psxed_project::brush::Brush::cuboid([32, 0, 64], [160, 192, 224]);
+    harness
+        .workspace
+        .project
+        .active_scene_mut()
+        .brushes
+        .push(brush.clone());
+    harness.workspace.replace_brush_selection(0, None);
+
+    let send = |workspace: &mut EditorWorkspace, key| {
+        let context = egui::Context::default();
+        let _ = context.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                }],
+                ..egui::RawInput::default()
+            },
+            |ctx| workspace.handle_global_shortcuts(ctx, EditorPlaytestStatus::Idle),
+        );
+    };
+    send(&mut harness.workspace, egui::Key::C);
+    assert!(harness.workspace.portable_geometry_clipboard.is_some());
+    send(&mut harness.workspace, egui::Key::V);
+
+    let brushes = &harness.workspace.project.active_scene().brushes;
+    assert_eq!(brushes.len(), 2);
+    assert_eq!(brushes[1], brush, "paste keeps the authored coordinates");
+    assert_eq!(harness.workspace.selected_brush_set(), vec![1]);
+}
+
+#[test]
 fn undo_reconciles_stale_brush_selection_and_clip_never_panics() {
     let mut harness = ViewportHarness::floored_room("brush_stale_sel", 4);
     harness.workspace.active_tool = ViewTool::Brush;
