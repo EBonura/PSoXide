@@ -272,6 +272,11 @@ impl ViewProjection {
 #[derive(Copy, Clone, Debug)]
 pub struct FrustumPlanes {
     planes: [([i32; 3], i64); 5],
+    view_rows: [[i16; 3]; 3],
+    view_translation: [i32; 3],
+    side_scale: [i32; 2],
+    focal_length: i32,
+    near_view: i32,
 }
 
 impl FrustumPlanes {
@@ -321,6 +326,11 @@ impl FrustumPlanes {
                 combine(down, translation.y, ky, 1),
                 combine(down, translation.y, ky, -1),
             ],
+            view_rows: [rotation.m[0], rotation.m[1], rotation.m[2]],
+            view_translation: [translation.x, translation.y, translation.z],
+            side_scale: [kx, ky],
+            focal_length: h,
+            near_view,
         }
     }
 
@@ -349,6 +359,45 @@ impl FrustumPlanes {
         })
     }
 
+    /// Cheaply prove that a point is inside every plane using only 32-bit
+    /// arithmetic. View coordinates are rounded down from Q12; the extra
+    /// screen-axis unit makes the side-plane proof conservative. Points near
+    /// a boundary fall back to the exact i64 clip below.
+    #[inline]
+    fn point_definitely_inside(&self, position: [i16; 3]) -> bool {
+        let view_coord = |row: [i16; 3], translation: i32| {
+            let dot = row[0] as i32 * position[0] as i32
+                + row[1] as i32 * position[1] as i32
+                + row[2] as i32 * position[2] as i32;
+            (dot >> 12).saturating_add(translation)
+        };
+        let view_z = view_coord(self.view_rows[2], self.view_translation[2]);
+        if view_z < self.near_view {
+            return false;
+        }
+        let view_x = view_coord(self.view_rows[0], self.view_translation[0]);
+        let view_y = view_coord(self.view_rows[1], self.view_translation[1]);
+        let Some(x_extent) = view_x.checked_abs().and_then(|v| v.checked_add(1)) else {
+            return false;
+        };
+        let Some(y_extent) = view_y.checked_abs().and_then(|v| v.checked_add(1)) else {
+            return false;
+        };
+        let Some(x_depth) = self.side_scale[0].checked_mul(view_z) else {
+            return false;
+        };
+        let Some(y_depth) = self.side_scale[1].checked_mul(view_z) else {
+            return false;
+        };
+        let Some(x_edge) = self.focal_length.checked_mul(x_extent) else {
+            return false;
+        };
+        let Some(y_edge) = self.focal_length.checked_mul(y_extent) else {
+            return false;
+        };
+        x_depth >= x_edge && y_depth >= y_edge
+    }
+
     /// Clip a convex polygon in place. Returns the vertex count after
     /// clipping (0 when nothing remains). `vertices` must have room for
     /// `count + 5` records; `scratch` the same.
@@ -359,6 +408,15 @@ impl FrustumPlanes {
         scratch: &mut [ClassicAffineVertex],
     ) -> usize {
         let mut count = count;
+        // Most visible world faces are well inside the frustum. Prove that
+        // common case with 32-bit math before paying for fifteen i64 products
+        // per vertex in the exact five-plane test.
+        if vertices[..count]
+            .iter()
+            .all(|vertex| self.point_definitely_inside(vertex.position))
+        {
+            return count;
+        }
         // Trivial accept: every vertex inside every plane (the common case).
         let mut all_inside = true;
         'planes: for plane in &self.planes {
@@ -2413,6 +2471,37 @@ mod frustum_tests {
                 v.position
             );
         }
+    }
+
+    #[test]
+    fn fast_accept_only_proves_points_inside_every_exact_plane() {
+        let mut accepted = 0usize;
+        for origin in [[0, 0, 0], [37, 70, 273], [-96, 24, 128]] {
+            for yaw in [0, 257, 1024, 2051, 3072] {
+                for pitch in [-320, 0, 100, 512] {
+                    let (planes, _) = planes_for(origin, yaw, pitch);
+                    for x in (-256i16..=256).step_by(64) {
+                        for y in (-128i16..=256).step_by(64) {
+                            for z in (-256i16..=256).step_by(64) {
+                                let position = [x, y, z];
+                                if !planes.point_definitely_inside(position) {
+                                    continue;
+                                }
+                                accepted += 1;
+                                assert!(
+                                    planes
+                                        .planes
+                                        .iter()
+                                        .all(|plane| FrustumPlanes::distance(plane, position) >= 0),
+                                    "fast accept escaped the exact frustum: origin={origin:?} yaw={yaw} pitch={pitch} point={position:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(accepted > 100, "sample did not exercise the fast path");
     }
 
     #[test]

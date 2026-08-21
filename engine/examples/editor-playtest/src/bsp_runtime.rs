@@ -50,8 +50,7 @@ pub(super) const BSP_FALLBACK_CAMERA_DISTANCE: i32 = 192;
 pub(super) const BSP_FALLBACK_CAMERA_HEIGHT: i32 = 128;
 pub(super) const BSP_FALLBACK_CAMERA_TARGET_HEIGHT: i32 = 64;
 pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 16;
-/// Extra boom-to-wall margin for the follow camera in brush worlds, on top
-/// of the body hull's own radius (world units).
+/// Boom-to-wall margin for the point-traced follow camera in brush worlds.
 pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 12;
 pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 16;
 pub(super) const BSP_USE_DISTANCE: i32 = 256;
@@ -543,14 +542,14 @@ impl BspRuntime {
     ) -> Result<ThirdPersonCameraFrame, CollisionQueryError> {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
-        // Spring-arm containment: the solver's point queries run through the
-        // standard body hull (the world expanded by that hull's radius) instead
-        // of hull 0, so the boom is effectively a swept box: side walls push
-        // the camera off them too and it never sits flush against, or inside,
-        // a wall it is skimming along.
+        // The camera is a point and the renderer now clips world polygons at
+        // the near plane, so use Quake's balanced render BSP (hull 0) for the
+        // spring-arm trace. The authored collision margin still stops the eye
+        // before a wall. Walking the expanded body-hull brush chains here made
+        // a single E1M1 camera solve roughly as expensive as rendering a room.
         let mut provider = PxbspCollisionProvider::new(
             &self.map,
-            PXBSP_BODY_HULLS[0].hull_index,
+            BSP_POINT_HULL_INDEX,
             &models[..count],
             CollisionTraceShape::Point,
             &mut self.trace_scratch,

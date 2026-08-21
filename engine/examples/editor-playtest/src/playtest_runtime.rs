@@ -725,8 +725,9 @@ impl Playtest {
         config.height = config.height.max(16);
         config.min_floor_clearance = camera.min_floor_clearance;
         if self.bsp.is_some() {
-            // Brush walls are not near-plane clipped: keep the boom far
-            // enough from them that no wall piece sits inside the near plane.
+            // Keep a small authored gap between the point-traced camera and
+            // brush walls. The renderer clips any remaining near-plane
+            // intersection exactly.
             config.collision_margin = BSP_CAMERA_WALL_MARGIN;
         }
         config.position_lag_shift = camera.position_lag_shift;

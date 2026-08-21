@@ -5,7 +5,10 @@ use crate::brush_compile::{pack_normalized_plane, pack_plane};
 
 const CONTENTS_EMPTY: i16 = psx_bsp::collision::CONTENTS_EMPTY;
 const HULL_EPSILON: f64 = 1.0 / 1024.0;
-const SPATIAL_LEAF_BRUSHES: usize = 64;
+// E1M1's authored brush hull stays below the signed 16-bit clipnode ceiling
+// at 48 while cutting the worst moving-player leaf walks substantially. A
+// 32-brush leaf crosses 32,768 clipnodes and is therefore not representable.
+const SPATIAL_LEAF_BRUSHES: usize = 48;
 const MAX_SPATIAL_DEPTH: usize = 12;
 pub const MAX_MAP_HULLS: usize = 4;
 
