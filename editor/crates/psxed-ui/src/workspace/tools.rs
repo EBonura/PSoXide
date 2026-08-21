@@ -303,8 +303,7 @@ impl ViewportTool3d for SelectTool {
         // drag start, so gizmo clicks never fall through to a face behind.
         match frame.pointer_target {
             Some(Viewport3dPointerTarget::Entity(hit)) => {
-                let visible_order = ws.scene_node_order();
-                ws.apply_node_selection_modifiers(hit.node, frame.modifiers, &visible_order);
+                ws.select_node_with_group_semantics(hit.node, frame.modifiers, false);
             }
             Some(Viewport3dPointerTarget::Brush { brush, face, .. }) => {
                 let (brush, face) = frame
@@ -315,6 +314,10 @@ impl ViewportTool3d for SelectTool {
                     })
                     .map(|(brush, face, _)| (brush, face))
                     .unwrap_or((brush, face));
+                if !matches!(ws.brush_group_pick(brush), BrushGroupPick::Brush) {
+                    ws.select_brush_with_group_semantics(brush, Some(face), frame.modifiers, false);
+                    return;
+                }
                 // Face mode selects the face under the cursor as an
                 // element from the FIRST click (the UV-editing entry).
                 // Deliberately the NEAREST face, not the click-through
@@ -343,15 +346,7 @@ impl ViewportTool3d for SelectTool {
                     ws.apply_brush_element_selection(BrushElement::Face(face), frame.modifiers);
                     return;
                 }
-                ws.clear_node_selection_state();
-                ws.clear_resource_selection_state();
-                ws.clear_primitive_selection_state();
-                ws.clear_sector_selection();
-                if frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl {
-                    ws.toggle_brush_selection(brush);
-                } else {
-                    ws.replace_brush_selection(brush, Some(face));
-                }
+                ws.select_brush_with_group_semantics(brush, Some(face), frame.modifiers, false);
                 ws.status = format!("Selected BSP brush {}", brush + 1);
             }
             Some(Viewport3dPointerTarget::Surface { .. }) | None => {
@@ -519,6 +514,11 @@ impl EditorWorkspace {
         let dir_f64 = dir.map(f64::from);
         let mut hits = Vec::new();
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            if self.brush_effectively_hidden(index)
+                || matches!(self.brush_group_pick(index), BrushGroupPick::Locked)
+            {
+                continue;
+            }
             if let Some((t, face)) = brush.raycast(origin_f64, dir_f64) {
                 hits.push((t, index, face));
             }
@@ -561,6 +561,11 @@ impl EditorWorkspace {
         let mut projected = Vec::with_capacity(16);
         with_cached_brush_pick_solves(&self.project, |solved_brushes| {
             for (index, solved) in solved_brushes.iter().enumerate() {
+                if self.brush_effectively_hidden(index)
+                    || matches!(self.brush_group_pick(index), BrushGroupPick::Locked)
+                {
+                    continue;
+                }
                 if !solved.is_valid() {
                     continue;
                 }
@@ -680,6 +685,36 @@ impl EditorWorkspace {
         let count = self.project.active_scene().brushes.len();
         set.retain(|index| *index < count);
         set
+    }
+
+    /// Exact solved bounds of the complete brush selection. Every selected
+    /// brush must be valid so transforms either act on the whole set or do
+    /// nothing; silently dropping one member would be much worse than
+    /// refusing the gesture.
+    fn selected_brush_bounds(&self) -> Option<([f64; 3], [f64; 3])> {
+        let selected = self.selected_brush_set();
+        let mut selected = selected.into_iter();
+        let first = self
+            .project
+            .active_scene()
+            .brushes
+            .get(selected.next()?)?
+            .solve();
+        if !first.is_valid() {
+            return None;
+        }
+        let (mut min, mut max) = (first.min, first.max);
+        for index in selected {
+            let solved = self.project.active_scene().brushes.get(index)?.solve();
+            if !solved.is_valid() {
+                return None;
+            }
+            for axis in 0..3 {
+                min[axis] = min[axis].min(solved.min[axis]);
+                max[axis] = max[axis].max(solved.max[axis]);
+            }
+        }
+        Some((min, max))
     }
 
     /// Whether `index` is the primary selection or a multi-selection
@@ -1000,10 +1035,11 @@ impl EditorWorkspace {
                 if !solved.is_valid() {
                     return None;
                 }
+                let (selection_min, selection_max) = self.selected_brush_bounds()?;
                 let anchor = [
-                    (solved.min[0] + solved.max[0]) * 0.5,
-                    (solved.min[1] + solved.max[1]) * 0.5,
-                    (solved.min[2] + solved.max[2]) * 0.5,
+                    (selection_min[0] + selection_max[0]) * 0.5,
+                    (selection_min[1] + selection_max[1]) * 0.5,
+                    (selection_min[2] + selection_max[2]) * 0.5,
                 ];
                 let targets = brush_elements::unique_vertices(&solved);
                 let faces = (0..brush.faces.len()).collect();
@@ -1149,6 +1185,9 @@ impl EditorWorkspace {
         } else {
             self.transform_gizmo_mode
         };
+        let whole_brush_others = (self.brush_edit_mode == BrushEditMode::Move)
+            .then(|| self.brush_move_others(index))
+            .unwrap_or_default();
         match mode {
             TransformGizmoMode::Move => {
                 if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
@@ -1159,6 +1198,7 @@ impl EditorWorkspace {
                     mask[axis] = true;
                     drag.axis_mask = mask;
                     drag.faces = faces;
+                    drag.others = whole_brush_others;
                 }
                 true
             }
@@ -1187,6 +1227,7 @@ impl EditorWorkspace {
                 self.brush_element_transform = Some(BrushElementTransformDrag {
                     index,
                     base,
+                    others: whole_brush_others,
                     targets,
                     faces,
                     center: anchor,
@@ -1253,11 +1294,29 @@ impl EditorWorkspace {
             }
             map
         };
-        let mut preview = drag.base.clone();
-        if preview.transform_selected(&drag.faces, &drag.targets, drag.center, map, 0.5) > 0
-            && brush_preview_ok(&preview)
+        let mut previews = Vec::with_capacity(drag.others.len() + 1);
+        let mut primary = drag.base.clone();
+        if primary.transform_selected(&drag.faces, &drag.targets, drag.center, map, 0.5) == 0
+            || !brush_preview_ok(&primary)
         {
-            self.project.active_scene_mut().brushes[drag.index] = preview;
+            return;
+        }
+        previews.push((drag.index, primary));
+        for (index, base) in &drag.others {
+            let mut preview = base.clone();
+            let faces: Vec<usize> = (0..preview.faces.len()).collect();
+            if preview.transform_selected(&faces, &[], drag.center, map, 0.5) == 0
+                || !brush_preview_ok(&preview)
+            {
+                return;
+            }
+            previews.push((*index, preview));
+        }
+        {
+            let scene = self.project.active_scene_mut();
+            for (index, preview) in previews {
+                scene.brushes[index] = preview;
+            }
             if let Some(state) = self.brush_element_transform.as_mut() {
                 state.applied = applied;
             }
@@ -1433,10 +1492,21 @@ impl EditorWorkspace {
             return false;
         };
         let live = self.project.active_scene().brushes[drag.index].clone();
+        let live_others: Vec<_> = drag
+            .others
+            .iter()
+            .map(|(index, _)| (*index, self.project.active_scene().brushes[*index].clone()))
+            .collect();
         self.project.active_scene_mut().brushes[drag.index] = drag.base;
+        for (index, base) in &drag.others {
+            self.project.active_scene_mut().brushes[*index] = base.clone();
+        }
         if drag.applied != 0 {
             self.push_undo();
             self.project.active_scene_mut().brushes[drag.index] = live;
+            for (index, live) in live_others {
+                self.project.active_scene_mut().brushes[index] = live;
+            }
             self.mark_dirty();
             self.reconcile_brush_elements();
         }
@@ -1610,6 +1680,11 @@ impl EditorWorkspace {
             {
                 *slot = transform.base;
             }
+            for (index, base) in transform.others {
+                if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(index) {
+                    *slot = base;
+                }
+            }
         }
         if let Some(extrude) = self.brush_extrude.take() {
             if let Some(slot) = self
@@ -1635,6 +1710,11 @@ impl EditorWorkspace {
             if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(drag.index) {
                 *slot = drag.base;
             }
+            for (index, base) in drag.others {
+                if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(index) {
+                    *slot = base;
+                }
+            }
         }
     }
 
@@ -1649,6 +1729,7 @@ impl EditorWorkspace {
         for index in targets.iter().rev() {
             self.project.active_scene_mut().brushes.remove(*index);
         }
+        self.prune_empty_groups();
         self.mark_dirty();
     }
 
@@ -1791,7 +1872,7 @@ impl EditorWorkspace {
         if selection_count > 1 {
             ui.label(
                 egui::RichText::new(format!(
-                    "{selection_count} brushes selected. Move changes the group; Resize and Size change the primary brush."
+                    "{selection_count} brushes selected. Move, Rotate, Scale, Size, and material assignment change the full selection."
                 ))
                 .small()
                 .color(STUDIO_TEXT_WEAK),
@@ -1829,8 +1910,11 @@ impl EditorWorkspace {
                 }
             });
             if edited != size && !self.set_selected_brush_size(edited) {
-                self.status =
-                    "Size edit rejected: use Face mode for non-axis-aligned brushes".to_string();
+                self.status = if selection_count > 1 {
+                    "Size edit rejected: the full brush selection could not be scaled".to_string()
+                } else {
+                    "Size edit rejected: use Face mode for non-axis-aligned brushes".to_string()
+                };
             }
         }
         ui.horizontal_wrapped(|ui| {
@@ -1953,6 +2037,75 @@ impl EditorWorkspace {
         // Above the per-face early return on purpose: texture lock applies
         // to the whole brush and has to be reachable with no face selected.
         self.draw_brush_texture_mapping_header(ui);
+        if selection_count > 1 && self.selected_brush_face.is_none() {
+            let targets = self.selected_brush_material_targets();
+            let first = targets
+                .first()
+                .and_then(|target| self.material_target_value(*target));
+            let mixed = targets
+                .iter()
+                .skip(1)
+                .any(|target| self.material_target_value(*target) != first);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Material for {} faces across {selection_count} brushes",
+                    targets.len()
+                ))
+                .strong(),
+            );
+            let materials = self.project.material_options();
+            let mut selected_material = (!mixed).then_some(first).flatten();
+            let selected_label = if mixed {
+                "Mixed"
+            } else {
+                selected_material
+                    .and_then(|selected| {
+                        materials
+                            .iter()
+                            .find(|(id, _)| *id == selected)
+                            .map(|(_, name)| name.as_str())
+                    })
+                    .unwrap_or("None (flat grey)")
+            };
+            let changed = searchable_picker(
+                ui,
+                ui.id().with(("multi-brush-material-picker", index)),
+                &mut selected_material,
+                selected_label,
+                &materials,
+                SearchablePickerConfig::optional("None (flat grey)")
+                    .with_width(180.0)
+                    .with_popup_min_width(360.0)
+                    .with_search_hint("Search materials…"),
+            );
+            if changed {
+                self.brush_material = selected_material;
+                if let Some(material) = selected_material {
+                    self.material_paint_sampling = false;
+                    self.replace_resource_selection(material);
+                }
+                let updated = self.apply_material_to_selected_brush_surfaces();
+                self.status = format!(
+                    "Assigned material to {updated} faces across {selection_count} brushes"
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Apply current to selection").clicked() {
+                    let updated = self.apply_material_to_selected_brush_surfaces();
+                    self.status = format!(
+                        "Assigned material to {updated} faces across {selection_count} brushes"
+                    );
+                }
+                if ui.button("Clear selection materials").clicked() {
+                    self.brush_material = None;
+                    let updated = self.apply_material_to_selected_brush_surfaces();
+                    self.status = format!(
+                        "Cleared material from {updated} faces across {selection_count} brushes"
+                    );
+                }
+            });
+            return;
+        }
         let Some(face) = self.selected_brush_face else {
             ui.label(
                 egui::RichText::new(
@@ -2046,22 +2199,33 @@ impl EditorWorkspace {
                 self.material_paint_sampling = false;
                 self.replace_resource_selection(material);
             }
-            self.apply_material_to_selected_brush_face();
-            self.status = match selected_material {
-                Some(material) => format!(
-                    "Assigned {} to brush {} face {}",
-                    self.project.resource_name(material).unwrap_or("material"),
-                    index + 1,
-                    face + 1
-                ),
-                None => format!("Cleared brush {} face {} material", index + 1, face + 1),
+            let updated = self.apply_material_to_selected_brush_surfaces();
+            self.status = if selection_count > 1 {
+                format!("Assigned material to {updated} faces across {selection_count} brushes")
+            } else {
+                match selected_material {
+                    Some(material) => format!(
+                        "Assigned {} to brush {} face {}",
+                        self.project.resource_name(material).unwrap_or("material"),
+                        index + 1,
+                        face + 1
+                    ),
+                    None => format!("Cleared brush {} face {} material", index + 1, face + 1),
+                }
             };
         }
         if ui
-            .button(icons::label(icons::PALETTE, "Apply to face"))
+            .button(icons::label(
+                icons::PALETTE,
+                if selection_count > 1 {
+                    "Apply to selection"
+                } else {
+                    "Apply to face"
+                },
+            ))
             .clicked()
         {
-            self.apply_material_to_selected_brush_face();
+            self.apply_material_to_selected_brush_surfaces();
         }
         self.draw_brush_face_uv_controls(ui);
     }
@@ -2771,20 +2935,15 @@ impl EditorWorkspace {
         self.brush_uv_canvas_drag = None;
     }
 
-    /// Solved axis-aligned min corner of the selected brush, rounded to
-    /// integers: the numeric inspector's "Origin".
+    /// Solved axis-aligned min corner of the complete brush selection,
+    /// rounded to integers: the numeric inspector's "Origin".
     pub(crate) fn selected_brush_origin(&self) -> Option<[i32; 3]> {
-        let index = self.selected_brush?;
-        let brush = self.project.active_scene().brushes.get(index)?;
-        let solved = brush.solve();
-        solved
-            .is_valid()
-            .then(|| solved.min.map(|value| value.round() as i32))
+        self.selected_brush_bounds()
+            .map(|(min, _)| min.map(|value| value.round() as i32))
     }
 
     /// Numeric fallback for whole-brush placement: translate the selected
-    /// brush set so the primary brush's solved min corner lands exactly on
-    /// `origin`. No grid
+    /// brush set so its shared solved min corner lands exactly on `origin`. No grid
     /// snapping: typing exact off-grid coordinates is the point of the
     /// fallback. Inspector-owned mutation: history is recorded by the
     /// inspector transaction wrapper, not here.
@@ -2822,22 +2981,18 @@ impl EditorWorkspace {
         true
     }
 
-    /// Solved axis-aligned bounding-box size shown by the numeric inspector.
+    /// Solved axis-aligned bounding-box size of the complete selection shown
+    /// by the numeric inspector.
     pub(crate) fn selected_brush_size(&self) -> Option<[i32; 3]> {
-        let index = self.selected_brush?;
-        let solved = self.project.active_scene().brushes.get(index)?.solve();
-        solved.is_valid().then(|| {
-            std::array::from_fn(|axis| {
-                (solved.max[axis] - solved.min[axis]).round().max(1.0) as i32
-            })
+        self.selected_brush_bounds().map(|(min, max)| {
+            std::array::from_fn(|axis| (max[axis] - min[axis]).round().max(1.0) as i32)
         })
     }
 
-    /// Exact numeric size fallback for ordinary axis-aligned brushes. The
-    /// negative faces keep the current Origin while the three positive faces
-    /// move to the requested extents. Sloped brushes stay editable through
-    /// their visible Face/Edge/Vertex handles instead of being distorted by a
-    /// bounding-box scale.
+    /// Exact numeric size fallback. A single ordinary axis-aligned brush keeps
+    /// its historical face-slide semantics. A multi-selection is scaled as
+    /// one object about its shared minimum corner, preserving every member's
+    /// relative spacing and proportions.
     pub(crate) fn set_selected_brush_size(&mut self, size: [i32; 3]) -> bool {
         if size.into_iter().any(|value| value <= 0) {
             return false;
@@ -2846,6 +3001,40 @@ impl EditorWorkspace {
             return false;
         };
         if size == current {
+            return true;
+        }
+        let targets = self.selected_brush_set();
+        if targets.len() > 1 {
+            let Some((min, max)) = self.selected_brush_bounds() else {
+                return false;
+            };
+            let mut map = [[0.0; 3]; 3];
+            for axis in 0..3 {
+                let extent = max[axis] - min[axis];
+                if !extent.is_finite() || extent <= f64::EPSILON {
+                    return false;
+                }
+                map[axis][axis] = f64::from(size[axis]) / extent;
+            }
+            let mut previews = Vec::with_capacity(targets.len());
+            for index in targets {
+                let Some(mut preview) = self.project.active_scene().brushes.get(index).cloned()
+                else {
+                    return false;
+                };
+                let faces: Vec<usize> = (0..preview.faces.len()).collect();
+                if preview.transform_selected(&faces, &[], min, map, 0.5) == 0
+                    || !brush_preview_ok(&preview)
+                {
+                    return false;
+                }
+                previews.push((index, preview));
+            }
+            let scene = self.project.active_scene_mut();
+            for (index, preview) in previews {
+                scene.brushes[index] = preview;
+            }
+            self.mark_dirty();
             return true;
         }
         let Some(index) = self.selected_brush else {
@@ -2940,25 +3129,30 @@ impl EditorWorkspace {
         true
     }
 
-    /// Apply the paint material to the selected brush face, as one undo
-    /// step. No-op when no brush face is selected or the material is unchanged.
-    pub(crate) fn apply_material_to_selected_brush_face(&mut self) {
-        let (Some(index), Some(face)) = (self.selected_brush, self.selected_brush_face) else {
-            return;
-        };
+    /// Apply the paint material to the brush surfaces implied by the current
+    /// selection as one undo step. A single selected face remains precise;
+    /// whole-brush and multi-brush selections cover every selected brush face.
+    pub(crate) fn apply_material_to_selected_brush_surfaces(&mut self) -> usize {
+        let targets = self.selected_brush_material_targets();
+        if targets.is_empty() {
+            return 0;
+        }
         let material = self.brush_material;
-        let scene = self.project.active_scene();
-        if scene
-            .brushes
-            .get(index)
-            .and_then(|brush| brush.faces.get(face))
-            .is_none_or(|selected| selected.material == material)
+        if targets
+            .iter()
+            .all(|target| self.material_target_value(*target) == material)
         {
-            return;
+            return 0;
         }
         self.push_undo();
-        self.project.active_scene_mut().brushes[index].faces[face].material = material;
-        self.mark_dirty();
+        let updated = targets
+            .into_iter()
+            .filter(|target| self.assign_material_target_no_undo(*target, material))
+            .count();
+        if updated > 0 {
+            self.mark_dirty();
+        }
+        updated
     }
 
     /// The cuboid a brush drag would commit, if it has area.
@@ -3384,6 +3578,11 @@ impl EditorWorkspace {
         let mut hits = Vec::<(f64, f64, usize, usize)>::new();
 
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            if self.brush_effectively_hidden(index)
+                || matches!(self.brush_group_pick(index), BrushGroupPick::Locked)
+            {
+                continue;
+            }
             let solved = brush.solve();
             if !solved.is_valid() {
                 continue;
@@ -3574,6 +3773,11 @@ impl EditorWorkspace {
         let mut best: Option<(f64, bool, usize, usize, usize, i32)> = None;
 
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            if self.brush_effectively_hidden(index)
+                || matches!(self.brush_group_pick(index), BrushGroupPick::Locked)
+            {
+                continue;
+            }
             let solved = brush.solve();
             for (face, polygon) in solved.polygons.iter().enumerate() {
                 let Some(polygon) = polygon else { continue };
@@ -3792,6 +3996,7 @@ impl EditorWorkspace {
         self.brush_vertex_drag = Some(BrushVertexDrag {
             index,
             base,
+            others: Vec::new(),
             targets,
             press_ground: self
                 .orthographic_view
@@ -3822,15 +4027,51 @@ impl EditorWorkspace {
         if applied == drag.applied {
             return;
         }
-        let uv_lock = self.brush_texture_lock;
-        let mut preview = drag.base.clone();
-        let moved = preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock);
-        if moved > 0 && brush_preview_ok(&preview) {
-            self.project.active_scene_mut().brushes[drag.index] = preview;
+        if let Some(previews) = self.brush_vertex_drag_previews(&drag, applied) {
+            let scene = self.project.active_scene_mut();
+            for (index, preview) in previews {
+                scene.brushes[index] = preview;
+            }
             if let Some(state) = self.brush_vertex_drag.as_mut() {
                 state.applied = applied;
             }
         }
+    }
+
+    /// Build every member of an axis-constrained move preview before
+    /// touching the scene. A failed member rejects the whole preview, so a
+    /// multi-selection can never shear apart because only some brushes were
+    /// valid.
+    fn brush_vertex_drag_previews(
+        &self,
+        drag: &BrushVertexDrag,
+        applied: [i32; 3],
+    ) -> Option<Vec<(usize, psxed_project::brush::Brush)>> {
+        let uv_lock = self.brush_texture_lock;
+        let mut primary = drag.base.clone();
+        if primary.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock) == 0
+            || !brush_preview_ok(&primary)
+        {
+            return None;
+        }
+        let mut previews = Vec::with_capacity(drag.others.len() + 1);
+        previews.push((drag.index, primary));
+        for (index, base) in &drag.others {
+            let mut preview = base.clone();
+            if uv_lock {
+                preview.translate_with_uv_lock(
+                    applied,
+                    psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                );
+            } else {
+                preview.translate(applied);
+            }
+            if !brush_preview_ok(&preview) {
+                return None;
+            }
+            previews.push((*index, preview));
+        }
+        Some(previews)
     }
 
     fn commit_brush_vertex_drag_preview(&mut self) -> bool {
@@ -3838,10 +4079,21 @@ impl EditorWorkspace {
             return false;
         };
         let live = self.project.active_scene().brushes[drag.index].clone();
+        let live_others: Vec<_> = drag
+            .others
+            .iter()
+            .map(|(index, _)| (*index, self.project.active_scene().brushes[*index].clone()))
+            .collect();
         self.project.active_scene_mut().brushes[drag.index] = drag.base;
+        for (index, base) in &drag.others {
+            self.project.active_scene_mut().brushes[*index] = base.clone();
+        }
         if drag.applied != [0; 3] {
             self.push_undo();
             self.project.active_scene_mut().brushes[drag.index] = live;
+            for (index, live) in live_others {
+                self.project.active_scene_mut().brushes[index] = live;
+            }
             self.mark_dirty();
             // Translate the selected element keys that rode this drag so
             // the selection survives its own edit (adding one delta to
@@ -3984,7 +4236,11 @@ impl EditorWorkspace {
             }
         };
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            let selected = self.brush_is_selected(index);
+            if self.brush_effectively_hidden(index) {
+                continue;
+            }
+            let selected =
+                self.brush_is_selected(index) || self.brush_selected_through_group(index);
             let stroke = if selected {
                 egui::Stroke::new(2.0, STUDIO_ACCENT)
             } else {
@@ -4201,7 +4457,11 @@ impl EditorWorkspace {
             }
         };
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            let selected = self.brush_is_selected(index);
+            if self.brush_effectively_hidden(index) {
+                continue;
+            }
+            let selected =
+                self.brush_is_selected(index) || self.brush_selected_through_group(index);
             // Unselected brushes render as plain shaded geometry; the full
             // wireframe cage is the opt-in "Brush wireframes" View toggle.
             if !selected && !self.show_brush_wireframes {
@@ -4744,6 +5004,7 @@ impl EditorWorkspace {
         self.brush_vertex_drag = Some(BrushVertexDrag {
             index,
             base: self.project.active_scene().brushes[index].clone(),
+            others: Vec::new(),
             targets,
             press_ground: [pointer.x, 0.0, 0.0],
             plane_3d: Some(plane),
@@ -4776,12 +5037,11 @@ impl EditorWorkspace {
         if applied == drag.applied {
             return;
         }
-        let uv_lock = self.brush_texture_lock;
-        let mut preview = drag.base.clone();
-        if preview.translate_selected(&drag.faces, &drag.targets, applied, 0.5, uv_lock) > 0
-            && brush_preview_ok(&preview)
-        {
-            self.project.active_scene_mut().brushes[drag.index] = preview;
+        if let Some(previews) = self.brush_vertex_drag_previews(&drag, applied) {
+            let scene = self.project.active_scene_mut();
+            for (index, preview) in previews {
+                scene.brushes[index] = preview;
+            }
             if let Some(state) = self.brush_vertex_drag.as_mut() {
                 state.applied = applied;
             }
@@ -5084,6 +5344,10 @@ impl ViewportTool3d for BrushTool {
         }
         match ws.pick_brush_face_cycled_for_selection_3d(frame.rect, pointer) {
             Some((index, face, _)) => {
+                if !matches!(ws.brush_group_pick(index), BrushGroupPick::Brush) {
+                    ws.select_brush_with_group_semantics(index, Some(face), frame.modifiers, false);
+                    return;
+                }
                 if ws.brush_edit_mode == BrushEditMode::Face {
                     let (index, face) = ws
                         .pick_brush_face_nearest_for_selection_3d(frame.rect, pointer)
@@ -5099,15 +5363,7 @@ impl ViewportTool3d for BrushTool {
                     ws.apply_brush_element_selection(BrushElement::Face(face), frame.modifiers);
                     return;
                 }
-                ws.clear_node_selection_state();
-                ws.clear_resource_selection_state();
-                ws.clear_primitive_selection_state();
-                ws.clear_sector_selection();
-                if frame.modifiers.shift || frame.modifiers.ctrl {
-                    ws.toggle_brush_selection(index);
-                } else {
-                    ws.replace_brush_selection(index, Some(face));
-                }
+                ws.select_brush_with_group_semantics(index, Some(face), frame.modifiers, false);
             }
             None if frame.modifiers.shift => {}
             None => ws.clear_brush_selection(),

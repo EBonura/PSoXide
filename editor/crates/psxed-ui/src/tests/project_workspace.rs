@@ -78,6 +78,228 @@ fn brush_geometry_clipboard_survives_project_switch_and_rebinds_materials_by_nam
 }
 
 #[test]
+fn multi_brush_paste_shortcut_survives_a_switch_to_a_non_room_workspace() {
+    let source_dir = test_temp_dir("multi-brush-clipboard-source");
+    let destination_dir = test_temp_dir("multi-brush-clipboard-destination");
+    let mut source = ProjectDocument::new("multi clipboard source");
+    let originals = [
+        psxed_project::brush::Brush::cuboid([0, 0, 0], [64, 64, 64]),
+        psxed_project::brush::Brush::cuboid([128, 0, 0], [192, 64, 64]),
+    ];
+    source
+        .active_scene_mut()
+        .brushes
+        .extend(originals.iter().cloned());
+    save_watch_project(&source_dir, &source);
+    save_watch_project(
+        &destination_dir,
+        &ProjectDocument::new("multi clipboard destination"),
+    );
+
+    let mut workspace = EditorWorkspace::open_directory(&source_dir).unwrap();
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.view_2d = true;
+    workspace.orthographic_view = OrthographicView::Top;
+    workspace.active_tool = ViewTool::Select;
+    workspace.replace_brush_selection(0, None);
+    workspace.toggle_brush_selection(1);
+
+    // Exercise the same full draw/input path as `make run`. Inspector and
+    // search widgets can retain egui focus after world selection; clicking
+    // back into the viewport must release it before Cmd/Ctrl+C is handled.
+    let (context, viewport) = super::brush_tools::real_egui_workspace_ctx("clipboard-runtime");
+    let initial = super::brush_tools::real_egui_workspace_frame(
+        &context,
+        &mut workspace,
+        &viewport,
+        0.0,
+        Vec::new(),
+    );
+    let rendered_copy = icons::label(icons::COPY, "Copy 2 brushes");
+    let rendered_empty = icons::label(icons::COPY, "Clipboard empty");
+    assert_eq!(
+        super::brush_tools::text_shape_centers(&initial.shapes, &rendered_copy).len(),
+        1,
+        "the runtime toolbar must expose the selected brush count"
+    );
+    assert_eq!(
+        super::brush_tools::text_shape_centers(&initial.shapes, &rendered_empty).len(),
+        1,
+        "the runtime toolbar must expose an empty clipboard"
+    );
+    let stale_focus = egui::Id::new("stale-inspector-focus");
+    context.memory_mut(|memory| memory.request_focus(stale_focus));
+    let viewport_point = workspace.last_orthographic_viewport_rect.center();
+    let _ = super::brush_tools::real_egui_workspace_frame(
+        &context,
+        &mut workspace,
+        &viewport,
+        1.0 / 60.0,
+        vec![
+            egui::Event::PointerMoved(viewport_point),
+            egui::Event::PointerButton {
+                pos: viewport_point,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    assert_eq!(context.memory(|memory| memory.focused()), None);
+    let copied_frame = super::brush_tools::real_egui_workspace_frame(
+        &context,
+        &mut workspace,
+        &viewport,
+        2.0 / 60.0,
+        vec![egui::Event::Copy],
+    );
+    assert_eq!(
+        workspace
+            .clipboard_notice
+            .as_ref()
+            .map(|notice| notice.message.as_str()),
+        Some("2 brushes copied")
+    );
+    assert!(
+        copied_frame.platform_output.commands.iter().any(|command| {
+            matches!(
+                command,
+                egui::OutputCommand::CopyText(text)
+                    if text.contains("PSoXide geometry clipboard: 2 brushes")
+            )
+        }),
+        "a real copy must seed the OS clipboard so egui-winit can emit the following Paste event"
+    );
+    let rendered_paste = icons::label(icons::COPY, "Paste 2 brushes");
+    assert_eq!(
+        super::brush_tools::text_shape_centers(&copied_frame.shapes, &rendered_paste).len(),
+        1,
+        "the runtime toolbar must expose the retained clipboard count"
+    );
+    assert_eq!(
+        super::brush_tools::text_shape_centers(&copied_frame.shapes, "2 brushes copied").len(),
+        1,
+        "the runtime frame must visibly draw the copy notification"
+    );
+    workspace.switch_project(&destination_dir).unwrap();
+    assert!(workspace.status.contains("2 brushes ready to paste"));
+    assert_eq!(
+        workspace
+            .clipboard_notice
+            .as_ref()
+            .map(|notice| notice.message.as_str()),
+        Some("Clipboard retained: 2 brushes ready to paste")
+    );
+
+    // Real projects restore their own saved workspace. Previously a target
+    // that opened in UI routed Cmd/Ctrl+V to the empty UI-node clipboard and
+    // made the retained brush clipboard appear to have been erased.
+    workspace.active_workspace = WorkspaceView::Ui;
+    assert!(workspace.ui_node_clipboard.is_none());
+    let context = egui::Context::default();
+    let _ = context.run(
+        egui::RawInput {
+            // egui-winit translates Cmd/Ctrl+V into this platform event
+            // before the workspace sees input. Key-event-only tests do not
+            // exercise the real `make run` path.
+            events: vec![egui::Event::Paste(
+                "PSoXide internal geometry clipboard".to_string(),
+            )],
+            ..egui::RawInput::default()
+        },
+        |ctx| workspace.handle_global_shortcuts(ctx, EditorPlaytestStatus::Idle),
+    );
+
+    assert_eq!(workspace.active_workspace, WorkspaceView::Room);
+    assert!(
+        workspace.view_2d,
+        "cross-project paste reveals the Top view"
+    );
+    assert_eq!(workspace.project.active_scene().brushes, originals);
+    assert_eq!(workspace.selected_brush_set(), vec![0, 1]);
+    assert_eq!(
+        workspace
+            .clipboard_notice
+            .as_ref()
+            .map(|notice| notice.message.as_str()),
+        Some("2 brushes pasted")
+    );
+
+    let _ = std::fs::remove_dir_all(source_dir);
+    let _ = std::fs::remove_dir_all(destination_dir);
+}
+
+#[test]
+#[ignore = "developer regression over the tracked full E1M1 project"]
+fn e1m1_real_platform_copy_and_paste_duplicates_the_selected_brush() {
+    let editor_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("psxed-ui lives below the editor workspace")
+        .to_path_buf();
+    let project_root = editor_root.join("projects/quake-e1m1-geometry");
+    let mut workspace = EditorWorkspace::open_directory(&project_root).expect("E1M1 opens");
+    let original_count = workspace.project.active_scene().brushes.len();
+    assert!(
+        original_count >= 1_200,
+        "regression must exercise the full E1M1 project"
+    );
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.replace_brush_selection(0, Some(0));
+
+    let (context, viewport) = super::brush_tools::real_egui_workspace_ctx("e1m1-clipboard");
+    let copied = super::brush_tools::real_egui_workspace_frame(
+        &context,
+        &mut workspace,
+        &viewport,
+        0.0,
+        vec![egui::Event::Copy],
+    );
+    assert_eq!(workspace.brush_geometry_clipboard_count(), Some(1));
+    assert_eq!(
+        workspace
+            .clipboard_notice
+            .as_ref()
+            .map(|notice| notice.message.as_str()),
+        Some("1 brush copied")
+    );
+    assert!(copied.platform_output.commands.iter().any(|command| {
+        matches!(command, egui::OutputCommand::CopyText(text) if text.contains("1 brush"))
+    }));
+
+    let pasted = super::brush_tools::real_egui_workspace_frame(
+        &context,
+        &mut workspace,
+        &viewport,
+        1.0 / 60.0,
+        vec![egui::Event::Paste(
+            "PSoXide geometry clipboard: 1 brush".to_string(),
+        )],
+    );
+    assert_eq!(
+        workspace.project.active_scene().brushes.len(),
+        original_count + 1
+    );
+    assert_eq!(
+        workspace
+            .clipboard_notice
+            .as_ref()
+            .map(|notice| notice.message.as_str()),
+        Some("1 brush pasted")
+    );
+    assert!(
+        !super::brush_tools::text_shape_centers(&pasted.shapes, "1 brush pasted").is_empty(),
+        "the source-built editor frame must visibly confirm the paste"
+    );
+    workspace.do_undo();
+    assert_eq!(
+        workspace.project.active_scene().brushes.len(),
+        original_count
+    );
+}
+
+#[test]
 fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
     let dir = test_temp_dir("project-watch-conflict");
     let project = ProjectDocument::new("watch baseline");

@@ -1523,8 +1523,36 @@ impl EditorWorkspace {
         };
 
         let scene = self.project.active_scene();
-        let targets: Vec<NodeGizmoTarget> = ids
+        let group_roots: Vec<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                scene
+                    .node(*id)
+                    .is_some_and(|node| matches!(node.kind, NodeKind::Group))
+            })
+            .collect();
+        let mut target_ids = ids;
+        if mode == TransformGizmoMode::Move {
+            for node in scene.nodes() {
+                if !matches!(node.kind, NodeKind::Group)
+                    && group_roots
+                        .iter()
+                        .any(|group| scene.is_descendant_of(node.id, *group))
+                    && node_kind_supports_transform_gizmo(&node.kind, mode)
+                    && !target_ids.contains(&node.id)
+                {
+                    target_ids.push(node.id);
+                }
+            }
+        }
+        let targets: Vec<NodeGizmoTarget> = target_ids
             .into_iter()
+            .filter(|id| {
+                !scene
+                    .node(*id)
+                    .is_some_and(|node| matches!(node.kind, NodeKind::Group))
+            })
             .filter_map(|id| {
                 scene.node(id).map(|node| NodeGizmoTarget {
                     node: id,
@@ -1550,7 +1578,25 @@ impl EditorWorkspace {
                 })
             })
             .collect();
-        if targets.is_empty() {
+        let mut group_brush_indices = Vec::new();
+        for group in &group_roots {
+            for index in scene.brush_indices_in_group(*group, true) {
+                if !group_brush_indices.contains(&index) {
+                    group_brush_indices.push(index);
+                }
+            }
+        }
+        let group_brushes: Vec<GroupBrushGizmoTarget> = group_brush_indices
+            .into_iter()
+            .filter_map(|index| {
+                scene
+                    .brushes
+                    .get(index)
+                    .cloned()
+                    .map(|start| GroupBrushGizmoTarget { index, start })
+            })
+            .collect();
+        if targets.is_empty() && group_brushes.is_empty() {
             return false;
         }
 
@@ -1564,6 +1610,7 @@ impl EditorWorkspace {
             move_axis_world,
             rotate: rotate_state,
             targets,
+            group_brushes,
             current_steps: 0,
             snapshot_pushed: false,
             free: false,
@@ -1691,6 +1738,28 @@ impl EditorWorkspace {
             .unwrap_or(RotationSpace::Global);
         let mode = drag.mode;
         let targets = drag.targets.clone();
+        let group_brushes = drag.group_brushes.clone();
+        let brush_delta = if mode == TransformGizmoMode::Move {
+            match handle {
+                NodeGizmoHandle::Axis(_) => std::array::from_fn(|axis| {
+                    (move_axis_world[axis] * steps as f32 * world_quantum as f32).round() as i32
+                }),
+                NodeGizmoHandle::Plane(plane) => {
+                    let mut delta = [0; 3];
+                    for axis in plane.axes() {
+                        let index = axis.index();
+                        delta[index] = (plane_delta_world[index] / world_quantum as f32).round()
+                            as i32
+                            * world_quantum;
+                    }
+                    delta
+                }
+                NodeGizmoHandle::BoxFace(_) => [0; 3],
+            }
+        } else {
+            [0; 3]
+        };
+        let texture_lock = self.brush_texture_lock;
         let scene = self.project.active_scene_mut();
         for target in targets {
             let Some(node) = scene.node_mut(target.node) else {
@@ -1754,6 +1823,22 @@ impl EditorWorkspace {
             }
             if let NodeKind::ArchProp { geometry, .. } = &node.kind {
                 snap_arch_prop_transform(&mut node.transform, *geometry, target.sector_size);
+            }
+        }
+        if mode == TransformGizmoMode::Move {
+            for target in group_brushes {
+                let mut brush = target.start;
+                if texture_lock {
+                    brush.translate_with_uv_lock(
+                        brush_delta,
+                        psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL,
+                    );
+                } else {
+                    brush.translate(brush_delta);
+                }
+                if let Some(destination) = scene.brushes.get_mut(target.index) {
+                    *destination = brush;
+                }
             }
         }
         self.mark_dirty();

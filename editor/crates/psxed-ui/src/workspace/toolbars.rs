@@ -79,6 +79,7 @@ impl EditorWorkspace {
                         let size = Vec2::new(size.x.max(320.0), size.y.max(240.0));
                         let (rect, response) =
                             ui.allocate_exact_size(size, Sense::click_and_drag());
+                        surrender_stale_focus_on_viewport_pointer(ui.ctx(), &response);
                         self.last_viewport_size = rect.size();
                         #[cfg(test)]
                         {
@@ -392,7 +393,12 @@ impl EditorWorkspace {
                             if let Some(pos) = response.interact_pointer_pos() {
                                 let world = transform.screen_to_world(pos);
                                 let modifiers = ui.input(|input| input.modifiers);
-                                self.handle_viewport_click(world, &hits, modifiers);
+                                let group_double_click = response
+                                    .double_clicked_by(egui::PointerButton::Primary)
+                                    && self.handle_group_double_click_2d(world, &hits);
+                                if !group_double_click {
+                                    self.handle_viewport_click(world, &hits, modifiers);
+                                }
                             }
                         }
 

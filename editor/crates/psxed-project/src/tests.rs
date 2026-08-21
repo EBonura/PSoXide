@@ -2049,6 +2049,34 @@ fn removing_node_removes_descendants() {
 }
 
 #[test]
+fn brush_groups_normalize_and_remove_with_their_subtree() {
+    let mut scene = Scene::new("Test");
+    let group = scene.add_node(scene.root, "Architecture", NodeKind::Group);
+    let nested = scene.add_node(group, "Stairs", NodeKind::Group);
+    let not_a_group = scene.add_node(scene.root, "Entity", NodeKind::Entity);
+    for owner in [
+        Some(group),
+        Some(nested),
+        Some(not_a_group),
+        Some(NodeId(99_999)),
+    ] {
+        let mut brush = brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+        brush.group = owner;
+        scene.brushes.push(brush);
+    }
+
+    scene.normalize_brush_groups();
+    assert_eq!(scene.brushes[0].group, Some(group));
+    assert_eq!(scene.brushes[1].group, Some(nested));
+    assert_eq!(scene.brushes[2].group, None);
+    assert_eq!(scene.brushes[3].group, None);
+    assert_eq!(scene.brush_indices_in_group(group, true), vec![0, 1]);
+
+    assert!(scene.remove_node(group));
+    assert!(scene.brushes.iter().all(|brush| brush.group.is_none()));
+}
+
+#[test]
 fn move_node_reparents_and_reorders() {
     let mut scene = Scene::new("Test");
     let a = scene.add_node(scene.root, "A", NodeKind::Node3D);

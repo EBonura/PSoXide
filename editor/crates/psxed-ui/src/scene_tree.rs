@@ -932,6 +932,7 @@ pub(crate) fn draw_scene_node_row(
     let painter = ui.painter_at(rect);
     let hovered = response.hovered();
     let display_kind = scene_tree_kind_label(row.kind);
+    let content_count = row.child_count + row.brush_count;
 
     paint_list_row(&painter, rect, selected, hovered);
 
@@ -1014,7 +1015,7 @@ pub(crate) fn draw_scene_node_row(
         rect,
         text_left,
         row.id != NodeId::ROOT,
-        row.child_count > 0 && row.id != NodeId::ROOT,
+        content_count > 0 && row.id != NodeId::ROOT,
     );
 
     if in_rename {
@@ -1075,7 +1076,7 @@ pub(crate) fn draw_scene_node_row(
         }
     }
 
-    if row.child_count > 0 && row.id != NodeId::ROOT {
+    if content_count > 0 && row.id != NodeId::ROOT {
         let pill = Rect::from_min_size(
             Pos2::new(rect.right() - 50.0, rect.center().y - 8.0),
             Vec2::new(24.0, 16.0),
@@ -1084,7 +1085,7 @@ pub(crate) fn draw_scene_node_row(
         painter.text(
             pill.center(),
             Align2::CENTER_CENTER,
-            row.child_count.to_string(),
+            content_count.to_string(),
             FontId::monospace(10.0),
             STUDIO_TEXT_WEAK,
         );
@@ -1209,7 +1210,11 @@ pub(crate) fn draw_scene_node_row(
         });
     }
     if response.double_clicked() && !icon_clicked && row.id != NodeId::ROOT {
-        actions.push(TreeAction::BeginRename(row.id));
+        if row.kind == NodeKind::Group.label() {
+            actions.push(TreeAction::OpenGroup(row.id));
+        } else {
+            actions.push(TreeAction::BeginRename(row.id));
+        }
     }
 
     if row.id != NodeId::ROOT {
@@ -1233,6 +1238,20 @@ pub(crate) fn draw_scene_node_row(
             if ui.button(icons::label(icons::COPY, "Duplicate")).clicked() {
                 actions.push(TreeAction::Duplicate(row.id));
                 ui.close_menu();
+            }
+            if row.kind == NodeKind::Group.label() {
+                if ui.button("Open Group").clicked() {
+                    actions.push(TreeAction::OpenGroup(row.id));
+                    ui.close_menu();
+                }
+                if ui.button("Ungroup").clicked() {
+                    actions.push(TreeAction::Ungroup(row.id));
+                    ui.close_menu();
+                }
+                if ui.button("Merge Selected Groups").clicked() {
+                    actions.push(TreeAction::MergeSelectedGroups(row.id));
+                    ui.close_menu();
+                }
             }
             ui.separator();
             if ui.button(icons::label(icons::TRASH, "Delete")).clicked() {
@@ -1460,7 +1479,7 @@ pub(crate) fn scene_tree_kind_label(kind: &'static str) -> &'static str {
 ///
 /// Runtime objects are placed through the toolbar Add/Place menu so a click
 /// can resolve room context, resources, floor anchoring, and dedupe rules.
-pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 3] {
+pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 4] {
     [
         (
             "Section",
@@ -1469,6 +1488,7 @@ pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 3] {
             },
         ),
         ("Entity", NodeKind::Entity),
+        ("Group", NodeKind::Group),
         ("Folder", NodeKind::Node),
     ]
 }

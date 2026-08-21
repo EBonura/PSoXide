@@ -161,6 +161,7 @@ pub fn import_quake_map_geometry_scaled(
                 faces,
                 contents,
                 mover: None,
+                group: None,
             };
             let solved = brush.solve();
             if !solved.is_valid() || !solved.within_extent(crate::brush::BRUSH_EDIT_EXTENT_LIMIT) {

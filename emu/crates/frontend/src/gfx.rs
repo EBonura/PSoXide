@@ -342,6 +342,7 @@ impl Graphics {
                 project,
                 camera,
                 grid_units,
+                hidden_scene_nodes,
                 &mut self.editor_preview_frame.overlay_lines,
             );
         }

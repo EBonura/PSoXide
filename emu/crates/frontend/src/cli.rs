@@ -2883,6 +2883,7 @@ fn headless_editor_viewport_image(
             project,
             editor.viewport_3d_camera(),
             project.editor_viewport.snap_units,
+            &hidden,
             &mut frame.overlay_lines,
         );
     }

@@ -649,18 +649,33 @@ impl EditorWorkspace {
         let consume_redo = consume_command_shift_shortcut(ctx, egui::Key::Z);
         let consume_undo = consume_command_shortcut(ctx, egui::Key::Z);
         let focus_taken = ctx.memory(|m| m.focused().is_some());
+        let consume_ungroup = !focus_taken
+            && self.active_workspace == WorkspaceView::Room
+            && consume_command_shift_shortcut(ctx, egui::Key::G);
+        let consume_group = !focus_taken
+            && self.active_workspace == WorkspaceView::Room
+            && consume_command_shortcut(ctx, egui::Key::G);
         let consume_ui_copy = !focus_taken
             && self.active_workspace == WorkspaceView::Ui
-            && consume_command_shortcut(ctx, egui::Key::C);
+            && consume_copy_shortcut(ctx);
+        // A project switch reconstructs the destination's local UI-node
+        // clipboard, but deliberately retains the portable brush clipboard.
+        // When the destination happens to reopen in UI/Animation/Material,
+        // route Paste back to brushes instead of making the retained data
+        // appear lost. A real UI-node clipboard remains the more local choice
+        // while actively editing UI.
+        let paste_portable_brushes = self.has_brush_geometry_clipboard()
+            && (self.active_workspace != WorkspaceView::Ui || self.ui_node_clipboard.is_none());
         let consume_ui_paste = !focus_taken
             && self.active_workspace == WorkspaceView::Ui
-            && consume_command_shortcut(ctx, egui::Key::V);
+            && !paste_portable_brushes
+            && consume_paste_shortcut(ctx);
         let consume_geometry_copy = !focus_taken
             && self.active_workspace == WorkspaceView::Room
-            && consume_command_shortcut(ctx, egui::Key::C);
+            && consume_copy_shortcut(ctx);
         let consume_geometry_paste = !focus_taken
-            && self.active_workspace == WorkspaceView::Room
-            && consume_command_shortcut(ctx, egui::Key::V);
+            && (self.active_workspace == WorkspaceView::Room || paste_portable_brushes)
+            && consume_paste_shortcut(ctx);
         let consume_duplicate = if focus_taken || self.active_workspace == WorkspaceView::Ui {
             false
         } else {
@@ -708,10 +723,17 @@ impl EditorWorkspace {
             self.paste_ui_node();
         }
         if consume_geometry_copy {
-            self.copy_current_geometry();
+            if self.copy_current_geometry() {
+                self.publish_geometry_clipboard_marker(ctx);
+            }
         }
         if consume_geometry_paste {
             self.paste_current_geometry();
+        }
+        if consume_ungroup {
+            self.ungroup_selected_groups();
+        } else if consume_group {
+            self.group_current_selection();
         }
         self.handle_toolbar_group_shortcuts(ctx);
 
@@ -751,6 +773,8 @@ impl EditorWorkspace {
             let escape = ctx.input_mut(|i| i.key_pressed(egui::Key::Escape));
             if escape && self.floating_geometry.is_some() {
                 self.cancel_floating_geometry();
+            } else if escape && self.open_group.is_some() {
+                self.close_open_group();
             }
             let frame = ctx.input_mut(|i| i.key_pressed(egui::Key::Period));
             if frame {
@@ -1347,6 +1371,24 @@ impl EditorWorkspace {
                     self.pending_rename_focus = true;
                 }
             }
+            TreeAction::OpenGroup(id) => {
+                self.open_group_for_editing(id);
+                self.renaming = None;
+            }
+            TreeAction::Ungroup(id) => {
+                if !self.node_is_selected(id) {
+                    self.replace_node_selection(id);
+                }
+                self.ungroup_selected_groups();
+                self.renaming = None;
+            }
+            TreeAction::MergeSelectedGroups(id) => {
+                if !self.node_is_selected(id) {
+                    self.replace_node_selection(id);
+                }
+                self.merge_selected_groups();
+                self.renaming = None;
+            }
             TreeAction::CommitRename(id, name) => {
                 let trimmed = name.trim();
                 let final_name = if trimmed.is_empty() {
@@ -1387,7 +1429,7 @@ impl EditorWorkspace {
                 if !self.node_is_selected(id) {
                     self.replace_node_selection(id);
                 }
-                self.duplicate_selected();
+                self.duplicate_current_selection();
                 self.renaming = None;
             }
             TreeAction::AddChild { parent, kind, name } => {
@@ -1607,6 +1649,47 @@ impl EditorWorkspace {
                     self.draw_project_identity(ui);
                     ui.add_space(6.0);
                     self.draw_main_menus(ctx, ui, playtest_status);
+                    ui.add_space(4.0);
+                    let copy_count = self.brush_geometry_copy_count();
+                    let copy_label = if copy_count == 0 {
+                        "Copy selection".to_string()
+                    } else {
+                        format!(
+                            "Copy {copy_count} brush{}",
+                            if copy_count == 1 { "" } else { "es" }
+                        )
+                    };
+                    if ui
+                        .add_enabled(
+                            copy_count > 0,
+                            egui::Button::new(icons::label(icons::COPY, &copy_label)),
+                        )
+                        .on_hover_text(
+                            "Copy selected brushes for paste into this or another project",
+                        )
+                        .clicked()
+                    {
+                        if self.copy_current_geometry() {
+                            self.publish_geometry_clipboard_marker(ui.ctx());
+                        }
+                    }
+                    let paste_count = self.brush_geometry_clipboard_count();
+                    let paste_label = paste_count.map_or_else(
+                        || "Clipboard empty".to_string(),
+                        |count| {
+                            format!("Paste {count} brush{}", if count == 1 { "" } else { "es" })
+                        },
+                    );
+                    if ui
+                        .add_enabled(
+                            paste_count.is_some(),
+                            egui::Button::new(icons::label(icons::COPY, &paste_label)),
+                        )
+                        .on_hover_text("The brush clipboard is retained when you switch projects")
+                        .clicked()
+                    {
+                        self.paste_current_geometry();
+                    }
                     ui.add_space(8.0);
                     self.draw_build_play_controls(ui, playtest_status, play_metrics);
                     let remaining = ui.available_width();
@@ -1782,9 +1865,12 @@ impl EditorWorkspace {
         ui.menu_button("Edit", |ui| {
             let can_node_delete = self.selection.selected_node != NodeId::ROOT;
             let has_geometry_selection = self.has_geometry_selection();
+            let selected_nodes = self.selected_node_ids_in_hierarchy();
+            let has_selected_group = selected_nodes.iter().any(|id| self.node_is_group(*id));
             if self.active_workspace == WorkspaceView::Room {
-                let can_copy_geometry =
-                    !self.selected_brush_set().is_empty() || has_geometry_selection;
+                let can_copy_geometry = !self.selected_brush_set().is_empty()
+                    || has_geometry_selection
+                    || has_selected_group;
                 if ui
                     .add_enabled(
                         can_copy_geometry,
@@ -1792,7 +1878,9 @@ impl EditorWorkspace {
                     )
                     .clicked()
                 {
-                    self.copy_current_geometry();
+                    if self.copy_current_geometry() {
+                        self.publish_geometry_clipboard_marker(ui.ctx());
+                    }
                     ui.close_menu();
                 }
                 if ui
@@ -1803,6 +1891,46 @@ impl EditorWorkspace {
                             &command_shortcut_text("V"),
                         )),
                     )
+                    .clicked()
+                {
+                    self.paste_current_geometry();
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        !self.selected_brush_set().is_empty() || !selected_nodes.is_empty(),
+                        egui::Button::new(menu_label(
+                            "Group Selection",
+                            &command_shortcut_text("G"),
+                        )),
+                    )
+                    .clicked()
+                {
+                    self.group_current_selection();
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        has_selected_group,
+                        egui::Button::new(menu_label(
+                            "Ungroup Selection",
+                            &command_shift_shortcut_text("G"),
+                        )),
+                    )
+                    .clicked()
+                {
+                    self.ungroup_selected_groups();
+                    ui.close_menu();
+                }
+                ui.separator();
+            } else if self.has_brush_geometry_clipboard() {
+                if ui
+                    .button(menu_label(
+                        "Paste Brush Geometry",
+                        &command_shortcut_text("V"),
+                    ))
+                    .on_hover_text("Paste the retained cross-project brush clipboard and open the Room workspace")
                     .clicked()
                 {
                     self.paste_current_geometry();

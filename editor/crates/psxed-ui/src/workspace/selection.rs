@@ -666,6 +666,9 @@ impl EditorWorkspace {
         }
         let scene = self.project.active_scene();
         let node = scene.node(id)?;
+        if matches!(node.kind, NodeKind::Group) {
+            return self.group_bounds_3d(id);
+        }
         if matches!(node.kind, NodeKind::Section { .. }) {
             return self.room_bounds_3d(node.id);
         }
@@ -687,6 +690,11 @@ impl EditorWorkspace {
         }
         let scene = self.project.active_scene();
         let node = scene.node(id)?;
+        if matches!(node.kind, NodeKind::Group) {
+            return self
+                .group_bounds_3d(id)
+                .map(|(center, half)| ([center[0], center[2]], [half[0], half[2]]));
+        }
         match &node.kind {
             NodeKind::Section { grid } => {
                 let (local_center, half) = grid_authored_editor_center_half(grid)?;
@@ -734,6 +742,12 @@ impl EditorWorkspace {
             .retain(|id| valid_nodes.contains(id));
         self.hidden_scene_nodes
             .retain(|id| valid_nodes.contains(id));
+        if self
+            .open_group
+            .is_some_and(|id| !valid_nodes.contains(&id) || !self.node_is_group(id))
+        {
+            self.open_group = None;
+        }
         if self
             .selection
             .node_selection_anchor
@@ -998,6 +1012,11 @@ impl EditorWorkspace {
         };
         let mut hits = Vec::new();
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            if self.brush_effectively_hidden(index)
+                || matches!(self.brush_group_pick(index), BrushGroupPick::Locked)
+            {
+                continue;
+            }
             let solved = brush.solve();
             if !solved.is_valid() {
                 continue;
@@ -1142,6 +1161,11 @@ impl EditorWorkspace {
         };
         let mut hits = Vec::new();
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+            if self.brush_effectively_hidden(index)
+                || matches!(self.brush_group_pick(index), BrushGroupPick::Locked)
+            {
+                continue;
+            }
             let solved = brush.solve();
             if !solved.is_valid() {
                 continue;

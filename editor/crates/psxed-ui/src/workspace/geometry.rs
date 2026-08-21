@@ -187,21 +187,17 @@ impl EditorWorkspace {
                 } else if self.select_brush_elements_2d(world, modifiers) {
                 } else if let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world)
                 {
+                    if !matches!(self.brush_group_pick(brush), BrushGroupPick::Brush) {
+                        self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
+                        return;
+                    }
                     if self.brush_edit_mode == BrushEditMode::Face
                         && self.selected_brush == Some(brush)
                     {
                         self.apply_brush_element_selection(BrushElement::Face(face), modifiers);
                         return;
                     }
-                    self.clear_node_selection_state();
-                    self.clear_resource_selection_state();
-                    self.clear_primitive_selection_state();
-                    self.clear_sector_selection();
-                    if modifiers.shift || modifiers.ctrl {
-                        self.toggle_brush_selection(brush);
-                    } else {
-                        self.replace_brush_selection(brush, Some(face));
-                    }
+                    self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
                     self.status = format!("Selected BSP brush {}", brush + 1);
                 } else if !modifiers.shift && !modifiers.ctrl {
                     self.clear_brush_selection();
@@ -216,8 +212,7 @@ impl EditorWorkspace {
                     {
                         self.select_sector(sector, modifiers);
                     } else {
-                        let visible_order = self.scene_node_order();
-                        self.apply_node_selection_modifiers(hit.id, modifiers, &visible_order);
+                        self.select_node_with_group_semantics(hit.id, modifiers, false);
                         self.clear_primitive_selection_state();
                         self.clear_sector_selection();
                     }
@@ -229,21 +224,17 @@ impl EditorWorkspace {
                 } else if self.select_brush_elements_2d(world, modifiers) {
                 } else if let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world)
                 {
+                    if !matches!(self.brush_group_pick(brush), BrushGroupPick::Brush) {
+                        self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
+                        return;
+                    }
                     if self.brush_edit_mode == BrushEditMode::Face
                         && self.selected_brush == Some(brush)
                     {
                         self.apply_brush_element_selection(BrushElement::Face(face), modifiers);
                         return;
                     }
-                    self.clear_node_selection_state();
-                    self.clear_resource_selection_state();
-                    self.clear_primitive_selection_state();
-                    self.clear_sector_selection();
-                    if modifiers.shift || modifiers.command || modifiers.ctrl {
-                        self.toggle_brush_selection(brush);
-                    } else {
-                        self.replace_brush_selection(brush, Some(face));
-                    }
+                    self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
                     self.status = format!("Selected BSP brush {}", brush + 1);
                 } else {
                     self.clear_brush_selection();
@@ -382,6 +373,14 @@ impl EditorWorkspace {
             self.duplicate_selected_brushes();
             return;
         }
+        if self
+            .selected_node_ids_in_hierarchy()
+            .into_iter()
+            .any(|id| self.node_is_group(id))
+        {
+            self.duplicate_selected();
+            return;
+        }
         if self.has_geometry_selection() {
             self.begin_floating_geometry_duplicate();
         } else {
@@ -389,16 +388,41 @@ impl EditorWorkspace {
         }
     }
 
+    pub(crate) fn copy_current_geometry(&mut self) -> bool {
+        let copied = self.copy_current_geometry_inner();
+        let message = if copied {
+            self.status.clone()
+        } else {
+            format!("Copy failed: {}", self.status)
+        };
+        self.show_clipboard_notice(message, copied);
+        copied
+    }
+
     /// Copy BSP brushes or authored cell geometry into a clipboard that can
     /// survive a project switch. Project-local ids are captured by name (or
     /// removed, for Door bindings) instead of leaking into the destination.
-    pub(crate) fn copy_current_geometry(&mut self) -> bool {
+    fn copy_current_geometry_inner(&mut self) -> bool {
         if self.floating_geometry.is_some() {
             self.status = "Place or cancel the geometry preview first".to_string();
             return false;
         }
 
-        let brush_targets = self.selected_brush_set();
+        let selected_group_roots: Vec<NodeId> = self
+            .selected_node_ids_in_hierarchy()
+            .into_iter()
+            .filter(|id| self.node_is_group(*id))
+            .collect();
+        let mut brush_targets = self.selected_brush_set();
+        for group in &selected_group_roots {
+            brush_targets.extend(
+                self.project
+                    .active_scene()
+                    .brush_indices_in_group(*group, true),
+            );
+        }
+        brush_targets.sort_unstable();
+        brush_targets.dedup();
         if !brush_targets.is_empty() {
             let primary = self
                 .selected_brush
@@ -407,11 +431,57 @@ impl EditorWorkspace {
             let mut materials = BTreeMap::new();
             let mut stripped_movers = 0usize;
             let mut brushes = Vec::with_capacity(brush_targets.len());
+            let scene = self.project.active_scene();
+            let mut included_groups = HashSet::new();
+            for index in &brush_targets {
+                for group in self.brush_group_chain(*index) {
+                    included_groups.insert(group);
+                }
+            }
+            for root in &selected_group_roots {
+                for node in scene.nodes() {
+                    if matches!(node.kind, NodeKind::Group)
+                        && scene.is_descendant_of(node.id, *root)
+                    {
+                        included_groups.insert(node.id);
+                    }
+                }
+            }
+            let ordered_groups: Vec<NodeId> = scene
+                .hierarchy_rows()
+                .into_iter()
+                .map(|row| row.id)
+                .filter(|id| included_groups.contains(id))
+                .collect();
+            let group_local: HashMap<NodeId, usize> = ordered_groups
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (*id, index))
+                .collect();
+            let groups: Vec<PortableBrushGroup> = ordered_groups
+                .iter()
+                .filter_map(|id| {
+                    let node = scene.node(*id)?;
+                    Some(PortableBrushGroup {
+                        name: node.name.clone(),
+                        parent: node
+                            .parent
+                            .and_then(|parent| group_local.get(&parent).copied()),
+                    })
+                })
+                .collect();
+            let mut brush_groups = Vec::with_capacity(brush_targets.len());
             for index in brush_targets {
                 let Some(source) = self.project.active_scene().brushes.get(index) else {
                     continue;
                 };
                 let mut brush = source.clone();
+                brush_groups.push(
+                    brush
+                        .group
+                        .and_then(|group| group_local.get(&group).copied()),
+                );
+                brush.group = None;
                 for face in &brush.faces {
                     if let Some(material) = face.material {
                         if let Some(name) = self.project.resource_name(material) {
@@ -430,12 +500,14 @@ impl EditorWorkspace {
             self.portable_geometry_clipboard =
                 Some(PortableGeometryClipboard::Brushes(BrushGeometryClipboard {
                     brushes,
+                    groups,
+                    brush_groups,
                     primary: primary.min(count - 1),
                     materials,
                     stripped_movers,
                 }));
             self.status = format!(
-                "Copied {count} brush{} for cross-project paste{}",
+                "{count} brush{} copied{}",
                 if count == 1 { "" } else { "es" },
                 if stripped_movers == 0 {
                     String::new()
@@ -480,7 +552,65 @@ impl EditorWorkspace {
     /// Paste the portable Room-workspace clipboard into the active project.
     /// Brushes keep world coordinates; cell geometry enters the existing
     /// floating placement loop at the destination room's current cell.
+    pub(crate) fn has_brush_geometry_clipboard(&self) -> bool {
+        matches!(
+            self.portable_geometry_clipboard.as_ref(),
+            Some(PortableGeometryClipboard::Brushes(_))
+        )
+    }
+
+    pub(crate) fn brush_geometry_copy_count(&self) -> usize {
+        let mut brush_targets = self.selected_brush_set();
+        for group in self
+            .selected_node_ids_in_hierarchy()
+            .into_iter()
+            .filter(|id| self.node_is_group(*id))
+        {
+            brush_targets.extend(
+                self.project
+                    .active_scene()
+                    .brush_indices_in_group(group, true),
+            );
+        }
+        brush_targets.sort_unstable();
+        brush_targets.dedup();
+        brush_targets.len()
+    }
+
+    pub(crate) fn brush_geometry_clipboard_count(&self) -> Option<usize> {
+        match self.portable_geometry_clipboard.as_ref()? {
+            PortableGeometryClipboard::Brushes(clipboard) => Some(clipboard.brushes.len()),
+            PortableGeometryClipboard::World(_) => None,
+        }
+    }
+
+    /// Put a small marker on the OS clipboard after an internal geometry
+    /// copy. egui-winit only emits `Event::Paste` when the OS clipboard is
+    /// non-empty, so this makes a following Cmd/Ctrl+V observable even when
+    /// the user started with an empty system clipboard. The actual geometry
+    /// remains in the typed, project-portable in-process clipboard above.
+    pub(crate) fn publish_geometry_clipboard_marker(&self, ctx: &egui::Context) {
+        let description = self.brush_geometry_clipboard_count().map_or_else(
+            || "world geometry".to_string(),
+            |count| format!("{count} brush{}", if count == 1 { "" } else { "es" }),
+        );
+        ctx.copy_text(format!(
+            "PSoXide geometry clipboard: {description}. Paste inside PSoXide."
+        ));
+    }
+
     pub(crate) fn paste_current_geometry(&mut self) -> bool {
+        let pasted = self.paste_current_geometry_inner();
+        let message = if pasted {
+            self.status.clone()
+        } else {
+            format!("Paste failed: {}", self.status)
+        };
+        self.show_clipboard_notice(message, pasted);
+        pasted
+    }
+
+    fn paste_current_geometry_inner(&mut self) -> bool {
         if self.floating_geometry.is_some() {
             self.status = "Place or cancel the geometry preview first".to_string();
             return false;
@@ -500,6 +630,7 @@ impl EditorWorkspace {
             self.status = "The brush clipboard is empty".to_string();
             return false;
         }
+        let reveal_room_workspace = self.active_workspace != WorkspaceView::Room;
         let destination_materials: BTreeMap<String, ResourceId> = self
             .project
             .resources
@@ -529,12 +660,55 @@ impl EditorWorkspace {
         }
 
         self.push_undo();
+        let group_parent = self
+            .open_group
+            .filter(|group| self.node_is_group(*group))
+            .unwrap_or_else(|| self.project.active_scene().root);
+        let mut pasted_groups = Vec::with_capacity(clipboard.groups.len());
+        for group in &clipboard.groups {
+            let parent = group
+                .parent
+                .and_then(|parent| pasted_groups.get(parent).copied())
+                .unwrap_or(group_parent);
+            let id = self.project.active_scene_mut().add_node(
+                parent,
+                group.name.clone(),
+                NodeKind::Group,
+            );
+            pasted_groups.push(id);
+        }
+        for (index, brush) in brushes.iter_mut().enumerate() {
+            brush.group = clipboard
+                .brush_groups
+                .get(index)
+                .copied()
+                .flatten()
+                .and_then(|group| pasted_groups.get(group).copied());
+        }
         let first = self.project.active_scene().brushes.len();
         let count = brushes.len();
         self.project.active_scene_mut().brushes.extend(brushes);
         let primary = first + clipboard.primary.min(count - 1);
-        self.replace_brush_selection(primary, None);
-        self.selected_brushes = (first..first + count).collect();
+        if let Some(group) = clipboard
+            .groups
+            .iter()
+            .position(|group| group.parent.is_none())
+            .and_then(|group| pasted_groups.get(group).copied())
+        {
+            self.clear_brush_selection();
+            self.replace_node_selection(group);
+        } else {
+            self.replace_brush_selection(primary, None);
+            self.selected_brushes = (first..first + count).collect();
+        }
+        if reveal_room_workspace {
+            self.show_room_orthographic();
+            self.active_tool = ViewTool::Select;
+        }
+        // Cross-project brushes intentionally retain authored world
+        // coordinates. Frame the new selection so a paste from a distant map
+        // cannot succeed off-screen and look indistinguishable from failure.
+        self.frame_viewport();
         self.mark_dirty();
 
         let mut notes = Vec::new();
@@ -556,7 +730,7 @@ impl EditorWorkspace {
             ));
         }
         self.status = format!(
-            "Pasted {count} brush{}{}",
+            "{count} brush{} pasted{}",
             if count == 1 { "" } else { "es" },
             if notes.is_empty() {
                 String::new()
@@ -565,6 +739,56 @@ impl EditorWorkspace {
             }
         );
         true
+    }
+
+    pub(crate) fn show_clipboard_notice(&mut self, message: impl Into<String>, success: bool) {
+        self.clipboard_notice = Some(ClipboardNotice {
+            message: message.into(),
+            success,
+            shown_at: Instant::now(),
+        });
+    }
+
+    pub(crate) fn draw_clipboard_notice(&mut self, ctx: &egui::Context) {
+        const NOTICE_SECONDS: f32 = 3.0;
+        let Some(notice) = self.clipboard_notice.clone() else {
+            return;
+        };
+        let elapsed = notice.shown_at.elapsed().as_secs_f32();
+        if elapsed >= NOTICE_SECONDS {
+            self.clipboard_notice = None;
+            return;
+        }
+        let accent = if notice.success {
+            STUDIO_SUCCESS
+        } else {
+            STUDIO_ERROR
+        };
+        let fill = if notice.success {
+            STUDIO_SUCCESS_DIM
+        } else {
+            STUDIO_ERROR_DIM
+        };
+        egui::Area::new(egui::Id::new("geometry_clipboard_notice"))
+            .anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 72.0))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(fill)
+                    .stroke(egui::Stroke::new(2.0, accent))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(18, 10))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(notice.message)
+                                .strong()
+                                .size(16.0)
+                                .color(egui::Color32::WHITE),
+                        );
+                    });
+            });
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
     fn paste_world_geometry(&mut self, prefab: psxed_project::Prefab) -> bool {
@@ -1913,6 +2137,57 @@ impl EditorWorkspace {
             let Some(source) = self.project.active_scene().node(selected).cloned() else {
                 continue;
             };
+            if matches!(source.kind, NodeKind::Group) {
+                let scene = self.project.active_scene();
+                let subtree: Vec<_> = scene
+                    .hierarchy_rows()
+                    .into_iter()
+                    .filter(|row| row.id == selected || scene.is_descendant_of(row.id, selected))
+                    .filter_map(|row| scene.node(row.id).cloned())
+                    .collect();
+                let subtree_ids: HashSet<_> = subtree.iter().map(|node| node.id).collect();
+                let brushes: Vec<_> = scene
+                    .brushes
+                    .iter()
+                    .filter(|brush| {
+                        brush
+                            .group
+                            .is_some_and(|group| subtree_ids.contains(&group))
+                    })
+                    .cloned()
+                    .collect();
+                let mut remap = HashMap::new();
+                for node in subtree {
+                    let parent = if node.id == selected {
+                        source.parent.unwrap_or(NodeId::ROOT)
+                    } else {
+                        node.parent
+                            .and_then(|parent| remap.get(&parent).copied())
+                            .unwrap_or(source.parent.unwrap_or(NodeId::ROOT))
+                    };
+                    let name = if node.id == selected {
+                        format!("{} Copy", node.name)
+                    } else {
+                        node.name.clone()
+                    };
+                    let id = self
+                        .project
+                        .active_scene_mut()
+                        .add_node(parent, name, node.kind);
+                    if let Some(copy) = self.project.active_scene_mut().node_mut(id) {
+                        copy.transform = node.transform;
+                    }
+                    remap.insert(node.id, id);
+                }
+                for mut brush in brushes {
+                    brush.group = brush.group.and_then(|group| remap.get(&group).copied());
+                    self.project.active_scene_mut().brushes.push(brush);
+                }
+                if let Some(root) = remap.get(&selected).copied() {
+                    duplicated.push(root);
+                }
+                continue;
+            }
             let parent = source.parent.unwrap_or(NodeId::ROOT);
             let id = self.project.active_scene_mut().add_node(
                 parent,

@@ -319,10 +319,17 @@ pub(crate) fn prepend_bsp_surface_grid_overlay(
     project: &ProjectDocument,
     camera: ViewportCameraState,
     grid_units: u16,
+    hidden_scene_nodes: &HashSet<NodeId>,
     overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
 ) {
     let world_camera = setup_gte_for_camera(camera);
-    overlays::prepend_bsp_surface_grid_overlay(project, world_camera, grid_units, overlay_lines);
+    overlays::prepend_bsp_surface_grid_overlay(
+        project,
+        world_camera,
+        grid_units,
+        hidden_scene_nodes,
+        overlay_lines,
+    );
 }
 
 /// Build a fresh preview frame rendering the active editor room window
@@ -1030,6 +1037,16 @@ fn scene_node_hidden(scene: &Scene, hidden_scene_nodes: &HashSet<NodeId>, id: No
         current = scene.node(node_id).and_then(|node| node.parent);
     }
     false
+}
+
+fn brush_group_hidden(
+    scene: &Scene,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    brush: &psxed_project::brush::Brush,
+) -> bool {
+    brush
+        .group
+        .is_some_and(|group| scene_node_hidden(scene, hidden_scene_nodes, group))
 }
 
 fn host_renders_as_preview_model(
@@ -1749,11 +1766,15 @@ fn walk_brushes_with_culling(
     // contract (PXBSP_AMBIENT_RGB = [32; 3]). With zero lights the
     // historic unlit shading is kept, so lightless maps don't go dark.
     let lights = collect_bsp_preview_bake_lights(project, hidden_scene_nodes);
+    let scene = project.active_scene();
     if lights.is_empty() {
         with_cached_solved_brushes(project, |solved_brushes| {
             for (brush, solved) in project.active_scene().brushes.iter().zip(solved_brushes) {
                 if scratch.geometry_full() {
                     break;
+                }
+                if brush_group_hidden(scene, hidden_scene_nodes, brush) {
+                    continue;
                 }
                 if cull_brush_bounds
                     && solved
@@ -1800,6 +1821,9 @@ fn walk_brushes_with_culling(
     for (brush, lit_brush) in project.active_scene().brushes.iter().zip(&cache.brushes) {
         if scratch.geometry_full() {
             break;
+        }
+        if brush_group_hidden(scene, hidden_scene_nodes, brush) {
+            continue;
         }
         if cull_brush_bounds
             && lit_brush
@@ -3819,6 +3843,7 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         | NodeKind::Equipment { .. }
         | NodeKind::Interactable { .. }
         | NodeKind::PhysicsBody { .. }
+        | NodeKind::Group
         | NodeKind::Section { .. }
         | NodeKind::World { .. }
         | NodeKind::Node

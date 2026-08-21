@@ -218,6 +218,11 @@ pub struct Brush {
     /// Logic mover that owns this brush, or `None` for static world geometry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mover: Option<crate::NodeId>,
+    /// Editor-only authoring group. Group nodes are flattened away by the
+    /// cooker; this reference only controls selection, visibility, and
+    /// hierarchy operations in the editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<crate::NodeId>,
 }
 
 /// Exact unnormalized plane `dot(normal, p) == dist` from integer points.
@@ -333,6 +338,7 @@ impl Brush {
             faces: faces.map(BrushFace::from_points).into(),
             contents: BrushContents::Solid,
             mover: None,
+            group: None,
         }
     }
 
@@ -482,6 +488,7 @@ impl Brush {
                 .collect(),
             contents: self.contents,
             mover: self.mover,
+            group: self.group,
         }
     }
 
@@ -819,6 +826,7 @@ impl Brush {
             faces,
             contents: self.contents,
             mover: self.mover,
+            group: self.group,
         };
         // Round-trip gate: the normalized brush must be the same solid.
         let resolved = candidate.solve();
@@ -942,6 +950,7 @@ impl Brush {
                 faces,
                 contents: self.contents,
                 mover: None,
+                group: self.group,
             }
         };
         // Polygon winding orientation varies; try both side windings and

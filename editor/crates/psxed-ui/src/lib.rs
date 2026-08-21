@@ -346,6 +346,9 @@ enum TreeAction {
         modifiers: egui::Modifiers,
     },
     BeginRename(NodeId),
+    OpenGroup(NodeId),
+    Ungroup(NodeId),
+    MergeSelectedGroups(NodeId),
     CommitRename(NodeId, String),
     CancelRename,
     Delete(NodeId),
@@ -505,6 +508,10 @@ pub struct EditorWorkspace {
     /// material names rather than trusting project-local resource ids, so it
     /// deliberately survives switching or creating projects.
     portable_geometry_clipboard: Option<PortableGeometryClipboard>,
+    /// High-visibility confirmation/error bubble for Copy/Paste. The ordinary
+    /// action-bar status is easy to miss on a wide editor window, so geometry
+    /// clipboard actions also announce themselves over the viewport.
+    clipboard_notice: Option<ClipboardNotice>,
     /// Name typed into the Prefabs menu for the next "Save Selection".
     prefab_name: String,
     /// Shared editor-library prefabs, cached outside project data. Refreshed
@@ -579,6 +586,11 @@ pub struct EditorWorkspace {
     collapsed_scene_nodes: HashSet<NodeId>,
     collapsed_file_folders: HashSet<String>,
     hidden_scene_nodes: HashSet<NodeId>,
+    /// TrenchBroom-style edit context. A closed group is selected as one
+    /// object; opening it makes its direct contents editable and locks the
+    /// rest of the scene. Nested groups replace this with their child and
+    /// closing walks back to the parent group.
+    open_group: Option<NodeId>,
     hidden_ui_nodes: HashSet<(UiSceneId, UiNodeId)>,
     ui_node_clipboard: Option<UiNodeClipboard>,
     history: UndoStack,
@@ -1420,11 +1432,20 @@ struct NodeGizmoDrag {
     /// Angular tracking state, present only for Rotate drags.
     rotate: Option<NodeGizmoRotateDrag>,
     targets: Vec<NodeGizmoTarget>,
+    /// BSP brushes recursively owned by selected Group roots, captured from
+    /// the drag start so every preview applies the total delta once.
+    group_brushes: Vec<GroupBrushGizmoTarget>,
     current_steps: i32,
     snapshot_pushed: bool,
     /// Shift held: world-unit nodes skip the brush-grid snap and move at
     /// single-unit precision. Refreshed every update from the live modifiers.
     free: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GroupBrushGizmoTarget {
+    index: usize,
+    start: psxed_project::brush::Brush,
 }
 
 /// Angular state for a rotation-ring drag. Steps come from the angle
@@ -1483,8 +1504,20 @@ enum PortableGeometryClipboard {
 }
 
 #[derive(Debug, Clone)]
+struct ClipboardNotice {
+    message: String,
+    success: bool,
+    shown_at: Instant,
+}
+
+#[derive(Debug, Clone)]
 struct BrushGeometryClipboard {
     brushes: Vec<psxed_project::brush::Brush>,
+    /// Portable authoring hierarchy, stored parent-before-child. NodeIds are
+    /// intentionally absent because paste allocates destination-local ids.
+    groups: Vec<PortableBrushGroup>,
+    /// Per-brush owner index into `groups`.
+    brush_groups: Vec<Option<usize>>,
     /// Position of the source primary brush within `brushes`.
     primary: usize,
     /// Source resource id -> material display name. Resource ids are local to
@@ -1493,6 +1526,12 @@ struct BrushGeometryClipboard {
     /// Door bindings are intentionally stripped because their NodeIds cannot
     /// safely address another project. Kept only for an honest paste status.
     stripped_movers: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PortableBrushGroup {
+    name: String,
+    parent: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -2442,6 +2481,10 @@ pub(crate) struct BrushDragPlane3d {
 pub(crate) struct BrushVertexDrag {
     pub(crate) index: usize,
     pub(crate) base: psxed_project::brush::Brush,
+    /// Whole-brush selection members riding an axis-constrained Move gizmo
+    /// drag. Element edits leave this empty and continue to affect only the
+    /// primary brush.
+    pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
     /// Solved base-brush vertices being dragged, world f64.
     pub(crate) targets: Vec<[f64; 3]>,
     /// Unsnapped plane point at press.
@@ -2466,6 +2509,9 @@ pub(crate) struct BrushVertexDrag {
 pub(crate) struct BrushElementTransformDrag {
     pub(crate) index: usize,
     pub(crate) base: psxed_project::brush::Brush,
+    /// Other whole brushes transformed about the same selection pivot.
+    /// Face/edge/vertex transforms leave this empty.
+    pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
     pub(crate) targets: Vec<[f64; 3]>,
     pub(crate) center: [f64; 3],
     pub(crate) axis: usize,
@@ -3068,6 +3114,7 @@ impl EditorWorkspace {
             last_cook_errors: Vec::new(),
             floating_geometry: None,
             portable_geometry_clipboard: None,
+            clipboard_notice: None,
             prefab_name: String::new(),
             prefab_library,
             paint_target_preview: None,
@@ -3088,6 +3135,7 @@ impl EditorWorkspace {
             collapsed_scene_nodes: HashSet::new(),
             collapsed_file_folders: HashSet::new(),
             hidden_scene_nodes: HashSet::new(),
+            open_group: None,
             hidden_ui_nodes: HashSet::new(),
             ui_node_clipboard: None,
             history: UndoStack::default(),
@@ -3657,6 +3705,22 @@ impl EditorWorkspace {
         let target = dir.into();
         let mut opened = Self::open_directory(&target)?;
         opened.portable_geometry_clipboard = self.portable_geometry_clipboard.clone();
+        if let Some(clipboard) = opened.portable_geometry_clipboard.as_ref() {
+            let retained = match clipboard {
+                PortableGeometryClipboard::Brushes(clipboard) => format!(
+                    "{} brush{} ready to paste",
+                    clipboard.brushes.len(),
+                    if clipboard.brushes.len() == 1 {
+                        ""
+                    } else {
+                        "es"
+                    }
+                ),
+                PortableGeometryClipboard::World(_) => "world geometry ready to paste".to_string(),
+            };
+            opened.status = format!("{}; clipboard retained ({retained})", opened.status);
+            opened.show_clipboard_notice(format!("Clipboard retained: {retained}"), true);
+        }
         opened.retire_egui_textures(self.drain_live_egui_textures());
         *self = opened;
         Ok(())
@@ -3710,6 +3774,7 @@ impl EditorWorkspace {
         }
         let fallback_dir = Self::delete_project_fallback_dir(&delete_dir)?;
         let mut opened = Self::open_directory(&fallback_dir)?;
+        opened.portable_geometry_clipboard = self.portable_geometry_clipboard.clone();
         let deleted_name = self.project.name.clone();
         std::fs::remove_dir_all(&delete_dir)
             .map_err(|error| format!("delete {}: {error}", delete_dir.display()))?;
