@@ -139,6 +139,66 @@ pub(crate) fn clip_preview_brush_polygon(
     clipped
 }
 
+/// One depth key for every triangle produced from the same clipped surface.
+/// Keeping a fan atomic prevents an unrelated polygon from being submitted
+/// between its halves merely because their centroids have different depths.
+pub(crate) fn clipped_surface_depth_slot(vertices: &[PreviewClipVertex]) -> usize {
+    if vertices.is_empty() {
+        return room_depth_slot(0);
+    }
+    let avg_sz = vertices
+        .iter()
+        .map(|vertex| vertex.view.z.clamp(0, i32::from(u16::MAX)) as u64)
+        .sum::<u64>()
+        / vertices.len() as u64;
+    room_depth_slot(avg_sz as u32)
+}
+
+/// Clip one world-space editor guide segment to the preview frustum before
+/// projecting it. Projecting the endpoints independently is not sufficient:
+/// a radius ring or bound can straddle the camera plane while both projected
+/// endpoints saturate to valid-looking i16 coordinates, turning a short guide
+/// edge into a screen-wide slash.
+pub(crate) fn clip_preview_world_segment(
+    camera: psx_engine::WorldCamera,
+    a: [i32; 3],
+    b: [i32; 3],
+) -> Option<[psx_gte::scene::Projected; 2]> {
+    let world = |point: [i32; 3]| psx_engine::WorldVertex::new(point[0], point[1], point[2]);
+    let mut a = camera.view_vertex(world(a));
+    let mut b = camera.view_vertex(world(b));
+    for plane in 0..5 {
+        let a_distance = preview_clip_distance(camera.projection, plane, a);
+        let b_distance = preview_clip_distance(camera.projection, plane, b);
+        match (a_distance >= 0, b_distance >= 0) {
+            (false, false) => return None,
+            (true, true) => {}
+            (false, true) => {
+                a = interpolate_preview_clip_vertex(
+                    PreviewClipVertex::new(a, [0.0; 2], (0, 0, 0)),
+                    PreviewClipVertex::new(b, [0.0; 2], (0, 0, 0)),
+                    a_distance,
+                    b_distance,
+                )
+                .view;
+            }
+            (true, false) => {
+                b = interpolate_preview_clip_vertex(
+                    PreviewClipVertex::new(a, [0.0; 2], (0, 0, 0)),
+                    PreviewClipVertex::new(b, [0.0; 2], (0, 0, 0)),
+                    a_distance,
+                    b_distance,
+                )
+                .view;
+            }
+        }
+    }
+    Some([
+        preview_projected_from_engine(camera.projection.project_view(a)?),
+        preview_projected_from_engine(camera.projection.project_view(b)?),
+    ])
+}
+
 fn preview_clip_distance(
     projection: psx_engine::WorldProjection,
     plane: usize,
@@ -272,14 +332,43 @@ pub(crate) fn emit_face_tri_lit(
     shade: FaceShade,
     colors: [(u8, u8, u8); 3],
 ) -> bool {
+    emit_face_tri_lit_at_slot(
+        scratch,
+        p,
+        uvs,
+        shade,
+        colors,
+        room_depth_slot(projected_avg_sz(p)),
+    )
+}
+
+/// Emit one face triangle at a surface-owned OT slot. BSP brush polygons are
+/// often fans of several triangles; sorting every triangle by its own centroid
+/// lets another wall land between the halves of one planar face, producing the
+/// conspicuous diagonal wedges seen around arches and pillars.
+pub(crate) fn emit_face_tri_lit_at_slot(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    uvs: [(u8, u8); 3],
+    shade: FaceShade,
+    colors: [(u8, u8, u8); 3],
+    slot_idx: usize,
+) -> bool {
     if !face_side_visible(shade.sidedness(), p) {
         return false;
     }
     match shade {
-        FaceShade::Flat { .. } => push_tri_colors(scratch, p, colors),
+        FaceShade::Flat { .. } => push_tri_colors_at_slot(scratch, p, colors, slot_idx),
         FaceShade::Textured {
             slot, blend_mode, ..
-        } => push_tex_tri_colors(scratch, p, uvs, slot, colors, blend_mode),
+        } => push_textured_material_tri(
+            scratch,
+            p,
+            uvs,
+            colors,
+            preview_texture_material(slot, colors[0], blend_mode),
+            slot_idx,
+        ),
     }
 }
 
@@ -436,45 +525,6 @@ pub(crate) fn midpoint_color(a: (u8, u8, u8), b: (u8, u8, u8)) -> (u8, u8, u8) {
     )
 }
 
-/// Compose a [`TriTexturedGouraud`] sampling `slot`'s tpage / CLUT,
-/// stash it in the static `tex_tris` arena, and chain it into the OT.
-///
-/// The per-vertex colour modulates the texel: PSX hardware computes
-/// `output = texel * color / 0x80`, so `(0x80, 0x80, 0x80)` is a
-/// pass-through and `(0xFF, 0x60, 0x40)` saturates a grey texel
-/// toward terracotta. Textured preview uses the authored material
-/// tint so it matches the cooked runtime path; flat fallback still
-/// uses material-name colours to keep untextured faces readable.
-pub(crate) fn push_tex_tri(
-    scratch: &mut PreviewScratch,
-    p: [psx_gte::scene::Projected; 3],
-    uvs: [(u8, u8); 3],
-    slot: MaterialSlot,
-    tint: (u8, u8, u8),
-    blend_mode: BlendMode,
-) -> bool {
-    push_tex_tri_colors(scratch, p, uvs, slot, [tint; 3], blend_mode)
-}
-
-pub(crate) fn push_tex_tri_colors(
-    scratch: &mut PreviewScratch,
-    p: [psx_gte::scene::Projected; 3],
-    uvs: [(u8, u8); 3],
-    slot: MaterialSlot,
-    colors: [(u8, u8, u8); 3],
-    blend_mode: BlendMode,
-) -> bool {
-    let avg_sz = projected_avg_sz(p);
-    push_textured_material_tri(
-        scratch,
-        p,
-        uvs,
-        colors,
-        preview_texture_material(slot, colors[0], blend_mode),
-        room_depth_slot(avg_sz),
-    )
-}
-
 pub(crate) fn preview_texture_material(
     slot: MaterialSlot,
     tint: (u8, u8, u8),
@@ -595,13 +645,23 @@ pub(crate) fn push_tri_colors(
     p: [psx_gte::scene::Projected; 3],
     colors: [(u8, u8, u8); 3],
 ) -> bool {
-    push_tri_split(scratch, p, colors, 0)
+    push_tri_colors_at_slot(scratch, p, colors, room_depth_slot(projected_avg_sz(p)))
+}
+
+pub(crate) fn push_tri_colors_at_slot(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    colors: [(u8, u8, u8); 3],
+    slot: usize,
+) -> bool {
+    push_tri_split(scratch, p, colors, slot, 0)
 }
 
 pub(crate) fn push_tri_split(
     scratch: &mut PreviewScratch,
     p: [psx_gte::scene::Projected; 3],
     colors: [(u8, u8, u8); 3],
+    slot: usize,
     depth: u8,
 ) -> bool {
     let p = clamp_preview_projected_triangle(p);
@@ -611,8 +671,8 @@ pub(crate) fn push_tri_split(
         }
         let (a, _, a_colors, b, _, b_colors) =
             split_preview_projected_triangle(p, [(0, 0); 3], colors);
-        let left = push_tri_split(scratch, a, a_colors, depth + 1);
-        let right = push_tri_split(scratch, b, b_colors, depth + 1);
+        let left = push_tri_split(scratch, a, a_colors, slot, depth + 1);
+        let right = push_tri_split(scratch, b, b_colors, slot, depth + 1);
         return left || right;
     }
     if scratch.used >= TRI_CAP {
@@ -624,13 +684,6 @@ pub(crate) fn push_tri_split(
         colors,
     );
     scratch.used = idx + 1;
-    // Map sz (Q0, range up to ~32K for our scenes) into the OT
-    // depth band. Smaller sz = closer = drawn last, so map to a
-    // lower OT slot index. We reserve slot OT_DEPTH-1 for the
-    // per-frame fill-rect clear and slot 0 for the hover overlay
-    // (drawn last so it tops everything), so geometry rides the
-    // 1..OT_DEPTH-1 band exclusively.
-    let slot = room_depth_slot(projected_avg_sz(p));
     let packet_ptr: *mut TriGouraud = &mut scratch.tris[idx];
     unsafe {
         scratch
@@ -653,5 +706,5 @@ pub(crate) fn shadow_depth_slot(avg_sz: u32) -> usize {
 }
 
 pub(crate) fn preview_geometry_depth_slot(avg_sz: u32) -> usize {
-    ((avg_sz as usize) >> 6).clamp(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX)
+    ((avg_sz as usize) >> 2).clamp(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX)
 }

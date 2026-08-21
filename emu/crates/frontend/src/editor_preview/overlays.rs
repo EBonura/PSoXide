@@ -474,6 +474,7 @@ fn dot3_f64(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// light gizmos rather than generic entities.
 pub(super) fn walk_light_gizmos(
     project: &ProjectDocument,
+    camera: psx_engine::WorldCamera,
     room_id: NodeId,
     grid: &WorldGrid,
     floor_index: usize,
@@ -523,8 +524,8 @@ pub(super) fn walk_light_gizmos(
         // attenuation footprint. The bulb remains visible even
         // for radius-zero lights.
         let radius_engine = spatial::light_radius_engine_units(grid, light.radius);
-        if radius_engine > 0 {
-            push_horizontal_ring(scratch, center_world, radius_engine, 16, style);
+        if radius_engine > 0 && (is_selected || is_hovered) {
+            push_horizontal_ring(scratch, camera, center_world, radius_engine, 16, style);
         }
         push_light_bulb_icon(
             scratch,
@@ -545,6 +546,7 @@ pub(super) fn walk_light_gizmos(
 /// size, matching both the brush bake and the runtime light records.
 pub(super) fn walk_roomless_light_gizmos(
     project: &ProjectDocument,
+    camera: psx_engine::WorldCamera,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
     hovered: Option<psxed_project::NodeId>,
@@ -588,8 +590,8 @@ pub(super) fn walk_roomless_light_gizmos(
             }
         };
         let radius_engine = (light.radius * radius_units) as i32;
-        if radius_engine > 0 {
-            push_horizontal_ring(scratch, center_world, radius_engine, 16, style);
+        if radius_engine > 0 && (is_selected || is_hovered) {
+            push_horizontal_ring(scratch, camera, center_world, radius_engine, 16, style);
         }
         push_light_bulb_icon(
             scratch,
@@ -792,6 +794,7 @@ pub(super) fn push_facing_arrow(
 /// and any future ground-plane affordances.
 pub(super) fn push_horizontal_ring(
     scratch: &mut PreviewScratch,
+    camera: psx_engine::WorldCamera,
     center: [i32; 3],
     radius: i32,
     segments: u16,
@@ -801,7 +804,6 @@ pub(super) fn push_horizontal_ring(
         return;
     }
     let mut prev_world = [center[0] + radius, center[1], center[2]];
-    let mut prev_proj = gte_scene::project_vertex(world_to_view(prev_world));
     for i in 1..=segments {
         // Authored editor angles use 4096 units per turn; sample
         // the unit circle around the light origin once per segment.
@@ -813,14 +815,13 @@ pub(super) fn push_horizontal_ring(
             center[1],
             center[2] + ((s * radius) >> 12),
         ];
-        let next_proj = gte_scene::project_vertex(world_to_view(next_world));
-        if prev_proj.sz != 0 && next_proj.sz != 0 {
+        if let Some([prev_proj, next_proj]) =
+            clip_preview_world_segment(camera, prev_world, next_world)
+        {
             push_screen_line(scratch, prev_proj, next_proj, style);
         }
         prev_world = next_world;
-        prev_proj = next_proj;
     }
-    let _ = prev_world; // silence the unused-final-assignment lint
 }
 
 pub(super) fn push_light_bulb_icon(
