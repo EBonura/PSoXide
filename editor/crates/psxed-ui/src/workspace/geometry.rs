@@ -191,10 +191,7 @@ impl EditorWorkspace {
                         self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
                         return;
                     }
-                    if self.brush_edit_mode == BrushEditMode::Face
-                        && self.selected_brush == Some(brush)
-                    {
-                        self.apply_brush_element_selection(BrushElement::Face(face), modifiers);
+                    if self.select_brush_element_from_2d_hit(brush, face, world, modifiers) {
                         return;
                     }
                     self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
@@ -228,10 +225,7 @@ impl EditorWorkspace {
                         self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
                         return;
                     }
-                    if self.brush_edit_mode == BrushEditMode::Face
-                        && self.selected_brush == Some(brush)
-                    {
-                        self.apply_brush_element_selection(BrushElement::Face(face), modifiers);
+                    if self.select_brush_element_from_2d_hit(brush, face, world, modifiers) {
                         return;
                     }
                     self.select_brush_with_group_semantics(brush, Some(face), modifiers, false);
@@ -700,6 +694,8 @@ impl EditorWorkspace {
         } else {
             self.replace_brush_selection(primary, None);
             self.selected_brushes = (first..first + count).collect();
+            self.selected_brush_faces.clear();
+            self.selected_brush_elements.clear();
         }
         if reveal_room_workspace {
             self.show_room_orthographic();

@@ -905,7 +905,21 @@ impl EditorWorkspace {
             return;
         }
         self.cancel_brush_gestures();
+        let previous = self.brush_edit_mode;
         self.brush_edit_mode = mode;
+        if previous == BrushEditMode::Face && mode != BrushEditMode::Face {
+            self.selected_brush_faces.clear();
+            self.selected_brush_elements.clear();
+            self.selected_brushes = self.selected_brush.into_iter().collect();
+        } else if mode == BrushEditMode::Face {
+            self.selected_brush_faces.clear();
+            self.selected_brush_elements.clear();
+            if let (Some(brush), Some(face)) = (self.selected_brush, self.selected_brush_face) {
+                self.selected_brush_faces.push((brush, face));
+                self.selected_brush_elements.push(BrushElement::Face(face));
+                self.selected_brushes = vec![brush];
+            }
+        }
         if let Some(selection_mode) = mode.selection_mode() {
             self.set_selection_mode(selection_mode);
         }

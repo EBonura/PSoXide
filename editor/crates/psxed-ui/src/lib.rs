@@ -647,6 +647,11 @@ pub struct EditorWorkspace {
     selected_brushes: Vec<usize>,
     /// Selected face index within the selected brush.
     selected_brush_face: Option<usize>,
+    /// Exact face-mode selection across brushes. Unlike
+    /// `selected_brush_elements`, each face carries its owning brush so
+    /// Shift/Ctrl-click can preserve faces while the primary brush moves.
+    /// The last entry is the active face shown in the Inspector.
+    selected_brush_faces: Vec<(usize, usize)>,
     /// Selected sub-elements of the primary brush (faces by index,
     /// edges/vertices by quantized key, see `workspace::brush_elements`).
     /// Last entry is the primary element. Cleared whenever the primary
@@ -1129,7 +1134,9 @@ impl BrushEditMode {
 
     const fn gesture_hint(self) -> &'static str {
         match self {
-            Self::Move => "Whole brush: drag to move; the gizmo moves, rotates, and scales it",
+            Self::Move => {
+                "Whole brush: click to select, then use the gizmo to move, rotate, or scale it"
+            }
             Self::Face => "Click a face to select it; drag its handle to resize, Cmd-drag or E to extrude a new brush",
             Self::Edge => "Drag an edge handle to reshape",
             Self::Vertex => "Drag a vertex handle to reshape",
@@ -1631,32 +1638,6 @@ impl Viewport3dBoxSelect {
     }
 }
 
-/// Active node-drag stroke. Set on press over an entity
-/// bound, updated each frame the pointer moves with primary
-/// held, cleared on release. The drag is constrained to the
-/// horizontal plane the node sits on so X/Z editing is the
-/// only motion -- Y stays editable via the inspector.
-#[derive(Debug, Clone)]
-struct NodeDrag {
-    /// The node being dragged.
-    node: NodeId,
-    /// Editor-space translation when the drag started. The
-    /// per-frame update writes `start + delta` so floating
-    /// rounding errors don't accumulate.
-    start_translation: [f32; 3],
-    /// World-space hit point on the node's drag plane at
-    /// drag start. Subsequent ray hits on the same plane
-    /// yield a delta to add to `start_translation`.
-    start_world_hit: [f32; 3],
-    /// Plane Y in world units -- locked to the node's current
-    /// world Y at drag start.
-    drag_plane_y: f32,
-    /// `true` once `push_undo` has fired for this stroke.
-    /// Pure clicks (press without movement) leave the undo
-    /// stack untouched.
-    snapshot_pushed: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiResizeHandle {
     TopLeft,
@@ -1756,8 +1737,6 @@ enum Interaction {
     PrimitiveGizmo(PrimitiveGizmoDrag),
     /// Axis-gizmo drag of selected scene nodes.
     NodeGizmo(NodeGizmoDrag),
-    /// Entity-bound plane drag of a scene node (3D viewport).
-    Node(NodeDrag),
     /// Screen-space marquee selection in the 3D viewport.
     BoxSelect3d(Viewport3dBoxSelect),
     /// Screen-space marquee selection in the 2D viewport.
@@ -1808,7 +1787,6 @@ interaction_accessors! {
     PrimitiveGrid => primitive_grid_drag, primitive_grid_drag_mut, take_primitive_grid_drag : PrimitiveGridDrag;
     PrimitiveGizmo => primitive_gizmo_drag, primitive_gizmo_drag_mut, take_primitive_gizmo_drag : PrimitiveGizmoDrag;
     NodeGizmo => node_gizmo_drag, node_gizmo_drag_mut, take_node_gizmo_drag : NodeGizmoDrag;
-    Node => node_drag, node_drag_mut, take_node_drag : NodeDrag;
     BoxSelect3d => box_select_3d, box_select_3d_mut, take_box_select_3d : Viewport3dBoxSelect;
     BoxSelect2d => box_select_2d, box_select_2d_mut, take_box_select_2d : ViewportBoxSelect;
     UiCanvas => ui_canvas_drag, ui_canvas_drag_mut, take_ui_canvas_drag : UiCanvasDrag;
@@ -3158,6 +3136,7 @@ impl EditorWorkspace {
             selected_brush: None,
             selected_brushes: Vec::new(),
             selected_brush_face: None,
+            selected_brush_faces: Vec::new(),
             selected_brush_elements: Vec::new(),
             brush_edit_mode: BrushEditMode::Move,
             brush_element_transform: None,

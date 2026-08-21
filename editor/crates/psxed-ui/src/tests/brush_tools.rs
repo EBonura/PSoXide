@@ -921,7 +921,7 @@ fn coincident_brushes_cycle_individually_in_3d_via_real_egui() {
 }
 
 #[test]
-fn brush_and_select_tools_plain_drag_move_selected_brush_in_3d_via_real_egui() {
+fn brush_and_select_tools_require_the_gizmo_for_whole_brush_moves_in_3d() {
     for tool in [ViewTool::Brush, ViewTool::Select] {
         let mut harness = ViewportHarness::floored_room("3d plain brush move", 1);
         let base = psxed_project::brush::Brush::cuboid([320, 0, 320], [704, 640, 704]);
@@ -950,14 +950,12 @@ fn brush_and_select_tools_plain_drag_move_selected_brush_in_3d_via_real_egui() {
             start,
             start + Vec2::new(64.0, 0.0),
         );
-        assert_ne!(
+        assert_eq!(
             harness.workspace.project.active_scene().brushes[0],
             base,
-            "{tool:?}"
+            "{tool:?}: body drag must not move the selected brush"
         );
-        assert!(harness.workspace.is_dirty(), "{tool:?}");
-        harness.workspace.do_undo();
-        assert_eq!(harness.workspace.project.active_scene().brushes[0], base);
+        assert!(!harness.workspace.is_dirty(), "{tool:?}");
     }
 }
 
@@ -2096,7 +2094,7 @@ fn brush_tool_clip_keep_back_replaces_in_place() {
 }
 
 #[test]
-fn brush_tool_shift_drag_moves_whole_brush() {
+fn brush_tool_shift_drag_does_not_bypass_the_whole_brush_gizmo() {
     let mut harness = ViewportHarness::floored_room("brush_tool_move", 4);
     harness.frame(harness.room_center(), 3000.0);
     harness.workspace.active_tool = ViewTool::Brush;
@@ -2107,15 +2105,15 @@ fn brush_tool_shift_drag_moves_whole_brush() {
     tool.primary_pressed(&mut harness.workspace, &press);
     tool.primary_dragged(&mut harness.workspace, &commit);
     tool.primary_released(&mut harness.workspace, &commit);
-    let before = harness.workspace.project.active_scene().brushes[0].solve();
+    let before = harness.workspace.project.active_scene().brushes[0].clone();
 
     // Shift-press over the projected top-face centre, then drag right.
     let camera = harness.workspace.viewport_3d_camera();
     let (nx, ny) = camera
         .normalized_panel_point_for_world([
-            ((before.min[0] + before.max[0]) * 0.5) as f32,
-            before.max[1] as f32,
-            ((before.min[2] + before.max[2]) * 0.5) as f32,
+            ((before.solve().min[0] + before.solve().max[0]) * 0.5) as f32,
+            before.solve().max[1] as f32,
+            ((before.solve().min[2] + before.solve().max[2]) * 0.5) as f32,
         ])
         .expect("brush projects");
     let rect = harness.viewport;
@@ -2128,22 +2126,13 @@ fn brush_tool_shift_drag_moves_whole_brush() {
     let mut dragged = brush_frame(&harness, Pos2::new(over.x + 80.0, over.y));
     dragged.modifiers.shift = true;
     tool.primary_pressed(&mut harness.workspace, &grab);
-    assert!(harness.workspace.brush_move.is_some(), "shift-press grabs");
+    assert!(
+        harness.workspace.brush_move.is_none(),
+        "shift-press must not start a hidden body move"
+    );
     tool.primary_dragged(&mut harness.workspace, &dragged);
     tool.primary_released(&mut harness.workspace, &dragged);
-
-    let after = harness.workspace.project.active_scene().brushes[0].solve();
-    let size_before = before.max[0] - before.min[0];
-    let size_after = after.max[0] - after.min[0];
-    assert_eq!(size_before, size_after, "move preserves shape");
-    assert!(
-        after.min[0] != before.min[0] || after.min[2] != before.min[2],
-        "brush moved"
-    );
-
-    harness.workspace.do_undo();
-    let restored = harness.workspace.project.active_scene().brushes[0].solve();
-    assert_eq!(restored.min, before.min);
+    assert_eq!(harness.workspace.project.active_scene().brushes[0], before);
 }
 
 #[test]
@@ -2349,31 +2338,19 @@ fn texture_lock_compensates_face_uv_on_move() {
     harness.workspace.commit_brush_drag();
     let before = harness.workspace.project.active_scene().brushes[0].solve();
 
-    // Shift-drag move through the tool; the top face UV offset must
+    // Move through the orthographic brush gesture; the top face UV offset must
     // compensate for the world shift (identity UV would stay [0, 0]
     // only if the brush did not move).
-    let tool = tool_impl_3d(ViewTool::Brush);
-    harness.frame(harness.room_center(), 3000.0);
-    let camera = harness.workspace.viewport_3d_camera();
-    let (nx, ny) = camera
-        .normalized_panel_point_for_world([
-            ((before.min[0] + before.max[0]) * 0.5) as f32,
-            before.max[1] as f32,
-            ((before.min[2] + before.max[2]) * 0.5) as f32,
-        ])
-        .expect("brush projects");
-    let rect = harness.viewport;
-    let over = Pos2::new(
-        rect.center().x + nx * rect.width() * 0.5,
-        rect.center().y + ny * rect.height() * 0.5,
-    );
-    let mut grab = brush_frame(&harness, over);
-    grab.modifiers.shift = true;
-    let mut dragged = brush_frame(&harness, Pos2::new(over.x + 90.0, over.y));
-    dragged.modifiers.shift = true;
-    tool.primary_pressed(&mut harness.workspace, &grab);
-    tool.primary_dragged(&mut harness.workspace, &dragged);
-    tool.primary_released(&mut harness.workspace, &dragged);
+    harness.workspace.replace_brush_selection(0, None);
+    let start = [
+        ((before.min[0] + before.max[0]) * 0.5) as f32,
+        ((before.min[2] + before.max[2]) * 0.5) as f32,
+    ];
+    assert!(harness.workspace.begin_brush_move_2d(start));
+    harness
+        .workspace
+        .update_brush_move_2d([start[0] + 256.0, start[1]]);
+    harness.workspace.commit_brush_gesture_2d();
 
     let scene = harness.workspace.project.active_scene();
     let after = scene.brushes[0].solve();
@@ -3907,6 +3884,7 @@ fn apply_to_face_button_paints_only_the_selected_face_and_undoes_once() {
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("apply-face"), project);
     workspace.active_workspace = WorkspaceView::Room;
     workspace.active_tool = ViewTool::Select;
+    workspace.brush_edit_mode = BrushEditMode::Face;
     workspace.replace_brush_selection(0, Some(2));
     workspace.brush_material = Some(moss);
 
@@ -3964,6 +3942,7 @@ fn inspector_material_picker_assigns_the_selected_brush_face_via_real_egui() {
         EditorWorkspace::with_project(test_temp_dir("inspector-face-picker"), project);
     workspace.active_workspace = WorkspaceView::Room;
     workspace.active_tool = ViewTool::Select;
+    workspace.brush_edit_mode = BrushEditMode::Face;
     workspace.resources_open = false;
     workspace.replace_brush_selection(0, Some(2));
 
@@ -4009,6 +3988,7 @@ fn resource_browser_material_card_assigns_the_selected_brush_face_via_real_egui(
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("resource-face-card"), project);
     workspace.active_workspace = WorkspaceView::Room;
     workspace.active_tool = ViewTool::Select;
+    workspace.brush_edit_mode = BrushEditMode::Face;
     workspace.inspector_open = false;
     workspace.resources_open = true;
     workspace.replace_brush_selection(0, Some(2));
@@ -4052,6 +4032,7 @@ fn selected_brush_face_is_a_resource_browser_material_target() {
     }
     project.active_scene_mut().brushes.push(brush);
     let mut workspace = EditorWorkspace::with_project(test_temp_dir("brush-resource"), project);
+    workspace.brush_edit_mode = BrushEditMode::Face;
     workspace.replace_brush_selection(0, Some(2));
 
     assert_eq!(
@@ -4068,6 +4049,48 @@ fn selected_brush_face_is_a_resource_browser_material_target() {
         .iter()
         .enumerate()
         .all(|(index, face)| index == 2 || face.material == Some(stone)));
+
+    workspace.do_undo();
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .all(|face| face.material == Some(stone)));
+}
+
+#[test]
+fn brush_mode_material_assignment_updates_every_face_despite_retained_hit_face() {
+    let mut project = ProjectDocument::new("whole brush material assignment");
+    let stone = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let moss = project.add_resource(
+        "Moss",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut brush = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    for face in &mut brush.faces {
+        face.material = Some(stone);
+    }
+    project.active_scene_mut().brushes.push(brush);
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("whole-brush-resource"), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.resources_open = false;
+    workspace.brush_edit_mode = BrushEditMode::Move;
+    // Picking a brush retains the hit face for overlap cycling. It must not
+    // narrow an object-mode material assignment to that face.
+    workspace.replace_brush_selection(0, Some(2));
+
+    let targets = workspace.selected_brush_material_targets();
+    assert_eq!(targets.len(), 6);
+    run_real_egui_workspace_select_picker_option(&mut workspace, "Stone", "Moss");
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .all(|face| face.material == Some(moss)));
+    assert!(workspace.is_dirty());
 
     workspace.do_undo();
     assert!(workspace.project.active_scene().brushes[0]
@@ -4136,6 +4159,7 @@ fn face_uv_numeric_edits_cook_into_the_brush_world_and_undo_per_edit() {
     let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
     workspace.active_workspace = WorkspaceView::Room;
     workspace.active_tool = ViewTool::Select;
+    workspace.brush_edit_mode = BrushEditMode::Face;
     workspace.replace_brush_selection(0, Some(0));
     assert_eq!(
         workspace.project.active_scene().brushes[0].faces[0].uv,
@@ -4248,6 +4272,7 @@ fn face_material_swap_survives_reopen_and_reaches_the_cooked_brush_world() {
     let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
     workspace.active_workspace = WorkspaceView::Room;
     workspace.active_tool = ViewTool::Select;
+    workspace.brush_edit_mode = BrushEditMode::Face;
 
     // The starter courtyard carries two materials on purpose, so the swap is
     // between two real textures rather than to or from "none".
@@ -4766,6 +4791,7 @@ fn texture_lock_is_reachable_from_the_inspector_in_both_tools() {
 
     for tool in [ViewTool::Select, ViewTool::Brush] {
         workspace.active_tool = tool;
+        workspace.brush_edit_mode = BrushEditMode::Move;
         // No face selected: the lock still shows, with an instruction for
         // how to reach the per-face controls.
         workspace.replace_brush_selection(0, None);
@@ -4779,6 +4805,7 @@ fn texture_lock_is_reachable_from_the_inspector_in_both_tools() {
         assert_eq!(workspace.brush_texture_lock, before);
 
         // With a face selected the per-face controls come with it.
+        workspace.brush_edit_mode = BrushEditMode::Face;
         workspace.replace_brush_selection(0, Some(0));
         let (ctx, viewport) = real_egui_workspace_ctx("uv-lock-labels");
         for label in ["Texture Coordinates", "UV offset", "UV scale", "Reset UV"] {
@@ -4790,10 +4817,10 @@ fn texture_lock_is_reachable_from_the_inspector_in_both_tools() {
 }
 
 /// The UV canvas lives inside the Inspector ScrollArea. A wheel gesture over
-/// it belongs exclusively to canvas zoom; allowing the parent to observe the
-/// same delta makes every zoom also throw the numeric controls up or down.
+/// it is intentionally inert: it must neither zoom the UV canvas nor scroll
+/// the surrounding Inspector.
 #[test]
-fn uv_canvas_wheel_zooms_without_scrolling_the_inspector() {
+fn uv_canvas_wheel_is_consumed_without_zooming_or_scrolling_the_inspector() {
     fn uv_canvas_rect(shapes: &[egui::epaint::ClippedShape]) -> Option<Rect> {
         fn find(shape: &egui::Shape) -> Option<Rect> {
             match shape {
@@ -4817,13 +4844,14 @@ fn uv_canvas_wheel_zooms_without_scrolling_the_inspector() {
     let mut workspace = EditorWorkspace::open_directory(&dir).unwrap();
     workspace.active_workspace = WorkspaceView::Room;
     workspace.active_tool = ViewTool::Brush;
+    workspace.brush_edit_mode = BrushEditMode::Face;
     workspace.replace_brush_selection(0, Some(0));
 
     let (ctx, viewport) = real_egui_workspace_ctx("uv-canvas-wheel-ownership");
     let before = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 0.0, vec![]);
     let canvas = uv_canvas_rect(&before.shapes).expect("selected face draws the UV canvas");
     let heading_before = text_shape_center(&before.shapes, "Texture Coordinates")
-        .expect("UV heading is visible before zoom");
+        .expect("UV heading is visible before scrolling");
     let zoom_before = workspace
         .brush_uv_canvas_view
         .expect("canvas view was fitted")
@@ -4844,15 +4872,12 @@ fn uv_canvas_wheel_zooms_without_scrolling_the_inspector() {
         ],
     );
     let heading_after = text_shape_center(&after.shapes, "Texture Coordinates")
-        .expect("UV heading remains visible after zoom");
+        .expect("UV heading remains visible after scrolling");
     let zoom_after = workspace
         .brush_uv_canvas_view
-        .expect("canvas view survives zoom")
+        .expect("canvas view survives scrolling")
         .pixels_per_texel;
-    assert_ne!(
-        zoom_before, zoom_after,
-        "wheel must still zoom the UV canvas"
-    );
+    assert_eq!(zoom_before, zoom_after, "wheel must not zoom the UV canvas");
     assert!(
         (heading_after.y - heading_before.y).abs() < 0.1,
         "UV wheel leaked into the Inspector scroll: {heading_before:?} -> {heading_after:?}"
