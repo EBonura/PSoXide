@@ -1479,14 +1479,8 @@ pub(crate) fn scene_tree_kind_label(kind: &'static str) -> &'static str {
 ///
 /// Runtime objects are placed through the toolbar Add/Place menu so a click
 /// can resolve room context, resources, floor anchoring, and dedupe rules.
-pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 4] {
+pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 3] {
     [
-        (
-            "Section",
-            NodeKind::Section {
-                grid: WorldGrid::empty(3, 3, 1024),
-            },
-        ),
         ("Entity", NodeKind::Entity),
         ("Group", NodeKind::Group),
         ("Folder", NodeKind::Node),
