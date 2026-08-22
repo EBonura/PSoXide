@@ -4422,78 +4422,151 @@ impl EditorWorkspace {
         &self,
         painter: &egui::Painter,
         transform: crate::viewport2d::ViewportTransform,
+        grid_base_step: Option<f32>,
     ) {
         let view = self.orthographic_view;
-        let draw = |brush: &psxed_project::brush::Brush,
-                    selected_faces: &[usize],
-                    stroke: egui::Stroke| {
-            let solved = brush.solve();
-            if !solved.is_valid() {
-                return;
-            }
-            for (face, polygon) in solved.polygons.iter().enumerate() {
-                let Some(polygon) = polygon else { continue };
-                let points = polygon
-                    .verts
+        let project_polygon = |polygon: &psxed_project::brush::FacePolygon| {
+            polygon
+                .verts
+                .iter()
+                .copied()
+                .map(|world| {
+                    let projected = view.project_f64(world);
+                    transform.world_to_screen([projected[0] as f32, projected[1] as f32])
+                })
+                .collect::<Vec<_>>()
+        };
+        let selected_faces_by_brush = self
+            .project
+            .active_scene()
+            .brushes
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let mut selected_faces: Vec<usize> = self
+                    .selected_brush_faces
                     .iter()
-                    .copied()
-                    .map(|world| {
-                        let projected = view.project_f64(world);
-                        transform.world_to_screen([projected[0] as f32, projected[1] as f32])
-                    })
-                    .collect::<Vec<_>>();
-                if points.len() < 2 {
+                    .filter_map(|(brush, face)| (*brush == index).then_some(*face))
+                    .collect();
+                if selected_faces.is_empty() && self.selected_brush == Some(index) {
+                    selected_faces.extend(self.selected_brush_face);
+                }
+                selected_faces
+            })
+            .collect::<Vec<_>>();
+        let preview = self.brush_drag.and_then(Self::brush_drag_cuboid);
+        let preview_solved = preview.as_ref().map(psxed_project::brush::Brush::solve);
+
+        with_cached_brush_pick_solves(&self.project, |solved_brushes| {
+            // Face fills are material/selection pixels. Like TrenchBroom's
+            // face shader, the surface grid is submitted after these pixels
+            // so they cannot cover it.
+            for (index, solved) in solved_brushes.iter().enumerate() {
+                if self.brush_effectively_hidden(index) || !solved.is_valid() {
                     continue;
                 }
-                if selected_faces.contains(&face) && projected_polygon_area(&points).abs() > 0.5 {
-                    painter.add(egui::Shape::convex_polygon(
-                        points.clone(),
-                        Color32::from_rgba_unmultiplied(
-                            STUDIO_ACCENT.r(),
-                            STUDIO_ACCENT.g(),
-                            STUDIO_ACCENT.b(),
-                            28,
-                        ),
-                        egui::Stroke::NONE,
-                    ));
-                }
-                let face_stroke = if selected_faces.contains(&face) {
-                    egui::Stroke::new(3.0, STUDIO_ACCENT)
-                } else {
-                    stroke
+                let Some(selected_faces) = selected_faces_by_brush.get(index) else {
+                    continue;
                 };
-                for edge in 0..points.len() {
-                    painter.line_segment(
-                        [points[edge], points[(edge + 1) % points.len()]],
-                        face_stroke,
-                    );
+                for (face, polygon) in solved.polygons.iter().enumerate() {
+                    let Some(polygon) = polygon else { continue };
+                    if !selected_faces.contains(&face) {
+                        continue;
+                    }
+                    let points = project_polygon(polygon);
+                    if points.len() >= 3 && projected_polygon_area(&points).abs() > 0.5 {
+                        painter.add(egui::Shape::convex_polygon(
+                            points,
+                            Color32::from_rgba_unmultiplied(
+                                STUDIO_ACCENT.r(),
+                                STUDIO_ACCENT.g(),
+                                STUDIO_ACCENT.b(),
+                                28,
+                            ),
+                            egui::Stroke::NONE,
+                        ));
+                    }
                 }
             }
-        };
-        for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
-            if self.brush_effectively_hidden(index) {
-                continue;
+
+            // Reapply the same globally phased grid to every brush face, as
+            // TrenchBroom does. Degenerate edge-on projections are ignored by
+            // the clipping helper. Tool outlines and handles are drawn later.
+            if let Some(base_step) = grid_base_step {
+                let draw_surface_grid = |solved: &psxed_project::brush::SolvedBrush| {
+                    for polygon in solved.polygons.iter().flatten() {
+                        let projected = polygon
+                            .verts
+                            .iter()
+                            .map(|&world| view.project_f64(world))
+                            .collect::<Vec<_>>();
+                        crate::viewport2d::draw_world_grid_on_convex_polygon(
+                            painter, transform, base_step, &projected,
+                        );
+                    }
+                };
+                for (index, solved) in solved_brushes.iter().enumerate() {
+                    if !self.brush_effectively_hidden(index) && solved.is_valid() {
+                        draw_surface_grid(solved);
+                    }
+                }
+                if let Some(solved) = preview_solved.as_ref().filter(|solved| solved.is_valid()) {
+                    draw_surface_grid(solved);
+                }
             }
-            let selected =
-                self.brush_is_selected(index) || self.brush_selected_through_group(index);
-            let stroke = if selected {
-                egui::Stroke::new(2.0, STUDIO_ACCENT)
-            } else {
-                egui::Stroke::new(1.0, brush_contents_outline(brush.contents))
+
+            // Brush cages and selected-face emphasis are tool geometry and
+            // therefore stay above every surface-grid stroke.
+            let draw_outline = |solved: &psxed_project::brush::SolvedBrush,
+                                selected_faces: &[usize],
+                                stroke: egui::Stroke| {
+                for (face, polygon) in solved.polygons.iter().enumerate() {
+                    let Some(polygon) = polygon else { continue };
+                    let points = project_polygon(polygon);
+                    if points.len() < 2 {
+                        continue;
+                    }
+                    let face_stroke = if selected_faces.contains(&face) {
+                        egui::Stroke::new(3.0, STUDIO_ACCENT)
+                    } else {
+                        stroke
+                    };
+                    for edge in 0..points.len() {
+                        painter.line_segment(
+                            [points[edge], points[(edge + 1) % points.len()]],
+                            face_stroke,
+                        );
+                    }
+                }
             };
-            let mut selected_faces: Vec<usize> = self
-                .selected_brush_faces
-                .iter()
-                .filter_map(|(brush, face)| (*brush == index).then_some(*face))
-                .collect();
-            if selected_faces.is_empty() && self.selected_brush == Some(index) {
-                selected_faces.extend(self.selected_brush_face);
+            for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
+                if self.brush_effectively_hidden(index) {
+                    continue;
+                }
+                let Some(solved) = solved_brushes.get(index).filter(|solved| solved.is_valid())
+                else {
+                    continue;
+                };
+                let selected =
+                    self.brush_is_selected(index) || self.brush_selected_through_group(index);
+                let stroke = if selected {
+                    egui::Stroke::new(2.0, STUDIO_ACCENT)
+                } else {
+                    egui::Stroke::new(1.0, brush_contents_outline(brush.contents))
+                };
+                draw_outline(
+                    solved,
+                    selected_faces_by_brush
+                        .get(index)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    stroke,
+                );
             }
-            draw(brush, &selected_faces, stroke);
-        }
-        if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
-            draw(&preview, &[], egui::Stroke::new(1.5, STUDIO_ACCENT));
-        }
+            if let Some(solved) = preview_solved.as_ref().filter(|solved| solved.is_valid()) {
+                draw_outline(solved, &[], egui::Stroke::new(1.5, STUDIO_ACCENT));
+            }
+        });
         for (number, clip_point) in self.brush_clip_points.iter().enumerate() {
             let projected = view.project_f32(clip_point.point.map(|value| value as f32));
             let center = transform.world_to_screen(projected);

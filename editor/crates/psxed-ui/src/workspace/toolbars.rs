@@ -169,7 +169,7 @@ impl EditorWorkspace {
                         }
                         let painter = ui.painter_at(rect);
                         painter.rect_filled(rect, 0.0, STUDIO_VIEWPORT);
-                        if self.show_grid {
+                        let grid_base_step = if self.show_grid {
                             let bsp_only = self.active_room_id().is_none()
                                 && !self.project.active_scene().brushes.is_empty();
                             let base_step = if bsp_only {
@@ -178,7 +178,12 @@ impl EditorWorkspace {
                                 1.0
                             };
                             draw_world_grid(&painter, transform, base_step);
-                        }
+                            Some(base_step)
+                        } else {
+                            None
+                        };
+                        let brush_surface_grid_step =
+                            grid_base_step.filter(|_| self.show_brush_surface_grid);
 
                         let hits = if top_view {
                             draw_scene_viewport(
@@ -418,7 +423,7 @@ impl EditorWorkspace {
                                 .then(|| self.viewport_box_select_rect())
                                 .flatten(),
                         );
-                        self.draw_brush_footprints_2d(&painter, transform);
+                        self.draw_brush_footprints_2d(&painter, transform, brush_surface_grid_step);
                         self.draw_bsp_leak_path_2d(&painter, transform, orthographic_view);
                         draw_axes_gizmo(&painter, rect, orthographic_view);
                         self.draw_bsp_leak_notice(&painter, rect);
@@ -566,6 +571,29 @@ impl EditorWorkspace {
             &active_tool_label,
             |ui| self.draw_tool_group_menu(ui),
         );
+        if !self.project.active_scene().brushes.is_empty() {
+            let surface_grid_button = egui::Button::new(icons::text(icons::GRID, 14.0))
+                .selected(self.show_brush_surface_grid)
+                .min_size(Vec2::new(28.0, 23.0));
+            if ui
+                .add(surface_grid_button)
+                .on_hover_text(if self.show_brush_surface_grid {
+                    "Brush surface grid: on (click to hide it from brush faces)"
+                } else {
+                    "Brush surface grid: off (click to show it over brush faces)"
+                })
+                .clicked()
+            {
+                self.show_brush_surface_grid = !self.show_brush_surface_grid;
+                self.persist_editor_visibility_state();
+                self.status = if self.show_brush_surface_grid {
+                    "Brush surface grid shown".to_string()
+                } else {
+                    "Brush surface grid hidden".to_string()
+                };
+                self.mark_shortcut_group_changed(ShortcutGroup::Visibility);
+            }
+        }
         match self.active_tool {
             ViewTool::Brush => {
                 ui.separator();
@@ -1414,6 +1442,12 @@ impl EditorWorkspace {
             .spacing(Vec2::new(14.0, 5.0))
             .show(ui, |ui| {
                 changed |= visibility_menu_row(ui, "grid", "Grid", &mut self.show_grid);
+                changed |= visibility_menu_row(
+                    ui,
+                    "brush-surface-grid",
+                    "Brush surface grid",
+                    &mut self.show_brush_surface_grid,
+                );
                 changed |= visibility_menu_row(ui, "portals", "Portals", &mut self.show_portals);
                 changed |= visibility_menu_row(ui, "lights", "Lights", &mut self.show_lights);
                 changed |= visibility_menu_row(ui, "fog", "Fog", &mut self.preview_fog);
@@ -1570,6 +1604,7 @@ impl EditorWorkspace {
 
     pub(crate) fn editor_visibility_has_hidden_items(&self) -> bool {
         !self.show_grid
+            || !self.show_brush_surface_grid
             || !self.show_portals
             || !self.show_lights
             || !self.preview_fog

@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="910mm" height="610mm" viewBox="0 0 910 610"
+     role="img" aria-label="PSoXide Demo Disc Comic Con banner, impact version">
+  <!-- Finished size: 910 x 610 mm. Add bleed only after receiving the printer's template. -->
+  <defs>
+    <linearGradient id="bannerBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#11171d"/>
+      <stop offset="61%" stop-color="#0b1117"/>
+      <stop offset="100%" stop-color="#05080b"/>
+    </linearGradient>
+    <radialGradient id="bannerGlow" cx="45%" cy="35%" r="68%">
+      <stop offset="0%" stop-color="#00c4ec" stop-opacity="0.25"/>
+      <stop offset="43%" stop-color="#00bfe6" stop-opacity="0.07"/>
+      <stop offset="100%" stop-color="#00bfe6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cardFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#141d25"/>
+      <stop offset="100%" stop-color="#091017"/>
+    </linearGradient>
+    <filter id="cardShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="9" result="blur"/>
+      <feOffset dy="8" result="offset"/>
+      <feFlood flood-color="#000" flood-opacity="0.46" result="colour"/>
+      <feComposite in="colour" in2="offset" operator="in" result="shadow"/>
+      <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="bannerClip"><rect width="910" height="610" rx="5"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#bannerClip)">
+    <rect width="910" height="610" fill="url(#bannerBg)"/>
+    <ellipse cx="375" cy="211" rx="430" ry="330" fill="url(#bannerGlow)"/>
+
+    <g opacity="0.96">
+      <path d="M0 427 H910 M0 462 H910 M0 505 H910 M0 553 H910 M0 609 H910"
+            fill="none" stroke="#25313c" stroke-width="1.4" stroke-opacity="0.78"/>
+      <path d="M95 421 L-155 610 M205 421 L70 610 M315 421 L295 610
+               M425 421 L520 610 M535 421 L745 610 M645 421 L970 610
+               M755 421 L1195 610"
+            fill="none" stroke="#172731" stroke-width="1.4" stroke-opacity="0.95"/>
+      <path d="M0 426 H910" fill="none" stroke="#00c4ec" stroke-width="1.5" stroke-opacity="0.2"/>
+    </g>
+
+    <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+      <text x="55" y="60" fill="#8e9aa8" font-size="12" font-weight="700" letter-spacing="3.5">
+        BONNIE <tspan fill="#dbe4ec">STUDIOS</tspan>
+      </text>
+      <rect x="55" y="73" width="34" height="2.4" rx="1.2" fill="#00c4ec"/>
+
+      <image x="-7" y="82" width="595" height="154.7"
+             href="psoxide-logo.svg" xlink:href="psoxide-logo.svg"
+             preserveAspectRatio="xMidYMid meet"/>
+
+      <text x="55" y="280" fill="#ffffff" font-size="31" font-weight="800" letter-spacing="0.72">
+        UN NUOVO DEMO DISC
+      </text>
+      <text x="55" y="316" fill="#ffffff" font-size="31" font-weight="800" letter-spacing="0.72">
+        PER LA PLAYSTATION 1 NEL 2026
+      </text>
+      <text x="56" y="349" fill="#9aa8b6" font-size="11.8" letter-spacing="0.78">
+        INQUADRA IL QR, SCARICA IL DISCO E GIOCA SULLA CONSOLE ORIGINALE
+      </text>
+      <text x="56" y="374" fill="#dbe4ec" font-size="11.7" font-weight="750" letter-spacing="0.45">
+        NON HAI UNA PLAYSTATION 1? <tspan fill="#00c4ec">GIOCA ORA NEL BROWSER!</tspan>
+      </text>
+
+      <g font-size="10.2" font-weight="750" letter-spacing="0.85">
+        <g transform="translate(55 396)">
+          <rect width="245" height="43" rx="21.5" fill="#00c4ec"/>
+          <text x="122.5" y="25.2" text-anchor="middle" fill="#061017">SCARICA E MASTERIZZA</text>
+        </g>
+        <g transform="translate(315 396)">
+          <rect width="253" height="43" rx="21.5" fill="#0f1a22" stroke="#00c4ec" stroke-opacity="0.65" stroke-width="1.4"/>
+          <text x="126.5" y="25.2" text-anchor="middle" fill="#dbe4ec">GIOCA ORA NEL BROWSER</text>
+        </g>
+      </g>
+
+      <!-- Disc contents: short descriptions stay readable from across the table. -->
+      <text x="55" y="466" fill="#00c4ec" font-size="10.5" font-weight="800" letter-spacing="1.35">
+        TRA I GIOCHI INCLUSI NEL DISCO:
+      </text>
+      <g>
+        <g transform="translate(55 479)">
+          <rect width="245" height="43" rx="8" fill="#0f1a22" fill-opacity="0.9"
+                stroke="#25313c" stroke-width="1"/>
+          <rect x="10" y="10" width="2.5" height="23" rx="1.25" fill="#00c4ec"/>
+          <text x="20" y="18" fill="#ffffff" font-size="10.2" font-weight="800" letter-spacing="0.55">CORTEX IGNITION</text>
+          <text x="20" y="33" fill="#9aa8b6" font-size="6.9" letter-spacing="0.18">NUOVO SOULS-LIKE CREATO DA ZERO PER PS1</text>
+        </g>
+        <g transform="translate(315 479)">
+          <rect width="253" height="43" rx="8" fill="#0f1a22" fill-opacity="0.9"
+                stroke="#25313c" stroke-width="1"/>
+          <rect x="10" y="10" width="2.5" height="23" rx="1.25" fill="#00c4ec"/>
+          <text x="20" y="18" fill="#ffffff" font-size="10.2" font-weight="800" letter-spacing="0.55">VOXIDE</text>
+          <text x="20" y="33" fill="#9aa8b6" font-size="7.3" letter-spacing="0.3">SANDBOX VOXEL IN STILE MINECRAFT</text>
+        </g>
+        <g transform="translate(55 530)">
+          <rect width="245" height="43" rx="8" fill="#0f1a22" fill-opacity="0.9"
+                stroke="#25313c" stroke-width="1"/>
+          <rect x="10" y="10" width="2.5" height="23" rx="1.25" fill="#00c4ec"/>
+          <text x="20" y="18" fill="#ffffff" font-size="10.2" font-weight="800" letter-spacing="0.55">NITROXIDE</text>
+          <text x="20" y="33" fill="#9aa8b6" font-size="6.2" letter-spacing="0.04">CALCIO CON AUTO IN STILE ROCKET LEAGUE · 2 GIOCATORI</text>
+        </g>
+        <g transform="translate(315 530)">
+          <rect width="253" height="43" rx="8" fill="#0f1a22" fill-opacity="0.9"
+                stroke="#25313c" stroke-width="1"/>
+          <rect x="10" y="10" width="2.5" height="23" rx="1.25" fill="#00c4ec"/>
+          <text x="20" y="18" fill="#ffffff" font-size="10.2" font-weight="800" letter-spacing="0.55">QUAKE 1</text>
+          <text x="20" y="33" fill="#9aa8b6" font-size="7.3" letter-spacing="0.3">VERSIONE SHAREWARE</text>
+        </g>
+      </g>
+    </g>
+
+    <path d="M607 60 V573" stroke="#00c4ec" stroke-width="1.4" stroke-opacity="0.24"/>
+    <circle cx="607" cy="60" r="2.7" fill="#00c4ec"/>
+    <circle cx="607" cy="573" r="2.7" fill="#00c4ec"/>
+
+    <g filter="url(#cardShadow)" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+      <rect x="631" y="90" width="255" height="430" rx="24" fill="url(#cardFill)"
+            stroke="#00c4ec" stroke-opacity="0.3" stroke-width="1.6"/>
+      <rect x="654" y="116" width="209" height="209" rx="14" fill="#ffffff"/>
+      <image x="660" y="122" width="197" height="197"
+             href="bonnie-studios-qr.svg" xlink:href="bonnie-studios-qr.svg"
+             preserveAspectRatio="xMidYMid meet"/>
+
+      <text x="758.5" y="368" text-anchor="middle" fill="#ffffff"
+            font-size="19" font-weight="750" letter-spacing="0.95">INQUADRA E GIOCA</text>
+      <g transform="translate(651 388)">
+        <rect width="215" height="39" rx="19.5" fill="#00c4ec"/>
+        <text x="107.5" y="24.7" text-anchor="middle" fill="#061017"
+              font-size="10.7" font-weight="800" letter-spacing="0.75">IL DEMO DISC PER PS1</text>
+      </g>
+      <text x="758.5" y="462" text-anchor="middle" fill="#dbe4ec"
+            font-size="10" font-weight="650" letter-spacing="0.7">DOWNLOAD · BROWSER · CONSOLE</text>
+    </g>
+  </g>
+</svg>

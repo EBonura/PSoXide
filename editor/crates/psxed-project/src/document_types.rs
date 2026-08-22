@@ -111,6 +111,10 @@ pub(crate) fn clamp_q12_pitch(value: u16) -> u16 {
 pub struct EditorVisibilityState {
     #[serde(default = "default_true")]
     pub show_grid: bool,
+    /// Project the active world grid over visible BSP brush faces while
+    /// leaving the ordinary background grid independently controllable.
+    #[serde(default = "default_true")]
+    pub show_brush_surface_grid: bool,
     #[serde(default = "default_true")]
     pub show_portals: bool,
     #[serde(default = "default_true")]
@@ -135,6 +139,7 @@ impl Default for EditorVisibilityState {
     fn default() -> Self {
         Self {
             show_grid: true,
+            show_brush_surface_grid: true,
             show_portals: true,
             show_lights: true,
             preview_fog: true,
