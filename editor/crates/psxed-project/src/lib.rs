@@ -137,6 +137,7 @@ pub fn projects_dir() -> PathBuf {
 /// paths are stable platform conventions and this crate has no other need for
 /// one.
 pub fn user_projects_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
     const QUALIFIED: &str = "com.psoxide.PSoXide";
     #[cfg(target_os = "macos")]
     {
