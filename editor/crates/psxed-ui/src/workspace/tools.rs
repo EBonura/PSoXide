@@ -970,7 +970,7 @@ impl EditorWorkspace {
         }
     }
 
-    fn brush_element_status(&self) -> String {
+    pub(crate) fn brush_element_status(&self) -> String {
         if self.brush_edit_mode == BrushEditMode::Face && !self.selected_brush_faces.is_empty() {
             let faces = self.selected_brush_faces.len();
             let brushes = self
@@ -1479,9 +1479,17 @@ impl EditorWorkspace {
             }
             map
         };
+        let snap_step = i32::from(self.snap_units.max(1));
         let mut previews = Vec::with_capacity(drag.others.len() + 1);
         let mut primary = drag.base.clone();
-        if primary.transform_selected(&drag.faces, &drag.targets, drag.center, map, 0.5) == 0
+        if primary.transform_selected_snapped(
+            &drag.faces,
+            &drag.targets,
+            drag.center,
+            map,
+            0.5,
+            snap_step,
+        ) == 0
             || !brush_preview_ok(&primary)
         {
             return;
@@ -1490,7 +1498,8 @@ impl EditorWorkspace {
         for (index, base) in &drag.others {
             let mut preview = base.clone();
             let faces: Vec<usize> = (0..preview.faces.len()).collect();
-            if preview.transform_selected(&faces, &[], drag.center, map, 0.5) == 0
+            if preview.transform_selected_snapped(&faces, &[], drag.center, map, 0.5, snap_step)
+                == 0
                 || !brush_preview_ok(&preview)
             {
                 return;
@@ -1966,14 +1975,15 @@ impl EditorWorkspace {
         if ui.ctx().memory(|memory| memory.focused().is_some()) {
             return;
         }
-        // Arrow nudges, Shift+arrow duplicate-and-move, Cmd+R repeat:
-        // the brush stamping loop. Arrows move on the ground plane
+        // Arrow nudges and Cmd+R repeat the brush editing chain. Shift is
+        // deliberately ignored here: it must never turn an arrow nudge into
+        // an implicit duplicate command. Arrows move on the ground plane
         // relative to the camera (Up is away from the camera),
         // PageUp/PageDown move vertically, all by one grid step.
         if self.selected_brush.is_some() && self.floating_geometry.is_none() {
             let step = i32::from(self.snap_units.max(1));
             let (forward, right) = self.camera_ground_axes();
-            let (delta, shift) = ui.input(|input| {
+            let delta = ui.input(|input| {
                 let mut delta = [0i32; 3];
                 let mut add = |axis: [i32; 3], sign: i32| {
                     for component in 0..3 {
@@ -1998,14 +2008,10 @@ impl EditorWorkspace {
                 if input.key_pressed(egui::Key::PageDown) {
                     add([0, 1, 0], -1);
                 }
-                (delta, input.modifiers.shift)
+                delta
             });
             if delta != [0, 0, 0] {
-                if shift {
-                    self.duplicate_move_selected_brushes(delta);
-                } else {
-                    self.nudge_selected_brushes(delta);
-                }
+                self.nudge_selected_brushes(delta);
             }
             let repeat =
                 ui.input(|input| input.modifiers.command && input.key_pressed(egui::Key::R));
@@ -2565,14 +2571,12 @@ impl EditorWorkspace {
         self.mark_dirty();
     }
 
-    /// Duplicate every selected brush (offset by one grid step, honouring
-    /// texture lock) and select the copies. One undo step; the primary
-    /// selection follows its own copy.
+    /// Duplicate every selected brush in place and select the copies. One
+    /// undo step; the primary selection follows its own copy.
     pub(crate) fn duplicate_selected_brushes(&mut self) {
-        let step = (self.snap_units.max(1)) as i32;
         self.push_undo();
-        if self.duplicate_selected_brushes_offset([step, 0, step]) {
-            self.record_brush_repeat(BrushRepeatAction::Duplicate([step, 0, step]));
+        if self.duplicate_selected_brushes_offset([0, 0, 0]) {
+            self.record_brush_repeat(BrushRepeatAction::Duplicate([0, 0, 0]));
         }
     }
 
@@ -2646,28 +2650,12 @@ impl EditorWorkspace {
         true
     }
 
-    /// Shift+arrow: duplicate the selection and move the copies by
-    /// `delta` in one gesture. One undo step; records for Cmd+R.
-    pub(crate) fn duplicate_move_selected_brushes(&mut self, delta: [i32; 3]) -> bool {
-        if self.selected_brush_set().is_empty() {
-            return false;
-        }
-        self.push_undo();
-        if !self.duplicate_selected_brushes_offset(delta) {
-            return false;
-        }
-        self.record_brush_repeat(BrushRepeatAction::Duplicate(delta));
-        self.status = "Duplicated and moved; Cmd+R repeats".to_string();
-        true
-    }
-
     fn record_brush_repeat(&mut self, action: BrushRepeatAction) {
         self.brush_repeat_chain.push(action);
     }
 
     /// Cmd+R: replay every recorded duplicate/nudge since the chain was
-    /// last reset, as one undo step. Stairs are Shift+arrow, PageUp,
-    /// then Cmd+R held down.
+    /// last reset, as one undo step.
     pub(crate) fn repeat_brush_actions(&mut self) -> bool {
         let chain = self.brush_repeat_chain.clone();
         if chain.is_empty() || self.selected_brush_set().is_empty() {
@@ -5139,7 +5127,7 @@ impl EditorWorkspace {
         })
     }
 
-    fn brush_face_handle_visible(&self, center: [f64; 3], normal: [f64; 3]) -> bool {
+    pub(crate) fn brush_face_handle_visible(&self, center: [f64; 3], normal: [f64; 3]) -> bool {
         let camera = self.viewport_3d_camera().basis().position;
         let to_camera = [
             f64::from(camera[0]) - center[0],

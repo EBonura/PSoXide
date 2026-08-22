@@ -929,6 +929,12 @@ impl EditorWorkspace {
     ) {
         let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
         let brushes = !self.project.active_scene().brushes.is_empty();
+        let element_mode = matches!(
+            self.brush_edit_mode,
+            BrushEditMode::Face | BrushEditMode::Edge | BrushEditMode::Vertex
+        )
+        .then_some(self.brush_edit_mode);
+        let element_brush = element_mode.and(self.selected_brush);
         let base_sectors = if additive {
             self.selection.selected_sectors.clone()
         } else {
@@ -942,8 +948,26 @@ impl EditorWorkspace {
         let base_primary_brush = (brushes && additive)
             .then_some(self.selected_brush)
             .flatten();
+        let base_brush_elements = if element_brush.is_some() && additive {
+            self.selected_brush_elements.clone()
+        } else {
+            Vec::new()
+        };
+        let base_brush_faces = if element_brush.is_some() && additive {
+            self.selected_brush_faces.clone()
+        } else {
+            Vec::new()
+        };
         if brushes {
-            if !additive {
+            if element_brush.is_some() {
+                self.reset_brush_drill();
+                self.clear_uv_edit_transaction();
+                if !additive {
+                    self.selected_brush_face = None;
+                    self.selected_brush_faces.clear();
+                    self.selected_brush_elements.clear();
+                }
+            } else if !additive {
                 self.clear_brush_selection();
             }
             self.clear_sector_selection();
@@ -963,6 +987,10 @@ impl EditorWorkspace {
             brushes,
             base_brushes,
             base_primary_brush,
+            element_brush,
+            element_mode,
+            base_brush_elements,
+            base_brush_faces,
         });
     }
 
@@ -982,7 +1010,21 @@ impl EditorWorkspace {
         let brushes = drag.brushes;
         let base_brushes = drag.base_brushes.clone();
         let base_primary_brush = drag.base_primary_brush;
-        if brushes {
+        let element_brush = drag.element_brush;
+        let element_mode = drag.element_mode;
+        let base_brush_elements = drag.base_brush_elements.clone();
+        let base_brush_faces = drag.base_brush_faces.clone();
+        if let (Some(brush), Some(mode)) = (element_brush, element_mode) {
+            self.select_brush_elements_in_screen_rect(
+                transform,
+                rect,
+                brush,
+                mode,
+                additive,
+                &base_brush_elements,
+                &base_brush_faces,
+            );
+        } else if brushes {
             self.select_brushes_in_screen_rect(
                 transform,
                 rect,
@@ -994,6 +1036,65 @@ impl EditorWorkspace {
             self.select_sectors_in_screen_rect(transform, rect, room, additive, &base_sectors);
         }
         true
+    }
+
+    fn select_brush_elements_in_screen_rect(
+        &mut self,
+        transform: ViewportTransform,
+        rect: Rect,
+        brush_index: usize,
+        mode: BrushEditMode,
+        additive: bool,
+        base_elements: &[BrushElement],
+        base_faces: &[(usize, usize)],
+    ) {
+        let Some(brush) = self.project.active_scene().brushes.get(brush_index) else {
+            return;
+        };
+        let solved = brush.solve();
+        if !solved.is_valid() {
+            return;
+        }
+        let view = self.orthographic_view;
+        let contains = |point: [f64; 3]| {
+            let projected = view.project_f64(point);
+            rect.contains(transform.world_to_screen([projected[0] as f32, projected[1] as f32]))
+        };
+        let hits = match mode {
+            BrushEditMode::Face => brush_elements::face_handles(brush, &solved)
+                .into_iter()
+                .filter_map(|(face, center, _)| {
+                    contains(center).then_some(BrushElement::Face(face))
+                })
+                .collect(),
+            BrushEditMode::Edge => brush_elements::unique_edges(&solved)
+                .into_iter()
+                .filter_map(|(a, b)| {
+                    let midpoint = std::array::from_fn(|axis| (a[axis] + b[axis]) * 0.5);
+                    contains(midpoint).then(|| {
+                        let (a, b) = brush_elements::edge_element_key(a, b);
+                        BrushElement::Edge(a, b)
+                    })
+                })
+                .collect(),
+            BrushEditMode::Vertex => brush_elements::unique_vertices(&solved)
+                .into_iter()
+                .filter_map(|vertex| {
+                    contains(vertex).then(|| {
+                        BrushElement::Vertex(brush_elements::quantize_element_point(vertex))
+                    })
+                })
+                .collect(),
+            BrushEditMode::Move | BrushEditMode::Clip => Vec::new(),
+        };
+        self.apply_brush_element_marquee(
+            brush_index,
+            mode,
+            hits,
+            additive,
+            base_elements,
+            base_faces,
+        );
     }
 
     fn select_brushes_in_screen_rect(
@@ -1081,6 +1182,12 @@ impl EditorWorkspace {
     ) {
         let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
         let brushes = !self.project.active_scene().brushes.is_empty();
+        let element_mode = matches!(
+            self.brush_edit_mode,
+            BrushEditMode::Face | BrushEditMode::Edge | BrushEditMode::Vertex
+        )
+        .then_some(self.brush_edit_mode);
+        let element_brush = element_mode.and(self.selected_brush);
         self.interaction = Interaction::BoxSelect3d(Viewport3dBoxSelect {
             start,
             current: start,
@@ -1100,9 +1207,29 @@ impl EditorWorkspace {
             base_primary_brush: (additive && brushes)
                 .then_some(self.selected_brush)
                 .flatten(),
+            element_brush,
+            element_mode,
+            base_brush_elements: if additive && element_brush.is_some() {
+                self.selected_brush_elements.clone()
+            } else {
+                Vec::new()
+            },
+            base_brush_faces: if additive && element_brush.is_some() {
+                self.selected_brush_faces.clone()
+            } else {
+                Vec::new()
+            },
         });
         if brushes {
-            if !additive {
+            if element_brush.is_some() {
+                self.reset_brush_drill();
+                self.clear_uv_edit_transaction();
+                if !additive {
+                    self.selected_brush_face = None;
+                    self.selected_brush_faces.clear();
+                    self.selected_brush_elements.clear();
+                }
+            } else if !additive {
                 self.clear_brush_selection();
             }
             self.clear_primitive_selection_state();
@@ -1128,7 +1255,21 @@ impl EditorWorkspace {
         let brushes = drag.brushes;
         let base_brushes = drag.base_brushes.clone();
         let base_primary_brush = drag.base_primary_brush;
-        if brushes {
+        let element_brush = drag.element_brush;
+        let element_mode = drag.element_mode;
+        let base_brush_elements = drag.base_brush_elements.clone();
+        let base_brush_faces = drag.base_brush_faces.clone();
+        if let (Some(brush), Some(mode)) = (element_brush, element_mode) {
+            self.select_brush_elements_in_viewport_3d_rect(
+                viewport,
+                rect,
+                brush,
+                mode,
+                additive,
+                &base_brush_elements,
+                &base_brush_faces,
+            );
+        } else if brushes {
             self.select_brushes_in_viewport_3d_rect(
                 viewport,
                 rect,
@@ -1146,6 +1287,134 @@ impl EditorWorkspace {
             );
         }
         true
+    }
+
+    fn select_brush_elements_in_viewport_3d_rect(
+        &mut self,
+        viewport: Rect,
+        rect: Rect,
+        brush_index: usize,
+        mode: BrushEditMode,
+        additive: bool,
+        base_elements: &[BrushElement],
+        base_faces: &[(usize, usize)],
+    ) {
+        let Some(brush) = self.project.active_scene().brushes.get(brush_index) else {
+            return;
+        };
+        let solved = brush.solve();
+        if !solved.is_valid() {
+            return;
+        }
+        let contains = |point: [f64; 3]| {
+            self.project_brush_point_3d(viewport, point)
+                .is_some_and(|point| rect.contains(point))
+        };
+        let hits = match mode {
+            BrushEditMode::Face => brush_elements::face_handles(brush, &solved)
+                .into_iter()
+                .filter_map(|(face, center, normal)| {
+                    (self.brush_face_handle_visible(center, normal) && contains(center))
+                        .then_some(BrushElement::Face(face))
+                })
+                .collect(),
+            BrushEditMode::Edge => brush_elements::unique_edges(&solved)
+                .into_iter()
+                .filter_map(|(a, b)| {
+                    let midpoint = std::array::from_fn(|axis| (a[axis] + b[axis]) * 0.5);
+                    contains(midpoint).then(|| {
+                        let (a, b) = brush_elements::edge_element_key(a, b);
+                        BrushElement::Edge(a, b)
+                    })
+                })
+                .collect(),
+            BrushEditMode::Vertex => brush_elements::unique_vertices(&solved)
+                .into_iter()
+                .filter_map(|vertex| {
+                    contains(vertex).then(|| {
+                        BrushElement::Vertex(brush_elements::quantize_element_point(vertex))
+                    })
+                })
+                .collect(),
+            BrushEditMode::Move | BrushEditMode::Clip => Vec::new(),
+        };
+        self.apply_brush_element_marquee(
+            brush_index,
+            mode,
+            hits,
+            additive,
+            base_elements,
+            base_faces,
+        );
+    }
+
+    fn apply_brush_element_marquee(
+        &mut self,
+        brush_index: usize,
+        mode: BrushEditMode,
+        hits: Vec<BrushElement>,
+        additive: bool,
+        base_elements: &[BrushElement],
+        base_faces: &[(usize, usize)],
+    ) {
+        self.selected_brush = Some(brush_index);
+        if mode == BrushEditMode::Face {
+            let mut faces = if additive {
+                base_faces.to_vec()
+            } else {
+                Vec::new()
+            };
+            for face in hits.into_iter().filter_map(|element| match element {
+                BrushElement::Face(face) => Some(face),
+                BrushElement::Edge(..) | BrushElement::Vertex(_) => None,
+            }) {
+                if !faces.contains(&(brush_index, face)) {
+                    faces.push((brush_index, face));
+                }
+            }
+            self.selected_brush_faces = faces;
+            self.selected_brush_elements = self
+                .selected_brush_faces
+                .iter()
+                .filter_map(|(brush, face)| {
+                    (*brush == brush_index).then_some(BrushElement::Face(*face))
+                })
+                .collect();
+            self.selected_brush_face =
+                self.selected_brush_elements
+                    .iter()
+                    .rev()
+                    .find_map(|element| match element {
+                        BrushElement::Face(face) => Some(*face),
+                        BrushElement::Edge(..) | BrushElement::Vertex(_) => None,
+                    });
+            self.selected_brushes = self
+                .selected_brush_faces
+                .iter()
+                .map(|(brush, _)| *brush)
+                .collect();
+            self.selected_brushes.sort_unstable();
+            self.selected_brushes.dedup();
+            if self.selected_brushes.is_empty() {
+                self.selected_brushes.push(brush_index);
+            }
+        } else {
+            let mut elements = if additive {
+                base_elements.to_vec()
+            } else {
+                Vec::new()
+            };
+            for element in hits {
+                if !elements.contains(&element) {
+                    elements.push(element);
+                }
+            }
+            self.selected_brush_elements = elements;
+            self.selected_brush_faces.clear();
+            self.selected_brush_face = None;
+            self.selected_brushes = vec![brush_index];
+        }
+        self.status = self.brush_element_status();
     }
 
     fn select_brushes_in_viewport_3d_rect(
