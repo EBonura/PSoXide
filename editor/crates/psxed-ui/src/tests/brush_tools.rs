@@ -473,8 +473,8 @@ pub(super) fn text_shape_centers(shapes: &[egui::epaint::ClippedShape], label: &
     found
 }
 
-/// Drive an always-visible brush mode button by finding its rendered label,
-/// then issuing real egui pointer events at that label's screen position.
+/// Drive an always-visible BSP mode button by finding its rendered icon, then
+/// issuing real egui pointer events at that icon's screen position.
 fn click_visible_brush_mode(workspace: &mut EditorWorkspace, mode: BrushEditMode) {
     let ctx = egui::Context::default();
     let mut fonts = egui::FontDefinitions::default();
@@ -507,13 +507,32 @@ fn click_visible_brush_mode(workspace: &mut EditorWorkspace, mode: BrushEditMode
         text_shape_center(&output.shapes, "Brush Transform").is_some(),
         "selected brush did not expose the Inspector transform section"
     );
-    for label in ["Brush", "Face", "Edge", "Vertex", "Clip"] {
+    let select_y = text_shape_centers(&output.shapes, &icons::POINTER.to_string())
+        .into_iter()
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .expect("flat BSP toolbar omitted Select")
+        .y;
+    for toolbar_mode in BspToolbarMode::ALL {
         assert!(
-            text_shape_center(&output.shapes, label).is_some(),
-            "visible brush toolbar omitted {label:?}"
+            text_shape_centers(&output.shapes, &toolbar_mode.icon().to_string())
+                .into_iter()
+                .any(|point| (point.y - select_y).abs() < 2.0),
+            "visible BSP toolbar omitted {:?}",
+            toolbar_mode
         );
     }
-    let point = text_shape_center(&output.shapes, mode.label()).unwrap();
+    let toolbar_mode = match mode {
+        BrushEditMode::Move => BspToolbarMode::Select,
+        BrushEditMode::Face => BspToolbarMode::Face,
+        BrushEditMode::Edge => BspToolbarMode::Edge,
+        BrushEditMode::Vertex => BspToolbarMode::Vertex,
+        BrushEditMode::Clip => BspToolbarMode::Clip,
+    };
+    let point = text_shape_centers(&output.shapes, &toolbar_mode.icon().to_string())
+        .into_iter()
+        .filter(|point| (point.y - select_y).abs() < 2.0)
+        .min_by(|a, b| a.x.total_cmp(&b.x))
+        .expect("requested BSP toolbar mode icon");
     let _ = ctx.run(
         input(
             1.0 / 60.0,

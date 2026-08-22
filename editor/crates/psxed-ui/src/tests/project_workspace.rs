@@ -1404,41 +1404,33 @@ fn cycle_value_wraps_forward_and_backward() {
 }
 
 #[test]
-fn tool_group_cycle_includes_explicit_add_slots() {
-    let (mut workspace, room) = workspace_with_populated_grid("tool-group-cycle", 1, 1);
-    workspace.replace_node_selection(room);
-    workspace.active_tool = ViewTool::Erase;
-    workspace.place_kind = PlaceKind::Character;
+fn tool_group_cycle_follows_the_flat_bsp_mode_strip() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("tool-group-cycle"),
+        ProjectDocument::new("tool-group-cycle"),
+    );
 
-    workspace.cycle_tool_group(false);
-    assert_eq!(workspace.active_tool, ViewTool::Place);
-    assert_eq!(workspace.place_kind, PlaceKind::PlayerSpawn);
-
-    workspace.cycle_tool_group(false);
-    assert_eq!(workspace.active_tool, ViewTool::Place);
-    assert_eq!(workspace.place_kind, PlaceKind::SpawnMarker);
-
+    assert_eq!(
+        workspace.active_bsp_toolbar_mode(),
+        Some(BspToolbarMode::Select)
+    );
     for expected in [
-        PlaceKind::ModelInstance,
-        PlaceKind::Character,
-        PlaceKind::ImageProp,
-        PlaceKind::BoxProp,
-        PlaceKind::CylinderProp,
-        PlaceKind::PointLightMarker,
-        PlaceKind::ParticleEmitter,
-        PlaceKind::Portal,
+        BspToolbarMode::Draw,
+        BspToolbarMode::Paint,
+        BspToolbarMode::Face,
+        BspToolbarMode::Edge,
+        BspToolbarMode::Vertex,
+        BspToolbarMode::Clip,
+        BspToolbarMode::Select,
     ] {
         workspace.cycle_tool_group(false);
-        assert_eq!(workspace.active_tool, ViewTool::Place);
-        assert_eq!(workspace.place_kind, expected);
+        assert_eq!(workspace.active_bsp_toolbar_mode(), Some(expected));
     }
-
-    workspace.cycle_tool_group(false);
-    assert_eq!(workspace.active_tool, ViewTool::Select);
-
     workspace.cycle_tool_group(true);
-    assert_eq!(workspace.active_tool, ViewTool::Place);
-    assert_eq!(workspace.place_kind, PlaceKind::Portal);
+    assert_eq!(
+        workspace.active_bsp_toolbar_mode(),
+        Some(BspToolbarMode::Clip)
+    );
 }
 
 #[test]
@@ -1521,8 +1513,8 @@ fn visibility_cycle_only_changes_editor_view_items() {
 
     workspace.cycle_visibility_group(false);
 
-    assert!(!workspace.show_grid);
-    assert!(!workspace.show_brush_surface_grid);
+    assert!(workspace.show_grid);
+    assert!(workspace.show_brush_surface_grid);
     assert!(!workspace.show_portals);
     assert!(!workspace.show_lights);
     assert!(!workspace.preview_fog);
@@ -1530,6 +1522,27 @@ fn visibility_cycle_only_changes_editor_view_items() {
     assert!(!workspace.preview_bounds);
     assert!(!workspace.show_play_debug_overlays);
     assert!(workspace.show_play_debug_map);
+}
+
+#[test]
+fn grid_master_controls_both_overlays_while_their_settings_remain_independent() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("grid-master"),
+        ProjectDocument::new("grid master"),
+    );
+    workspace.show_grid = true;
+    workspace.show_brush_surface_grid = false;
+
+    workspace.toggle_grid_overlays();
+    assert!(!workspace.show_grid);
+    assert!(!workspace.show_brush_surface_grid);
+
+    workspace.toggle_grid_overlays();
+    assert!(workspace.show_grid);
+    assert!(workspace.show_brush_surface_grid);
+
+    workspace.show_grid = false;
+    assert!(workspace.show_brush_surface_grid);
 }
 
 #[test]
@@ -2062,7 +2075,7 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         workspace.bsp_authoring_root(),
         Some(workspace.project().active_scene().root)
     );
-    workspace.cycle_tool_group(false);
+    workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PlayerSpawn)));
     assert_eq!(workspace.active_tool, ViewTool::Place);
     assert_eq!(workspace.place_kind, PlaceKind::PlayerSpawn);
     workspace.set_active_tool_cycle_value((ViewTool::Brush, None));
@@ -2436,7 +2449,7 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
         workspace.delete_selected_brushes();
     }
     assert!(workspace.project().active_scene().brushes.is_empty());
-    assert_eq!(workspace.bsp_authoring_root(), None);
+    assert_eq!(workspace.bsp_authoring_root(), Some(root));
 
     let material = workspace.first_material().expect("template material");
     workspace.set_orthographic_view(OrthographicView::Top);

@@ -1848,6 +1848,7 @@ impl EditorWorkspace {
 
     /// Replace the selected brush with six hollow wall slabs (one undo
     /// step); the first slab stays selected. No-op when not hollowable.
+    #[allow(dead_code)] // Kept as the explicit-thickness primitive behind CSG Hollow.
     pub(crate) fn hollow_selected_brush(&mut self, thickness: i32) {
         let Some(index) = self.selected_brush else {
             return;
@@ -2083,10 +2084,9 @@ impl EditorWorkspace {
         ));
         let selection_count = self.selected_brush_set().len();
         ui.label(egui::RichText::new("Brush Transform").strong());
-        ui.horizontal_wrapped(|ui| self.draw_brush_edit_mode_controls(ui));
         ui.label(
             egui::RichText::new(format!(
-                "{} mode: {}. Dragging snaps to {} units. Ctrl/Cmd+Z undoes one gesture.",
+                "{} mode: {}. Dragging snaps to {} units.",
                 self.brush_edit_mode.label(),
                 self.brush_edit_mode.gesture_hint(),
                 self.snap_units.max(1)
@@ -2145,10 +2145,6 @@ impl EditorWorkspace {
         ui.horizontal_wrapped(|ui| {
             if ui.button("Duplicate").clicked() {
                 self.duplicate_selected_brushes();
-            }
-            if ui.button("Hollow").clicked() {
-                let thickness = (self.snap_units.max(1)) as i32;
-                self.hollow_selected_brush(thickness);
             }
             if ui.button("Snap to grid").clicked() {
                 self.snap_selected_brush();

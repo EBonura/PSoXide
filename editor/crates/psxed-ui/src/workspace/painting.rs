@@ -2,12 +2,14 @@ use super::*;
 use psxed_project::GridFloorLink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // LegacyGrid stacked-floor editing is retained for old project tests.
 enum LayerDirection {
     Above,
     Below,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // LegacyGrid stacked-floor editing is retained for old project tests.
 struct LayerFootprintCell {
     world: (i32, i32),
     floor_material: Option<ResourceId>,
@@ -270,6 +272,7 @@ fn swap_paint_edges(edges: u8, a: u8, b: u8) -> u8 {
     without_pair | if edges & a != 0 { b } else { 0 } | if edges & b != 0 { a } else { 0 }
 }
 
+#[allow(dead_code)] // LegacyGrid stacked-floor editing is retained for old project tests.
 fn layer_neighbor((x, z): (i32, i32), direction: GridDirection) -> Option<(i32, i32)> {
     match direction {
         GridDirection::North => Some((x, z.saturating_add(1))),
@@ -321,7 +324,7 @@ impl EditorWorkspace {
     /// consumes those transforms directly in world units.
     pub(crate) fn bsp_authoring_root(&self) -> Option<NodeId> {
         let scene = self.project.active_scene();
-        (!scene.brushes.is_empty()).then_some(scene.root)
+        self.project.world_format().is_bsp().then_some(scene.root)
     }
 
     /// `true` when Material Paint should address BSP brush faces instead of
@@ -1424,6 +1427,7 @@ impl EditorWorkspace {
 
     /// Step up one floor, adding a new empty floor above the top when
     /// already on the highest floor.
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn floor_up(&mut self) {
         let Some(room_id) = self.floors_target_room() else {
             return;
@@ -1455,6 +1459,7 @@ impl EditorWorkspace {
     }
 
     /// Step down one floor (no-op on the base floor).
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn floor_down(&mut self) {
         if self.active_floor > 0 {
             self.active_floor -= 1;
@@ -1465,6 +1470,7 @@ impl EditorWorkspace {
     /// Whether the active layer has no tile geometry and another layer can
     /// replace it. Layer-owned nodes are preserved and remapped by
     /// [`Self::delete_active_empty_layer`].
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn can_delete_active_empty_layer(&self) -> bool {
         let Some(room) = self.floors_target_room() else {
             return false;
@@ -1576,6 +1582,7 @@ impl EditorWorkspace {
     /// promotes layer two and offsets the Room node so the promoted geometry
     /// does not move in world space. Nodes and authored floor-link targets are
     /// compacted to the surviving layer indices instead of being discarded.
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn delete_active_empty_layer(&mut self) {
         let Some(room) = self.floors_target_room() else {
             self.status = "Layer deletion needs an active Room".to_string();
@@ -1614,6 +1621,7 @@ impl EditorWorkspace {
         );
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     fn selected_layer_footprint(&self, room: NodeId) -> Vec<LayerFootprintCell> {
         let Some(base) = self.room_base_grid(room) else {
             return Vec::new();
@@ -1673,19 +1681,23 @@ impl EditorWorkspace {
             .collect()
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn can_author_selected_layer_footprint(&self) -> bool {
         self.floors_target_room()
             .is_some_and(|room| !self.selected_layer_footprint(room).is_empty())
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn extrude_selected_layer_above(&mut self, open_boundary: bool) {
         self.extrude_selected_layer(LayerDirection::Above, open_boundary);
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn extrude_selected_layer_below(&mut self, open_boundary: bool) {
         self.extrude_selected_layer(LayerDirection::Below, open_boundary);
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     fn extrude_selected_layer(&mut self, direction: LayerDirection, open_boundary: bool) {
         let Some(room) = self.floors_target_room() else {
             self.status = "Layer extrusion needs an active Room".to_string();
@@ -1868,14 +1880,17 @@ impl EditorWorkspace {
         }
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn set_selected_slab_above(&mut self, open: bool) {
         self.set_selected_slab(LayerDirection::Above, open);
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     pub(crate) fn set_selected_slab_below(&mut self, open: bool) {
         self.set_selected_slab(LayerDirection::Below, open);
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     fn set_selected_slab(&mut self, direction: LayerDirection, open: bool) {
         let Some(room) = self.floors_target_room() else {
             return;
@@ -1935,6 +1950,7 @@ impl EditorWorkspace {
         );
     }
 
+    #[allow(dead_code)] // LegacyGrid stacked-floor command retained for compatibility tests.
     fn set_layer_boundary_open_no_undo(
         &mut self,
         room: NodeId,
