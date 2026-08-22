@@ -12,6 +12,7 @@ use psx_bsp::{
     encode_node_bound_max, encode_node_bound_min, FACE_BACKSIDE, FACE_BAKED_LIGHT,
     FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED,
 };
+use psx_render_contract::CookedDrawSurface;
 
 const CONTENTS_SOLID: i16 = psx_bsp::collision::CONTENTS_SOLID;
 const FULLBRIGHT_RGB: u32 = 0x00ff_ffff;
@@ -176,7 +177,6 @@ pub fn pack_bsp_geometry_with_visibility(
                 vertex_light(&lighting, surface_index, vertex_index),
             )?;
         }
-        push_u16(&mut faces, plane_index as u16);
         let flags = FACE_BAKED_LIGHT
             | if page_local_uv { FACE_PAGE_LOCAL_UV } else { 0 }
             | if plane_flipped { FACE_BACKSIDE } else { 0 }
@@ -185,11 +185,17 @@ pub fn pack_bsp_geometry_with_visibility(
             } else {
                 FACE_TWO_SIDED
             };
-        push_u16(&mut faces, first_vertex as u16);
-        push_u16(&mut faces, texture_index as u16);
-        faces.push(flags as u8);
-        faces.push(surface.vertices.len() as u8);
-        faces.extend_from_slice(&[0, 64]);
+        faces.extend_from_slice(
+            &CookedDrawSurface {
+                plane: plane_index as u16,
+                first_corner: first_vertex as u16,
+                material: texture_index as u16,
+                flags: flags as u8,
+                corner_count: surface.vertices.len() as u8,
+                light_styles: [0, 64],
+            }
+            .encode(),
+        );
     }
 
     let (leaf_mapping, visible_leaves) = runtime_leaf_mapping(bsp)?;

@@ -675,7 +675,7 @@ pub fn compile_brush_world(
                 .get(hull_index)
                 .ok_or(BrushWorldCookError::InvalidWorldTree)?;
             if CollisionHull::new(collision_planes, collision_nodes, head_node)
-                .point_contents(origin)
+                .and_then(|hull| hull.point_contents(origin))
                 .is_none_or(|contents| contents == CONTENTS_SOLID)
             {
                 return Err(BrushWorldCookError::PlayerSpawnInSolid(node.id));
@@ -2015,9 +2015,13 @@ mod tests {
                     "sealed room floor"
                 );
             }
-            let sentinel = psx_bsp::collision::CollisionHull::new(
+            let clipnodes = map
+                .clip_nodes()
+                .as_native_clip_nodes()
+                .expect("validated native clipnodes");
+            let sentinel = psx_bsp::collision::CollisionHull::from_native_clip_nodes(
                 map.planes(),
-                map.clip_nodes(),
+                clipnodes,
                 model.head_nodes[1],
             );
             let (mut checked, mut solid) = (0usize, 0usize);
