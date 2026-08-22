@@ -407,8 +407,7 @@ impl Model {
         };
         let requested_body_masks = hmd_flags & HMD_FLAG_BODY_MASKS != 0;
         let requested_packed_normals = hmd_flags & HMD_FLAG_PACKED_NORMALS != 0;
-        let metadata_ok = !(requested_body_masks && requested_packed_normals)
-            && !(full_normals && requested_packed_normals)
+        let metadata_ok = (!requested_packed_normals || (!requested_body_masks && !full_normals))
             && hitboxes_off.saturating_add(hitboxes_len) == tri_off;
 
         // Validate the parsed header against the actual buffer before trusting
@@ -422,8 +421,7 @@ impl Model {
             && n_bones > 0
             && n_ranges > 0
             && n_verts <= max_verts
-            && (!requested_vertex_soa
-                || (data.as_ptr() as usize + vertices_off) & 3 == 0)
+            && (!requested_vertex_soa || (data.as_ptr() as usize + vertices_off) & 3 == 0)
             && poses_off <= tri_off
             && tri_end <= data.len();
         let mut range = 0usize;
@@ -743,12 +741,9 @@ impl Model {
                     // align=1 in LLVM even after the cast and become LWL/LWR.
                     // HMD_FLAG_VERTEX_SOA is validated against the actual base
                     // address at load, making these native aligned loads safe.
-                    xy: core::ptr::read_volatile(
-                        self.data.as_ptr().add(xy).cast::<u32>(),
-                    ),
-                    z: core::ptr::read_volatile(
-                        self.data.as_ptr().add(z).cast::<i16>(),
-                    ) as i32 as u32,
+                    xy: core::ptr::read_volatile(self.data.as_ptr().add(xy).cast::<u32>()),
+                    z: core::ptr::read_volatile(self.data.as_ptr().add(z).cast::<i16>()) as i32
+                        as u32,
                 };
             }
             #[cfg(not(target_arch = "mips"))]
@@ -798,6 +793,12 @@ impl Model {
     /// triangle tail is deliberately discarded by the caller after face bake.
     ///
     /// Returns the compact frame-section length, or `None` for malformed input.
+    ///
+    /// # Safety
+    ///
+    /// `data` must be writable for `data_len` bytes and contain this model's
+    /// source bytes. `remap` must be writable for `remap_len` `u16` entries;
+    /// neither allocation may overlap the other.
     pub unsafe fn compact_visible_body_frames_raw(
         &self,
         data: *mut u8,
@@ -1053,6 +1054,12 @@ impl Model {
     /// and ordered texture runs. Each run word is
     /// `end_face:u16 | tex:u8<<16 | body_mask:u8<<24`; `end_face` is relative
     /// to this model. The caller guarantees enough face and run storage.
+    ///
+    /// # Safety
+    ///
+    /// `indices` and `payloads` must each be writable for `out_len` records.
+    /// `runs` must be writable for the maximum texture/body run count reported
+    /// by [`Self::render_face_run_count`], and the outputs must not overlap.
     pub unsafe fn fill_render_faces_split_raw(
         &self,
         indices: *mut u32,
@@ -1184,7 +1191,7 @@ impl<'a> ModelFrame<'a> {
             for column in 0..3 {
                 let identity = if row == column { 4096 } else { 0 };
                 relative.rotation.m[row][column] =
-                    (identity + ((open.rotation.m[row][column] as i32 - identity) * amount >> 6))
+                    (identity + (((open.rotation.m[row][column] as i32 - identity) * amount) >> 6))
                         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             }
         }

@@ -9,8 +9,10 @@ use crate::brush_vis::{quake_portal_fast_rows, quake_portal_flow_rows};
 use crate::ResourceId;
 
 use psx_bsp::{
-    encode_node_bound_max, encode_node_bound_min, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_TWO_SIDED,
+    encode_node_bound_max, encode_node_bound_min, FACE_BACKSIDE, FACE_BAKED_LIGHT,
+    FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED,
 };
+use psx_render_contract::CookedDrawSurface;
 
 const CONTENTS_SOLID: i16 = psx_bsp::collision::CONTENTS_SOLID;
 const FULLBRIGHT_RGB: u32 = 0x00ff_ffff;
@@ -150,12 +152,21 @@ pub fn pack_bsp_geometry_with_visibility(
                 ])
             })
             .collect();
-        if let Some(dims) = texture_dims.get(&surface.material) {
+        let page_local_uv = if let Some(dims) = texture_dims.get(&surface.material) {
             crate::brush::rebase_texel_uvs(
                 &mut surface_uvs,
                 [f64::from(dims[0].max(1)), f64::from(dims[1].max(1))],
             );
-        }
+            surface_uvs.iter().all(|uv| {
+                uv.iter().zip(dims).all(|(&value, &size)| {
+                    value.is_finite()
+                        && value.round() >= 0.0
+                        && value.round() < f64::from(size.max(1))
+                })
+            })
+        } else {
+            false
+        };
         for (vertex_index, vertex) in surface.vertices.iter().copied().enumerate() {
             pack_vertex(
                 &mut vertices,
@@ -166,19 +177,25 @@ pub fn pack_bsp_geometry_with_visibility(
                 vertex_light(&lighting, surface_index, vertex_index),
             )?;
         }
-        push_u16(&mut faces, plane_index as u16);
         let flags = FACE_BAKED_LIGHT
+            | if page_local_uv { FACE_PAGE_LOCAL_UV } else { 0 }
             | if plane_flipped { FACE_BACKSIDE } else { 0 }
             | if surface.contents.is_solid() {
                 0
             } else {
                 FACE_TWO_SIDED
             };
-        push_u16(&mut faces, first_vertex as u16);
-        push_u16(&mut faces, texture_index as u16);
-        faces.push(flags as u8);
-        faces.push(surface.vertices.len() as u8);
-        faces.extend_from_slice(&[0, 64]);
+        faces.extend_from_slice(
+            &CookedDrawSurface {
+                plane: plane_index as u16,
+                first_corner: first_vertex as u16,
+                material: texture_index as u16,
+                flags: flags as u8,
+                corner_count: surface.vertices.len() as u8,
+                light_styles: [0, 64],
+            }
+            .encode(),
+        );
     }
 
     let (leaf_mapping, visible_leaves) = runtime_leaf_mapping(bsp)?;
@@ -792,6 +809,25 @@ mod tests {
     }
 
     #[test]
+    fn faces_inside_one_texture_copy_are_marked_page_local() {
+        // Offset from a repeat seam so every signed paraxial axis remains
+        // strictly inside one 64x64 copy after whole-repeat rebasing.
+        let brushes = [Brush::cuboid([16, 16, 16], [144, 80, 272])];
+        let surfaces = compile_csg_surfaces(&brushes);
+        let mut bsp = build_surface_bsp(&surfaces);
+        let portals = portalize_surface_bsp(&bsp);
+        classify_bsp_leaves(&mut bsp, &portals, &brushes);
+        let mut dims = std::collections::HashMap::new();
+        dims.insert(None, [64u16, 64u16]);
+        let packed =
+            pack_bsp_geometry(&bsp, &portals, BspLighting::Fullbright, &dims).expect("pack");
+        let faces = RecordSlice::<Face>::new(&packed.faces).expect("faces");
+        assert!(faces
+            .iter()
+            .all(|face| face.flags & FACE_PAGE_LOCAL_UV != 0));
+    }
+
+    #[test]
     fn cuboid_packs_checked_runtime_records() {
         let (bsp, packed) = packed(&[Brush::cuboid([0, 0, 0], [128, 64, 256])]);
         let vertices = RecordSlice::<Vertex>::new(&packed.vertices).expect("vertices");
@@ -1173,7 +1209,7 @@ mod tests {
     fn face_uv_and_baked_light_reach_vertex_records() {
         let mut brush = Brush::cuboid([0, 0, 0], [128, 64, 256]);
         brush.faces[5].uv.offset_texels = [17, -9];
-        let surfaces = compile_csg_surfaces(&[brush.clone()]);
+        let surfaces = compile_csg_surfaces(std::slice::from_ref(&brush));
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, &[brush]);
@@ -1244,7 +1280,7 @@ mod tests {
     #[test]
     fn packed_face_flags_preserve_authored_outward_winding() {
         let brush = Brush::cuboid([0, 0, 0], [128, 64, 256]);
-        let surfaces = compile_csg_surfaces(&[brush.clone()]);
+        let surfaces = compile_csg_surfaces(std::slice::from_ref(&brush));
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, &[brush]);

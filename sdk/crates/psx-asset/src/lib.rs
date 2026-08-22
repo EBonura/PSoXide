@@ -407,8 +407,7 @@ impl<'a> Model<'a> {
         let face_bytes = checked_table_bytes(face_count, FACE_RECORD_SIZE)?;
         let faces = take_table(bytes, &mut off, face_bytes)?;
 
-        let has_face_palette_banks =
-            flags & psxed_format::model::flags::FACE_PALETTE_BANKS != 0;
+        let has_face_palette_banks = flags & psxed_format::model::flags::FACE_PALETTE_BANKS != 0;
         if version == LEGACY_VERSION && has_face_palette_banks {
             return Err(ParseError::InvalidModelLayout);
         }

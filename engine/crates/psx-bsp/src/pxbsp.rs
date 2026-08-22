@@ -16,7 +16,12 @@ pub const PXBSP_VERSION_V4: u16 = 4;
 /// PXBSP v5 stores 16-byte nodes with six eight-world-unit model-local bound
 /// codes and exact node-owned face ranges. Saturated codes decode outward to
 /// the i16 extremes, preserving conservative culling for larger maps.
-pub const PXBSP_VERSION: u16 = 5;
+pub const PXBSP_VERSION_V5: u16 = 5;
+/// PXBSP v6 additionally stores Quake-style native 12-byte plane records with
+/// an aligned distance and cached sign bits.
+pub const PXBSP_VERSION_V6: u16 = 6;
+/// Current cooker/runtime PXBSP contract.
+pub const PXBSP_VERSION: u16 = PXBSP_VERSION_V6;
 pub const PXBSP_HEADER_BYTES: u32 = 8;
 pub const PXBSP_DIRECTORY_ENTRY_BYTES: u32 = 12;
 pub const PXBSP_LUMP_COUNT: usize = 16;
@@ -29,6 +34,7 @@ pub enum PxbspVersion {
     V1,
     V4,
     V5,
+    V6,
 }
 
 impl PxbspVersion {
@@ -36,7 +42,8 @@ impl PxbspVersion {
         match self {
             Self::V1 => PXBSP_VERSION_V1,
             Self::V4 => PXBSP_VERSION_V4,
-            Self::V5 => PXBSP_VERSION,
+            Self::V5 => PXBSP_VERSION_V5,
+            Self::V6 => PXBSP_VERSION_V6,
         }
     }
 
@@ -44,7 +51,8 @@ impl PxbspVersion {
         match value {
             PXBSP_VERSION_V1 => Some(Self::V1),
             PXBSP_VERSION_V4 => Some(Self::V4),
-            PXBSP_VERSION => Some(Self::V5),
+            PXBSP_VERSION_V5 => Some(Self::V5),
+            PXBSP_VERSION_V6 => Some(Self::V6),
             _ => None,
         }
     }
@@ -142,28 +150,30 @@ impl PxbspLumpKind {
         match self {
             Self::Vertices => Some(12),
             Self::Planes => Some(match version {
-                PxbspVersion::V1 => 14,
-                PxbspVersion::V4 | PxbspVersion::V5 => crate::Plane::SIZE as u32,
+                PxbspVersion::V1 | PxbspVersion::V4 | PxbspVersion::V5 => 14,
+                PxbspVersion::V6 => crate::CompactPlane::SIZE as u32,
             }),
             Self::Materials => Some(PxbspMaterial::SIZE as u32),
             Self::Faces => Some(match version {
                 PxbspVersion::V1 => 14,
-                PxbspVersion::V4 | PxbspVersion::V5 => 10,
+                PxbspVersion::V4 | PxbspVersion::V5 | PxbspVersion::V6 => 10,
             }),
             Self::MarkSurfaces => Some(2),
             Self::Leaves => Some(match version {
                 PxbspVersion::V1 => 26,
-                PxbspVersion::V4 | PxbspVersion::V5 => crate::Leaf::SIZE as u32,
+                PxbspVersion::V4 | PxbspVersion::V5 | PxbspVersion::V6 => crate::Leaf::SIZE as u32,
             }),
             Self::Nodes => Some(match version {
                 PxbspVersion::V1 => 34,
                 PxbspVersion::V4 => 6,
-                PxbspVersion::V5 => crate::Node::SIZE as u32,
+                PxbspVersion::V5 | PxbspVersion::V6 => crate::Node::SIZE as u32,
             }),
             Self::ClipNodes => Some(6),
             Self::Models => Some(match version {
                 PxbspVersion::V1 => 32,
-                PxbspVersion::V4 | PxbspVersion::V5 => crate::BrushModel::SIZE as u32,
+                PxbspVersion::V4 | PxbspVersion::V5 | PxbspVersion::V6 => {
+                    crate::BrushModel::SIZE as u32
+                }
             }),
             Self::Strings => Some(1),
             Self::TextureData
@@ -823,7 +833,7 @@ mod tests {
             0,
             0,
             12,
-            14,
+            crate::CompactPlane::SIZE,
             0,
             10,
             2,
@@ -863,13 +873,16 @@ mod tests {
         let bytes = valid_file();
         let index = PxbspIndex::read(&mut SliceReader::new(&bytes)).expect("index");
         assert_eq!(index.file_len(), bytes.len() as u32);
-        assert_eq!(index.version(), PxbspVersion::V5);
+        assert_eq!(index.version(), PxbspVersion::V6);
         assert_eq!(index.lump(PxbspLumpKind::Vertices).len, 12);
         assert_eq!(
             index.lump(PxbspLumpKind::Nodes).len,
             crate::Node::SIZE as u32
         );
-        assert_eq!(PxbspLumpKind::Planes.record_size(index.version()), Some(14));
+        assert_eq!(
+            PxbspLumpKind::Planes.record_size(index.version()),
+            Some(crate::CompactPlane::SIZE as u32)
+        );
         assert_eq!(PxbspLumpKind::Faces.record_size(index.version()), Some(10));
         assert_eq!(PxbspLumpKind::Leaves.record_size(index.version()), Some(14));
         assert_eq!(PxbspLumpKind::Models.record_size(index.version()), Some(32));
@@ -878,10 +891,10 @@ mod tests {
     #[test]
     fn rejects_unknown_version_and_lump_count() {
         let mut bytes = valid_file();
-        bytes[4..6].copy_from_slice(&6u16.to_le_bytes());
+        bytes[4..6].copy_from_slice(&7u16.to_le_bytes());
         assert!(matches!(
             PxbspIndex::read(&mut SliceReader::new(&bytes)),
-            Err(PxbspError::BadVersion { found: 6 })
+            Err(PxbspError::BadVersion { found: 7 })
         ));
         bytes[4..6].copy_from_slice(&PXBSP_VERSION_V3.to_le_bytes());
         assert!(matches!(

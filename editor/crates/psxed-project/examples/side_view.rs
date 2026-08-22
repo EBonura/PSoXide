@@ -21,7 +21,7 @@ fn main() {
     let apply = |v: i32| ((v as i64 * composed as i64) >> 12) as i32;
     // The clip's own cooked floor (frame 0 lowest raw vertex), like the runtime.
     let mut clip_floor = i32::MAX;
-    let mut posed = |frame: u16, out: &mut Vec<[i32; 3]>| {
+    let posed = |frame: u16, out: &mut Vec<[i32; 3]>| {
         for part_index in 0..model.part_count() {
             let part = model.part(part_index).unwrap();
             let Some(pose) = clip.pose(frame, part.joint_index() as u16) else {

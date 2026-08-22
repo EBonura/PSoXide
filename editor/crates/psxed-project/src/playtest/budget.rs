@@ -343,7 +343,8 @@ pub fn cooked_playtest_budgets(
             pvs_row_bytes = (leaves.len as usize / leaf_size)
                 .saturating_sub(1)
                 .div_ceil(8);
-            light_bytes = light_bytes.saturating_add(vertices.len as usize / Vertex::SIZE * 3);
+            let vertex_count = vertices.len as usize / Vertex::SIZE;
+            light_bytes = light_bytes.saturating_add(vertex_count * 3);
             bsp_packets = cooked_bsp_packets(package);
         }
     }
@@ -494,22 +495,20 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
 #[cfg(test)]
 fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
     match version {
-        PxbspVersion::V4 | PxbspVersion::V5 => {
-            RecordSlice::<Face>::new(bytes)?
-                .iter()
-                .try_fold(0usize, |total, face| {
-                    let vertex_count = usize::try_from(face.vertex_count).ok()?;
-                    total.checked_add(vertex_count.saturating_sub(2))
-                })
-        }
+        PxbspVersion::V4 | PxbspVersion::V5 | PxbspVersion::V6 => RecordSlice::<Face>::new(bytes)?
+            .iter()
+            .try_fold(0usize, |total, face| {
+                let vertex_count = usize::try_from(face.vertex_count).ok()?;
+                total.checked_add(vertex_count.saturating_sub(2))
+            }),
         PxbspVersion::V1 => {
-            let faces = bytes.chunks_exact(14);
+            let mut faces = bytes.chunks_exact(14);
             if !faces.remainder().is_empty() {
                 return None;
             }
-            faces.fold(Some(0usize), |total, face| {
+            faces.try_fold(0usize, |total, face| {
                 let vertex_count = usize::try_from(i16::from_le_bytes([face[8], face[9]])).ok()?;
-                total?.checked_add(vertex_count.saturating_sub(2))
+                total.checked_add(vertex_count.saturating_sub(2))
             })
         }
     }
@@ -542,11 +541,10 @@ fn authored_texture_paths(project: &ProjectDocument) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     for resource in &project.resources {
         match &resource.data {
-            ResourceData::Texture { psxt_path } => {
-                if !psxt_path.trim().is_empty() {
-                    paths.insert(psxt_path.clone());
-                }
+            ResourceData::Texture { psxt_path } if !psxt_path.trim().is_empty() => {
+                paths.insert(psxt_path.clone());
             }
+            ResourceData::Texture { .. } => {}
             ResourceData::Material(material) => {
                 for path in material.version_texture_paths() {
                     if !path.trim().is_empty() {
@@ -1073,7 +1071,7 @@ mod tests {
             panic!("tracked fixture must cook PXBSP");
         };
         let index = PxbspIndex::read(&mut SliceReader::new(&world.bytes)).expect("PXBSP index");
-        assert_eq!(index.version(), PxbspVersion::V5);
+        assert_eq!(index.version(), PxbspVersion::V6);
         let faces = index.lump(PxbspLumpKind::Faces);
         assert_eq!(faces.len % Face::SIZE as u32, 0);
         let face_bytes = &world.bytes[faces.offset as usize..faces.end() as usize];
@@ -1084,7 +1082,7 @@ mod tests {
         // the count and inflated wildly); every packet total stays bounded
         // by three triangles per face and the worst-leaf sizing never
         // exceeds the map total.
-        let total = pxbsp_face_packets(PxbspVersion::V5, face_bytes).expect("compact faces");
+        let total = pxbsp_face_packets(index.version(), face_bytes).expect("compact faces");
         assert!(
             total >= face_count && total <= face_count * 3,
             "{total} for {face_count} faces"
@@ -1100,7 +1098,7 @@ mod tests {
             cooked_packet_count(&package, worst_leaf)
         );
         let leaves = index.lump(PxbspLumpKind::Leaves).len as usize
-            / PxbspLumpKind::Leaves.record_size(PxbspVersion::V5).unwrap() as usize;
+            / PxbspLumpKind::Leaves.record_size(index.version()).unwrap() as usize;
         assert_eq!(budget.pvs_row_bytes, leaves.saturating_sub(1).div_ceil(8));
     }
 }

@@ -187,6 +187,7 @@ pub mod bundled {
     #[derive(Copy, Clone, PartialEq, Eq)]
     pub enum BundledKind {
         /// A full disc image, booted through the no-BIOS HLE disc path. Games.
+        #[allow(dead_code)]
         DiscBin,
         /// A raw PSX-EXE, side-loaded. Examples and tests; roughly a tenth the
         /// size of the equivalent disc, which is what makes bundling a set of
@@ -812,7 +813,7 @@ impl AppState {
         let mut boot_mode = "EXE";
         // Image hash for input-tape change detection, computed where the
         // bytes are already in hand so no path re-reads the file.
-        let mut game_hash = None;
+        let game_hash;
 
         let bus = match entry.kind {
             GameKind::Exe => {

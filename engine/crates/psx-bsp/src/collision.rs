@@ -4,7 +4,7 @@
 //! authorship). This is PSoXide's canonical allocation-free implementation.
 //! PXBSP positions are Y-up Q20.12 and plane normals are Q3.12.
 
-use crate::{ClipNode, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32};
+use crate::{ClipNode, CompactPlane, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32};
 use psx_engine::div_q12_i32;
 use psx_gte::math::Mat3I16;
 use psx_math::int32::{mul_q12_i32, mul_q12_i32_wide};
@@ -234,7 +234,7 @@ impl Trace {
 /// straddle; on a 460-brush map that was ~1.4M cycles per camera solve.
 #[derive(Copy, Clone)]
 enum HullNodes<'a> {
-    Clip(ClipNodeRecords<'a>),
+    Clip(&'a [ClipNode]),
     Render {
         nodes: RecordSlice<'a, Node>,
         leaves: RecordSlice<'a, Leaf>,
@@ -256,7 +256,7 @@ impl<'a> HullNodes<'a> {
     #[inline(always)]
     fn get(&self, index: usize) -> Option<ClipNode> {
         match self {
-            Self::Clip(nodes) => nodes.get(index),
+            Self::Clip(nodes) => nodes.get(index).copied(),
             Self::Render { nodes, .. } => {
                 let bytes = nodes.record_bytes(index)?;
                 Some(ClipNode {
@@ -287,6 +287,7 @@ impl<'a> HullNodes<'a> {
 #[derive(Copy, Clone)]
 enum PlaneRecords<'a> {
     Packed(RecordSlice<'a, Plane>),
+    Compact(&'a [CompactPlane]),
     Decoded(&'a [Plane]),
 }
 
@@ -295,6 +296,7 @@ impl PlaneRecords<'_> {
     fn get(self, index: usize) -> Option<Plane> {
         match self {
             Self::Packed(records) => records.get(index),
+            Self::Compact(records) => records.get(index).copied().map(CompactPlane::decoded),
             Self::Decoded(records) => records.get(index).copied(),
         }
     }
@@ -326,34 +328,14 @@ impl PlaneRecords<'_> {
                 };
                 Some(dot.wrapping_sub(distance))
             }
+            Self::Compact(records) => records
+                .get(index)
+                .copied()
+                .map(|plane| compact_plane_distance(plane, point)),
             Self::Decoded(records) => records
                 .get(index)
                 .copied()
                 .map(|plane| plane_distance(plane, point)),
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-enum ClipNodeRecords<'a> {
-    Packed(RecordSlice<'a, ClipNode>),
-    Decoded(&'a [ClipNode]),
-}
-
-impl ClipNodeRecords<'_> {
-    #[inline(always)]
-    fn len(self) -> usize {
-        match self {
-            Self::Packed(records) => records.len(),
-            Self::Decoded(records) => records.len(),
-        }
-    }
-
-    #[inline(always)]
-    fn get(self, index: usize) -> Option<ClipNode> {
-        match self {
-            Self::Packed(records) => records.get(index),
-            Self::Decoded(records) => records.get(index).copied(),
         }
     }
 }
@@ -366,14 +348,36 @@ pub struct CollisionHull<'a> {
 }
 
 impl<'a> CollisionHull<'a> {
-    pub const fn new(
+    /// Construct a hull from packed records whose clip-node bytes already
+    /// satisfy the native little-endian layout. Cooker and host-side callers
+    /// use this compatibility entry point; the resident runtime validates the
+    /// same alignment once at map load and calls [`Self::from_native_clip_nodes`]
+    /// directly.
+    pub fn new(
         planes: RecordSlice<'a, Plane>,
         nodes: RecordSlice<'a, ClipNode>,
         head_node: i16,
+    ) -> Option<Self> {
+        let nodes = nodes.as_native_clip_nodes()?;
+        Some(Self {
+            planes: PlaneRecords::Packed(planes),
+            nodes: HullNodes::Clip(nodes),
+            head_node,
+        })
+    }
+
+    /// Construct a collision hull over validated, native-layout clip nodes.
+    ///
+    /// Resident maps validate the clip-node lump alignment once during load,
+    /// so the trace hot path can borrow Quake-style node records directly.
+    pub const fn from_native_clip_nodes(
+        planes: &'a [CompactPlane],
+        nodes: &'a [ClipNode],
+        head_node: i16,
     ) -> Self {
         Self {
-            planes: PlaneRecords::Packed(planes),
-            nodes: HullNodes::Clip(ClipNodeRecords::Packed(nodes)),
+            planes: PlaneRecords::Compact(planes),
+            nodes: HullNodes::Clip(nodes),
             head_node,
         }
     }
@@ -381,13 +385,13 @@ impl<'a> CollisionHull<'a> {
     /// A point hull served by the render BSP (Quake's hull 0): balanced
     /// tree, leaf contents from the leaf records.
     pub const fn from_render_bsp(
-        planes: RecordSlice<'a, Plane>,
+        planes: &'a [CompactPlane],
         nodes: RecordSlice<'a, Node>,
         leaves: RecordSlice<'a, Leaf>,
         head_node: i16,
     ) -> Self {
         Self {
-            planes: PlaneRecords::Packed(planes),
+            planes: PlaneRecords::Compact(planes),
             nodes: HullNodes::Render { nodes, leaves },
             head_node,
         }
@@ -399,7 +403,7 @@ impl<'a> CollisionHull<'a> {
     pub const fn new_decoded(planes: &'a [Plane], nodes: &'a [ClipNode], head_node: i16) -> Self {
         Self {
             planes: PlaneRecords::Decoded(planes),
-            nodes: HullNodes::Clip(ClipNodeRecords::Decoded(nodes)),
+            nodes: HullNodes::Clip(nodes),
             head_node,
         }
     }
@@ -665,6 +669,19 @@ fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
     dot.wrapping_sub(plane.distance)
 }
 
+#[inline(always)]
+fn compact_plane_distance(plane: CompactPlane, point: Vec3I32) -> i32 {
+    let dot = match plane.kind {
+        0 => point.x,
+        1 => point.y,
+        2 => point.z,
+        _ => mul_q12_i32_wide(point.x, plane.normal.x as i32)
+            .wrapping_add(mul_q12_i32_wide(point.y, plane.normal.y as i32))
+            .wrapping_add(mul_q12_i32_wide(point.z, plane.normal.z as i32)),
+    };
+    dot.wrapping_sub(plane.distance)
+}
+
 const fn liquid_precedence(contents: i16) -> u8 {
     match contents {
         CONTENTS_LAVA => 3,
@@ -812,6 +829,7 @@ mod tests {
             RecordSlice::new(nodes).unwrap(),
             0,
         )
+        .expect("aligned hull fixture")
     }
 
     fn trace(
@@ -830,6 +848,7 @@ mod tests {
     ///
     /// The flag slots deliberately keep `fill`, which is normally neither 0 nor
     /// 1. That is legal precisely because [`TraceFlag`] is byte-backed; with
+    ///
     /// `bool` slots this helper had to overwrite them with valid booleans, and
     /// so could never test the bytes that actually matter.
     fn sentinel_trace(fill: u8) -> Trace {

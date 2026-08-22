@@ -465,6 +465,11 @@ pub struct CharacterMotorConfig {
     pub walk_speed: i32,
     /// Sprint speed in Q8 world units per display frame.
     pub run_speed: i32,
+    /// Whether sprint input may enter the Run state.
+    ///
+    /// Characters without an authored Run action disable this while retaining
+    /// `run_speed` as harmless authoring data.
+    pub run_enabled: bool,
     /// Turn speed per display frame.
     pub yaw_step: Angle,
     /// Downward acceleration in engine units per fixed 60 Hz tick squared.
@@ -523,6 +528,7 @@ impl CharacterMotorConfig {
             height,
             walk_speed,
             run_speed,
+            run_enabled: true,
             yaw_step,
             gravity_per_tick: GRAVITY_PER_TICK,
             weight_q8: DEFAULT_WEIGHT_Q8,
@@ -1269,7 +1275,8 @@ impl CharacterMotorState {
     }
 
     fn can_sprint(&mut self, wants_sprint: bool, config: CharacterMotorConfig) -> bool {
-        if !wants_sprint {
+        if !wants_sprint || !config.run_enabled {
+            self.sprint_latched = false;
             return false;
         }
         if self.sprint_exhausted || self.stamina_q12 <= 0 {
@@ -1771,6 +1778,49 @@ pub fn commit_body_step_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
         moved: false,
         blocked: true,
     })
+}
+
+/// Collision-check one exact non-player movement direction through a trace
+/// provider. Unlike [`commit_body_step_with_trace_provider`], this does not
+/// retry X-only and Z-only slides after a blocked diagonal. Quake's monster
+/// chase already enumerates those cardinal directions explicitly, so doing the
+/// slide cascade inside every candidate only repeats hull traces.
+pub fn commit_body_direction_with_trace_provider<P: CollisionTraceProvider + ?Sized>(
+    provider: &mut P,
+    start: RoomPoint,
+    dx: i32,
+    dz: i32,
+    radius: i32,
+    height: i32,
+) -> Result<BodyStep, CollisionQueryError> {
+    let target = RoomPoint::new(
+        start.x.saturating_add(dx),
+        start.y,
+        start.z.saturating_add(dz),
+    );
+    if target.x == start.x && target.z == start.z {
+        return Ok(BodyStep {
+            position: start,
+            moved: false,
+            blocked: false,
+        });
+    }
+    let shape = CollisionTraceShape::Body {
+        radius: radius.max(0),
+        height: height.max(1),
+    };
+    match trace_body_grounded_stand_position(provider, start, target, shape)? {
+        Some(position) => Ok(BodyStep {
+            position,
+            moved: true,
+            blocked: false,
+        }),
+        None => Ok(BodyStep {
+            position: start,
+            moved: false,
+            blocked: true,
+        }),
+    }
 }
 
 fn trace_body_grounded_stand_position<P: CollisionTraceProvider + ?Sized>(
@@ -3819,12 +3869,13 @@ mod tests {
 
         let query = CollisionTraceQuery::body(RoomPoint::ZERO, RoomPoint::new(20, 0, 0), 2, 8);
         let mut world = CountingProvider { calls: 0 };
-        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &[]);
-        assert_eq!(
-            trace_collision(&mut provider, query),
-            Ok(CollisionTrace::unobstructed(query.end))
-        );
-        drop(provider);
+        {
+            let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &[]);
+            assert_eq!(
+                trace_collision(&mut provider, query),
+                Ok(CollisionTrace::unobstructed(query.end))
+            );
+        }
         assert_eq!(world.calls, 1);
     }
 
@@ -3893,6 +3944,23 @@ mod tests {
                 .expect("trace body step");
         assert_eq!(step.position, RoomPoint::new(20, 0, 0));
         assert!(step.moved);
+        assert!(step.blocked);
+    }
+
+    #[test]
+    fn trace_body_direction_rejects_blocked_diagonal_without_axis_slide() {
+        let blockers = [CharacterCollisionCylinder::new(
+            RoomPoint::new(10, 0, 10),
+            2,
+            8,
+        )];
+        let mut world = FlatTraceProvider::new(None);
+        let mut provider = CharacterBlockerTraceProvider::new(&mut world, &blockers);
+        let step =
+            commit_body_direction_with_trace_provider(&mut provider, RoomPoint::ZERO, 20, 20, 2, 8)
+                .expect("trace body direction");
+        assert_eq!(step.position, RoomPoint::ZERO);
+        assert!(!step.moved);
         assert!(step.blocked);
     }
 
@@ -4756,6 +4824,28 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(64, 0, 0));
         assert_eq!(frame.anim, CharacterMotorAnim::Run);
         assert!(frame.sprinting);
+    }
+
+    #[test]
+    fn disabled_run_capability_ignores_sprint_input() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut cfg = config_instant_turn();
+        cfg.run_enabled = false;
+        let frame = motor.update(
+            None,
+            CharacterMotorInput {
+                move_x: Q12::ONE,
+                move_z: Q12::ZERO,
+                walk: 1,
+                sprint: true,
+                ..CharacterMotorInput::default()
+            },
+            cfg,
+        );
+        assert_eq!(frame.position, RoomPoint::new(32, 0, 0));
+        assert_eq!(frame.anim, CharacterMotorAnim::Walk);
+        assert!(!frame.sprinting);
+        assert_eq!(frame.stamina_q12, DEFAULT_STAMINA_MAX_Q12);
     }
 
     #[test]

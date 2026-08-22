@@ -463,6 +463,71 @@ fn native_model_compacts_duplicate_part_vertices() {
 }
 
 #[test]
+fn native_model_keeps_uv_seams_on_face_corners_without_vertex_duplication() {
+    let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let mut vertices = Vec::new();
+    for (uvs, order) in [
+        ([[0.0, 0.0], [0.25, 0.0], [0.0, 0.25]], [0, 1, 2]),
+        ([[0.75, 0.75], [1.0, 0.75], [0.75, 1.0]], [0, 2, 1]),
+    ] {
+        for corner in 0..3 {
+            vertices.push(SourceVertex {
+                uv: uvs[corner],
+                ..test_source_vertex(positions[order[corner]])
+            });
+        }
+    }
+    let source = SkinnedSourceMesh {
+        vertices,
+        faces: vec![
+            SourceFace {
+                indices: [0, 1, 2],
+                joint: 0,
+            },
+            SourceFace {
+                indices: [3, 4, 5],
+                joint: 0,
+            },
+        ],
+    };
+    let bounds =
+        ModelBounds::from_min_max([0.0, 0.0, 0.0], [1.0, 1.0, 0.0], 30_000.0).expect("bounds");
+
+    let (bytes, cooked_vertices, _) = cook_model_blob(
+        &source,
+        &bounds,
+        &[None],
+        &[0],
+        [255; 4],
+        128,
+        128,
+        psxed_format::model::DEFAULT_LOCAL_TO_WORLD_Q12,
+        false,
+    )
+    .expect("model cook");
+    let model = psx_asset::Model::from_bytes(&bytes).expect("model parse");
+    let first = model.face(0).expect("first face");
+    let second = model.face(1).expect("second face");
+
+    assert_eq!(
+        cooked_vertices, 3,
+        "UV seams must not duplicate skin points"
+    );
+    assert_eq!(
+        first.corners[0].vertex_index,
+        second.corners[0].vertex_index
+    );
+    assert_eq!(first.corners[0].uv, (0, 0));
+    assert_eq!(second.corners[0].uv, (95, 95));
+    assert_ne!(first.corners[0].uv, second.corners[0].uv);
+    assert!(first
+        .corners
+        .iter()
+        .chain(second.corners.iter())
+        .all(|corner| corner.uv.0 < 128 && corner.uv.1 < 128));
+}
+
+#[test]
 fn native_model_prunes_small_detached_cooked_position_islands() {
     let mut source = SkinnedSourceMesh {
         vertices: vec![

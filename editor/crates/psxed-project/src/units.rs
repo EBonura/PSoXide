@@ -260,13 +260,13 @@ fn scale_node(node: &mut SceneNode) {
             }
             geometry.height = div_u16_min1(geometry.height);
         }
-        NodeKind::CharacterController { settings, .. } => {
-            // A controller with no override has nothing of its own to scale;
-            // the Character resource it defers to is scaled with the others.
-            if let Some(settings) = settings {
-                scale_controller_settings(settings);
-            }
-        }
+        NodeKind::CharacterController {
+            settings: Some(settings),
+            ..
+        } => scale_controller_settings(settings),
+        // A controller with no override has nothing of its own to scale; the
+        // Character resource it defers to is scaled with the others.
+        NodeKind::CharacterController { settings: None, .. } => {}
         NodeKind::Camera { settings } => {
             settings.distance = div_i32_min1(settings.distance);
             settings.height = div_i32(settings.height);
