@@ -313,13 +313,15 @@ impl Playtest {
             .unwrap_or(LevelCameraRecord::DEFAULT.orbit_speed_level)
     }
 
-    pub(super) fn collect_collision_blockers(
+    pub(super) fn collect_collision_blockers_into<
+        S: psx_engine::BoundedSink<CharacterCollisionCylinder>,
+    >(
         &self,
-        out: &mut [CharacterCollisionCylinder],
+        out: &mut S,
     ) -> usize {
         let mut count = 0usize;
         for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
-            if inst.room != self.room_index || count >= out.len() {
+            if inst.room != self.room_index {
                 continue;
             }
             let Some(model) = self.models.get(inst.model.to_usize()).copied().flatten() else {
@@ -348,14 +350,16 @@ impl Playtest {
                 }
                 None => RoomPoint::new(inst.x, inst.y, inst.z),
             };
-            out[count] = CharacterCollisionCylinder::new(center, radius, height);
+            if !out.try_push(CharacterCollisionCylinder::new(center, radius, height)) {
+                return count;
+            }
             count += 1;
         }
         count
-            + psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers(
+            + psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers_into(
                 CYLINDER_PROPS,
                 self.room_index,
-                &mut out[count..],
+                out,
             )
     }
 
@@ -815,22 +819,22 @@ impl Playtest {
             .or_else(|| self.soft_lock_target_position());
         let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
         let config = self.camera_config();
-        let mut prop_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
-        let prop_blocker_count = if self.bsp.is_some() {
-            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut prop_blockers)
-            else {
-                // Invalid generated prop collision freezes the existing camera
-                // instead of treating the obstructed boom as clear.
-                return world_camera_from_position_focus(
-                    PROJECTION,
-                    self.camera.position(),
-                    self.camera.focus(),
-                );
-            };
-            count
-        } else {
-            0
-        };
+        let mut prop_blockers =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        if self.bsp.is_some()
+            && self
+                .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
+                .is_none()
+        {
+            // Invalid generated prop collision freezes the existing camera
+            // instead of treating the obstructed boom as clear.
+            return world_camera_from_position_focus(
+                PROJECTION,
+                self.camera.position(),
+                self.camera.focus(),
+            );
+        }
         if let Some(bsp) = self.bsp.as_mut() {
             return bsp
                 .update_camera(
@@ -839,7 +843,7 @@ impl Playtest {
                     input,
                     config,
                     1,
-                    &prop_blockers[..prop_blocker_count],
+                    prop_blockers.as_slice(),
                 )
                 .expect("PXBSP camera trace failed")
                 .camera;

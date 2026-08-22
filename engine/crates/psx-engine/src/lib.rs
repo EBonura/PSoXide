@@ -71,6 +71,7 @@ pub mod render;
 pub mod render3d;
 pub mod scene;
 pub mod scheduler;
+pub mod scratch;
 pub mod scratchpad;
 pub mod sfx;
 pub mod telemetry;
@@ -144,6 +145,7 @@ pub use scheduler::{
     SchedulerConfig, TaskBudget, TaskCadence, TaskDescriptor, TaskId, TaskLane, TASK_FIXED_UPDATE,
     TASK_VISUAL_RENDER,
 };
+pub use scratch::{BoundedSink, FixedScratch, SliceSink};
 // Re-export the GTE math types callers need to construct model render
 // arguments (instance rotation, joint transforms) without pulling in
 // `psx-gte` directly.

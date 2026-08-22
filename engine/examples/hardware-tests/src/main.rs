@@ -120,6 +120,12 @@ unsafe extern "C" {
 //        existing record measuring the same thing. Captures remain comparable
 //        for the records they share.
 //
+// v1.20: Eight RTPT hazard characterisation records. Four isolate the input
+//        commit window after the exact six-MTC2 HL/PSoXide vertex load; four
+//        isolate result availability after RTPT with a settled input load.
+//        Every sequence is one literal assembly block and compares against a
+//        64-NOP settled reference, so compiler scheduling cannot answer the
+//        question for the console.
 // v1.10: SB2, aimed at the wider SPU problem: Celeste's looped
 //       wavetables and VoXide's sample bank are both wrong on console while
 //       CD-DA -- the one path that never stores in SPU RAM -- is fine. Pass
@@ -179,16 +185,16 @@ unsafe extern "C" {
 //       Supersedes the v0.18 suite, whose records used a different sampling
 //       method and cannot be compared against these.
 const SUITE_VERSION_MAJOR: u8 = 1;
-const SUITE_VERSION_MINOR: u8 = 19;
+const SUITE_VERSION_MINOR: u8 = 20;
 /// Display form. Keep in step with the two constants above.
-const SUITE_VERSION: &str = "HWTEST v1.19";
+const SUITE_VERSION: &str = "HWTEST v1.20";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 192;
+const TEST_COUNT: usize = 200;
 const PAD_POLL_TEST_INDEX: usize = 26;
 
 /// Number of timing variants the controller probe sweeps.
@@ -2047,6 +2053,54 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "SPU",
         name: "SPU upload, four small blocks",
         run: test_spu_upload_small_blocks,
+    },
+    TestSpec {
+        id: 0x00c0,
+        group: "GTE",
+        name: "RTPT input commit +0",
+        run: test_rtpt_input_gap0,
+    },
+    TestSpec {
+        id: 0x00c1,
+        group: "GTE",
+        name: "RTPT input commit +1",
+        run: test_rtpt_input_gap1,
+    },
+    TestSpec {
+        id: 0x00c2,
+        group: "GTE",
+        name: "RTPT input commit +2",
+        run: test_rtpt_input_gap2,
+    },
+    TestSpec {
+        id: 0x00c3,
+        group: "GTE",
+        name: "RTPT input commit +4",
+        run: test_rtpt_input_gap4,
+    },
+    TestSpec {
+        id: 0x00c4,
+        group: "GTE",
+        name: "RTPT result read +0",
+        run: test_rtpt_read_gap0,
+    },
+    TestSpec {
+        id: 0x00c5,
+        group: "GTE",
+        name: "RTPT result read +8",
+        run: test_rtpt_read_gap8,
+    },
+    TestSpec {
+        id: 0x00c6,
+        group: "GTE",
+        name: "RTPT result read +16",
+        run: test_rtpt_read_gap16,
+    },
+    TestSpec {
+        id: 0x00c7,
+        group: "GTE",
+        name: "RTPT result read +24",
+        run: test_rtpt_read_gap24,
     },
 ];
 
@@ -6304,6 +6358,247 @@ const RTPT_F: [u32; 6] = [
     0x10c0_0000,
     0x0000_1380,
 ];
+
+// Exact RTPT input/result hazard characterisation. `RTPT_E` and `RTPT_F`
+// produce visibly different projected triples, so F is a deterministic stale
+// output/input poison for E. Each target sequence lives in one asm block: the
+// compiler cannot hide an unsafe schedule by inserting a register move between
+// the final VZ2 write and RTPT or between RTPT and its first MFC2.
+const RTPT_HAZARD_TARGET: [u32; 6] = RTPT_E;
+const RTPT_HAZARD_POISON: [u32; 6] = RTPT_F;
+
+fn rtpt_result_digest(sxy0: u32, sxy1: u32, sxy2: u32, sz1: u32, sz2: u32, sz3: u32) -> u32 {
+    gte_tri_digest(sxy0, sxy1, sxy2) ^ gte_tri_digest(sz1, sz2, sz3).rotate_left(7)
+}
+
+/// Leave a distinct, fully settled RTPT result and input triple in the GTE.
+/// Both the later input-commit and result-read probes use this as their stale
+/// value, so returning old state cannot accidentally compare equal.
+fn prime_rtpt_hazard_state() {
+    seed_scene_xform();
+    gte_nops!(64);
+    let v0_xy = RTPT_HAZARD_POISON[0];
+    let v0_z = RTPT_HAZARD_POISON[1];
+    let v1_xy = RTPT_HAZARD_POISON[2];
+    let v1_z = RTPT_HAZARD_POISON[3];
+    let v2_xy = RTPT_HAZARD_POISON[4];
+    let v2_z = RTPT_HAZARD_POISON[5];
+    #[cfg(target_arch = "mips")]
+    unsafe {
+        core::arch::asm!(
+            ".word 0x48880000", // MTC2 $8,VXY0
+            ".word 0x48890800", // MTC2 $9,VZ0
+            ".word 0x488a1000", // MTC2 $10,VXY1
+            ".word 0x488b1800", // MTC2 $11,VZ1
+            ".word 0x488c2000", // MTC2 $12,VXY2
+            ".word 0x488d2800", // MTC2 $13,VZ2
+            ".word 0",
+            ".word 0",
+            ".word 0x4a080030", // RTPT
+            in("$8") v0_xy,
+            in("$9") v0_z,
+            in("$10") v1_xy,
+            in("$11") v1_z,
+            in("$12") v2_xy,
+            in("$13") v2_z,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        mtc2!(0, v0_xy);
+        mtc2!(1, v0_z);
+        mtc2!(2, v1_xy);
+        mtc2!(3, v1_z);
+        mtc2!(4, v2_xy);
+        mtc2!(5, v2_z);
+        unsafe { gte_ops::rtpt() };
+    }
+    gte_nops!(64);
+}
+
+macro_rules! rtpt_input_gap_probe {
+    ($name:ident, $gap:literal) => {
+        fn $name() -> u32 {
+            prime_rtpt_hazard_state();
+            let v0_xy = RTPT_HAZARD_TARGET[0];
+            let v0_z = RTPT_HAZARD_TARGET[1];
+            let v1_xy = RTPT_HAZARD_TARGET[2];
+            let v1_z = RTPT_HAZARD_TARGET[3];
+            let v2_xy = RTPT_HAZARD_TARGET[4];
+            let v2_z = RTPT_HAZARD_TARGET[5];
+            #[cfg(target_arch = "mips")]
+            unsafe {
+                core::arch::asm!(
+                    ".word 0x48880000",
+                    ".word 0x48890800",
+                    ".word 0x488a1000",
+                    ".word 0x488b1800",
+                    ".word 0x488c2000",
+                    ".word 0x488d2800",
+                    concat!(".rept ", $gap, "\nnop\n.endr"),
+                    ".word 0x4a080030",
+                    in("$8") v0_xy,
+                    in("$9") v0_z,
+                    in("$10") v1_xy,
+                    in("$11") v1_z,
+                    in("$12") v2_xy,
+                    in("$13") v2_z,
+                    options(nostack, nomem, preserves_flags),
+                );
+            }
+            #[cfg(not(target_arch = "mips"))]
+            {
+                mtc2!(0, v0_xy);
+                mtc2!(1, v0_z);
+                mtc2!(2, v1_xy);
+                mtc2!(3, v1_z);
+                mtc2!(4, v2_xy);
+                mtc2!(5, v2_z);
+                unsafe { gte_ops::rtpt() };
+            }
+            gte_nops!(64);
+            rtpt_result_digest(
+                mfc2!(12),
+                mfc2!(13),
+                mfc2!(14),
+                mfc2!(17),
+                mfc2!(18),
+                mfc2!(19),
+            )
+        }
+    };
+}
+
+rtpt_input_gap_probe!(rtpt_input_digest_gap0, 0);
+rtpt_input_gap_probe!(rtpt_input_digest_gap1, 1);
+rtpt_input_gap_probe!(rtpt_input_digest_gap2, 2);
+rtpt_input_gap_probe!(rtpt_input_digest_gap4, 4);
+rtpt_input_gap_probe!(rtpt_input_digest_gap64, 64);
+
+macro_rules! rtpt_read_gap_probe {
+    ($name:ident, $gap:literal) => {
+        fn $name() -> u32 {
+            prime_rtpt_hazard_state();
+            let mut v0_xy = RTPT_HAZARD_TARGET[0];
+            let mut v0_z = RTPT_HAZARD_TARGET[1];
+            let mut v1_xy = RTPT_HAZARD_TARGET[2];
+            let mut v1_z = RTPT_HAZARD_TARGET[3];
+            let mut v2_xy = RTPT_HAZARD_TARGET[4];
+            let mut v2_z = RTPT_HAZARD_TARGET[5];
+            #[cfg(target_arch = "mips")]
+            unsafe {
+                core::arch::asm!(
+                    ".word 0x48880000",
+                    ".word 0x48890800",
+                    ".word 0x488a1000",
+                    ".word 0x488b1800",
+                    ".word 0x488c2000",
+                    ".word 0x488d2800",
+                    ".word 0",
+                    ".word 0",
+                    ".word 0x4a080030",
+                    concat!(".rept ", $gap, "\nnop\n.endr"),
+                    ".word 0x48086000", // MFC2 $8,SXY0
+                    ".word 0x48096800", // MFC2 $9,SXY1
+                    ".word 0x480a7000", // MFC2 $10,SXY2
+                    ".word 0x480b8800", // MFC2 $11,SZ1
+                    ".word 0x480c9000", // MFC2 $12,SZ2
+                    ".word 0x480d9800", // MFC2 $13,SZ3
+                    ".word 0",
+                    inlateout("$8") v0_xy,
+                    inlateout("$9") v0_z,
+                    inlateout("$10") v1_xy,
+                    inlateout("$11") v1_z,
+                    inlateout("$12") v2_xy,
+                    inlateout("$13") v2_z,
+                    options(nostack, nomem, preserves_flags),
+                );
+            }
+            #[cfg(not(target_arch = "mips"))]
+            {
+                mtc2!(0, v0_xy);
+                mtc2!(1, v0_z);
+                mtc2!(2, v1_xy);
+                mtc2!(3, v1_z);
+                mtc2!(4, v2_xy);
+                mtc2!(5, v2_z);
+                unsafe { gte_ops::rtpt() };
+                v0_xy = mfc2!(12);
+                v0_z = mfc2!(13);
+                v1_xy = mfc2!(14);
+                v1_z = mfc2!(17);
+                v2_xy = mfc2!(18);
+                v2_z = mfc2!(19);
+            }
+            rtpt_result_digest(v0_xy, v0_z, v1_xy, v1_z, v2_xy, v2_z)
+        }
+    };
+}
+
+rtpt_read_gap_probe!(rtpt_read_digest_gap0, 0);
+rtpt_read_gap_probe!(rtpt_read_digest_gap8, 8);
+rtpt_read_gap_probe!(rtpt_read_digest_gap16, 16);
+rtpt_read_gap_probe!(rtpt_read_digest_gap24, 24);
+rtpt_read_gap_probe!(rtpt_read_digest_gap64, 64);
+
+macro_rules! rtpt_characterisation_test {
+    ($name:ident, $reference:ident, $probe:ident, $note:literal) => {
+        fn $name() -> TestResult {
+            TestResult::info($reference(), $probe(), $note)
+        }
+    };
+}
+
+rtpt_characterisation_test!(
+    test_rtpt_input_gap0,
+    rtpt_input_digest_gap64,
+    rtpt_input_digest_gap0,
+    "rtpt input commit gap"
+);
+rtpt_characterisation_test!(
+    test_rtpt_input_gap1,
+    rtpt_input_digest_gap64,
+    rtpt_input_digest_gap1,
+    "rtpt input commit gap"
+);
+rtpt_characterisation_test!(
+    test_rtpt_input_gap2,
+    rtpt_input_digest_gap64,
+    rtpt_input_digest_gap2,
+    "rtpt input commit gap"
+);
+rtpt_characterisation_test!(
+    test_rtpt_input_gap4,
+    rtpt_input_digest_gap64,
+    rtpt_input_digest_gap4,
+    "rtpt input commit gap"
+);
+rtpt_characterisation_test!(
+    test_rtpt_read_gap0,
+    rtpt_read_digest_gap64,
+    rtpt_read_digest_gap0,
+    "rtpt result read gap"
+);
+rtpt_characterisation_test!(
+    test_rtpt_read_gap8,
+    rtpt_read_digest_gap64,
+    rtpt_read_digest_gap8,
+    "rtpt result read gap"
+);
+rtpt_characterisation_test!(
+    test_rtpt_read_gap16,
+    rtpt_read_digest_gap64,
+    rtpt_read_digest_gap16,
+    "rtpt result read gap"
+);
+rtpt_characterisation_test!(
+    test_rtpt_read_gap24,
+    rtpt_read_digest_gap64,
+    rtpt_read_digest_gap24,
+    "rtpt result read gap"
+);
+
 fn scene_rtpt(v: [u32; 6]) {
     seed_scene_xform();
     mtc2!(0, v[0]);

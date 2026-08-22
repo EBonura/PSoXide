@@ -36,7 +36,7 @@ pub mod vram;
 // psx-gpu-render) actually reach by name. Everything else stays on
 // its module path.
 pub use bus::Bus;
-pub use cpu::{Cpu, InstructionCacheProfileSnapshot};
+pub use cpu::{Cpu, CpuCycleProfileSnapshot, InstructionCacheProfileSnapshot};
 pub use fastboot::{
     fast_boot_disc, fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot,
     DISC_FAST_BOOT_WARMUP_STEPS,
