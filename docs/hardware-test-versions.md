@@ -33,6 +33,18 @@ shipped without either, which is why no machine-code baseline exists for them.
 
 ## History
 
+### v1.20 (2026-08-22, schema PX8)
+
+Eight INFO-only RTPT hazard probes (`0xC0`-`0xC7`) settle the remaining
+cross-engine scheduling disagreement without changing existing record meaning.
+The first four compare the exact six-`MTC2` input load used by PSoXide and
+hl-psx at +0/+1/+2/+4 instructions against a +64 settled reference. The second
+four compare RTPT result reads at +0/+8/+16/+24 against a +64 reference. Every
+measured sequence is one literal MIPS assembly block, with a distinct prior
+triple left in both the input and output registers, so neither LLVM scheduling
+nor an accidentally equal stale value can hide a hazard. These records remain
+characterisation until a new console capture answers them.
+
 ### v1.19 (2026-08-07, schema PX8)
 
 Three probes aimed at the last two conformance failures on silicon,
