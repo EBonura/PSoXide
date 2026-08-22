@@ -53,6 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test itch.io publisher contract
+        run: .github/actions/itch-publish/tests/test.sh
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: rustup show
       - name: Install Linux native deps for the desktop frontend
