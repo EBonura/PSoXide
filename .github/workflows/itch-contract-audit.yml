@@ -1,0 +1,23 @@
+name: Audit itch.io deployment contracts
+
+on:
+  schedule:
+    - cron: "17 08 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the deployment registry
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit every registered public workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/audit-itch-deployments.py
