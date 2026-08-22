@@ -291,7 +291,9 @@ impl Scene for Playtest {
         }
 
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
-        let mut primitive_packets = unsafe { PrimitivePacketArena::new(&mut PRIMITIVE_PACKETS) };
+        let render_scratch = frame_render_scratch();
+        let mut primitive_packets =
+            PrimitivePacketArena::new(&mut render_scratch.primitive_packets);
 
         let room_record = ROOMS.get(self.room_index.to_usize());
         // The cooked BSP replaces only static grid surfaces. It writes its
@@ -313,7 +315,7 @@ impl Scene for Playtest {
             telemetry::stage_end(telemetry::stage::SKY);
         }
 
-        let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
+        let mut world = begin_world_render_pass(&mut ot, &mut render_scratch.world_commands);
 
         if let Some(room_record) = room_record {
             telemetry::stage_begin(telemetry::stage::FAR_VISTA);

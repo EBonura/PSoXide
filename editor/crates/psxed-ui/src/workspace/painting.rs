@@ -319,6 +319,23 @@ fn default_model_visual_defaults(project: &ProjectDocument, model_id: ResourceId
 }
 
 impl EditorWorkspace {
+    /// Character explicitly authored for the player role when there is one
+    /// unambiguous choice. Enemy profiles never participate in this fallback,
+    /// so adding the light/heavy catalogue cannot make a new player spawn
+    /// ambiguous.
+    pub(crate) fn default_player_character_resource(&self) -> Option<ResourceId> {
+        let mut players = self.project.resources.iter().filter_map(|resource| {
+            matches!(
+                &resource.data,
+                ResourceData::Character(character)
+                    if character.spawn_role == psxed_project::CharacterSpawnRole::Player
+            )
+            .then_some(resource.id)
+        });
+        let player = players.next()?;
+        players.next().is_none().then_some(player)
+    }
+
     /// BSP scenes have no legacy `Section`/Room owner. Their world root is
     /// the correct parent for authored point entities because the PXBSP cook
     /// consumes those transforms directly in world units.
@@ -2279,7 +2296,7 @@ impl EditorWorkspace {
                     "Player Spawn".to_string(),
                     NodeKind::SpawnPoint {
                         player: true,
-                        character: None,
+                        character: self.default_player_character_resource(),
                     },
                 ),
                 PlaceKind::SpawnMarker => {

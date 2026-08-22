@@ -193,6 +193,88 @@ fn run_real_egui_viewport_drag(workspace: &mut EditorWorkspace, start: Pos2, end
     );
 }
 
+fn run_real_egui_vertex_snap_drag(workspace: &mut EditorWorkspace, start: Pos2, end: Pos2) {
+    let ctx = egui::Context::default();
+    let texture = ctx.load_texture(
+        "3d-vertex-snap-viewport",
+        egui::ColorImage::new([1, 1], egui::Color32::BLACK),
+        egui::TextureOptions::NEAREST,
+    );
+    let viewport = EditorViewport3dPresentation::edit(texture.id(), Vec::new());
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let input = |time, events| egui::RawInput {
+        screen_rect: Some(screen),
+        time: Some(time),
+        events,
+        ..egui::RawInput::default()
+    };
+    let draw = |ctx: &egui::Context, workspace: &mut EditorWorkspace| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            workspace.draw_viewport_3d_body(ui, viewport.clone());
+        });
+    };
+    let key_event = |pressed| egui::Event::Key {
+        key: egui::Key::B,
+        physical_key: Some(egui::Key::B),
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    let _ = ctx.run(input(0.0, vec![]), |ctx| draw(ctx, workspace));
+    let _ = ctx.run(
+        input(
+            1.0 / 60.0,
+            vec![egui::Event::PointerMoved(start), key_event(true)],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+    assert!(workspace.brush_vertex_snap_hover.is_some());
+    let _ = ctx.run(
+        input(
+            2.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+    let threshold = start + (end - start).normalized() * 7.0;
+    let _ = ctx.run(
+        input(3.0 / 60.0, vec![egui::Event::PointerMoved(threshold)]),
+        |ctx| draw(ctx, workspace),
+    );
+    assert!(
+        workspace
+            .brush_vertex_drag
+            .as_ref()
+            .is_some_and(|drag| drag.snap_source.is_some()),
+        "held B starts the dedicated vertex-snap drag"
+    );
+    let _ = ctx.run(
+        input(
+            4.0 / 60.0,
+            vec![key_event(false), egui::Event::PointerMoved(end)],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+    let _ = ctx.run(
+        input(
+            5.0 / 60.0,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ),
+        |ctx| draw(ctx, workspace),
+    );
+}
+
 fn run_real_egui_viewport_plain_drag(workspace: &mut EditorWorkspace, start: Pos2, end: Pos2) {
     let ctx = egui::Context::default();
     let texture = ctx.load_texture(
@@ -1389,6 +1471,150 @@ fn vertex_and_edge_3d_handles_start_camera_plane_edits_and_keep_brush_valid() {
         workspace.do_undo();
         assert_eq!(workspace.project.active_scene().brushes[0], brush);
     }
+}
+
+fn vertex_snap_test_workspace() -> (EditorWorkspace, Rect, [f64; 3], [f64; 3]) {
+    let moving = psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    let target = psxed_project::brush::Brush::cuboid([384, 0, 0], [512, 128, 128]);
+    let mut project = ProjectDocument::new("Godot-style vertex snap");
+    project.active_scene_mut().brushes.extend([moving, target]);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("godot-vertex-snap"), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.replace_brush_selection(0, None);
+    workspace.set_brush_edit_mode(BrushEditMode::Move);
+    workspace.snap_units = 16;
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [720, 480, -900];
+    let (yaw, pitch) = camera_angles_to_look_at([720, 480, -900], [256, 64, 64]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    (
+        workspace,
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)),
+        [128.0, 0.0, 0.0],
+        [384.0, 0.0, 0.0],
+    )
+}
+
+#[test]
+fn godot_style_vertex_snap_aligns_a_brush_corner_and_undoes_once() {
+    let (mut workspace, rect, source, target) = vertex_snap_test_workspace();
+    let base = workspace.project.active_scene().brushes[0].clone();
+    let source_screen = workspace.project_brush_point_3d(rect, source).unwrap();
+    let target_screen = workspace.project_brush_point_3d(rect, target).unwrap();
+    workspace.brush_vertex_snap_key_down = true;
+    workspace.update_brush_vertex_snap_hover_3d(rect, Some(source_screen));
+    assert_eq!(workspace.brush_vertex_snap_hover, Some(source));
+
+    let tool = tool_impl_3d(ViewTool::Select);
+    let mut frame = element_click_frame(rect, source_screen, egui::Modifiers::NONE);
+    tool.primary_pressed(&mut workspace, &frame);
+    assert_eq!(
+        workspace
+            .brush_vertex_drag
+            .as_ref()
+            .and_then(|drag| drag.snap_source),
+        Some(source)
+    );
+
+    frame.pointer_interact = Some(target_screen);
+    frame.pointer_hover = Some(target_screen);
+    tool.primary_dragged(&mut workspace, &frame);
+    let drag = workspace.brush_vertex_drag.as_ref().unwrap();
+    assert_eq!(drag.snap_target, Some(target));
+    assert_eq!(drag.applied, [256, 0, 0]);
+    let moved_vertices = crate::workspace::brush_elements::unique_vertices(
+        &workspace.project.active_scene().brushes[0].solve(),
+    );
+    assert!(moved_vertices.contains(&target));
+
+    tool.primary_released(&mut workspace, &frame);
+    assert!(workspace.is_dirty());
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes[0], base);
+}
+
+#[test]
+fn vertex_snap_excludes_the_moving_set_and_moves_multiselection_rigidly() {
+    let brushes = [
+        psxed_project::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]),
+        psxed_project::brush::Brush::cuboid([384, 0, 0], [512, 128, 128]),
+        psxed_project::brush::Brush::cuboid([768, 0, 0], [896, 128, 128]),
+    ];
+    let mut project = ProjectDocument::new("multi brush vertex snap");
+    project.active_scene_mut().brushes.extend(brushes.clone());
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("multi-vertex-snap"), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.replace_brush_selection(0, None);
+    workspace.selected_brushes = vec![0, 1];
+    workspace.set_brush_edit_mode(BrushEditMode::Move);
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [1050, 560, -1450];
+    let (yaw, pitch) = camera_angles_to_look_at([1050, 560, -1450], [448, 64, 64]).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let source = [128.0, 0.0, 0.0];
+    let selected_neighbor = [384.0, 0.0, 0.0];
+    let external_target = [768.0, 0.0, 0.0];
+    let source_screen = workspace.project_brush_point_3d(rect, source).unwrap();
+    workspace.brush_vertex_snap_key_down = true;
+    workspace.update_brush_vertex_snap_hover_3d(rect, Some(source_screen));
+    let tool = tool_impl_3d(ViewTool::Select);
+    let mut frame = element_click_frame(rect, source_screen, egui::Modifiers::NONE);
+    tool.primary_pressed(&mut workspace, &frame);
+
+    let selected_neighbor_screen = workspace
+        .project_brush_point_3d(rect, selected_neighbor)
+        .unwrap();
+    frame.pointer_interact = Some(selected_neighbor_screen);
+    frame.pointer_hover = Some(selected_neighbor_screen);
+    tool.primary_dragged(&mut workspace, &frame);
+    assert_eq!(
+        workspace.brush_vertex_drag.as_ref().unwrap().snap_target,
+        None,
+        "vertices on every moving brush must be excluded as snap targets"
+    );
+
+    let target_screen = workspace
+        .project_brush_point_3d(rect, external_target)
+        .unwrap();
+    frame.pointer_interact = Some(target_screen);
+    frame.pointer_hover = Some(target_screen);
+    tool.primary_dragged(&mut workspace, &frame);
+    let drag = workspace.brush_vertex_drag.as_ref().unwrap();
+    assert_eq!(drag.snap_target, Some(external_target));
+    assert_eq!(drag.applied, [640, 0, 0]);
+    assert_eq!(
+        workspace.project.active_scene().brushes[1].solve().min,
+        [1024.0, 0.0, 0.0],
+        "the other selected brush rides the exact same snap delta"
+    );
+
+    tool.primary_released(&mut workspace, &frame);
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes, brushes);
+}
+
+#[test]
+fn held_b_vertex_snap_runs_through_real_egui_input() {
+    let (mut workspace, _, source, target) = vertex_snap_test_workspace();
+    // `draw_viewport_3d_body` allocates this centred canvas inside an
+    // 800x600 CentralPanel (the same stable dimensions used by the existing
+    // real-egui handle tests).
+    let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+    let source_screen = workspace.project_brush_point_3d(viewport, source).unwrap();
+    let target_screen = workspace.project_brush_point_3d(viewport, target).unwrap();
+
+    run_real_egui_vertex_snap_drag(&mut workspace, source_screen, target_screen);
+
+    assert!(workspace.is_dirty());
+    assert!(crate::workspace::brush_elements::unique_vertices(
+        &workspace.project.active_scene().brushes[0].solve()
+    )
+    .contains(&target));
 }
 
 #[test]
@@ -4882,6 +5108,34 @@ fn brush_mode_buttons_visible_and_clickable_with_3d_viewport_active() {
     // before clicking, so this proves visibility with the 3D viewport up.
     click_visible_brush_mode(&mut workspace, BrushEditMode::Vertex);
     assert_eq!(workspace.brush_edit_mode, BrushEditMode::Vertex);
+}
+
+#[test]
+fn draw_toolbar_exposes_a_compact_primitive_selector_in_3d() {
+    let mut workspace = ViewportHarness::floored_room("draw-primitive-selector", 4).workspace;
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Brush;
+    workspace.view_2d = false;
+    let (ctx, viewport) = real_egui_workspace_ctx("draw-primitive-selector");
+
+    let box_label = icons::label(icons::BOX, "Box");
+    let box_button = locate_unique_label(&ctx, &mut workspace, &viewport, &box_label);
+    let (press, release) = press_release(box_button);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 1.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 2.0 / 60.0, release);
+    let frame = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 3.0 / 60.0, vec![]);
+    let cylinder_label = icons::label(icons::BOX, "Cylinder");
+    let cylinder = text_shape_centers(&frame.shapes, &cylinder_label);
+    assert_eq!(cylinder.len(), 1, "primitive menu contents: {cylinder:?}");
+
+    let (press, release) = press_release(cylinder[0]);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 4.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 5.0 / 60.0, release);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 6.0 / 60.0, vec![]);
+    assert_eq!(
+        workspace.brush_draw_settings.shape,
+        BrushDrawShape::Cylinder
+    );
 }
 
 /// The defect this covers: the live move preview called plain `translate`

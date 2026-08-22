@@ -648,7 +648,7 @@ impl EditorWorkspace {
         let consume_play = consume_command_shortcut(ctx, egui::Key::Enter);
         let consume_redo = consume_command_shift_shortcut(ctx, egui::Key::Z);
         let consume_undo = consume_command_shortcut(ctx, egui::Key::Z);
-        let focus_taken = ctx.memory(|m| m.focused().is_some());
+        let focus_taken = widget_owns_keyboard_shortcuts(ctx);
         let consume_ungroup = !focus_taken
             && self.active_workspace == WorkspaceView::Room
             && consume_command_shift_shortcut(ctx, egui::Key::G);
@@ -2196,7 +2196,12 @@ impl EditorWorkspace {
                     // reading error four wants error four's brush.
                     for error in &self.last_cook_errors {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(&error.message).color(STUDIO_ERROR).small());
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&error.message).color(STUDIO_ERROR).small(),
+                                )
+                                .selectable(true),
+                            );
                         });
                         if let Some(target) = error.target {
                             if ui.small_button("Focus").clicked() {

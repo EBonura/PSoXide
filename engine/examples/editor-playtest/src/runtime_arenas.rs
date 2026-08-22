@@ -1,11 +1,11 @@
 //! The example's mutable runtime state, folded into ONE arena struct
 //! behind ONE static (phase 1.5 of docs/game-runtime-plan.md). The
-//! seven former `static mut` instances (`VRAM_RUNTIME`,
-//! `FONT_PACK_SCRATCH`, `UI_IMAGE_CACHE`, `PERSISTENT_ASSETS`,
+//! former `static mut` instances (`VRAM_RUNTIME`, `FONT_PACK_SCRATCH`,
+//! `PRIMITIVE_PACKETS`, `WORLD_COMMANDS`, `UI_IMAGE_CACHE`, `PERSISTENT_ASSETS`,
 //! `STREAMED_ROOM_SLOTS`, `ROOM_STREAM_SCHEDULER`, `ROOM_MATERIAL_POOL`,
 //! `PREBUILT_ROOM_QUADS`) are now [`RuntimeArenas`] fields.
 //!
-//! Flat-binary discipline: the arena's ~430 KB of buffers must stay
+//! Flat-binary discipline: the arena's project-sized buffers must stay
 //! link-time-zero (`.bss` is NOLOAD in the PSX-EXE), so the static is
 //! built from the crate types' all-zero `zeroed()`/`new()` constructors
 //! and [`init_runtime_arenas`] stamps the non-zero initial state (VRAM
@@ -31,8 +31,9 @@ pub(super) struct RuntimeArenas {
     /// VRAM slot table, unified allocator, residency tracker, and
     /// upload queue (see `psx_game_runtime::vram::VramRuntime`).
     pub(super) vram: RuntimeVram,
-    /// Shared font-pack / streamed-sky staging scratch.
-    pub(super) font_scratch: RuntimeFontPackScratch,
+    /// Scene-load staging and per-frame renderer scratch have disjoint
+    /// lifetimes, so they share one RAM region.
+    pub(super) load_render: LoadRenderOverlay,
     /// Front-end/gameplay RAM overlay (see [`FrontEndGameplayOverlay`]).
     #[cfg(feature = "cd-stream-bench")]
     pub(super) overlay: FrontEndGameplayOverlay,
@@ -71,6 +72,30 @@ pub(super) struct RuntimeArenas {
     pub(super) room_projection: RuntimeCachedRoomProjection,
 }
 
+/// Scratch used only while rendering a frame.
+pub(super) struct FrameRenderScratch {
+    pub(super) primitive_packets: PrimitivePacketScratch<MAX_TEXTURED_TRIS>,
+    pub(super) world_commands: [WorldTriCommand; MAX_WORLD_COMMANDS],
+}
+
+impl FrameRenderScratch {
+    const ZEROED: Self = Self {
+        primitive_packets: PrimitivePacketScratch::ZERO,
+        world_commands: [WorldTriCommand::EMPTY; MAX_WORLD_COMMANDS],
+    };
+}
+
+/// RAM overlay for mutually exclusive load-time and render-time scratch.
+///
+/// Fonts are packed on first menu entry and the sky is staged on gameplay
+/// entry. Both operations finish before the next frame starts using packet
+/// and world-command storage. Once uploaded, their bytes live in VRAM and no
+/// longer need this staging region.
+pub(super) union LoadRenderOverlay {
+    pub(super) load: core::mem::ManuallyDrop<RuntimeFontPackScratch>,
+    pub(super) render: core::mem::ManuallyDrop<FrameRenderScratch>,
+}
+
 /// Gameplay-only arenas that overlay the front-end UI-image cache.
 pub(super) struct GameplayAssetArenas {
     pub(super) persistent_assets: RuntimePersistentAssetStreamer,
@@ -106,7 +131,9 @@ impl RuntimeArenas {
         vram: RuntimeVram::zeroed(),
         // These three are zero-init types: their `new()` state IS the
         // all-zero pattern, so they need no later stamping.
-        font_scratch: RuntimeFontPackScratch::new(),
+        load_render: LoadRenderOverlay {
+            render: core::mem::ManuallyDrop::new(FrameRenderScratch::ZEROED),
+        },
         // Both union variants are all-zero images, so initializing via
         // the gameplay side leaves the ui_images side valid-zeroed too.
         #[cfg(feature = "cd-stream-bench")]
@@ -189,8 +216,23 @@ pub(super) fn vram_arena() -> &'static mut RuntimeVram {
 
 /// Exclusive borrow of the shared font/sky staging scratch.
 pub(super) fn font_scratch_arena() -> &'static mut RuntimeFontPackScratch {
-    // SAFETY: see `vram_arena`.
-    unsafe { &mut (*arenas_ptr()).font_scratch }
+    // SAFETY: font packing and sky staging complete before frame rendering,
+    // so the `load` and `render` union views never have live overlapping
+    // borrows. Both variants are all-zero-compatible at boot.
+    unsafe {
+        &mut *core::ptr::addr_of_mut!((*arenas_ptr()).load_render.load)
+            .cast::<RuntimeFontPackScratch>()
+    }
+}
+
+/// Exclusive borrow of the packet and world-command scratch for one frame.
+pub(super) fn frame_render_scratch() -> &'static mut FrameRenderScratch {
+    // SAFETY: see `font_scratch_arena`; load-time users have returned before
+    // the render pass borrows this union view.
+    unsafe {
+        &mut *core::ptr::addr_of_mut!((*arenas_ptr()).load_render.render)
+            .cast::<FrameRenderScratch>()
+    }
 }
 
 /// Shared borrow of the streamed-UI image RAM cache.
