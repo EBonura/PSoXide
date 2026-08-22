@@ -8,13 +8,17 @@
 extern crate psx_rt;
 
 use psx_asset::Texture;
-use psx_engine::{button, sfx, Angle, App, Config, Ctx, Scene, SimTick};
+use psx_engine::{
+    button, sfx, ActionBinding, ActionMap, Angle, App, Config, Ctx, MicrogameAction,
+    MicrogameShell, Scene, SimTick,
+};
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_gpu::material::TextureMaterial;
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, QuadTexturedMaterial, RectFlat};
 use psx_io::cdrom;
 use psx_math::int32::clamp_i16;
+use psx_settings::Profile;
 use psx_spu::{self as spu, CdVolume, SpuAddr, Voice, Volume};
 use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
 
@@ -55,6 +59,15 @@ const PADDLE_SPEED: i16 = 4;
 const AI_SPEED: i16 = 3;
 const AI_HYSTERESIS: i16 = 10;
 const AI_REACTION_TICKS: u32 = 3;
+
+const SETTINGS_FILE: &str = "BESLES-00000MAGIPNG";
+const SETTINGS_TITLE: &str = "Magikarp Pong";
+const ACTION_UP: usize = 0;
+const ACTION_DOWN: usize = 1;
+const PONG_ACTIONS: ActionMap<2> = ActionMap::new([
+    ActionBinding::new(button::UP, 0),
+    ActionBinding::new(button::DOWN, 0),
+]);
 
 const BALL_SIZE: u16 = 42;
 const BALL_START_VX: i16 = 2;
@@ -179,12 +192,15 @@ struct MagikaaaaaarpPong {
     score_flyby_tick: u16,
     score_flyby_dir: i8,
     score_flyby_spin: Angle,
+    rally_hits: u32,
+    two_player: bool,
     cdda_started: bool,
     cdda_start_step: CddaStartStep,
     cdda_started_tick: u32,
     cdda_next_retry_tick: u32,
     cdda_wait_logged: bool,
     font: Option<FontAtlas>,
+    shell: MicrogameShell<3>,
 }
 
 impl MagikaaaaaarpPong {
@@ -206,12 +222,15 @@ impl MagikaaaaaarpPong {
             score_flyby_tick: SCORE_FLYBY_DURATION_TICKS,
             score_flyby_dir: 0,
             score_flyby_spin: Angle::ZERO,
+            rally_hits: 0,
+            two_player: false,
             cdda_started: false,
             cdda_start_step: CddaStartStep::SetMode,
             cdda_started_tick: 0,
             cdda_next_retry_tick: GONCHAROV_START_DELAY_TICKS,
             cdda_wait_logged: false,
             font: None,
+            shell: MicrogameShell::new(Profile::new(ActionMap::new([]))),
         }
     }
 
@@ -228,6 +247,7 @@ impl MagikaaaaaarpPong {
         self.score_flyby_tick = SCORE_FLYBY_DURATION_TICKS;
         self.score_flyby_dir = 0;
         self.score_flyby_spin = Angle::ZERO;
+        self.rally_hits = 0;
         self.reset_ball();
     }
 
@@ -329,6 +349,25 @@ impl MagikaaaaaarpPong {
             inset,
         }
     }
+
+    fn apply_shell_settings(&self) {
+        let level = self.shell.profile().sfx_volume as u16;
+        VOICE_WALL.set_volume(Volume::linear(level, 600), Volume::linear(level, 600));
+        VOICE_PADDLE.set_volume(Volume::linear(level, 500), Volume::linear(level, 500));
+        VOICE_SCORE.set_volume(Volume::linear(level, 600), Volume::linear(level, 600));
+        VOICE_FLYBY.set_volume(Volume::linear(level, 300), Volume::linear(level, 300));
+    }
+
+    fn persist_shell(&mut self) {
+        if !self.shell.take_dirty() {
+            return;
+        }
+        self.apply_shell_settings();
+        if psx_settings::save_slot_one(SETTINGS_FILE, SETTINGS_TITLE, self.shell.profile()).is_err()
+        {
+            self.shell.mark_dirty();
+        }
+    }
 }
 
 impl Scene for MagikaaaaaarpPong {
@@ -338,6 +377,10 @@ impl Scene for MagikaaaaaarpPong {
         game_trace("magikarp: spu ok");
         sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
         game_trace("magikarp: sfx ok");
+        if let Ok(profile) = psx_settings::load_slot_one(SETTINGS_FILE) {
+            self.shell.set_profile(profile);
+        }
+        self.apply_shell_settings();
         spu::set_cd_volume(CdVolume::linear(1, 4), CdVolume::linear(1, 4));
         spu::enable_cd_audio(true);
         game_trace("magikarp: cd route ok");
@@ -361,31 +404,52 @@ impl Scene for MagikaaaaaarpPong {
         self.advance_cube_spin();
         self.advance_score_flyby();
         self.maybe_start_goncharov(tick);
-        let cube_scale = cube_scale_q12(tick);
-        let ball_size = ball_size_for_scale(cube_scale);
 
-        if self.winner != 0 {
-            if ctx.just_pressed(button::START) {
+        match self.shell.update(ctx) {
+            MicrogameAction::Start | MicrogameAction::Restart => {
                 self.reset_match();
+                self.persist_shell();
             }
+            MicrogameAction::ReturnToTitle => self.persist_shell(),
+            MicrogameAction::None | MicrogameAction::Resume => {}
+        }
+        if !self.shell.is_playing() {
             return;
         }
 
-        if ctx.is_held(button::UP) {
+        let cube_scale = cube_scale_q12(tick);
+        let ball_size = ball_size_for_scale(cube_scale);
+
+        ctx.refresh_second_pad();
+        self.two_player = ctx.pad_for(1).is_connected();
+        let p1 = ctx.actions(0, &PONG_ACTIONS);
+        if p1.held(ACTION_UP) {
             self.p1_y -= PADDLE_SPEED;
         }
-        if ctx.is_held(button::DOWN) {
+        if p1.held(ACTION_DOWN) {
             self.p1_y += PADDLE_SPEED;
         }
         clamp_paddle(&mut self.p1_y);
 
-        if tick % AI_REACTION_TICKS == 0 {
-            let target = ai_target_y(tick, self.ball_vx, self.ball_center_y());
-            let paddle_mid = self.p2_y + PADDLE_H as i16 / 2;
-            if target < paddle_mid - AI_HYSTERESIS {
-                self.p2_y -= AI_SPEED;
-            } else if target > paddle_mid + AI_HYSTERESIS {
-                self.p2_y += AI_SPEED;
+        if self.two_player {
+            let p2 = ctx.actions(1, &PONG_ACTIONS);
+            if p2.held(ACTION_UP) {
+                self.p2_y -= PADDLE_SPEED;
+            }
+            if p2.held(ACTION_DOWN) {
+                self.p2_y += PADDLE_SPEED;
+            }
+        } else {
+            let reaction = [5, AI_REACTION_TICKS, 1][self.shell.difficulty().min(2)];
+            if tick % reaction == 0 {
+                let target = ai_target_y(tick, self.ball_vx, self.ball_center_y());
+                let paddle_mid = self.p2_y + PADDLE_H as i16 / 2;
+                let ai_speed = [2, AI_SPEED, 4][self.shell.difficulty().min(2)];
+                if target < paddle_mid - AI_HYSTERESIS {
+                    self.p2_y -= ai_speed;
+                } else if target > paddle_mid + AI_HYSTERESIS {
+                    self.p2_y += ai_speed;
+                }
             }
         }
         clamp_paddle(&mut self.p2_y);
@@ -416,6 +480,7 @@ impl Scene for MagikaaaaaarpPong {
             self.ball_x = left_face - hitbox.inset;
             self.ball_vx = bounce_speed(-self.ball_vx);
             self.ball_vy = spin_from_paddle(hitbox.center_y(), self.p1_y, self.ball_vy);
+            self.rally_hits = self.rally_hits.saturating_add(1);
             sfx::play(VOICE_PADDLE);
             hitbox = self.ball_hitbox(ball_size);
         }
@@ -430,6 +495,7 @@ impl Scene for MagikaaaaaarpPong {
             self.ball_x = right_face - hitbox.size - hitbox.inset;
             self.ball_vx = -bounce_speed(self.ball_vx);
             self.ball_vy = spin_from_paddle(hitbox.center_y(), self.p2_y, self.ball_vy);
+            self.rally_hits = self.rally_hits.saturating_add(1);
             sfx::play(VOICE_PADDLE);
             hitbox = self.ball_hitbox(ball_size);
         }
@@ -446,6 +512,10 @@ impl Scene for MagikaaaaaarpPong {
             self.start_score_flyby(1);
             sfx::play(VOICE_SCORE);
             self.check_win_and_reset();
+        }
+        if self.winner != 0 {
+            self.shell.finish(self.rally_hits);
+            self.persist_shell();
         }
     }
 
@@ -661,20 +731,10 @@ impl MagikaaaaaarpPong {
         font.draw_text(SCREEN_W - 24 - 8 * 2, SCORE_Y, "P2", INK);
         font.draw_text(SCREEN_W - 60 - 8, SCORE_Y, p2.as_str(), INK);
 
-        if self.winner != 0 {
-            let msg = if self.winner == 1 {
-                "YOU WIN!"
-            } else {
-                "AI WINS!"
-            };
-            font.draw_text((SCREEN_W - 8 * 7) / 2, 108, msg, INK);
-            font.draw_text(
-                (SCREEN_W - 17 * 8) / 2,
-                132,
-                "START to play again",
-                MUTED_INK,
-            );
+        if self.two_player && self.shell.is_playing() {
+            font.draw_text((SCREEN_W - 8 * 7) / 2, SCORE_Y, "2P MODE", MUTED_INK);
         }
+        self.shell.draw(font, "MAGIKARP PONG");
     }
 }
 
