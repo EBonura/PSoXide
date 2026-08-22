@@ -221,7 +221,7 @@ WEB_FRONTEND_DIR := emu/crates/frontend
 WEB_DIST_DIR := $(WEB_FRONTEND_DIR)/dist
 WEB_DISC_RELEASE_REPO ?= EBonura/PSoXide
 ITCH_WEB_CHANNEL ?= bonnie-studios/psoxide:html5
-ITCH_WEB_VERSION ?= $(shell git describe --tags --always)
+ITCH_WEB_VERSION ?= $(shell tr -d '[:space:]' < VERSION)
 WEB_RUSTFLAGS := -C target-feature=+simd128 -C link-arg=-zstack-size=16777216
 
 web-bundle:
@@ -236,7 +236,7 @@ web-stage-disc:
 		--pattern 'demo-disc.cue' --pattern 'web-manifest.txt' \
 		--pattern 'demo-data.bin.gz' --pattern 'track-*.flac' \
 		--dir $(WEB_DIST_DIR)
-	python3 tools/verify-web-dist.py $(WEB_DIST_DIR)
+	python3 tools/verify-web-dist.py --public-disc $(WEB_DIST_DIR)
 
 itch-web: web-bundle
 	@command -v $(BUTLER) >/dev/null || { echo "itch-web: butler is required"; exit 1; }
