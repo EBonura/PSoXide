@@ -8,8 +8,9 @@ use crate::model_rendering::{model_override_blend_mode, sphere_visible_to_camera
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::VramSlot;
 use psx_engine::{
-    CharacterCollisionCylinder, CullMode, DepthPolicy, LoadedWorldCameraGte, PrimitiveSink,
-    RoomPoint, WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    BoundedSink, CharacterCollisionCylinder, CullMode, DepthPolicy, LoadedWorldCameraGte,
+    PrimitiveSink, RoomPoint, SliceSink, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
+    WorldVertex,
 };
 use psx_gpu::{
     material::TextureMaterial,
@@ -188,12 +189,20 @@ pub fn collect_cylinder_prop_collision_blockers(
     room: RoomIndex,
     out: &mut [CharacterCollisionCylinder],
 ) -> usize {
+    let mut sink = SliceSink::new(out);
+    collect_cylinder_prop_collision_blockers_into(props, room, &mut sink)
+}
+
+/// Append radial blockers to any bounded sink without requiring its unused
+/// capacity to contain initialized records.
+pub fn collect_cylinder_prop_collision_blockers_into<S: BoundedSink<CharacterCollisionCylinder>>(
+    props: &[LevelCylinderPropRecord],
+    room: RoomIndex,
+    out: &mut S,
+) -> usize {
     let mut count = 0usize;
     for prop in props {
-        if prop.room != room
-            || prop.flags & cylinder_prop_flags::COLLISION_ENABLED == 0
-            || count >= out.len()
-        {
+        if prop.room != room || prop.flags & cylinder_prop_flags::COLLISION_ENABLED == 0 {
             continue;
         }
         let span_x = prop.bounds_max[0].saturating_sub(prop.bounds_min[0]);
@@ -203,7 +212,7 @@ pub fn collect_cylinder_prop_collision_blockers(
         if radius <= 0 || span_y <= 0 {
             continue;
         }
-        out[count] = CharacterCollisionCylinder::new(
+        let blocker = CharacterCollisionCylinder::new(
             RoomPoint::new(
                 prop.bounds_min[0].saturating_add(span_x / 2),
                 prop.bounds_min[1],
@@ -212,6 +221,9 @@ pub fn collect_cylinder_prop_collision_blockers(
             radius,
             span_y,
         );
+        if !out.try_push(blocker) {
+            return count;
+        }
         count += 1;
     }
     count

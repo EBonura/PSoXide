@@ -5,8 +5,9 @@ use crate::model_rendering::{model_override_blend_mode, sphere_visible_to_camera
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::VramSlot;
 use psx_engine::{
-    CharacterCollisionAabb, CullMode, DepthPolicy, LoadedWorldCameraGte, PrimitiveSink, RoomPoint,
-    WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    BoundedSink, CharacterCollisionAabb, CullMode, DepthPolicy, LoadedWorldCameraGte,
+    PrimitiveSink, RoomPoint, SliceSink, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
+    WorldVertex,
 };
 use psx_gpu::{
     material::TextureMaterial,
@@ -135,6 +136,17 @@ pub fn collect_arch_prop_collision_blockers(
     room: RoomIndex,
     out: &mut [CharacterCollisionAabb],
 ) -> usize {
+    let mut sink = SliceSink::new(out);
+    collect_arch_prop_collision_blockers_into(props, collisions, room, &mut sink)
+}
+
+/// Append arch blockers to bounded scratch without clearing unused entries.
+pub fn collect_arch_prop_collision_blockers_into<S: BoundedSink<CharacterCollisionAabb>>(
+    props: &[LevelArchPropRecord],
+    collisions: &[LevelArchPropCollisionRecord],
+    room: RoomIndex,
+    out: &mut S,
+) -> usize {
     let mut count = 0;
     for prop in props {
         if prop.room != room || prop.flags & arch_prop_flags::COLLISION_ENABLED == 0 {
@@ -145,13 +157,13 @@ pub fn collect_arch_prop_collision_blockers(
             .saturating_add(usize::from(prop.collision_count))
             .min(collisions.len());
         for collision in collisions.get(first..end).unwrap_or(&[]) {
-            if count >= out.len() {
-                return count;
-            }
-            out[count] = CharacterCollisionAabb::new(
+            let blocker = CharacterCollisionAabb::new(
                 RoomPoint::new(collision.min[0], collision.min[1], collision.min[2]),
                 RoomPoint::new(collision.max[0], collision.max[1], collision.max[2]),
             );
+            if !out.try_push(blocker) {
+                return count;
+            }
             count += 1;
         }
     }
@@ -165,6 +177,17 @@ pub fn collect_arch_prop_collision_blockers_checked(
     collisions: &[LevelArchPropCollisionRecord],
     room: RoomIndex,
     out: &mut [CharacterCollisionAabb],
+) -> Option<usize> {
+    let mut sink = SliceSink::new(out);
+    collect_arch_prop_collision_blockers_checked_into(props, collisions, room, &mut sink)
+}
+
+/// Checked arch-blocker append for bounded scratch.
+pub fn collect_arch_prop_collision_blockers_checked_into<S: BoundedSink<CharacterCollisionAabb>>(
+    props: &[LevelArchPropRecord],
+    collisions: &[LevelArchPropCollisionRecord],
+    room: RoomIndex,
+    out: &mut S,
 ) -> Option<usize> {
     let mut count = 0usize;
     for prop in props {
@@ -182,7 +205,9 @@ pub fn collect_arch_prop_collision_blockers_checked(
             if !blocker.is_strictly_valid() {
                 return None;
             }
-            *out.get_mut(count)? = blocker;
+            if !out.try_push(blocker) {
+                return None;
+            }
             count += 1;
         }
     }
