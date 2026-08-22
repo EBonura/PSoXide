@@ -459,6 +459,9 @@ struct ActionBarStatus<'a> {
     border: Color32,
 }
 
+// LegacyGrid shortcuts remain represented while old projects stay loadable,
+// even though BSP authoring no longer exposes every legacy toolbar group.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShortcutGroup {
     Workspace,
@@ -576,6 +579,7 @@ pub struct EditorWorkspace {
     /// clipboard actions also announce themselves over the viewport.
     clipboard_notice: Option<ClipboardNotice>,
     /// Name typed into the Prefabs menu for the next "Save Selection".
+    #[allow(dead_code)] // Retained with the dormant prefab authoring helpers.
     prefab_name: String,
     /// Shared editor-library prefabs, cached outside project data. Refreshed
     /// after saves and on explicit request so panel paint never hits disk.
@@ -770,7 +774,6 @@ pub struct EditorWorkspace {
     /// Active Water subtool: select an existing volume, add cells to the
     /// selected volume, or erase cells from any volume on the active floor.
     water_tool_mode: WaterToolMode,
-    snap_to_grid: bool,
     snap_units: u16,
     show_grid: bool,
     /// TrenchBroom-style projection of the global grid over BSP faces.
@@ -1147,6 +1150,7 @@ pub enum SelectionMode {
     Vertex,
 }
 
+#[allow(dead_code)] // LegacyGrid selection UI is hidden but its data remains supported.
 impl SelectionMode {
     pub const fn label(self) -> &'static str {
         match self {
@@ -1192,12 +1196,13 @@ enum BrushEditMode {
     Clip,
 }
 
+#[allow(dead_code)] // Some labels remain useful to tests and dormant inspector affordances.
 impl BrushEditMode {
     const ALL: [Self; 5] = [Self::Move, Self::Face, Self::Edge, Self::Vertex, Self::Clip];
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Move => "Brush",
+            Self::Move => "Select",
             Self::Face => "Face",
             Self::Edge => "Edge",
             Self::Vertex => "Vertex",
@@ -1219,7 +1224,7 @@ impl BrushEditMode {
 
     const fn toolbar_hint(self) -> &'static str {
         match self {
-            Self::Move => "Whole brush",
+            Self::Move => "Select whole brushes and entities",
             Self::Face => "Select faces; drag normal to extrude",
             Self::Edge => "Drag edge",
             Self::Vertex => "Drag vertex",
@@ -1234,6 +1239,69 @@ impl BrushEditMode {
             Self::Edge => Some(SelectionMode::Edge),
             Self::Vertex => Some(SelectionMode::Vertex),
             Self::Clip => None,
+        }
+    }
+}
+
+/// The flat, BSP-first mode strip shown in the Room workspace.
+///
+/// This combines the old top-level tool and nested brush-edit mode into one
+/// user-facing state machine. `Select` owns whole brushes and entities;
+/// `Draw` is the only brush-creation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BspToolbarMode {
+    Select,
+    Draw,
+    Paint,
+    Face,
+    Edge,
+    Vertex,
+    Clip,
+}
+
+impl BspToolbarMode {
+    const ALL: [Self; 7] = [
+        Self::Select,
+        Self::Draw,
+        Self::Paint,
+        Self::Face,
+        Self::Edge,
+        Self::Vertex,
+        Self::Clip,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::Draw => "Draw",
+            Self::Paint => "Paint",
+            Self::Face => "Face",
+            Self::Edge => "Edge",
+            Self::Vertex => "Vertex",
+            Self::Clip => "Clip",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Select => icons::POINTER,
+            Self::Draw => icons::BOX,
+            Self::Paint => icons::PALETTE,
+            Self::Face => icons::SQUARE,
+            Self::Edge => icons::SCAN,
+            Self::Vertex => icons::CIRCLE_DOT,
+            Self::Clip => icons::PEN_LINE,
+        }
+    }
+
+    const fn brush_edit_mode(self) -> Option<BrushEditMode> {
+        match self {
+            Self::Select | Self::Draw => Some(BrushEditMode::Move),
+            Self::Face => Some(BrushEditMode::Face),
+            Self::Edge => Some(BrushEditMode::Edge),
+            Self::Vertex => Some(BrushEditMode::Vertex),
+            Self::Clip => Some(BrushEditMode::Clip),
+            Self::Paint => None,
         }
     }
 }
@@ -1287,6 +1355,7 @@ impl UiTransformMode {
 }
 
 /// Floor/ceiling edit granularity for Select mode.
+#[allow(dead_code)] // Persisted LegacyGrid editing state remains readable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum HorizontalEditMode {
     #[default]
@@ -1294,6 +1363,7 @@ enum HorizontalEditMode {
     Triangle,
 }
 
+#[allow(dead_code)]
 impl HorizontalEditMode {
     const fn label(self) -> &'static str {
         match self {
@@ -1311,6 +1381,7 @@ impl HorizontalEditMode {
 }
 
 /// Vertex propagation behavior for primitive height edits.
+#[allow(dead_code)] // Persisted LegacyGrid editing state remains readable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum VertexConnectivity {
     /// Move every face-corner currently sharing the same physical
@@ -1321,6 +1392,7 @@ enum VertexConnectivity {
     Detached,
 }
 
+#[allow(dead_code)]
 impl VertexConnectivity {
     const fn label(self) -> &'static str {
         match self {
@@ -2396,6 +2468,7 @@ impl ViewportCameraState {
     }
 }
 
+#[allow(dead_code)] // Retired LegacyGrid tools remain decodable for old projects and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewTool {
     /// Click to select; press-and-drag on a selected primitive
@@ -2621,6 +2694,7 @@ enum WaterToolMode {
     Select,
 }
 
+#[allow(dead_code)] // Legacy diagonal-wall authoring remains load-compatible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WallPaintShape {
     Cardinal,
@@ -2628,6 +2702,7 @@ enum WallPaintShape {
     NorthEastSouthWest,
 }
 
+#[allow(dead_code)]
 impl WallPaintShape {
     const fn label(self) -> &'static str {
         match self {
@@ -2735,6 +2810,7 @@ impl PlaceKind {
     }
 }
 
+#[allow(dead_code)]
 impl ViewTool {
     const fn label(self) -> &'static str {
         match self {
@@ -3242,7 +3318,6 @@ impl EditorWorkspace {
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
-            snap_to_grid: true,
             snap_units: 16,
             show_grid: editor_visibility.show_grid,
             show_brush_surface_grid: editor_visibility.show_brush_surface_grid,
@@ -3954,14 +4029,10 @@ impl EditorWorkspace {
             return;
         };
         let tool = match tool.trim().to_ascii_lowercase().as_str() {
-            "floor" => ViewTool::PaintFloor,
-            "ceiling" => ViewTool::PaintCeiling,
-            "wall" => ViewTool::PaintWall,
             "paint" | "material" => ViewTool::PaintMaterial,
-            "water" => ViewTool::Water,
             _ => return,
         };
-        if self.active_room_id().is_none() {
+        if !self.project.world_format().is_bsp() {
             return;
         }
         self.active_tool = tool;
@@ -3970,21 +4041,7 @@ impl EditorWorkspace {
         self.material_paint_sampling = tool == ViewTool::PaintMaterial
             && std::env::var("PSXED_DEBUG_PAINT_SAMPLE")
                 .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
-        if tool == ViewTool::Water {
-            self.water_tool_mode = match std::env::var("PSXED_DEBUG_WATER_MODE")
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "erase" => WaterToolMode::Erase,
-                "select" => WaterToolMode::Select,
-                _ => WaterToolMode::Add,
-            };
-        }
-        self.status = if tool == ViewTool::Water {
-            format!("Water: {:?}", self.water_tool_mode)
-        } else if self.material_paint_sampling {
+        self.status = if self.material_paint_sampling {
             "Eyedropper: click a surface to sample its material".to_string()
         } else if self.material_paint_blend {
             "Material Paint: Blend".to_string()

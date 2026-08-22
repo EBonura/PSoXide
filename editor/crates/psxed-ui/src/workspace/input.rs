@@ -681,6 +681,14 @@ impl EditorWorkspace {
         } else {
             consume_command_shortcut(ctx, egui::Key::D)
         };
+        let bsp_brush_shortcuts = !focus_taken
+            && self.active_workspace == WorkspaceView::Room
+            && self.project.world_format().is_bsp();
+        let shift_down = ctx.input(|input| input.modifiers.shift);
+        let consume_hollow =
+            bsp_brush_shortcuts && shift_down && consume_command_shift_shortcut(ctx, egui::Key::K);
+        let consume_subtract =
+            bsp_brush_shortcuts && !shift_down && consume_command_shortcut(ctx, egui::Key::K);
         if consume_save {
             self.save_project_from_ui();
         }
@@ -715,6 +723,12 @@ impl EditorWorkspace {
         }
         if consume_duplicate {
             self.duplicate_current_selection();
+        }
+        if consume_hollow {
+            self.csg_hollow_selected();
+        }
+        if consume_subtract {
+            self.csg_subtract_selected();
         }
         if consume_ui_copy {
             self.copy_selected_ui_node();
@@ -787,23 +801,21 @@ impl EditorWorkspace {
                     WorkspaceView::Ui | WorkspaceView::Material => {}
                 }
             }
-            // 1-4 pick the brush edit mode (Move / Resize / Edge / Vertex),
-            // matching the toolbar button order. Active for the Brush tool and
-            // for a brush selected through Select, same as the toolbar.
-            if self.active_workspace == WorkspaceView::Room
-                && (self.active_tool == ViewTool::Brush
-                    || (self.active_tool == ViewTool::Select && self.selected_brush.is_some()))
+            // Bare 1-7 select the same flat BSP modes as the visible strip.
+            if self.active_workspace == WorkspaceView::Room && self.project.world_format().is_bsp()
             {
-                const MODE_KEYS: [egui::Key; 5] = [
+                const MODE_KEYS: [egui::Key; 7] = [
                     egui::Key::Num1,
                     egui::Key::Num2,
                     egui::Key::Num3,
                     egui::Key::Num4,
                     egui::Key::Num5,
+                    egui::Key::Num6,
+                    egui::Key::Num7,
                 ];
-                for (key, mode) in MODE_KEYS.into_iter().zip(BrushEditMode::ALL) {
+                for (key, mode) in MODE_KEYS.into_iter().zip(BspToolbarMode::ALL) {
                     if ctx.input_mut(|i| i.key_pressed(key)) {
-                        self.set_brush_edit_mode(mode);
+                        self.set_bsp_toolbar_mode(mode);
                     }
                 }
             }
@@ -882,30 +894,14 @@ impl EditorWorkspace {
         if self.active_workspace != WorkspaceView::Room {
             return;
         }
+        let bsp_authoring = self.project.world_format().is_bsp();
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
-            self.cycle_tool_group(reverse);
+            if bsp_authoring {
+                self.cycle_tool_group(reverse);
+            }
         }
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num3) {
             self.cycle_transform_group(reverse);
-        }
-        // BSP scenes: the Selection slot cycles the brush edit mode (the
-        // grid Face/Edge/Vertex selection modes address nothing there), and
-        // the grid-only Surface / Vertex Edits groups go dormant.
-        let bsp_select = self.active_room_id().is_none() && self.bsp_authoring_root().is_some();
-        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num4) {
-            if bsp_select {
-                self.cycle_brush_edit_mode_group(reverse);
-            } else {
-                self.cycle_selection_group(reverse);
-            }
-        }
-        if !bsp_select {
-            if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num5) {
-                self.cycle_horizontal_edit_group(reverse);
-            }
-            if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num6) {
-                self.cycle_vertex_connectivity_group(reverse);
-            }
         }
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num7) {
             self.cycle_visibility_group(reverse);
@@ -931,55 +927,14 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn cycle_tool_group(&mut self, reverse: bool) {
-        const ALL_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
-            (ViewTool::Select, None),
-            (ViewTool::PaintMaterial, None),
-            (ViewTool::Water, None),
-            (ViewTool::PaintFloor, None),
-            (ViewTool::PaintWall, None),
-            (ViewTool::PaintCeiling, None),
-            (ViewTool::Erase, None),
-            (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
-            (ViewTool::Place, Some(PlaceKind::SpawnMarker)),
-            (ViewTool::Place, Some(PlaceKind::ModelInstance)),
-            (ViewTool::Place, Some(PlaceKind::Character)),
-            (ViewTool::Place, Some(PlaceKind::ImageProp)),
-            (ViewTool::Place, Some(PlaceKind::BoxProp)),
-            (ViewTool::Place, Some(PlaceKind::CylinderProp)),
-            (ViewTool::Place, Some(PlaceKind::PointLightMarker)),
-            (ViewTool::Place, Some(PlaceKind::ParticleEmitter)),
-            (ViewTool::Place, Some(PlaceKind::Portal)),
-        ];
-        const BSP_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
-            (ViewTool::Select, None),
-            // Same cycle slot as the grid project's Paint, but it addresses
-            // BSP brush faces instead of grid cells (`bsp_face_paint_active`).
-            (ViewTool::PaintMaterial, None),
-            (ViewTool::Brush, None),
-            (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
-            (ViewTool::Place, Some(PlaceKind::SpawnMarker)),
-            (ViewTool::Place, Some(PlaceKind::ModelInstance)),
-            (ViewTool::Place, Some(PlaceKind::Character)),
-            (ViewTool::Place, Some(PlaceKind::ImageProp)),
-            (ViewTool::Place, Some(PlaceKind::BoxProp)),
-            (ViewTool::Place, Some(PlaceKind::CylinderProp)),
-            (ViewTool::Place, Some(PlaceKind::ArchProp)),
-            (ViewTool::Place, Some(PlaceKind::PointLightMarker)),
-            (ViewTool::Place, Some(PlaceKind::ParticleEmitter)),
-            (ViewTool::Place, Some(PlaceKind::Logic)),
-        ];
-        const BRUSH_ONLY: &[(ViewTool, Option<PlaceKind>)] =
-            &[(ViewTool::Select, None), (ViewTool::Brush, None)];
-        let values = if self.active_room_id().is_some() {
-            ALL_VALUES
-        } else if self.bsp_authoring_root().is_some() {
-            BSP_VALUES
-        } else {
-            BRUSH_ONLY
-        };
-        let current = self.active_tool_cycle_value();
-        let next = cycle_value(values, current, reverse);
-        self.set_active_tool_cycle_value(next);
+        if !self.project.world_format().is_bsp() {
+            return;
+        }
+        let current = self
+            .active_bsp_toolbar_mode()
+            .unwrap_or(BspToolbarMode::Select);
+        let next = cycle_value(&BspToolbarMode::ALL, current, reverse);
+        self.set_bsp_toolbar_mode(next);
     }
 
     pub(crate) fn active_tool_cycle_value(&self) -> (ViewTool, Option<PlaceKind>) {
@@ -1077,6 +1032,7 @@ impl EditorWorkspace {
         self.mark_shortcut_group_changed(ShortcutGroup::Transform);
     }
 
+    #[allow(dead_code)] // LegacyGrid shortcut retained while its toolbar is retired.
     pub(crate) fn cycle_selection_group(&mut self, reverse: bool) {
         const VALUES: &[SelectionMode] = &[
             SelectionMode::Face,
@@ -1086,6 +1042,7 @@ impl EditorWorkspace {
         self.set_selection_mode(cycle_value(VALUES, self.selection_mode, reverse));
     }
 
+    #[allow(dead_code)] // Superseded by the flat BSP mode strip.
     pub(crate) fn cycle_brush_edit_mode_group(&mut self, reverse: bool) {
         self.set_brush_edit_mode(cycle_value(
             &BrushEditMode::ALL,
@@ -1095,12 +1052,14 @@ impl EditorWorkspace {
         self.mark_shortcut_group_changed(ShortcutGroup::Selection);
     }
 
+    #[allow(dead_code)] // LegacyGrid shortcut retained while its toolbar is retired.
     pub(crate) fn cycle_horizontal_edit_group(&mut self, reverse: bool) {
         const VALUES: &[HorizontalEditMode] =
             &[HorizontalEditMode::Quad, HorizontalEditMode::Triangle];
         self.set_horizontal_edit_mode(cycle_value(VALUES, self.horizontal_edit_mode, reverse));
     }
 
+    #[allow(dead_code)] // LegacyGrid shortcut retained while its toolbar is retired.
     pub(crate) fn cycle_vertex_connectivity_group(&mut self, reverse: bool) {
         const VALUES: &[VertexConnectivity] =
             &[VertexConnectivity::Welded, VertexConnectivity::Detached];
@@ -1110,8 +1069,6 @@ impl EditorWorkspace {
     pub(crate) fn cycle_visibility_group(&mut self, reverse: bool) {
         let all_visible = !self.editor_visibility_has_hidden_items();
         let show_all = reverse || !all_visible;
-        self.show_grid = show_all;
-        self.show_brush_surface_grid = show_all;
         self.show_portals = show_all;
         self.show_lights = show_all;
         self.preview_fog = show_all;
@@ -1216,6 +1173,7 @@ impl EditorWorkspace {
         self.mark_shortcut_group_changed(ShortcutGroup::Selection);
     }
 
+    #[allow(dead_code)] // LegacyGrid command retained for project compatibility tests.
     pub(crate) fn set_horizontal_edit_mode(&mut self, mode: HorizontalEditMode) {
         if self.horizontal_edit_mode == mode {
             return;
@@ -1242,6 +1200,7 @@ impl EditorWorkspace {
         self.mark_shortcut_group_changed(ShortcutGroup::Surface);
     }
 
+    #[allow(dead_code)] // LegacyGrid command retained for project compatibility tests.
     pub(crate) fn set_vertex_connectivity(&mut self, mode: VertexConnectivity) {
         if self.vertex_connectivity == mode {
             return;
@@ -1251,6 +1210,7 @@ impl EditorWorkspace {
         self.mark_shortcut_group_changed(ShortcutGroup::Vertex);
     }
 
+    #[allow(dead_code)] // LegacyGrid command retained for project compatibility tests.
     pub(crate) fn selection_as_horizontal_mode(
         &self,
         selection: Selection,
@@ -1969,6 +1929,48 @@ impl EditorWorkspace {
                 ui.close_menu();
             }
         });
+        if self.active_workspace == WorkspaceView::Room && self.project.world_format().is_bsp() {
+            ui.menu_button("Brush", |ui| {
+                let can_extrude = self.brush_edit_mode == BrushEditMode::Face
+                    && self.selected_brush.is_some()
+                    && self.selected_brush_face.is_some();
+                if ui
+                    .add_enabled(
+                        can_extrude,
+                        egui::Button::new(menu_label("Extrude Face", "E")),
+                    )
+                    .on_hover_text("Extrude the selected face by one grid step")
+                    .clicked()
+                {
+                    self.extrude_selected_face_one_step();
+                    ui.close_menu();
+                }
+                ui.separator();
+                let has_brush = !self.selected_brush_set().is_empty();
+                if ui
+                    .add_enabled(
+                        has_brush,
+                        egui::Button::new(menu_label("Hollow", &command_shift_shortcut_text("K"))),
+                    )
+                    .on_hover_text("Replace each selected brush with grid-thick walls")
+                    .clicked()
+                {
+                    self.csg_hollow_selected();
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        has_brush,
+                        egui::Button::new(menu_label("Subtract", &command_shortcut_text("K"))),
+                    )
+                    .on_hover_text("Carve the selected brushes from touching neighbours")
+                    .clicked()
+                {
+                    self.csg_subtract_selected();
+                    ui.close_menu();
+                }
+            });
+        }
         ui.menu_button("View", |ui| {
             if ui
                 .checkbox(&mut self.left_dock_open, "World and files")
@@ -2006,20 +2008,6 @@ impl EditorWorkspace {
             }
         });
         ui.menu_button("Tools", |ui| {
-            if ui
-                .button("Remove Duplicate Walls")
-                .on_hover_text(
-                    "Delete every wall segment that is byte-identical to another on the same \
-                     edge. Two of them sit in one plane, so the second can never be seen and \
-                     still costs a full room surface to draw. Undoable.",
-                )
-                .clicked()
-            {
-                self.remove_duplicate_walls();
-                ui.close_menu();
-            }
-            ui.menu_button("Prefabs", |ui| self.draw_prefab_menu(ui));
-            ui.separator();
             if ui.button("Build Project").clicked() {
                 self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
                 ui.close_menu();
