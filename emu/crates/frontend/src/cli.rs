@@ -519,6 +519,9 @@ pub struct DumpEditorUiArgs {
     /// Top-level editor workspace to render.
     #[arg(long, value_enum, default_value = "3d")]
     pub view: EditorViewArg,
+    /// UI scene name or zero-based index to show in the 2D workspace.
+    #[arg(long, value_name = "NAME_OR_INDEX")]
+    pub ui_scene: Option<String>,
     /// Resource name or numeric id to focus in Animation Studio or Material Lab.
     #[arg(long, value_name = "NAME_OR_ID")]
     pub resource: Option<String>,
@@ -534,6 +537,15 @@ pub struct DumpEditorUiArgs {
     /// Inject the `.` frame-selected shortcut before the captured frame.
     #[arg(long)]
     pub frame_selected: bool,
+    /// Deterministic 60 Hz UI animation frame to capture.
+    #[arg(long, default_value_t = 1)]
+    pub ui_frame: u16,
+    /// Number of deterministic UI animation frames to capture.
+    #[arg(long, default_value_t = 1)]
+    pub ui_frame_count: u16,
+    /// 60 Hz animation-frame distance between sequence images.
+    #[arg(long, default_value_t = 1)]
+    pub ui_frame_step: u16,
     /// Render the embedded Play viewport with the named Room Topology debug
     /// view. Accepted values: rooms, cells, portals, streaming.
     #[arg(long, value_name = "VIEW")]
@@ -2651,6 +2663,12 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
     if args.width > 8192 || args.height > 8192 {
         return Err("headless editor dimensions must not exceed 8192 px".to_string());
     }
+    if args.ui_frame_count == 0 {
+        return Err("--ui-frame-count must be at least 1".to_string());
+    }
+    if args.ui_frame_step == 0 {
+        return Err("--ui-frame-step must be at least 1".to_string());
+    }
 
     let (project_root, _) = resolve_project_arg(&args.project);
     let mut editor = EditorWorkspace::open_directory(&project_root)
@@ -2659,6 +2677,15 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
     editor.show_workspace(workspace_view);
     if args.view.is_room_orthographic() {
         editor.show_room_orthographic();
+    }
+
+    if let Some(selector) = args.ui_scene.as_deref() {
+        if !matches!(args.view, EditorViewArg::TwoD) {
+            return Err("--ui-scene requires --view 2d".to_string());
+        }
+        if !editor.focus_ui_scene(selector) {
+            return Err(format!("editor UI scene {selector:?} was not found"));
+        }
     }
 
     if let Some(selector) = args.resource.as_deref() {
@@ -2787,35 +2814,62 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
     // Prime one complete frame before injecting input. This mirrors the native
     // app's first layout pass and ensures fonts/resource textures and widget
     // focus state all exist before the captured interaction frame.
+    let first_capture_time = f64::from(args.ui_frame) / 60.0;
+    let prime_time = (first_capture_time - 1.0 / 60.0).max(0.0);
     let first = ctx.run(
-        headless_editor_input(args.width, args.height, 0.0, Vec::new()),
+        headless_editor_input(args.width, args.height, prime_time, Vec::new()),
         |ctx| editor.draw(ctx, viewport.clone(), play_status),
     );
     let mut textures_delta = first.textures_delta;
-
-    let captured = ctx.run(
-        headless_editor_input(args.width, args.height, 1.0 / 60.0, Vec::new()),
-        |ctx| editor.draw(ctx, viewport.clone(), play_status),
-    );
-    textures_delta.append(captured.textures_delta);
-    let paint_jobs = ctx.tessellate(captured.shapes, captured.pixels_per_point);
-
-    render_headless_editor_png(
-        &paint_jobs,
-        textures_delta,
-        args.width,
-        args.height,
-        captured.pixels_per_point,
-        &args.out,
-    )?;
+    let mut headless_renderer = None;
+    for capture_index in 0..args.ui_frame_count {
+        let ui_frame = args
+            .ui_frame
+            .wrapping_add(capture_index.wrapping_mul(args.ui_frame_step));
+        let capture_time = f64::from(ui_frame) / 60.0;
+        let captured = ctx.run(
+            headless_editor_input(args.width, args.height, capture_time, Vec::new()),
+            |ctx| editor.draw(ctx, viewport.clone(), play_status),
+        );
+        textures_delta.append(captured.textures_delta);
+        let paint_jobs = ctx.tessellate(captured.shapes, captured.pixels_per_point);
+        let renderer = match headless_renderer.as_mut() {
+            Some(renderer) => renderer,
+            None => headless_renderer.insert(HeadlessEditorPngRenderer::new(
+                args.width,
+                args.height,
+                captured.pixels_per_point,
+            )?),
+        };
+        let out = headless_editor_sequence_out(&args.out, capture_index, args.ui_frame_count);
+        renderer.render(&paint_jobs, std::mem::take(&mut textures_delta), &out)?;
+    }
     println!(
-        "headless editor ui: view={:?} resource={} status={:?} out={}",
+        "headless editor ui: view={:?} resource={} status={:?} frames={} out={}",
         workspace_view,
         args.resource.as_deref().unwrap_or("(none)"),
         editor.status_text(),
+        args.ui_frame_count,
         args.out.display()
     );
     Ok(())
+}
+
+#[cfg(feature = "editor")]
+fn headless_editor_sequence_out(out: &Path, index: u16, count: u16) -> PathBuf {
+    if count == 1 {
+        return out.to_path_buf();
+    }
+    let stem = out
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("frame");
+    let file_name = format!("{stem}_{index:03}.png");
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        parent.join(file_name)
+    } else {
+        PathBuf::from(file_name)
+    }
 }
 
 #[cfg(feature = "editor")]
@@ -2931,134 +2985,176 @@ fn headless_editor_input(
 }
 
 #[cfg(feature = "editor")]
-fn render_headless_editor_png(
-    paint_jobs: &[egui::ClippedPrimitive],
-    textures_delta: egui::TexturesDelta,
+struct HeadlessEditorPngRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    renderer: egui_wgpu::Renderer,
+    target: wgpu::Texture,
+    view: wgpu::TextureView,
+    readback: wgpu::Buffer,
+    screen: egui_wgpu::ScreenDescriptor,
     width: u32,
     height: u32,
-    pixels_per_point: f32,
-    out: &Path,
-) -> Result<(), String> {
-    let (device, queue) = headless_wgpu_device()?;
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("psoxide-headless-editor-ui"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
-    for (id, delta) in &textures_delta.set {
-        renderer.update_texture(&device, &queue, *id, delta);
-    }
+    unpadded_bytes_per_row: u32,
+    padded_bytes_per_row: u32,
+}
 
-    let screen = egui_wgpu::ScreenDescriptor {
-        size_in_pixels: [width, height],
-        pixels_per_point,
-    };
-    let unpadded_bytes_per_row = width * 4;
-    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("psoxide-headless-editor-ui-readback"),
-        size: (padded_bytes_per_row * height) as wgpu::BufferAddress,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("psoxide-headless-editor-ui-encoder"),
-    });
-    renderer.update_buffers(&device, &queue, &mut encoder, paint_jobs, &screen);
-    {
-        let mut pass = encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("psoxide-headless-editor-ui-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.04,
-                            g: 0.04,
-                            b: 0.06,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            })
-            .forget_lifetime();
-        renderer.render(&mut pass, paint_jobs, &screen);
-    }
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: &target,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: Some(height),
+#[cfg(feature = "editor")]
+impl HeadlessEditorPngRenderer {
+    fn new(width: u32, height: u32, pixels_per_point: f32) -> Result<Self, String> {
+        let (device, queue) = headless_wgpu_device()?;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("psoxide-headless-editor-ui"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
             },
-        },
-        wgpu::Extent3d {
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [width, height],
+            pixels_per_point,
+        };
+        let unpadded_bytes_per_row = width * 4;
+        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("psoxide-headless-editor-ui-readback"),
+            size: (padded_bytes_per_row * height) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Ok(Self {
+            device,
+            queue,
+            renderer,
+            target,
+            view,
+            readback,
+            screen,
             width,
             height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(encoder.finish()));
-
-    let slice = readback.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    device.poll(wgpu::Maintain::Wait);
-    receiver
-        .recv()
-        .map_err(|_| "headless editor readback callback dropped".to_string())?
-        .map_err(|error| format!("headless editor readback: {error:?}"))?;
-    let mapped = slice.get_mapped_range();
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for row in 0..height {
-        let start = (row * padded_bytes_per_row) as usize;
-        let end = start + unpadded_bytes_per_row as usize;
-        rgba.extend_from_slice(&mapped[start..end]);
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+        })
     }
-    drop(mapped);
-    readback.unmap();
 
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    fn render(
+        &mut self,
+        paint_jobs: &[egui::ClippedPrimitive],
+        textures_delta: egui::TexturesDelta,
+        out: &Path,
+    ) -> Result<(), String> {
+        for (id, delta) in &textures_delta.set {
+            self.renderer
+                .update_texture(&self.device, &self.queue, *id, delta);
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("psoxide-headless-editor-ui-encoder"),
+            });
+        self.renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            paint_jobs,
+            &self.screen,
+        );
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("psoxide-headless-editor-ui-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.04,
+                                g: 0.04,
+                                b: 0.06,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                })
+                .forget_lifetime();
+            self.renderer.render(&mut pass, paint_jobs, &self.screen);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = self.readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .map_err(|_| "headless editor readback callback dropped".to_string())?
+            .map_err(|error| format!("headless editor readback: {error:?}"))?;
+        let mapped = slice.get_mapped_range();
+        let mut rgba = Vec::with_capacity((self.width * self.height * 4) as usize);
+        for row in 0..self.height {
+            let start = (row * self.padded_bytes_per_row) as usize;
+            let end = start + self.unpadded_bytes_per_row as usize;
+            rgba.extend_from_slice(&mapped[start..end]);
+        }
+        drop(mapped);
+        self.readback.unmap();
+        for id in &textures_delta.free {
+            self.renderer.free_texture(id);
+        }
+
+        if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        }
+        image::save_buffer_with_format(
+            out,
+            &rgba,
+            self.width,
+            self.height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .map_err(|error| format!("write {}: {error}", out.display()))?;
+        Ok(())
     }
-    image::save_buffer_with_format(
-        out,
-        &rgba,
-        width,
-        height,
-        image::ColorType::Rgba8,
-        image::ImageFormat::Png,
-    )
-    .map_err(|error| format!("write {}: {error}", out.display()))?;
-    Ok(())
 }
 
 #[cfg(feature = "editor")]
@@ -3583,6 +3679,17 @@ mod press_script_tests {
             let sampled = presentation.uv.min + normalized.to_vec2() * presentation.uv.size();
             assert_eq!(sampled, normalized);
         }
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn headless_editor_ui_sequence_uses_numbered_png_siblings() {
+        let out = PathBuf::from("/tmp/cortex/capture.png");
+        assert_eq!(headless_editor_sequence_out(&out, 0, 1), out);
+        assert_eq!(
+            headless_editor_sequence_out(&out, 7, 90),
+            PathBuf::from("/tmp/cortex/capture_007.png")
+        );
     }
 
     #[cfg(feature = "editor")]

@@ -1581,6 +1581,7 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 text_color: [236, 240, 248],
                 text_gradient: None,
                 transparent: false,
+                focus_chrome: false,
                 shape: None,
                 action: UiAction::Back,
                 sfx: UiSfxBindings::default(),

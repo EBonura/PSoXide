@@ -1348,4 +1348,21 @@ mod tests {
         assert_eq!(tall[2].1, 255);
         assert_eq!(tall[3].1, 255);
     }
+
+    #[test]
+    fn zen_dots_display_is_native_size_and_fits_the_ps1_upload_budget() {
+        let font = &crate::fonts::ZEN_DOTS_DISPLAY;
+        assert_eq!(font.first_char, b'A' as u16);
+        assert_eq!(font.glyph_count, 26);
+        assert_eq!(font.glyph_h, 27);
+        assert_eq!(font.text_width("CORTEX"), 162);
+
+        let (_, atlas_w, atlas_h, halfwords_per_row) = font_atlas_dims(font);
+        assert!(atlas_w <= FontAtlas::MAX_ATLAS_W_TEXELS);
+        assert!(atlas_h <= u8::MAX as u16);
+        assert!(
+            usize::from(halfwords_per_row) * usize::from(atlas_h)
+                <= FontAtlas::MAX_PACK_HALFWORDS
+        );
+    }
 }

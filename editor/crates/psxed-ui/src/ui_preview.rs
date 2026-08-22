@@ -255,6 +255,7 @@ pub(crate) fn draw_ui_scene_preview(
                             })
                         }),
                         *shape,
+                        None,
                     );
                 }
             }
@@ -426,6 +427,7 @@ pub(crate) fn draw_ui_scene_preview(
                 text_color,
                 text_gradient,
                 transparent,
+                focus_chrome,
                 shape,
                 ..
             } => {
@@ -433,23 +435,43 @@ pub(crate) fn draw_ui_scene_preview(
                 else {
                     continue;
                 };
-                draw_ui_preview_shape(
-                    painter,
-                    preview,
-                    (!*transparent).then(|| ui_preview_paint(*color, *background_gradient)),
-                    shape.and_then(|style| {
-                        (style.border_width != 0).then(|| {
-                            (
-                                ui_preview_paint(style.border_color, style.border_gradient),
-                                style.border_width,
-                            )
-                        })
-                    }),
-                    *shape,
-                );
+                let draw_chrome = !*focus_chrome || scene.default_focus == Some(node.id);
+                if draw_chrome {
+                    let fill = ui_preview_paint(*color, *background_gradient);
+                    let fill = if *focus_chrome {
+                        ui_preview_focus_chrome_sweep(fill, frame, scene.focus_style.period)
+                    } else {
+                        fill
+                    };
+                    draw_ui_preview_shape(
+                        painter,
+                        preview,
+                        (!*transparent).then_some(fill),
+                        shape.and_then(|style| {
+                            (style.border_width != 0).then(|| {
+                                (
+                                    ui_preview_paint(style.border_color, style.border_gradient),
+                                    style.border_width,
+                                )
+                            })
+                        }),
+                        *shape,
+                        (*focus_chrome).then_some(UiPreviewFocusSweep {
+                            frame,
+                            period: scene.focus_style.period,
+                            color: scene.focus_style.color_a,
+                        }),
+                    );
+                }
                 let base_scale = preview.transform.y_scale().clamp(1.0, 8.0);
                 let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
                 let texture = ui_preview_font_texture(font_textures, *font);
+                let text_paint = ui_preview_paint(*text_color, *text_gradient);
+                let text_paint = if *focus_chrome && !draw_chrome {
+                    ui_preview_paint_dimmed(text_paint)
+                } else {
+                    text_paint
+                };
                 draw_ui_preview_text(
                     painter,
                     texture,
@@ -462,7 +484,7 @@ pub(crate) fn draw_ui_scene_preview(
                     scale,
                     *letter_spacing,
                     base_scale,
-                    ui_preview_paint(*text_color, *text_gradient),
+                    text_paint,
                 );
             }
             UiNodeKind::Slider {
@@ -589,6 +611,7 @@ pub(crate) fn draw_ui_preview_shape(
     fill: Option<UiPreviewPaint>,
     border: Option<(UiPreviewPaint, u8)>,
     style: Option<UiShapeStyle>,
+    sweep: Option<UiPreviewFocusSweep>,
 ) {
     let style = style.unwrap_or_default();
     let fill = fill.map(|paint| {
@@ -605,6 +628,9 @@ pub(crate) fn draw_ui_preview_shape(
     let outer = ui_preview_shape_points(preview.width, preview.height, cut, corners, 0.0);
     if let Some(fill) = fill {
         draw_ui_preview_convex_paint(painter, preview, &outer, fill);
+    }
+    if let Some(sweep) = sweep {
+        draw_ui_preview_focus_sweep(painter, preview, style, sweep);
     }
 
     let Some((paint, authored_width)) = border else {
@@ -645,6 +671,54 @@ pub(crate) fn draw_ui_preview_shape(
         mesh.add_triangle(base + 1, base + 2, base + 3);
     }
     painter.add(egui::Shape::mesh(mesh));
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct UiPreviewFocusSweep {
+    frame: u16,
+    period: u16,
+    color: [u8; 3],
+}
+
+fn draw_ui_preview_focus_sweep(
+    painter: &egui::Painter,
+    preview: UiPreviewNode,
+    style: UiShapeStyle,
+    sweep: UiPreviewFocusSweep,
+) {
+    let safe_inset = f32::from(style.corner_cut.max(style.border_width).max(1));
+    let available = preview.width - safe_inset * 2.0;
+    if available < 3.0 || preview.height < 3.0 {
+        return;
+    }
+    let band_width = (preview.width / 5.0).clamp(12.0, 28.0).min(available);
+    let phase = if sweep.period == 0 {
+        255
+    } else {
+        let position = u32::from(sweep.frame % sweep.period);
+        preview_triangle_wave_u8(((position * 512) / u32::from(sweep.period)) as u16)
+    };
+    let x = safe_inset + (available - band_width) * (f32::from(phase) / 255.0);
+    let y = f32::from(style.border_width.max(1)).min(preview.height * 0.5);
+    let height = preview.height - y * 2.0;
+    let left_width = (band_width * 0.5).max(1.0);
+    let right_width = (band_width - left_width).max(1.0);
+    let edge = Color32::from_rgba_unmultiplied(sweep.color[0], sweep.color[1], sweep.color[2], 0);
+    let peak = Color32::from_rgba_unmultiplied(sweep.color[0], sweep.color[1], sweep.color[2], 112);
+    draw_ui_preview_quad_mesh(
+        painter,
+        egui::TextureId::default(),
+        preview.subrect(x, y, left_width, height),
+        Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
+        [edge, peak, edge, peak],
+    );
+    draw_ui_preview_quad_mesh(
+        painter,
+        egui::TextureId::default(),
+        preview.subrect(x + left_width, y, right_width, height),
+        Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
+        [peak, edge, peak, edge],
+    );
 }
 
 fn ui_preview_shape_points(
@@ -750,6 +824,66 @@ fn ui_preview_paint_with_alpha(paint: UiPreviewPaint, alpha: u8) -> UiPreviewPai
             to: with_alpha(to),
             direction,
         },
+    }
+}
+
+fn ui_preview_paint_dimmed(paint: UiPreviewPaint) -> UiPreviewPaint {
+    let dim = |color: Color32| {
+        Color32::from_rgba_unmultiplied(
+            ((u16::from(color.r()) * 9) / 16) as u8,
+            ((u16::from(color.g()) * 9) / 16) as u8,
+            ((u16::from(color.b()) * 9) / 16) as u8,
+            color.a(),
+        )
+    };
+    match paint {
+        UiPreviewPaint::Solid(color) => UiPreviewPaint::Solid(dim(color)),
+        UiPreviewPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => UiPreviewPaint::Gradient {
+            from: dim(from),
+            to: dim(to),
+            direction,
+        },
+    }
+}
+
+fn ui_preview_focus_chrome_sweep(paint: UiPreviewPaint, frame: u16, period: u16) -> UiPreviewPaint {
+    let brighten = |color: Color32| {
+        Color32::from_rgba_unmultiplied(
+            color.r().saturating_add(34),
+            color.g().saturating_add(34),
+            color.b().saturating_add(34),
+            color.a(),
+        )
+    };
+    let (dark, bright) = match paint {
+        UiPreviewPaint::Solid(color) => (color, brighten(color)),
+        UiPreviewPaint::Gradient { from, to, .. } => (from, to),
+    };
+    let phase = if period == 0 {
+        255
+    } else {
+        let position = u32::from(frame % period);
+        preview_triangle_wave_u8(((position * 512) / u32::from(period)) as u16)
+    };
+    let mix = |a: Color32, b: Color32| {
+        let phase = u16::from(phase);
+        let channel =
+            |a: u8, b: u8| ((u16::from(a) * phase + u16::from(b) * (255 - phase)) / 255) as u8;
+        Color32::from_rgba_unmultiplied(
+            channel(a.r(), b.r()),
+            channel(a.g(), b.g()),
+            channel(a.b(), b.b()),
+            channel(a.a(), b.a()),
+        )
+    };
+    UiPreviewPaint::Gradient {
+        from: mix(dark, bright),
+        to: mix(bright, dark),
+        direction: UiGradientDirection::Horizontal,
     }
 }
 
@@ -1075,6 +1209,7 @@ pub(crate) fn ui_preview_font_source(font: UiFontChoice) -> &'static psx_font::B
         UiFontChoice::Syncopate => &psx_font::fonts::SYNCOPATE,
         UiFontChoice::ShareTechMono => &psx_font::fonts::SHARE_TECH_MONO,
         UiFontChoice::Jura => &psx_font::fonts::JURA,
+        UiFontChoice::ZenDotsDisplay => &psx_font::fonts::ZEN_DOTS_DISPLAY,
     }
 }
 
