@@ -80,7 +80,7 @@ def audit_deployment(
             context,
         )
 
-    for match in re.finditer(r"uses:\s+(actions/[^@\s]+)@([^\s#]+)", workflow):
+    for match in re.finditer(r"uses:\s+([^./\s][^@\s]+)@([^\s#]+)", workflow):
         action, revision = match.groups()
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
             raise AuditError(
