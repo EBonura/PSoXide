@@ -1,5 +1,12 @@
 use super::*;
 
+#[test]
+fn ui_font_runtime_indices_follow_the_editor_font_table() {
+    for (index, font) in UiFontChoice::ALL.iter().copied().enumerate() {
+        assert_eq!(font.runtime_index(), index as u8, "{}", font.label());
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct UiFontScaleFixture {
     #[serde(
