@@ -212,7 +212,7 @@ fn clip_floor_lift(model_bytes: &[u8], clip_bytes: &[u8]) -> Option<i32> {
             let Some(part) = model.part(part_index) else {
                 continue;
             };
-            let Some(pose) = clip.pose(frame, part.joint_index() as u16) else {
+            let Some(pose) = clip.pose(frame, part.joint_index()) else {
                 continue;
             };
             for v in part.first_vertex()..part.first_vertex() + part.vertex_count() {

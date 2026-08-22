@@ -1176,7 +1176,7 @@ impl Renderer {
                     &face_vertices[..source_count],
                     &mut clip_scratch,
                 );
-                if count < 3 || count > BATCH_MAX_VERTICES {
+                if !(3..=BATCH_MAX_VERTICES).contains(&count) {
                     continue;
                 }
                 count

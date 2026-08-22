@@ -674,6 +674,7 @@ const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT]
 ];
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod collision_tests {
     use super::*;
 

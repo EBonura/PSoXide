@@ -1438,7 +1438,7 @@ pub(crate) fn draw_ui_shape_style_editor(
         changed |= draw_ui_gradient_editor(
             ui,
             "Border Gradient",
-            &mut style.border_color,
+            &style.border_color,
             &mut style.border_gradient,
         );
     }

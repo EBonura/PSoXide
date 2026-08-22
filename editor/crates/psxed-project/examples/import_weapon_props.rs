@@ -47,10 +47,7 @@ fn right_hand_joint(project: &ProjectDocument, model_id: ResourceId) -> Option<u
         .and_then(|joint| u16::try_from(joint).ok())
 }
 
-fn sword_model<'a>(
-    project: &'a ProjectDocument,
-    id: ResourceId,
-) -> &'a psxed_project::ModelResource {
+fn sword_model(project: &ProjectDocument, id: ResourceId) -> &psxed_project::ModelResource {
     match &project.resource(id).expect("sword model resource").data {
         ResourceData::Model(model) => model,
         other => panic!("expected Model resource, got {other:?}"),
@@ -216,7 +213,7 @@ fn main() {
             let ResourceData::Model(m) = &mut project.resource_mut(id).unwrap().data else {
                 unreachable!()
             };
-            std::mem::replace(&mut m.texture_path, Some(target.to_string()))
+            m.texture_path.replace(target.to_string())
         };
         if let Some(old) = old {
             if old != target {

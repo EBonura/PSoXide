@@ -1209,7 +1209,7 @@ mod tests {
     fn face_uv_and_baked_light_reach_vertex_records() {
         let mut brush = Brush::cuboid([0, 0, 0], [128, 64, 256]);
         brush.faces[5].uv.offset_texels = [17, -9];
-        let surfaces = compile_csg_surfaces(&[brush.clone()]);
+        let surfaces = compile_csg_surfaces(std::slice::from_ref(&brush));
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, &[brush]);
@@ -1280,7 +1280,7 @@ mod tests {
     #[test]
     fn packed_face_flags_preserve_authored_outward_winding() {
         let brush = Brush::cuboid([0, 0, 0], [128, 64, 256]);
-        let surfaces = compile_csg_surfaces(&[brush.clone()]);
+        let surfaces = compile_csg_surfaces(std::slice::from_ref(&brush));
         let mut bsp = build_surface_bsp(&surfaces);
         let portals = portalize_surface_bsp(&bsp);
         classify_bsp_leaves(&mut bsp, &portals, &[brush]);

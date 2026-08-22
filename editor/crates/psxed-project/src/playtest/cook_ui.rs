@@ -793,11 +793,7 @@ fn cook_ui_bar_texture_asset(
         }
     };
     let expected_width = rect.width.max(1);
-    let expected_height = rect
-        .height
-        .max(1)
-        .checked_mul(u16::from(frame_count))
-        .unwrap_or(u16::MAX);
+    let expected_height = rect.height.max(1).saturating_mul(u16::from(frame_count));
     if texture.depth() != TextureDepth::Bit4
         || texture.clut_entries() != 16
         || texture.width() != expected_width

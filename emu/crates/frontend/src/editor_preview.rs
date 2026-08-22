@@ -1349,7 +1349,6 @@ fn walk_image_props(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 use psxed_project::brush::BRUSH_UV_UNITS_PER_TEXEL;
 
 /// Flat fallback tint for unmaterialed brush faces: neutral greys varied
@@ -1482,7 +1481,8 @@ fn rebuild_csg_surfaces(
 ) -> Vec<PreviewCsgSurface> {
     use psxed_project::brush::BRUSH_EDIT_EXTENT_LIMIT;
     let scene = project.active_scene();
-    let mut groups: Vec<(Option<NodeId>, Vec<(usize, psxed_project::brush::Brush)>)> = Vec::new();
+    type PreviewBrushGroup = (Option<NodeId>, Vec<(usize, psxed_project::brush::Brush)>);
+    let mut groups: Vec<PreviewBrushGroup> = Vec::new();
     for (source_index, brush) in scene.brushes.iter().enumerate() {
         if brush_group_hidden(scene, hidden_scene_nodes, brush) {
             continue;
@@ -1617,8 +1617,10 @@ struct PreviewLitSurface {
     plane: psxed_project::brush::Plane,
     bounds: PreviewBrushBounds,
     /// `(patch polygon, per-vertex baked colour)` pairs.
-    patches: Vec<(Vec<[f64; 3]>, Vec<(u8, u8, u8)>)>,
+    patches: Vec<PreviewLitPatch>,
 }
+
+type PreviewLitPatch = (Vec<[f64; 3]>, Vec<(u8, u8, u8)>);
 
 /// Lit brush geometry reused across frames: solving, subdividing and
 /// shadow-baking the whole scene costs milliseconds, and it only
@@ -1965,6 +1967,7 @@ fn walk_brushes_with_culling(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_box_props(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,

@@ -208,6 +208,7 @@ pub(crate) fn render_import_model_preview_with_orientation_at_size(
 
 /// Render an animated preview with rig-following combat capsules and return
 /// the projected body-part points needed for visual joint picking.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
     model_bytes: &[u8],
     clip_bytes: &[u8],

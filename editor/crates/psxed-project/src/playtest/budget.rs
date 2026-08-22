@@ -502,13 +502,13 @@ fn pxbsp_face_packets(version: PxbspVersion, bytes: &[u8]) -> Option<usize> {
                 total.checked_add(vertex_count.saturating_sub(2))
             }),
         PxbspVersion::V1 => {
-            let faces = bytes.chunks_exact(14);
+            let mut faces = bytes.chunks_exact(14);
             if !faces.remainder().is_empty() {
                 return None;
             }
-            faces.fold(Some(0usize), |total, face| {
+            faces.try_fold(0usize, |total, face| {
                 let vertex_count = usize::try_from(i16::from_le_bytes([face[8], face[9]])).ok()?;
-                total?.checked_add(vertex_count.saturating_sub(2))
+                total.checked_add(vertex_count.saturating_sub(2))
             })
         }
     }
@@ -541,11 +541,10 @@ fn authored_texture_paths(project: &ProjectDocument) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     for resource in &project.resources {
         match &resource.data {
-            ResourceData::Texture { psxt_path } => {
-                if !psxt_path.trim().is_empty() {
-                    paths.insert(psxt_path.clone());
-                }
+            ResourceData::Texture { psxt_path } if !psxt_path.trim().is_empty() => {
+                paths.insert(psxt_path.clone());
             }
+            ResourceData::Texture { .. } => {}
             ResourceData::Material(material) => {
                 for path in material.version_texture_paths() {
                     if !path.trim().is_empty() {

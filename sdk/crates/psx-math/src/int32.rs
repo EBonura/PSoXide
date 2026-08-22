@@ -114,6 +114,7 @@ pub fn mul_q12_i32(value: i32, q12: i32) -> i32 {
 /// is one `mult` and a two-word shift instead of two saturating multiplies.
 #[inline(always)]
 pub fn mul_q12_i32_wide(value: i32, q12: i32) -> i32 {
+    // psx-numeric-allow-next-line: R3000 MULT natively produces this 64-bit product; no wide division or helper call
     ((i64::from(value) * i64::from(q12)) >> 12) as i32
 }
 

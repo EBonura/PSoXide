@@ -34,26 +34,13 @@ pub fn crossing_fraction_q12_i32(first_distance: i32, second_distance: i32) -> i
     ratio_q12_i32(first_distance, first_distance.wrapping_sub(second_distance))
 }
 
-/// Wide-distance counterpart of [`crossing_fraction_q12_i32`].
-///
-/// PXBSP frustum planes accumulate Q12 dot products in `i64`; keeping the
-/// distance exact while reducing only the interpolation fraction avoids a
-/// second plane representation in resident RAM.
-#[inline(always)]
-pub fn crossing_fraction_q12_i64(first_distance: i64, second_distance: i64) -> i32 {
-    let denominator = first_distance.wrapping_sub(second_distance);
-    if denominator == 0 || (first_distance < 0) != (denominator < 0) {
-        return 0;
-    }
-    (((first_distance.unsigned_abs() << 12) / denominator.unsigned_abs()).min(4096)) as i32
-}
-
 /// Q16 crossing fraction for renderers whose exact plane distances already
 /// live in `i64`.
 ///
 /// PXBSP retains this policy because its same-tree E1M1 gate proved it faster
 /// and materially smaller than reducing the wide plane result to Q12.
 #[inline(always)]
+// psx-numeric-allow-next-line: rare exact PXBSP boundary crossing; measured Q16 parity path, not the common inside/outside test
 pub fn crossing_fraction_q16_i64(first_distance: i64, second_distance: i64) -> i64 {
     ((first_distance << 16) / first_distance.wrapping_sub(second_distance)).clamp(0, 1 << 16)
 }
@@ -93,7 +80,9 @@ pub fn lerp_q12_i32_wide(first: i32, second: i32, fraction: i32) -> i32 {
 
 /// Q16 interpolation for an `i32` authored attribute using a wide fraction.
 #[inline(always)]
+// psx-numeric-allow-next-line: paired with the reviewed exact PXBSP Q16 boundary fraction above
 pub fn lerp_q16_i32(first: i32, second: i32, fraction: i64) -> i32 {
+    // psx-numeric-allow-next-line: exact Q16 crossing interpolation; invoked only for a straddling edge
     (first as i64 + ((second.wrapping_sub(first) as i64).wrapping_mul(fraction) >> 16)) as i32
 }
 
@@ -444,9 +433,6 @@ mod tests {
             };
         assert_eq!(interpolate(10, 110, 7, -3), 79);
         assert_eq!(interpolate(110, 10, -3, 7), 79);
-
-        let wide = crossing_fraction_q12_i64(7_000_000_000, -3_000_000_000);
-        assert_eq!(lerp_q12_i32(10, 110, wide), 79);
     }
 
     #[test]

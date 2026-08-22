@@ -65,7 +65,7 @@ pub unsafe fn base_ptr() -> *mut u8 {
 #[inline(always)]
 pub unsafe fn ptr_at<T>(byte_offset: usize) -> *mut T {
     debug_assert!(byte_offset <= SIZE.saturating_sub(core::mem::size_of::<T>()));
-    debug_assert!(byte_offset % core::mem::align_of::<T>() == 0);
+    debug_assert!(byte_offset.is_multiple_of(core::mem::align_of::<T>()));
     unsafe { base_ptr().add(byte_offset).cast::<T>() }
 }
 

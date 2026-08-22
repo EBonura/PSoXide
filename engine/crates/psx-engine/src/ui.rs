@@ -1875,14 +1875,33 @@ fn bar_frame_index(value: i32, max_value: i32, frame_count: u8) -> u8 {
     if max_value <= 0 || frame_count < 2 || value <= 0 {
         return 0;
     }
-    let last = i64::from(frame_count - 1);
-    let value = i64::from(value.min(max_value));
-    let max_value = i64::from(max_value);
-    ((value * last + max_value - 1) / max_value).min(last) as u8
+    let value = value.min(max_value);
+    let last = i32::from(frame_count - 1);
+
+    // Find the smallest frame whose exact value threshold contains `value`.
+    // Writing floor(frame * max / last) as two bounded terms avoids the
+    // overflow-prone wide multiply previously used by this UI-only helper.
+    let max_whole = max_value / last;
+    let max_remainder = max_value % last;
+    let mut low = 1;
+    let mut high = last;
+    while low < high {
+        let middle = low + ((high - low) >> 1);
+        let threshold = max_whole * middle + (max_remainder * middle) / last;
+        if value <= threshold {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low as u8
 }
 
 fn bar_frame_v_range(texture_height: u16, frame_count: u8, frame: u8) -> Option<(u8, u8)> {
-    if frame_count < 2 || frame >= frame_count || texture_height % u16::from(frame_count) != 0 {
+    if frame_count < 2
+        || frame >= frame_count
+        || !texture_height.is_multiple_of(u16::from(frame_count))
+    {
         return None;
     }
     let frame_height = texture_height / u16::from(frame_count);
@@ -1933,16 +1952,20 @@ fn draw_button(
     } else {
         shape_config(node)
     };
-    if draw_chrome && !config.transparent && config.corners == 0 && config.border == 0 {
-        if resolved.height > 3 && fill.is_solid() {
-            let color = brighten(fill.from());
-            draw_quad_flat(
-                resolved.subrect(0, 0, resolved.width as i16, 1),
-                color.0,
-                color.1,
-                color.2,
-            );
-        }
+    if draw_chrome
+        && !config.transparent
+        && config.corners == 0
+        && config.border == 0
+        && resolved.height > 3
+        && fill.is_solid()
+    {
+        let color = brighten(fill.from());
+        draw_quad_flat(
+            resolved.subrect(0, 0, resolved.width as i16, 1),
+            color.0,
+            color.1,
+            color.2,
+        );
     }
     let Some(font) = font else {
         return;
