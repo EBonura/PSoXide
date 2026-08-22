@@ -79,6 +79,8 @@ jobs:
         run: python3 tools/check_mfc0.py sdk engine emu
       - name: make check
         run: make check
+      - name: Cook editor-playtest test fixtures
+        run: make cook-playtest
       - name: make test
         run: make test
       - name: make lint
