@@ -38,12 +38,12 @@ mod tests {
         let crate::playtest::PlaytestWorldGeometry::Pxbsp(world) = &package.world_geometry else {
             panic!("brush project selected the grid provider");
         };
-        // Exact wire-size pin for the shared brush pipeline. PXBSP v5 keeps
-        // compact bounded render nodes, leaf-owned render surfaces do not
+        // Exact wire-size pin for the shared brush pipeline. PXBSP v6 keeps
+        // compact bounded render nodes and compact native planes, leaf-owned render surfaces do not
         // duplicate node-face ranges, Quake outside fill removes surfaces
         // seen only by the unreachable exterior, and hull 0 reuses the
         // classified render BSP instead of storing a second point clip tree.
-        assert_eq!(world.bytes.len(), 4_312);
+        assert_eq!(world.bytes.len(), 4_192);
         assert_eq!(world.movers.len(), 1);
         assert_eq!(world.movers[0].model_index, 1);
         assert_eq!(package.rooms.len(), 1);

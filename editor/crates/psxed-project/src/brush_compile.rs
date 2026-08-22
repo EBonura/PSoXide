@@ -1087,6 +1087,7 @@ mod tests {
             RecordSlice::<ClipNode>::new(&compiled.clipnodes).expect("clipnode bytes"),
             compiled.head_node,
         )
+        .expect("aligned collision records")
     }
 
     fn q12(world: i32) -> i32 {

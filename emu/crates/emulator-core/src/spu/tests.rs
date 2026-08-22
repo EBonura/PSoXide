@@ -2374,14 +2374,19 @@ fn a_corrupted_parking_block_self_loops_and_sounds() {
     // unstable SPU transfer inserts at a block boundary. Flags 0xFF carry
     // REPEAT and LOOP_START, so the voice parks on it exactly as before --
     // but the data nibbles are no longer zero.
-    let block = [0xFF, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x11, 0x22, 0x33, 0x44,
-                 0x55, 0x66, 0x77];
+    let block = [
+        0xFF, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+        0x77,
+    ];
     let out = park_voice_and_render(&block, 600);
     let peak = out.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
     // Around 831 here: shift 0xF is reserved and decodes as 9, so the block is
     // heavily attenuated but plainly not silent. Against the zero block's
     // exact 0, that difference is the whole audible bug.
-    assert!(peak > 200, "a corrupted parking block must be audible, peak was {peak}");
+    assert!(
+        peak > 200,
+        "a corrupted parking block must be audible, peak was {peak}"
+    );
     // And it must still be looping at the end of the window rather than having
     // decayed: one block per 28 samples, forever.
     let tail_peak = out[out.len() - 112..]

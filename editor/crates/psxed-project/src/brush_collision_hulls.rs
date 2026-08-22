@@ -559,6 +559,7 @@ mod tests {
             RecordSlice::<ClipNode>::new(&compiled.clipnodes).expect("nodes"),
             compiled.head_nodes[hull],
         )
+        .expect("aligned collision records")
     }
 
     fn at(x: i32, y: i32, z: i32) -> Vec3I32 {

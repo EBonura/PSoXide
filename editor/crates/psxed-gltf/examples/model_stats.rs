@@ -20,8 +20,13 @@ fn main() {
                     }
                     println!(
                         "{name}: OK verts={} faces={} parts={} joints={} span x={} y={} z={}",
-                        m.vertex_count(), m.face_count(), m.part_count(), m.joint_count(),
-                        hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]
+                        m.vertex_count(),
+                        m.face_count(),
+                        m.part_count(),
+                        m.joint_count(),
+                        hi[0] - lo[0],
+                        hi[1] - lo[1],
+                        hi[2] - lo[2]
                     );
                 }
                 Err(e) => println!("{name}: FAILED {e:?}"),
@@ -41,7 +46,8 @@ fn main() {
                     }
                     println!(
                         "  {name}: OK frames={} joints={} max|translation|={worst}",
-                        a.frame_count(), a.joint_count()
+                        a.frame_count(),
+                        a.joint_count()
                     );
                 }
                 Err(e) => println!("  {name}: FAILED {e:?}"),

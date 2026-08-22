@@ -45,6 +45,7 @@
 //! translations using the MODEL's, so a clip that inflates its own bounds
 //! desyncs the two and distorts the pose.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use psxed_project::model_import::register_cooked_model_bundle;
@@ -291,7 +292,7 @@ fn main() {
     }
     let [project_arg, clips_arg] = positional.as_slice() else {
         eprintln!(
-            "usage: import-locomotion <project.ron> <clips-dir> [--fps N] [--pack NAME] [--no-trim] [--extra STEM] [--new-model NAME]\n\
+            "usage: import-locomotion <project.ron> <clips-dir> [--fps N] [--pack NAME] [--no-trim] [--extra STEM] [--new-model NAME] [--character NAME]\n\
              \n\
              Bakes walk_/run_ fwd|bwd|lft|rgt takes onto the project's player\n\
              character and binds them to the eight locomotion actions."
@@ -341,6 +342,8 @@ fn main() {
             &clips_dir,
             &project_root,
             &model_name,
+            &character_name,
+            model_id,
             &pack_name,
             fps,
             trim,
@@ -583,11 +586,25 @@ fn build_native_model(
     clips_dir: &Path,
     project_root: &Path,
     model_name: &str,
+    character_name: &str,
+    reference_model_id: ResourceId,
     pack_name: &str,
     fps: u16,
     trim: bool,
     world_height: u16,
 ) {
+    let reference_settings =
+        project
+            .resource(reference_model_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Model(model) => Some((
+                    model.collision_radius,
+                    model.scale_q8,
+                    model.default_visual_yaw_q12,
+                    model.attachments.clone(),
+                )),
+                _ => None,
+            });
     // The model source is one of the takes; the rest ride along as extras. The
     // cooked clip order is [model source's own take, extras in order], which is
     // how their identities are recovered -- the takes are unnamed.
@@ -690,7 +707,23 @@ fn build_native_model(
         if let ResourceData::Model(model) = &mut resource.data {
             model.source_path = Some(relative_to(&model_source, project_root));
             model.world_height = world_height;
+            if let Some((collision_radius, scale_q8, visual_yaw, attachments)) = &reference_settings
+            {
+                model.collision_radius = *collision_radius;
+                model.scale_q8 = *scale_q8;
+                model.default_visual_yaw_q12 = *visual_yaw;
+                model.attachments = attachments.clone();
+            }
             skeleton_id = model.skeleton;
+        }
+    }
+    if let Some(skeleton_id) = skeleton_id {
+        if let Some(resource) = project.resource_mut(skeleton_id) {
+            if let ResourceData::Skeleton(skeleton) = &mut resource.data {
+                if package.joint_names.len() == usize::from(skeleton.joint_count) {
+                    skeleton.joint_names = package.joint_names.clone();
+                }
+            }
         }
     }
     let model_joints = model_stats_from_bytes(&package.model)
@@ -898,23 +931,22 @@ fn build_native_model(
         None => project.add_resource(set_name.clone(), ResourceData::AnimationSet(set)),
     };
 
-    // Point the player at the new model and set. Swapping two fields keeps the
+    // Point the selected character at the new model and set. Swapping two fields keeps the
     // character's authored tuning and makes the change reversible; the old
     // model and set stay in the project, just unreferenced.
-    let (player_name, ..) = find_player(project);
-    let player_id = project
+    let character_id = project
         .resources
         .iter()
-        .find(|r| r.name == player_name && matches!(r.data, ResourceData::Character(_)))
+        .find(|r| r.name == character_name && matches!(r.data, ResourceData::Character(_)))
         .map(|r| r.id)
-        .unwrap_or_else(|| fail("player character vanished"));
+        .unwrap_or_else(|| fail(format!("character {character_name} vanished")));
     let previous_model = project
-        .resource(player_id)
+        .resource(character_id)
         .and_then(|resource| match &resource.data {
             ResourceData::Character(character) => character.model,
             _ => None,
         });
-    if let Some(resource) = project.resource_mut(player_id) {
+    if let Some(resource) = project.resource_mut(character_id) {
         if let ResourceData::Character(character) = &mut resource.data {
             character.model = Some(model_id);
             character.animation_set = Some(set_id);
@@ -930,21 +962,33 @@ fn build_native_model(
     // Collect first, then apply: `Scene` exposes its nodes immutably and only
     // hands out one mutable node at a time.
     let mut renderer_targets: Vec<(usize, psxed_project::NodeId)> = Vec::new();
+    let mut renderer_hosts = HashSet::new();
     let mut animator_targets: Vec<(usize, psxed_project::NodeId)> = Vec::new();
     for (scene_index, scene) in project.scenes.iter().enumerate() {
         for node in scene.nodes() {
-            match &node.kind {
-                psxed_project::NodeKind::ModelRenderer { model, .. }
-                    if *model == previous_model =>
-                {
+            if let psxed_project::NodeKind::ModelRenderer { model, .. } = &node.kind {
+                if *model == previous_model {
                     renderer_targets.push((scene_index, node.id));
+                    if let Some(parent) = node.parent {
+                        renderer_hosts.insert((scene_index, parent));
+                    }
                 }
-                psxed_project::NodeKind::Animator {
-                    clip, action_clips, ..
-                } if clip.is_some() || !action_clips.is_empty() => {
+            }
+        }
+    }
+    for (scene_index, scene) in project.scenes.iter().enumerate() {
+        for node in scene.nodes() {
+            if let psxed_project::NodeKind::Animator {
+                clip, action_clips, ..
+            } = &node.kind
+            {
+                if node
+                    .parent
+                    .is_some_and(|parent| renderer_hosts.contains(&(scene_index, parent)))
+                    && (clip.is_some() || !action_clips.is_empty())
+                {
                     animator_targets.push((scene_index, node.id));
                 }
-                _ => {}
             }
         }
     }
@@ -968,7 +1012,7 @@ fn build_native_model(
         }
     }
     println!(
-        "player {player_name} -> model {model_name}, set {set_name} \
+        "character {character_name} -> model {model_name}, set {set_name} \
          ({renderers} scene renderer(s) repointed, {animators} stale animator binding(s) cleared)"
     );
 }

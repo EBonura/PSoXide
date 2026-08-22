@@ -56,6 +56,7 @@
 
 pub mod angle;
 pub mod app;
+pub mod attributed_clip;
 pub mod character_motor;
 pub mod classic_affine;
 pub mod collision_query;
@@ -65,10 +66,12 @@ pub mod frames;
 pub mod game_app;
 pub mod lighting;
 pub mod movement;
+pub mod projection;
 pub mod render;
 pub mod render3d;
 pub mod scene;
 pub mod scheduler;
+pub mod scratchpad;
 pub mod sfx;
 pub mod telemetry;
 pub mod third_person_camera;

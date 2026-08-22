@@ -28,9 +28,10 @@
 //! to resolve.
 
 use std::env;
-use std::fs;
+use std::fs::{self, FileTimes, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 /// Boxed-error result, since every failure here ends a build.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -83,6 +84,14 @@ pub fn copy_tree(source: &Path, destination: &Path, relative: &Path) -> Result<u
                 fs::create_dir_all(parent)?;
             }
             fs::copy(entry.path(), &target)?;
+            // `fs::copy` may preserve an old source mtime. Replacing an SDK
+            // tree with older-dated files can then make Cargo reuse artifacts
+            // from the previous hydration even though the bytes changed.
+            // Stamp every newly copied file so its dependants are rebuilt.
+            OpenOptions::new()
+                .write(true)
+                .open(&target)?
+                .set_times(FileTimes::new().set_modified(SystemTime::now()))?;
             copied += 1;
         }
     }

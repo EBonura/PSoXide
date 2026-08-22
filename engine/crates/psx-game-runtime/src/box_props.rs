@@ -1166,7 +1166,8 @@ pub fn box_prop_movement_break_trigger(
     if !moving {
         return None;
     }
-    if input.sprint && stamina_q12 > 0 && config.run_speed > config.walk_speed {
+    if input.sprint && config.run_enabled && stamina_q12 > 0 && config.run_speed > config.walk_speed
+    {
         Some(box_prop_flags::BREAK_ON_RUN)
     } else {
         Some(box_prop_flags::BREAK_ON_WALK)

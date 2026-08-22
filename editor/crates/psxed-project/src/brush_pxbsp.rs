@@ -9,12 +9,15 @@ use psx_bsp::pxbsp::{
     PXBSP_ENTITY_TABLE_HEADER_BYTES, PXBSP_HEADER_BYTES, PXBSP_LUMP_COUNT, PXBSP_MAGIC,
     PXBSP_VERSION,
 };
-use psx_bsp::{decode_node_bound_max, decode_node_bound_min, CookedRecord, Node, Plane};
+use psx_bsp::{
+    decode_node_bound_max, decode_node_bound_min, CompactPlane, CookedRecord, Node, Plane,
+};
+use psx_render_contract::CookedDrawSurface;
 
 const WORLD_COLLISION_HULLS: usize = 3;
 const VERTEX_BYTES: usize = 12;
 const PLANE_BYTES: usize = Plane::SIZE;
-const FACE_BYTES: usize = 10;
+const FACE_BYTES: usize = CookedDrawSurface::SIZE;
 const MARK_SURFACE_BYTES: usize = 2;
 const LEAF_BYTES: usize = 14;
 const NODE_BYTES: usize = Node::SIZE;
@@ -140,7 +143,7 @@ pub fn build_pxbsp_with_submodels(
     lumps[PxbspLumpKind::SoundData as usize].extend_from_slice(payloads.sound_data);
     lumps[PxbspLumpKind::ModelData as usize].extend_from_slice(payloads.model_data);
     lumps[PxbspLumpKind::Vertices as usize] = geometry.vertices;
-    lumps[PxbspLumpKind::Planes as usize] = geometry.planes;
+    lumps[PxbspLumpKind::Planes as usize] = pack_runtime_planes(&geometry.planes)?;
     lumps[PxbspLumpKind::Materials as usize] = materials;
     lumps[PxbspLumpKind::Faces as usize] = geometry.faces;
     lumps[PxbspLumpKind::MarkSurfaces as usize] = geometry.mark_surfaces;
@@ -352,26 +355,32 @@ fn append_geometry(
         u16::MAX as usize + 1,
     )?;
     for face in input.faces.chunks_exact(FACE_BYTES) {
-        let plane = usize::from(read_u16(face, 0));
+        let surface = CookedDrawSurface::decode(face)
+            .ok_or(PxbspBuildError::InvalidReference("face record"))?;
+        let plane = usize::from(surface.plane);
         let plane = plane_remap
             .get(plane)
             .copied()
             .and_then(|value| i16::try_from(value).ok())
             .map(|value| value as u16)
             .ok_or(PxbspBuildError::InvalidReference("face plane"))?;
-        let first_vertex = remap_face_vertex(read_u16(face, 2), vertex_base)?;
-        let material = usize::from(read_u16(face, 4));
+        let first_vertex = remap_face_vertex(surface.first_corner, vertex_base)?;
+        let material = usize::from(surface.material);
         let material = material_remap
             .get(material)
             .copied()
             .and_then(|value| i16::try_from(value).ok())
             .map(|value| value as u16)
             .ok_or(PxbspBuildError::InvalidReference("face material"))?;
-        let mut remapped = face.to_vec();
-        remapped[0..2].copy_from_slice(&plane.to_le_bytes());
-        remapped[2..4].copy_from_slice(&first_vertex.to_le_bytes());
-        remapped[4..6].copy_from_slice(&material.to_le_bytes());
-        output.faces.extend_from_slice(&remapped);
+        output.faces.extend_from_slice(
+            &CookedDrawSurface {
+                plane,
+                first_corner: first_vertex,
+                material,
+                ..surface
+            }
+            .encode(),
+        );
     }
 
     let mark_count = input.mark_surfaces.len() / MARK_SURFACE_BYTES;
@@ -772,6 +781,26 @@ fn write_pxbsp(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT]) -> Result<Vec<u8>, PxbspBuil
     Ok(output)
 }
 
+fn pack_runtime_planes(source: &[u8]) -> Result<Vec<u8>, PxbspBuildError> {
+    let mut output = Vec::with_capacity(source.len() / Plane::SIZE * CompactPlane::SIZE);
+    for plane in source.chunks_exact(Plane::SIZE) {
+        let kind = i32::from_le_bytes(plane[10..14].try_into().unwrap());
+        let kind =
+            u8::try_from(kind).map_err(|_| PxbspBuildError::InvalidReference("plane kind"))?;
+        output.extend_from_slice(&plane[0..6]);
+        output.push(kind);
+        let mut sign_bits = 0u8;
+        for axis in 0..3 {
+            if read_i16(plane, axis * 2) < 0 {
+                sign_bits |= 1 << axis;
+            }
+        }
+        output.push(sign_bits);
+        output.extend_from_slice(&plane[6..10]);
+    }
+    Ok(output)
+}
+
 fn limit(kind: &'static str, count: usize, max: usize) -> Result<(), PxbspBuildError> {
     if count > max {
         Err(PxbspBuildError::LimitExceeded { kind, count, max })
@@ -815,9 +844,9 @@ mod tests {
     use crate::brush_pack::{pack_bsp_geometry, BspLighting};
     use crate::brush_portal::{classify_bsp_leaves, portalize_surface_bsp};
     use psx_bsp::collision::{CollisionHull, Trace, TraceScratch};
-    use psx_bsp::pxbsp::{PxbspEntityTable, PxbspIndex};
+    use psx_bsp::pxbsp::{PxbspEntityTable, PxbspIndex, PxbspVersion};
     use psx_bsp::pxbsp_resident::PxbspResidentMap;
-    use psx_bsp::{BrushModel, ClipNode, Plane, RecordSlice, SliceReader, Vec3I16, Vec3I32};
+    use psx_bsp::{BrushModel, RecordSlice, SliceReader, Vec3I16, Vec3I32};
 
     const PLAYER: CollisionHullBounds = CollisionHullBounds {
         mins: [-16, 0, -16],
@@ -914,7 +943,12 @@ mod tests {
         let mut reader = SliceReader::new(&compiled.bytes);
         let index = PxbspIndex::read(&mut reader).expect("index");
         assert_eq!(index.file_len(), compiled.bytes.len() as u32);
+        assert_eq!(index.version(), PxbspVersion::V6);
         assert!(index.lump(PxbspLumpKind::Vertices).len > 0);
+        assert_eq!(
+            index.lump(PxbspLumpKind::Planes).len as usize % CompactPlane::SIZE,
+            0
+        );
         assert!(index.lump(PxbspLumpKind::ClipNodes).len > 0);
         assert_eq!(index.lump(PxbspLumpKind::Materials).len, 16);
         let entities = index.lump(PxbspLumpKind::Entities);
@@ -944,20 +978,10 @@ mod tests {
     #[test]
     fn merged_player_hull_traces_room_floor() {
         let compiled = compiled_room();
-        let index = PxbspIndex::read(&mut SliceReader::new(&compiled.bytes)).expect("index");
-        let bytes = |kind| {
-            let range = index.lump(kind);
-            &compiled.bytes[range.offset as usize..range.end() as usize]
-        };
-        let world = RecordSlice::<BrushModel>::new(bytes(PxbspLumpKind::Models))
-            .expect("models")
-            .get(0)
-            .expect("world");
-        let hull = CollisionHull::new(
-            RecordSlice::<Plane>::new(bytes(PxbspLumpKind::Planes)).expect("planes"),
-            RecordSlice::<ClipNode>::new(bytes(PxbspLumpKind::ClipNodes)).expect("clipnodes"),
-            world.head_nodes[2],
-        );
+        let mut map = PxbspResidentMap::with_capacity(compiled.bytes.len());
+        map.load(5, &mut SliceReader::new(&compiled.bytes))
+            .expect("resident map");
+        let hull = map.model_collision_hull(0, 1).expect("player hull");
         let trace = trace(
             &hull,
             Vec3I32 {
@@ -1059,7 +1083,12 @@ mod tests {
                 first >= world_face_count && end <= world_face_count + door_face_count
             }));
 
-        let door_hull = CollisionHull::new(map.planes(), map.clip_nodes(), door.head_nodes[1]);
+        let clipnodes = map
+            .clip_nodes()
+            .as_native_clip_nodes()
+            .expect("validated native clipnodes");
+        let door_hull =
+            CollisionHull::from_native_clip_nodes(map.planes(), clipnodes, door.head_nodes[1]);
         let trace = trace(
             &door_hull,
             Vec3I32 {
