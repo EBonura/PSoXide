@@ -1111,6 +1111,7 @@ impl EditorWorkspace {
         let all_visible = !self.editor_visibility_has_hidden_items();
         let show_all = reverse || !all_visible;
         self.show_grid = show_all;
+        self.show_brush_surface_grid = show_all;
         self.show_portals = show_all;
         self.show_lights = show_all;
         self.preview_fog = show_all;

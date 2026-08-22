@@ -8,11 +8,17 @@ use super::*;
 /// power-of-two multiples instead of inventing an unrelated spacing.
 const BSP_SURFACE_GRID_LINES_PER_AXIS: usize = 24;
 const BSP_SURFACE_GRID_SEGMENT_CAP: usize = 2_048;
-const BSP_SURFACE_GRID_MAJOR_EVERY: i64 = 8;
-const BSP_SURFACE_GRID_MINOR_RGBA: (u8, u8, u8, u8) = (176, 208, 220, 68);
-const BSP_SURFACE_GRID_MAJOR_RGBA: (u8, u8, u8, u8) = (218, 232, 238, 104);
+/// TrenchBroom keeps major lines pinned to 64 world units even while the
+/// visible minor interval coarsens with distance.
+const BSP_SURFACE_GRID_MAJOR_WORLD_UNITS: i64 = 64;
+const BSP_SURFACE_GRID_DARK: u8 = 26;
+const BSP_SURFACE_GRID_LIGHT: u8 = 230;
+const BSP_SURFACE_GRID_MINOR_ALPHA: u8 = 68;
+const BSP_SURFACE_GRID_MAJOR_ALPHA: u8 = 104;
 const BSP_SURFACE_GRID_MINOR_WIDTH: f32 = 0.65;
 const BSP_SURFACE_GRID_MAJOR_WIDTH: f32 = 0.9;
+const BSP_SURFACE_GRID_FADE_START_CELLS: f64 = 32.0;
+const BSP_SURFACE_GRID_FADE_END_CELLS: f64 = 64.0;
 const GRID_INTERSECTION_EPSILON: f64 = 1.0 / 4096.0;
 const GRID_INTERSECTION_CAP: usize = 8;
 const BSP_LEAK_PATH_RGB: (u8, u8, u8) = (72, 236, 126);
@@ -151,46 +157,53 @@ pub(super) fn prepend_bsp_surface_grid_overlay(
     let step = f64::from(grid_units.max(1));
     let mut candidate_count = 0u64;
     let scene = project.active_scene();
-    with_cached_solved_brush_faces(project, |brush_index, _, plane, verts| {
-        let Some(brush) = scene.brushes.get(brush_index) else {
-            return;
-        };
-        if super::brush_group_hidden(scene, hidden_scene_nodes, brush) {
-            return;
-        }
-        if let Some(ranges) = surface_grid_face_ranges(
-            verts,
-            plane.normal.map(|component| component as f64),
-            camera,
-            step,
-        ) {
-            candidate_count = candidate_count.saturating_add(
-                ranges
-                    .iter()
-                    .map(|(_, range)| grid_index_count(*range))
-                    .sum::<u64>(),
-            );
+    // The material pass renders the CSG-resolved exterior, not every raw
+    // authored plane. Sharing that exact surface set prevents internal or
+    // overlap-hidden brush faces from leaking host grid strokes through the
+    // visible scene.
+    with_cached_csg_surfaces(project, hidden_scene_nodes, |surfaces| {
+        for cached in surfaces {
+            let surface = &cached.surface;
+            if let Some(ranges) = surface_grid_face_ranges(
+                &surface.vertices,
+                surface.plane.normal.map(|component| component as f64),
+                camera,
+                step,
+            ) {
+                candidate_count = candidate_count.saturating_add(
+                    ranges
+                        .iter()
+                        .map(|(_, range)| grid_index_count(*range))
+                        .sum::<u64>(),
+                );
+            }
         }
     });
 
     let mut grid_lines = Vec::new();
     let mut candidate_ordinal = 0u64;
-    with_cached_solved_brush_faces(project, |brush_index, _, plane, verts| {
-        let Some(brush) = scene.brushes.get(brush_index) else {
-            return;
-        };
-        if super::brush_group_hidden(scene, hidden_scene_nodes, brush) {
-            return;
+    with_cached_csg_surfaces(project, hidden_scene_nodes, |surfaces| {
+        for cached in surfaces {
+            let surface = &cached.surface;
+            let Some(brush) = scene.brushes.get(surface.source_brush) else {
+                continue;
+            };
+            let face_index = surface.source_face;
+            append_bsp_surface_grid_face(
+                &surface.vertices,
+                surface.plane.normal.map(|component| component as f64),
+                camera,
+                step,
+                candidate_count,
+                &mut candidate_ordinal,
+                adaptive_grid_value(material_color(
+                    project,
+                    brush.faces.get(face_index).and_then(|face| face.material),
+                    brush_fallback_color(face_index),
+                )),
+                &mut grid_lines,
+            );
         }
-        append_bsp_surface_grid_face(
-            verts,
-            plane.normal.map(|component| component as f64),
-            camera,
-            step,
-            candidate_count,
-            &mut candidate_ordinal,
-            &mut grid_lines,
-        );
     });
     if grid_lines.is_empty() {
         return;
@@ -214,62 +227,49 @@ pub(super) fn prepend_bsp_surface_grid_overlay_uncached(
         return;
     }
 
+    let surfaces = rebuild_csg_surfaces(project, hidden_scene_nodes);
     let step = f64::from(grid_units.max(1));
     let mut candidate_count = 0u64;
-    for brush in &project.active_scene().brushes {
-        if super::brush_group_hidden(project.active_scene(), hidden_scene_nodes, brush) {
-            continue;
-        }
-        let solved = brush.solve();
-        for (face_index, polygon) in solved.polygons.iter().enumerate() {
-            let Some(polygon) = polygon else { continue };
-            let Some(face) = brush.faces.get(face_index) else {
-                continue;
-            };
-            let Some(plane) = psxed_project::brush::Plane::from_points(face.points) else {
-                continue;
-            };
-            if let Some(ranges) = surface_grid_face_ranges(
-                &polygon.verts,
-                plane.normal.map(|component| component as f64),
-                camera,
-                step,
-            ) {
-                candidate_count = candidate_count.saturating_add(
-                    ranges
-                        .iter()
-                        .map(|(_, range)| grid_index_count(*range))
-                        .sum::<u64>(),
-                );
-            }
+    for cached in &surfaces {
+        let surface = &cached.surface;
+        if let Some(ranges) = surface_grid_face_ranges(
+            &surface.vertices,
+            surface.plane.normal.map(|component| component as f64),
+            camera,
+            step,
+        ) {
+            candidate_count = candidate_count.saturating_add(
+                ranges
+                    .iter()
+                    .map(|(_, range)| grid_index_count(*range))
+                    .sum::<u64>(),
+            );
         }
     }
 
     let mut grid_lines = Vec::new();
     let mut candidate_ordinal = 0u64;
-    for brush in &project.active_scene().brushes {
-        if super::brush_group_hidden(project.active_scene(), hidden_scene_nodes, brush) {
+    let scene = project.active_scene();
+    for cached in &surfaces {
+        let surface = &cached.surface;
+        let Some(brush) = scene.brushes.get(surface.source_brush) else {
             continue;
-        }
-        let solved = brush.solve();
-        for (face_index, polygon) in solved.polygons.iter().enumerate() {
-            let Some(polygon) = polygon else { continue };
-            let Some(face) = brush.faces.get(face_index) else {
-                continue;
-            };
-            let Some(plane) = psxed_project::brush::Plane::from_points(face.points) else {
-                continue;
-            };
-            append_bsp_surface_grid_face(
-                &polygon.verts,
-                plane.normal.map(|component| component as f64),
-                camera,
-                step,
-                candidate_count,
-                &mut candidate_ordinal,
-                &mut grid_lines,
-            );
-        }
+        };
+        let face_index = surface.source_face;
+        append_bsp_surface_grid_face(
+            &surface.vertices,
+            surface.plane.normal.map(|component| component as f64),
+            camera,
+            step,
+            candidate_count,
+            &mut candidate_ordinal,
+            adaptive_grid_value(material_color(
+                project,
+                brush.faces.get(face_index).and_then(|face| face.material),
+                brush_fallback_color(face_index),
+            )),
+            &mut grid_lines,
+        );
     }
     if grid_lines.is_empty() {
         return;
@@ -285,6 +285,7 @@ fn append_bsp_surface_grid_face(
     step: f64,
     candidate_count: u64,
     candidate_ordinal: &mut u64,
+    grid_value: u8,
     overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
 ) {
     let Some(ranges) = surface_grid_face_ranges(polygon, normal, camera, step) else {
@@ -298,7 +299,15 @@ fn append_bsp_surface_grid_face(
             if grid_candidate_selected(ordinal, candidate_count) {
                 if let Some((a, b)) = clip_grid_line_to_polygon(polygon, axis, index as f64 * step)
                 {
-                    append_projected_grid_segment(camera, a, b, index, overlay_lines);
+                    append_projected_grid_segment(
+                        camera,
+                        a,
+                        b,
+                        index as f64 * step,
+                        step,
+                        grid_value,
+                        overlay_lines,
+                    );
                 }
             }
             let Some(next) = index.checked_add(stride) else {
@@ -416,7 +425,9 @@ fn append_projected_grid_segment(
     camera: psx_engine::WorldCamera,
     a: [f64; 3],
     b: [f64; 3],
-    grid_index: i64,
+    world_coordinate: f64,
+    grid_step: f64,
+    grid_value: u8,
     overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
 ) {
     const SAFE_COORD_LIMIT: f64 = 500_000.0;
@@ -427,42 +438,83 @@ fn append_projected_grid_segment(
     {
         return;
     }
+    let camera_position = [
+        f64::from(camera.position.x),
+        f64::from(camera.position.y),
+        f64::from(camera.position.z),
+    ];
+    // TrenchBroom fades per fragment. A host overlay is one whole segment, so
+    // use its closest point to the camera; using the midpoint incorrectly
+    // erases a long line whose visible portion is nearby.
+    let camera_distance = point_segment_distance_squared(camera_position, a, b).sqrt();
+    let distance_fade = surface_grid_distance_fade(grid_step, camera_distance);
+    if distance_fade <= 0.0 {
+        return;
+    }
+
     let world_vertex = |point: [f64; 3]| {
-        psx_engine::WorldVertex::new(
+        [
             point[0].round() as i32,
             point[1].round() as i32,
             point[2].round() as i32,
-        )
+        ]
     };
-    let Some(a) = camera.project_world(world_vertex(a)) else {
+    let Some((a, b)) = project_clipped_world_segment(camera, world_vertex(a), world_vertex(b))
+    else {
         return;
     };
-    let Some(b) = camera.project_world(world_vertex(b)) else {
-        return;
-    };
-    let a = egui::pos2(f32::from(a.sx), f32::from(a.sy));
-    let b = egui::pos2(f32::from(b.sx), f32::from(b.sy));
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     if dx * dx + dy * dy < 2.25 {
         return;
     }
-    let major = grid_index.rem_euclid(BSP_SURFACE_GRID_MAJOR_EVERY) == 0;
-    let rgba = if major {
-        BSP_SURFACE_GRID_MAJOR_RGBA
+    let major = (world_coordinate / BSP_SURFACE_GRID_MAJOR_WORLD_UNITS as f64)
+        .fract()
+        .abs()
+        <= GRID_INTERSECTION_EPSILON;
+    let base_alpha = if major {
+        BSP_SURFACE_GRID_MAJOR_ALPHA
     } else {
-        BSP_SURFACE_GRID_MINOR_RGBA
+        BSP_SURFACE_GRID_MINOR_ALPHA
     };
+    let alpha = (f64::from(base_alpha) * distance_fade).round() as u8;
+    if alpha == 0 {
+        return;
+    }
     overlay_lines.push(psxed_ui::EditorViewportOverlayLine::new(
         a,
         b,
-        egui::Color32::from_rgba_unmultiplied(rgba.0, rgba.1, rgba.2, rgba.3),
+        egui::Color32::from_rgba_unmultiplied(grid_value, grid_value, grid_value, alpha),
         if major {
             BSP_SURFACE_GRID_MAJOR_WIDTH
         } else {
             BSP_SURFACE_GRID_MINOR_WIDTH
         },
     ));
+}
+
+fn adaptive_grid_value(background: (u8, u8, u8)) -> u8 {
+    let luma = 0.299 * f64::from(background.0)
+        + 0.587 * f64::from(background.1)
+        + 0.114 * f64::from(background.2);
+    if luma < 127.5 {
+        BSP_SURFACE_GRID_LIGHT
+    } else {
+        BSP_SURFACE_GRID_DARK
+    }
+}
+
+fn surface_grid_distance_fade(grid_step: f64, camera_distance: f64) -> f64 {
+    1.0 - smoothstep(
+        grid_step * BSP_SURFACE_GRID_FADE_START_CELLS,
+        grid_step * BSP_SURFACE_GRID_FADE_END_CELLS,
+        camera_distance,
+    )
+}
+
+fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn dominant_normal_axis(normal: [f64; 3]) -> usize {
@@ -551,6 +603,20 @@ fn clip_grid_line_to_polygon(
 
 fn squared_distance_f64(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
+}
+
+fn point_segment_distance_squared(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let ap = [point[0] - a[0], point[1] - a[1], point[2] - a[2]];
+    let denominator = dot3_f64(ab, ab);
+    if denominator <= GRID_INTERSECTION_EPSILON * GRID_INTERSECTION_EPSILON {
+        return squared_distance_f64(point, a);
+    }
+    let t = (dot3_f64(ap, ab) / denominator).clamp(0.0, 1.0);
+    squared_distance_f64(
+        point,
+        [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t],
+    )
 }
 
 fn dot3_f64(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -1760,6 +1826,37 @@ mod surface_grid_tests {
         assert_eq!(dominant_normal_axis([8.0, 2.0, 1.0]), 0);
         assert_eq!(dominant_normal_axis([1.0, -9.0, 2.0]), 1);
         assert_eq!(dominant_normal_axis([1.0, 2.0, -10.0]), 2);
+    }
+
+    #[test]
+    fn surface_grid_chooses_the_farthest_luminance_extreme() {
+        assert_eq!(adaptive_grid_value((0, 0, 0)), BSP_SURFACE_GRID_LIGHT);
+        assert_eq!(adaptive_grid_value((255, 255, 255)), BSP_SURFACE_GRID_DARK);
+        assert_eq!(adaptive_grid_value((127, 127, 127)), BSP_SURFACE_GRID_LIGHT);
+        assert_eq!(adaptive_grid_value((128, 128, 128)), BSP_SURFACE_GRID_DARK);
+    }
+
+    #[test]
+    fn surface_grid_distance_fade_matches_the_trenchbroom_ramp() {
+        assert_eq!(surface_grid_distance_fade(16.0, 511.0), 1.0);
+        assert!((surface_grid_distance_fade(16.0, 768.0) - 0.5).abs() <= f64::EPSILON);
+        assert_eq!(surface_grid_distance_fade(16.0, 1025.0), 0.0);
+        assert_eq!(
+            surface_grid_distance_fade(128.0, 4095.0),
+            1.0,
+            "larger authored grids keep the same fade distance in cells"
+        );
+    }
+
+    #[test]
+    fn long_surface_line_uses_its_closest_point_for_distance_fade() {
+        let distance = point_segment_distance_squared(
+            [0.0, 10.0, 0.0],
+            [-10_000.0, 0.0, 0.0],
+            [10_000.0, 0.0, 0.0],
+        )
+        .sqrt();
+        assert!((distance - 10.0).abs() <= f64::EPSILON);
     }
 
     #[test]

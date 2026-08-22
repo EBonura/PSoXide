@@ -773,6 +773,8 @@ pub struct EditorWorkspace {
     snap_to_grid: bool,
     snap_units: u16,
     show_grid: bool,
+    /// TrenchBroom-style projection of the global grid over BSP faces.
+    show_brush_surface_grid: bool,
     show_portals: bool,
     show_lights: bool,
     /// Wireframe outlines for unselected brushes (View menu toggle).
@@ -3243,6 +3245,7 @@ impl EditorWorkspace {
             snap_to_grid: true,
             snap_units: 16,
             show_grid: editor_visibility.show_grid,
+            show_brush_surface_grid: editor_visibility.show_brush_surface_grid,
             show_portals: editor_visibility.show_portals,
             show_lights: editor_visibility.show_lights,
             preview_fog: editor_visibility.preview_fog,
@@ -3393,6 +3396,7 @@ impl EditorWorkspace {
     fn current_editor_visibility_state(&self) -> EditorVisibilityState {
         EditorVisibilityState {
             show_grid: self.show_grid,
+            show_brush_surface_grid: self.show_brush_surface_grid,
             show_portals: self.show_portals,
             show_lights: self.show_lights,
             preview_fog: self.preview_fog,
@@ -3415,6 +3419,7 @@ impl EditorWorkspace {
     fn apply_project_editor_visibility(&mut self) {
         let editor_visibility = self.project.editor_visibility;
         self.show_grid = editor_visibility.show_grid;
+        self.show_brush_surface_grid = editor_visibility.show_brush_surface_grid;
         self.show_portals = editor_visibility.show_portals;
         self.show_lights = editor_visibility.show_lights;
         self.preview_fog = editor_visibility.preview_fog;
