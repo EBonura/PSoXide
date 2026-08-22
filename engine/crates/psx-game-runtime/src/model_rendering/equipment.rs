@@ -294,11 +294,6 @@ fn submit_equipped_weapon<
 /// A weapon at this assembly level is solid, and the normal model path draws it.
 pub const ASSEMBLED_Q12: u16 = 4096;
 
-/// Past this the shards have almost landed, so the solid model stands in and
-/// the expensive per-shard path stops. This is also what makes decimating the
-/// cloud safe: the effect never has to show a complete weapon.
-const SOLID_FROM_Q12: u16 = 3584;
-
 /// Draw the not-yet-solid part of a weapon as a green wireframe.
 ///
 /// The whole point of this over a shard cloud: the weapon stays RIGID, so every

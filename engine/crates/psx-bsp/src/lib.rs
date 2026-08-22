@@ -173,9 +173,18 @@ impl LumpRange {
 
 /// Minimal random-access input used by both CD streaming and host files.
 pub trait ReadAt {
+    /// Backend-specific read failure.
     type Error;
 
+    /// Total readable byte length.
     fn len(&self) -> u32;
+
+    /// Whether the input contains no bytes.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Fill `output` from the exact byte offset or return a backend error.
     fn read_exact_at(&mut self, offset: u32, output: &mut [u8]) -> Result<(), Self::Error>;
 }
 
@@ -322,7 +331,7 @@ impl PsbIndex {
             }
             let size = signed_size as u32;
             if let Some(record_size) = expected.record_size(version) {
-                if size % record_size != 0 {
+                if !size.is_multiple_of(record_size) {
                     return Err(PsbError::MisalignedLump {
                         kind: expected,
                         size,
@@ -447,7 +456,7 @@ pub struct RecordSlice<'a, T> {
 
 impl<'a, T: CookedRecord> RecordSlice<'a, T> {
     pub fn new(bytes: &'a [u8]) -> Option<Self> {
-        if bytes.len() % T::SIZE != 0 {
+        if !bytes.len().is_multiple_of(T::SIZE) {
             return None;
         }
         Some(Self {

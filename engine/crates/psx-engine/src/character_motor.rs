@@ -3869,12 +3869,13 @@ mod tests {
 
         let query = CollisionTraceQuery::body(RoomPoint::ZERO, RoomPoint::new(20, 0, 0), 2, 8);
         let mut world = CountingProvider { calls: 0 };
-        let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &[]);
-        assert_eq!(
-            trace_collision(&mut provider, query),
-            Ok(CollisionTrace::unobstructed(query.end))
-        );
-        drop(provider);
+        {
+            let mut provider = CharacterBlockerTraceProvider::new_with_aabbs(&mut world, &[], &[]);
+            assert_eq!(
+                trace_collision(&mut provider, query),
+                Ok(CollisionTrace::unobstructed(query.end))
+            );
+        }
         assert_eq!(world.calls, 1);
     }
 

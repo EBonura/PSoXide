@@ -853,7 +853,13 @@ fn smoothstep_q12(elapsed: u32, duration: u32) -> Q12 {
     let t = if duration == 0 {
         Q12::SCALE
     } else {
-        ((elapsed.min(duration) as u64 * Q12::SCALE as u64) / duration as u64) as i32
+        let mut numerator = elapsed.min(duration);
+        let mut denominator = duration;
+        while numerator > (u32::MAX >> 12) {
+            numerator = (numerator + 1) >> 1;
+            denominator = (denominator + 1) >> 1;
+        }
+        ((numerator << 12) / denominator.max(1)).min(Q12::SCALE as u32) as i32
     };
     // t*t*(3 - 2t)
     let tt = (t * t) >> 12;
