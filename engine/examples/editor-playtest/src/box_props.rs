@@ -8,6 +8,7 @@
 //! [`BoxProps`]: psx_game_runtime::box_props::BoxProps
 
 use super::*;
+use psx_engine::BoundedSink;
 
 pub(super) use psx_game_runtime::box_props::box_prop_movement_break_trigger;
 
@@ -54,48 +55,49 @@ impl Playtest {
         );
     }
 
-    pub(super) fn collect_static_prop_aabb_blockers(
+    pub(super) fn collect_static_prop_aabb_blockers_into<S: BoundedSink<CharacterCollisionAabb>>(
         &self,
-        out: &mut [CharacterCollisionAabb],
+        out: &mut S,
     ) -> usize {
-        let count = self
-            .box_props
-            .collect_collision_blockers(BOX_PROPS, self.room_index, out);
-        let count = count
-            + psx_game_runtime::arch_props::collect_arch_prop_collision_blockers(
-                ARCH_PROPS,
-                ARCH_PROP_COLLISIONS,
-                self.room_index,
-                &mut out[count..],
-            );
-        count
-            + psx_game_runtime::image_props::collect_image_prop_collision_blockers(
-                IMAGE_PROPS,
-                self.room_index,
-                &mut out[count..],
-            )
-    }
-
-    /// Checked fixed-capacity collection for the resident BSP provider.
-    /// Invalid generated tables or more blockers than the explicit stack
-    /// budget return `None`; no partially filled slice is consumed.
-    pub(super) fn collect_static_prop_aabb_blockers_checked(
-        &self,
-        out: &mut [CharacterCollisionAabb],
-    ) -> Option<usize> {
         let mut count =
             self.box_props
-                .collect_collision_blockers_checked(BOX_PROPS, self.room_index, out)?;
-        count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked(
+                .collect_collision_blockers_into(BOX_PROPS, self.room_index, out);
+        count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_into(
             ARCH_PROPS,
             ARCH_PROP_COLLISIONS,
             self.room_index,
-            out.get_mut(count..)?,
-        )?;
-        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked(
+            out,
+        );
+        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_into(
             IMAGE_PROPS,
             self.room_index,
-            out.get_mut(count..)?,
+            out,
+        );
+        count
+    }
+
+    /// Checked no-clear collection for resident BSP collision scratch.
+    pub(super) fn collect_static_prop_aabb_blockers_checked_into<
+        S: BoundedSink<CharacterCollisionAabb>,
+    >(
+        &self,
+        out: &mut S,
+    ) -> Option<usize> {
+        let mut count = self.box_props.collect_collision_blockers_checked_into(
+            BOX_PROPS,
+            self.room_index,
+            out,
+        )?;
+        count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
+            ARCH_PROPS,
+            ARCH_PROP_COLLISIONS,
+            self.room_index,
+            out,
+        )?;
+        count += psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into(
+            IMAGE_PROPS,
+            self.room_index,
+            out,
         )?;
         Some(count)
     }

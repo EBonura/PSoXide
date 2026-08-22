@@ -8,8 +8,8 @@
 //! crate consts; promoting them to authored data is phase-3 work.
 
 use psx_engine::{
-    Angle, CharacterCollisionAabb, CharacterMotorConfig, CharacterMotorInput, RoomPoint,
-    WorldVertex,
+    Angle, BoundedSink, CharacterCollisionAabb, CharacterMotorConfig, CharacterMotorInput,
+    RoomPoint, SliceSink, WorldVertex,
 };
 use psx_level::{box_prop_flags, LevelBoxPropRecord, LevelBoxPropSurfaceRecord, RoomIndex};
 use psx_math::int32::{abs_i32, square_i32_saturating};
@@ -590,13 +590,24 @@ impl<
         current_room: RoomIndex,
         out: &mut [CharacterCollisionAabb],
     ) -> usize {
+        let mut sink = SliceSink::new(out);
+        self.collect_collision_blockers_into(props, current_room, &mut sink)
+    }
+
+    /// Append live collision boxes to bounded scratch without clearing its
+    /// unused capacity.
+    pub fn collect_collision_blockers_into<S: BoundedSink<CharacterCollisionAabb>>(
+        &self,
+        props: &'static [LevelBoxPropRecord],
+        current_room: RoomIndex,
+        out: &mut S,
+    ) -> usize {
         let mut count = 0usize;
         for (index, prop) in props.iter().enumerate() {
             if prop.room != current_room
                 || prop.flags & box_prop_flags::COLLISION_ENABLED == 0
                 || self.is_box_prop_broken(index)
                 || self.is_door_open(index)
-                || count >= out.len()
             {
                 continue;
             }
@@ -604,7 +615,9 @@ impl<
                 continue;
             };
             let (min, max) = (box_runtime.aabb_min, box_runtime.aabb_max);
-            out[count] = CharacterCollisionAabb::new(min, max);
+            if !out.try_push(CharacterCollisionAabb::new(min, max)) {
+                return count;
+            }
             count += 1;
         }
         count
@@ -623,6 +636,18 @@ impl<
         current_room: RoomIndex,
         out: &mut [CharacterCollisionAabb],
     ) -> Option<usize> {
+        let mut sink = SliceSink::new(out);
+        self.collect_collision_blockers_checked_into(props, current_room, &mut sink)
+    }
+
+    /// Checked append variant for bounded scratch. Malformed live bounds or
+    /// output overflow reject the whole collection just like the slice API.
+    pub fn collect_collision_blockers_checked_into<S: BoundedSink<CharacterCollisionAabb>>(
+        &self,
+        props: &'static [LevelBoxPropRecord],
+        current_room: RoomIndex,
+        out: &mut S,
+    ) -> Option<usize> {
         let mut count = 0usize;
         for (index, prop) in props.iter().enumerate() {
             if prop.room != current_room
@@ -637,7 +662,9 @@ impl<
             if !blocker.is_strictly_valid() {
                 return None;
             }
-            *out.get_mut(count)? = blocker;
+            if !out.try_push(blocker) {
+                return None;
+            }
             count += 1;
         }
         Some(count)
