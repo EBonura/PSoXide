@@ -488,40 +488,6 @@ fn clip_axis_line_to_convex_polygon(
         .then(|| (intersections[farthest.0], intersections[farthest.1]))
 }
 
-#[cfg(test)]
-mod brush_surface_grid_tests {
-    use super::*;
-
-    #[test]
-    fn surface_grid_line_is_clipped_to_the_projected_face() {
-        let polygon = [[5.0, 7.0], [37.0, 7.0], [37.0, 39.0], [5.0, 39.0]];
-        let (a, b) = clip_axis_line_to_convex_polygon(&polygon, 0, 16.0)
-            .expect("world-aligned line crosses the brush face");
-        assert_eq!(a[0], 16.0);
-        assert_eq!(b[0], 16.0);
-        assert_eq!([a[1].min(b[1]), a[1].max(b[1])], [7.0, 39.0]);
-    }
-
-    #[test]
-    fn surface_grid_handles_a_line_coincident_with_a_face_edge() {
-        let polygon = [[5.0, 7.0], [37.0, 7.0], [37.0, 39.0], [5.0, 39.0]];
-        let (a, b) = clip_axis_line_to_convex_polygon(&polygon, 1, 7.0)
-            .expect("face edge is also a valid global grid segment");
-        assert_eq!(a[1], 7.0);
-        assert_eq!(b[1], 7.0);
-        assert_eq!([a[0].min(b[0]), a[0].max(b[0])], [5.0, 37.0]);
-    }
-
-    #[test]
-    fn surface_grid_uses_the_same_readable_interval_as_the_background() {
-        assert_eq!(readable_grid_step(16.0, 1.0), 16.0);
-        assert_eq!(readable_grid_step(16.0, 0.25), 64.0);
-        let polygon_min = 5.0_f64;
-        let first_global_line = (polygon_min / 16.0).ceil() * 16.0;
-        assert_eq!(first_global_line, 16.0, "grid must not restart at the face");
-    }
-}
-
 // Selection, validation, and visibility state for one 2D scene-viewport pass.
 pub(crate) struct SceneViewportContext<'a> {
     pub(crate) hidden_scene_nodes: &'a HashSet<NodeId>,
@@ -1494,4 +1460,38 @@ pub(crate) fn draw_simple_marker(
         center,
         radius.max(8.0 / transform.zoom),
     ));
+}
+
+#[cfg(test)]
+mod brush_surface_grid_tests {
+    use super::*;
+
+    #[test]
+    fn surface_grid_line_is_clipped_to_the_projected_face() {
+        let polygon = [[5.0, 7.0], [37.0, 7.0], [37.0, 39.0], [5.0, 39.0]];
+        let (a, b) = clip_axis_line_to_convex_polygon(&polygon, 0, 16.0)
+            .expect("world-aligned line crosses the brush face");
+        assert_eq!(a[0], 16.0);
+        assert_eq!(b[0], 16.0);
+        assert_eq!([a[1].min(b[1]), a[1].max(b[1])], [7.0, 39.0]);
+    }
+
+    #[test]
+    fn surface_grid_handles_a_line_coincident_with_a_face_edge() {
+        let polygon = [[5.0, 7.0], [37.0, 7.0], [37.0, 39.0], [5.0, 39.0]];
+        let (a, b) = clip_axis_line_to_convex_polygon(&polygon, 1, 7.0)
+            .expect("face edge is also a valid global grid segment");
+        assert_eq!(a[1], 7.0);
+        assert_eq!(b[1], 7.0);
+        assert_eq!([a[0].min(b[0]), a[0].max(b[0])], [5.0, 37.0]);
+    }
+
+    #[test]
+    fn surface_grid_uses_the_same_readable_interval_as_the_background() {
+        assert_eq!(readable_grid_step(16.0, 1.0), 16.0);
+        assert_eq!(readable_grid_step(16.0, 0.25), 64.0);
+        let polygon_min = 5.0_f64;
+        let first_global_line = (polygon_min / 16.0).ceil() * 16.0;
+        assert_eq!(first_global_line, 16.0, "grid must not restart at the face");
+    }
 }
