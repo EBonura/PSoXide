@@ -827,6 +827,7 @@ fn editor_visibility_saves_with_project_and_restores_on_open() {
     let mut workspace =
         EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("visibility"));
     workspace.show_grid = false;
+    workspace.show_brush_surface_grid = false;
     workspace.show_portals = false;
     workspace.show_lights = false;
     workspace.preview_fog = false;
@@ -839,6 +840,7 @@ fn editor_visibility_saves_with_project_and_restores_on_open() {
 
     let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
     assert!(!reopened.show_grid_enabled());
+    assert!(!reopened.show_brush_surface_grid_enabled());
     assert!(!reopened.show_portals_enabled());
     assert!(!reopened.show_lights_enabled());
     assert!(!reopened.preview_fog_enabled());
@@ -1507,6 +1509,7 @@ fn visibility_cycle_only_changes_editor_view_items() {
         ProjectDocument::new("visibility"),
     );
     workspace.show_grid = true;
+    workspace.show_brush_surface_grid = true;
     workspace.show_portals = true;
     workspace.show_lights = true;
     workspace.preview_fog = true;
@@ -1518,6 +1521,7 @@ fn visibility_cycle_only_changes_editor_view_items() {
     workspace.cycle_visibility_group(false);
 
     assert!(!workspace.show_grid);
+    assert!(!workspace.show_brush_surface_grid);
     assert!(!workspace.show_portals);
     assert!(!workspace.show_lights);
     assert!(!workspace.preview_fog);

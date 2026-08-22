@@ -1384,12 +1384,6 @@ pub(super) fn node_has_section_ancestor(scene: &Scene, id: NodeId) -> bool {
 /// outward winding, so normal material sidedness must remain intact: forcing
 /// both sides makes the hidden exterior planes of hollow-room slabs occlude
 /// an interior editing camera.
-struct PreviewSolvedFace {
-    face_index: usize,
-    plane: psxed_project::brush::Plane,
-    verts: Vec<[f64; 3]>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PreviewBrushBounds {
     min: [f64; 3],
@@ -1397,7 +1391,6 @@ pub(crate) struct PreviewBrushBounds {
 }
 
 struct PreviewSolvedBrush {
-    faces: Vec<PreviewSolvedFace>,
     all_planes: Vec<psxed_project::brush::Plane>,
     pickable: bool,
 }
@@ -1418,8 +1411,8 @@ static SOLVED_BRUSH_CACHE: OnceLock<Mutex<PreviewSolvedBrushCache>> = OnceLock::
 /// brushes may overlap, but submitting every authored face independently is
 /// not renderable with a PS1 painter's algorithm: two faces can exchange
 /// front/back order inside one triangle. The cook already solves that with
-/// union CSG, so the editor caches the same split exterior polygons and keeps
-/// raw solved brushes only for picking, grids, and selection outlines.
+/// union CSG, so the editor caches the same split exterior polygons. Raw
+/// solved brush planes remain separately cached for lighting occlusion tests.
 struct PreviewCsgSurface {
     surface: psxed_project::brush_compile::CompiledSurface,
     bounds: PreviewBrushBounds,
@@ -1547,27 +1540,12 @@ fn rebuild_solved_brushes(project: &ProjectDocument) -> Vec<PreviewSolvedBrush> 
         .map(|brush| {
             let solved = brush.solve();
             let pickable = solved.is_valid() && solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT);
-            let faces = solved
-                .polygons
-                .into_iter()
-                .enumerate()
-                .filter_map(|(face_index, polygon)| {
-                    let verts = polygon?.verts;
-                    let plane = Plane::from_points(brush.faces.get(face_index)?.points)?;
-                    Some(PreviewSolvedFace {
-                        face_index,
-                        plane,
-                        verts,
-                    })
-                })
-                .collect();
             let all_planes = brush
                 .faces
                 .iter()
                 .filter_map(|face| Plane::from_points(face.points))
                 .collect();
             PreviewSolvedBrush {
-                faces,
                 all_planes,
                 pickable,
             }
@@ -1592,22 +1570,6 @@ fn with_cached_solved_brushes<R>(
         cache.key = Some(key);
     }
     visit(&cache.brushes)
-}
-
-/// Visit the exact solved face geometry shared by the material pass and host
-/// overlays. The visitor runs while the cache is borrowed and must not call
-/// back into this helper.
-pub(super) fn with_cached_solved_brush_faces(
-    project: &ProjectDocument,
-    mut visit: impl FnMut(usize, usize, psxed_project::brush::Plane, &[[f64; 3]]),
-) {
-    with_cached_solved_brushes(project, |brushes| {
-        for (brush_index, brush) in brushes.iter().enumerate() {
-            for face in &brush.faces {
-                visit(brush_index, face.face_index, face.plane, &face.verts);
-            }
-        }
-    });
 }
 
 /// Subdivided + shadow-baked output for one exterior CSG surface.

@@ -331,34 +331,194 @@ pub(crate) fn draw_world_grid(
     let min_z = (top_left[1].min(bottom_right[1]) / step).floor() as i32 - 1;
     let max_z = (top_left[1].max(bottom_right[1]) / step).ceil() as i32 + 1;
 
-    let minor = Stroke::new(1.0, Color32::from_rgb(20, 43, 52));
-    let major = Stroke::new(1.0, Color32::from_rgb(31, 63, 75));
-    let axis = Stroke::new(1.0, Color32::from_rgb(58, 91, 103));
-
     for x in min_x..=max_x {
-        let stroke = if x == 0 {
-            axis
-        } else if x % 4 == 0 {
-            major
-        } else {
-            minor
-        };
         let a = transform.world_to_screen([x as f32 * step, min_z as f32 * step]);
         let b = transform.world_to_screen([x as f32 * step, max_z as f32 * step]);
-        painter.line_segment([a, b], stroke);
+        painter.line_segment([a, b], world_grid_stroke(x));
     }
 
     for z in min_z..=max_z {
-        let stroke = if z == 0 {
-            axis
-        } else if z % 4 == 0 {
-            major
-        } else {
-            minor
-        };
         let a = transform.world_to_screen([min_x as f32 * step, z as f32 * step]);
         let b = transform.world_to_screen([max_x as f32 * step, z as f32 * step]);
-        painter.line_segment([a, b], stroke);
+        painter.line_segment([a, b], world_grid_stroke(z));
+    }
+}
+
+fn world_grid_stroke(index: i32) -> Stroke {
+    let color = if index == 0 {
+        Color32::from_rgb(58, 91, 103)
+    } else if index % 4 == 0 {
+        Color32::from_rgb(31, 63, 75)
+    } else {
+        Color32::from_rgb(20, 43, 52)
+    };
+    Stroke::new(1.0, color)
+}
+
+/// Reapply the active world grid inside one projected brush face.
+///
+/// TrenchBroom renders its background grid first, then evaluates the same
+/// world-space grid in the brush-face shader so texture/fill pixels cannot
+/// hide it. PSoXide's orthographic brush pass is host-drawn, so the equivalent
+/// is to clip the existing global grid to each convex face after face fills and
+/// before outlines and edit handles. Coordinates remain anchored at world zero;
+/// this is deliberately not a face-local grid.
+pub(crate) fn draw_world_grid_on_convex_polygon(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    base_step: f32,
+    polygon: &[[f64; 2]],
+) {
+    if polygon.len() < 3 || projected_polygon_area_f64(polygon).abs() <= f64::EPSILON {
+        return;
+    }
+    let step = f64::from(readable_grid_step(base_step, transform.zoom));
+    let (min_x, max_x) = polygon
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), point| {
+            (min.min(point[0]), max.max(point[0]))
+        });
+    let (min_y, max_y) = polygon
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), point| {
+            (min.min(point[1]), max.max(point[1]))
+        });
+    let view_a = transform.screen_to_world(transform.rect.left_top());
+    let view_b = transform.screen_to_world(transform.rect.right_bottom());
+    let min_x = min_x.max(f64::from(view_a[0].min(view_b[0])));
+    let max_x = max_x.min(f64::from(view_a[0].max(view_b[0])));
+    let min_y = min_y.max(f64::from(view_a[1].min(view_b[1])));
+    let max_y = max_y.min(f64::from(view_a[1].max(view_b[1])));
+    if ![min_x, max_x, min_y, max_y, step]
+        .into_iter()
+        .all(f64::is_finite)
+        || step <= 0.0
+    {
+        return;
+    }
+
+    let x_first = (min_x / step).ceil() as i32;
+    let x_last = (max_x / step).floor() as i32;
+    for index in x_first..=x_last {
+        let coordinate = f64::from(index) * step;
+        if let Some((a, b)) = clip_axis_line_to_convex_polygon(polygon, 0, coordinate) {
+            painter.line_segment(
+                [
+                    transform.world_to_screen(a.map(|value| value as f32)),
+                    transform.world_to_screen(b.map(|value| value as f32)),
+                ],
+                world_grid_stroke(index),
+            );
+        }
+    }
+
+    let y_first = (min_y / step).ceil() as i32;
+    let y_last = (max_y / step).floor() as i32;
+    for index in y_first..=y_last {
+        let coordinate = f64::from(index) * step;
+        if let Some((a, b)) = clip_axis_line_to_convex_polygon(polygon, 1, coordinate) {
+            painter.line_segment(
+                [
+                    transform.world_to_screen(a.map(|value| value as f32)),
+                    transform.world_to_screen(b.map(|value| value as f32)),
+                ],
+                world_grid_stroke(index),
+            );
+        }
+    }
+}
+
+fn projected_polygon_area_f64(polygon: &[[f64; 2]]) -> f64 {
+    polygon
+        .iter()
+        .zip(polygon.iter().cycle().skip(1))
+        .take(polygon.len())
+        .map(|(a, b)| a[0] * b[1] - a[1] * b[0])
+        .sum::<f64>()
+        * 0.5
+}
+
+fn clip_axis_line_to_convex_polygon(
+    polygon: &[[f64; 2]],
+    axis: usize,
+    coordinate: f64,
+) -> Option<([f64; 2], [f64; 2])> {
+    const EPSILON: f64 = 1.0 / 4096.0;
+    let mut intersections = Vec::with_capacity(polygon.len().min(8));
+    let mut push_unique = |candidate: [f64; 2]| {
+        if intersections.iter().all(|point: &[f64; 2]| {
+            (point[0] - candidate[0]).powi(2) + (point[1] - candidate[1]).powi(2)
+                > EPSILON * EPSILON
+        }) {
+            intersections.push(candidate);
+        }
+    };
+    for edge in 0..polygon.len() {
+        let a = polygon[edge];
+        let b = polygon[(edge + 1) % polygon.len()];
+        let da = a[axis] - coordinate;
+        let db = b[axis] - coordinate;
+        if da.abs() <= EPSILON {
+            push_unique(a);
+        }
+        if db.abs() <= EPSILON {
+            push_unique(b);
+        }
+        if (da < -EPSILON && db > EPSILON) || (da > EPSILON && db < -EPSILON) {
+            let t = da / (da - db);
+            push_unique([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+        }
+    }
+    if intersections.len() < 2 {
+        return None;
+    }
+    let mut farthest = (0, 1);
+    let mut farthest_distance = 0.0;
+    for a in 0..intersections.len() {
+        for b in (a + 1)..intersections.len() {
+            let distance = (intersections[a][0] - intersections[b][0]).powi(2)
+                + (intersections[a][1] - intersections[b][1]).powi(2);
+            if distance > farthest_distance {
+                farthest = (a, b);
+                farthest_distance = distance;
+            }
+        }
+    }
+    (farthest_distance > EPSILON * EPSILON)
+        .then(|| (intersections[farthest.0], intersections[farthest.1]))
+}
+
+#[cfg(test)]
+mod brush_surface_grid_tests {
+    use super::*;
+
+    #[test]
+    fn surface_grid_line_is_clipped_to_the_projected_face() {
+        let polygon = [[5.0, 7.0], [37.0, 7.0], [37.0, 39.0], [5.0, 39.0]];
+        let (a, b) = clip_axis_line_to_convex_polygon(&polygon, 0, 16.0)
+            .expect("world-aligned line crosses the brush face");
+        assert_eq!(a[0], 16.0);
+        assert_eq!(b[0], 16.0);
+        assert_eq!([a[1].min(b[1]), a[1].max(b[1])], [7.0, 39.0]);
+    }
+
+    #[test]
+    fn surface_grid_handles_a_line_coincident_with_a_face_edge() {
+        let polygon = [[5.0, 7.0], [37.0, 7.0], [37.0, 39.0], [5.0, 39.0]];
+        let (a, b) = clip_axis_line_to_convex_polygon(&polygon, 1, 7.0)
+            .expect("face edge is also a valid global grid segment");
+        assert_eq!(a[1], 7.0);
+        assert_eq!(b[1], 7.0);
+        assert_eq!([a[0].min(b[0]), a[0].max(b[0])], [5.0, 37.0]);
+    }
+
+    #[test]
+    fn surface_grid_uses_the_same_readable_interval_as_the_background() {
+        assert_eq!(readable_grid_step(16.0, 1.0), 16.0);
+        assert_eq!(readable_grid_step(16.0, 0.25), 64.0);
+        let polygon_min = 5.0_f64;
+        let first_global_line = (polygon_min / 16.0).ceil() * 16.0;
+        assert_eq!(first_global_line, 16.0, "grid must not restart at the face");
     }
 }
 

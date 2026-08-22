@@ -1815,6 +1815,8 @@ impl ApplicationHandler for Shell {
                         state.editor.preview_backface_wireframe_enabled();
                     let editor_preview_bounds = state.editor.preview_bounds_enabled();
                     let editor_show_grid = state.editor.show_grid_enabled();
+                    let editor_show_brush_surface_grid =
+                        state.editor.show_brush_surface_grid_enabled();
                     let editor_grid_units = state.editor.grid_snap_units();
                     let editor_bsp_leak_path = state.editor.visible_bsp_leak_path();
                     let editor_show_portals = state.editor.show_portals_enabled();
@@ -1843,6 +1845,7 @@ impl ApplicationHandler for Shell {
                         editor_preview_backface_wireframe,
                         editor_preview_bounds,
                         editor_show_grid,
+                        editor_show_brush_surface_grid,
                         editor_grid_units,
                         editor_bsp_leak_path,
                         editor_show_portals,
