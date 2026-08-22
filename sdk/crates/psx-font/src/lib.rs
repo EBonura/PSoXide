@@ -1361,8 +1361,7 @@ mod tests {
         assert!(atlas_w <= FontAtlas::MAX_ATLAS_W_TEXELS);
         assert!(atlas_h <= u8::MAX as u16);
         assert!(
-            usize::from(halfwords_per_row) * usize::from(atlas_h)
-                <= FontAtlas::MAX_PACK_HALFWORDS
+            usize::from(halfwords_per_row) * usize::from(atlas_h) <= FontAtlas::MAX_PACK_HALFWORDS
         );
     }
 }

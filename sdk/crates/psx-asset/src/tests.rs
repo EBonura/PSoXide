@@ -206,9 +206,7 @@ fn model_round_trip_minimal_textured_part() {
     buf.extend_from_slice(&model::MAGIC);
     buf.extend_from_slice(&model::VERSION.to_le_bytes());
     buf.extend_from_slice(
-        &(model::flags::HAS_UVS
-            | model::flags::RIGID_SKINNED
-            | model::flags::FACE_PALETTE_BANKS)
+        &(model::flags::HAS_UVS | model::flags::RIGID_SKINNED | model::flags::FACE_PALETTE_BANKS)
             .to_le_bytes(),
     );
     buf.extend_from_slice(&(payload_len as u32).to_le_bytes());
