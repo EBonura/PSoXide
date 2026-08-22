@@ -482,6 +482,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 text_color,
                 text_gradient,
                 transparent,
+                focus_chrome,
                 shape,
                 action,
                 ..
@@ -508,6 +509,11 @@ pub(crate) fn cook_ui_scene_nodes(
                 ui_node_flags(rect.anchor, *align, false)
                     | if *transparent {
                         psx_level::ui_node_flags::BUTTON_TRANSPARENT
+                    } else {
+                        0
+                    }
+                    | if *focus_chrome {
+                        psx_level::ui_node_flags::BUTTON_FOCUS_CHROME
                     } else {
                         0
                     },

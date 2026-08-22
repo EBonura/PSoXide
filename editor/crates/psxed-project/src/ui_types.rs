@@ -719,11 +719,13 @@ pub enum UiFontChoice {
     ShareTechMono,
     /// Jura UI font.
     Jura,
+    /// Zen Dots uppercase face rasterized natively for large titles.
+    ZenDotsDisplay,
 }
 
 impl UiFontChoice {
     /// All editor-selectable built-in UI fonts.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 37] = [
         Self::Basic,
         Self::Basic8x16,
         Self::KenneyBlocks,
@@ -760,6 +762,7 @@ impl UiFontChoice {
         Self::Syncopate,
         Self::ShareTechMono,
         Self::Jura,
+        Self::ZenDotsDisplay,
     ];
 
     /// Editor-facing label for this font.
@@ -801,6 +804,7 @@ impl UiFontChoice {
             Self::Syncopate => "Syncopate",
             Self::ShareTechMono => "Share Tech Mono",
             Self::Jura => "Jura",
+            Self::ZenDotsDisplay => "Zen Dots Display",
         }
     }
 
@@ -843,6 +847,7 @@ impl UiFontChoice {
             Self::Syncopate => "syncopate",
             Self::ShareTechMono => "share-tech-mono",
             Self::Jura => "jura",
+            Self::ZenDotsDisplay => "zen-dots-display",
         }
     }
 
@@ -885,6 +890,7 @@ impl UiFontChoice {
             Self::Syncopate => 33,
             Self::ShareTechMono => 34,
             Self::Jura => 35,
+            Self::ZenDotsDisplay => 36,
         }
     }
 }
@@ -1239,6 +1245,11 @@ pub enum UiNodeKind {
         /// Transparent background: skip the fill and draw only the label.
         #[serde(default)]
         transparent: bool,
+        /// Draw the button fill and border only while this control is focused.
+        /// The label remains visible but dimmed, producing a restrained
+        /// text-first menu with no duplicate focus-specific authoring.
+        #[serde(default)]
+        focus_chrome: bool,
         /// Optional clipped-corner and border treatment.
         #[serde(default)]
         shape: Option<UiShapeStyle>,

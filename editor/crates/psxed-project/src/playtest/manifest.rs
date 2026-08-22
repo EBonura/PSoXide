@@ -3351,6 +3351,7 @@ fn render_ui_font_source(font: UiFontChoice) -> &'static str {
         UiFontChoice::Syncopate => "psx_font::fonts::SYNCOPATE",
         UiFontChoice::ShareTechMono => "psx_font::fonts::SHARE_TECH_MONO",
         UiFontChoice::Jura => "psx_font::fonts::JURA",
+        UiFontChoice::ZenDotsDisplay => "psx_font::fonts::ZEN_DOTS_DISPLAY",
     }
 }
 

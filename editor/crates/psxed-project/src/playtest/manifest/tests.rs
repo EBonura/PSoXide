@@ -322,6 +322,7 @@ fn button_and_slider_nodes_render_action_accent_and_option_fields() {
                     text_color: [236, 240, 248],
                     text_gradient: None,
                     transparent: false,
+                    focus_chrome: false,
                     shape: None,
                     action: UiAction::Back,
                     sfx: crate::UiSfxBindings::default(),
