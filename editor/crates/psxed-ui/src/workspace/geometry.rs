@@ -1081,6 +1081,7 @@ impl EditorWorkspace {
     /// Tools > Prefabs. Saving names the piece; stamping picks one off disk
     /// and hands it to the same preview loop Duplicate uses, so rotate / flip /
     /// place stay exactly as they are.
+    #[allow(dead_code)] // Retained for a future BSP-focused prefab entry point.
     pub(crate) fn draw_prefab_menu(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Name");
@@ -1130,6 +1131,7 @@ impl EditorWorkspace {
     }
 
     /// Capture the current geometry selection as a named prefab.
+    #[allow(dead_code)] // Used by the dormant prefab authoring flow and its tests.
     pub(crate) fn capture_selection_as_prefab(
         &mut self,
         name: &str,
@@ -1229,6 +1231,7 @@ impl EditorWorkspace {
     }
 
     /// Write the current geometry selection to `editor/prefabs/<name>.ron`.
+    #[allow(dead_code)] // Retained for a future BSP-focused prefab entry point.
     pub(crate) fn save_selection_as_prefab(&mut self, name: &str) {
         let Some(prefab) = self.capture_selection_as_prefab(name) else {
             return;
@@ -2973,6 +2976,7 @@ impl EditorWorkspace {
     ///
     /// Counts first so the status line can say nothing was found without
     /// spending an undo step on a no-op.
+    #[allow(dead_code)] // LegacyGrid repair stays available to tests and migration work.
     pub(crate) fn remove_duplicate_walls(&mut self) {
         let room_ids: Vec<_> = self
             .project
