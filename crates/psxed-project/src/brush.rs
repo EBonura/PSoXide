@@ -638,8 +638,8 @@ impl Brush {
         let snap = |v: i32| (v + step / 2).div_euclid(step) * step;
         for face in &mut self.faces {
             for point in &mut face.points {
-                for axis in 0..3 {
-                    point[axis] = snap(point[axis]);
+                for coordinate in point.iter_mut() {
+                    *coordinate = snap(*coordinate);
                 }
             }
         }

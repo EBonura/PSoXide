@@ -152,7 +152,7 @@ mod tests {
                 .as_nanos()
         ));
         generate(&generated);
-        let mut project = ProjectDocument::load_from_path(&generated.join("project.ron")).unwrap();
+        let mut project = ProjectDocument::load_from_path(generated.join("project.ron")).unwrap();
         let scene = project.active_scene();
         assert_eq!(scene.brushes.len(), 6);
         assert_eq!(
