@@ -9,7 +9,7 @@ fn main() {
     let bytes = std::fs::read(&args[0]).expect("read pxbsp");
     let mut map = PxbspResidentMap::default();
     let mut reader = SliceReader::new(&bytes);
-    map.load(0, &mut reader).ok().expect("load pxbsp");
+    map.load(0, &mut reader).expect("load pxbsp");
     let leaves = map.leaves();
     for spec in &args[1..] {
         let v: Vec<i32> = spec.split(',').map(|s| s.trim().parse().unwrap()).collect();

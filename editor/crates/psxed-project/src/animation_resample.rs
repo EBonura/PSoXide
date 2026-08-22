@@ -39,10 +39,9 @@ fn q12_sine_of_degrees(degrees: u8) -> i32 {
 fn blend(a: &JointPose, b: &JointPose, numerator: i32, denominator: i32) -> JointPose {
     let mix = |x: i32, y: i32| x + (y - x) * numerator / denominator.max(1);
     let mut matrix = [[0i16; 3]; 3];
-    for column in 0..3 {
-        for row in 0..3 {
-            matrix[column][row] =
-                mix(a.matrix[column][row] as i32, b.matrix[column][row] as i32) as i16;
+    for (column, output_column) in matrix.iter_mut().enumerate() {
+        for (row, output) in output_column.iter_mut().enumerate() {
+            *output = mix(a.matrix[column][row] as i32, b.matrix[column][row] as i32) as i16;
         }
     }
     // Start from a real translation so the vector type stays inferred; the

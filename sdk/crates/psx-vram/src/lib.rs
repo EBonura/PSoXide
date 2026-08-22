@@ -265,7 +265,7 @@ pub const fn first_vram_overlap(rects: &[VramRect]) -> Option<(usize, usize)> {
 /// True when no two rectangles in `rects` share a pixel. See
 /// [`first_vram_overlap`] for the pattern and why it is worth pinning.
 pub const fn vram_layout_is_disjoint(rects: &[VramRect]) -> bool {
-    matches!(first_vram_overlap(rects), None)
+    first_vram_overlap(rects).is_none()
 }
 
 // ======================================================================

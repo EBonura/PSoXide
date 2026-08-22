@@ -3,6 +3,8 @@
 
 use super::*;
 
+type ProjectedPreviewVertex = (psx_gte::scene::Projected, (u8, u8), (u8, u8, u8));
+
 /// Two preview triangles produced by splitting one: each is a vertex
 /// triple plus its UV triple and per-vertex colour triple.
 type SplitPreviewTri = (
@@ -67,7 +69,7 @@ impl PreviewClipVertex {
     pub(crate) fn projected(
         self,
         projection: psx_engine::WorldProjection,
-    ) -> Option<(psx_gte::scene::Projected, (u8, u8), (u8, u8, u8))> {
+    ) -> Option<ProjectedPreviewVertex> {
         let projected = projection.project_view(self.view)?;
         let uv_component = |value: i64| ((value >> 16).rem_euclid(256)) as u8;
         let color_component = |value: i64| (value >> 16).clamp(0, 255) as u8;

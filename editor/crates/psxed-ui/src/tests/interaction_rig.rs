@@ -321,13 +321,14 @@ fn mouse_matrix_selects_and_transforms_faces_edges_and_vertices() {
     // Geometric no-ops the gestures must leave alone: scaling a flat
     // face along its own normal, scaling an edge across its direction,
     // and rotating an edge about an axis parallel to itself.
-    let expect_change =
-        |mode: BrushEditMode, gizmo: TransformGizmoMode, axis: usize| match (mode, gizmo, axis) {
-            (BrushEditMode::Face, TransformGizmoMode::Scale, 1) => false,
-            (BrushEditMode::Edge, TransformGizmoMode::Scale, 1 | 2) => false,
-            (BrushEditMode::Edge, TransformGizmoMode::Rotate, 0) => false,
-            _ => true,
-        };
+    let expect_change = |mode: BrushEditMode, gizmo: TransformGizmoMode, axis: usize| {
+        !matches!(
+            (mode, gizmo, axis),
+            (BrushEditMode::Face, TransformGizmoMode::Scale, 1)
+                | (BrushEditMode::Edge, TransformGizmoMode::Scale, 1 | 2)
+                | (BrushEditMode::Edge, TransformGizmoMode::Rotate, 0)
+        )
+    };
     for (mode, anchor) in cases {
         for sloppy in [false, true] {
             for gizmo_mode in [

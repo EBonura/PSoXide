@@ -47,10 +47,10 @@ pub const OUT_BOTTOM: u8 = 1 << 3;
 pub fn screen_outcode(position: [i32; 2], bounds: ScreenClipBounds) -> u8 {
     let x = position[0];
     let y = position[1];
-    ((x < bounds.min_x) as u8) * OUT_LEFT
-        | ((x > bounds.max_x) as u8) * OUT_RIGHT
-        | ((y < bounds.min_y) as u8) * OUT_TOP
-        | ((y > bounds.max_y) as u8) * OUT_BOTTOM
+    (((x < bounds.min_x) as u8) * OUT_LEFT)
+        | (((x > bounds.max_x) as u8) * OUT_RIGHT)
+        | (((y < bounds.min_y) as u8) * OUT_TOP)
+        | (((y > bounds.max_y) as u8) * OUT_BOTTOM)
 }
 
 /// Branch-minimal outcode for the common zero-origin viewport.

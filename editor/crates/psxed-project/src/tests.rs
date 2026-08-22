@@ -2341,7 +2341,7 @@ fn tracked_projects_use_the_segmented_health_gauge_without_a_stamina_bar() {
     }
 
     let cortex =
-        ProjectDocument::load_from_path(&manifest.join("../../samples/cortex_v1/project.ron"))
+        ProjectDocument::load_from_path(manifest.join("../../samples/cortex_v1/project.ron"))
             .expect("load cortex sample");
     assert!(cortex
         .ui_scenes

@@ -2695,7 +2695,7 @@ fn joint_bind_anchor(model: &psx_asset::Model<'_>, joint: u16) -> [i32; 3] {
         let Some(part) = model.part(part_index) else {
             continue;
         };
-        if part.joint_index() as u16 != joint {
+        if part.joint_index() != joint {
             continue;
         }
         for index in part.first_vertex()..part.first_vertex() + part.vertex_count() {

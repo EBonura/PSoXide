@@ -973,7 +973,7 @@ impl EditorWorkspace {
         model_id: Option<ResourceId>,
         material_id: Option<ResourceId>,
         idle_clip: Option<u16>,
-        settings: CharacterControllerSettings,
+        _settings: CharacterControllerSettings,
         player: bool,
         camera_settings: WorldCameraSettings,
         hit_world: [f32; 3],
