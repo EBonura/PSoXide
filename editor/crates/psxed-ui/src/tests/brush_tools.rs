@@ -1097,6 +1097,64 @@ fn bsp_marquee_multi_selects_brushes_in_every_orthographic_view_via_real_egui() 
 }
 
 #[test]
+fn bsp_marquee_selects_faces_edges_and_vertices_in_orthographic_view_via_real_egui() {
+    for (mode, expected) in [
+        (BrushEditMode::Face, 6),
+        (BrushEditMode::Edge, 12),
+        (BrushEditMode::Vertex, 8),
+    ] {
+        let mut project = ProjectDocument::new("2d BSP element marquee");
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [0, 0, 0],
+                [512, 512, 512],
+            ));
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("2d-element-marquee"), project);
+        workspace.active_workspace = WorkspaceView::Room;
+        workspace.view_2d = true;
+        workspace.orthographic_view = OrthographicView::Top;
+        workspace.active_tool = ViewTool::Select;
+        workspace.replace_brush_selection(0, None);
+        workspace.set_brush_edit_mode(mode);
+        workspace.frame_viewport();
+
+        // Begin clear of the silhouette and sweep every displayed handle.
+        run_real_egui_orthographic_drag(
+            &mut workspace,
+            [-32.0, -32.0],
+            [544.0, 544.0],
+            egui::Modifiers::NONE,
+        );
+
+        assert_eq!(workspace.selected_brush, Some(0), "{mode:?}");
+        assert_eq!(
+            workspace.selected_brush_elements.len(),
+            expected,
+            "{mode:?}"
+        );
+        assert!(
+            workspace
+                .selected_brush_elements
+                .iter()
+                .all(|element| matches!(
+                    (mode, element),
+                    (BrushEditMode::Face, BrushElement::Face(_))
+                        | (BrushEditMode::Edge, BrushElement::Edge(..))
+                        | (BrushEditMode::Vertex, BrushElement::Vertex(_))
+                )),
+            "{mode:?}: {:?}",
+            workspace.selected_brush_elements
+        );
+        if mode == BrushEditMode::Face {
+            assert_eq!(workspace.selected_brush_faces.len(), expected);
+        }
+    }
+}
+
+#[test]
 fn tracked_bsp_starter_top_view_emits_headless_brush_outline_shapes() {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../archive/fixtures/brush-first-playable");
@@ -1608,6 +1666,83 @@ fn whole_brush_gizmo_rotates_and_scales_the_full_multi_selection() {
     assert!((centers[0][2] - centers[1][2]).abs() >= 255.0);
     workspace.do_undo();
     assert_eq!(workspace.project.active_scene().brushes, originals);
+}
+
+#[test]
+fn element_gizmo_rotation_and_scale_snap_every_vertex_to_active_grid() {
+    let exercise = |rotate: bool| {
+        let base = psxed_project::brush::Brush::cuboid([0, 0, 0], [256, 192, 128]);
+        let mut project = ProjectDocument::new("quantized element transform");
+        project.active_scene_mut().brushes.push(base.clone());
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("quantized-transform"), project);
+        workspace.snap_units = 32;
+        workspace.replace_brush_selection(0, None);
+
+        let start_pointer = if rotate {
+            Pos2::new(100.0, 0.0)
+        } else {
+            Pos2::new(0.0, 0.0)
+        };
+        workspace.brush_element_transform = Some(crate::BrushElementTransformDrag {
+            index: 0,
+            base: base.clone(),
+            others: Vec::new(),
+            targets: Vec::new(),
+            center: [128.0, 96.0, 64.0],
+            axis: if rotate { 1 } else { 0 },
+            rotate,
+            faces: (0..base.faces.len()).collect(),
+            start_pointer,
+            screen_axis: Vec2::RIGHT,
+            center_screen: Pos2::new(0.0, 0.0),
+            start_angle: 0.0,
+            applied: 0,
+        });
+
+        let pointer = if rotate {
+            let angle = 35.0_f32.to_radians();
+            Pos2::new(angle.cos() * 100.0, angle.sin() * 100.0)
+        } else {
+            // 2.56 px per percent: this is a deliberately off-grid 15%
+            // scale before the active 32-unit quantisation is applied.
+            Pos2::new(38.4, 0.0)
+        };
+        workspace.update_brush_element_transform(pointer, false);
+        assert_eq!(
+            workspace.brush_element_transform.as_ref().unwrap().applied,
+            if rotate { 35 } else { 15 }
+        );
+        assert!(workspace.commit_brush_element_transform());
+
+        let transformed = workspace.project.active_scene().brushes[0].clone();
+        assert_ne!(transformed, base);
+        assert!(transformed.solve().is_valid());
+        transformed
+    };
+
+    for (label, brush) in [("rotation", exercise(true)), ("scale", exercise(false))] {
+        for face in &brush.faces {
+            for point in face.points {
+                for coordinate in point {
+                    assert_eq!(
+                        coordinate.rem_euclid(32),
+                        0,
+                        "{label} left authored point {point:?} off the 32-unit grid"
+                    );
+                }
+            }
+        }
+        for vertex in crate::workspace::brush_elements::unique_vertices(&brush.solve()) {
+            for coordinate in vertex {
+                let snapped = (coordinate / 32.0).round() * 32.0;
+                assert!(
+                    (coordinate - snapped).abs() <= 0.01,
+                    "{label} left solved vertex {vertex:?} off the 32-unit grid"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -2499,6 +2634,9 @@ fn multi_selection_delete_and_duplicate_are_grouped() {
         Some(4),
         "primary follows its copy"
     );
+    let brushes = &harness.workspace.project.active_scene().brushes;
+    assert_eq!(brushes[3], brushes[0], "first copy stays in place");
+    assert_eq!(brushes[4], brushes[2], "second copy stays in place");
     harness.workspace.do_undo();
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 3);
 
@@ -3033,6 +3171,11 @@ fn duplicate_routes_to_brushes_from_the_select_tool() {
     harness.workspace.duplicate_current_selection();
     assert_eq!(harness.workspace.project.active_scene().brushes.len(), 2);
     assert_eq!(harness.workspace.selected_brush, Some(1));
+    assert_eq!(
+        harness.workspace.project.active_scene().brushes[1],
+        harness.workspace.project.active_scene().brushes[0],
+        "Cmd+D keeps the duplicate exactly on the source"
+    );
 }
 
 #[test]
@@ -4513,6 +4656,68 @@ fn marquee_3d_selects_multiple_brushes_via_real_egui() {
 
     assert_eq!(workspace.selected_brush_set(), vec![0, 1]);
     assert_eq!(workspace.status_text(), "Selected 2 brushes");
+}
+
+#[test]
+fn marquee_3d_selects_faces_edges_and_vertices_via_real_egui() {
+    for (mode, expected) in [
+        (BrushEditMode::Face, None),
+        (BrushEditMode::Edge, Some(12)),
+        (BrushEditMode::Vertex, Some(8)),
+    ] {
+        let (mut workspace, _) = element_click_workspace();
+        workspace.replace_brush_selection(0, None);
+        workspace.set_brush_edit_mode(mode);
+        let viewport = Rect::from_center_size(Pos2::new(400.0, 300.0), Vec2::new(778.6667, 584.0));
+        let solved = workspace.project.active_scene().brushes[0].solve();
+        let projected: Vec<_> = crate::workspace::brush_elements::unique_vertices(&solved)
+            .into_iter()
+            .filter_map(|vertex| workspace.project_brush_point_3d(viewport, vertex))
+            .collect();
+        let bounds = projected.iter().fold(Rect::NOTHING, |mut bounds, point| {
+            bounds.extend_with(*point);
+            bounds
+        });
+
+        // The expanded corner starts outside the solid and every handle,
+        // allowing Select to enter marquee mode before crossing the brush.
+        run_real_egui_viewport_plain_drag(
+            &mut workspace,
+            bounds.min - Vec2::splat(20.0),
+            bounds.max + Vec2::splat(20.0),
+        );
+
+        assert_eq!(workspace.selected_brush, Some(0), "{mode:?}");
+        assert!(
+            workspace
+                .selected_brush_elements
+                .iter()
+                .all(|element| matches!(
+                    (mode, element),
+                    (BrushEditMode::Face, BrushElement::Face(_))
+                        | (BrushEditMode::Edge, BrushElement::Edge(..))
+                        | (BrushEditMode::Vertex, BrushElement::Vertex(_))
+                )),
+            "{mode:?}: {:?}",
+            workspace.selected_brush_elements
+        );
+        if let Some(expected) = expected {
+            assert_eq!(
+                workspace.selected_brush_elements.len(),
+                expected,
+                "{mode:?}"
+            );
+        } else {
+            assert!(
+                !workspace.selected_brush_elements.is_empty(),
+                "Face mode should collect the camera-facing handles"
+            );
+            assert_eq!(
+                workspace.selected_brush_faces.len(),
+                workspace.selected_brush_elements.len()
+            );
+        }
+    }
 }
 
 /// Two side-by-side brushes viewed head-on from -Z, with the Material Paint

@@ -1683,6 +1683,13 @@ struct ViewportBoxSelect {
     brushes: bool,
     base_brushes: Vec<usize>,
     base_primary_brush: Option<usize>,
+    /// Face/Edge/Vertex marquee selection is scoped to the active brush,
+    /// matching the handles drawn by those edit modes. `None` keeps the
+    /// whole-brush marquee used by Move/Clip.
+    element_brush: Option<usize>,
+    element_mode: Option<BrushEditMode>,
+    base_brush_elements: Vec<BrushElement>,
+    base_brush_faces: Vec<(usize, usize)>,
 }
 
 impl ViewportBoxSelect {
@@ -1701,6 +1708,10 @@ struct Viewport3dBoxSelect {
     brushes: bool,
     base_brushes: Vec<usize>,
     base_primary_brush: Option<usize>,
+    element_brush: Option<usize>,
+    element_mode: Option<BrushEditMode>,
+    base_brush_elements: Vec<BrushElement>,
+    base_brush_faces: Vec<(usize, usize)>,
 }
 
 impl Viewport3dBoxSelect {
