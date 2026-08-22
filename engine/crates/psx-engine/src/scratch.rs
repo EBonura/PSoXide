@@ -117,6 +117,11 @@ impl<'a, T> SliceSink<'a, T> {
     pub const fn len(&self) -> usize {
         self.len
     }
+
+    /// Whether no entries have been written to the slice.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 impl<T> BoundedSink<T> for SliceSink<'_, T> {

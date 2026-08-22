@@ -1079,11 +1079,8 @@ impl EditorWorkspace {
                 .collect(),
             BrushEditMode::Vertex => brush_elements::unique_vertices(&solved)
                 .into_iter()
-                .filter_map(|vertex| {
-                    contains(vertex).then(|| {
-                        BrushElement::Vertex(brush_elements::quantize_element_point(vertex))
-                    })
-                })
+                .filter(|&vertex| contains(vertex))
+                .map(|vertex| BrushElement::Vertex(brush_elements::quantize_element_point(vertex)))
                 .collect(),
             BrushEditMode::Move | BrushEditMode::Clip => Vec::new(),
         };
@@ -1330,11 +1327,8 @@ impl EditorWorkspace {
                 .collect(),
             BrushEditMode::Vertex => brush_elements::unique_vertices(&solved)
                 .into_iter()
-                .filter_map(|vertex| {
-                    contains(vertex).then(|| {
-                        BrushElement::Vertex(brush_elements::quantize_element_point(vertex))
-                    })
-                })
+                .filter(|&vertex| contains(vertex))
+                .map(|vertex| BrushElement::Vertex(brush_elements::quantize_element_point(vertex)))
                 .collect(),
             BrushEditMode::Move | BrushEditMode::Clip => Vec::new(),
         };
