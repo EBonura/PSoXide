@@ -1419,6 +1419,7 @@ impl EditorWorkspace {
                 text_color,
                 text_gradient,
                 transparent,
+                focus_chrome,
                 shape,
                 action,
                 sfx,
@@ -1460,6 +1461,12 @@ impl EditorWorkspace {
                     true,
                     |ui| {
                         changed |= color_editor(ui, "Text", text_color);
+                        changed |= ui
+                            .checkbox(focus_chrome, "Focused chrome only")
+                            .on_hover_text(
+                                "Keep the label visible, but draw the fill and border only while focused; the selected fill sweeps horizontally",
+                            )
+                            .changed();
                         changed |= draw_ui_shape_style_editor(ui, transparent, shape);
                         if !*transparent {
                             changed |= color_editor(ui, "Fill", color);

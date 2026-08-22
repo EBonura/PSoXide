@@ -381,6 +381,7 @@ fn clipped_transparent_rect_cooks_border_and_compact_shape_style() {
             text_color: [90, 120, 126],
             text_gradient: None,
             transparent: false,
+            focus_chrome: true,
             shape: Some(crate::UiShapeStyle {
                 semi_transparent_fill: true,
                 corner_cut: 6,
@@ -440,6 +441,10 @@ fn clipped_transparent_rect_cooks_border_and_compact_shape_style() {
     assert_eq!(psx_level::ui_shape::border(button.option), 2);
     assert!(!psx_level::ui_shape::transparent(button.option));
     assert!(psx_level::ui_shape::semi_transparent_fill(button.option));
+    assert_ne!(
+        button.flags & psx_level::ui_node_flags::BUTTON_FOCUS_CHROME,
+        0
+    );
     assert_eq!(button.background, [18, 92, 110]);
     assert_eq!(button.background_paint, Some(0));
 }
@@ -625,6 +630,7 @@ fn button_and_slider_cook_action_colours_and_option_binding() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            focus_chrome: false,
             shape: None,
             action: UiAction::GotoScene(target_scene),
             sfx: crate::UiSfxBindings::default(),
@@ -710,6 +716,7 @@ fn button_sfx_cooks_wav_to_sample_and_cue_range() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            focus_chrome: false,
             shape: None,
             action: UiAction::Back,
             sfx: crate::UiSfxBindings {
@@ -772,6 +779,7 @@ fn button_set_option_and_back_actions_lower_to_runtime_ids() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            focus_chrome: false,
             shape: None,
             action: UiAction::SetOption { option, delta: 2 },
             sfx: crate::UiSfxBindings::default(),
@@ -792,6 +800,7 @@ fn button_set_option_and_back_actions_lower_to_runtime_ids() {
             text_color: [236, 240, 248],
             text_gradient: None,
             transparent: false,
+            focus_chrome: false,
             shape: None,
             action: UiAction::Back,
             sfx: crate::UiSfxBindings::default(),

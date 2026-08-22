@@ -431,7 +431,7 @@ pub fn draw_scene(
             | LevelUiNodeKind::Music
             | LevelUiNodeKind::Timer => {}
             LevelUiNodeKind::Rect => {
-                draw_shape_node(node, resolved, paints);
+                draw_shape_node(node, resolved, paints, None, None);
             }
             LevelUiNodeKind::Label => {
                 if let Some(font) = node_font(fonts, node.font) {
@@ -464,7 +464,15 @@ pub fn draw_scene(
                 }
             }
             LevelUiNodeKind::Button => {
-                draw_button(node_font(fonts, node.font), node, resolved, paints);
+                draw_button(
+                    node_font(fonts, node.font),
+                    node,
+                    resolved,
+                    paints,
+                    is_focused,
+                    frame,
+                    focus_style,
+                );
                 if is_focused {
                     draw_focus_ring(resolved, focus_style, frame, Some(shape_config(node)));
                 }
@@ -911,13 +919,15 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bar_frame_index, bar_frame_v_range, diamond_quad, font_index, font_tint,
-        image_effect_vertex_colors, image_effect_verts, node_absolute_rect, scale_u16_q8,
-        selected_label_text, shape_config, shape_edge_point, shape_perimeter, shape_polygon,
+        bar_frame_index, bar_frame_v_range, diamond_quad, focus_chrome_sweep_paint,
+        focus_sweep_rect, font_index, font_tint, image_effect_vertex_colors, image_effect_verts,
+        node_absolute_rect, scale_u16_q8, selected_label_text, shape_config, shape_edge_point,
+        shape_perimeter, shape_polygon, UiPaint, UiShapeConfig,
     };
     use psx_level::{
-        ui_node_flags, AssetId, LevelUiAction, LevelUiImageEffect, LevelUiNodeKind,
-        LevelUiNodeRecord, LevelUiValueBinding, UI_OPTION_NONE, UI_PAINT_NONE, UI_SFX_NONE,
+        ui_node_flags, AssetId, LevelUiAction, LevelUiGradientDirection, LevelUiImageEffect,
+        LevelUiNodeKind, LevelUiNodeRecord, LevelUiValueBinding, UI_OPTION_NONE, UI_PAINT_NONE,
+        UI_SFX_NONE,
     };
 
     fn ui_node(
@@ -977,6 +987,50 @@ mod tests {
         // No fonts uploaded: text is skipped entirely.
         assert_eq!(font_index(0, 0), None);
         assert_eq!(font_index(0, 7), None);
+    }
+
+    #[test]
+    fn focused_chrome_fill_sweeps_bright_end_left_then_right() {
+        let authored = UiPaint::Gradient {
+            from: (10, 20, 30),
+            to: (110, 120, 130),
+            direction: LevelUiGradientDirection::Vertical,
+        };
+        assert_eq!(
+            focus_chrome_sweep_paint(authored, 0, 100),
+            UiPaint::Gradient {
+                from: (110, 120, 130),
+                to: (10, 20, 30),
+                direction: LevelUiGradientDirection::Horizontal,
+            }
+        );
+        assert_eq!(
+            focus_chrome_sweep_paint(authored, 50, 100),
+            UiPaint::Gradient {
+                from: (10, 20, 30),
+                to: (110, 120, 130),
+                direction: LevelUiGradientDirection::Horizontal,
+            }
+        );
+    }
+
+    #[test]
+    fn focused_chrome_scanner_travels_between_clipped_corner_insets() {
+        let config = UiShapeConfig {
+            corners: 5,
+            cut: 4,
+            border: 1,
+            transparent: false,
+            semi_transparent_fill: true,
+        };
+        assert_eq!(
+            focus_sweep_rect(126, 16, config, 0, 100),
+            Some((4, 1, 25, 14))
+        );
+        assert_eq!(
+            focus_sweep_rect(126, 16, config, 50, 100),
+            Some((97, 1, 25, 14))
+        );
     }
 
     #[test]
@@ -1857,10 +1911,29 @@ fn draw_button(
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
+    focused: bool,
+    frame: u16,
+    focus_style: &LevelUiFocusStyle,
 ) {
-    let config = draw_shape_node(node, resolved, paints);
-    if !config.transparent && config.corners == 0 && config.border == 0 {
-        let fill = shape_paint(node.color, node.color_paint, paints);
+    let focus_chrome = node.flags & ui_node_flags::BUTTON_FOCUS_CHROME != 0;
+    let draw_chrome = !focus_chrome || focused;
+    let fill = shape_paint(node.color, node.color_paint, paints);
+    let fill = if focus_chrome && focused {
+        focus_chrome_sweep_paint(fill, frame, focus_style.period)
+    } else {
+        fill
+    };
+    let sweep = (focus_chrome && focused).then_some(UiShapeSweep {
+        frame,
+        period: focus_style.period,
+        color: focus_style.color_a,
+    });
+    let config = if draw_chrome {
+        draw_shape_node(node, resolved, paints, Some(fill), sweep)
+    } else {
+        shape_config(node)
+    };
+    if draw_chrome && !config.transparent && config.corners == 0 && config.border == 0 {
         if resolved.height > 3 && fill.is_solid() {
             let color = brighten(fill.from());
             draw_quad_flat(
@@ -1892,6 +1965,12 @@ fn draw_button(
         scale,
         letter_spacing,
     );
+    let paint = text_paint(node.accent, node.accent_paint, paints);
+    let paint = if focus_chrome && !focused {
+        dim_paint(paint)
+    } else {
+        paint
+    };
     draw_transformed_text_paint(
         font,
         resolved,
@@ -1900,7 +1979,7 @@ fn draw_button(
         node.text,
         scale,
         letter_spacing,
-        text_paint(node.accent, node.accent_paint, paints),
+        paint,
     );
 }
 
@@ -1911,6 +1990,13 @@ struct UiShapeConfig {
     border: u8,
     transparent: bool,
     semi_transparent_fill: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UiShapeSweep {
+    frame: u16,
+    period: u16,
+    color: (u8, u8, u8),
 }
 
 fn shape_config(node: &LevelUiNodeRecord) -> UiShapeConfig {
@@ -1937,9 +2023,11 @@ fn draw_shape_node(
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
+    fill_override: Option<UiPaint>,
+    sweep: Option<UiShapeSweep>,
 ) -> UiShapeConfig {
     let config = shape_config(node);
-    let fill = shape_paint(node.color, node.color_paint, paints);
+    let fill = fill_override.unwrap_or_else(|| shape_paint(node.color, node.color_paint, paints));
     if config.corners == 0 && config.border == 0 && !config.semi_transparent_fill {
         if !config.transparent {
             draw_quad_paint(resolved.verts, fill);
@@ -1956,6 +2044,9 @@ fn draw_shape_node(
             resolved.height,
             config.semi_transparent_fill,
         );
+        if let Some(sweep) = sweep {
+            draw_focus_sweep(resolved, config, sweep);
+        }
     }
     if config.border != 0 {
         draw_shape_border(
@@ -1966,6 +2057,71 @@ fn draw_shape_node(
         );
     }
     config
+}
+
+fn focus_sweep_rect(
+    width: u16,
+    height: u16,
+    config: UiShapeConfig,
+    frame: u16,
+    period: u16,
+) -> Option<(i16, i16, i16, i16)> {
+    let width = i32::from(width);
+    let height = i32::from(height);
+    let safe_inset = i32::from(config.cut.max(config.border).max(1));
+    let available = width.saturating_sub(safe_inset.saturating_mul(2));
+    if available < 3 || height < 3 {
+        return None;
+    }
+    let band_width = (width / 5).clamp(12, 28).min(available);
+    let travel = available.saturating_sub(band_width);
+    let x = safe_inset + travel.saturating_mul(i32::from(focus_wave(frame, period))) / 255;
+    let y = i32::from(config.border.max(1)).min(height / 2);
+    let band_height = height.saturating_sub(y.saturating_mul(2));
+    Some((x as i16, y as i16, band_width as i16, band_height as i16))
+}
+
+fn draw_focus_sweep(resolved: UiResolvedNode, config: UiShapeConfig, sweep: UiShapeSweep) {
+    let Some((x, y, width, height)) = focus_sweep_rect(
+        resolved.width,
+        resolved.height,
+        config,
+        sweep.frame,
+        sweep.period,
+    ) else {
+        return;
+    };
+    let left_width = (width / 2).max(1);
+    let right_width = width.saturating_sub(left_width).max(1);
+    let peak = scale_color_q8(sweep.color, 112);
+    draw_focus_sweep_half(resolved.subrect(x, y, left_width, height), (0, 0, 0), peak);
+    draw_focus_sweep_half(
+        resolved.subrect(x.saturating_add(left_width), y, right_width, height),
+        peak,
+        (0, 0, 0),
+    );
+}
+
+fn draw_focus_sweep_half(vertices: [(i16, i16); 4], left: (u8, u8, u8), right: (u8, u8, u8)) {
+    draw_tri_gouraud_blended(
+        [vertices[0], vertices[1], vertices[2]],
+        [left, right, left],
+        BlendMode::Add,
+    );
+    draw_tri_gouraud_blended(
+        [vertices[1], vertices[2], vertices[3]],
+        [right, left, right],
+        BlendMode::Add,
+    );
+}
+
+fn scale_color_q8(color: (u8, u8, u8), scale: u8) -> (u8, u8, u8) {
+    let scale = u16::from(scale);
+    (
+        ((u16::from(color.0) * scale) >> 8) as u8,
+        ((u16::from(color.1) * scale) >> 8) as u8,
+        ((u16::from(color.2) * scale) >> 8) as u8,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2227,7 +2383,7 @@ fn gradient_vertex_colors(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UiPaint {
     Solid((u8, u8, u8)),
     Gradient {
@@ -2283,6 +2439,44 @@ fn brighten(color: (u8, u8, u8)) -> (u8, u8, u8) {
         color.1.saturating_add(34),
         color.2.saturating_add(34),
     )
+}
+
+fn dim_paint(paint: UiPaint) -> UiPaint {
+    let dim = |color: (u8, u8, u8)| {
+        (
+            ((u16::from(color.0) * 9) / 16) as u8,
+            ((u16::from(color.1) * 9) / 16) as u8,
+            ((u16::from(color.2) * 9) / 16) as u8,
+        )
+    };
+    match paint {
+        UiPaint::Solid(color) => UiPaint::Solid(dim(color)),
+        UiPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => UiPaint::Gradient {
+            from: dim(from),
+            to: dim(to),
+            direction,
+        },
+    }
+}
+
+/// Turn the selected button's authored fill into a horizontal, ping-pong
+/// gradient. Because this replaces the shape fill itself, clipped corners and
+/// PS1 average-blend transparency remain intact without extra geometry.
+fn focus_chrome_sweep_paint(paint: UiPaint, frame: u16, period: u16) -> UiPaint {
+    let (dark, bright) = match paint {
+        UiPaint::Solid(color) => (color, brighten(color)),
+        UiPaint::Gradient { from, to, .. } => (from, to),
+    };
+    let phase = focus_wave(frame, period);
+    UiPaint::Gradient {
+        from: lerp_color(dark, bright, phase),
+        to: lerp_color(bright, dark, phase),
+        direction: LevelUiGradientDirection::Horizontal,
+    }
 }
 
 fn rgb(color: [u8; 3]) -> (u8, u8, u8) {

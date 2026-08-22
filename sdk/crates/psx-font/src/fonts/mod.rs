@@ -85,6 +85,8 @@ pub mod syncopate;
 pub mod share_tech_mono;
 /// Built-in font: `jura` (U+0020..U+007F, 96 glyphs).
 pub mod jura;
+/// Built-in font: `zen_dots_display` (U+0041..U+005A, 26 glyphs).
+pub mod zen_dots_display;
 
 // Flat re-exports so call sites read as
 // `psx_font::fonts::BASIC` etc.
@@ -126,6 +128,7 @@ pub use aldrich::ALDRICH;
 pub use syncopate::SYNCOPATE;
 pub use share_tech_mono::SHARE_TECH_MONO;
 pub use jura::JURA;
+pub use zen_dots_display::ZEN_DOTS_DISPLAY;
 
 /// Spleen 5x8, hand-maintained: no `psoxide-dev gen-fonts` entry, so
 /// unlike its siblings in this module it is edited directly.

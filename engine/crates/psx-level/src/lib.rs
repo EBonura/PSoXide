@@ -413,6 +413,8 @@ pub mod ui_node_flags {
     /// Timer node fires early on CROSS when the scene has no focusable
     /// control.
     pub const TIMER_SKIPPABLE: u16 = 1 << 14;
+    /// Button fill and border are drawn only while the button has focus.
+    pub const BUTTON_FOCUS_CHROME: u16 = 1 << 15;
 }
 
 typed_index! {
