@@ -2764,6 +2764,7 @@ fn editor_visibility_roundtrips_through_ron_string() {
     let mut project = ProjectDocument::new("visibility");
     project.editor_visibility = EditorVisibilityState {
         show_grid: false,
+        show_brush_surface_grid: false,
         show_portals: true,
         show_lights: false,
         preview_fog: false,
