@@ -8,6 +8,20 @@ fn brush_workspace(label: &str) -> EditorWorkspace {
     workspace
 }
 
+fn draw_primitive(
+    workspace: &mut EditorWorkspace,
+    view: OrthographicView,
+    shape: BrushDrawShape,
+    start: [f32; 2],
+    end: [f32; 2],
+) {
+    workspace.set_orthographic_view(view);
+    workspace.brush_draw_settings.shape = shape;
+    workspace.begin_brush_drag_2d(start);
+    workspace.update_brush_drag_2d(end);
+    workspace.commit_brush_drag();
+}
+
 #[test]
 fn orthographic_projection_and_unprojection_cover_all_world_axes() {
     let world = [11.0, 22.0, 33.0];
@@ -179,6 +193,144 @@ fn brush_creation_uses_active_plane_and_preserves_top_defaults() {
     let side = workspace.project.active_scene().brushes[2].solve();
     assert_eq!(side.min, [-128.0, 0.0, 64.0]);
     assert_eq!(side.max, [128.0, 128.0, 192.0]);
+}
+
+#[test]
+fn ramp_draw_rises_toward_the_selected_world_direction() {
+    for (direction, high_axis, high_coordinate) in [
+        (BrushCardinalDirection::North, 2, 0.0),
+        (BrushCardinalDirection::East, 0, 512.0),
+        (BrushCardinalDirection::South, 2, 512.0),
+        (BrushCardinalDirection::West, 0, 0.0),
+    ] {
+        let mut workspace = brush_workspace("primitive_ramp");
+        workspace.brush_draw_settings.direction = direction;
+        draw_primitive(
+            &mut workspace,
+            OrthographicView::Top,
+            BrushDrawShape::Ramp,
+            [0.0, 0.0],
+            [512.0, 512.0],
+        );
+        let brush = &workspace.project.active_scene().brushes[0];
+        let solved = brush.solve();
+        assert!(solved.is_valid());
+        assert_eq!(brush.faces.len(), 5);
+        let high_vertices: Vec<_> = solved
+            .polygons
+            .iter()
+            .flatten()
+            .flat_map(|polygon| polygon.verts.iter().copied())
+            .filter(|vertex| vertex[1] == f64::from(BRUSH_CREATE_HEIGHT))
+            .collect();
+        assert!(!high_vertices.is_empty());
+        assert!(high_vertices
+            .iter()
+            .all(|vertex| vertex[high_axis] == high_coordinate));
+    }
+}
+
+#[test]
+fn cylinder_draw_uses_requested_sides_and_quantises_every_authored_point() {
+    let mut workspace = brush_workspace("primitive_cylinder");
+    workspace.snap_units = 16;
+    workspace.brush_draw_settings.cylinder_sides = 8;
+    draw_primitive(
+        &mut workspace,
+        OrthographicView::Top,
+        BrushDrawShape::Cylinder,
+        [0.0, 0.0],
+        [512.0, 512.0],
+    );
+
+    let brush = &workspace.project.active_scene().brushes[0];
+    assert_eq!(brush.faces.len(), 10);
+    assert!(brush.solve().is_valid());
+    assert!(brush
+        .faces
+        .iter()
+        .flat_map(|face| face.points)
+        .flatten()
+        .all(|coordinate| coordinate % 16 == 0));
+}
+
+#[test]
+fn doorway_and_curved_arches_create_grouped_native_brushes_in_one_undo_step() {
+    let mut doorway = brush_workspace("primitive_doorway_arch");
+    doorway.snap_units = 16;
+    doorway.brush_draw_settings.direction = BrushCardinalDirection::North;
+    doorway.brush_draw_settings.arch_segments = 6;
+    doorway.brush_draw_settings.arch_thickness = 64;
+    draw_primitive(
+        &mut doorway,
+        OrthographicView::Front,
+        BrushDrawShape::DoorwayArch,
+        [-256.0, 0.0],
+        [256.0, 512.0],
+    );
+    let doorway_scene = doorway.project.active_scene();
+    assert_eq!(doorway_scene.brushes.len(), 8);
+    let doorway_group = doorway_scene.brushes[0].group.expect("arch group");
+    assert!(doorway_scene
+        .brushes
+        .iter()
+        .all(|brush| brush.group == Some(doorway_group) && brush.solve().is_valid()));
+    assert!(matches!(
+        doorway_scene.node(doorway_group).map(|node| &node.kind),
+        Some(NodeKind::Group)
+    ));
+    doorway.do_undo();
+    assert!(doorway.project.active_scene().brushes.is_empty());
+    assert!(doorway.project.active_scene().node(doorway_group).is_none());
+
+    let mut curved = brush_workspace("primitive_curved_wall");
+    curved.snap_units = 16;
+    curved.brush_draw_settings.arch_segments = 4;
+    curved.brush_draw_settings.arch_thickness = 64;
+    curved.brush_draw_settings.curved_wall_arc_degrees = 90;
+    draw_primitive(
+        &mut curved,
+        OrthographicView::Top,
+        BrushDrawShape::CurvedWall,
+        [0.0, 0.0],
+        [512.0, 512.0],
+    );
+    assert_eq!(curved.project.active_scene().brushes.len(), 4);
+    assert!(curved
+        .project
+        .active_scene()
+        .brushes
+        .iter()
+        .all(|brush| brush.group.is_some() && brush.solve().is_valid()));
+}
+
+#[test]
+fn stair_draw_creates_quantised_world_up_steps_as_one_group() {
+    let mut workspace = brush_workspace("primitive_stairs");
+    workspace.snap_units = 16;
+    workspace.brush_draw_settings.direction = BrushCardinalDirection::East;
+    workspace.brush_draw_settings.stair_steps = 4;
+    draw_primitive(
+        &mut workspace,
+        OrthographicView::Top,
+        BrushDrawShape::Stairs,
+        [0.0, 0.0],
+        [512.0, 512.0],
+    );
+
+    let scene = workspace.project.active_scene();
+    assert_eq!(scene.brushes.len(), 4);
+    let group = scene.brushes[0].group.expect("stairs group");
+    let tops: Vec<_> = scene
+        .brushes
+        .iter()
+        .map(|brush| brush.solve().max[1])
+        .collect();
+    assert_eq!(tops, vec![64.0, 128.0, 192.0, 256.0]);
+    assert!(scene
+        .brushes
+        .iter()
+        .all(|brush| brush.group == Some(group) && brush.solve().is_valid()));
 }
 
 #[test]

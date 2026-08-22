@@ -3796,8 +3796,8 @@ fn preview_model_surface_options(
     psx_engine::WorldSurfaceOptions::new(
         psx_engine::DepthBand::new(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX),
         psx_engine::DepthRange::new(
-            (PREVIEW_GEOMETRY_SLOT_MIN as i32) << 6,
-            (PREVIEW_GEOMETRY_SLOT_MAX as i32) << 6,
+            (PREVIEW_GEOMETRY_SLOT_MIN as i32) << 2,
+            (PREVIEW_GEOMETRY_SLOT_MAX as i32) << 2,
         ),
     )
     .with_depth_policy(psx_engine::DepthPolicy::Average)

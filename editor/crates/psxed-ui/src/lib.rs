@@ -354,14 +354,35 @@ const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/aletha_delivered",
     "assets/models/rust_mantis",
+    // Keep both the delivered heavy-enemy backup and the native animated
+    // model. The Character profile uses the latter; the former remains a
+    // reversible source-of-truth import in every new project.
+    "assets/models/tank_boss_model",
+    "assets/models/tank_boss_animated_model",
     "assets/animations/aletha_delivered",
     "assets/animations/gen",
     "assets/animations/rust_mantis_starter",
     // The mantis's attack / stagger / death, which the enemy FSM needs and
     // which live in their own pack beside its locomotion.
     "assets/animations/mantis_combat",
+    "assets/animations/tank_boss",
+    "assets/animations/tank_boss_ai",
     "assets/models/sword1_light",
     "assets/models/sword1_heavy",
+    // The canonical default project is also the material library for a new
+    // BSP map. Copy every saved PSXT so its synced Material resource is usable
+    // immediately instead of pointing back into another project.
+    "assets/textures",
+];
+
+/// Authoring sources directly referenced by starter Model resources. Large
+/// audition/render directories stay in the canonical default project; a new
+/// map only receives the files required to reopen or reimport its catalogue.
+const STARTER_CHARACTER_SOURCE_ASSET_PATHS: &[&str] = &[
+    "source_assets/characters/aletha/Aletha.glb",
+    "source_assets/characters/rust_mantis.glb",
+    "source_assets/characters/tank_boss/Enemy_02.fbx",
+    "source_assets/characters/tank_boss/animations/heavy_walk_pack",
 ];
 
 fn action_bar_height_for_status(status: &str) -> f32 {
@@ -374,8 +395,17 @@ fn action_bar_height_for_status(status: &str) -> f32 {
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Aletha Delivered",
     "Rust Mantis",
+    "Tank Boss Model",
+    "Tank Boss Animated Model",
     "Sword1 Light",
     "Sword1 Heavy",
+];
+const STARTER_CHARACTER_SKELETON_NAMES: &[&str] = &[
+    "Cortex Humanoid 22-Bone Skeleton",
+    "Aletha Delivered Skeleton",
+    "Sword1 Light Skeleton",
+    "Tank Boss Skeleton",
+    "Tank Boss Animated Model Skeleton",
 ];
 const STARTER_CHARACTER_MATERIAL_NAMES: &[&str] = &["Aletha Crystal"];
 /// Verified combat loadout weapons synced beside the character profiles.
@@ -383,8 +413,10 @@ const STARTER_WEAPON_NAMES: &[&str] = &["Sword1 Light", "Sword1 Heavy"];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Aletha Delivered Animation Set",
     "Rust Mantis Starter Animation Set",
+    "Tank Boss Animation Set",
+    "tank_boss_ai_set",
 ];
-const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &["Aletha", "Rust Mantis Enemy"];
+const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &["Aletha", "Rust Mantis Enemy", "Tank Boss"];
 const LEGACY_WRAITH_HERO_PROFILE_NAME: &str = "Wraith Hero";
 const LEGACY_OBSIDIAN_WARDEN_ASSET_DIR: &str = "assets/models/obsidian_warden";
 const LEGACY_OBSIDIAN_WARDEN_RESOURCE_NAMES: &[&str] = &[
@@ -733,6 +765,10 @@ pub struct EditorWorkspace {
     brush_extrude_new: Option<BrushFaceExtrudeNew>,
     /// In-flight brush-create drag (Brush tool primary held).
     brush_drag: Option<BrushDrag>,
+    /// Primitive and generator parameters used by the Draw tool. These are
+    /// editor-session choices; committed output is always ordinary convex
+    /// brushes (multi-brush primitives receive an editor Group).
+    brush_draw_settings: BrushDrawSettings,
     /// In-flight brush face-extrude drag (Brush tool primary held on a
     /// brush face).
     brush_extrude: Option<BrushExtrude>,
@@ -764,6 +800,15 @@ pub struct EditorWorkspace {
     /// In-flight vertex/edge drag (Brush tool with Vertex or Edge
     /// selection mode in an orthographic view).
     brush_vertex_drag: Option<BrushVertexDrag>,
+    /// Godot-style momentary 3D vertex-snap mode. Holding B while the
+    /// pointer is over the 3D viewport highlights a source corner on the
+    /// selected brush set; dragging it moves the set and snaps that corner
+    /// to a visible corner on another brush.
+    brush_vertex_snap_key_down: bool,
+    /// Source corner currently highlighted before a vertex-snap drag. The
+    /// in-flight source/target live on `BrushVertexDrag` so releasing B does
+    /// not interrupt a gesture that has already started.
+    brush_vertex_snap_hover: Option<[f64; 3]>,
     /// Percentage of the painted material kept by generated Paint blends.
     /// Stored as a human-facing percentage and converted to the transition
     /// recipe's byte threshold when a stroke is baked.
@@ -2503,6 +2548,92 @@ pub(crate) struct BrushDrag {
     pub(crate) anchor: [i32; 3],
     pub(crate) current: [i32; 3],
     pub(crate) view: OrthographicView,
+    pub(crate) grid_step: i32,
+    /// Snapshot the generator at press time so changing toolbar options can
+    /// never mutate an in-flight preview.
+    pub(crate) settings: BrushDrawSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrushDrawShape {
+    Box,
+    Ramp,
+    Cylinder,
+    DoorwayArch,
+    CurvedWall,
+    Stairs,
+}
+
+impl BrushDrawShape {
+    const ALL: [Self; 6] = [
+        Self::Box,
+        Self::Ramp,
+        Self::Cylinder,
+        Self::DoorwayArch,
+        Self::CurvedWall,
+        Self::Stairs,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Box => "Box",
+            Self::Ramp => "Ramp",
+            Self::Cylinder => "Cylinder",
+            Self::DoorwayArch => "Doorway Arch",
+            Self::CurvedWall => "Curved Wall",
+            Self::Stairs => "Stairs",
+        }
+    }
+
+    const fn is_multi_brush(self) -> bool {
+        matches!(self, Self::DoorwayArch | Self::CurvedWall | Self::Stairs)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrushCardinalDirection {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl BrushCardinalDirection {
+    const ALL: [Self; 4] = [Self::North, Self::East, Self::South, Self::West];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::North => "North (-Z)",
+            Self::East => "East (+X)",
+            Self::South => "South (+Z)",
+            Self::West => "West (-X)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrushDrawSettings {
+    pub(crate) shape: BrushDrawShape,
+    pub(crate) direction: BrushCardinalDirection,
+    pub(crate) cylinder_sides: u8,
+    pub(crate) arch_segments: u8,
+    pub(crate) arch_thickness: u16,
+    pub(crate) curved_wall_arc_degrees: u16,
+    pub(crate) stair_steps: u8,
+}
+
+impl Default for BrushDrawSettings {
+    fn default() -> Self {
+        Self {
+            shape: BrushDrawShape::Box,
+            direction: BrushCardinalDirection::North,
+            cylinder_sides: 8,
+            arch_segments: 6,
+            arch_thickness: 32,
+            curved_wall_arc_degrees: 90,
+            stair_steps: 8,
+        }
+    }
 }
 
 /// One placed clip point: grid-snapped position plus the unit normal of
@@ -2635,6 +2766,13 @@ pub(crate) struct BrushVertexDrag {
     /// Selected Face elements riding this drag: their WHOLE authored
     /// planes translate (authored points need not sit at solved corners).
     pub(crate) faces: Vec<usize>,
+    /// Godot-style vertex-snap source. `None` is an ordinary grid drag;
+    /// `Some` means the whole selected brush set is being translated so
+    /// this exact corner follows the pointer and may lock to a target.
+    pub(crate) snap_source: Option<[f64; 3]>,
+    /// Current vertex-snap target on a non-moving brush, if one is within
+    /// the screen-space acquisition radius.
+    pub(crate) snap_target: Option<[f64; 3]>,
 }
 
 /// In-flight rotate/scale gesture from the element gizmo: the selected
@@ -3304,6 +3442,7 @@ impl EditorWorkspace {
             brush_element_transform: None,
             brush_extrude_new: None,
             brush_drag: None,
+            brush_draw_settings: BrushDrawSettings::default(),
             brush_extrude: None,
             brush_clip_points: Vec::new(),
             brush_drill: None,
@@ -3315,6 +3454,8 @@ impl EditorWorkspace {
             brush_uv_canvas_view: None,
             brush_uv_canvas_drag: None,
             brush_vertex_drag: None,
+            brush_vertex_snap_key_down: false,
+            brush_vertex_snap_hover: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
             water_tool_mode: WaterToolMode::Add,
@@ -3846,6 +3987,36 @@ impl EditorWorkspace {
         copy_dir_recursive(&psxed_project::new_project_template_dir(), &target)
             .map_err(|error| format!("copy BSP starter project: {error}"))?;
         let mut opened = Self::open_directory(&target)?;
+        // The geometry template stays a clean roofless BSP courtyard, while
+        // its catalogue is hydrated from the canonical default project. This
+        // gives every newly created map the verified Aletha, light-enemy and
+        // heavy-enemy chains plus the saved material library without placing
+        // any of those characters into the scene.
+        sync_starter_character_catalogue(&mut opened.project, &target)
+            .map_err(|error| format!("copy starter content catalogue: {error}"))?;
+        let player_character = opened.default_player_character_resource();
+        if let Some(player_character) = player_character {
+            let player_spawns: Vec<_> = opened
+                .project
+                .active_scene()
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
+                .map(|node| node.id)
+                .collect();
+            for node_id in player_spawns {
+                let Some(node) = opened.project.active_scene_mut().node_mut(node_id) else {
+                    continue;
+                };
+                if let NodeKind::SpawnPoint {
+                    player: true,
+                    character,
+                } = &mut node.kind
+                {
+                    *character = Some(player_character);
+                }
+            }
+        }
         opened.project.name = trimmed.to_string();
         opened.project.bsp_cook_mode = cook_mode;
         // Keep the template's deliberately authored courtyard 3D camera so a

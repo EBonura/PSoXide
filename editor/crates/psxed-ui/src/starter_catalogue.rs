@@ -63,7 +63,7 @@ pub(crate) fn load_project_with_starter_catalogue(
         Ok(report) => report,
         Err(error) => {
             let status = format!(
-                "Loaded {}; starter character sync failed: {error}",
+                "Loaded {}; starter content sync failed: {error}",
                 short_path(dir)
             );
             return Ok((project, Some(status), false));
@@ -77,7 +77,7 @@ pub(crate) fn load_project_with_starter_catalogue(
     match project.save_to_path(&project_file) {
         Ok(()) => {
             let status = format!(
-                "Synced starter characters: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
+                "Synced starter content: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
                 report.resources_added,
                 report.resources_updated,
                 report.resources_removed,
@@ -87,8 +87,7 @@ pub(crate) fn load_project_with_starter_catalogue(
             Ok((project, Some(status), false))
         }
         Err(error) => {
-            let status =
-                format!("Synced starter characters but save failed: {error}; save manually");
+            let status = format!("Synced starter content but save failed: {error}; save manually");
             Ok((project, Some(status), true))
         }
     }
@@ -107,10 +106,10 @@ pub(crate) fn should_auto_sync_starter_character_catalogue(project: &ProjectDocu
     has_legacy_obsidian_warden || has_legacy_starter_character
 }
 
-/// The resources-panel "Starter Characters" action: bring a project's copy
-/// of the verified starter catalogue (skeletons, materials, models, weapons,
-/// clips, sets, character profiles) up to date with the embedded default
-/// project, matching by name and remapping ids. Also callable headlessly
+/// The resources-panel "Starter Content" action: bring a project's copy of
+/// the verified character catalogue and saved material library (skeletons,
+/// materials, models, weapons, clips, sets and profiles) up to date with the
+/// embedded default project, matching by name and remapping ids. Also callable headlessly
 /// (`cargo run -p psxed-ui --example sync_starter -- <project_dir>`).
 pub fn sync_starter_character_catalogue(
     project: &mut ProjectDocument,
@@ -165,7 +164,7 @@ pub fn sync_starter_character_catalogue(
     }
 
     report.files_copied = copy_starter_character_asset_dirs(project_root)
-        .map_err(|error| format!("copy starter character assets: {error}"))?;
+        .map_err(|error| format!("copy starter content assets: {error}"))?;
     Ok(report)
 }
 
@@ -226,12 +225,14 @@ pub(crate) fn starter_catalogue_resource_matches_phase(
 ) -> bool {
     match (&resource.data, phase) {
         (ResourceData::Skeleton(_), StarterCataloguePhase::Skeleton) => {
-            resource.name == "Cortex Humanoid 22-Bone Skeleton"
-                || resource.name == "Aletha Delivered Skeleton"
-                || resource.name == "Sword1 Light Skeleton"
+            STARTER_CHARACTER_SKELETON_NAMES.contains(&resource.name.as_str())
         }
-        (ResourceData::Material(_), StarterCataloguePhase::Material) => {
+        (ResourceData::Material(material), StarterCataloguePhase::Material) => {
             STARTER_CHARACTER_MATERIAL_NAMES.contains(&resource.name.as_str())
+                || material
+                    .psxt_path
+                    .as_deref()
+                    .is_some_and(starter_texture_asset_path)
         }
         (ResourceData::Model(_), StarterCataloguePhase::Model) => {
             STARTER_CHARACTER_MODEL_NAMES.contains(&resource.name.as_str())
@@ -389,6 +390,11 @@ pub(crate) fn starter_character_asset_path(path: &str) -> bool {
     })
 }
 
+pub(crate) fn starter_texture_asset_path(path: &str) -> bool {
+    path.strip_prefix("assets/textures")
+        .is_some_and(|remaining| remaining.starts_with('/'))
+}
+
 pub(crate) fn copy_starter_character_asset_dirs(project_root: &Path) -> std::io::Result<usize> {
     let default_root = psxed_project::default_project_dir();
     if paths_equivalent(project_root, &default_root) {
@@ -401,7 +407,26 @@ pub(crate) fn copy_starter_character_asset_dirs(project_root: &Path) -> std::io:
         let dst = project_root.join(rel);
         copied += copy_dir_recursive_missing(&src, &dst)?;
     }
+    for rel in STARTER_CHARACTER_SOURCE_ASSET_PATHS {
+        let src = default_root.join(rel);
+        let dst = project_root.join(rel);
+        copied += copy_path_missing(&src, &dst)?;
+    }
     Ok(copied)
+}
+
+pub(crate) fn copy_path_missing(src: &Path, dst: &Path) -> std::io::Result<usize> {
+    if src.is_dir() {
+        return copy_dir_recursive_missing(src, dst);
+    }
+    if dst.exists() {
+        return Ok(0);
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst)?;
+    Ok(1)
 }
 
 pub(crate) fn copy_dir_recursive_missing(src: &Path, dst: &Path) -> std::io::Result<usize> {

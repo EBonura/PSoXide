@@ -667,8 +667,12 @@ impl EditorWorkspace {
                     mode.label(),
                     index + 1,
                     match mode {
-                        BspToolbarMode::Select => "Select and transform whole brushes or entities",
-                        BspToolbarMode::Draw => "Drag a new convex brush in an orthographic view",
+                        BspToolbarMode::Select => {
+                            "Select and transform whole brushes or entities\nHold B and drag a yellow brush corner to vertex-snap"
+                        }
+                        BspToolbarMode::Draw => {
+                            "Drag the selected brush primitive in an orthographic or 3D view"
+                        }
                         BspToolbarMode::Paint => "Paint or sample one brush face material",
                         BspToolbarMode::Face => "Select, resize, rotate, scale or extrude faces",
                         BspToolbarMode::Edge => "Select and reshape brush edges",
@@ -761,6 +765,19 @@ impl EditorWorkspace {
             ViewTool::PaintMaterial => {
                 self.draw_material_paint_toolbar_controls(ui);
             }
+            ViewTool::Brush => {
+                ui.separator();
+                let shape = self.brush_draw_settings.shape;
+                toolbar_option_menu(
+                    ui,
+                    icons::BOX,
+                    shape.label(),
+                    "Brush primitive",
+                    shape.label(),
+                    shape != BrushDrawShape::Box,
+                    |ui| self.draw_brush_draw_options(ui),
+                );
+            }
             ViewTool::Place
                 if matches!(
                     self.place_kind,
@@ -783,14 +800,155 @@ impl EditorWorkspace {
                     |ui| self.draw_active_place_options(ui),
                 );
             }
-            ViewTool::Brush
-            | ViewTool::Place
+            ViewTool::Place
             | ViewTool::PaintFloor
             | ViewTool::PaintWall
             | ViewTool::PaintCeiling
             | ViewTool::Water
             | ViewTool::Erase => {}
         }
+    }
+
+    fn draw_brush_draw_options(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(250.0);
+        ui.label(
+            RichText::new("BRUSH PRIMITIVE")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        for shape in BrushDrawShape::ALL {
+            if ui
+                .selectable_value(
+                    &mut self.brush_draw_settings.shape,
+                    shape,
+                    icons::label(icons::BOX, shape.label()),
+                )
+                .changed()
+            {
+                self.status = format!("Draw primitive: {}", shape.label());
+            }
+        }
+
+        ui.separator();
+        let mut changed = false;
+        let shape = self.brush_draw_settings.shape;
+        if shape == BrushDrawShape::DoorwayArch {
+            ui.label("Opening axis");
+            ui.horizontal(|ui| {
+                let north_south = matches!(
+                    self.brush_draw_settings.direction,
+                    BrushCardinalDirection::North | BrushCardinalDirection::South
+                );
+                if ui.selectable_label(north_south, "North / South").clicked() {
+                    self.brush_draw_settings.direction = BrushCardinalDirection::North;
+                    changed = true;
+                }
+                if ui.selectable_label(!north_south, "East / West").clicked() {
+                    self.brush_draw_settings.direction = BrushCardinalDirection::East;
+                    changed = true;
+                }
+            });
+        } else if matches!(
+            shape,
+            BrushDrawShape::Ramp | BrushDrawShape::CurvedWall | BrushDrawShape::Stairs
+        ) {
+            let direction_label = match shape {
+                BrushDrawShape::Ramp | BrushDrawShape::Stairs => "Rises toward",
+                BrushDrawShape::CurvedWall => "Arc faces",
+                _ => unreachable!(),
+            };
+            ui.label(direction_label);
+            ui.horizontal_wrapped(|ui| {
+                for direction in BrushCardinalDirection::ALL {
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.brush_draw_settings.direction,
+                            direction,
+                            direction
+                                .label()
+                                .split(' ')
+                                .next()
+                                .unwrap_or(direction.label()),
+                        )
+                        .changed();
+                }
+            });
+        }
+
+        match shape {
+            BrushDrawShape::Cylinder => {
+                ui.horizontal(|ui| {
+                    ui.label("Sides");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.brush_draw_settings.cylinder_sides)
+                                .range(3..=32),
+                        )
+                        .changed();
+                });
+                ui.weak("World-up prism; 8 sides is the PS1-friendly default.");
+            }
+            BrushDrawShape::DoorwayArch | BrushDrawShape::CurvedWall => {
+                ui.horizontal(|ui| {
+                    ui.label("Segments");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.brush_draw_settings.arch_segments)
+                                .range(2..=24),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Wall thickness");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.brush_draw_settings.arch_thickness)
+                                .range(1..=4096)
+                                .speed(f64::from(self.snap_units.max(1)))
+                                .suffix(" u"),
+                        )
+                        .changed();
+                });
+                if shape == BrushDrawShape::CurvedWall {
+                    ui.label("Arc");
+                    ui.horizontal(|ui| {
+                        for degrees in [90, 180, 270, 360] {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.brush_draw_settings.curved_wall_arc_degrees,
+                                    degrees,
+                                    format!("{degrees}°"),
+                                )
+                                .changed();
+                        }
+                    });
+                }
+                ui.weak("Generated pieces are grouped, but remain ordinary brushes.");
+            }
+            BrushDrawShape::Stairs => {
+                ui.horizontal(|ui| {
+                    ui.label("Steps");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.brush_draw_settings.stair_steps)
+                                .range(1..=32),
+                        )
+                        .changed();
+                });
+                ui.weak("Run and total rise come from the dragged bounds.");
+            }
+            BrushDrawShape::Ramp => {
+                ui.weak("The ramp always rises along world Y.");
+            }
+            BrushDrawShape::Box => {
+                ui.weak("The standard axis-aligned convex brush.");
+            }
+        }
+        if changed {
+            self.status = format!("{} primitive options updated", shape.label());
+        }
+        ui.separator();
+        ui.weak("Every generated point is quantised to the active global grid.");
     }
 
     fn draw_grid_controls(&mut self, ui: &mut egui::Ui) {
@@ -1551,7 +1709,7 @@ impl EditorWorkspace {
             .filter(|r| matches!(r.data, ResourceData::Character(_)))
             .collect();
         match characters.len() {
-            0 => Err("No Character Profile resources exist. Sync starter characters or add a profile first.".to_string()),
+            0 => Err("No Character Profile resources exist. Sync starter content or add a profile first.".to_string()),
             1 => {
                 let ResourceData::Character(character) = &characters[0].data else {
                     unreachable!("filtered to character resources");

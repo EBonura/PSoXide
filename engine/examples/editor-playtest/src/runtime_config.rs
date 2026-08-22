@@ -60,8 +60,10 @@ pub(super) const MODEL_TPAGE: Tpage = Tpage::new(384, 256, TexDepth::Bit8);
 pub(super) const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
 
 /// Runtime UI font slots. The cooked manifest compacts authored font choices
-/// into these slots, so only fonts actually used by cooked UI text are uploaded.
-pub(super) const MAX_RUNTIME_UI_FONTS: usize = 4;
+/// into these slots, so only fonts actually used by cooked UI text are uploaded
+/// and reserve RAM. The generated manifest enforces the PSX runtime's
+/// eight-font ceiling.
+pub(super) const MAX_RUNTIME_UI_FONTS: usize = UI_FONTS.len();
 /// Resource-set key for menu (non-gameplay) states. Distinct from the gameplay
 /// key so the flow driver fires `on_exit_state`/`on_enter_state` when crossing
 /// the menu->gameplay boundary, letting the runtime load streamed UI images on

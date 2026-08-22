@@ -77,6 +77,23 @@ impl EditorWorkspace {
         let (rect, response) =
             allocate_centered_preview_rect(ui, "viewport_3d_canvas", egui::Sense::click_and_drag());
         surrender_stale_focus_on_viewport_pointer(ui.ctx(), &response);
+        let vertex_snap_context = self.selected_brush.is_some()
+            && self.brush_edit_mode == BrushEditMode::Move
+            && matches!(self.active_tool, ViewTool::Select | ViewTool::Brush);
+        let vertex_snap_was_down = self.brush_vertex_snap_key_down;
+        self.brush_vertex_snap_key_down = response.hovered()
+            && vertex_snap_context
+            && !widget_owns_keyboard_shortcuts(ui.ctx())
+            && ui.input(|input| {
+                input.key_down(egui::Key::B)
+                    && !input.modifiers.command
+                    && !input.modifiers.ctrl
+                    && !input.modifiers.alt
+            });
+        if self.brush_vertex_snap_key_down && !vertex_snap_was_down {
+            self.status = "Vertex Snap: hover a selected brush corner, then drag".to_string();
+        }
+        self.update_brush_vertex_snap_hover_3d(rect, response.hover_pos());
         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
         let resource_drop_hovered = response.dnd_hover_payload::<ResourceId>().is_some();
         let prefab_drop_hovered = response.dnd_hover_payload::<PrefabDragPayload>().is_some();
@@ -178,6 +195,15 @@ impl EditorWorkspace {
                     });
                 }
             }
+        }
+        if self
+            .brush_vertex_drag
+            .as_ref()
+            .is_some_and(|drag| drag.snap_source.is_some())
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if self.brush_vertex_snap_hover.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
         let hover_entity_hit = pointer_target.and_then(|target| target.entity_hit());
         // Face hover ray-tests every floor / wall / ceiling in the

@@ -352,6 +352,141 @@ impl Brush {
         }
     }
 
+    /// Extrude a convex 2D polygon along the remaining world axis.
+    ///
+    /// `plane_axes` maps each polygon coordinate into world space and
+    /// `depth_axis` receives `depth`. The polygon may be clockwise or
+    /// counter-clockwise; consecutive duplicates and collinear points are
+    /// removed before the face planes are built. This is the shared primitive
+    /// kernel for editor-authored ramps, cylinders, arches and stairs.
+    pub fn convex_prism(
+        polygon: &[[i32; 2]],
+        plane_axes: [usize; 2],
+        depth_axis: usize,
+        depth: [i32; 2],
+    ) -> Option<Self> {
+        if plane_axes[0] >= 3
+            || plane_axes[1] >= 3
+            || depth_axis >= 3
+            || plane_axes[0] == plane_axes[1]
+            || plane_axes.contains(&depth_axis)
+            || depth[0] >= depth[1]
+        {
+            return None;
+        }
+
+        let mut polygon = polygon.to_vec();
+        if polygon.first() == polygon.last() {
+            polygon.pop();
+        }
+        polygon.dedup();
+        loop {
+            if polygon.len() < 3 {
+                return None;
+            }
+            let mut removed = false;
+            for index in 0..polygon.len() {
+                let a = polygon[(index + polygon.len() - 1) % polygon.len()];
+                let b = polygon[index];
+                let c = polygon[(index + 1) % polygon.len()];
+                let ab = [
+                    i128::from(b[0]) - i128::from(a[0]),
+                    i128::from(b[1]) - i128::from(a[1]),
+                ];
+                let bc = [
+                    i128::from(c[0]) - i128::from(b[0]),
+                    i128::from(c[1]) - i128::from(b[1]),
+                ];
+                if ab[0] * bc[1] - ab[1] * bc[0] == 0 {
+                    polygon.remove(index);
+                    removed = true;
+                    break;
+                }
+            }
+            if !removed {
+                break;
+            }
+        }
+
+        let signed_area_twice: i128 = polygon
+            .iter()
+            .zip(polygon.iter().cycle().skip(1))
+            .take(polygon.len())
+            .map(|(a, b)| i128::from(a[0]) * i128::from(b[1]) - i128::from(a[1]) * i128::from(b[0]))
+            .sum();
+        if signed_area_twice == 0 {
+            return None;
+        }
+        if signed_area_twice < 0 {
+            polygon.reverse();
+        }
+
+        // A brush must be convex. Collinear points are gone, so every turn
+        // in the normalized CCW polygon must be strictly positive.
+        for index in 0..polygon.len() {
+            let a = polygon[index];
+            let b = polygon[(index + 1) % polygon.len()];
+            let c = polygon[(index + 2) % polygon.len()];
+            let ab = [
+                i128::from(b[0]) - i128::from(a[0]),
+                i128::from(b[1]) - i128::from(a[1]),
+            ];
+            let bc = [
+                i128::from(c[0]) - i128::from(b[0]),
+                i128::from(c[1]) - i128::from(b[1]),
+            ];
+            if ab[0] * bc[1] - ab[1] * bc[0] <= 0 {
+                return None;
+            }
+        }
+
+        let embed = |point: [i32; 2], depth_value: i32| {
+            let mut world = [0; 3];
+            world[plane_axes[0]] = point[0];
+            world[plane_axes[1]] = point[1];
+            world[depth_axis] = depth_value;
+            world
+        };
+        let axis_order = [plane_axes[0], plane_axes[1], depth_axis];
+        let right_handed = matches!(axis_order, [0, 1, 2] | [1, 2, 0] | [2, 0, 1]);
+        let bottom: Vec<_> = polygon
+            .iter()
+            .copied()
+            .map(|point| embed(point, depth[0]))
+            .collect();
+        let top: Vec<_> = polygon
+            .iter()
+            .copied()
+            .map(|point| embed(point, depth[1]))
+            .collect();
+
+        let mut faces = Vec::with_capacity(polygon.len() + 2);
+        if right_handed {
+            faces.push(BrushFace::from_points([bottom[2], bottom[1], bottom[0]]));
+            faces.push(BrushFace::from_points([top[0], top[1], top[2]]));
+        } else {
+            faces.push(BrushFace::from_points([bottom[0], bottom[1], bottom[2]]));
+            faces.push(BrushFace::from_points([top[2], top[1], top[0]]));
+        }
+        for index in 0..polygon.len() {
+            let next = (index + 1) % polygon.len();
+            let points = if right_handed {
+                [bottom[index], bottom[next], top[next]]
+            } else {
+                [bottom[index], top[next], bottom[next]]
+            };
+            faces.push(BrushFace::from_points(points));
+        }
+        let brush = Self {
+            faces,
+            contents: BrushContents::Solid,
+            mover: None,
+            group: None,
+        };
+        let solved = brush.solve();
+        (solved.is_valid() && solved.within_extent(BRUSH_EDIT_EXTENT_LIMIT)).then_some(brush)
+    }
+
     /// Solve every face polygon by clipping its base winding against all
     /// other face planes.
     pub fn solve(&self) -> SolvedBrush {
@@ -1927,6 +2062,38 @@ mod tests {
         extruded.faces[0].material = Some(crate::ResourceId(9));
         extruded.translate_face(0, [0, 0, -32]);
         assert_eq!(extruded.faces[0].material, Some(crate::ResourceId(9)));
+    }
+
+    #[test]
+    fn convex_prism_accepts_either_winding_and_all_axis_permutations() {
+        let square = [[0, 0], [128, 0], [128, 64], [0, 64]];
+        for (plane_axes, depth_axis, expected_max) in [
+            ([0, 2], 1, [128.0, 32.0, 64.0]),
+            ([0, 1], 2, [128.0, 64.0, 32.0]),
+            ([2, 1], 0, [32.0, 64.0, 128.0]),
+        ] {
+            for polygon in [square.to_vec(), square.into_iter().rev().collect()] {
+                let brush = Brush::convex_prism(&polygon, plane_axes, depth_axis, [0, 32])
+                    .expect("valid convex prism");
+                let solved = brush.solve();
+                assert!(solved.is_valid());
+                assert_eq!(solved.min, [0.0; 3]);
+                assert_eq!(solved.max, expected_max);
+                assert_eq!(brush.faces.len(), 6);
+            }
+        }
+    }
+
+    #[test]
+    fn convex_prism_rejects_concave_or_flat_polygons() {
+        assert!(Brush::convex_prism(
+            &[[0, 0], [128, 0], [64, 32], [128, 64], [0, 64]],
+            [0, 2],
+            1,
+            [0, 64]
+        )
+        .is_none());
+        assert!(Brush::convex_prism(&[[0, 0], [64, 0], [128, 0]], [0, 2], 1, [0, 64]).is_none());
     }
 
     #[test]

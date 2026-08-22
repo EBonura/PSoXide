@@ -112,6 +112,123 @@ fn brush_geometry_clipboard_survives_project_switch_and_rebinds_materials_by_nam
 }
 
 #[test]
+fn selected_label_text_keeps_copy_away_from_geometry_shortcuts() {
+    const ERROR_TEXT: &str = "Cook error: trigger volume has no target";
+
+    fn draw_frame(
+        ctx: &egui::Context,
+        workspace: &mut EditorWorkspace,
+        time: f64,
+        events: Vec<egui::Event>,
+        route_shortcuts: bool,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0))),
+                time: Some(time),
+                events,
+                ..egui::RawInput::default()
+            },
+            |ctx| {
+                if route_shortcuts {
+                    workspace.handle_global_shortcuts(ctx, EditorPlaytestStatus::Idle);
+                }
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.add(egui::Label::new(ERROR_TEXT).selectable(true));
+                });
+            },
+        )
+    }
+
+    fn text_rect(shape: &egui::Shape) -> Option<Rect> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text() == ERROR_TEXT => {
+                Some(Rect::from_min_max(
+                    text.pos + text.galley.rect.min.to_vec2(),
+                    text.pos + text.galley.rect.max.to_vec2(),
+                ))
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(text_rect),
+            _ => None,
+        }
+    }
+
+    let dir = test_temp_dir("selected-label-copy-routing");
+    let mut workspace = EditorWorkspace::with_project(dir.clone(), ProjectDocument::new("copy"));
+    workspace.active_workspace = WorkspaceView::Room;
+    let ctx = egui::Context::default();
+
+    let initial = draw_frame(&ctx, &mut workspace, 0.0, Vec::new(), false);
+    let rect = initial
+        .shapes
+        .iter()
+        .find_map(|shape| text_rect(&shape.shape))
+        .expect("selectable error label is painted");
+    let start = Pos2::new(rect.left() + 2.0, rect.center().y);
+    let end = Pos2::new(rect.right() - 2.0, rect.center().y);
+    let _ = draw_frame(
+        &ctx,
+        &mut workspace,
+        1.0 / 60.0,
+        vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+        false,
+    );
+    let _ = draw_frame(
+        &ctx,
+        &mut workspace,
+        2.0 / 60.0,
+        vec![egui::Event::PointerMoved(end)],
+        false,
+    );
+    let _ = draw_frame(
+        &ctx,
+        &mut workspace,
+        3.0 / 60.0,
+        vec![egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        false,
+    );
+    assert!(
+        egui::text_selection::LabelSelectionState::load(&ctx).has_selection(),
+        "dragging the diagnostic must leave label text selected"
+    );
+    assert_eq!(ctx.memory(|memory| memory.focused()), None);
+
+    let copied = draw_frame(
+        &ctx,
+        &mut workspace,
+        4.0 / 60.0,
+        vec![egui::Event::Copy],
+        true,
+    );
+    assert!(
+        copied.platform_output.commands.iter().any(|command| {
+            matches!(
+                command,
+                egui::OutputCommand::CopyText(text) if ERROR_TEXT.contains(text.as_str())
+            )
+        }),
+        "the label selection, not the room workspace, must receive Copy"
+    );
+    assert!(!workspace.status.contains("Copy failed"));
+    assert_eq!(workspace.brush_geometry_clipboard_count(), None);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn multi_brush_paste_shortcut_survives_a_switch_to_a_non_room_workspace() {
     let source_dir = test_temp_dir("multi-brush-clipboard-source");
     let destination_dir = test_temp_dir("multi-brush-clipboard-destination");
@@ -2100,7 +2217,9 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
     let material = workspace.first_material().expect("template material");
     workspace.set_orthographic_view(OrthographicView::Top);
     // Author the enclosed test room directly on the courtyard's 64-unit
-    // floor, then focus its new 80-unit interior floor for point placement.
+    // floor. The 256-unit Draw extrusion is intentionally too short to hold
+    // Aletha's 1024-unit body, so place the replacement player on the open
+    // roof at Y=320 rather than inside the diagnostic hollow.
     workspace.orthographic_focus[1] = 64.0;
     workspace.begin_brush_drag_2d([2048.0, 0.0]);
     workspace.update_brush_drag_2d([2560.0, 512.0]);
@@ -2119,10 +2238,10 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         .iter()
         .flat_map(|brush| &brush.faces)
         .all(|face| face.material == Some(material)));
-    workspace.orthographic_focus[1] = 80.0;
+    workspace.orthographic_focus[1] = 320.0;
 
     // Real Place commands in a scene with no legacy Room/Section. The top
-    // view resolves the new room's upward floor at Y=80 and lifts the spawn
+    // view resolves the hollow's upward roof at Y=320 and lifts the spawn
     // one unit out of the solid boundary.
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PlayerSpawn)));
     workspace.handle_viewport_click([2304.0, 256.0], &[], egui::Modifiers::default());
@@ -2134,7 +2253,7 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
         .expect("placed BSP player spawn");
     assert_eq!(spawn.parent, Some(workspace.project().active_scene().root));
-    assert_eq!(spawn.transform.translation, [2304.0, 81.0, 256.0]);
+    assert_eq!(spawn.transform.translation, [2304.0, 321.0, 256.0]);
 
     workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::PointLightMarker)));
     workspace.handle_viewport_click([2304.0, 384.0], &[], egui::Modifiers::default());
@@ -2144,7 +2263,7 @@ fn bsp_new_project_can_author_save_cook_edit_and_recook_without_grid_rooms() {
         .nodes()
         .iter()
         .any(|node| matches!(node.kind, NodeKind::PointLight { .. })
-            && node.transform.translation == [2304.0, 336.0, 384.0]));
+            && node.transform.translation == [2304.0, 576.0, 384.0]));
 
     workspace.save().expect("save authored BSP project");
     workspace.request_play_or_rebuild(EditorPlaytestStatus::Idle);
@@ -2468,6 +2587,9 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
         .flat_map(|brush| &brush.faces)
         .all(|face| face.material == Some(material)
             && face.uv == psxed_project::brush::FaceUv::default()));
+    // This diagnostic hollow is only 256 units high; target its open roof so
+    // the now-default Aletha body has its full 1024-unit standing clearance.
+    workspace.orthographic_focus[1] = 256.0;
 
     // The BSP place lane must root every point/prop entity directly under the
     // World and preserve world-space coordinates. A portal request is rejected
@@ -2498,7 +2620,7 @@ fn bsp_blank_slate_commands_preserve_rooted_prop_door_and_portal_contract() {
             .unwrap()
             .transform
             .translation,
-        [192.0, 65.0, 192.0]
+        [192.0, 257.0, 192.0]
     );
     workspace.save().expect("save before rejected portal");
     let before_nodes = workspace.project().active_scene().nodes().len();
@@ -2696,13 +2818,19 @@ fn new_project_release_choice_copies_the_roofless_open_courtyard() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        material_paths,
-        [
+    assert!(
+        material_paths.starts_with(&[
             "assets/textures/courtyard_cobbles.psxt",
             "assets/textures/courtyard_brick.psxt",
             "assets/ui/health_bar_clean_slim.psxt"
-        ]
+        ]),
+        "the courtyard's authored material ordering must remain stable"
+    );
+    assert!(
+        material_paths.len() >= 20
+            && material_paths.contains(&"assets/textures/brick_1a_v2.psxt")
+            && material_paths.contains(&"assets/textures/tech_5f_v2.psxt"),
+        "New Project must append the canonical saved material library"
     );
     let template = psxed_project::new_project_template_dir();
     for relative in [
@@ -3315,15 +3443,12 @@ fn inspector_respects_explicit_history_and_deliberate_clears() {
     assert_eq!(workspace.status, "Nothing to undo");
 }
 
-/// The verified combat loadout must survive the production "Starter
-/// Characters" sync into a genuinely fresh New Project: sword weapon
-/// resources and their assets arrive byte-for-byte, the Aletha and Rust
-/// Mantis profiles carry the measured combat capsules, and every synced
-/// reference resolves inside the target project (a profile whose model or
-/// animation set points at a resource id the sync never copied is exactly
-/// the dangling-reference failure this test exists to catch).
+/// A genuinely fresh New Project must already carry the production content
+/// catalogue: Aletha, the Rust Mantis light enemy, the Tank heavy enemy, the
+/// saved material library and every file/reference they need. The manual
+/// "Starter Characters" action remains idempotent for older projects.
 #[test]
-fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
+fn new_project_starts_with_verified_character_and_material_content() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let name = format!(
@@ -3340,26 +3465,10 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
     let _ = std::fs::remove_dir_all(&project_dir);
 
     workspace.create_and_open_project(&name).unwrap();
-    assert!(
-        !workspace
-            .project()
-            .resources
-            .iter()
-            .any(|resource| matches!(resource.data, ResourceData::Character(_))),
-        "the BSP starter template must arrive character-free"
-    );
-
-    // The exact body of the resources-panel "Starter Characters" action.
-    workspace.push_undo();
     let target_dir = workspace.project_dir.clone();
-    let report = sync_starter_character_catalogue(&mut workspace.project, &target_dir)
-        .expect("starter character sync");
-    assert!(report.changed());
-    workspace.mark_dirty();
-    workspace.save().expect("save synced project");
 
-    // Weapon + character assets land as byte-copies of the tracked default
-    // project files (themselves byte-copies of the verified cortex_v1 sample).
+    // Character, source and representative material assets land as byte-copies
+    // of the tracked default project files.
     let default_root = psxed_project::default_project_dir();
     for relative in [
         "assets/models/sword1_light/sword1_light.psxmdl",
@@ -3370,6 +3479,16 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
         "assets/models/rust_mantis/rust_mantis.psxmdl",
         "assets/animations/aletha_delivered/aletha_light_wpn_light_atk_a.psxanim",
         "assets/animations/rust_mantis_starter/idle.psxanim",
+        "assets/models/tank_boss_model/tank_boss_model.psxmdl",
+        "assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl",
+        "assets/animations/tank_boss_ai/walk_fwd.psxanim",
+        "assets/animations/tank_boss_ai/walk_bwd.psxanim",
+        "assets/textures/brick_1a_v2.psxt",
+        "assets/textures/tech_5f_v2.psxt",
+        "source_assets/characters/aletha/Aletha.glb",
+        "source_assets/characters/rust_mantis.glb",
+        "source_assets/characters/tank_boss/Enemy_02.fbx",
+        "source_assets/characters/tank_boss/animations/heavy_walk_pack/idle.glb",
     ] {
         assert_eq!(
             std::fs::read(project_dir.join(relative)).unwrap(),
@@ -3433,6 +3552,19 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
     // the right hand joint 13), the artist moveset, and the crystal
     // covering material.
     let aletha = resource_by_name("Aletha", |data| matches!(data, ResourceData::Character(_)));
+    let player_spawn = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::SpawnPoint { player: true, .. }))
+        .expect("fresh project has a player spawn");
+    assert!(matches!(
+        player_spawn.kind,
+        NodeKind::SpawnPoint {
+            character: Some(character),
+            ..
+        } if character == aletha.id
+    ));
     let ResourceData::Character(aletha) = &aletha.data else {
         unreachable!();
     };
@@ -3527,6 +3659,67 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
         .iter()
         .any(|socket| socket.name == "right_hand_grip" && socket.joint == 13));
 
+    // The heavy enemy keeps both imports: the delivered FBX backup and the
+    // native animated model used by the Character. Its missing Run binding is
+    // deliberate capability data, not a dangling resource.
+    let tank = resource_by_name("Tank Boss", |data| {
+        matches!(data, ResourceData::Character(_))
+    });
+    let ResourceData::Character(tank) = &tank.data else {
+        unreachable!();
+    };
+    assert_eq!(tank.spawn_role, psxed_project::CharacterSpawnRole::Enemy);
+    let tank_model = project.resource(tank.model.unwrap()).unwrap();
+    assert_eq!(tank_model.name, "Tank Boss Animated Model");
+    let tank_set = project.resource(tank.animation_set.unwrap()).unwrap();
+    assert_eq!(tank_set.name, "tank_boss_ai_set");
+    let ResourceData::AnimationSet(tank_set) = &tank_set.data else {
+        panic!("Tank Boss animation-set reference is not an AnimationSet");
+    };
+    let has_action = |action| {
+        tank_set
+            .action_clips
+            .iter()
+            .any(|binding| binding.action == action)
+    };
+    assert!(has_action(psxed_project::CharacterAnimationAction::Walk));
+    assert!(has_action(
+        psxed_project::CharacterAnimationAction::WalkBackward
+    ));
+    assert!(has_action(
+        psxed_project::CharacterAnimationAction::StrafeLeft
+    ));
+    assert!(has_action(
+        psxed_project::CharacterAnimationAction::StrafeRight
+    ));
+    assert!(!has_action(psxed_project::CharacterAnimationAction::Run));
+    resource_by_name("Tank Boss Model", |data| {
+        matches!(data, ResourceData::Model(_))
+    });
+
+    // Every saved default-project texture has a Material in the new project
+    // and a project-owned file at the exact same relative path.
+    let starter_texture_materials: Vec<_> = ProjectDocument::starter()
+        .resources
+        .into_iter()
+        .filter_map(|resource| match resource.data {
+            ResourceData::Material(material) => material
+                .psxt_path
+                .filter(|path| starter_texture_asset_path(path))
+                .map(|path| (resource.name, path)),
+            _ => None,
+        })
+        .collect();
+    assert!(starter_texture_materials.len() >= 20);
+    for (name, path) in starter_texture_materials {
+        resource_by_name(&name, |data| matches!(data, ResourceData::Material(_)));
+        assert_eq!(
+            std::fs::read(target_dir.join(&path)).unwrap(),
+            std::fs::read(default_root.join(&path)).unwrap(),
+            "new project did not copy saved texture {path} byte-for-byte"
+        );
+    }
+
     // The verified sword weapons, grips exact (scale-specific measured
     // translations), each resolving to a synced Model resource.
     //
@@ -3564,8 +3757,8 @@ fn starter_character_sync_arms_a_new_project_with_verified_combat_content() {
     assert_eq!(light_weapon.hitboxes[0].active_start_frame, 12);
     assert_eq!(light_weapon.hitboxes[0].active_end_frame, 15);
 
-    // A second sync of an already-armed project is a no-op: the catalogue
-    // converged instead of duplicating resources or rewriting files.
+    // The manual action is now a no-op on a fresh project: automatic creation
+    // converged instead of requiring a second user-visible hydration step.
     let resources_before = workspace.project().resources.len();
     let repeat = sync_starter_character_catalogue(&mut workspace.project, &target_dir)
         .expect("repeat starter character sync");

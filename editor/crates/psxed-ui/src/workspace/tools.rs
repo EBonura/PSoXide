@@ -122,6 +122,10 @@ impl ViewportTool3d for SelectTool {
         let Some(pointer) = frame.pointer_interact else {
             return;
         };
+        if ws.brush_vertex_snap_key_down {
+            ws.begin_brush_vertex_snap_3d(frame.rect, pointer);
+            return;
+        }
         let additive = frame.modifiers.shift || frame.modifiers.command || frame.modifiers.ctrl;
         // Cmd+drag on a FACE handle extrudes a new brush out of the face
         // (TrenchBroom-style); a Cmd CLICK still toggles selection via
@@ -256,6 +260,9 @@ impl ViewportTool3d for SelectTool {
     }
 
     fn primary_clicked(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
+        if ws.brush_vertex_snap_key_down {
+            return;
+        }
         // Clip mode: clicks place clip points on brush faces.
         if ws.brush_edit_mode == BrushEditMode::Clip && ws.selected_brush.is_some() {
             if let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) {
@@ -1900,6 +1907,7 @@ impl EditorWorkspace {
         self.brush_drag = None;
         self.brush_extrude_new = None;
         self.brush_clip_points.clear();
+        self.brush_vertex_snap_hover = None;
         if let Some(transform) = self.brush_element_transform.take() {
             if let Some(slot) = self
                 .project
@@ -1936,6 +1944,7 @@ impl EditorWorkspace {
             }
         }
         if let Some(drag) = self.brush_vertex_drag.take() {
+            let vertex_snap = drag.snap_source.is_some();
             if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(drag.index) {
                 *slot = drag.base;
             }
@@ -1943,6 +1952,9 @@ impl EditorWorkspace {
                 if let Some(slot) = self.project.active_scene_mut().brushes.get_mut(index) {
                     *slot = base;
                 }
+            }
+            if vertex_snap {
+                self.status = "Vertex Snap: canceled".to_string();
             }
         }
     }
@@ -3386,12 +3398,278 @@ impl EditorWorkspace {
         updated
     }
 
-    /// The cuboid a brush drag would commit, if it has area.
-    fn brush_drag_cuboid(drag: BrushDrag) -> Option<psxed_project::brush::Brush> {
+    /// Axis-aligned bounds a primitive drag would commit, if it has volume.
+    fn brush_drag_bounds(drag: BrushDrag) -> Option<([i32; 3], [i32; 3])> {
         let mut opposite = drag.current;
         let depth_axis = drag.view.depth_axis();
         opposite[depth_axis] = drag.anchor[depth_axis].saturating_add(BRUSH_CREATE_HEIGHT);
-        psxed_project::brush::Brush::cuboid_from_corners(drag.anchor, opposite)
+        let min = std::array::from_fn(|axis| drag.anchor[axis].min(opposite[axis]));
+        let max = std::array::from_fn(|axis| drag.anchor[axis].max(opposite[axis]));
+        (0..3)
+            .all(|axis| min[axis] < max[axis])
+            .then_some((min, max))
+    }
+
+    fn primitive_snap(value: f64, step: i32) -> i32 {
+        let step = f64::from(step.max(1));
+        ((value / step).round() * step).clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    }
+
+    fn primitive_thickness(settings: BrushDrawSettings, step: i32) -> i32 {
+        Self::primitive_snap(f64::from(settings.arch_thickness.max(1)), step).max(step.max(1))
+    }
+
+    fn brush_drag_ramp(
+        min: [i32; 3],
+        max: [i32; 3],
+        direction: BrushCardinalDirection,
+    ) -> Option<psxed_project::brush::Brush> {
+        use BrushCardinalDirection::{East, North, South, West};
+        match direction {
+            East => psxed_project::brush::Brush::convex_prism(
+                &[[min[0], min[1]], [max[0], min[1]], [max[0], max[1]]],
+                [0, 1],
+                2,
+                [min[2], max[2]],
+            ),
+            West => psxed_project::brush::Brush::convex_prism(
+                &[[min[0], min[1]], [max[0], min[1]], [min[0], max[1]]],
+                [0, 1],
+                2,
+                [min[2], max[2]],
+            ),
+            South => psxed_project::brush::Brush::convex_prism(
+                &[[min[2], min[1]], [max[2], min[1]], [max[2], max[1]]],
+                [2, 1],
+                0,
+                [min[0], max[0]],
+            ),
+            North => psxed_project::brush::Brush::convex_prism(
+                &[[min[2], min[1]], [max[2], min[1]], [min[2], max[1]]],
+                [2, 1],
+                0,
+                [min[0], max[0]],
+            ),
+        }
+    }
+
+    fn brush_drag_cylinder(
+        min: [i32; 3],
+        max: [i32; 3],
+        sides: u8,
+        step: i32,
+    ) -> Option<psxed_project::brush::Brush> {
+        let sides = usize::from(sides.clamp(3, 32));
+        let center_x = (f64::from(min[0]) + f64::from(max[0])) * 0.5;
+        let center_z = (f64::from(min[2]) + f64::from(max[2])) * 0.5;
+        let radius_x = f64::from(max[0] - min[0]) * 0.5;
+        let radius_z = f64::from(max[2] - min[2]) * 0.5;
+        let polygon: Vec<_> = (0..sides)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * index as f64 / sides as f64;
+                [
+                    Self::primitive_snap(center_x + radius_x * angle.cos(), step),
+                    Self::primitive_snap(center_z + radius_z * angle.sin(), step),
+                ]
+            })
+            .collect();
+        psxed_project::brush::Brush::convex_prism(&polygon, [0, 2], 1, [min[1], max[1]])
+    }
+
+    fn brush_drag_doorway_arch(
+        min: [i32; 3],
+        max: [i32; 3],
+        settings: BrushDrawSettings,
+        step: i32,
+    ) -> Vec<psxed_project::brush::Brush> {
+        let facing_x = matches!(
+            settings.direction,
+            BrushCardinalDirection::East | BrushCardinalDirection::West
+        );
+        let width_axis = if facing_x { 2 } else { 0 };
+        let depth_axis = if facing_x { 0 } else { 2 };
+        let width_min = min[width_axis];
+        let width_max = max[width_axis];
+        let center = (f64::from(width_min) + f64::from(width_max)) * 0.5;
+        let radius = f64::from(width_max - width_min) * 0.5;
+        let vertical_radius = radius.min(f64::from(max[1] - min[1]));
+        let thickness = f64::from(Self::primitive_thickness(settings, step));
+        if radius <= thickness || vertical_radius <= thickness {
+            return Vec::new();
+        }
+        let spring = f64::from(max[1]) - vertical_radius;
+        let inner_radius = radius - thickness;
+        let inner_vertical_radius = vertical_radius - thickness;
+        let plane_axes = [width_axis, 1];
+        let depth = [min[depth_axis], max[depth_axis]];
+        let segments = usize::from(settings.arch_segments.clamp(2, 24));
+        let point = |angle: f64, horizontal_radius: f64, vertical_radius: f64| {
+            [
+                Self::primitive_snap(center + horizontal_radius * angle.cos(), step),
+                Self::primitive_snap(spring + vertical_radius * angle.sin(), step),
+            ]
+        };
+        let mut brushes = Vec::with_capacity(segments + 2);
+        for index in 0..segments {
+            let a0 = std::f64::consts::PI * index as f64 / segments as f64;
+            let a1 = std::f64::consts::PI * (index + 1) as f64 / segments as f64;
+            let polygon = [
+                point(a0, inner_radius, inner_vertical_radius),
+                point(a0, radius, vertical_radius),
+                point(a1, radius, vertical_radius),
+                point(a1, inner_radius, inner_vertical_radius),
+            ];
+            if let Some(brush) =
+                psxed_project::brush::Brush::convex_prism(&polygon, plane_axes, depth_axis, depth)
+            {
+                brushes.push(brush);
+            }
+        }
+
+        let spring = Self::primitive_snap(spring, step);
+        let inner_left = Self::primitive_snap(center - inner_radius, step);
+        let inner_right = Self::primitive_snap(center + inner_radius, step);
+        for polygon in [
+            [
+                [width_min, min[1]],
+                [inner_left, min[1]],
+                [inner_left, spring],
+                [width_min, spring],
+            ],
+            [
+                [inner_right, min[1]],
+                [width_max, min[1]],
+                [width_max, spring],
+                [inner_right, spring],
+            ],
+        ] {
+            if let Some(brush) =
+                psxed_project::brush::Brush::convex_prism(&polygon, plane_axes, depth_axis, depth)
+            {
+                brushes.push(brush);
+            }
+        }
+        brushes
+    }
+
+    fn brush_drag_curved_wall(
+        min: [i32; 3],
+        max: [i32; 3],
+        settings: BrushDrawSettings,
+        step: i32,
+    ) -> Vec<psxed_project::brush::Brush> {
+        let radius_x = f64::from(max[0] - min[0]) * 0.5;
+        let radius_z = f64::from(max[2] - min[2]) * 0.5;
+        let thickness = f64::from(Self::primitive_thickness(settings, step));
+        if radius_x <= thickness || radius_z <= thickness {
+            return Vec::new();
+        }
+        let center_x = (f64::from(min[0]) + f64::from(max[0])) * 0.5;
+        let center_z = (f64::from(min[2]) + f64::from(max[2])) * 0.5;
+        let inner_x = radius_x - thickness;
+        let inner_z = radius_z - thickness;
+        let arc = f64::from(settings.curved_wall_arc_degrees.clamp(90, 360)).to_radians();
+        let facing = match settings.direction {
+            BrushCardinalDirection::North => -std::f64::consts::FRAC_PI_2,
+            BrushCardinalDirection::East => 0.0,
+            BrushCardinalDirection::South => std::f64::consts::FRAC_PI_2,
+            BrushCardinalDirection::West => std::f64::consts::PI,
+        };
+        let start = facing - arc * 0.5;
+        let segments = usize::from(settings.arch_segments.clamp(2, 32));
+        let point = |angle: f64, rx: f64, rz: f64| {
+            [
+                Self::primitive_snap(center_x + rx * angle.cos(), step),
+                Self::primitive_snap(center_z + rz * angle.sin(), step),
+            ]
+        };
+        let mut brushes = Vec::with_capacity(segments);
+        for index in 0..segments {
+            let a0 = start + arc * index as f64 / segments as f64;
+            let a1 = start + arc * (index + 1) as f64 / segments as f64;
+            let polygon = [
+                point(a0, inner_x, inner_z),
+                point(a0, radius_x, radius_z),
+                point(a1, radius_x, radius_z),
+                point(a1, inner_x, inner_z),
+            ];
+            if let Some(brush) =
+                psxed_project::brush::Brush::convex_prism(&polygon, [0, 2], 1, [min[1], max[1]])
+            {
+                brushes.push(brush);
+            }
+        }
+        brushes
+    }
+
+    fn brush_drag_stairs(
+        min: [i32; 3],
+        max: [i32; 3],
+        settings: BrushDrawSettings,
+        step: i32,
+    ) -> Vec<psxed_project::brush::Brush> {
+        let (run_axis, positive) = match settings.direction {
+            BrushCardinalDirection::North => (2, false),
+            BrushCardinalDirection::East => (0, true),
+            BrushCardinalDirection::South => (2, true),
+            BrushCardinalDirection::West => (0, false),
+        };
+        let run = max[run_axis] - min[run_axis];
+        let rise = max[1] - min[1];
+        let available_steps = (run / step.max(1)).max(1) as usize;
+        let steps = usize::from(settings.stair_steps.clamp(1, 32)).min(available_steps);
+        let mut brushes = Vec::with_capacity(steps);
+        for index in 0..steps {
+            let run0 = Self::primitive_snap(
+                f64::from(min[run_axis]) + f64::from(run) * index as f64 / steps as f64,
+                step,
+            );
+            let run1 = Self::primitive_snap(
+                f64::from(min[run_axis]) + f64::from(run) * (index + 1) as f64 / steps as f64,
+                step,
+            );
+            let level = if positive { index + 1 } else { steps - index };
+            let top = Self::primitive_snap(
+                f64::from(min[1]) + f64::from(rise) * level as f64 / steps as f64,
+                step,
+            );
+            let mut step_min = min;
+            let mut step_max = max;
+            step_min[run_axis] = run0;
+            step_max[run_axis] = run1;
+            step_max[1] = top;
+            if let Some(brush) =
+                psxed_project::brush::Brush::cuboid_from_corners(step_min, step_max)
+            {
+                brushes.push(brush);
+            }
+        }
+        brushes
+    }
+
+    /// Ordinary convex brushes a primitive drag would commit. Concave presets
+    /// deliberately expand to several brushes so every existing edit, CSG and
+    /// cooker path continues to operate on the native brush representation.
+    fn brush_drag_brushes(drag: BrushDrag) -> Vec<psxed_project::brush::Brush> {
+        let Some((min, max)) = Self::brush_drag_bounds(drag) else {
+            return Vec::new();
+        };
+        let settings = drag.settings;
+        let step = drag.grid_step.max(1);
+        match settings.shape {
+            BrushDrawShape::Box => vec![psxed_project::brush::Brush::cuboid(min, max)],
+            BrushDrawShape::Ramp => Self::brush_drag_ramp(min, max, settings.direction)
+                .into_iter()
+                .collect(),
+            BrushDrawShape::Cylinder => {
+                Self::brush_drag_cylinder(min, max, settings.cylinder_sides, step)
+                    .into_iter()
+                    .collect()
+            }
+            BrushDrawShape::DoorwayArch => Self::brush_drag_doorway_arch(min, max, settings, step),
+            BrushDrawShape::CurvedWall => Self::brush_drag_curved_wall(min, max, settings, step),
+            BrushDrawShape::Stairs => Self::brush_drag_stairs(min, max, settings, step),
+        }
     }
 
     /// Snap a point from the active orthographic plane to the brush grid.
@@ -3411,6 +3689,8 @@ impl EditorWorkspace {
             anchor: point,
             current: point,
             view: self.orthographic_view,
+            grid_step: i32::from(self.snap_units.max(1)),
+            settings: self.brush_draw_settings,
         });
     }
 
@@ -3424,30 +3704,55 @@ impl EditorWorkspace {
         }
     }
 
-    /// Commit the in-flight create drag as a brush, one undo step.
+    /// Commit the in-flight create drag as ordinary brushes, one undo step.
     /// Shared by the 3D tool release and the 2D view release.
     pub(crate) fn commit_brush_drag(&mut self) {
         let Some(drag) = self.brush_drag.take() else {
             return;
         };
-        let Some(mut brush) = Self::brush_drag_cuboid(drag) else {
-            return; // zero-area drag: nothing to commit
-        };
+        let mut brushes = Self::brush_drag_brushes(drag);
+        if brushes.is_empty() {
+            self.status = format!(
+                "Draw {}: drag a larger footprint or reduce segments/thickness",
+                drag.settings.shape.label()
+            );
+            return;
+        }
         // New brushes should be cookable and visibly textured immediately.
         // This follows the same material resolution as the grid tools: an
         // explicit picker/selected resource wins, then the first project
-        // material. Hollow preserves the face materials on all six slabs.
+        // material.
         if let Some(material) = self.paint_material_for("brush") {
-            for face in &mut brush.faces {
-                face.material = Some(material);
+            for brush in &mut brushes {
+                for face in &mut brush.faces {
+                    face.material = Some(material);
+                }
             }
         }
         self.push_undo();
-        let scene = self.project.active_scene_mut();
-        scene.brushes.push(brush);
-        let created = self.project.active_scene().brushes.len() - 1;
-        self.replace_brush_selection(created, None);
+        let first = self.project.active_scene().brushes.len();
+        if drag.settings.shape.is_multi_brush() && brushes.len() > 1 {
+            let parent = self
+                .open_group
+                .filter(|group| self.node_is_group(*group))
+                .unwrap_or(self.project.active_scene().root);
+            let group = self.project.active_scene_mut().add_node(
+                parent,
+                drag.settings.shape.label(),
+                NodeKind::Group,
+            );
+            for brush in &mut brushes {
+                brush.group = Some(group);
+            }
+            self.project.active_scene_mut().brushes.extend(brushes);
+            self.clear_brush_selection();
+            self.replace_node_selection(group);
+        } else {
+            self.project.active_scene_mut().brushes.extend(brushes);
+            self.replace_brush_selection(first, None);
+        }
         self.mark_dirty();
+        self.status = format!("Created {}", drag.settings.shape.label());
     }
 
     /// One clip click at a snapped ground point: the first click stores
@@ -4236,6 +4541,8 @@ impl EditorWorkspace {
             applied: [0; 3],
             axis_mask: [true; 3],
             faces,
+            snap_source: None,
+            snap_target: None,
         });
     }
 
@@ -4309,6 +4616,8 @@ impl EditorWorkspace {
         let Some(drag) = self.brush_vertex_drag.take() else {
             return false;
         };
+        let vertex_snap = drag.snap_source.is_some();
+        self.brush_vertex_snap_hover = None;
         let live = self.project.active_scene().brushes[drag.index].clone();
         let live_others: Vec<_> = drag
             .others
@@ -4352,6 +4661,9 @@ impl EditorWorkspace {
                 }
             }
             self.reconcile_brush_elements();
+            if vertex_snap {
+                self.status = "Vertex Snap: committed".to_string();
+            }
         }
         true
     }
@@ -4450,8 +4762,14 @@ impl EditorWorkspace {
                 selected_faces
             })
             .collect::<Vec<_>>();
-        let preview = self.brush_drag.and_then(Self::brush_drag_cuboid);
-        let preview_solved = preview.as_ref().map(psxed_project::brush::Brush::solve);
+        let previews = self
+            .brush_drag
+            .map(Self::brush_drag_brushes)
+            .unwrap_or_default();
+        let preview_solved: Vec<_> = previews
+            .iter()
+            .map(psxed_project::brush::Brush::solve)
+            .collect();
 
         with_cached_brush_pick_solves(&self.project, |solved_brushes| {
             // Face fills are material/selection pixels. Like TrenchBroom's
@@ -4506,7 +4824,7 @@ impl EditorWorkspace {
                         draw_surface_grid(solved);
                     }
                 }
-                if let Some(solved) = preview_solved.as_ref().filter(|solved| solved.is_valid()) {
+                for solved in preview_solved.iter().filter(|solved| solved.is_valid()) {
                     draw_surface_grid(solved);
                 }
             }
@@ -4559,7 +4877,7 @@ impl EditorWorkspace {
                     stroke,
                 );
             }
-            if let Some(solved) = preview_solved.as_ref().filter(|solved| solved.is_valid()) {
+            for solved in preview_solved.iter().filter(|solved| solved.is_valid()) {
                 draw_outline(solved, &[], egui::Stroke::new(1.5, STUDIO_ACCENT));
             }
         });
@@ -4956,7 +5274,11 @@ impl EditorWorkspace {
                 }
             }
         }
-        if let Some(preview) = self.brush_drag.and_then(Self::brush_drag_cuboid) {
+        for preview in self
+            .brush_drag
+            .map(Self::brush_drag_brushes)
+            .unwrap_or_default()
+        {
             draw(&preview, egui::Stroke::new(1.5, STUDIO_ACCENT));
         }
         // Live wireframe of the pending face extrusion.
@@ -5003,6 +5325,23 @@ impl EditorWorkspace {
                 }
             }
         }
+        // Godot 4.7-style vertex-snap feedback: source is yellow, acquired
+        // target is green, both with a dark outline so they stay legible over
+        // any material. These are deliberately drawn last, above handles and
+        // the transform gizmo.
+        let (snap_source, snap_target) = self.brush_vertex_snap_markers();
+        let draw_snap_marker = |point: [f64; 3], color: egui::Color32| {
+            if let Some(screen) = self.project_brush_point_3d(rect, point) {
+                painter.circle_filled(screen, 8.0, egui::Color32::from_black_alpha(180));
+                painter.circle_filled(screen, 6.0, color);
+            }
+        };
+        if let Some(source) = snap_source {
+            draw_snap_marker(source, VERTEX_SNAP_SOURCE_COLOR);
+        }
+        if let Some(target) = snap_target {
+            draw_snap_marker(target, VERTEX_SNAP_TARGET_COLOR);
+        }
     }
 }
 
@@ -5013,6 +5352,34 @@ const EXTRUDE_UNITS_PER_PIXEL: f32 = 8.0;
 /// Pre-click hover tint for brush sub-element handles (yellow, matching
 /// the entity-bounds hover convention; selected stays white).
 const HANDLE_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 240, 144);
+
+/// Godot 4.7 uses a 30-device-pixel acquisition radius for both source and
+/// target vertices. Keeping this screen-space makes snapping independent of
+/// camera distance and world scale.
+const VERTEX_SNAP_RADIUS_PX: f32 = 30.0;
+const VERTEX_SNAP_SOURCE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 232, 64);
+const VERTEX_SNAP_TARGET_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 232, 112);
+
+/// BSP authored points translate in whole world units. Only advertise a
+/// green target when the selected source can land on it exactly in that
+/// representation; otherwise the ordinary grid drag remains active instead
+/// of displaying a false snap with a sub-unit gap.
+fn vertex_snap_integer_delta(source: [f64; 3], target: [f64; 3]) -> Option<[i32; 3]> {
+    let mut delta = [0; 3];
+    for axis in 0..3 {
+        let raw = target[axis] - source[axis];
+        let rounded = raw.round();
+        if !raw.is_finite()
+            || (raw - rounded).abs() > 1.0e-5
+            || rounded < f64::from(i32::MIN)
+            || rounded > f64::from(i32::MAX)
+        {
+            return None;
+        }
+        delta[axis] = rounded as i32;
+    }
+    Some(delta)
+}
 
 /// Plane translate honoring the texture lock: the face keeps its
 /// applied texture when the lock is on.
@@ -5352,6 +5719,128 @@ impl EditorWorkspace {
         })
     }
 
+    /// Nearest projected solved brush corner within the same fixed
+    /// screen-space radius Godot 4.7 uses for 3D vertex snapping. The
+    /// predicate separates source acquisition (selected brushes only) from
+    /// target acquisition (every visible, non-moving brush).
+    fn closest_brush_vertex_3d(
+        &self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        accept_vertex: impl Fn(usize, [f64; 3]) -> bool,
+    ) -> Option<(usize, [f64; 3])> {
+        let mut best: Option<(f32, usize, [f64; 3])> = None;
+        with_cached_brush_pick_solves(&self.project, |solved_brushes| {
+            for (index, solved) in solved_brushes.iter().enumerate() {
+                if self.brush_effectively_hidden(index) || !solved.is_valid() {
+                    continue;
+                }
+                for vertex in brush_elements::unique_vertices(solved) {
+                    if !accept_vertex(index, vertex) {
+                        continue;
+                    }
+                    let Some(screen) = self.project_brush_point_3d(rect, vertex) else {
+                        continue;
+                    };
+                    let distance2 = screen.distance_sq(pointer);
+                    if distance2 <= VERTEX_SNAP_RADIUS_PX * VERTEX_SNAP_RADIUS_PX
+                        && best.is_none_or(|(best_distance2, _, _)| distance2 < best_distance2)
+                    {
+                        best = Some((distance2, index, vertex));
+                    }
+                }
+            }
+        });
+        best.map(|(_, index, vertex)| (index, vertex))
+    }
+
+    /// Refresh the yellow source marker while B is held. Once a drag starts,
+    /// its source is retained by `BrushVertexDrag`, matching Godot's
+    /// momentary-key behavior when B is released mid-gesture.
+    pub(crate) fn update_brush_vertex_snap_hover_3d(
+        &mut self,
+        rect: egui::Rect,
+        pointer: Option<egui::Pos2>,
+    ) {
+        if self
+            .brush_vertex_drag
+            .as_ref()
+            .is_some_and(|drag| drag.snap_source.is_some())
+        {
+            self.brush_vertex_snap_hover = None;
+            return;
+        }
+        if !self.brush_vertex_snap_key_down || self.brush_edit_mode != BrushEditMode::Move {
+            self.brush_vertex_snap_hover = None;
+            return;
+        }
+        let Some(pointer) = pointer else {
+            self.brush_vertex_snap_hover = None;
+            return;
+        };
+        let selected = self.selected_brush_set();
+        self.brush_vertex_snap_hover = self
+            .closest_brush_vertex_3d(rect, pointer, |index, _| selected.contains(&index))
+            .map(|(_, vertex)| vertex);
+    }
+
+    /// Begin Godot-style vertex-to-vertex snapping for a BSP brush set. The
+    /// primary brush uses the existing whole-brush vertex-drag transaction;
+    /// every other selected brush rides the same delta, so preview, cancel,
+    /// undo and texture lock remain shared with ordinary Move-gizmo drags.
+    fn begin_brush_vertex_snap_3d(&mut self, rect: egui::Rect, pointer: egui::Pos2) -> bool {
+        if !self.brush_vertex_snap_key_down || self.brush_edit_mode != BrushEditMode::Move {
+            return false;
+        }
+        let index = match self.selected_brush {
+            Some(index) => index,
+            None => return false,
+        };
+        let selected = self.selected_brush_set();
+        let source = self.brush_vertex_snap_hover.or_else(|| {
+            self.closest_brush_vertex_3d(rect, pointer, |candidate, _| {
+                selected.contains(&candidate)
+            })
+            .map(|(_, vertex)| vertex)
+        });
+        let Some(source) = source else {
+            self.status = "Vertex Snap: hover a corner on the selected brush".to_string();
+            return false;
+        };
+        let Some((_, targets, faces)) = self.brush_gizmo_context() else {
+            return false;
+        };
+        if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, source) {
+            return false;
+        }
+        let others = self.brush_move_others(index);
+        if let Some(drag) = self.brush_vertex_drag.as_mut() {
+            drag.others = others;
+            drag.faces = faces;
+            drag.snap_source = Some(source);
+        }
+        self.brush_vertex_snap_hover = None;
+        self.status = "Vertex Snap: drag the yellow corner onto another brush corner".to_string();
+        true
+    }
+
+    fn brush_vertex_snap_markers(&self) -> (Option<[f64; 3]>, Option<[f64; 3]>) {
+        let Some(drag) = self
+            .brush_vertex_drag
+            .as_ref()
+            .filter(|drag| drag.snap_source.is_some())
+        else {
+            return (self.brush_vertex_snap_hover, None);
+        };
+        let source = drag.snap_source.map(|mut source| {
+            for axis in 0..3 {
+                source[axis] += f64::from(drag.applied[axis]);
+            }
+            source
+        });
+        (source, drag.snap_target)
+    }
+
     fn begin_brush_vertex_drag_3d(
         &mut self,
         rect: egui::Rect,
@@ -5380,6 +5869,8 @@ impl EditorWorkspace {
             applied: [0; 3],
             axis_mask: [true; 3],
             faces: Vec::new(),
+            snap_source: None,
+            snap_target: None,
         });
         true
     }
@@ -5394,16 +5885,46 @@ impl EditorWorkspace {
         let Some(current) = self.camera_plane_point(rect, pointer, plane) else {
             return;
         };
-        let step = self.snap_units.max(1) as f32;
-        let mut applied = [0; 3];
-        for axis in 0..3 {
-            if !drag.axis_mask[axis] {
-                continue;
+        let mut snap_target = None;
+        let applied = if let Some(source) = drag.snap_source {
+            let moving: Vec<_> = std::iter::once(drag.index)
+                .chain(drag.others.iter().map(|(index, _)| *index))
+                .collect();
+            if let Some((_, target)) =
+                self.closest_brush_vertex_3d(rect, pointer, |index, target| {
+                    !moving.contains(&index) && vertex_snap_integer_delta(source, target).is_some()
+                })
+            {
+                snap_target = Some(target);
+                self.status = "Vertex Snap: snapped".to_string();
+                let exact = vertex_snap_integer_delta(source, target)
+                    .expect("target predicate accepted an exact integer delta");
+                std::array::from_fn(|axis| drag.axis_mask[axis].then_some(exact[axis]).unwrap_or(0))
+            } else {
+                self.status = "Vertex Snap: drag onto another brush corner".to_string();
+                let step = self.snap_units.max(1) as f32;
+                std::array::from_fn(|axis| {
+                    if drag.axis_mask[axis] {
+                        (((current[axis] - plane.press_world[axis]) / step).round() * step) as i32
+                    } else {
+                        0
+                    }
+                })
             }
-            applied[axis] =
-                (((current[axis] - plane.press_world[axis]) / step).round() * step) as i32;
-        }
+        } else {
+            let step = self.snap_units.max(1) as f32;
+            std::array::from_fn(|axis| {
+                if drag.axis_mask[axis] {
+                    (((current[axis] - plane.press_world[axis]) / step).round() * step) as i32
+                } else {
+                    0
+                }
+            })
+        };
         if applied == drag.applied {
+            if let Some(state) = self.brush_vertex_drag.as_mut() {
+                state.snap_target = snap_target;
+            }
             return;
         }
         if let Some(previews) = self.brush_vertex_drag_previews(&drag, applied) {
@@ -5413,7 +5934,10 @@ impl EditorWorkspace {
             }
             if let Some(state) = self.brush_vertex_drag.as_mut() {
                 state.applied = applied;
+                state.snap_target = snap_target;
             }
+        } else if let Some(state) = self.brush_vertex_drag.as_mut() {
+            state.snap_target = None;
         }
     }
 
@@ -5486,6 +6010,10 @@ impl ViewportTool3d for BrushTool {
         let Some(pointer) = frame.pointer_interact else {
             return;
         };
+        if ws.brush_vertex_snap_key_down {
+            ws.begin_brush_vertex_snap_3d(frame.rect, pointer);
+            return;
+        }
         // Whole brushes use the transform gizmo exclusively. In the Brush
         // authoring tool, dragging empty space still creates a new brush.
         if ws.brush_edit_mode == BrushEditMode::Move {
@@ -5499,6 +6027,8 @@ impl ViewportTool3d for BrushTool {
                         anchor: point,
                         current: point,
                         view: OrthographicView::Top,
+                        grid_step: i32::from(ws.snap_units.max(1)),
+                        settings: ws.brush_draw_settings,
                     });
                 }
             }
@@ -5558,6 +6088,8 @@ impl ViewportTool3d for BrushTool {
                 anchor: point,
                 current: point,
                 view: OrthographicView::Top,
+                grid_step: i32::from(ws.snap_units.max(1)),
+                settings: ws.brush_draw_settings,
             });
         }
     }
@@ -5678,6 +6210,9 @@ impl ViewportTool3d for BrushTool {
     }
 
     fn primary_clicked(&self, ws: &mut EditorWorkspace, frame: &ToolFrame3d) {
+        if ws.brush_vertex_snap_key_down {
+            return;
+        }
         let Some(pointer) = frame.pointer_interact.or(frame.pointer_hover) else {
             return;
         };
