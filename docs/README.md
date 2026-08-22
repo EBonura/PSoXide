@@ -32,6 +32,7 @@ the [root README](../README.md) and the per-area READMEs
 | [game-states-plan.md](game-states-plan.md) | Game-state system plan. |
 | [multi-gameplay-scenes.md](multi-gameplay-scenes.md) | Design note: more than one gameplay Scene in GameFlow. |
 | [gte-camera-kit.md](gte-camera-kit.md) | Design note: shared GTE camera/projection kit. |
+| [shared-engine-standardisation-2026-08-22.md](shared-engine-standardisation-2026-08-22.md) | Guarded convergence plan for PSoXide, Quake-PSX and HL-PSX. |
 
 ## Hardware reference
 

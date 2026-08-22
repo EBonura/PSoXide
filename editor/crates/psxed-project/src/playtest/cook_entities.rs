@@ -826,7 +826,7 @@ pub(crate) fn cook_player_character(
 
     if action_clips[CharacterAnimationAction::Run.to_index()] == CHARACTER_CLIP_NONE {
         report.warn(format!(
-            "Character '{character_name}' has no run clip -- runtime will fall back to walk for run input",
+            "Character '{character_name}' has no run clip -- sprinting is disabled",
         ));
     }
     if action_clips[CharacterAnimationAction::Turn.to_index()] == CHARACTER_CLIP_NONE {
@@ -2176,14 +2176,18 @@ pub(crate) fn character_idle_clip_for_model_instance(
 
 /// Per-state model-local clip indices for one cooked game entity,
 /// resolved from the entity Character's AnimationSet roles. Missing
-/// roles fall back at cook time (walk -> idle, run -> walk, attack/
-/// stagger/death -> idle) so the runtime record always carries a
-/// playable clip per state.
+/// roles fall back at cook time (walk -> idle, directional walks/run
+/// -> walk, attack/stagger/death -> idle) so the runtime record always
+/// carries a playable clip per state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GameEntityStateClips {
     pub idle: u16,
     pub walk: u16,
+    pub walk_backward: u16,
+    pub strafe_left: u16,
+    pub strafe_right: u16,
     pub run: u16,
+    pub run_supported: bool,
     pub attack: u16,
     pub stagger: u16,
     pub death: u16,
@@ -2196,7 +2200,11 @@ impl GameEntityStateClips {
         Self {
             idle: clip,
             walk: clip,
+            walk_backward: clip,
+            strafe_left: clip,
+            strafe_right: clip,
             run: clip,
+            run_supported: false,
             attack: clip,
             stagger: clip,
             death: clip,
@@ -2268,11 +2276,15 @@ pub(crate) fn game_entity_state_clips(
         )
     };
     let walk = optional(CharacterAnimationAction::Walk).unwrap_or(idle);
-    let run = optional(CharacterAnimationAction::Run).unwrap_or(walk);
+    let run = optional(CharacterAnimationAction::Run);
     Some(GameEntityStateClips {
         idle,
         walk,
-        run,
+        walk_backward: optional(CharacterAnimationAction::WalkBackward).unwrap_or(walk),
+        strafe_left: optional(CharacterAnimationAction::StrafeLeft).unwrap_or(walk),
+        strafe_right: optional(CharacterAnimationAction::StrafeRight).unwrap_or(walk),
+        run: run.unwrap_or(walk),
+        run_supported: run.is_some(),
         attack: optional(CharacterAnimationAction::LightAttack).unwrap_or(idle),
         stagger: optional(CharacterAnimationAction::HitReact).unwrap_or(idle),
         death: optional(CharacterAnimationAction::Death).unwrap_or(idle),

@@ -1,0 +1,8 @@
+A person falls backward onto the ground and lies still.#76
+A person falls forward onto the ground and lies still.#76
+A person falls sideways to the left onto the ground and lies still.#76
+A person drops to both knees and then falls all the way down onto the ground.#76
+A person falls sideways to the right onto the ground and remains there.#76
+A person collapses completely onto their back and remains lying down.#76
+A person kneels down, tips fully sideways onto the floor, and stays there.#76
+A person trips forward, falls face first onto the floor, and does not move again.#76
