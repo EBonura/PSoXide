@@ -32,5 +32,6 @@ psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-io     = { path = "../../../sdk/crates/psx-io" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
 psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["boot-trace"] }
+psx-settings = { path = "../../../sdk/crates/psx-settings" }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
