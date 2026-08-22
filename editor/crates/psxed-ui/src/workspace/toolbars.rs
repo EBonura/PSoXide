@@ -601,14 +601,13 @@ impl EditorWorkspace {
                 self.draw_transform_gizmo_toolbar_controls(ui);
                 ui.separator();
                 self.draw_brush_edit_mode_controls(ui);
-                if self.brush_edit_mode == BrushEditMode::Clip {
-                    if ui
+                if self.brush_edit_mode == BrushEditMode::Clip
+                    && ui
                         .button(format!("Clip keeps: {}", self.brush_clip_keep.label()))
                         .on_hover_text("Which side(s) the cut keeps (Tab cycles)")
                         .clicked()
-                    {
-                        self.brush_clip_keep = self.brush_clip_keep.next();
-                    }
+                {
+                    self.brush_clip_keep = self.brush_clip_keep.next();
                 }
                 ui.label("Grid");
                 ui.add_sized(

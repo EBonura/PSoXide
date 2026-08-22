@@ -620,7 +620,7 @@ pub(crate) fn draw_model_animation_viewer(
     // The equipped-weapon overlay rides the SELECTED socket, the same
     // authoring loop the runtime resolves by name at cook time.
     let weapon_grip = socket_model_id
-        .and_then(|_| state.preview_weapon)
+        .and(state.preview_weapon)
         .and_then(|weapon_id| project.resource(weapon_id))
         .and_then(|resource| match &resource.data {
             ResourceData::Weapon(weapon) => weapon
@@ -3036,6 +3036,7 @@ fn set_camera_preset(state: &mut ModelAnimationViewerState, yaw_q12: i32, pitch_
     state.radius = 0;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_preview(
     ui: &mut egui::Ui,
     state: &mut ModelAnimationViewerState,

@@ -2071,7 +2071,6 @@ fn grounding_probe_player_lowest_vertex_matches_reference() {
 
     // Floor point at the VERTEX's own (x,z): the grounded reference for it.
     let vfd = [world[0] - cam[0], 4.0 - cam[1], world[2] - cam[2]];
-    let vx1 = vfd[0] * cy - vfd[2] * sy;
     let vz1 = -vfd[0] * sy - vfd[2] * cy;
     let vy2 = vfd[1] * cp - vz1 * sp;
     let vz2 = vfd[1] * sp + vz1 * cp;

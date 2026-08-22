@@ -518,10 +518,9 @@ impl ThirdPersonCameraState {
         // looking straight down. The lock-on boost stays additive on top.
         let base_camera_y_goal = if self.distance < config.distance {
             let above_focus = base_camera_y_goal.saturating_sub(self.focus.y);
-            self.focus.y.saturating_add(
-                ((above_focus as i64 * self.distance as i64) / config.distance.max(1) as i64)
-                    as i32,
-            )
+            self.focus
+                .y
+                .saturating_add(above_focus.saturating_mul(self.distance) / config.distance.max(1))
         } else {
             base_camera_y_goal
         };

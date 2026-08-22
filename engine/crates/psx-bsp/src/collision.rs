@@ -848,6 +848,7 @@ mod tests {
     ///
     /// The flag slots deliberately keep `fill`, which is normally neither 0 nor
     /// 1. That is legal precisely because [`TraceFlag`] is byte-backed; with
+    ///
     /// `bool` slots this helper had to overwrite them with valid booleans, and
     /// so could never test the bytes that actually matter.
     fn sentinel_trace(fill: u8) -> Trace {

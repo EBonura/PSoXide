@@ -195,7 +195,13 @@ fn runtime_numeric_guard() -> Result<(), String> {
     for runtime_root in runtime_roots {
         collect_rs_files(&runtime_root, &mut files, &mut seen)?;
     }
-    files.retain(|f| !exempt_files.contains(f));
+    // `src/tests.rs` files are only included from a `#[cfg(test)] mod tests;`
+    // declaration. They are host reference oracles, not guest runtime code;
+    // the item blanker below still handles inline `#[cfg(test)]` modules.
+    files.retain(|f| {
+        !exempt_files.contains(f)
+            && f.file_name().and_then(|name| name.to_str()) != Some("tests.rs")
+    });
     files.sort();
 
     let mut violations = Vec::new();

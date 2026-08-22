@@ -357,6 +357,7 @@ impl BspRuntime {
         &mut self,
         observer: RoomPoint,
         bounds: &[BspVisibilityBounds],
+        // psx-numeric-allow-next-line: one bit per queried bounds; return width is the caller's fixed capacity
     ) -> u64 {
         let q12 = |value: i32| value.saturating_mul(4096);
         let observer = Vec3I32 {
