@@ -630,22 +630,26 @@ impl Playtest {
         }
         telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
         telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
-        let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
-        let blocker_count = self.collect_collision_blockers(&mut blockers);
-        let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
-        let aabb_blocker_count = if self.bsp.is_some() {
-            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut aabb_blockers)
-            else {
+        let mut blockers =
+            psx_engine::FixedScratch::<CharacterCollisionCylinder, MAX_COLLISION_CYLINDERS>::new();
+        self.collect_collision_blockers_into(&mut blockers);
+        let mut aabb_blockers =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        if self.bsp.is_some() {
+            if self
+                .collect_static_prop_aabb_blockers_checked_into(&mut aabb_blockers)
+                .is_none()
+            {
                 // Cooked BSP collision state is authoritative. A malformed or
                 // overflowing prop table freezes this frame instead of
                 // allowing movement through a silently omitted blocker.
                 telemetry::stage_end(telemetry::stage::SIM_COLLISION);
                 return;
-            };
-            count
+            }
         } else {
-            self.collect_static_prop_aabb_blockers(&mut aabb_blockers)
-        };
+            self.collect_static_prop_aabb_blockers_into(&mut aabb_blockers);
+        }
         let motor_frame = if self.bsp.is_some() {
             // The resident provider owns its bounded hull scratch and mover
             // transforms. Actor/cylinder and authored image/box/arch blockers
@@ -661,8 +665,8 @@ impl Playtest {
                     input,
                     config,
                     delta_vblanks,
-                    &blockers[..blocker_count],
-                    &aabb_blockers[..aabb_blocker_count],
+                    blockers.as_slice(),
+                    aabb_blockers.as_slice(),
                 )
                 .expect("PXBSP player trace failed")
         } else {
@@ -693,14 +697,14 @@ impl Playtest {
             let collision = if collision_room_count <= 1 {
                 CharacterCollision::new_with_aabbs(
                     room_collision,
-                    &blockers[..blocker_count],
-                    &aabb_blockers[..aabb_blocker_count],
+                    blockers.as_slice(),
+                    aabb_blockers.as_slice(),
                 )
             } else {
                 CharacterCollision::rooms_with_aabbs(
                     &collision_rooms[..collision_room_count],
-                    &blockers[..blocker_count],
-                    &aabb_blockers[..aabb_blocker_count],
+                    blockers.as_slice(),
+                    aabb_blockers.as_slice(),
                 )
             };
             telemetry::stage_end(telemetry::stage::SIM_COLLISION);

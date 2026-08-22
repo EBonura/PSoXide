@@ -6,8 +6,9 @@
 //! resolver arrives as a closure until its glue fully migrates.
 
 use psx_engine::{
-    Angle, CharacterCollisionAabb, CullMode, DepthPolicy, LoadedWorldCameraGte, PrimitiveSink,
-    ProjectedVertex, RoomPoint, WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    Angle, BoundedSink, CharacterCollisionAabb, CullMode, DepthPolicy, LoadedWorldCameraGte,
+    PrimitiveSink, ProjectedVertex, RoomPoint, SliceSink, WorldCamera, WorldRenderPass,
+    WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::TextureMaterial,
@@ -32,12 +33,19 @@ pub fn collect_image_prop_collision_blockers(
     room: RoomIndex,
     out: &mut [CharacterCollisionAabb],
 ) -> usize {
+    let mut sink = SliceSink::new(out);
+    collect_image_prop_collision_blockers_into(props, room, &mut sink)
+}
+
+/// Append image-prop blockers to bounded scratch without clearing its tail.
+pub fn collect_image_prop_collision_blockers_into<S: BoundedSink<CharacterCollisionAabb>>(
+    props: &[LevelImagePropRecord],
+    room: RoomIndex,
+    out: &mut S,
+) -> usize {
     let mut count = 0usize;
     for prop in props {
-        if prop.room != room
-            || prop.flags & image_prop_flags::COLLISION_ENABLED == 0
-            || count >= out.len()
-        {
+        if prop.room != room || prop.flags & image_prop_flags::COLLISION_ENABLED == 0 {
             continue;
         }
         let min = RoomPoint::new(
@@ -53,7 +61,9 @@ pub fn collect_image_prop_collision_blockers(
         if min.x >= max.x || min.y >= max.y || min.z >= max.z {
             continue;
         }
-        out[count] = CharacterCollisionAabb::new(min, max);
+        if !out.try_push(CharacterCollisionAabb::new(min, max)) {
+            return count;
+        }
         count += 1;
     }
     count
@@ -64,6 +74,18 @@ pub fn collect_image_prop_collision_blockers_checked(
     props: &[LevelImagePropRecord],
     room: RoomIndex,
     out: &mut [CharacterCollisionAabb],
+) -> Option<usize> {
+    let mut sink = SliceSink::new(out);
+    collect_image_prop_collision_blockers_checked_into(props, room, &mut sink)
+}
+
+/// Checked image-prop append for bounded scratch.
+pub fn collect_image_prop_collision_blockers_checked_into<
+    S: BoundedSink<CharacterCollisionAabb>,
+>(
+    props: &[LevelImagePropRecord],
+    room: RoomIndex,
+    out: &mut S,
 ) -> Option<usize> {
     let mut count = 0usize;
     for prop in props {
@@ -85,7 +107,9 @@ pub fn collect_image_prop_collision_blockers_checked(
         if !blocker.is_strictly_valid() {
             return None;
         }
-        *out.get_mut(count)? = blocker;
+        if !out.try_push(blocker) {
+            return None;
+        }
         count += 1;
     }
     Some(count)
