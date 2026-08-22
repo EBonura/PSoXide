@@ -7,7 +7,7 @@
 //! Navigation: arrows + Enter + Escape (gamepad will land when the
 //! input subsystem does). Escape also toggles the overlay open/closed.
 //!
-//! Categories: Games / Examples / Projects / Editor / Settings / System
+//! Categories: Games / Projects / Editor / Settings / System
 //! (Projects + Create are editor/native-only). The debug sidebar is
 //! toggled from the toolbar, not the menu.
 
@@ -90,16 +90,14 @@ pub enum MenuAction {
     /// stable library ID; authored project builds use a path-qualified
     /// token so projects sharing the same PSX volume ID remain distinct.
     LaunchGame(String),
-    /// Open the CD burn submenu for a launchable example/project disc.
+    /// Open the CD burn submenu for a launchable project disc.
+    #[cfg(not(target_arch = "wasm32"))]
     OpenBurnMenu(String),
     /// Re-walk the configured library root and refresh
     /// `library.ron`. Surfaced as a "Refresh library" item in
-    /// the Games / Examples categories so users can trigger a
-    /// rescan without leaving the Menu.
+    /// the Games category so users can trigger a rescan without leaving the
+    /// Menu.
     RescanLibrary,
-    /// Build all public SDK/engine examples, then rescan the
-    /// library once the background make job completes.
-    BuildExamples,
     /// Enter or leave the host-side editor workspace.
     #[cfg(feature = "editor")]
     ToggleEditorWorkspace,
@@ -361,9 +359,8 @@ pub struct LibraryItem {
     /// Right-aligned subtitle, e.g. "NTSC-U · 602 MiB".
     pub subtitle: String,
     /// Whether the launcher should show the CD burn affordance.
+    #[cfg(not(target_arch = "wasm32"))]
     pub burnable: bool,
-    /// Whether confirming the row should launch a built artifact.
-    pub launchable: bool,
 }
 
 /// One existing save state, as far as the Menu needs to know to draw
@@ -401,7 +398,6 @@ impl MenuState {
         // games found -- run Refresh library" rows.
         let categories = vec![
             build_games_category(&[]),
-            build_examples_category(&[]),
             // Projects are editor-authored and filesystem-backed; the web build
             // has neither, so the category is dropped there.
             #[cfg(not(target_arch = "wasm32"))]
@@ -409,7 +405,7 @@ impl MenuState {
             // Projects is dropped outright on web rather than shown greyed:
             // it is filesystem-backed and can never work there, so a permanent
             // "not available" row is a dead entry the user has to skip past on
-            // every visit. Examples carry the web build instead.
+            // every visit.
             // The Editor category is the entry point into the host editor
             // workspace; it is absent in emulator-only builds.
             #[cfg(feature = "editor")]
@@ -456,17 +452,12 @@ impl MenuState {
         }
     }
 
-    /// Rebuild the Games + Examples + Projects categories from a library
+    /// Rebuild the Games and Projects categories from a library
     /// snapshot. Call after load, after a rescan, and whenever the
     /// library changes. Existing selection is preserved when
     /// possible (same category + in-range item) and clamped to the
     /// new bounds otherwise.
-    pub fn set_library(
-        &mut self,
-        games: &[LibraryItem],
-        examples: &[LibraryItem],
-        projects: &[LibraryItem],
-    ) {
+    pub fn set_library(&mut self, games: &[LibraryItem], projects: &[LibraryItem]) {
         // Snapshot the current selection's category NAME so we can
         // re-resolve after rebuilding (indices may change).
         let current_cat_name = self
@@ -475,16 +466,12 @@ impl MenuState {
             .map(|c| c.name)
             .unwrap_or("");
 
-        if let Some(games_cat) = self.categories.first_mut() {
+        if let Some(games_cat) = self.categories.iter_mut().find(|c| c.name == "Games") {
             *games_cat = build_games_category(games);
         }
-        if let Some(examples_cat) = self.categories.get_mut(1) {
-            *examples_cat = build_examples_category(examples);
-        }
-        // The web build has no Projects category (see `with_running`), so the
-        // index-2 slot is Settings there; only update Projects off-web.
+        // The web build has no Projects category (see `with_running`).
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(projects_cat) = self.categories.get_mut(2) {
+        if let Some(projects_cat) = self.categories.iter_mut().find(|c| c.name == "Projects") {
             *projects_cat = build_projects_category(projects);
         }
         #[cfg(target_arch = "wasm32")]
@@ -831,7 +818,7 @@ impl MenuState {
         // through `fade`, so the whole overlay cross-fades in and out.
         let target = if self.open { 1.0 } else { 0.0 };
         // Cap the per-frame step so a single long frame (e.g. the hitch when a
-        // game/example/demo boots) can't collapse the fade into a hard cut --
+        // game or demo boots) can't collapse the fade into a hard cut --
         // it stays a dissolve across the following frames.
         let k = (FADE_SPEED * dt).min(0.5);
         self.appear += (target - self.appear) * k;
@@ -2498,59 +2485,10 @@ fn build_games_category(games: &[LibraryItem]) -> Category {
     }
 }
 
-/// Construct the Examples category. Built examples launch from CUE/BIN
-/// discs; source placeholders are supplied by the app layer after it
-/// scans `sdk/examples` and `engine/examples`.
-fn build_examples_category(examples: &[LibraryItem]) -> Category {
-    let mut items = Vec::with_capacity(examples.len() + 2);
-    if examples.is_empty() {
-        items.push(MenuItem {
-            label: "Build public examples".into(),
-            action: MenuAction::BuildExamples,
-            burn_action: None,
-            value: Some("make examples".into()),
-        });
-        items.push(MenuItem {
-            label: "Refresh library".into(),
-            action: MenuAction::RescanLibrary,
-            burn_action: None,
-            value: Some("↻".into()),
-        });
-    } else {
-        for e in examples {
-            items.push(MenuItem {
-                label: e.title.clone(),
-                action: if e.launchable {
-                    MenuAction::LaunchGame(e.id.clone())
-                } else {
-                    MenuAction::BuildExamples
-                },
-                burn_action: (e.launchable && e.burnable)
-                    .then(|| MenuAction::OpenBurnMenu(e.id.clone())),
-                value: if e.subtitle.is_empty() {
-                    None
-                } else {
-                    Some(e.subtitle.clone())
-                },
-            });
-        }
-        items.push(MenuItem {
-            label: "Refresh library".into(),
-            action: MenuAction::RescanLibrary,
-            burn_action: None,
-            value: Some("↻".into()),
-        });
-    }
-    Category {
-        name: "Examples",
-        icon: icons::FOLDER,
-        items,
-    }
-}
-
 /// Construct the Projects category. These are project-baked CUE/BIN
-/// discs discovered under `editor/projects`, separated from SDK
-/// examples so authored games have their own launch surface.
+/// discs discovered under `editor/projects`, giving authored games their own
+/// launch surface.
+#[cfg(not(target_arch = "wasm32"))]
 fn build_projects_category(projects: &[LibraryItem]) -> Category {
     let mut items = Vec::with_capacity(projects.len() + 1);
     if projects.is_empty() {
@@ -2712,9 +2650,16 @@ mod tests {
             id: id.into(),
             title: title.into(),
             subtitle: sub.into(),
+            #[cfg(not(target_arch = "wasm32"))]
             burnable: false,
-            launchable: true,
         }
+    }
+
+    fn category<'a>(menu: &'a MenuState, name: &str) -> &'a Category {
+        menu.categories
+            .iter()
+            .find(|category| category.name == name)
+            .unwrap_or_else(|| panic!("missing {name} category"))
     }
 
     fn draw_pointer_click(menu: &mut MenuState, position: Pos2) {
@@ -2745,14 +2690,12 @@ mod tests {
     #[test]
     fn fresh_state_has_expected_categories() {
         let s = MenuState::new();
-        assert_eq!(s.categories.len(), 7);
-        assert_eq!(s.categories[0].name, "Games");
-        assert_eq!(s.categories[1].name, "Examples");
-        assert_eq!(s.categories[2].name, "Projects");
-        assert_eq!(s.categories[3].name, "Editor");
-        assert_eq!(s.categories[4].name, "Settings");
-        assert_eq!(s.categories[5].name, "System");
-        assert_eq!(s.categories[6].name, "Quit");
+        let names: Vec<_> = s.categories.iter().map(|category| category.name).collect();
+        let mut expected = vec!["Games", "Projects"];
+        #[cfg(feature = "editor")]
+        expected.push("Editor");
+        expected.extend(["Settings", "System", "Quit"]);
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -2760,16 +2703,15 @@ mod tests {
         let s = MenuState::new();
         let first = s.categories[0].items.first().unwrap();
         assert_eq!(first.action, MenuAction::RescanLibrary);
-        let first_example = s.categories[1].items.first().unwrap();
-        assert_eq!(first_example.action, MenuAction::BuildExamples);
+        let first_project = category(&s, "Projects").items.first().unwrap();
+        assert_eq!(first_project.action, MenuAction::RescanLibrary);
     }
 
     #[test]
-    fn set_library_populates_games_and_examples() {
+    fn set_library_populates_games_and_projects() {
         let mut s = MenuState::new();
         s.set_library(
             &[dummy_item("g1", "Crash", "NTSC-U · 600 MiB")],
-            &[dummy_item("e1", "hello-tri", "EXE")],
             &[dummy_item("p1", "Stone Room", "Project")],
         );
         assert_eq!(s.categories[0].items[0].label, "Crash");
@@ -2782,41 +2724,26 @@ mod tests {
             s.categories[0].items.last().unwrap().action,
             MenuAction::RescanLibrary
         );
-        assert_eq!(s.categories[1].items[0].label, "hello-tri");
-        assert_eq!(s.categories[2].items[0].label, "Stone Room");
+        assert_eq!(category(&s, "Projects").items[0].label, "Stone Room");
     }
 
     #[test]
-    fn burn_action_is_only_shown_for_burnable_examples_and_projects() {
+    fn burn_action_is_only_shown_for_burnable_projects() {
         let mut s = MenuState::new();
         let game = LibraryItem {
             burnable: true,
             ..dummy_item("g1", "Retail Disc", "NTSC-U")
-        };
-        let example = LibraryItem {
-            burnable: true,
-            ..dummy_item("e1", "hello-cdda", "CUE")
-        };
-        let source_example = LibraryItem {
-            launchable: false,
-            burnable: true,
-            ..dummy_item("e2", "hello-tri", "not built")
         };
         let project = LibraryItem {
             burnable: true,
             ..dummy_item("p1", "Demo 10", "Project")
         };
 
-        s.set_library(&[game], &[example, source_example], &[project]);
+        s.set_library(&[game], &[project]);
 
         assert_eq!(s.categories[0].items[0].burn_action, None);
         assert_eq!(
-            s.categories[1].items[0].burn_action,
-            Some(MenuAction::OpenBurnMenu("e1".to_string()))
-        );
-        assert_eq!(s.categories[1].items[1].burn_action, None);
-        assert_eq!(
-            s.categories[2].items[0].burn_action,
+            category(&s, "Projects").items[0].burn_action,
             Some(MenuAction::OpenBurnMenu("p1".to_string()))
         );
     }
@@ -2825,25 +2752,25 @@ mod tests {
     fn set_library_preserves_category_across_rebuild() {
         let mut s = MenuState::new();
         // Move to "System" category before rebuilding.
-        s.category_index = 5;
-        s.set_library(&[], &[], &[]);
+        s.select_category("System");
+        s.set_library(&[], &[]);
         assert_eq!(s.current_category(), Some("System"));
     }
 
     #[test]
     fn sync_run_label_flips_system_run_item() {
         let mut s = MenuState::new();
-        assert_eq!(s.categories[5].items[0].label, "Run");
+        assert_eq!(category(&s, "System").items[0].label, "Run");
         s.sync_run_label(true);
-        assert_eq!(s.categories[5].items[0].label, "Pause");
+        assert_eq!(category(&s, "System").items[0].label, "Pause");
         s.sync_run_label(false);
-        assert_eq!(s.categories[5].items[0].label, "Run");
+        assert_eq!(category(&s, "System").items[0].label, "Run");
     }
 
     #[test]
     fn sync_fast_boot_label_flips_system_value() {
         let mut s = MenuState::new();
-        let fast_boot = s.categories[5]
+        let fast_boot = category(&s, "System")
             .items
             .iter()
             .find(|item| item.action == MenuAction::ToggleFastBoot)
@@ -2851,7 +2778,7 @@ mod tests {
         assert_eq!(fast_boot.value.as_deref(), Some("On"));
 
         s.sync_fast_boot_label(false);
-        let fast_boot = s.categories[5]
+        let fast_boot = category(&s, "System")
             .items
             .iter()
             .find(|item| item.action == MenuAction::ToggleFastBoot)
@@ -2859,7 +2786,7 @@ mod tests {
         assert_eq!(fast_boot.value.as_deref(), Some("Off"));
 
         s.sync_fast_boot_label(true);
-        let fast_boot = s.categories[5]
+        let fast_boot = category(&s, "System")
             .items
             .iter()
             .find(|item| item.action == MenuAction::ToggleFastBoot)
@@ -2870,7 +2797,7 @@ mod tests {
     #[test]
     fn left_right_wraps_around_categories() {
         let mut s = MenuState::new();
-        s.set_library(&[dummy_item("a", "A", "")], &[], &[]);
+        s.set_library(&[dummy_item("a", "A", "")], &[]);
         let n = s.categories.len();
         assert!(n >= 2);
         assert_eq!(s.current_category(), Some("Games")); // first category
@@ -2906,7 +2833,6 @@ mod tests {
                 dummy_item("b", "B", ""),
                 dummy_item("c", "C", ""),
             ],
-            &[],
             &[],
         );
 
@@ -2972,11 +2898,17 @@ mod tests {
     fn sync_settings_paths_updates_menu_values() {
         let mut s = MenuState::new();
         s.sync_settings_paths("SCPH1001.BIN", "discs");
-        assert_eq!(s.categories[2].items[0].value.as_deref(), Some("Refresh"));
         assert_eq!(
-            s.categories[4].items[0].value.as_deref(),
+            category(&s, "Projects").items[0].value.as_deref(),
+            Some("Refresh")
+        );
+        assert_eq!(
+            category(&s, "Settings").items[0].value.as_deref(),
             Some("SCPH1001.BIN")
         );
-        assert_eq!(s.categories[4].items[1].value.as_deref(), Some("discs"));
+        assert_eq!(
+            category(&s, "Settings").items[1].value.as_deref(),
+            Some("discs")
+        );
     }
 }

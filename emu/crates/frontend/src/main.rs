@@ -46,7 +46,9 @@ mod playtest_input;
 mod theme;
 mod ui;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "editor")]
+use std::path::PathBuf;
 use std::sync::Arc;
 // `web_time::Instant` is a drop-in for `std::time::Instant`: on native it
 // re-exports the std type, and on wasm it reads the browser performance clock
@@ -128,6 +130,7 @@ fn elapsed_ms(start: Instant) -> f32 {
 
 // Path helpers shared by `app` and the editor-gated `playtest_disc` module,
 // kept private at the crate root so both sibling modules can reach them.
+#[cfg(feature = "editor")]
 fn repo_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -982,7 +985,6 @@ impl ApplicationHandler for Shell {
                 #[cfg(feature = "editor")]
                 self.state.stop_embedded_playtest();
                 self.state.flush_pending_input_profile_capture();
-                self.state.stop_examples_build();
                 // Flush any dirty memory card so save progress
                 // survives a window-close. A hard crash still
                 // loses whatever hasn't been flushed -- the run
@@ -1089,7 +1091,7 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 // The Menu *does* honour OS-level key-repeat: holding
-                // down-arrow scrolls through a long Examples list one
+                // down-arrow scrolls through a long library list one
                 // row per repeat tick, matching GUI-standard behaviour.
                 // Only press events (including repeats) trigger menu
                 // navigation; releases don't.
@@ -1408,7 +1410,6 @@ impl ApplicationHandler for Shell {
                             #[cfg(feature = "editor")]
                             self.state.stop_embedded_playtest();
                             self.state.flush_pending_input_profile_capture();
-                            self.state.stop_examples_build();
                             if let Err(e) = self.state.flush_memcard_port1() {
                                 eprintln!("[frontend] memcard flush on quit: {e}");
                             }
@@ -1426,7 +1427,6 @@ impl ApplicationHandler for Shell {
                 }
                 #[cfg(feature = "editor")]
                 self.state.poll_embedded_playtest_build();
-                self.state.poll_examples_build();
                 profile.input_ms = elapsed_ms(input_start);
 
                 // Keep the guest SIO topology in sync with the routing panel.
@@ -1937,7 +1937,6 @@ impl ApplicationHandler for Shell {
                         #[cfg(feature = "editor")]
                         state.stop_embedded_playtest();
                         state.flush_pending_input_profile_capture();
-                        state.stop_examples_build();
                         if let Err(error) = state.flush_memcard_port1() {
                             eprintln!("[frontend] memcard flush on quit: {error}");
                         }

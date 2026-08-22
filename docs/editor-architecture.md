@@ -8,13 +8,14 @@
 
 The editor should live inside the PSoXide desktop application, but as a
 separate host workspace from the emulator. The Menu remains the launcher shell:
-Games and Examples boot PS1 software, while Create opens the editor.
+Games boots PS1 software, Projects lists baked editor builds, and Create opens
+the editor.
 
 This keeps one app identity and one preview loop, without forcing mouse-heavy
 editing into the emulator overlay. Entering the editor pauses emulation, stops
 routing keyboard input to the virtual pad, and gives egui full mouse/keyboard
 ownership. The Menu can still be opened above the editor to return to games,
-launch examples, or close the workspace.
+launch a project build, or close the workspace.
 
 ## Workspaces
 
@@ -22,7 +23,7 @@ launch examples, or close the workspace.
 PSoXide desktop app
   Menu shell
     Games       -> emulator workspace
-    Examples    -> emulator workspace
+    Projects    -> emulator workspace
     Create      -> editor workspace
     System      -> emulator controls
     Debug       -> emulator debug panels

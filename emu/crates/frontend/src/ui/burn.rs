@@ -6,7 +6,7 @@ use egui::{Align, ComboBox, RichText};
 
 use crate::app::AppState;
 
-/// Draw the burn submenu opened from an example/project row.
+/// Draw the burn submenu opened from a project row.
 pub fn draw(ctx: &egui::Context, state: &mut AppState) {
     if !state.burn.open {
         return;
