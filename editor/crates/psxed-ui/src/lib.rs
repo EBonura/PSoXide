@@ -91,7 +91,7 @@ use psxed_project::{
     RuntimeTextureSplitMode, Scene, SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings,
     TransitionMaskShape, TransitionMaterialTexture, UiAction, UiAnchor, UiFontChoice, UiGradient,
     UiGradientDirection, UiImageEffect, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
-    UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WaterVolumeCell,
+    UiSceneId, UiSfxBindings, UiSfxCue, UiShapeStyle, UiTextAlign, UiValueBinding, WaterVolumeCell,
     WaterVolumeSettings, WorldCameraSettings, WorldCullingSettings, WorldGrid,
     WorldPhysicsSettings, WorldStreamingSettings, AUTO_PAINT_BLEND_PREFIX,
     DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,

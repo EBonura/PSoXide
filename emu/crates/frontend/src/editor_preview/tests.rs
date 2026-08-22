@@ -2746,8 +2746,8 @@ fn benchmark_e1m1_brush_navigation() {
             None,
             &[],
             None,
-            &textures,
-            &assets,
+            textures,
+            assets,
             output,
         )
     };

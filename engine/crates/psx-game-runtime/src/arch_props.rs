@@ -201,6 +201,7 @@ fn surface_front_facing(camera: &WorldCamera, surface: &LevelArchPropSurfaceReco
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod collision_tests {
     use super::*;
 

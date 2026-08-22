@@ -3387,7 +3387,8 @@ fn brush_edits_mark_the_project_dirty_for_save_and_cook() {
 
     // Every other committed brush mutation must mark dirty too, or the
     // Play flow's save_if_dirty cooks stale on-disk data.
-    let ops: [(&str, fn(&mut EditorWorkspace)); 4] = [
+    type WorkspaceOperation = (&'static str, fn(&mut EditorWorkspace));
+    let ops: [WorkspaceOperation; 4] = [
         ("duplicate", |ws| ws.duplicate_selected_brushes()),
         ("snap", |ws| {
             ws.project.active_scene_mut().brushes[0] =
@@ -4949,7 +4950,7 @@ fn a_held_uv_interaction_does_not_accumulate_rounding_drift() {
         let mut incremental = EditorWorkspace::open_directory(&dir).unwrap();
         incremental.active_workspace = WorkspaceView::Room;
         incremental.replace_brush_selection(0, Some(0));
-        let (worst, ended) = drag_uv(&mut incremental, steps, &shape);
+        let (worst, ended) = drag_uv(&mut incremental, steps, shape);
         assert!(
             worst <= 1.0,
             "{label}: a held interaction drifted {worst} texels over {steps} frames"

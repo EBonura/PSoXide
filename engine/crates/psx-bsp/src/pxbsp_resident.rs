@@ -11,8 +11,8 @@ use crate::pxbsp::{
     PxbspLumpKind, PxbspMaterial, PxbspMaterialError, PxbspVersion, PXBSP_LUMP_COUNT,
 };
 use crate::{
-    encode_node_bound_max, encode_node_bound_min, BrushModel, ClipNode, CookedRecord, Face, Leaf,
-    LumpRange, Node, Plane, ReadAt, RecordSlice, SliceReadError, SliceReader, Vec3I32, Vertex,
+    encode_node_bound_max, encode_node_bound_min, BrushModel, ClipNode, CompactPlane, CookedRecord,
+    Face, Leaf, LumpRange, Node, ReadAt, RecordSlice, SliceReadError, SliceReader, Vec3I32, Vertex,
 };
 
 use crate::resident::MAX_RESIDENT_MAP_BYTES;
@@ -43,6 +43,7 @@ pub enum PxbspMapLoadError<E> {
     StaticLegacyVersion { found: u16 },
     LegacyRecord { kind: PxbspLumpKind, index: usize },
     BadVertexData,
+    BadPlane(usize),
     BadMaterial(usize, PxbspMaterialError),
     BadEntityTable(PxbspEntityTableError),
     BadFace(usize),
@@ -73,6 +74,7 @@ impl<E: fmt::Display> fmt::Display for PxbspMapLoadError<E> {
                 write!(output, "legacy {kind:?} record {index} cannot be compacted")
             }
             Self::BadVertexData => output.write_str("vertex data is not four-byte aligned"),
+            Self::BadPlane(index) => write!(output, "plane {index} is invalid"),
             Self::BadMaterial(index, error) => {
                 write!(output, "material {index} is invalid: {error:?}")
             }
@@ -148,7 +150,7 @@ impl PxbspResidentMap {
     ) -> Result<Self, PxbspMapLoadError<SliceReadError>> {
         let mut reader = SliceReader::new(bytes);
         let index = PxbspIndex::read(&mut reader).map_err(PxbspMapLoadError::Index)?;
-        if index.version() != PxbspVersion::V5 {
+        if index.version() != PxbspVersion::V6 {
             return Err(PxbspMapLoadError::StaticLegacyVersion {
                 found: index.version().wire(),
             });
@@ -216,7 +218,7 @@ impl PxbspResidentMap {
                     .expect("transcoded lump has fixed source records")
                     as usize;
                 let resident_size = kind
-                    .record_size(PxbspVersion::V5)
+                    .record_size(PxbspVersion::V6)
                     .expect("transcoded lump has fixed resident records")
                     as usize;
                 for record_index in 0..source.len as usize / source_size {
@@ -302,8 +304,14 @@ impl PxbspResidentMap {
         self.lump_bytes(PxbspLumpKind::Vertices)
     }
 
-    pub fn planes(&self) -> RecordSlice<'_, Plane> {
-        self.records(PxbspLumpKind::Planes)
+    pub fn planes(&self) -> &[CompactPlane] {
+        let records: RecordSlice<'_, CompactPlane> = self.records(PxbspLumpKind::Planes);
+        if records.is_empty() {
+            return &[];
+        }
+        records
+            .as_native_compact_planes()
+            .expect("validated native PXBSP plane alignment")
     }
 
     pub fn materials(&self) -> RecordSlice<'_, PxbspMaterial> {
@@ -394,9 +402,19 @@ impl PxbspResidentMap {
             ));
         }
         let head_node = *model.head_nodes.get(hull_index.checked_add(1)?)?;
-        Some(CollisionHull::new(
+        let records = self.clip_nodes();
+        // SAFETY: validate_references rejects a non-empty clip-node lump whose
+        // address is not compatible with ClipNode. Owned resident lumps are
+        // also placed at four-byte-aligned offsets and never move after load.
+        let nodes = unsafe {
+            core::slice::from_raw_parts(
+                records.as_bytes().as_ptr().cast::<ClipNode>(),
+                records.len(),
+            )
+        };
+        Some(CollisionHull::from_native_clip_nodes(
             self.planes(),
-            self.clip_nodes(),
+            nodes,
             head_node,
         ))
     }
@@ -428,6 +446,75 @@ impl PxbspResidentMap {
             };
             node_index = node.children[(dot.saturating_sub(plane.distance) <= 0) as usize];
         }
+    }
+
+    /// Return whether an axis-aligned Q20.12 box touches any leaf selected by
+    /// a decompressed world PVS row.
+    ///
+    /// This is the Quake `SV_LinkEdict`/efrag visibility rule without a
+    /// retained linked list: a dynamic entity remains active and drawable if
+    /// any part of its bounds reaches a visible leaf, even when its origin is
+    /// across a BSP plane. The traversal allocates nothing. An unusually deep
+    /// tree which exhausts the fixed traversal stack fails open so visibility
+    /// optimisation can never make an entity disappear.
+    pub fn aabb_touches_visible_leaf(
+        &self,
+        mins: Vec3I32,
+        maxs: Vec3I32,
+        visibility: &[u8],
+        visible_leaves: usize,
+    ) -> bool {
+        const NODE_STACK_CAPACITY: usize = 64;
+
+        if mins.x > maxs.x
+            || mins.y > maxs.y
+            || mins.z > maxs.z
+            || visible_leaves > visibility.len().saturating_mul(8)
+        {
+            return false;
+        }
+        let Some(world) = self.brush_models().get(0) else {
+            return false;
+        };
+        let mut stack = [0i16; NODE_STACK_CAPACITY];
+        stack[0] = world.head_nodes[0];
+        let mut stack_len = 1usize;
+        while stack_len != 0 {
+            stack_len -= 1;
+            let node_index = stack[stack_len];
+            if node_index < 0 {
+                let leaf = (-1i32 - i32::from(node_index)) as usize;
+                if leaf == 0 || leaf > visible_leaves {
+                    continue;
+                }
+                let visible_index = leaf - 1;
+                if visibility[visible_index >> 3] & (1 << (visible_index & 7)) != 0 {
+                    return true;
+                }
+                continue;
+            }
+
+            let node = unsafe { self.nodes().get_unchecked(node_index as usize) };
+            let plane = unsafe { self.planes().get_unchecked(node.plane as usize) };
+            let (minimum_dot, maximum_dot) = aabb_plane_dot_range(mins, maxs, *plane);
+            let minimum_distance = minimum_dot.saturating_sub(plane.distance);
+            let maximum_distance = maximum_dot.saturating_sub(plane.distance);
+            if minimum_distance > 0 {
+                stack[stack_len] = node.children[0];
+                stack_len += 1;
+            } else if maximum_distance <= 0 {
+                stack[stack_len] = node.children[1];
+                stack_len += 1;
+            } else {
+                if stack_len + 2 > stack.len() {
+                    return true;
+                }
+                stack[stack_len] = node.children[1];
+                stack[stack_len + 1] = node.children[0];
+                stack_len += 2;
+            }
+        }
+        false
     }
 
     fn clear_loaded_state(&mut self) {
@@ -489,7 +576,11 @@ impl PxbspResidentMap {
         if self.vertex_data().as_ptr() as usize & 3 != 0 {
             return Err(PxbspMapLoadError::BadVertexData);
         }
-        let vertices = self.vertices();
+        let vertex_count = self.vertex_data().len() / Vertex::SIZE;
+        let plane_records: RecordSlice<'_, CompactPlane> = self.records(PxbspLumpKind::Planes);
+        if !plane_records.is_empty() && plane_records.as_native_compact_planes().is_none() {
+            return Err(PxbspMapLoadError::BadPlane(0));
+        }
         let planes = self.planes();
         let materials = self.materials();
         let faces = self.faces();
@@ -498,6 +589,12 @@ impl PxbspResidentMap {
         let leaves = self.leaves();
         let nodes = self.nodes();
         let clip_nodes = self.clip_nodes();
+        if !clip_nodes.is_empty()
+            && clip_nodes.as_bytes().as_ptr() as usize & (core::mem::align_of::<ClipNode>() - 1)
+                != 0
+        {
+            return Err(PxbspMapLoadError::BadClipNode(0));
+        }
 
         for (index, material) in materials.iter().enumerate() {
             material
@@ -513,7 +610,7 @@ impl PxbspResidentMap {
                 || face.texture as usize >= materials.len()
                 || face.vertex_count < 3
                 || first.is_none()
-                || first.unwrap().saturating_add(face.vertex_count as usize) > vertices.len()
+                || first.unwrap().saturating_add(face.vertex_count as usize) > vertex_count
                 || face
                     .light_styles
                     .into_iter()
@@ -588,6 +685,100 @@ impl PxbspResidentMap {
     }
 }
 
+fn aabb_plane_dot_range(mins: Vec3I32, maxs: Vec3I32, plane: CompactPlane) -> (i32, i32) {
+    match plane.kind {
+        0 => (mins.x, maxs.x),
+        1 => (mins.y, maxs.y),
+        2 => (mins.z, maxs.z),
+        _ => {
+            let (minimum, maximum) = match plane.sign_bits & 7 {
+                0 => (mins, maxs),
+                1 => (
+                    Vec3I32 {
+                        x: maxs.x,
+                        y: mins.y,
+                        z: mins.z,
+                    },
+                    Vec3I32 {
+                        x: mins.x,
+                        y: maxs.y,
+                        z: maxs.z,
+                    },
+                ),
+                2 => (
+                    Vec3I32 {
+                        x: mins.x,
+                        y: maxs.y,
+                        z: mins.z,
+                    },
+                    Vec3I32 {
+                        x: maxs.x,
+                        y: mins.y,
+                        z: maxs.z,
+                    },
+                ),
+                3 => (
+                    Vec3I32 {
+                        x: maxs.x,
+                        y: maxs.y,
+                        z: mins.z,
+                    },
+                    Vec3I32 {
+                        x: mins.x,
+                        y: mins.y,
+                        z: maxs.z,
+                    },
+                ),
+                4 => (
+                    Vec3I32 {
+                        x: mins.x,
+                        y: mins.y,
+                        z: maxs.z,
+                    },
+                    Vec3I32 {
+                        x: maxs.x,
+                        y: maxs.y,
+                        z: mins.z,
+                    },
+                ),
+                5 => (
+                    Vec3I32 {
+                        x: maxs.x,
+                        y: mins.y,
+                        z: maxs.z,
+                    },
+                    Vec3I32 {
+                        x: mins.x,
+                        y: maxs.y,
+                        z: mins.z,
+                    },
+                ),
+                6 => (
+                    Vec3I32 {
+                        x: mins.x,
+                        y: maxs.y,
+                        z: maxs.z,
+                    },
+                    Vec3I32 {
+                        x: maxs.x,
+                        y: mins.y,
+                        z: mins.z,
+                    },
+                ),
+                _ => (maxs, mins),
+            };
+            (
+                mul_q12_i32(minimum.x, i32::from(plane.normal.x))
+                    .saturating_add(mul_q12_i32(minimum.y, i32::from(plane.normal.y)))
+                    .saturating_add(mul_q12_i32(minimum.z, i32::from(plane.normal.z))),
+                mul_q12_i32(maximum.x, i32::from(plane.normal.x))
+                    .saturating_add(mul_q12_i32(maximum.y, i32::from(plane.normal.y)))
+                    .saturating_add(mul_q12_i32(maximum.z, i32::from(plane.normal.z))),
+            )
+        }
+    }
+}
+
 impl Default for PxbspResidentMap {
     fn default() -> Self {
         Self::new()
@@ -610,7 +801,11 @@ const fn is_compact_lump(kind: PxbspLumpKind) -> bool {
 }
 
 const fn requires_transcode(version: PxbspVersion, kind: PxbspLumpKind) -> bool {
-    (matches!(version, PxbspVersion::V1) && is_compact_lump(kind))
+    (matches!(
+        version,
+        PxbspVersion::V1 | PxbspVersion::V4 | PxbspVersion::V5
+    ) && matches!(kind, PxbspLumpKind::Planes))
+        || (matches!(version, PxbspVersion::V1) && is_compact_lump(kind))
         || (matches!(version, PxbspVersion::V4) && matches!(kind, PxbspLumpKind::Nodes))
 }
 
@@ -623,7 +818,7 @@ fn resident_lump_len(index: &PxbspIndex, kind: PxbspLumpKind) -> usize {
         .record_size(index.version())
         .expect("transcoded lump has a source record size") as usize;
     let resident_size = kind
-        .record_size(PxbspVersion::V5)
+        .record_size(PxbspVersion::V6)
         .expect("transcoded lump has a resident record size") as usize;
     source / source_size * resident_size
 }
@@ -636,7 +831,21 @@ fn transcode_record(
 ) -> bool {
     match kind {
         PxbspLumpKind::Planes => {
-            output.copy_from_slice(&source[..Plane::SIZE]);
+            let kind = i32::from_le_bytes(source[10..14].try_into().unwrap());
+            let Ok(kind) = u8::try_from(kind) else {
+                return false;
+            };
+            output[0..6].copy_from_slice(&source[0..6]);
+            output[6] = kind;
+            let mut sign_bits = 0u8;
+            for axis in 0..3 {
+                let normal = i16::from_le_bytes(source[axis * 2..axis * 2 + 2].try_into().unwrap());
+                if normal < 0 {
+                    sign_bits |= 1 << axis;
+                }
+            }
+            output[7] = sign_bits;
+            output[8..12].copy_from_slice(&source[6..10]);
         }
         PxbspLumpKind::Faces => {
             let plane = i16::from_le_bytes(source[0..2].try_into().unwrap());
@@ -692,7 +901,7 @@ fn transcode_record(
                 output[..6].copy_from_slice(source);
                 output[6..].fill(0);
             }
-            PxbspVersion::V5 => return false,
+            PxbspVersion::V5 | PxbspVersion::V6 => return false,
         },
         PxbspLumpKind::Models => output.copy_from_slice(&source[..32]),
         _ => return false,
@@ -716,7 +925,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::pxbsp::{
         PxbspEntity, PXBSP_DIRECTORY_ENTRY_BYTES, PXBSP_ENTITY_TABLE_HEADER_BYTES,
-        PXBSP_HEADER_BYTES, PXBSP_MAGIC, PXBSP_VERSION,
+        PXBSP_HEADER_BYTES, PXBSP_MAGIC,
     };
     use crate::SliceReader;
     use crate::Vec3I16;
@@ -774,7 +983,7 @@ pub(crate) mod tests {
         push_i16(&mut plane, 4096);
         push_i16(&mut plane, 0);
         push_i16(&mut plane, 0);
-        push_i32(&mut plane, 0);
+        plane.extend_from_slice(&[0, 0]);
         push_i32(&mut plane, 0);
         lumps[PxbspLumpKind::Planes as usize] = plane;
         lumps[PxbspLumpKind::Materials as usize] = vec![0; PxbspMaterial::SIZE];
@@ -831,7 +1040,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn write_file(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT]) -> Vec<u8> {
-        write_file_version(lumps, PXBSP_VERSION)
+        // Most resident/renderer fixtures below author the legacy word-corner
+        // payload directly. Keep them as explicit v6 compatibility coverage;
+        // v7 indexed loading has its own format-specific regression.
+        write_file_version(lumps, crate::pxbsp::PXBSP_VERSION_V6)
     }
 
     fn write_file_version(lumps: &[Vec<u8>; PXBSP_LUMP_COUNT], version: u16) -> Vec<u8> {
@@ -858,7 +1070,13 @@ pub(crate) mod tests {
         let compact = valid_lumps();
         let mut legacy = compact.clone();
 
-        // Plane records deliberately retain the exact v1 physical layout.
+        legacy[PxbspLumpKind::Planes as usize].clear();
+        for plane in compact[PxbspLumpKind::Planes as usize].chunks_exact(CompactPlane::SIZE) {
+            let output = &mut legacy[PxbspLumpKind::Planes as usize];
+            output.extend_from_slice(&plane[0..6]);
+            output.extend_from_slice(&plane[8..12]);
+            push_i32(output, i32::from(plane[6]));
+        }
 
         legacy[PxbspLumpKind::Faces as usize].clear();
         for face in compact[PxbspLumpKind::Faces as usize].chunks_exact(Face::SIZE) {
@@ -907,8 +1125,20 @@ pub(crate) mod tests {
     }
 
     fn v4_lumps() -> [Vec<u8>; PXBSP_LUMP_COUNT] {
-        let mut legacy = valid_lumps();
+        let mut legacy = v5_lumps();
         legacy[PxbspLumpKind::Nodes as usize].truncate(6);
+        legacy
+    }
+
+    fn v5_lumps() -> [Vec<u8>; PXBSP_LUMP_COUNT] {
+        let mut legacy = valid_lumps();
+        let compact_planes = core::mem::take(&mut legacy[PxbspLumpKind::Planes as usize]);
+        for plane in compact_planes.chunks_exact(CompactPlane::SIZE) {
+            let output = &mut legacy[PxbspLumpKind::Planes as usize];
+            output.extend_from_slice(&plane[0..6]);
+            output.extend_from_slice(&plane[8..12]);
+            push_i32(output, i32::from(plane[6]));
+        }
         legacy
     }
 
@@ -947,12 +1177,72 @@ pub(crate) mod tests {
         assert_eq!(map.generation(), 1);
         assert_eq!(map.source_file_len(), bytes.len() as u32);
         assert_eq!(map.vertices().len(), 3);
+        assert_eq!(
+            map.planes()[0],
+            CompactPlane {
+                normal: Vec3I16 {
+                    x: 4096,
+                    y: 0,
+                    z: 0
+                },
+                kind: 0,
+                sign_bits: 0,
+                distance: 0,
+            }
+        );
         assert_eq!(map.materials().len(), 1);
         assert_eq!(map.faces().len(), 1);
         assert_eq!(map.entities().get(0).expect("entity").leaf, 1);
         assert_eq!(map.string_at(0), Some(&b"world"[..]));
         assert!(map.resident_bytes() < bytes.len());
         assert_eq!(map.source_lump(PxbspLumpKind::TextureData).len, 0);
+    }
+
+    #[test]
+    fn compact_plane_sign_bits_select_exact_aabb_extrema() {
+        let mins = Vec3I32 {
+            x: -9 * 4096,
+            y: -5 * 4096,
+            z: -2 * 4096,
+        };
+        let maxs = Vec3I32 {
+            x: 7 * 4096,
+            y: 11 * 4096,
+            z: 13 * 4096,
+        };
+        for sign_bits in 0..8u8 {
+            let component = |axis: u32| -> i16 {
+                if sign_bits & (1u8 << axis) == 0 {
+                    1024
+                } else {
+                    -1024
+                }
+            };
+            let plane = CompactPlane {
+                normal: Vec3I16 {
+                    x: component(0),
+                    y: component(1),
+                    z: component(2),
+                },
+                kind: 3,
+                sign_bits,
+                distance: 0,
+            };
+            let actual = aabb_plane_dot_range(mins, maxs, plane);
+            let mut expected = (i32::MAX, i32::MIN);
+            for x in [mins.x, maxs.x] {
+                for y in [mins.y, maxs.y] {
+                    for z in [mins.z, maxs.z] {
+                        let dot = mul_q12_i32(x, i32::from(plane.normal.x))
+                            .saturating_add(mul_q12_i32(y, i32::from(plane.normal.y)))
+                            .saturating_add(mul_q12_i32(z, i32::from(plane.normal.z)));
+                        expected.0 = expected.0.min(dot);
+                        expected.1 = expected.1.max(dot);
+                    }
+                }
+            }
+            assert_eq!(actual, expected, "sign bits {sign_bits}");
+        }
     }
 
     #[test]
@@ -989,6 +1279,26 @@ pub(crate) mod tests {
         assert_eq!(node.face_count, 1);
         let model = map.brush_models().get(0).expect("model");
         assert_eq!(model.origin, Vec3I16::default());
+        assert!(map.resident_bytes() < bytes.len());
+    }
+
+    #[test]
+    fn owned_load_transcodes_v5_planes_to_native_layout() {
+        let bytes = write_file_version(&v5_lumps(), crate::pxbsp::PXBSP_VERSION_V5);
+        let map = load(&bytes).expect("v5 resident map");
+        assert_eq!(
+            map.planes()[0],
+            CompactPlane {
+                normal: Vec3I16 {
+                    x: 4096,
+                    y: 0,
+                    z: 0
+                },
+                kind: 0,
+                sign_bits: 0,
+                distance: 0,
+            }
+        );
         assert!(map.resident_bytes() < bytes.len());
     }
 
@@ -1138,6 +1448,34 @@ pub(crate) mod tests {
             None
         );
         assert_eq!(map.leaf_visibility_into(1, &mut []), None);
+    }
+
+    #[test]
+    fn entity_bounds_link_to_every_touched_render_leaf() {
+        let map = load(&write_file(&valid_lumps())).expect("resident map");
+        let visible_front_leaf = [1u8];
+
+        // The representative origin is behind the x=0 splitter in the solid
+        // leaf, but the complete actor bounds cross into visible leaf one.
+        let mins = Vec3I32 {
+            x: -4096,
+            y: -4096,
+            z: -4096,
+        };
+        let maxs = Vec3I32 {
+            x: 4096,
+            y: 4096,
+            z: 4096,
+        };
+        assert_eq!(map.point_leaf_index(mins), Some(0));
+        assert!(map.aabb_touches_visible_leaf(mins, maxs, &visible_front_leaf, 1));
+
+        let wholly_behind = Vec3I32 {
+            x: -1,
+            y: 4096,
+            z: 4096,
+        };
+        assert!(!map.aabb_touches_visible_leaf(mins, wholly_behind, &visible_front_leaf, 1,));
     }
 
     #[test]

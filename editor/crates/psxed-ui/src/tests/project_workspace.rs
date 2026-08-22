@@ -2,7 +2,7 @@ use super::*;
 
 fn save_watch_project(dir: &Path, project: &ProjectDocument) {
     std::fs::create_dir_all(dir).unwrap();
-    project.save_to_path(&dir.join("project.ron")).unwrap();
+    project.save_to_path(dir.join("project.ron")).unwrap();
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
 
     let mut external = project.clone();
     external.name = "clean external change with different length".to_string();
-    external.save_to_path(&dir.join("project.ron")).unwrap();
+    external.save_to_path(dir.join("project.ron")).unwrap();
     workspace.poll_project_watch(true);
     assert_eq!(workspace.project().name, external.name);
     assert!(!workspace.is_dirty());
@@ -353,7 +353,7 @@ fn external_project_change_auto_reloads_clean_but_protects_dirty_edits() {
     let mut second_external = external.clone();
     second_external.name = "second external edit with another length".to_string();
     second_external
-        .save_to_path(&dir.join("project.ron"))
+        .save_to_path(dir.join("project.ron"))
         .unwrap();
     assert!(workspace.save().unwrap_err().contains("changed outside"));
     assert_eq!(workspace.project().name, "unsaved local name");

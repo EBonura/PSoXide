@@ -220,6 +220,11 @@ fn enemy_controller_cooks_game_entity_with_interned_archetype() {
     assert_eq!(a.touch_damage, enemy.touch_damage);
     assert_eq!(a.max_health, enemy.max_health);
     assert_eq!(a.flags & psx_level::game_entity_flags::ENABLED, 1);
+    assert_ne!(
+        a.flags & psx_level::game_entity_flags::CAN_RUN,
+        0,
+        "an authored Run action enables enemy chase running"
+    );
     // The non-player controller still cooks its idle model instance
     // and the record links it by index.
     assert_ne!(a.model_instance, psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE);
@@ -234,6 +239,9 @@ fn enemy_controller_cooks_game_entity_with_interned_archetype() {
     for clip in [
         a.idle_clip,
         a.walk_clip,
+        a.walk_backward_clip,
+        a.strafe_left_clip,
+        a.strafe_right_clip,
         a.run_clip,
         a.attack_clip,
         a.stagger_clip,
@@ -243,6 +251,9 @@ fn enemy_controller_cooks_game_entity_with_interned_archetype() {
     }
     assert_eq!(a.idle_clip, instance.clip);
     assert_ne!(a.walk_clip, a.idle_clip);
+    assert_ne!(a.walk_backward_clip, a.walk_clip);
+    assert_ne!(a.strafe_left_clip, a.walk_clip);
+    assert_ne!(a.strafe_right_clip, a.walk_clip);
     assert_ne!(a.run_clip, a.walk_clip);
     assert_eq!(
         (a.idle_clip, a.walk_clip, a.run_clip),
@@ -300,6 +311,14 @@ fn game_entity_state_clips_fall_back_down_the_chain() {
     let entity = &package.game_entities[0];
     assert_ne!(entity.walk_clip, entity.idle_clip, "walk stays authored");
     assert_eq!(entity.run_clip, entity.walk_clip, "run falls back to walk");
+    assert_eq!(entity.walk_backward_clip, entity.walk_clip);
+    assert_eq!(entity.strafe_left_clip, entity.walk_clip);
+    assert_eq!(entity.strafe_right_clip, entity.walk_clip);
+    assert_eq!(
+        entity.flags & psx_level::game_entity_flags::CAN_RUN,
+        0,
+        "the visual fallback must not enable run mechanics"
+    );
     assert_eq!(entity.attack_clip, entity.idle_clip);
     assert_eq!(entity.stagger_clip, entity.idle_clip);
     assert_eq!(entity.death_clip, entity.idle_clip);

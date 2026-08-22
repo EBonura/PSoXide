@@ -16,3 +16,11 @@ Do not replace the light atlas with the Tank Boss 8bpp PSXT directly. Rebuild
 the 8bpp reference from this PNG, then run `tools/model_palette_banks.py` with
 the Rust Mantis model so the model and four-bank atlas stay paired. Rebanking
 does not change its geometry, skeleton, UVs, or animation compatibility.
+
+## Selected animations
+
+`WalkBackward` uses candidate 2 from
+`animations/candidates/backward_walk_v1/glb/backward_02.glb`. It is cooked at
+12 Hz to `assets/animations/rust_mantis_starter/walk_bwd.psxanim` and bound in
+the Rust Mantis Starter Animation Set. The original MoMask prompt, seed, BVH,
+other auditions, and rebuild scripts remain under `animations/candidates/`.

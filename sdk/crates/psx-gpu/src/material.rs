@@ -106,6 +106,15 @@ impl TextureWindow {
         )
     }
 
+    /// Texture-page origin selected by this window, in texels.
+    ///
+    /// Power-of-two atlas placements use the raw offset fields as their
+    /// aligned page-local origin. Exposing it lets a cooker-proven surface
+    /// address the same texels directly and omit GP0(E2) from its packets.
+    pub const fn origin_texels(self) -> [u8; 2] {
+        [self.offset_x * 8, self.offset_y * 8]
+    }
+
     /// Apply this texture window to the GPU state.
     pub fn apply(self) {
         wait_cmd_ready();
@@ -459,6 +468,7 @@ mod tests {
         assert_eq!((material.tpage_word() >> 5) & 0x3, 3);
         assert_eq!((material.tpage_word() >> 9) & 0x1, 1);
         assert_eq!(material.texture_window_word(), 0xE204_2318);
+        assert_eq!(material.texture_window.origin_texels(), [64, 64]);
         assert_eq!((material.textured_rect_header() >> 24) & 0xFF, 0x67);
         assert_eq!(
             (material.flat_textured_polygon_header(true) >> 24) & 0xFF,

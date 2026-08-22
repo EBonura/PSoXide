@@ -674,6 +674,7 @@ const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT]
 ];
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod collision_tests {
     use super::*;
 
@@ -1166,7 +1167,8 @@ pub fn box_prop_movement_break_trigger(
     if !moving {
         return None;
     }
-    if input.sprint && stamina_q12 > 0 && config.run_speed > config.walk_speed {
+    if input.sprint && config.run_enabled && stamina_q12 > 0 && config.run_speed > config.walk_speed
+    {
         Some(box_prop_flags::BREAK_ON_RUN)
     } else {
         Some(box_prop_flags::BREAK_ON_WALK)

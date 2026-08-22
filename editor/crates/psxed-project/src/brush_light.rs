@@ -315,8 +315,9 @@ mod tests {
             intensity_q8: 256,
             color: [128; 3],
         };
-        let open = bake_brush_vertex_lighting(&[surface.clone()], &[], [16; 3], &[light], &[])
-            .expect("open bake");
+        let open =
+            bake_brush_vertex_lighting(std::slice::from_ref(&surface), &[], [16; 3], &[light], &[])
+                .expect("open bake");
         let blocker = Brush::cuboid([0, 48, 0], [128, 80, 128]);
         let shadowed = bake_brush_vertex_lighting(&[surface], &[blocker], [16; 3], &[light], &[])
             .expect("shadow bake");

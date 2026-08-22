@@ -429,9 +429,7 @@ impl EditorWorkspace {
             if let Some(pointer) = response.interact_pointer_pos() {
                 let alt = ui.input(|input| input.modifiers.alt);
                 let mut kind = UvCanvasDragKind::Move;
-                if alt {
-                    kind = UvCanvasDragKind::Rotate;
-                } else if pointer.distance(rotate_px) <= HANDLE_HIT_PX {
+                if alt || pointer.distance(rotate_px) <= HANDLE_HIT_PX {
                     kind = UvCanvasDragKind::Rotate;
                 } else {
                     for corner in corner_handles {

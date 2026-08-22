@@ -309,12 +309,15 @@ fn append_bsp_surface_grid_face(
     }
 }
 
+type SurfaceGridRange = (usize, (i64, i64, i64));
+type SurfaceGridFaceRanges = [SurfaceGridRange; 2];
+
 fn surface_grid_face_ranges(
     polygon: &[[f64; 3]],
     normal: [f64; 3],
     camera: psx_engine::WorldCamera,
     step: f64,
-) -> Option<[(usize, (i64, i64, i64)); 2]> {
+) -> Option<SurfaceGridFaceRanges> {
     if polygon.len() < 3 || !surface_grid_face_maybe_visible(polygon, normal, camera) {
         return None;
     }

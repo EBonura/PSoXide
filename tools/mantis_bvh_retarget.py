@@ -65,6 +65,28 @@ MANTIS_JOINT_MAP: dict[str, tuple[str, str]] = {
 }
 
 
+def joint_map_for_target(target: bpy.types.Object) -> dict[str, tuple[str, str]]:
+    """Adapt the stock Mixamo map to deliberately collapsed target rigs.
+
+    The Tank Boss delivery ends its torso at ``Spine1`` and contains no
+    neck/head chain.  Its upper-spine motion is still meaningful, so route the
+    HumanML3D ``Spine2`` channel to ``Spine1`` and leave the unavailable neck
+    channel unmapped.  Full Mixamo rigs keep the original map unchanged.
+    """
+
+    available = {bone.name for bone in target.data.bones}
+    mapping = dict(MANTIS_JOINT_MAP)
+    if "Spine2" not in available and "Spine1" in available:
+        mapping["Spine2"] = ("Spine1", "torso")
+    if "Neck" not in available:
+        mapping.pop("Neck", None)
+
+    missing = sorted({target_name for target_name, _ in mapping.values()} - available)
+    if missing:
+        raise RuntimeError(f"Target rig lacks mapped bones: {missing}")
+    return mapping
+
+
 def load_aletha_module(repo: Path):
     """Import the proven retargeter as a module, not a copy of its maths."""
     spec = importlib.util.spec_from_file_location(
@@ -170,7 +192,7 @@ def main() -> None:
     retargeter = load_aletha_module(Path(repo))
     target = import_mantis(fbx_path, retargeter.MIXAMO_PREFIX)
     source = retargeter.import_animation_source(Path(bvh_path))
-    retargeter.JOINT_MAP = MANTIS_JOINT_MAP
+    retargeter.JOINT_MAP = joint_map_for_target(target)
 
     scene = bpy.context.scene
     start = int(scene.frame_start) + start_at

@@ -3397,6 +3397,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-render-contract"
+version = "0.1.0"
+
+[[package]]
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
@@ -3496,6 +3500,7 @@ dependencies = [
  "psx-engine",
  "psx-iso",
  "psx-level",
+ "psx-render-contract",
  "psxed-audio",
  "psxed-format",
  "psxed-gltf",

@@ -8,6 +8,8 @@
 
 use super::*;
 
+type BrushGizmoContext = ([f64; 3], Vec<[f64; 3]>, Vec<usize>);
+
 struct BrushPickSolvedCache {
     key: Option<u64>,
     brushes: Vec<psxed_project::brush::SolvedBrush>,
@@ -897,15 +899,15 @@ impl EditorWorkspace {
             | BrushEditMode::Clip => return false,
         };
         let crossing_brushes = self.selected_brush != Some(brush);
-        if crossing_brushes {
-            if !self.select_brush_with_group_semantics(
+        if crossing_brushes
+            && !self.select_brush_with_group_semantics(
                 brush,
                 Some(face),
                 egui::Modifiers::NONE,
                 false,
-            ) {
-                return false;
-            }
+            )
+        {
+            return false;
         }
         self.apply_brush_element_selection(
             element,
@@ -1206,7 +1208,7 @@ impl EditorWorkspace {
     /// `(anchor, targets, faces)`. Brush mode targets the whole primary
     /// brush (every corner, every face plane: rigid moves/rotates/
     /// scales); Face/Edge/Vertex modes target the element selection.
-    pub(crate) fn brush_gizmo_context(&self) -> Option<([f64; 3], Vec<[f64; 3]>, Vec<usize>)> {
+    pub(crate) fn brush_gizmo_context(&self) -> Option<BrushGizmoContext> {
         match self.brush_edit_mode {
             BrushEditMode::Clip => None,
             BrushEditMode::Move => {
@@ -1366,9 +1368,11 @@ impl EditorWorkspace {
         } else {
             self.transform_gizmo_mode
         };
-        let whole_brush_others = (self.brush_edit_mode == BrushEditMode::Move)
-            .then(|| self.brush_move_others(index))
-            .unwrap_or_default();
+        let whole_brush_others = if self.brush_edit_mode == BrushEditMode::Move {
+            self.brush_move_others(index)
+        } else {
+            Vec::new()
+        };
         match mode {
             TransformGizmoMode::Move => {
                 if !self.begin_brush_vertex_drag_3d(rect, pointer, index, targets, anchor) {
@@ -1470,8 +1474,8 @@ impl EditorWorkspace {
         } else {
             let factor = (1.0 + f64::from(applied) / 100.0).clamp(0.05, 16.0);
             let mut map = [[0.0; 3]; 3];
-            for axis in 0..3 {
-                map[axis][axis] = if axis == drag.axis { factor } else { 1.0 };
+            for (axis, row) in map.iter_mut().enumerate() {
+                row[axis] = if axis == drag.axis { factor } else { 1.0 };
             }
             map
         };
@@ -2201,7 +2205,7 @@ impl EditorWorkspace {
             .active_scene()
             .nodes()
             .iter()
-            .filter_map(|node| {
+            .filter(|node| {
                 matches!(
                     &node.kind,
                     psxed_project::NodeKind::Logic {
@@ -2209,8 +2213,8 @@ impl EditorWorkspace {
                         ..
                     }
                 )
-                .then(|| (node.id, node.name.clone()))
             })
+            .map(|node| (node.id, node.name.clone()))
             .collect();
         let mut mover = brush.mover;
         let mover_label = mover
@@ -3033,14 +3037,14 @@ impl EditorWorkspace {
                 rotation_deg: current.rotation_deg,
                 scale_q8: [256, 256],
             };
-            for axis in 0..2 {
+            for (axis, dimension) in dims.iter().enumerate() {
                 let mapped = polygon
                     .iter()
                     .map(|&uv| rotation_only.apply_linear(uv)[axis]);
                 let min = mapped.clone().fold(f64::MAX, f64::min);
                 let max = mapped.fold(f64::MIN, f64::max);
                 let span = (max - min).max(1e-6);
-                edited.scale_q8[axis] = ((span / dims[axis]) * 256.0)
+                edited.scale_q8[axis] = ((span / *dimension) * 256.0)
                     .round()
                     .clamp(1.0, f64::from(i16::MAX)) as i16;
             }
@@ -3298,10 +3302,8 @@ impl EditorWorkspace {
                 return false;
             }
             let axis = dominant_axis(plane.normal);
-            if plane.normal[axis] > 0 {
-                if positive_faces[axis].replace(face_index).is_some() {
-                    return false;
-                }
+            if plane.normal[axis] > 0 && positive_faces[axis].replace(face_index).is_some() {
+                return false;
             }
         }
         if positive_faces.iter().any(Option::is_none) {
@@ -3606,7 +3608,7 @@ impl EditorWorkspace {
         painter: &egui::Painter,
         project: &dyn Fn([f64; 3]) -> Option<egui::Pos2>,
     ) {
-        self.draw_brush_clip_preview(painter, |world| project(world));
+        self.draw_brush_clip_preview(painter, project);
     }
 
     fn draw_brush_clip_preview_2d(
@@ -5430,18 +5432,17 @@ impl ViewportTool3d for BrushTool {
         // Whole brushes use the transform gizmo exclusively. In the Brush
         // authoring tool, dragging empty space still creates a new brush.
         if ws.brush_edit_mode == BrushEditMode::Move {
-            if ws.active_tool == ViewTool::Brush {
-                if ws
+            if ws.active_tool == ViewTool::Brush
+                && ws
                     .pick_brush_face_nearest_for_selection_3d(frame.rect, pointer)
                     .is_none()
-                {
-                    if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
-                        ws.brush_drag = Some(BrushDrag {
-                            anchor: point,
-                            current: point,
-                            view: OrthographicView::Top,
-                        });
-                    }
+            {
+                if let Some(point) = ws.brush_ground_point(frame.rect, pointer) {
+                    ws.brush_drag = Some(BrushDrag {
+                        anchor: point,
+                        current: point,
+                        view: OrthographicView::Top,
+                    });
                 }
             }
             return;

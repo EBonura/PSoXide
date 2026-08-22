@@ -8,11 +8,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use psx_engine::{
+    attributed_clip::{
+        clip_convex_plane, crossing_fraction_q16_i64, lerp_q16_i32, AttributedClipPlane,
+        ClipTraversal,
+    },
     compose_classic_alias_transform, materialize_classic_affine_word_vertices,
-    submit_classic_affine_batch, submit_classic_affine_scoped_windowed_batch,
+    submit_classic_affine_batch, submit_classic_affine_mixed_batch,
     submit_classic_affine_scoped_windowed_fan, submit_classic_alias_model,
-    ClassicAffineBatchSurface, ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex,
-    ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex, ClassicAliasFace,
+    ClassicAffineBatchSurface, ClassicAffineMixedBatchSurface, ClassicAffineProfile,
+    ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWordSourceVertex, ClassicAliasFace,
     ClassicAliasProjectedVertex, ClassicAliasVertex,
 };
 use psx_gpu::material::TextureWindow;
@@ -31,8 +35,9 @@ use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
 use crate::sky::{submit_view_ray_layered_sky, VIEW_RAY_SKY_PACKET_WORDS};
 use crate::{
-    Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT, FACE_BAKED_UV,
-    FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID, TEXTURE_NULL, TEXTURE_SKY,
+    CompactPlane, Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT,
+    FACE_BAKED_UV, FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID,
+    TEXTURE_NULL, TEXTURE_SKY,
 };
 
 /// Packet storage used by the original renderer's double-buffered arenas.
@@ -73,6 +78,12 @@ fn set_packed_bit(bits: &mut [u8], index: usize) {
 const BATCH_MAX_VERTICES: usize = 39;
 const BATCH_MAX_SURFACES: usize = 13;
 const SUBDIVISION_SCRATCH_VERTICES: usize = 12;
+const AFFINE_BATCH_VERTEX_CAPACITY: usize = BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES;
+#[cfg(target_arch = "mips")]
+const AFFINE_BATCH_WORKSPACE_BYTES: usize =
+    AFFINE_BATCH_VERTEX_CAPACITY * core::mem::size_of::<ClassicAffineVertex>();
+#[cfg(target_arch = "mips")]
+const _: () = assert!(AFFINE_BATCH_WORKSPACE_BYTES <= psx_engine::scratchpad::SIZE);
 const MAX_ALIAS_VERTICES: usize = 512;
 const MAX_RENDER_ENTITIES: usize = 512;
 const CLUT_DEFAULT: u16 = 240 << 6;
@@ -130,6 +141,9 @@ pub struct PxbspTextureBinding {
     pub clut: u16,
     pub texture_window_word: u32,
     pub uv_origin: [u8; 2],
+    /// Direct page-local origin of the texture allocation. Cooker-proven
+    /// faces add this to their UVs and use packets without GP0(E2).
+    pub page_uv_origin: [u8; 2],
     pub texture_size: [u8; 2],
 }
 
@@ -342,6 +356,67 @@ impl FrustumPlanes {
             + plane.1
     }
 
+    /// Exact sign of [`Self::distance`] without materializing a Rust `i64`
+    /// expression on MIPS-I. The R3000 already produces each signed product
+    /// in HI:LO; accumulating the three pairs and carries directly avoids the
+    /// compiler's generic wide-integer scaffolding. Put the small coordinate
+    /// in `rs` so the console's operand-sensitive multiply completes sooner.
+    #[inline(always)]
+    fn distance_negative(plane: &([i32; 3], i64), position: [i16; 3]) -> bool {
+        #[cfg(target_arch = "mips")]
+        unsafe {
+            let lo = plane.1 as u32;
+            let mut hi = (plane.1 >> 32) as u32;
+            core::arch::asm!(
+                ".set push",
+                ".set noat",
+                ".set noreorder",
+                "mult {px}, {nx}",
+                "mflo {product_lo}",
+                "mfhi {product_hi}",
+                "addu {product_lo}, {lo}, {product_lo}",
+                "sltu {carry}, {product_lo}, {lo}",
+                "addu {hi}, {hi}, {product_hi}",
+                "addu {hi}, {hi}, {carry}",
+                "move {lo}, {product_lo}",
+                "mult {py}, {ny}",
+                "mflo {product_lo}",
+                "mfhi {product_hi}",
+                "addu {product_lo}, {lo}, {product_lo}",
+                "sltu {carry}, {product_lo}, {lo}",
+                "addu {hi}, {hi}, {product_hi}",
+                "addu {hi}, {hi}, {carry}",
+                "move {lo}, {product_lo}",
+                "mult {pz}, {nz}",
+                "mflo {product_lo}",
+                "mfhi {product_hi}",
+                "addu {product_lo}, {lo}, {product_lo}",
+                "sltu {carry}, {product_lo}, {lo}",
+                "addu {hi}, {hi}, {product_hi}",
+                "addu {hi}, {hi}, {carry}",
+                ".set pop",
+                lo = inout(reg) lo => _,
+                hi = inout(reg) hi,
+                nx = in(reg) plane.0[0],
+                ny = in(reg) plane.0[1],
+                nz = in(reg) plane.0[2],
+                px = in(reg) i32::from(position[0]),
+                py = in(reg) i32::from(position[1]),
+                pz = in(reg) i32::from(position[2]),
+                product_lo = out(reg) _,
+                product_hi = out(reg) _,
+                carry = out(reg) _,
+                options(nostack, nomem, preserves_flags),
+            );
+            return (hi as i32) < 0;
+        }
+
+        #[cfg(not(target_arch = "mips"))]
+        {
+            Self::distance(plane, position) < 0
+        }
+    }
+
     /// True when the whole axis-aligned box lies outside any clip plane.
     /// Testing the vertex farthest along each plane normal makes this a
     /// conservative hierarchical reject; intersecting nodes still reach the
@@ -423,6 +498,16 @@ impl FrustumPlanes {
         count: usize,
         scratch: &mut [ClassicAffineVertex],
     ) -> (usize, bool) {
+        self.clip_polygon_buffers_inner(vertices, count, scratch, false)
+    }
+
+    fn clip_polygon_buffers_inner(
+        &self,
+        vertices: &mut [ClassicAffineVertex],
+        count: usize,
+        scratch: &mut [ClassicAffineVertex],
+        outside_rejected: bool,
+    ) -> (usize, bool) {
         let mut count = count;
         // Most visible world faces are well inside the frustum. Prove that
         // common case with 32-bit math before paying for fifteen i64 products
@@ -433,18 +518,35 @@ impl FrustumPlanes {
         {
             return (count, false);
         }
-        // Trivial accept: every vertex inside every plane (the common case).
+        // Classify once before clipping. Quake-PSX performs the equivalent
+        // screen outcode AND before emitting a brush triangle: if every point
+        // is outside the same boundary, no edge can cross the view. Keeping
+        // this test in exact plane space preserves the polygon clip contract
+        // while avoiding five complete copy/interpolation passes for the many
+        // PVS faces that sit wholly beyond one side of the camera frustum.
         let mut all_inside = true;
-        'planes: for plane in &self.planes {
-            for v in &vertices[..count] {
-                if Self::distance(plane, v.position) < 0 {
+        let mut outside_every_vertex = if outside_rejected {
+            0
+        } else {
+            (1u8 << self.planes.len()) - 1
+        };
+        for vertex in &vertices[..count] {
+            let mut vertex_outside = 0u8;
+            for (plane_index, plane) in self.planes.iter().enumerate() {
+                if Self::distance(plane, vertex.position) < 0 {
                     all_inside = false;
-                    break 'planes;
+                    vertex_outside |= 1 << plane_index;
                 }
+            }
+            if !outside_rejected {
+                outside_every_vertex &= vertex_outside;
             }
         }
         if all_inside {
             return (count, false);
+        }
+        if outside_every_vertex != 0 {
+            return (0, false);
         }
         let mut in_scratch = false;
         for plane in &self.planes {
@@ -466,39 +568,58 @@ impl FrustumPlanes {
     }
 }
 
+struct PxbspClipPlane<'a>(&'a ([i32; 3], i64));
+
+impl AttributedClipPlane<ClassicAffineVertex> for PxbspClipPlane<'_> {
+    type Distance = i64;
+
+    #[inline(always)]
+    fn distance(&self, _: usize, vertex: &ClassicAffineVertex) -> Self::Distance {
+        FrustumPlanes::distance(self.0, vertex.position)
+    }
+
+    #[inline(always)]
+    fn inside(&self, distance: Self::Distance) -> bool {
+        distance >= 0
+    }
+
+    #[inline(always)]
+    fn intersection(
+        &self,
+        _: usize,
+        first: &ClassicAffineVertex,
+        first_distance: Self::Distance,
+        _: usize,
+        second: &ClassicAffineVertex,
+        second_distance: Self::Distance,
+    ) -> ClassicAffineVertex {
+        let fraction = crossing_fraction_q16_i64(first_distance, second_distance);
+        lerp_vertex(first, second, fraction)
+    }
+}
+
 #[inline(never)]
 fn clip_polygon_plane(
     plane: &([i32; 3], i64),
     source: &[ClassicAffineVertex],
     destination: &mut [ClassicAffineVertex],
 ) -> usize {
-    let mut out = 0usize;
-    let mut prev = source[source.len() - 1];
-    let mut prev_d = FrustumPlanes::distance(plane, prev.position);
-    for &cur in source {
-        let cur_d = FrustumPlanes::distance(plane, cur.position);
-        if (prev_d >= 0) != (cur_d >= 0) {
-            // Crossing: interpolate at t = prev_d / (prev_d - cur_d), Q16.
-            let t = ((prev_d << 16) / (prev_d - cur_d)).clamp(0, 1 << 16);
-            destination[out] = lerp_vertex(&prev, &cur, t);
-            out += 1;
-        }
-        if cur_d >= 0 {
-            destination[out] = cur;
-            out += 1;
-        }
-        prev = cur;
-        prev_d = cur_d;
+    unsafe {
+        clip_convex_plane::<_, _, false>(
+            source,
+            destination,
+            &PxbspClipPlane(plane),
+            ClipTraversal::PreviousToCurrent,
+        )
     }
-    out
 }
 
 fn lerp_vertex(
     a: &ClassicAffineVertex,
     b: &ClassicAffineVertex,
-    t_q16: i64,
+    fraction_q16: i64,
 ) -> ClassicAffineVertex {
-    let lerp_i = |x: i32, y: i32| -> i32 { (x as i64 + (((y - x) as i64 * t_q16) >> 16)) as i32 };
+    let lerp_i = |x: i32, y: i32| -> i32 { lerp_q16_i32(x, y, fraction_q16) };
     let lerp_u8 = |x: u8, y: u8| -> u8 { lerp_i(x as i32, y as i32).clamp(0, 255) as u8 };
     let ca = a.color;
     let cb = b.color;
@@ -665,8 +786,21 @@ impl Renderer {
 
         let visibility_valid = self.mark_visible_faces(map, camera.origin);
         if visibility_valid {
-            let mut batch_vertices =
-                [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES];
+            // This hot CPU-only workspace lives in the PS1's 1 KiB
+            // scratchpad while GPU DMA reads packet data from main RAM. Host
+            // builds retain an ordinary local array for parallel-safe tests.
+            #[cfg(target_arch = "mips")]
+            let batch_vertices = unsafe {
+                core::slice::from_raw_parts_mut(
+                    psx_engine::scratchpad::ptr_at::<ClassicAffineVertex>(0),
+                    AFFINE_BATCH_VERTEX_CAPACITY,
+                )
+            };
+            #[cfg(not(target_arch = "mips"))]
+            let mut batch_vertex_storage =
+                [ClassicAffineVertex::default(); AFFINE_BATCH_VERTEX_CAPACITY];
+            #[cfg(not(target_arch = "mips"))]
+            let batch_vertices = &mut batch_vertex_storage[..];
             let mut batch_surfaces = [ClassicAffineBatchSurface::default(); BATCH_MAX_SURFACES];
             let mut batch_vertex_count = 0usize;
             let mut batch_surface_count = 0usize;
@@ -696,7 +830,7 @@ impl Renderer {
                     }
                     let submitted = unsafe {
                         flush_batch(
-                            &mut batch_vertices,
+                            batch_vertices,
                             batch_vertex_count,
                             &batch_surfaces,
                             batch_surface_count,
@@ -755,7 +889,7 @@ impl Renderer {
                     }
                     let submitted = unsafe {
                         flush_batch(
-                            &mut batch_vertices,
+                            batch_vertices,
                             batch_vertex_count,
                             &batch_surfaces,
                             batch_surface_count,
@@ -799,7 +933,7 @@ impl Renderer {
             }
             let submitted = unsafe {
                 flush_batch(
-                    &mut batch_vertices,
+                    batch_vertices,
                     batch_vertex_count,
                     &batch_surfaces,
                     batch_surface_count,
@@ -948,9 +1082,21 @@ impl Renderer {
         let mut next = start;
         let mut stats = RenderStats::default();
 
-        let mut batch_vertices =
-            [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + SUBDIVISION_SCRATCH_VERTICES];
-        let mut batch_surfaces = [ClassicAffineWindowedBatchSurface::default(); BATCH_MAX_SURFACES];
+        // The two world paths are never active concurrently, so they can
+        // share the same complete scratchpad reservation.
+        #[cfg(target_arch = "mips")]
+        let batch_vertices = unsafe {
+            core::slice::from_raw_parts_mut(
+                psx_engine::scratchpad::ptr_at::<ClassicAffineVertex>(0),
+                AFFINE_BATCH_VERTEX_CAPACITY,
+            )
+        };
+        #[cfg(not(target_arch = "mips"))]
+        let mut batch_vertex_storage =
+            [ClassicAffineVertex::default(); AFFINE_BATCH_VERTEX_CAPACITY];
+        #[cfg(not(target_arch = "mips"))]
+        let batch_vertices = &mut batch_vertex_storage[..];
+        let mut batch_surfaces = [ClassicAffineMixedBatchSurface::default(); BATCH_MAX_SURFACES];
         // One face at a time is materialized here, frustum-clipped, then
         // copied into the batch (a clip adds at most one vertex per plane).
         let mut face_vertices = [ClassicAffineVertex::default(); BATCH_MAX_VERTICES + 8];
@@ -993,20 +1139,15 @@ impl Renderer {
                 stats.packet_overflow_avoided = true;
                 break;
             }
-            let state = pxbsp_material_state(material, binding, material_tick);
-            self.materialize_pxbsp_face(
-                map,
-                face,
-                state.uv_offset,
-                &mut face_vertices[..source_count],
-            );
-            let (vertex_count, clipped_in_scratch) =
-                frustum.clip_polygon_buffers(&mut face_vertices, source_count, &mut clip_scratch);
-            if vertex_count == 0 || vertex_count > BATCH_MAX_VERTICES {
-                // Fully outside the frustum (or too many vertices after the
-                // clip for one batch, which a face this size never is).
+            if self.pxbsp_face_wholly_outside(map, face, frustum) {
                 continue;
             }
+            let needs_near_clip = self.pxbsp_face_needs_near_clip(map, face, frustum);
+            let state = pxbsp_material_state(material, binding, material_tick);
+            let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
+                && material.blend_mode == material_blend::OPAQUE
+                && material.animation_kind == crate::pxbsp::material_animation::STATIC
+                && material.flags & crate::pxbsp::material_flags::LAYERED_SKY == 0;
             if material.flags & crate::pxbsp::material_flags::LAYERED_SKY != 0 {
                 if sky_view.is_some() {
                     if let Some(selected) = layered_sky_binding {
@@ -1018,7 +1159,36 @@ impl Renderer {
                 stats.visible_faces = stats.visible_faces.saturating_add(1);
                 continue;
             }
-            let face_worst_words = (vertex_count - 2) * WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE;
+            let uv_offset = if compact_surface {
+                state.page_uv_offset
+            } else {
+                state.uv_offset
+            };
+            let vertex_count = if needs_near_clip {
+                self.materialize_pxbsp_face(
+                    map,
+                    face,
+                    uv_offset,
+                    &mut face_vertices[..source_count],
+                );
+                let count = clip_polygon_plane(
+                    &frustum.planes[0],
+                    &face_vertices[..source_count],
+                    &mut clip_scratch,
+                );
+                if !(3..=BATCH_MAX_VERTICES).contains(&count) {
+                    continue;
+                }
+                count
+            } else {
+                source_count
+            };
+            let face_worst_words = (vertex_count - 2)
+                * if compact_surface {
+                    WORST_PACKET_WORDS_PER_TRIANGLE
+                } else {
+                    WORST_WINDOWED_PACKET_WORDS_PER_TRIANGLE
+                };
             if batch_vertex_count + vertex_count > BATCH_MAX_VERTICES
                 || batch_surface_count == BATCH_MAX_SURFACES
                 || !packet_capacity(next, end, batch_worst_words + face_worst_words)
@@ -1027,8 +1197,8 @@ impl Renderer {
                     stats.surface_batches = stats.surface_batches.saturating_add(1);
                 }
                 let submitted = unsafe {
-                    flush_windowed_batch(
-                        &mut batch_vertices,
+                    flush_pxbsp_batch(
+                        batch_vertices,
                         batch_vertex_count,
                         &batch_surfaces,
                         batch_surface_count,
@@ -1049,25 +1219,30 @@ impl Renderer {
                 break;
             }
 
-            batch_surfaces[batch_surface_count] = ClassicAffineWindowedBatchSurface {
+            batch_surfaces[batch_surface_count] = ClassicAffineMixedBatchSurface {
                 first_vertex: batch_vertex_count as u16,
                 vertex_count: vertex_count as u16,
                 tpage: state.texture_page,
                 clut: binding.clut,
                 // PXBSP vertices are materialized with the resolved layer
-                // offset below, so the shared packet writer must not apply it
-                // a second time.
+                // offset above, so the shared writer applies no second offset.
                 uv_offset: [0; 2],
+                compact: u8::from(compact_surface),
+                _padding: 0,
                 texture_window_word: binding.texture_window_word,
                 color_command_word: state.color_command_word,
             };
-            batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count].copy_from_slice(
-                if clipped_in_scratch {
-                    &clip_scratch[..vertex_count]
-                } else {
-                    &face_vertices[..vertex_count]
-                },
-            );
+            if needs_near_clip {
+                batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count]
+                    .copy_from_slice(&clip_scratch[..vertex_count]);
+            } else {
+                self.materialize_pxbsp_face(
+                    map,
+                    face,
+                    uv_offset,
+                    &mut batch_vertices[batch_vertex_count..batch_vertex_count + vertex_count],
+                );
+            }
             batch_vertex_count += vertex_count;
             batch_surface_count += 1;
             batch_worst_words += face_worst_words;
@@ -1078,8 +1253,8 @@ impl Renderer {
             stats.surface_batches = stats.surface_batches.saturating_add(1);
         }
         let submitted = unsafe {
-            flush_windowed_batch(
-                &mut batch_vertices,
+            flush_pxbsp_batch(
+                batch_vertices,
                 batch_vertex_count,
                 &batch_surfaces,
                 batch_surface_count,
@@ -1211,6 +1386,64 @@ impl Renderer {
                 vertex.color = normalize_baked_color(vertex.color);
             }
         }
+    }
+
+    fn pxbsp_face_wholly_outside(
+        &self,
+        map: &PxbspResidentMap,
+        face: Face,
+        frustum: &FrustumPlanes,
+    ) -> bool {
+        let first = face.first_vertex as usize;
+        let count = face.vertex_count as usize;
+        let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
+        let source = unsafe {
+            map.vertex_data()
+                .as_ptr()
+                .add(source_offset)
+                .cast::<ClassicAffineWordSourceVertex>()
+        };
+        for plane in &frustum.planes {
+            let mut index = 0usize;
+            while index < count {
+                let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
+                if !FrustumPlanes::distance_negative(plane, position) {
+                    break;
+                }
+                index += 1;
+            }
+            if index == count {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn pxbsp_face_needs_near_clip(
+        &self,
+        map: &PxbspResidentMap,
+        face: Face,
+        frustum: &FrustumPlanes,
+    ) -> bool {
+        let first = face.first_vertex as usize;
+        let count = face.vertex_count as usize;
+        let near = &frustum.planes[0];
+        let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
+        let source = unsafe {
+            map.vertex_data()
+                .as_ptr()
+                .add(source_offset)
+                .cast::<ClassicAffineWordSourceVertex>()
+        };
+        let mut index = 0usize;
+        while index < count {
+            let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
+            if FrustumPlanes::distance_negative(near, position) {
+                return true;
+            }
+            index += 1;
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1621,7 +1854,7 @@ impl Renderer {
             let plane = planes
                 .get(node.plane as usize)
                 .expect("validated node plane");
-            let behind = plane_distance(plane, camera_origin) < 0;
+            let behind = compact_plane_distance(*plane, camera_origin) < 0;
             let near = node.children[behind as usize];
             let far = node.children[usize::from(!behind)];
             for child in [far, near] {
@@ -1820,6 +2053,7 @@ struct PxbspMaterialState {
     texture_page: u16,
     color_command_word: u32,
     uv_offset: [u8; 2],
+    page_uv_offset: [u8; 2],
 }
 fn pxbsp_material_state(
     material: PxbspMaterial,
@@ -1843,12 +2077,17 @@ fn pxbsp_material_state(
         .animation()
         .expect("resident PXBSP material was validated");
     let animated = pxbsp_animation_offset(animation, binding.texture_size, tick);
+    let uv_offset = [
+        binding.uv_origin[0].wrapping_add(animated[0]),
+        binding.uv_origin[1].wrapping_add(animated[1]),
+    ];
     PxbspMaterialState {
         texture_page,
         color_command_word,
-        uv_offset: [
-            binding.uv_origin[0].wrapping_add(animated[0]),
-            binding.uv_origin[1].wrapping_add(animated[1]),
+        uv_offset,
+        page_uv_offset: [
+            uv_offset[0].wrapping_add(binding.page_uv_origin[0]),
+            uv_offset[1].wrapping_add(binding.page_uv_origin[1]),
         ],
     }
 }
@@ -1939,10 +2178,10 @@ unsafe fn flush_batch(
     }
 }
 
-unsafe fn flush_windowed_batch(
+unsafe fn flush_pxbsp_batch(
     vertices: &mut [ClassicAffineVertex],
     vertex_count: usize,
-    surfaces: &[ClassicAffineWindowedBatchSurface],
+    surfaces: &[ClassicAffineMixedBatchSurface],
     surface_count: usize,
     output: *mut u32,
 ) -> ClassicAffineSubmit {
@@ -1954,7 +2193,7 @@ unsafe fn flush_windowed_batch(
         };
     }
     unsafe {
-        submit_classic_affine_scoped_windowed_batch(
+        submit_classic_affine_mixed_batch(
             vertices.as_mut_ptr(),
             vertex_count,
             surfaces.as_ptr(),
@@ -1973,11 +2212,24 @@ fn front_facing(map: &ResidentMap, face: Face, point: Vec3I32) -> bool {
 
 fn front_facing_pxbsp(map: &PxbspResidentMap, face: Face, point: Vec3I32) -> bool {
     let plane = unsafe { map.planes().get_unchecked(face.plane as usize) };
-    let behind = plane_distance(plane, point) < 0;
+    let behind = compact_plane_distance(*plane, point) < 0;
     behind == (face.flags & FACE_BACKSIDE != 0)
 }
 
 fn plane_distance(plane: Plane, point: Vec3I32) -> i32 {
+    let dot = match plane.kind {
+        0 => point.x,
+        1 => point.y,
+        2 => point.z,
+        _ => mul_q12_i32(point.x, plane.normal.x as i32)
+            .saturating_add(mul_q12_i32(point.y, plane.normal.y as i32))
+            .saturating_add(mul_q12_i32(point.z, plane.normal.z as i32)),
+    };
+    dot.saturating_sub(plane.distance)
+}
+
+#[inline(always)]
+fn compact_plane_distance(plane: CompactPlane, point: Vec3I32) -> i32 {
     let dot = match plane.kind {
         0 => point.x,
         1 => point.y,
@@ -2096,12 +2348,14 @@ mod tests {
             clut: 0x4567,
             texture_window_word: 0xe200_0000,
             uv_origin: [8, 16],
+            page_uv_origin: [32, 64],
             texture_size: [64, 32],
         };
         let state = pxbsp_material_state(material, binding, 60);
         assert_eq!((state.texture_page >> 5) & 3, 2);
         assert_eq!(state.color_command_word, 0x3600_0000);
         assert_eq!(state.uv_offset, [16, 24]);
+        assert_eq!(state.page_uv_offset, [48, 88]);
     }
 
     #[test]
@@ -2172,6 +2426,7 @@ mod tests {
             clut: 0x1234,
             texture_window_word: 0xe200_0000,
             uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
             texture_size: [64; 2],
         };
         let mut packets = [0u32; 512];
@@ -2229,6 +2484,90 @@ mod tests {
     }
 
     #[test]
+    fn draws_cooker_proven_page_local_face_without_texture_window_packets() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for (position, uv) in [
+            ([64i16, -16, -16], [1u8, 2]),
+            ([64, 16, -16], [9, 2]),
+            ([64, 0, 16], [1, 10]),
+        ] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[uv[0], uv[1], 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        lumps[PxbspLumpKind::Faces as usize][6] = FACE_PAGE_LOCAL_UV as u8;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(11, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            page_uv_origin: [32, 64],
+            texture_size: [64; 2],
+        };
+        let mut packets = [0u32; 512];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[Some(binding)],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.stats.visible_faces, 1);
+        assert!(frame.stats.packets > 0);
+        let mut offset = 0usize;
+        let mut packet_count = 0u32;
+        while offset < frame.packet_words {
+            let data_words = (packets[offset] >> 24) as usize;
+            let uv_offsets: &[usize] = match data_words {
+                9 => {
+                    assert_eq!(packets[offset + 1] >> 24, 0x34);
+                    &[3, 6, 9]
+                }
+                12 => {
+                    assert_eq!(packets[offset + 1] >> 24, 0x3c);
+                    &[3, 6, 9, 12]
+                }
+                _ => panic!("unexpected compact packet length {data_words}"),
+            };
+            assert_ne!(packets[offset + 1], binding.texture_window_word);
+            for &uv_offset in uv_offsets {
+                let uv_word = packets[offset + uv_offset];
+                assert!((32..96).contains(&((uv_word & 0xff) as u8)));
+                assert!((64..128).contains(&(((uv_word >> 8) & 0xff) as u8)));
+            }
+            offset += data_words + 1;
+            packet_count += 1;
+        }
+        assert_eq!(offset, frame.packet_words);
+        assert_eq!(packet_count, frame.stats.packets);
+    }
+
+    #[test]
     fn layered_sky_face_selects_one_constant_cost_view_background() {
         configure_projection();
         let mut lumps = valid_lumps();
@@ -2264,6 +2603,7 @@ mod tests {
             clut: 0x1234,
             texture_window_word: 0xe200_0000,
             uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
             // Runtime bindings describe one square half of the 256x128 pair.
             texture_size: [128; 2],
         };
@@ -2391,6 +2731,7 @@ mod tests {
             clut: 0x1234,
             texture_window_word: 0xe200_0000,
             uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
             texture_size: [64; 2],
         };
         let mut packets = [0u32; 512];
@@ -2536,6 +2877,32 @@ mod frustum_tests {
             }
         }
         assert!(accepted > 100, "sample did not exercise the fast path");
+    }
+
+    #[test]
+    fn polygon_wholly_outside_one_plane_is_rejected_before_clipping() {
+        let (planes, _) = planes_for([0, 0, 0], 0, 0);
+        let mut vertices = [vertex([0; 3]); 16];
+        vertices[..4].copy_from_slice(&[
+            vertex([-320, -32, 96]),
+            vertex([-288, -32, 96]),
+            vertex([-288, 32, 96]),
+            vertex([-320, 32, 96]),
+        ]);
+        let mut scratch = [vertex([0; 3]); 16];
+
+        let (count, in_scratch) = planes.clip_polygon_buffers(&mut vertices, 4, &mut scratch);
+
+        assert_eq!(count, 0);
+        assert!(!in_scratch);
+        assert!(
+            planes.planes.iter().any(|plane| {
+                vertices[..4]
+                    .iter()
+                    .all(|vertex| FrustumPlanes::distance(plane, vertex.position) < 0)
+            }),
+            "fixture must sit wholly outside one exact plane"
+        );
     }
 
     #[test]

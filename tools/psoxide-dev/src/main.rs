@@ -195,7 +195,13 @@ fn runtime_numeric_guard() -> Result<(), String> {
     for runtime_root in runtime_roots {
         collect_rs_files(&runtime_root, &mut files, &mut seen)?;
     }
-    files.retain(|f| !exempt_files.contains(f));
+    // `src/tests.rs` files are only included from a `#[cfg(test)] mod tests;`
+    // declaration. They are host reference oracles, not guest runtime code;
+    // the item blanker below still handles inline `#[cfg(test)]` modules.
+    files.retain(|f| {
+        !exempt_files.contains(f)
+            && f.file_name().and_then(|name| name.to_str()) != Some("tests.rs")
+    });
     files.sort();
 
     let mut violations = Vec::new();
@@ -3162,6 +3168,30 @@ fn font_entries() -> Vec<FontEntry> {
         }
         entries.push(entry);
     }
+
+    // The regular Zen Dots atlas deliberately fits the complete printable
+    // ASCII range into a compact 16px-high cell. Enlarging that 1bpp raster
+    // for a logo turns every source pixel into a chunky block, so keep a
+    // separate uppercase-only atlas rasterized at its intended display size.
+    // A-Z stays compact enough to fit the PS1 uploader's audited 16 KiB
+    // scratch buffer and one 4bpp texture page.
+    let mut zen_dots_display = font_entry(
+        "google-fonts/zendots/ZenDots-Regular.ttf",
+        FontFormat::Ttf,
+        "zen_dots_display",
+        "ZEN_DOTS_DISPLAY",
+        "SIL OFL 1.1",
+        0x41,
+        26,
+        "Zen Dots uppercase display face, rasterized natively for large UI titles.",
+        0,
+        0,
+    );
+    zen_dots_display.max_cell_w = 32;
+    zen_dots_display.max_cell_h = 32;
+    zen_dots_display.preferred_px = 28.0;
+    zen_dots_display.min_px = 28.0;
+    entries.push(zen_dots_display);
     entries
 }
 

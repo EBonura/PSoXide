@@ -62,63 +62,67 @@ impl Playtest {
                 == psx_game_runtime::entities::GameEntityState::Dead;
         }
         let spatial_masks = self.bsp.as_mut().map(|bsp| {
-            // Sample the observer and actors inside their body volumes rather
-            // than at the floor seam, which can classify as solid at exact
-            // brush boundaries. Runtime movement still owns the live X/Z.
+            // The observer stays inside the player's body rather than on the
+            // floor seam. Actors and model instances are linked by complete
+            // dynamic bounds below, matching Quake's multi-leaf entity rule.
             let observer = RoomPoint::new(
                 player.x,
                 player.y.saturating_add(player_height.max(1) >> 1),
                 player.z,
             );
-            let mut entity_activation_points = entity_positions;
-            for (index, point) in entity_activation_points
+            let mut entity_activation_bounds = [BspVisibilityBounds::EMPTY; MAX_GAME_ENTITIES];
+            for (index, bounds) in entity_activation_bounds
                 .iter_mut()
                 .enumerate()
                 .take(self.game_entities.count())
             {
-                let height = GAME_ENTITIES
-                    .get(index)
-                    .map_or(1, |record| i32::from(record.height).max(1));
-                point[1] = point[1].saturating_add(height >> 1);
+                let Some(record) = GAME_ENTITIES.get(index) else {
+                    continue;
+                };
+                *bounds = BspVisibilityBounds::cylinder(
+                    entity_positions[index],
+                    i32::from(record.radius),
+                    i32::from(record.height),
+                );
             }
-            let entity_mask = bsp.visible_points_mask(
+            let entity_mask = bsp.visible_bounds_mask(
                 observer,
-                &entity_activation_points[..self.game_entities.count()],
+                &entity_activation_bounds[..self.game_entities.count()],
             );
-            let mut instance_activation_points = [[0i32; 3]; MAX_MODEL_INSTANCES];
-            for (index, point) in instance_activation_points
+            let mut instance_activation_bounds = [BspVisibilityBounds::EMPTY; MAX_MODEL_INSTANCES];
+            for (index, bounds) in instance_activation_bounds
                 .iter_mut()
                 .enumerate()
                 .take(MODEL_INSTANCES.len())
             {
                 let instance = &MODEL_INSTANCES[index];
-                let height = self
+                let model = self
                     .models
                     .get(instance.model.to_usize())
                     .copied()
-                    .flatten()
-                    .map_or(1, |model| i32::from(model.world_height).max(1));
-                *point = [
-                    instance.x,
-                    instance.y.saturating_add(height >> 1),
-                    instance.z,
-                ];
+                    .flatten();
+                let radius = model.map_or(0, |model| i32::from(model.collision_radius));
+                let height = model.map_or(1, |model| i32::from(model.world_height));
+                *bounds = BspVisibilityBounds::cylinder(
+                    [instance.x, instance.y, instance.z],
+                    radius,
+                    height,
+                );
             }
             for (entity, record) in GAME_ENTITIES.iter().enumerate() {
                 let instance = usize::from(record.model_instance);
-                let Some(point) = instance_activation_points.get_mut(instance) else {
+                let Some(bounds) = instance_activation_bounds.get_mut(instance) else {
                     continue;
                 };
-                let position = entity_positions[entity];
-                *point = [
-                    position[0],
-                    position[1].saturating_add(i32::from(record.height).max(1) >> 1),
-                    position[2],
-                ];
+                *bounds = BspVisibilityBounds::cylinder(
+                    entity_positions[entity],
+                    i32::from(record.radius),
+                    i32::from(record.height),
+                );
             }
-            let instance_mask = bsp.visible_points_mask(
+            let instance_mask = bsp.visible_bounds_mask(
                 observer,
-                &instance_activation_points[..MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES)],
+                &instance_activation_bounds[..MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES)],
             );
             let mut logic_positions = [[0i32; 3]; MAX_LOGIC_RECORDS];
             for (slot, record) in logic_positions.iter_mut().zip(LOGIC.iter()) {
@@ -849,7 +853,13 @@ fn smoothstep_q12(elapsed: u32, duration: u32) -> Q12 {
     let t = if duration == 0 {
         Q12::SCALE
     } else {
-        ((elapsed.min(duration) as u64 * Q12::SCALE as u64) / duration as u64) as i32
+        let mut numerator = elapsed.min(duration);
+        let mut denominator = duration;
+        while numerator > (u32::MAX >> 12) {
+            numerator = (numerator + 1) >> 1;
+            denominator = (denominator + 1) >> 1;
+        }
+        ((numerator << 12) / denominator.max(1)).min(Q12::SCALE as u32) as i32
     };
     // t*t*(3 - 2t)
     let tt = (t * t) >> 12;
