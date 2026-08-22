@@ -429,7 +429,6 @@ hello-input:
 # write/read/power-cycle persistence test).
 hello-memcard:
 	cd sdk/examples/hello-memcard && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
-	cp $(EXAMPLE_OUT)/hello-memcard.exe emu/crates/frontend/assets/examples/hello-memcard.exe
 
 # Software 64-bit integer correctness probe (signed __divdi3 is broken on-target;
 # unsigned works -- see the example's docs).

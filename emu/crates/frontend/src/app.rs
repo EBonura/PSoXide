@@ -5,7 +5,8 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(feature = "editor")]
+use std::process::{Command, Stdio};
 
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, EmulatorState,
@@ -23,9 +24,12 @@ use psxed_project::EditorWorkspaceView;
 #[cfg(feature = "editor")]
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
-use crate::burn::{validate_burn_target_path, BurnState};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::burn::validate_burn_target_path;
+use crate::burn::BurnState;
 #[cfg(feature = "editor")]
 use crate::embedded_playtest::EmbeddedPlaytestState;
+use crate::paths_equivalent;
 #[cfg(feature = "editor")]
 use crate::playtest_disc::{
     build_embedded_playtest_disc, build_log_failure_detail, copy_project_disc,
@@ -33,11 +37,12 @@ use crate::playtest_disc::{
     project_disc_volume_id, DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID,
 };
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
+#[cfg(feature = "editor")]
+use crate::repo_root_dir;
 use crate::ui;
 use crate::ui::hud::HudState;
 use crate::ui::memory::MemoryView;
 use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, PadBindTarget, SaveStateRow};
-use crate::{paths_equivalent, repo_root_dir};
 
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
 /// the "what just ran" context window -- enough to spot a tight loop
@@ -52,7 +57,7 @@ fn env_flag(name: &str) -> bool {
 }
 
 /// Panels that can be shown/hidden via the Menu. The Menu *is* the
-/// library browser (Games / Examples columns), so we don't have
+/// library browser, so we don't have
 /// a separate "library" panel -- it's integrated into the shell
 /// the PSX way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -177,190 +182,6 @@ enum EditorBuildCompletion {
 
 /// Top-level app state. Owns the emulator state directly -- no Arc/Mutex,
 /// single-threaded, UI reads state in-place per frame.
-/// Payloads baked into the web build. They appear in the menu and boot via
-/// the no-BIOS HLE path. Full disc images are not baked here -- they stream
-/// on demand instead (`web_stream`), because `include_bytes!` puts the image
-/// inside the wasm every visitor downloads up front.
-pub mod bundled {
-    /// What a baked-in payload is, which decides both how it boots and which
-    /// menu column it lands in.
-    #[derive(Copy, Clone, PartialEq, Eq)]
-    pub enum BundledKind {
-        /// A full disc image, booted through the no-BIOS HLE disc path. Games.
-        DiscBin,
-        /// A raw PSX-EXE, side-loaded. Examples and tests; roughly a tenth the
-        /// size of the equivalent disc, which is what makes bundling a set of
-        /// them affordable in the wasm payload.
-        Exe,
-    }
-
-    /// One baked-in payload.
-    pub struct BundledDisc {
-        /// Menu launch id; the `bundled:` prefix is how launch routing spots it.
-        pub id: &'static str,
-        /// Menu title.
-        pub title: &'static str,
-        /// Menu subtitle.
-        pub subtitle: &'static str,
-        /// Disc image or PSX-EXE.
-        pub kind: BundledKind,
-        /// Raw payload bytes.
-        pub bytes: &'static [u8],
-    }
-
-    /// The baked-in payloads in menu order. The first auto-boots on load.
-    ///
-    /// Games hold shipped homebrew; examples hold the SDK/engine samples and
-    /// tests. They are separate columns in the menu, so a sample never shows up
-    /// beside a real game.
-    pub static DISCS: &[BundledDisc] = &[
-        BundledDisc {
-            id: "bundled:game-breakout",
-            title: "game-breakout",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-breakout.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-invaders",
-            title: "game-invaders",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-invaders.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-magikaaaaaarp-pong",
-            title: "game-magikaaaaaarp-pong",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-magikaaaaaarp-pong.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-pong",
-            title: "game-pong",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-pong.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-audio",
-            title: "hello-audio",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-audio.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-cdda",
-            title: "hello-cdda",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-cdda.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-engine",
-            title: "hello-engine",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-engine.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-gte",
-            title: "hello-gte",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-gte.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-input",
-            title: "hello-input",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-input.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-memcard",
-            title: "hello-memcard",
-            subtitle: "hardware diagnostic",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-memcard.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-ot",
-            title: "hello-ot",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-ot.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-pack",
-            title: "hello-pack",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-pack.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-tex",
-            title: "hello-tex",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-tex.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-tri",
-            title: "hello-tri",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-tri.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-3d",
-            title: "showcase-3d",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-3d.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-fog",
-            title: "showcase-fog",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-fog.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-lights",
-            title: "showcase-lights",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-lights.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-model",
-            title: "showcase-model",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-model.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-particles",
-            title: "showcase-particles",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-particles.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-text",
-            title: "showcase-text",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-text.exe"),
-        },
-    ];
-
-    /// Look up a baked-in disc by its menu launch id.
-    pub fn find(id: &str) -> Option<&'static BundledDisc> {
-        DISCS.iter().find(|d| d.id == id)
-    }
-}
 
 /// Analog-stick drive for the freelook camera (see the toolbar EYE toggle
 /// and the L3+R3 pad chord). Filled each frame from the merged host sticks
@@ -408,8 +229,6 @@ pub struct AppState {
     /// Deferred action attached to the currently running editor build.
     #[cfg(feature = "editor")]
     editor_build_completion: Option<EditorBuildCompletion>,
-    /// Background `make examples` job launched from the Examples menu.
-    examples_build_child: Option<Child>,
     /// CD burning submenu state and burner hotplug watcher.
     pub(crate) burn: BurnState,
     pub panels: PanelVisibility,
@@ -479,7 +298,7 @@ pub struct AppState {
     /// Cached library scan results. Populated from
     /// `<config>/library.ron` at startup, refreshed by
     /// [`AppState::rescan_library`] (triggered from the Menu's
-    /// Games / Examples "Refresh library" row).
+    /// Games "Refresh library" row).
     pub library: Library,
     /// Resolved on-disk paths (settings.ron, library.ron, per-game
     /// subtree). Set once from the platform default or a
@@ -531,7 +350,7 @@ pub struct AppState {
     /// [`emulator_core::game_image_hash`] of the current game image, both
     /// targets. Recorded into browser tape CSVs; compared when a replay
     /// loads so a changed build gets flagged to the user. `None` when the
-    /// image bytes were never in hand (e.g. a bundled example boot).
+    /// image bytes were never retained by the current boot path.
     current_game_hash: Option<u64>,
 }
 
@@ -544,9 +363,6 @@ enum WebBoot {
     /// Uploaded raw disc booted through the uploaded real BIOS. The disc
     /// itself is taken back out of the outgoing bus at reboot time.
     DiscBios,
-    /// Streamed disc booted through HLE fast boot (no BIOS), same reboot
-    /// path as `DiscBios`.
-    DiscHle,
 }
 
 impl Default for AppState {
@@ -649,7 +465,6 @@ impl AppState {
             editor_project_dir_seen,
             #[cfg(feature = "editor")]
             editor_build_completion: None,
-            examples_build_child: None,
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
             sidebar_width: 430.0,
@@ -703,18 +518,15 @@ impl AppState {
         //
         // Scoped to "SDK/project dirs exist" so an end-user install
         // without local builds doesn't pay the cost every startup.
-        let sdk_exists = out
-            .resolve_sdk_examples_dir()
-            .is_some_and(|sdk_dir| sdk_dir.exists());
         let projects_exist = out
             .resolve_editor_projects_dir()
             .is_some_and(|projects_dir| projects_dir.exists());
-        if sdk_exists || projects_exist {
+        if projects_exist {
             if let Err(e) = out.rescan_library() {
                 eprintln!("[frontend] startup auto-rescan skipped: {e}");
             }
         }
-        // Seed the Menu's Games + Examples columns from the (now
+        // Seed the Menu's Games and Projects categories from the (now
         // possibly-rescanned) library so the user sees entries
         // immediately instead of a "No games found" placeholder.
         out.refresh_menu_library();
@@ -737,9 +549,8 @@ impl AppState {
         // offer a one-click reconnect.
         #[cfg(target_arch = "wasm32")]
         crate::web_files::check_saved();
-        // Both builds start on the open menu (bundled discs like Celeste are
-        // launchable from the Games/Examples categories), rather than
-        // auto-booting into a game.
+        // Both builds start on the open menu rather than auto-booting into a
+        // game. The web demo disc is streamed on demand from Games.
         out
     }
 }
@@ -767,19 +578,9 @@ impl AppState {
     /// disc paths. On success the emulator is paused at the reset
     /// vector (or the legacy EXE entry point); the user clicks Run
     /// to start stepping.
-    /// Boot a homebrew disc image from raw bytes via the no-BIOS HLE path (the
-    /// same one embedded Play uses for PSoXide-authored discs). Used by the web
-    /// build to auto-boot a bundled disc, and later a user-supplied one.
-    pub fn boot_disc_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
-        if bytes.len() < SECTOR_BYTES {
-            return Err("disc image too small to be valid".to_string());
-        }
-        self.boot_disc(Disc::from_bin(bytes))
-    }
-
-    /// Boot an already-modelled disc via the same no-BIOS HLE path. Split out
-    /// of [`Self::boot_disc_bytes`] so the web build's streamed CUE+BIN discs
-    /// (multi-track, CD-DA) reach the identical boot sequence.
+    /// Boot an already-modelled disc via the no-BIOS HLE path. The web build's
+    /// streamed CUE+BIN discs use this to retain their multi-track CD-DA model.
+    #[cfg(target_arch = "wasm32")]
     pub fn boot_disc(&mut self, disc: Disc) -> Result<(), String> {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
@@ -812,7 +613,7 @@ impl AppState {
         let mut boot_mode = "EXE";
         // Image hash for input-tape change detection, computed where the
         // bytes are already in hand so no path re-reads the file.
-        let mut game_hash = None;
+        let game_hash;
 
         let bus = match entry.kind {
             GameKind::Exe => {
@@ -1257,33 +1058,6 @@ impl AppState {
     /// path-qualified tokens because authored PSoXide discs can still
     /// share a PSX volume ID.
     pub fn launch_by_id(&mut self, id: &str) -> Result<(), String> {
-        // Baked-in payloads boot via the no-BIOS HLE path, not the library.
-        // Both targets: the download has no source tree, so its Examples come
-        // from here too.
-        if let Some(disc) = bundled::find(id) {
-            let kind = match disc.kind {
-                bundled::BundledKind::DiscBin => {
-                    self.boot_disc_bytes(disc.bytes.to_vec())?;
-                    GameKind::DiscBin
-                }
-                bundled::BundledKind::Exe => {
-                    self.boot_exe_bytes(disc.bytes.to_vec())?;
-                    GameKind::Exe
-                }
-            };
-            // Web-only bookkeeping for the "now playing" header; the native
-            // build tracks the current entry through the library instead.
-            #[cfg(target_arch = "wasm32")]
-            self.set_web_current_game(
-                disc.id.to_string(),
-                disc.title.to_string(),
-                kind,
-                disc.bytes.len() as u64,
-            );
-            #[cfg(not(target_arch = "wasm32"))]
-            let _ = kind;
-            return Ok(());
-        }
         // Web streamed discs: kick off the fetch; boot happens on a later
         // frame via `poll_web_uploads` once the bytes are in.
         #[cfg(target_arch = "wasm32")]
@@ -1326,14 +1100,13 @@ impl AppState {
     }
 
     /// Open the burn settings submenu for a launchable library entry.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_burn_menu_by_id(&mut self, id: &str) -> Result<(), String> {
         let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
             return Err(format!("no library entry with id={id}"));
         };
         if !self.entry_can_open_burn_menu(&entry) {
-            return Err(
-                "disc burning is only available for built examples and projects".to_string(),
-            );
+            return Err("disc burning is only available for built projects".to_string());
         }
         validate_burn_target_path(&entry.path)?;
         self.burn.open_for(&entry);
@@ -1345,19 +1118,14 @@ impl AppState {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn entry_can_open_burn_menu(&self, entry: &LibraryEntry) -> bool {
         if entry.kind != GameKind::DiscCue {
             return false;
         }
-        let in_examples = self
-            .resolve_sdk_examples_dir()
+        self.resolve_editor_projects_dir()
             .filter(|root| root.exists())
-            .is_some_and(|root| path_is_under(&entry.path, &root));
-        let in_projects = self
-            .resolve_editor_projects_dir()
-            .filter(|root| root.exists())
-            .is_some_and(|root| path_is_under(&entry.path, &root));
-        in_examples || in_projects
+            .is_some_and(|root| path_is_under(&entry.path, &root))
     }
 
     /// Poll CD burner hotplug in the same lightweight style as controller notices.
@@ -1375,18 +1143,15 @@ impl AppState {
     /// Scans roots in one pass:
     ///
     /// 1. `settings.paths.game_library` -- user's retail-disc folder.
-    /// 2. `settings.paths.sdk_examples` (or auto-detected
-    ///    `build/examples/mipsel-sony-psx/release/` under the repo
-    ///    root) -- `.cue` homebrew discs built by `make examples`.
-    /// 3. Auto-detected `editor/projects/` under the repo root --
+    /// 2. Auto-detected `editor/projects/` under the repo root --
     ///    project-baked disc images surfaced in the Projects category.
     ///
     /// Either can be missing without erroring. If neither yields
     /// entries, the Menu's columns show the "No … found" placeholder
     /// instead of blowing up.
     ///
-    /// Also refreshes the Menu's Games + Examples columns so the
-    /// newly-scanned entries appear immediately.
+    /// Also refreshes the Menu's Games and Projects categories so newly
+    /// scanned entries appear immediately.
     pub fn rescan_library(&mut self) -> Result<usize, String> {
         let game_library = self.settings.paths.game_library.trim();
         let game_root = if game_library.is_empty() {
@@ -1394,7 +1159,6 @@ impl AppState {
         } else {
             Some(PathBuf::from(game_library))
         };
-        let sdk_root = self.resolve_sdk_examples_dir();
         let projects_root = self.resolve_editor_projects_dir();
 
         // No roots → still not an error; the UI shows empty columns.
@@ -1407,13 +1171,6 @@ impl AppState {
             } else {
                 return Err(format!("Library root does not exist: {}", g.display()));
             }
-        }
-        if let Some(s) = sdk_root.clone() {
-            // sdk_root from auto-detect may not exist (e.g. on an
-            // end-user install that never built the examples); that
-            // doesn't deserve an error. `scan_roots` silently skips
-            // missing roots for exactly this reason.
-            roots.push(s);
         }
         if let Some(p) = projects_root.clone() {
             roots.push(p);
@@ -1428,120 +1185,11 @@ impl AppState {
             .save(&self.paths.library_file())
             .map_err(|e| format!("save library.ron: {e}"))?;
         self.refresh_menu_library();
-        let sdk_hint = match &sdk_root {
-            Some(p) if p.exists() => format!(" (SDK: {})", p.display()),
-            _ => String::new(),
-        };
         self.status_message = Some((
-            format!(
-                "Scan complete: {} entries{sdk_hint}",
-                self.library.entries.len()
-            ),
+            format!("Scan complete: {} entries", self.library.entries.len()),
             STATUS_MESSAGE_TTL_SECS,
         ));
         Ok(changed)
-    }
-
-    /// Build the public SDK/engine examples in the background so the
-    /// Examples menu can populate a fresh clone without blocking UI
-    /// frames. Completion is handled by [`Self::poll_examples_build`].
-    pub fn start_examples_build(&mut self) {
-        if self.finish_completed_examples_build() {
-            return;
-        }
-        if self.examples_build_child.is_some() {
-            self.status_message_set("Examples build still running");
-            return;
-        }
-
-        let workspace_root = repo_root_dir();
-        let mut command = Command::new("make");
-        command
-            .arg("examples")
-            .current_dir(&workspace_root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        match command.spawn() {
-            Ok(child) => {
-                self.examples_build_child = Some(child);
-                self.status_message_set("Building public examples");
-            }
-            Err(error) => {
-                let message = format!("Build examples failed to start: {error}");
-                eprintln!("[frontend] {message}");
-                self.status_message_set(message);
-            }
-        }
-    }
-
-    /// Poll a background examples build. On success, rescan the
-    /// library so the newly-created CUE/BIN discs appear immediately.
-    pub fn poll_examples_build(&mut self) {
-        self.finish_completed_examples_build();
-    }
-
-    fn finish_completed_examples_build(&mut self) -> bool {
-        let Some(child) = self.examples_build_child.as_mut() else {
-            return false;
-        };
-        let status = match child.try_wait() {
-            Ok(Some(status)) => status,
-            Ok(None) => return false,
-            Err(error) => {
-                self.examples_build_child = None;
-                let message = format!("Examples build poll failed: {error}");
-                eprintln!("[frontend] {message}");
-                self.status_message_set(message);
-                return true;
-            }
-        };
-
-        self.examples_build_child = None;
-        self.finish_examples_build(status);
-        true
-    }
-
-    fn finish_examples_build(&mut self, status: ExitStatus) {
-        if !status.success() {
-            let message = format!("Examples build failed: {status}");
-            eprintln!("[frontend] {message}; run `make examples` for full logs");
-            self.status_message_set(message);
-            return;
-        }
-
-        match self.rescan_library() {
-            Ok(_) => self.status_message_set("Examples built and library refreshed"),
-            Err(error) => {
-                let message = format!("Examples built; refresh failed: {error}");
-                eprintln!("[frontend] {message}");
-                self.status_message_set(message);
-            }
-        }
-    }
-
-    pub fn stop_examples_build(&mut self) {
-        if let Some(mut child) = self.examples_build_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    /// Resolve where to look for SDK-built example `.exe`s. Honours
-    /// the explicit `settings.paths.sdk_examples` if the user set
-    /// one; otherwise walks up from the frontend crate's source
-    /// directory (`CARGO_MANIFEST_DIR`) to the repo root and joins
-    /// the canonical build-output path. Returns `None` when the
-    /// resolver can't place the repo root -- in which case scanning
-    /// proceeds with only the game-library root.
-    fn resolve_sdk_examples_dir(&self) -> Option<PathBuf> {
-        if !self.settings.paths.sdk_examples.is_empty() {
-            return Some(PathBuf::from(&self.settings.paths.sdk_examples));
-        }
-        // `emu/crates/frontend/` → four `..`s land at the repo root.
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let repo_root = manifest.parent()?.parent()?.parent()?;
-        let candidate = repo_root.join("build/examples/mipsel-sony-psx/release");
-        Some(candidate)
     }
 
     /// Resolve the editor projects root used for launchable project
@@ -1554,8 +1202,8 @@ impl AppState {
         Some(repo_root.join("editor/projects"))
     }
 
-    /// Project the current library into the Menu's Games + Examples +
-    /// Projects columns. Three passes:
+    /// Project the current library into the Menu's Games and Projects
+    /// categories. Three passes:
     ///
     /// 1. Walk every CUE entry and parse it to find its primary
     ///    (data-track) BIN. Build a map
@@ -1565,18 +1213,16 @@ impl AppState {
     ///    the raw PVD ID "SCUS-94900"), and under the CUE's stable
     ///    game ID so savestates key off the disc identity rather
     ///    than the BIN byte hash alone.
-    /// 2. Walk every entry. SDK examples and project builds launch
-    ///    from their CUEs; their EXE/BIN siblings are intermediates.
-    ///    Retail BIN entries still use a CUE title/id when one owns
-    ///    them, and retail CUE entries remain hidden from Games.
+    /// 2. Walk every entry. Project builds launch from their CUEs and their
+    ///    EXE/BIN siblings are intermediates. Retail BIN entries still use a
+    ///    CUE title/id when one owns them, retail CUE entries remain hidden,
+    ///    and user-scanned PSX-EXEs appear directly in Games.
     /// 3. Alphabetise each column.
     ///
-    /// Result: the title shows once, under its friendly
-    /// title, and clicking it launches the BIN.
+    /// Result: each title shows once under its friendly name and launches the
+    /// correct disc image or executable.
     pub fn refresh_menu_library(&mut self) {
-        use std::collections::{HashMap, HashSet};
-
-        let sdk_examples_root = self.resolve_sdk_examples_dir().filter(|p| p.exists());
+        use std::collections::HashMap;
 
         // Pass 1: map "BIN path" → (CUE-derived title, CUE id).
         let mut cue_owns_bin: HashMap<PathBuf, (String, String)> = HashMap::new();
@@ -1591,7 +1237,6 @@ impl AppState {
 
         // Pass 2: project menu entries, applying dedup + title overrides.
         let mut games: Vec<MenuLibraryItem> = Vec::new();
-        let mut examples: Vec<MenuLibraryItem> = Vec::new();
         let mut projects: Vec<MenuLibraryItem> = Vec::new();
         let mut cue_already_listed: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -1603,10 +1248,6 @@ impl AppState {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("<unknown>");
-            let is_sdk_example = sdk_examples_root
-                .as_ref()
-                .is_some_and(|root| path_is_under(&e.path, root));
-
             // Audio tracks: any "(Track N)" filename where N != 1.
             // Multi-track CUE rips leave each audio track as a
             // standalone BIN; none of those boot, so hide them.
@@ -1616,25 +1257,8 @@ impl AppState {
             {
                 continue;
             }
-            if is_sdk_example {
-                match e.kind {
-                    GameKind::DiscCue => examples.push(MenuLibraryItem {
-                        id: path_launch_id(&e.path),
-                        title: e.title.clone(),
-                        subtitle: format_subtitle(e),
-                        burnable: true,
-                        launchable: true,
-                    }),
-                    GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd | GameKind::Exe => {
-                        continue;
-                    }
-                    GameKind::Unknown => {}
-                }
-                continue;
-            }
-
             match e.kind {
-                _ if is_internal_example_artifact(&e.path) => continue,
+                _ if is_internal_editor_playtest_artifact(&e.path) => continue,
                 GameKind::DiscCue
                     if project_root
                         .as_ref()
@@ -1655,8 +1279,8 @@ impl AppState {
                                 id: project_build_launch_id(&e.path),
                                 title: metadata.title,
                                 subtitle: metadata.subtitle,
+                                #[cfg(not(target_arch = "wasm32"))]
                                 burnable: true,
-                                launchable: true,
                             });
                         }
                     }
@@ -1689,8 +1313,8 @@ impl AppState {
                         id,
                         title,
                         subtitle: format_subtitle(e),
+                        #[cfg(not(target_arch = "wasm32"))]
                         burnable: false,
-                        launchable: true,
                     });
                 }
                 GameKind::Exe => {
@@ -1700,12 +1324,12 @@ impl AppState {
                     {
                         continue;
                     } else {
-                        examples.push(MenuLibraryItem {
+                        games.push(MenuLibraryItem {
                             id: e.id.clone(),
                             title: e.title.clone(),
                             subtitle: format_subtitle(e),
+                            #[cfg(not(target_arch = "wasm32"))]
                             burnable: false,
-                            launchable: true,
                         });
                     }
                 }
@@ -1713,37 +1337,10 @@ impl AppState {
             }
         }
 
-        let built_examples: HashSet<String> = examples
-            .iter()
-            .map(|entry| example_key(&entry.title))
-            .collect();
-        examples.extend(public_example_source_items(&built_examples));
-
-        merge_baked_examples(&mut examples, &built_examples);
-
         // Pass 3: stable alphabetical order per column.
         games.sort_by_key(|a| a.title.to_lowercase());
-        examples.sort_by_key(|a| a.title.to_lowercase());
         projects.sort_by_key(|a| a.title.to_lowercase());
-        // Web build: surface the baked-in payloads. A disc image is a shipped
-        // game and belongs under Games; a baked EXE is an SDK/engine sample and
-        // belongs under Examples, next to the ones a source tree would list.
-        // Baked disc images are shipped games; the EXEs were folded into
-        // Examples above, for both targets.
-        #[cfg(target_arch = "wasm32")]
-        for disc in bundled::DISCS {
-            if disc.kind != bundled::BundledKind::DiscBin {
-                continue;
-            }
-            games.push(MenuLibraryItem {
-                id: disc.id.to_string(),
-                title: disc.title.to_string(),
-                subtitle: disc.subtitle.to_string(),
-                burnable: false,
-                launchable: true,
-            });
-        }
-        // Streamed discs sit beside the baked ones; the subtitle says the
+        // Streamed discs sit at the top-level Games surface; the subtitle says the
         // download out loud so the click is informed.
         #[cfg(target_arch = "wasm32")]
         for disc in crate::web_stream::DISCS {
@@ -1751,8 +1348,8 @@ impl AppState {
                 id: disc.id.to_string(),
                 title: disc.title.to_string(),
                 subtitle: disc.subtitle.to_string(),
+                #[cfg(not(target_arch = "wasm32"))]
                 burnable: false,
-                launchable: true,
             });
         }
         #[cfg(target_arch = "wasm32")]
@@ -1761,11 +1358,11 @@ impl AppState {
                 id: id.clone(),
                 title: title.clone(),
                 subtitle: subtitle.clone(),
+                #[cfg(not(target_arch = "wasm32"))]
                 burnable: false,
-                launchable: true,
             });
         }
-        self.menu.set_library(&games, &examples, &projects);
+        self.menu.set_library(&games, &projects);
     }
 
     /// Persist the current `Settings` to `settings.ron`. Called
@@ -1777,6 +1374,7 @@ impl AppState {
     }
 
     /// True when the user game-library path is blank.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn games_path_missing(&self) -> bool {
         self.settings.paths.game_library.trim().is_empty()
     }
@@ -1799,8 +1397,8 @@ impl AppState {
                     "Saved BIOS / games found - your browser needs one click: Reconnect in Settings",
                 );
             }
-            // Otherwise prompt for whatever's missing (bundled discs still play
-            // without either).
+            // Otherwise prompt for whatever is missing. The streamed demo disc
+            // still plays without either.
             return match (has_bios, has_games) {
                 (true, true) => None,
                 (false, false) => {
@@ -1997,18 +1595,12 @@ impl AppState {
         let saved_game = self.current_game.take();
         let result = match boot {
             WebBoot::Exe(bytes) => self.boot_exe_bytes(bytes),
-            WebBoot::DiscBios | WebBoot::DiscHle => {
-                let disc = self
-                    .bus
-                    .as_mut()
-                    .and_then(|bus| bus.cdrom.take_disc())
-                    .ok_or_else(|| "no disc image to reboot".to_string());
-                match (disc, boot) {
-                    (Err(error), _) => Err(error),
-                    (Ok(disc), WebBoot::DiscBios) => self.boot_disc_with_bios(disc),
-                    (Ok(disc), _) => self.boot_disc(disc),
-                }
-            }
+            WebBoot::DiscBios => self
+                .bus
+                .as_mut()
+                .and_then(|bus| bus.cdrom.take_disc())
+                .ok_or_else(|| "no disc image to reboot".to_string())
+                .and_then(|disc| self.boot_disc_with_bios(disc)),
         };
         self.current_game = saved_game;
         result
@@ -2319,8 +1911,8 @@ impl AppState {
     /// Side-load a homebrew PS-EXE from bytes via the no-BIOS HLE path,
     /// mirroring the native `GameKind::Exe` branch.
     ///
-    /// Both targets: a downloaded build boots its baked-in examples through
-    /// here, having no file on disk to point the library at.
+    /// The browser uses this for a PSX-EXE loaded from the user's games folder.
+    #[cfg(target_arch = "wasm32")]
     fn boot_exe_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
         let exe = Exe::parse(&bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
         let mut bus = Bus::new_without_bios();
@@ -2334,9 +1926,9 @@ impl AppState {
         Ok(())
     }
 
-    /// Common tail for a from-bytes boot: swap in the new machine, start
-    /// running, and close the menu so the game is visible. Nothing here is
-    /// web-specific; the native build reaches it through the baked-in examples.
+    /// Common browser tail for a from-bytes boot: swap in the new machine,
+    /// start running, and close the menu so the game is visible.
+    #[cfg(target_arch = "wasm32")]
     fn swap_in_booted(&mut self, bus: Bus, cpu: Cpu) {
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
@@ -3499,7 +3091,7 @@ const STATUS_MESSAGE_TTL_SECS: f32 = 3.5;
 
 /// Format the right-aligned subtitle the Menu shows next to a
 /// game's title. Keeps everything in one place so the Games and
-/// Examples columns stay visually consistent.
+/// Games and Projects categories stay visually consistent.
 fn format_subtitle(e: &LibraryEntry) -> String {
     let region = match e.region {
         Region::NtscU => "NTSC-U",
@@ -3574,14 +3166,9 @@ fn display_size_bytes(e: &LibraryEntry) -> u64 {
     e.size
 }
 
-const PATH_LAUNCH_ID_PREFIX: &str = "path:";
 const PROJECT_LAUNCH_ID_PREFIX: &str = "project-path:";
 
-fn path_launch_id(path: &Path) -> String {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    format!("{PATH_LAUNCH_ID_PREFIX}{}", canonical.to_string_lossy())
-}
-
+#[cfg(feature = "editor")]
 fn project_build_launch_id(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     format!("{PROJECT_LAUNCH_ID_PREFIX}{}", canonical.to_string_lossy())
@@ -3591,12 +3178,6 @@ fn library_entry_for_launch_id<'a>(
     entries: &'a [LibraryEntry],
     launch_id: &str,
 ) -> Option<&'a LibraryEntry> {
-    if let Some(path) = launch_id.strip_prefix(PATH_LAUNCH_ID_PREFIX) {
-        let path = Path::new(path);
-        return entries
-            .iter()
-            .find(|entry| paths_equivalent(&entry.path, path));
-    }
     if let Some(path) = launch_id.strip_prefix(PROJECT_LAUNCH_ID_PREFIX) {
         let path = Path::new(path);
         return entries
@@ -3606,7 +3187,7 @@ fn library_entry_for_launch_id<'a>(
     entries.iter().find(|entry| entry.id == launch_id)
 }
 
-fn is_internal_example_artifact(path: &Path) -> bool {
+fn is_internal_editor_playtest_artifact(path: &Path) -> bool {
     let Some(stem) = path.file_stem().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -3651,85 +3232,6 @@ fn path_is_under(path: &Path, root: &Path) -> bool {
         (Ok(path), Ok(root)) => path.starts_with(root),
         _ => path.starts_with(root),
     }
-}
-
-fn public_example_source_items(
-    built_examples: &std::collections::HashSet<String>,
-) -> Vec<MenuLibraryItem> {
-    let mut items = Vec::new();
-    let root = repo_root_dir();
-    for examples_root in [root.join("sdk/examples"), root.join("engine/examples")] {
-        let Ok(entries) = std::fs::read_dir(&examples_root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.join("Cargo.toml").is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name == "editor-playtest" || built_examples.contains(&example_key(name)) {
-                continue;
-            }
-            items.push(MenuLibraryItem {
-                id: format!("example-source:{name}"),
-                title: name.to_string(),
-                subtitle: "not built".to_string(),
-                burnable: false,
-                launchable: false,
-            });
-        }
-    }
-    items
-}
-
-/// Fold the baked-in examples into a scanned Examples column.
-///
-/// Three cases, and the middle one is what shipped broken: a source checkout
-/// lists every known example, including ones it has not compiled, as a "not
-/// built" placeholder. Those placeholders are added AFTER `built` is collected,
-/// so keying only on `built` let a baked copy sit next to the placeholder for
-/// the same example and the row appeared twice. The web build has no source
-/// tree, hence no placeholders, which is why it looked fine there.
-///
-/// - A real local build wins; the baked copy is dropped, so a checkout runs
-///   what it just compiled rather than a stale bundled binary.
-/// - A "not built" placeholder is REPLACED by the baked copy, which is
-///   genuinely runnable.
-/// - Otherwise the baked copy is appended.
-fn merge_baked_examples(
-    examples: &mut Vec<MenuLibraryItem>,
-    built: &std::collections::HashSet<String>,
-) {
-    for baked in bundled::DISCS {
-        if baked.kind != bundled::BundledKind::Exe {
-            continue;
-        }
-        let key = example_key(baked.title);
-        if built.contains(&key) {
-            continue;
-        }
-        let item = MenuLibraryItem {
-            id: baked.id.to_string(),
-            title: baked.title.to_string(),
-            subtitle: baked.subtitle.to_string(),
-            burnable: false,
-            launchable: true,
-        };
-        match examples
-            .iter_mut()
-            .find(|entry| example_key(&entry.title) == key)
-        {
-            Some(placeholder) => *placeholder = item,
-            None => examples.push(item),
-        }
-    }
-}
-
-fn example_key(name: &str) -> String {
-    name.to_ascii_lowercase()
 }
 
 /// Pick the BIOS path the launcher should read, honouring
@@ -4359,43 +3861,58 @@ mod tests {
 
     #[test]
     fn internal_editor_playtest_artifacts_are_hidden_from_menu() {
-        assert!(is_internal_example_artifact(Path::new(
+        assert!(is_internal_editor_playtest_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/editor-playtest.exe"
         )));
-        assert!(is_internal_example_artifact(Path::new(
+        assert!(is_internal_editor_playtest_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/editor-playtest.bin"
         )));
-        assert!(is_internal_example_artifact(Path::new(
+        assert!(is_internal_editor_playtest_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/editor-playtest.cue"
         )));
-        assert!(is_internal_example_artifact(Path::new(
+        assert!(is_internal_editor_playtest_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/editor-playtest.iso"
         )));
-        assert!(is_internal_example_artifact(Path::new(
+        assert!(is_internal_editor_playtest_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/editor-playtest-cortex-ignition-v1-profile.bin"
         )));
-        assert!(!is_internal_example_artifact(Path::new(
+        assert!(!is_internal_editor_playtest_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/hello-cdda.exe"
         )));
-        assert!(!is_internal_example_artifact(Path::new(
+        assert!(!is_internal_editor_playtest_artifact(Path::new(
             "/games/editor-playtest.bin"
         )));
     }
 
     #[test]
-    fn public_example_placeholders_are_discovered_from_source_dirs() {
-        let built = std::collections::HashSet::from([example_key("hello-tri")]);
-        let examples = public_example_source_items(&built);
-        assert!(examples
-            .iter()
-            .any(|entry| entry.title == "game-pong" && !entry.launchable));
-        assert!(examples
-            .iter()
-            .all(|entry| entry.title != "editor-playtest"));
-        assert!(examples.iter().all(|entry| entry.title != "hello-tri"));
+    fn scanned_psx_executables_are_listed_under_games() {
+        let root = frontend_test_temp_dir("exe-games-category");
+        let exe_path = root.join("homebrew.exe");
+        std::fs::write(&exe_path, b"PS-X EXE").unwrap();
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        state.library.entries = vec![LibraryEntry {
+            id: "homebrew-id".to_string(),
+            path: exe_path,
+            kind: GameKind::Exe,
+            title: "Homebrew".to_string(),
+            region: Region::Unknown,
+            size: 8,
+            mtime: 0,
+            diagnostic: None,
+        }];
+
+        state.refresh_menu_library();
+        state.menu.select_category("Games");
+
+        assert_eq!(
+            state.menu.selected_action(),
+            Some(&ui::menu::MenuAction::LaunchGame("homebrew-id".to_string()))
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
+    #[cfg(feature = "editor")]
     fn project_build_launch_ids_resolve_by_path_when_disc_ids_collide() {
         let root = frontend_test_temp_dir("project-build-launch-ids");
         let a_path = root.join("demo4").join("baked").join("demo4.cue");
@@ -4447,53 +3964,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn path_launch_ids_resolve_duplicate_disc_ids_by_path() {
-        let root = frontend_test_temp_dir("example-launch-ids");
-        let a_path = root.join("hello-tex.cue");
-        let b_path = root.join("hello-tri.cue");
-        std::fs::write(&a_path, b"disc a").unwrap();
-        std::fs::write(&b_path, b"disc b").unwrap();
-
-        let entries = vec![
-            LibraryEntry {
-                id: "same-disc-id".to_string(),
-                path: a_path.clone(),
-                kind: GameKind::DiscCue,
-                title: "hello-tex".to_string(),
-                region: Region::Unknown,
-                size: 6,
-                mtime: 0,
-                diagnostic: None,
-            },
-            LibraryEntry {
-                id: "same-disc-id".to_string(),
-                path: b_path.clone(),
-                kind: GameKind::DiscCue,
-                title: "hello-tri".to_string(),
-                region: Region::Unknown,
-                size: 6,
-                mtime: 0,
-                diagnostic: None,
-            },
-        ];
-
-        assert_eq!(
-            library_entry_for_launch_id(&entries, "same-disc-id")
-                .unwrap()
-                .path,
-            a_path
-        );
-        assert_eq!(
-            library_entry_for_launch_id(&entries, &path_launch_id(&b_path))
-                .unwrap()
-                .path,
-            b_path
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
     fn frontend_test_temp_dir(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4506,85 +3976,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-}
-
-#[cfg(test)]
-mod baked_example_merge_tests {
-    use super::{bundled, example_key, merge_baked_examples, MenuLibraryItem};
-
-    fn item(title: &str, subtitle: &str, launchable: bool) -> MenuLibraryItem {
-        MenuLibraryItem {
-            id: format!("scanned:{title}"),
-            title: title.to_string(),
-            subtitle: subtitle.to_string(),
-            burnable: false,
-            launchable,
-        }
-    }
-
-    fn a_baked_example() -> &'static bundled::BundledDisc {
-        bundled::DISCS
-            .iter()
-            .find(|d| d.kind == bundled::BundledKind::Exe)
-            .expect("at least one baked example ships")
-    }
-
-    /// The shipped bug: a source checkout lists uncompiled examples as "not
-    /// built", and the baked copy was appended beside one instead of replacing
-    /// it, so the row showed twice.
-    #[test]
-    fn a_not_built_placeholder_is_replaced_not_duplicated() {
-        let baked = a_baked_example();
-        let mut examples = vec![item(baked.title, "not built", false)];
-        merge_baked_examples(&mut examples, &Default::default());
-
-        let matching: Vec<_> = examples
-            .iter()
-            .filter(|e| example_key(&e.title) == example_key(baked.title))
-            .collect();
-        assert_eq!(matching.len(), 1, "one row per example, got {examples:?}");
-        assert!(matching[0].launchable, "the surviving row must be runnable");
-        assert_eq!(matching[0].id, baked.id, "the baked copy should have won");
-    }
-
-    /// A real local build beats the bundled one, so a checkout runs what it
-    /// just compiled.
-    #[test]
-    fn a_local_build_wins_over_the_baked_copy() {
-        let baked = a_baked_example();
-        let mut examples = vec![item(baked.title, "EXE · 118 KiB", true)];
-        let built = std::iter::once(example_key(baked.title)).collect();
-        merge_baked_examples(&mut examples, &built);
-
-        let matching: Vec<_> = examples
-            .iter()
-            .filter(|e| example_key(&e.title) == example_key(baked.title))
-            .collect();
-        assert_eq!(matching.len(), 1);
-        assert!(
-            matching[0].id.starts_with("scanned:"),
-            "the scanned build should have been kept"
-        );
-    }
-
-    /// With nothing scanned at all -- the web build, and any download -- every
-    /// baked example is appended exactly once.
-    #[test]
-    fn an_empty_column_gets_each_baked_example_once() {
-        let mut examples = Vec::new();
-        merge_baked_examples(&mut examples, &Default::default());
-
-        let expected = bundled::DISCS
-            .iter()
-            .filter(|d| d.kind == bundled::BundledKind::Exe)
-            .count();
-        assert_eq!(examples.len(), expected);
-        let mut keys: Vec<_> = examples.iter().map(|e| example_key(&e.title)).collect();
-        keys.sort();
-        let before = keys.len();
-        keys.dedup();
-        assert_eq!(keys.len(), before, "no example may appear twice");
     }
 }
 

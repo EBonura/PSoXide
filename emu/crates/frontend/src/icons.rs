@@ -47,7 +47,7 @@ pub const CARET_DOWN: char = '\u{e136}'; // ph-caret-down
 /// so "close the app" has its own place instead of hiding inside
 /// Debug.
 pub const POWER: char = '\u{e3da}'; // ph-power
-/// Folder icon -- Examples category badge.
+/// Folder icon -- Projects/Editor category badge.
 pub const FOLDER: char = '\u{e24a}'; // ph-folder
 /// Refresh/rotate icon -- reset + rescan-library action.
 pub const ROTATE_CCW: char = '\u{e038}'; // ph-arrow-counter-clockwise

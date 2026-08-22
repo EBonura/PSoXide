@@ -7,7 +7,9 @@ use std::time::Duration;
 // there). Burn is inert on wasm, but BurnState is still constructed at startup.
 use web_time::Instant;
 
-use psoxide_settings::library::{cue_referenced_files, LibraryEntry};
+use psoxide_settings::library::cue_referenced_files;
+#[cfg(not(target_arch = "wasm32"))]
+use psoxide_settings::library::LibraryEntry;
 
 const BURNER_SCAN_INTERVAL: Duration = Duration::from_secs(4);
 pub(crate) const RECOMMENDED_BURN_SPEED: &str = "4x";
@@ -95,6 +97,7 @@ impl Default for BurnState {
 }
 
 impl BurnState {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn open_for(&mut self, entry: &LibraryEntry) {
         self.open = true;
         self.target = Some(BurnTarget {

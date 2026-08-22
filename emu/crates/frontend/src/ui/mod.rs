@@ -177,6 +177,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             }
             MenuOutcome::None
         }
+        #[cfg(not(target_arch = "wasm32"))]
         OpenBurnMenu(id) => {
             if let Err(e) = state.open_burn_menu_by_id(&id) {
                 eprintln!("[frontend] burn menu failed: {e}");
@@ -197,10 +198,6 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
                     state.status_message_set(format!("Rescan failed: {e}"));
                 }
             }
-            MenuOutcome::None
-        }
-        BuildExamples => {
-            state.start_examples_build();
             MenuOutcome::None
         }
         #[cfg(feature = "editor")]

@@ -20,8 +20,8 @@ disc images, and run them in emulators or on original hardware.
 **Try it now:** the emulator runs in your browser on
 [the itch.io page](https://bonnie-studios.itch.io/psoxide). Press play and the
 PSoXide Demo Disc (ten homebrew programs, CD audio and all) streams in on
-demand; the SDK and engine samples are baked in under **Examples**, so there
-is something to run without supplying a disc. No install, no BIOS.
+demand. You can also load your own legally obtained discs and PSX executables
+through **Games**. No install or BIOS is required for the streamed demo disc.
 
 The primary reference project is a dark, third-person PS1 action-RPG vertical
 slice. The public tools are built around proving the full workflow end to end.
@@ -277,9 +277,9 @@ small games (Pong, Breakout, Space Invaders). Build them all with
 `make examples`; descriptions are in the [`sdk/`](sdk/README.md) and
 [`engine/`](engine/README.md) READMEs.
 
-They are also baked into the emulator itself, under **Examples** in the menu, so
-the [web build](https://bonnie-studios.itch.io/psoxide) and a binary with no source
-tree beside it both have something to run without supplying a disc.
+The examples remain development and regression fixtures rather than bundled
+emulator content. After building one, load its executable or disc through the
+emulator's **Games** library when you want to run it interactively.
 
 | ![showcase-3d](assets/media/readme/examples/showcase-3d.png) | ![showcase-fog](assets/media/readme/examples/showcase-fog.png) | ![showcase-model](assets/media/readme/examples/showcase-model.png) |
 | --- | --- | --- |
