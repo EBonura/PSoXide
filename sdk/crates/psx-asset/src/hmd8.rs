@@ -422,8 +422,7 @@ impl Model {
             && n_bones > 0
             && n_ranges > 0
             && n_verts <= max_verts
-            && (!requested_vertex_soa
-                || (data.as_ptr() as usize + vertices_off) & 3 == 0)
+            && (!requested_vertex_soa || (data.as_ptr() as usize + vertices_off) & 3 == 0)
             && poses_off <= tri_off
             && tri_end <= data.len();
         let mut range = 0usize;
@@ -743,12 +742,9 @@ impl Model {
                     // align=1 in LLVM even after the cast and become LWL/LWR.
                     // HMD_FLAG_VERTEX_SOA is validated against the actual base
                     // address at load, making these native aligned loads safe.
-                    xy: core::ptr::read_volatile(
-                        self.data.as_ptr().add(xy).cast::<u32>(),
-                    ),
-                    z: core::ptr::read_volatile(
-                        self.data.as_ptr().add(z).cast::<i16>(),
-                    ) as i32 as u32,
+                    xy: core::ptr::read_volatile(self.data.as_ptr().add(xy).cast::<u32>()),
+                    z: core::ptr::read_volatile(self.data.as_ptr().add(z).cast::<i16>()) as i32
+                        as u32,
                 };
             }
             #[cfg(not(target_arch = "mips"))]
