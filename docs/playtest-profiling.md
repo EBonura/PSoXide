@@ -85,6 +85,8 @@ emulated timing:
 - `--pc-line-log <csv>` counts every retired instruction by canonical 16-byte
   I-cache line. This is exact execution density rather than the periodic sample
   emitted by `--pc-sample-log`, and is intended for conflict-aware code layout.
+  Add `--pc-line-start-route-tick <N>` to exclude deterministic boot/loading
+  work and rank only the gameplay tail of a route.
 - `--stack-profile-log <csv>` observes `$sp` without writing a canary into guest
   memory. Add `--stack-profile-root-pc 0xADDRESS` to measure each completed call
   of a render root from its entry stack pointer through its return; omit the

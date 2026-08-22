@@ -376,6 +376,10 @@ pub struct LaunchArgs {
     /// write a ranked CSV. Unlike `--pc-sample-log`, this is not sampled.
     #[arg(long)]
     pub pc_line_log: Option<PathBuf>,
+    /// Ignore exact PC-line samples before this route tick. This excludes boot,
+    /// loading and menus when profiling a deterministic gameplay route.
+    #[arg(long, default_value_t = 0, requires = "pc_line_log")]
+    pub pc_line_start_route_tick: u64,
     /// Write stack high-water observations without modifying guest RAM.
     #[arg(long)]
     pub stack_profile_log: Option<PathBuf>,
@@ -1265,8 +1269,10 @@ fn run_headless_launch(
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
-        if let Some(histogram) = pc_line_histogram.as_mut() {
-            histogram.record(cpu.pc());
+        if route_ticks >= args.pc_line_start_route_tick {
+            if let Some(histogram) = pc_line_histogram.as_mut() {
+                histogram.record(cpu.pc());
+            }
         }
         if let Some(profile) = stack_high_water_profile.as_mut() {
             profile.observe(cpu.pc(), cpu.gpr(29), cpu.gpr(31));
@@ -2584,6 +2590,7 @@ fn validation_launch_args(
         pc_sample_instructions: 16_384,
         cpu_cycle_profile_log: None,
         pc_line_log: None,
+        pc_line_start_route_tick: 0,
         stack_profile_log: None,
         stack_profile_root_pc: None,
         dump_vram: None,
@@ -3985,6 +3992,8 @@ mod press_script_tests {
             "cycles.csv",
             "--pc-line-log",
             "lines.csv",
+            "--pc-line-start-route-tick",
+            "88",
             "--stack-profile-log",
             "stack.csv",
             "--stack-profile-root-pc",
@@ -4000,6 +4009,7 @@ mod press_script_tests {
             Some(PathBuf::from("cycles.csv"))
         );
         assert_eq!(args.pc_line_log, Some(PathBuf::from("lines.csv")));
+        assert_eq!(args.pc_line_start_route_tick, 88);
         assert_eq!(args.stack_profile_log, Some(PathBuf::from("stack.csv")));
         assert_eq!(args.stack_profile_root_pc, Some(0x8001_2340));
     }
