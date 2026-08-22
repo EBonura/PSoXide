@@ -130,6 +130,16 @@ fn clamp_offset_texels(value: f64) -> i16 {
         .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
 
+/// Nearest multiple of `step`, with the same positive tie-breaking used by
+/// the editor grid. The i64 intermediate keeps extreme authored coordinates
+/// from overflowing while the snap is calculated.
+fn snap_grid_coordinate(value: i32, step: i32) -> i32 {
+    let step = i64::from(step.max(1));
+    let value = i64::from(value);
+    ((value + step / 2).div_euclid(step) * step).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+        as i32
+}
+
 /// One brush face: three integer points defining the plane, plus the
 /// face's material (None = untextured default) and texture placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -633,13 +643,10 @@ impl Brush {
     /// resulting faces may degenerate, which `solve` reports per face).
     pub fn snap_to_grid(&mut self, step: i32) {
         let step = step.max(1);
-        // Round to nearest: div_euclid floors, so one +half shift is
-        // correct for negatives too (-1 -> 0, -17 -> -32 at step 32).
-        let snap = |v: i32| (v + step / 2).div_euclid(step) * step;
         for face in &mut self.faces {
             for point in &mut face.points {
                 for coordinate in point.iter_mut() {
-                    *coordinate = snap(*coordinate);
+                    *coordinate = snap_grid_coordinate(*coordinate, step);
                 }
             }
         }
@@ -683,6 +690,22 @@ impl Brush {
         map: [[f64; 3]; 3],
         epsilon: f64,
     ) -> usize {
+        self.transform_selected_snapped(selected_faces, targets, center, map, epsilon, 1)
+    }
+
+    /// [`Self::transform_selected`] with every transformed coordinate snapped
+    /// to the supplied absolute world-grid step. Unselected authored points
+    /// remain byte-for-byte unchanged, while rotations and scales cannot
+    /// introduce vertices between the editor's active grid lines.
+    pub fn transform_selected_snapped(
+        &mut self,
+        selected_faces: &[usize],
+        targets: &[[f64; 3]],
+        center: [f64; 3],
+        map: [[f64; 3]; 3],
+        epsilon: f64,
+        snap_step: i32,
+    ) -> usize {
         let mut moved = 0;
         for (face_index, face) in self.faces.iter_mut().enumerate() {
             let whole_face = selected_faces.contains(&face_index);
@@ -704,7 +727,7 @@ impl Brush {
                         + map[axis][1] * local[1]
                         + map[axis][2] * local[2]
                         + center[axis];
-                    point[axis] = value.round() as i32;
+                    point[axis] = snap_grid_coordinate(value.round() as i32, snap_step);
                 }
                 moved += 1;
             }

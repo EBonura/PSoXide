@@ -456,9 +456,10 @@ pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> RtptInFlight {
                 ".word 0x488b1800",
                 ".word 0x488c2000",
                 ".word 0x488d2800",
-                // HWB-010/011 input-commit gap for the final V2 write.
-                // RTPT reads V2 as part of this operation; issuing it
-                // immediately can consume the previous vertex on silicon.
+                // Conservative HWB-010/011 input-commit gap for the final V2
+                // write. The original console failure proved the rule for
+                // MVMVA/RTPS, not RTPT; hardware-tests v1.20 records 0xC0-C3
+                // explicitly arbitrate whether RTPT needs these two slots.
                 ".word 0",
                 ".word 0",
                 // RTPT.
@@ -481,10 +482,14 @@ pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> RtptInFlight {
 }
 
 impl RtptInFlight {
-    /// Collect the projected triple. If the GTE is still busy the
-    /// first MFC2 interlocks until the op retires, exactly like the
-    /// blocking wrapper -- overlapped scalar work between kick and
-    /// read is pure profit.
+    /// Collect the projected triple.
+    ///
+    /// MFC2 does not provide a general GTE-busy interlock: the console result
+    /// in hardware-tests record 0xB0 disproved that older assumption for
+    /// NCLIP/MAC0. This RTPT sequence is safe only if its first result is ready
+    /// by the read issue point; v1.20 records 0xC4-C7 measure that exact window.
+    /// Until silicon answers them, callers must not treat a short overlap as a
+    /// guaranteed blocking wait.
     #[inline(always)]
     pub fn read(self) -> [Projected; 3] {
         #[cfg(target_arch = "mips")]
@@ -600,10 +605,10 @@ fn project_triangle_mips(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3
             ".word 0x488b1800",
             ".word 0x488c2000",
             ".word 0x488d2800",
-            // HWB-010/011 input-commit gap. RTPT consumes V2 after the
-            // final MTC2 above, so V0/V1 having ample distance does not make
-            // this schedule safe: without these two slots real silicon can
-            // project a stale V2. Keep this in sync with project_vertex_mips.
+            // Conservative HWB-010/011 input-commit gap. The original
+            // console failure proved MVMVA/RTPS; hardware-tests v1.20 records
+            // 0xC0-C3 measure RTPT directly before we remove these slots.
+            // Keep this in sync with rtpt_kick.
             ".word 0",
             ".word 0",
             // RTPT.

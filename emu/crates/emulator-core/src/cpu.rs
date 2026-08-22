@@ -124,6 +124,93 @@ pub struct InstructionCacheProfileSnapshot {
     pub refill_stall_cycles: u64,
 }
 
+/// Emulator-owned breakdown of CPU cycles charged while retiring guest code.
+///
+/// The buckets are observational only: enabling them does not alter guest
+/// state or the emulated cycle counter. `stack_ram_load_stall_cycles` is a
+/// subset of `ram_load_stall_cycles`, so callers must not add it to
+/// [`Self::total_profiled_cycles`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuCycleProfileSnapshot {
+    /// One-cycle issue cost charged for ordinary retired instructions.
+    pub issue_cycles: u64,
+    /// Main-RAM load stalls, including refresh waits and unaligned merge work.
+    pub ram_load_stall_cycles: u64,
+    /// Main-RAM load stalls whose addressing base register was `$sp`.
+    pub stack_ram_load_stall_cycles: u64,
+    /// Main-RAM store stalls, including read/modify/write store forms.
+    pub ram_store_stall_cycles: u64,
+    /// Stalls charged by MMIO or expansion-bus data accesses.
+    pub mmio_stall_cycles: u64,
+    /// I-cache refill stalls already charged by the instruction fetch path.
+    pub icache_refill_stall_cycles: u64,
+    /// Stalls from uncached instruction fetches.
+    pub uncached_fetch_stall_cycles: u64,
+    /// Interlock stalls before issuing a GTE command while the GTE is busy.
+    pub gte_busy_stall_cycles: u64,
+    /// Interlock stalls on `MFHI`/`MFLO` while multiply/divide is busy.
+    pub muldiv_interlock_stall_cycles: u64,
+    /// CPU-charged cycles not covered by the named buckets above.
+    pub other_stall_cycles: u64,
+}
+
+impl CpuCycleProfileSnapshot {
+    /// Sum of the disjoint cycle buckets in this snapshot.
+    pub fn total_profiled_cycles(self) -> u64 {
+        self.issue_cycles
+            .saturating_add(self.ram_load_stall_cycles)
+            .saturating_add(self.ram_store_stall_cycles)
+            .saturating_add(self.mmio_stall_cycles)
+            .saturating_add(self.icache_refill_stall_cycles)
+            .saturating_add(self.uncached_fetch_stall_cycles)
+            .saturating_add(self.gte_busy_stall_cycles)
+            .saturating_add(self.muldiv_interlock_stall_cycles)
+            .saturating_add(self.other_stall_cycles)
+    }
+
+    /// Saturating per-field difference from an earlier snapshot.
+    pub fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            issue_cycles: self.issue_cycles.saturating_sub(earlier.issue_cycles),
+            ram_load_stall_cycles: self
+                .ram_load_stall_cycles
+                .saturating_sub(earlier.ram_load_stall_cycles),
+            stack_ram_load_stall_cycles: self
+                .stack_ram_load_stall_cycles
+                .saturating_sub(earlier.stack_ram_load_stall_cycles),
+            ram_store_stall_cycles: self
+                .ram_store_stall_cycles
+                .saturating_sub(earlier.ram_store_stall_cycles),
+            mmio_stall_cycles: self
+                .mmio_stall_cycles
+                .saturating_sub(earlier.mmio_stall_cycles),
+            icache_refill_stall_cycles: self
+                .icache_refill_stall_cycles
+                .saturating_sub(earlier.icache_refill_stall_cycles),
+            uncached_fetch_stall_cycles: self
+                .uncached_fetch_stall_cycles
+                .saturating_sub(earlier.uncached_fetch_stall_cycles),
+            gte_busy_stall_cycles: self
+                .gte_busy_stall_cycles
+                .saturating_sub(earlier.gte_busy_stall_cycles),
+            muldiv_interlock_stall_cycles: self
+                .muldiv_interlock_stall_cycles
+                .saturating_sub(earlier.muldiv_interlock_stall_cycles),
+            other_stall_cycles: self
+                .other_stall_cycles
+                .saturating_sub(earlier.other_stall_cycles),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfiledDataAccess {
+    RamLoad { stack_relative: bool },
+    RamStore,
+    Mmio,
+    Other,
+}
+
 /// MIPS R3000A CPU state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
@@ -290,6 +377,13 @@ pub struct Cpu {
     /// states because it is diagnostic history, not emulated hardware state.
     #[serde(skip)]
     instruction_cache_profile: InstructionCacheProfileSnapshot,
+    /// Opt-in CPU cycle attribution. Kept off on the normal interpreter path
+    /// so profiling cannot become a host-performance tax for regular play.
+    #[serde(skip)]
+    cpu_cycle_profile_enabled: bool,
+    /// Emulator-owned CPU cycle attribution history. Diagnostic only.
+    #[serde(skip)]
+    cpu_cycle_profile: CpuCycleProfileSnapshot,
     /// COP2 -- Geometry Transformation Engine. Holds 32 data + 32
     /// control registers and dispatches the GTE function set.
     cop2: Gte,
@@ -384,6 +478,8 @@ impl Cpu {
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
             instruction_cache_profile: InstructionCacheProfileSnapshot::default(),
+            cpu_cycle_profile_enabled: false,
+            cpu_cycle_profile: CpuCycleProfileSnapshot::default(),
             cop2: Gte::new(),
             freelook: FreelookState::default(),
             isr_depth: 0,
@@ -572,6 +668,18 @@ impl Cpu {
         self.instruction_cache_profile
     }
 
+    /// Enable or disable CPU cycle attribution, resetting prior observations.
+    pub fn set_cpu_cycle_profile_enabled(&mut self, enabled: bool) {
+        self.cpu_cycle_profile_enabled = enabled;
+        self.cpu_cycle_profile = CpuCycleProfileSnapshot::default();
+    }
+
+    /// Snapshot emulator-owned CPU cycle attribution counters.
+    #[inline]
+    pub fn cpu_cycle_profile(&self) -> CpuCycleProfileSnapshot {
+        self.cpu_cycle_profile
+    }
+
     /// Write a general-purpose register, enforcing the MIPS invariant
     /// that `$0` is hardwired to zero.
     ///
@@ -613,6 +721,12 @@ impl Cpu {
     fn fetch_instruction(&mut self, addr: u32, bus: &mut Bus) -> u32 {
         if !self.instruction_cache_enabled_at(addr) {
             let stalls = bus.instruction_read_stalls(addr);
+            if self.cpu_cycle_profile_enabled {
+                self.cpu_cycle_profile.uncached_fetch_stall_cycles = self
+                    .cpu_cycle_profile
+                    .uncached_fetch_stall_cycles
+                    .saturating_add(stalls as u64);
+            }
             bus.add_cycles(stalls);
             return bus.read_instruction32(addr);
         }
@@ -635,8 +749,115 @@ impl Cpu {
                 .refill_stall_cycles
                 .saturating_add(stalls as u64);
         }
+        if self.cpu_cycle_profile_enabled {
+            self.cpu_cycle_profile.icache_refill_stall_cycles = self
+                .cpu_cycle_profile
+                .icache_refill_stall_cycles
+                .saturating_add(stalls as u64);
+        }
         bus.add_cycles(stalls);
         instruction
+    }
+
+    #[inline]
+    fn profiled_data_access(&self, instr: u32) -> Option<ProfiledDataAccess> {
+        let opcode = ((instr >> 26) & 0x3f) as u8;
+        let is_load = matches!(
+            opcode,
+            0x20 | 0x21 | 0x22 | 0x23 | 0x24 | 0x25 | 0x26 | 0x32
+        );
+        let is_store = matches!(opcode, 0x28 | 0x29 | 0x2a | 0x2b | 0x2e | 0x3a);
+        if !is_load && !is_store {
+            return None;
+        }
+
+        let base = ((instr >> 21) & 0x1f) as u8;
+        let offset = (instr as i16) as i32 as u32;
+        let address = self.gpr(base).wrapping_add(offset);
+        let physical = memory::to_physical(address);
+        if physical < memory::ram::MIRROR_END {
+            return Some(if is_load {
+                ProfiledDataAccess::RamLoad {
+                    stack_relative: base == 29,
+                }
+            } else {
+                ProfiledDataAccess::RamStore
+            });
+        }
+        if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+            .contains(&physical)
+        {
+            return Some(ProfiledDataAccess::Other);
+        }
+        if (memory::expansion1::BASE..memory::bios::BASE).contains(&physical) {
+            return Some(ProfiledDataAccess::Mmio);
+        }
+        Some(ProfiledDataAccess::Other)
+    }
+
+    #[inline]
+    fn record_execution_stalls(
+        &mut self,
+        instr: u32,
+        access: Option<ProfiledDataAccess>,
+        stalls: u64,
+    ) {
+        if stalls == 0 {
+            return;
+        }
+        match access {
+            Some(ProfiledDataAccess::RamLoad { stack_relative }) => {
+                self.cpu_cycle_profile.ram_load_stall_cycles = self
+                    .cpu_cycle_profile
+                    .ram_load_stall_cycles
+                    .saturating_add(stalls);
+                if stack_relative {
+                    self.cpu_cycle_profile.stack_ram_load_stall_cycles = self
+                        .cpu_cycle_profile
+                        .stack_ram_load_stall_cycles
+                        .saturating_add(stalls);
+                }
+            }
+            Some(ProfiledDataAccess::RamStore) => {
+                self.cpu_cycle_profile.ram_store_stall_cycles = self
+                    .cpu_cycle_profile
+                    .ram_store_stall_cycles
+                    .saturating_add(stalls);
+            }
+            Some(ProfiledDataAccess::Mmio) => {
+                self.cpu_cycle_profile.mmio_stall_cycles = self
+                    .cpu_cycle_profile
+                    .mmio_stall_cycles
+                    .saturating_add(stalls);
+            }
+            Some(ProfiledDataAccess::Other) => {
+                self.cpu_cycle_profile.other_stall_cycles = self
+                    .cpu_cycle_profile
+                    .other_stall_cycles
+                    .saturating_add(stalls);
+            }
+            None => {
+                let opcode = ((instr >> 26) & 0x3f) as u8;
+                let special = opcode == 0;
+                let function = (instr & 0x3f) as u8;
+                if opcode == 0x12 && instr & (1 << 25) != 0 {
+                    self.cpu_cycle_profile.gte_busy_stall_cycles = self
+                        .cpu_cycle_profile
+                        .gte_busy_stall_cycles
+                        .saturating_add(stalls);
+                } else if special && matches!(function, 0x10 | 0x12) {
+                    self.cpu_cycle_profile.muldiv_interlock_stall_cycles = self
+                        .cpu_cycle_profile
+                        .muldiv_interlock_stall_cycles
+                        .saturating_add(stalls);
+                } else {
+                    self.cpu_cycle_profile.other_stall_cycles = self
+                        .cpu_cycle_profile
+                        .other_stall_cycles
+                        .saturating_add(stalls);
+                }
+            }
+        }
     }
 
     #[inline]
@@ -868,6 +1089,10 @@ impl Cpu {
                 let record_pc = self.pc;
                 self.finish_hle_exception(bus);
                 bus.tick(2);
+                if self.cpu_cycle_profile_enabled {
+                    self.cpu_cycle_profile.issue_cycles =
+                        self.cpu_cycle_profile.issue_cycles.saturating_add(2);
+                }
                 self.tick += 1;
                 return Ok(ExecutedInstruction {
                     record_pc,
@@ -878,6 +1103,7 @@ impl Cpu {
             let sp = self.gpr(29);
             let t1 = self.gpr(9);
             let ra = self.gpr(31);
+            let hle_cycles_before = bus.cycles();
             if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, args, sp, t1, ra) {
                 // A(44h) FlushCache normally executes the BIOS's isolated
                 // tag-clear loop. HLE skips that code, so preserve the
@@ -898,6 +1124,15 @@ impl Cpu {
                 self.pending_load = None;
                 self.committing_load = None;
                 bus.tick(2);
+                if self.cpu_cycle_profile_enabled {
+                    self.cpu_cycle_profile.issue_cycles =
+                        self.cpu_cycle_profile.issue_cycles.saturating_add(2);
+                    self.cpu_cycle_profile.other_stall_cycles =
+                        self.cpu_cycle_profile.other_stall_cycles.saturating_add(
+                            bus.cycles()
+                                .saturating_sub(hle_cycles_before.saturating_add(2)),
+                        );
+                }
                 self.tick += 1;
                 return Ok(ExecutedInstruction {
                     record_pc: self.pc,
@@ -918,7 +1153,14 @@ impl Cpu {
         // Timer 1's counter behind Redux's by ~2 cycles per memory
         // access -- which showed as a 34-count offset at step
         // 19,472,447's Timer 1 read.
-        bus.tick(cycle_cost(instr));
+        let issue_cycles = cycle_cost(instr);
+        bus.tick(issue_cycles);
+        if self.cpu_cycle_profile_enabled {
+            self.cpu_cycle_profile.issue_cycles = self
+                .cpu_cycle_profile
+                .issue_cycles
+                .saturating_add(issue_cycles as u64);
+        }
 
         // If the *previous* instruction was a branch, the current
         // instruction is its delay slot -- after retiring, PC goes to
@@ -935,7 +1177,19 @@ impl Cpu {
         // goes into `pending_load` and fires on the *next* call.
         self.committing_load = self.pending_load.take();
 
+        let profiled_access = self
+            .cpu_cycle_profile_enabled
+            .then(|| self.profiled_data_access(instr))
+            .flatten();
+        let execute_cycles_before = bus.cycles();
         self.execute(instr, pc_before, in_delay_slot, bus)?;
+        if self.cpu_cycle_profile_enabled {
+            self.record_execution_stalls(
+                instr,
+                profiled_access,
+                bus.cycles().saturating_sub(execute_cycles_before),
+            );
+        }
 
         if let Some((reg, value)) = self.committing_load.take() {
             let i = (reg & 31) as usize;
@@ -2717,6 +2971,55 @@ mod tests {
         for i in 0..32 {
             assert_eq!(cpu.gpr(i), 0);
         }
+    }
+
+    #[test]
+    fn cpu_cycle_profile_attributes_stack_loads_without_changing_cycles() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.pc = 0x8000_1000;
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        cpu.gprs[29] = 0x8000_2000;
+        bus.write32(0x8000_1000, 0x8fa8_0000); // lw $t0, 0($sp)
+        bus.write32(0x8000_2000, 0x1234_5678);
+        cpu.set_cpu_cycle_profile_enabled(true);
+
+        let cycles_before = bus.cycles();
+        cpu.step(&mut bus).unwrap();
+        let profile = cpu.cpu_cycle_profile();
+
+        assert_eq!(profile.issue_cycles, 1);
+        assert!(profile.icache_refill_stall_cycles > 0);
+        assert!(profile.ram_load_stall_cycles > 0);
+        assert_eq!(
+            profile.stack_ram_load_stall_cycles,
+            profile.ram_load_stall_cycles
+        );
+        assert_eq!(
+            profile.total_profiled_cycles(),
+            bus.cycles().saturating_sub(cycles_before)
+        );
+    }
+
+    #[test]
+    fn cpu_cycle_profile_attributes_muldiv_interlocks() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.pc = 0x8000_1000;
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        cpu.gprs[8] = 7;
+        cpu.gprs[9] = 9;
+        bus.write32(0x8000_1000, (8 << 21) | (9 << 16) | 0x18); // mult $t0, $t1
+        bus.write32(0x8000_1004, (10 << 11) | 0x12); // mflo $t2
+        cpu.set_cpu_cycle_profile_enabled(true);
+
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        let profile = cpu.cpu_cycle_profile();
+
+        assert_eq!(profile.issue_cycles, 2);
+        assert!(profile.muldiv_interlock_stall_cycles > 0);
+        assert_eq!(cpu.gpr(10), 63);
     }
 
     #[test]

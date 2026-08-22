@@ -67,9 +67,9 @@ pub(super) struct SceneEntityMover<'a> {
     pub(super) models: &'a [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Pre-tick entity positions (entities move one at a time inside
     /// the tick; the snapshot keeps blocker order deterministic).
-    pub(super) entity_positions: [[i32; 3]; MAX_GAME_ENTITIES],
+    pub(super) entity_positions: &'a [[i32; 3]],
     /// Pre-tick dead flags: corpses stop blocking other movers.
-    pub(super) entity_dead: [bool; MAX_GAME_ENTITIES],
+    pub(super) entity_dead: &'a [bool],
     pub(super) player: RoomPoint,
     pub(super) player_room: RoomIndex,
     pub(super) player_radius: i32,
@@ -107,10 +107,10 @@ impl SceneEntityMover<'_> {
             .get(entity)
             .map(|record| record.model_instance)
             .unwrap_or(psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE);
-        let mut cylinders = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
-        let mut cylinder_count = 0usize;
+        let mut cylinders =
+            psx_engine::FixedScratch::<CharacterCollisionCylinder, MAX_COLLISION_CYLINDERS>::new();
         for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
-            if inst.room != room || cylinder_count >= cylinders.len() {
+            if inst.room != room {
                 continue;
             }
             let inst_index = index.min(u16::MAX as usize) as u16;
@@ -126,63 +126,71 @@ impl SceneEntityMover<'_> {
                 Some(other) => {
                     let other = other.min(MAX_GAME_ENTITIES - 1);
                     // Dead entities stop blocking (souls corpses).
-                    if self.entity_dead[other] {
+                    let Some((&dead, &live)) = self
+                        .entity_dead
+                        .get(other)
+                        .zip(self.entity_positions.get(other))
+                    else {
+                        continue;
+                    };
+                    if dead {
                         continue;
                     }
-                    let live = self.entity_positions[other];
                     RoomPoint::new(live[0], live[1], live[2])
                 }
                 None => RoomPoint::new(inst.x, inst.y, inst.z),
             };
-            cylinders[cylinder_count] =
-                CharacterCollisionCylinder::new(center, body_radius, body_height);
-            cylinder_count += 1;
+            if !cylinders.try_push(CharacterCollisionCylinder::new(
+                center,
+                body_radius,
+                body_height,
+            )) {
+                break;
+            }
         }
-        if self.player_room == room && self.player_radius > 0 && cylinder_count < cylinders.len() {
-            cylinders[cylinder_count] = CharacterCollisionCylinder::new(
+        if self.player_room == room && self.player_radius > 0 {
+            cylinders.try_push(CharacterCollisionCylinder::new(
                 self.player,
                 self.player_radius,
                 self.player_height.max(1),
-            );
-            cylinder_count += 1;
+            ));
         }
-        cylinder_count +=
-            psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers(
-                CYLINDER_PROPS,
-                room,
-                &mut cylinders[cylinder_count..],
-            );
+        psx_game_runtime::cylinder_props::collect_cylinder_prop_collision_blockers_into(
+            CYLINDER_PROPS,
+            room,
+            &mut cylinders,
+        );
 
         let start = RoomPoint::new(position[0], position[1], position[2]);
-        let mut aabbs = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+        let mut aabbs =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
         if let Some(bsp) = self.bsp.as_deref_mut() {
-            let Some(mut aabb_count) = self
+            let Some(_) = self
                 .box_props
-                .collect_collision_blockers_checked(BOX_PROPS, room, &mut aabbs)
+                .collect_collision_blockers_checked_into(BOX_PROPS, room, &mut aabbs)
             else {
                 return position;
             };
-            let Some(count) =
-                psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked(
+            let Some(_) =
+                psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_checked_into(
                     ARCH_PROPS,
                     ARCH_PROP_COLLISIONS,
                     room,
-                    &mut aabbs[aabb_count..],
+                    &mut aabbs,
                 )
             else {
                 return position;
             };
-            aabb_count += count;
-            let Some(count) =
-                psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked(
+            let Some(_) =
+                psx_game_runtime::image_props::collect_image_prop_collision_blockers_checked_into(
                     IMAGE_PROPS,
                     room,
-                    &mut aabbs[aabb_count..],
+                    &mut aabbs,
                 )
             else {
                 return position;
             };
-            aabb_count += count;
             let step = if exact_direction {
                 bsp.commit_body_direction(
                     start,
@@ -190,8 +198,8 @@ impl SceneEntityMover<'_> {
                     dz,
                     radius,
                     height,
-                    &cylinders[..cylinder_count],
-                    &aabbs[..aabb_count],
+                    cylinders.as_slice(),
+                    aabbs.as_slice(),
                 )
             } else {
                 bsp.commit_body_step(
@@ -200,27 +208,26 @@ impl SceneEntityMover<'_> {
                     dz,
                     radius,
                     height,
-                    &cylinders[..cylinder_count],
-                    &aabbs[..aabb_count],
+                    cylinders.as_slice(),
+                    aabbs.as_slice(),
                 )
             }
             .expect("PXBSP entity trace failed");
             return [step.position.x, step.position.y, step.position.z];
         }
 
-        let mut aabb_count = self
-            .box_props
-            .collect_collision_blockers(BOX_PROPS, room, &mut aabbs);
-        aabb_count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers(
+        self.box_props
+            .collect_collision_blockers_into(BOX_PROPS, room, &mut aabbs);
+        psx_game_runtime::arch_props::collect_arch_prop_collision_blockers_into(
             ARCH_PROPS,
             ARCH_PROP_COLLISIONS,
             room,
-            &mut aabbs[aabb_count..],
+            &mut aabbs,
         );
-        aabb_count += psx_game_runtime::image_props::collect_image_prop_collision_blockers(
+        psx_game_runtime::image_props::collect_image_prop_collision_blockers_into(
             IMAGE_PROPS,
             room,
-            &mut aabbs[aabb_count..],
+            &mut aabbs,
         );
 
         // Entity coordinates are their OWN room's local space, so the grid
@@ -236,8 +243,8 @@ impl SceneEntityMover<'_> {
         )];
         let collision = CharacterCollision::rooms_with_aabbs(
             &collision_rooms,
-            &cylinders[..cylinder_count],
-            &aabbs[..aabb_count],
+            cylinders.as_slice(),
+            aabbs.as_slice(),
         );
         let step =
             psx_engine::character_motor::commit_body_step(collision, start, dx, dz, radius, height);
@@ -313,18 +320,18 @@ impl Playtest {
             })
             .unwrap_or(&[]);
         let player_pose = self.player_actor_pose.map(|snapshot| snapshot.pose());
-        let mut prop_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
-        let prop_blocker_count = if self.bsp.is_some() {
-            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut prop_blockers)
-            else {
-                // Malformed or overflowing authored collision cannot grant a
-                // combat connection. Deferred tokens stay available to retry.
-                return;
-            };
-            count
-        } else {
-            0
-        };
+        let mut prop_blockers =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        if self.bsp.is_some()
+            && self
+                .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
+                .is_none()
+        {
+            // Malformed or overflowing authored collision cannot grant a
+            // combat connection. Deferred tokens stay available to retry.
+            return;
+        }
         let mut hits = 0u16;
         let mut damage_total = 0u16;
         let mut attack_index = 0usize;
@@ -387,7 +394,7 @@ impl Playtest {
                 if !bsp.melee_segment_clear(
                     melee_eye_point(attacker),
                     melee_eye_point(player_position),
-                    &prop_blockers[..prop_blocker_count],
+                    prop_blockers.as_slice(),
                 ) {
                     continue;
                 }
@@ -434,18 +441,18 @@ impl Playtest {
         let Some(player_pose) = self.player_actor_pose else {
             return;
         };
-        let mut prop_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
-        let prop_blocker_count = if self.bsp.is_some() {
-            let Some(count) = self.collect_static_prop_aabb_blockers_checked(&mut prop_blockers)
-            else {
-                // Fail closed before either authored capsules or the legacy
-                // arc can latch a hit through invalid generated prop state.
-                return;
-            };
-            count
-        } else {
-            0
-        };
+        let mut prop_blockers =
+            psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
+            );
+        if self.bsp.is_some()
+            && self
+                .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
+                .is_none()
+        {
+            // Fail closed before either authored capsules or the legacy
+            // arc can latch a hit through invalid generated prop state.
+            return;
+        }
         let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
         // ComboAttack is the heaviest swing the player has, so it takes the
         // heavy scaling too; a distinct multiplier would be a tuning change,
@@ -467,7 +474,7 @@ impl Playtest {
             player_pose,
             phase,
             action,
-            &prop_blockers[..prop_blocker_count],
+            prop_blockers.as_slice(),
         ) {
             self.report_player_melee_stats(stats);
             return;
@@ -500,7 +507,7 @@ impl Playtest {
                 Some(bsp) => !bsp.melee_segment_clear(
                     player_eye,
                     melee_eye_point(target),
-                    &prop_blockers[..prop_blocker_count],
+                    prop_blockers.as_slice(),
                 ),
                 None => false,
             },
