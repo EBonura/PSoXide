@@ -1183,11 +1183,17 @@ impl EditorWorkspace {
         self.preview_bounds
     }
 
-    /// Whether the Grid toolbar toggle is currently on. In 2D this
-    /// controls the editor's world grid; in 3D the frontend uses it
-    /// for BSP surface grids and legacy streaming chunk boundaries.
+    /// Whether the editor's global grid is currently on. In 2D this controls
+    /// the background grid; in 3D it also controls legacy streaming chunk
+    /// boundaries. BSP face compositing has its own subordinate toggle.
     pub fn show_grid_enabled(&self) -> bool {
         self.show_grid
+    }
+
+    /// Whether the global grid should be composited over BSP brush faces.
+    /// The ordinary background grid remains controlled by `show_grid`.
+    pub fn show_brush_surface_grid_enabled(&self) -> bool {
+        self.show_brush_surface_grid
     }
 
     /// Current world-space grid interval. Brush surface grids use the

@@ -3058,7 +3058,7 @@ fn headless_editor_viewport_image(
         &textures,
         &assets,
     );
-    if visibility.show_grid {
+    if visibility.show_grid && visibility.show_brush_surface_grid {
         crate::editor_preview::prepend_bsp_surface_grid_overlay(
             project,
             editor.viewport_3d_camera(),

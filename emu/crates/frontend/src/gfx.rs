@@ -288,6 +288,7 @@ impl Graphics {
         preview_backface_wireframe: bool,
         preview_bounds: bool,
         show_grid: bool,
+        show_brush_surface_grid: bool,
         grid_units: u16,
         bsp_leak_path: &[[i32; 3]],
         show_portals: bool,
@@ -338,7 +339,7 @@ impl Graphics {
             &self.editor_assets,
             reusable_frame,
         );
-        if show_grid {
+        if show_grid && show_brush_surface_grid {
             crate::editor_preview::prepend_bsp_surface_grid_overlay(
                 project,
                 camera,
