@@ -537,7 +537,7 @@ pub fn requantize_psxt_to_4bpp(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 fn decode_clut_rgb(bytes: &[u8]) -> Result<Vec<[u8; 3]>, Error> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(Error::InvalidPsxt);
     }
     Ok(bytes

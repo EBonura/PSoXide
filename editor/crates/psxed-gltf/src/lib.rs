@@ -1270,8 +1270,8 @@ struct SourceVertex {
     weights: [f32; 4],
     /// Bone this vertex follows under rigid skinning. Picked as the
     /// joint with the highest weight in `weights`. Pre-computed so the
-    /// face-grouping pass and the seam-duplication step both see the
-    /// same per-vertex choice.
+    /// face-grouping and face-corner UV seam assignment both see the same
+    /// per-vertex choice.
     dominant_joint: u16,
 }
 

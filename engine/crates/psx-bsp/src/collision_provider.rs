@@ -385,6 +385,7 @@ mod tests {
             RecordSlice::<ClipNode>::new(nodes).expect("clipnode records"),
             0,
         )
+        .expect("aligned hull fixture")
     }
 
     #[test]

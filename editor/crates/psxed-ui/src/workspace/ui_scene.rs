@@ -1,6 +1,29 @@
 use super::*;
 
 impl EditorWorkspace {
+    /// Select a UI scene by exact/case-insensitive name or zero-based index.
+    /// Intended for deterministic headless captures and other scripted editor
+    /// entry points; this only changes transient workspace state.
+    pub fn focus_ui_scene(&mut self, selector: &str) -> bool {
+        let numeric_index = selector.parse::<usize>().ok();
+        let index = self
+            .project
+            .ui_scenes
+            .iter()
+            .enumerate()
+            .find(|(index, scene)| {
+                numeric_index.is_some_and(|candidate| candidate == *index)
+                    || scene.name == selector
+                    || scene.name.eq_ignore_ascii_case(selector)
+            })
+            .map(|(index, _)| index);
+        let Some(index) = index else {
+            return false;
+        };
+        self.switch_ui_scene(index);
+        true
+    }
+
     /// List position of the UI scene the editor is currently authoring,
     /// clamped into range. Returns 0 when there are no scenes. Read this
     /// first (by value) before taking a mutable borrow of `self.project`

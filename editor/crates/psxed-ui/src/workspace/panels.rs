@@ -1154,6 +1154,8 @@ impl EditorWorkspace {
                 rect,
                 color,
                 gradient,
+                transparent,
+                shape,
             } => {
                 inspector_section(ui, "ui-rect-layout", icons::MOVE, "Layout", true, |ui| {
                     changed |= draw_ui_rect_editor(ui, rect);
@@ -1165,8 +1167,12 @@ impl EditorWorkspace {
                     "Appearance",
                     true,
                     |ui| {
-                        changed |= color_editor(ui, "Color", color);
-                        changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
+                        changed |= draw_ui_shape_style_editor(ui, transparent, shape);
+                        if !*transparent {
+                            changed |= color_editor(ui, "Fill", color);
+                            changed |=
+                                draw_ui_gradient_editor(ui, "Fill Gradient", color, gradient);
+                        }
                     },
                 );
             }
@@ -1413,6 +1419,8 @@ impl EditorWorkspace {
                 text_color,
                 text_gradient,
                 transparent,
+                focus_chrome,
+                shape,
                 action,
                 sfx,
             } => {
@@ -1453,14 +1461,22 @@ impl EditorWorkspace {
                     true,
                     |ui| {
                         changed |= color_editor(ui, "Text", text_color);
-                        changed |= ui.checkbox(transparent, "Transparent background").changed();
-                        changed |= color_editor(ui, "Background", color);
-                        changed |= draw_ui_gradient_editor(
-                            ui,
-                            "Background Gradient",
-                            color,
-                            background_gradient,
-                        );
+                        changed |= ui
+                            .checkbox(focus_chrome, "Focused chrome only")
+                            .on_hover_text(
+                                "Keep the label visible, but draw the fill and border only while focused; the selected fill sweeps horizontally",
+                            )
+                            .changed();
+                        changed |= draw_ui_shape_style_editor(ui, transparent, shape);
+                        if !*transparent {
+                            changed |= color_editor(ui, "Fill", color);
+                            changed |= draw_ui_gradient_editor(
+                                ui,
+                                "Fill Gradient",
+                                color,
+                                background_gradient,
+                            );
+                        }
                         changed |=
                             draw_ui_gradient_editor(ui, "Text Gradient", text_color, text_gradient);
                     },

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{UiTransition, UiTransitionKind, UiVisibilityCondition};
+use crate::{UiShapeStyle, UiTransition, UiTransitionKind, UiVisibilityCondition};
 
 pub(crate) fn active_far_vista_panel_count(
     texture_panels: &[Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT],
@@ -355,16 +355,20 @@ pub(crate) fn cook_ui_scene_nodes(
                 rect,
                 color,
                 gradient,
+                transparent,
+                shape,
             } => (
                 rect.x,
                 rect.y,
                 rect.width.max(1),
                 rect.height.max(1),
                 *color,
-                [0, 0, 0],
+                shape.map(|style| style.border_color).unwrap_or([0, 0, 0]),
                 [0, 0, 0],
                 cook_ui_paint(*color, *gradient, ui_paints),
-                None,
+                shape.and_then(|style| {
+                    cook_ui_paint(style.border_color, style.border_gradient, ui_paints)
+                }),
                 None,
                 UiValueBinding::ConstantQ12(0),
                 UiValueBinding::ConstantQ12(0),
@@ -372,7 +376,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 String::new(),
                 String::new(),
                 PlaytestUiAction::default(),
-                psx_level::UI_OPTION_NONE,
+                cook_ui_shape_option(*shape, *transparent),
                 ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 0,
                 default_ui_font_scale(),
@@ -478,6 +482,8 @@ pub(crate) fn cook_ui_scene_nodes(
                 text_color,
                 text_gradient,
                 transparent,
+                focus_chrome,
+                shape,
                 action,
                 ..
             } => (
@@ -486,10 +492,12 @@ pub(crate) fn cook_ui_scene_nodes(
                 rect.width.max(1),
                 rect.height.max(1),
                 *color,
-                [0, 0, 0],
+                shape.map(|style| style.border_color).unwrap_or([0, 0, 0]),
                 *text_color,
                 cook_ui_paint(*color, *background_gradient, ui_paints),
-                None,
+                shape.and_then(|style| {
+                    cook_ui_paint(style.border_color, style.border_gradient, ui_paints)
+                }),
                 cook_ui_paint(*text_color, *text_gradient, ui_paints),
                 UiValueBinding::ConstantQ12(0),
                 UiValueBinding::ConstantQ12(0),
@@ -497,10 +505,15 @@ pub(crate) fn cook_ui_scene_nodes(
                 label.clone(),
                 String::new(),
                 cook_ui_action(*action),
-                psx_level::UI_OPTION_NONE,
+                cook_ui_shape_option(*shape, *transparent),
                 ui_node_flags(rect.anchor, *align, false)
                     | if *transparent {
                         psx_level::ui_node_flags::BUTTON_TRANSPARENT
+                    } else {
+                        0
+                    }
+                    | if *focus_chrome {
+                        psx_level::ui_node_flags::BUTTON_FOCUS_CHROME
                     } else {
                         0
                     },
@@ -780,11 +793,7 @@ fn cook_ui_bar_texture_asset(
         }
     };
     let expected_width = rect.width.max(1);
-    let expected_height = rect
-        .height
-        .max(1)
-        .checked_mul(u16::from(frame_count))
-        .unwrap_or(u16::MAX);
+    let expected_height = rect.height.max(1).saturating_mul(u16::from(frame_count));
     if texture.depth() != TextureDepth::Bit4
         || texture.clut_entries() != 16
         || texture.width() != expected_width
@@ -925,6 +934,23 @@ pub(crate) fn cook_ui_paint(
     let index = ui_paints.len().min(u16::MAX as usize) as u16;
     ui_paints.push(paint);
     Some(index)
+}
+
+/// Pack optional clipped-corner/border authoring into the compact runtime
+/// shape field. Legacy opaque, borderless rectangles keep the historical
+/// `UI_OPTION_NONE` sentinel.
+pub(crate) fn cook_ui_shape_option(shape: Option<UiShapeStyle>, transparent: bool) -> u16 {
+    let style = shape.unwrap_or_default();
+    if shape.is_none() && !transparent {
+        return psx_level::UI_OPTION_NONE;
+    }
+    psx_level::ui_shape::encode(
+        style.corner_mask(),
+        style.corner_cut,
+        style.border_width,
+        transparent,
+        style.semi_transparent_fill,
+    )
 }
 
 pub(crate) fn cooked_ui_group_node(parent: Option<u16>, rect: UiRect) -> PlaytestUiNode {

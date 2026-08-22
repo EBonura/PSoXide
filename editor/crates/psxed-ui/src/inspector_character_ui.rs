@@ -1343,6 +1343,117 @@ pub(crate) fn draw_ui_rect_editor(ui: &mut egui::Ui, rect: &mut UiRect) -> bool 
     changed
 }
 
+/// Shared clipped-corner/border editor for shape-backed Rect and Button
+/// nodes. The local copy keeps `shape: None` for the legacy/default style so
+/// merely opening the inspector does not churn old project files.
+pub(crate) fn draw_ui_shape_style_editor(
+    ui: &mut egui::Ui,
+    transparent: &mut bool,
+    shape: &mut Option<UiShapeStyle>,
+) -> bool {
+    let mut changed = false;
+    let mut filled = !*transparent;
+    if ui.checkbox(&mut filled, "Fill").changed() {
+        *transparent = !filled;
+        changed = true;
+    }
+
+    let original = *shape;
+    let mut style = shape.unwrap_or_default();
+    ui.add_enabled_ui(filled, |ui| {
+        changed |= ui
+            .checkbox(&mut style.semi_transparent_fill, "Semi-transparent fill")
+            .on_hover_text("PS1 native 50/50 blend with the framebuffer")
+            .changed();
+    });
+    ui.separator();
+    ui.strong("45-degree corner cuts");
+    changed |= inspector_property_row(ui, "Cut size", |ui| {
+        ui.add(
+            egui::DragValue::new(&mut style.corner_cut)
+                .range(0..=63)
+                .suffix(" px"),
+        )
+        .changed()
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Corners");
+        changed |= ui.checkbox(&mut style.cut_top_left, "TL").changed();
+        changed |= ui.checkbox(&mut style.cut_top_right, "TR").changed();
+        changed |= ui.checkbox(&mut style.cut_bottom_left, "BL").changed();
+        changed |= ui.checkbox(&mut style.cut_bottom_right, "BR").changed();
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("Presets");
+        if ui.small_button("TL + BR").clicked() {
+            style.cut_top_left = true;
+            style.cut_top_right = false;
+            style.cut_bottom_left = false;
+            style.cut_bottom_right = true;
+            style.corner_cut = style.corner_cut.max(4);
+            changed = true;
+        }
+        if ui.small_button("TR + BL").clicked() {
+            style.cut_top_left = false;
+            style.cut_top_right = true;
+            style.cut_bottom_left = true;
+            style.cut_bottom_right = false;
+            style.corner_cut = style.corner_cut.max(4);
+            changed = true;
+        }
+        if ui.small_button("All").clicked() {
+            style.cut_top_left = true;
+            style.cut_top_right = true;
+            style.cut_bottom_left = true;
+            style.cut_bottom_right = true;
+            style.corner_cut = style.corner_cut.max(4);
+            changed = true;
+        }
+        if ui.small_button("Clear").clicked() {
+            style.corner_cut = 0;
+            style.cut_top_left = false;
+            style.cut_top_right = false;
+            style.cut_bottom_left = false;
+            style.cut_bottom_right = false;
+            changed = true;
+        }
+    });
+
+    ui.separator();
+    let mut border_enabled = style.border_width != 0;
+    if ui.checkbox(&mut border_enabled, "Border").changed() {
+        style.border_width = if border_enabled { 1 } else { 0 };
+        changed = true;
+    }
+    if border_enabled {
+        changed |= inspector_property_row(ui, "Border width", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut style.border_width)
+                    .range(1..=7)
+                    .suffix(" px"),
+            )
+            .changed()
+        });
+        changed |= color_editor(ui, "Border", &mut style.border_color);
+        changed |= draw_ui_gradient_editor(
+            ui,
+            "Border Gradient",
+            &style.border_color,
+            &mut style.border_gradient,
+        );
+    }
+    if *transparent && !border_enabled {
+        ui.weak("Enable a border to keep this transparent shape visible.");
+    }
+
+    let next = (style != UiShapeStyle::default()).then_some(style);
+    if next != original {
+        *shape = next;
+        changed = true;
+    }
+    changed
+}
+
 pub(crate) fn draw_ui_anchor_editor(ui: &mut egui::Ui, anchor: &mut UiAnchor) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {

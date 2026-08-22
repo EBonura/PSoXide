@@ -150,7 +150,10 @@ fn parses_a_minimal_blob() {
     }
 
     for t in 0..model.n_tris {
-        assert_eq!(model.tri(t).idx, [(t * 2) as u16, (t * 2 + 1) as u16, (t * 2) as u16]);
+        assert_eq!(
+            model.tri(t).idx,
+            [(t * 2) as u16, (t * 2 + 1) as u16, (t * 2) as u16]
+        );
     }
 }
 
@@ -172,7 +175,10 @@ fn decodes_poses_and_interpolates_between_frames() {
     // halfway between frame 0 (t = 0) and frame 1 (t = 100) for bone 0
     let half = a.interpolate(b, 8).bone(0, false, 0);
     assert_eq!(half.translation.x, 50);
-    assert_eq!(half.rotation.m[0][0], 4096, "identity must survive the blend");
+    assert_eq!(
+        half.rotation.m[0][0], 4096,
+        "identity must survive the blend"
+    );
 }
 
 #[test]
@@ -254,7 +260,10 @@ fn real_chunks_hold_their_invariants() {
         for i in 0..model.n_ranges {
             let range = model.range(i);
             assert!(range.bone < model.n_bones, "{name} range {i} bone");
-            assert!(range.first + range.count <= model.n_verts, "{name} range {i}");
+            assert!(
+                range.first + range.count <= model.n_verts,
+                "{name} range {i}"
+            );
             covered += range.count;
         }
         assert!(covered <= model.n_verts, "{name} ranges overlap the stream");

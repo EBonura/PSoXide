@@ -1071,7 +1071,7 @@ mod tests {
             ([1.0, 0.0, 0.0], 0),
             ([0.0, 1.0, 0.0], 1),
             ([0.0, 0.0, 1.0], 2),
-            ([0.5, 0.5, 0.7071067811865476], 3),
+            ([0.5, 0.5, std::f64::consts::FRAC_1_SQRT_2], 3),
         ] {
             let (packed, _) = pack_normalized_plane(normal, 12.0).expect("valid plane");
             assert_eq!(
@@ -1087,6 +1087,7 @@ mod tests {
             RecordSlice::<ClipNode>::new(&compiled.clipnodes).expect("clipnode bytes"),
             compiled.head_node,
         )
+        .expect("aligned collision records")
     }
 
     fn q12(world: i32) -> i32 {

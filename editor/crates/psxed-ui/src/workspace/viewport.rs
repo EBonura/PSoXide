@@ -565,7 +565,7 @@ impl EditorWorkspace {
         } else {
             return None;
         };
-        let host = scene.node(host_id)?;
+        scene.node(host_id)?;
         let settings = self.character_controller_settings(host_id)?;
         let bounds = self
             .collect_entity_bounds(None)

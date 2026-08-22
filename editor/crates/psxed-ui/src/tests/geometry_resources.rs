@@ -188,6 +188,8 @@ fn ui_scene_create_switch_edit_isolated_delete_clamps() {
             rect: UiRect::new(8, 8, 32, 16),
             color: [10, 20, 30],
             gradient: None,
+            transparent: false,
+            shape: None,
         },
         "Probe",
     );

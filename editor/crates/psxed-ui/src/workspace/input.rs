@@ -722,10 +722,8 @@ impl EditorWorkspace {
         if consume_ui_paste {
             self.paste_ui_node();
         }
-        if consume_geometry_copy {
-            if self.copy_current_geometry() {
-                self.publish_geometry_clipboard_marker(ctx);
-            }
+        if consume_geometry_copy && self.copy_current_geometry() {
+            self.publish_geometry_clipboard_marker(ctx);
         }
         if consume_geometry_paste {
             self.paste_current_geometry();
@@ -1671,10 +1669,9 @@ impl EditorWorkspace {
                             "Copy selected brushes for paste into this or another project",
                         )
                         .clicked()
+                        && self.copy_current_geometry()
                     {
-                        if self.copy_current_geometry() {
-                            self.publish_geometry_clipboard_marker(ui.ctx());
-                        }
+                        self.publish_geometry_clipboard_marker(ui.ctx());
                     }
                     let paste_count = self.brush_geometry_clipboard_count();
                     let paste_label = paste_count.map_or_else(

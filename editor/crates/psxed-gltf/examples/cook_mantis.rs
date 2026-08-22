@@ -36,16 +36,30 @@ fn main() {
         model.vertex_count(),
         model.part_count(),
         model.joint_count(),
-        lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]
+        lo[0],
+        hi[0],
+        lo[1],
+        hi[1],
+        lo[2],
+        hi[2]
     );
-    println!("  spans: x={} y={} z={}", hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]);
+    println!(
+        "  spans: x={} y={} z={}",
+        hi[0] - lo[0],
+        hi[1] - lo[1],
+        hi[2] - lo[2]
+    );
     std::fs::write(format!("{out}/rust_mantis.psxmdl"), &pkg.model).unwrap();
     if let Some(texture) = &pkg.texture {
         std::fs::write(format!("{out}/rust_mantis.psxt"), texture).unwrap();
     }
     for clip in &pkg.clips {
         let anim = psx_asset::Animation::from_bytes(&clip.bytes).expect("clip");
-        println!("  clip '{}' frames={}", clip.source_name.as_deref().unwrap_or("?"), anim.frame_count());
+        println!(
+            "  clip '{}' frames={}",
+            clip.source_name.as_deref().unwrap_or("?"),
+            anim.frame_count()
+        );
         std::fs::write(
             format!("{out}/{}.psxanim", clip.sanitized_name),
             &clip.bytes,

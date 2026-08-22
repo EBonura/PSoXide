@@ -326,6 +326,31 @@ pub fn draw_tri_gouraud(verts: [(i16, i16); 3], colors: [(u8, u8, u8); 3]) {
     write_gp0(pack_vertex(verts[2].0, verts[2].1));
 }
 
+/// Draw a semi-transparent Gouraud-shaded triangle. The GPU interpolates the
+/// vertex colours first, then applies the selected native blend equation.
+pub fn draw_tri_gouraud_blended(
+    verts: [(i16, i16); 3],
+    colors: [(u8, u8, u8); 3],
+    blend_mode: BlendMode,
+) {
+    if !blend_mode.is_translucent() {
+        draw_tri_gouraud(verts, colors);
+        return;
+    }
+    TextureMaterial::blended(0, 0, colors[0], blend_mode).apply_draw_mode();
+    wait_cmd_ready();
+    let op = gp0::polygon_opcode(true, false, false, true, false);
+    let (r0, g0, b0) = colors[0];
+    write_gp0(op | pack_color(r0, g0, b0));
+    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    let (r1, g1, b1) = colors[1];
+    write_gp0(pack_color(r1, g1, b1));
+    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    let (r2, g2, b2) = colors[2];
+    write_gp0(pack_color(r2, g2, b2));
+    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+}
+
 /// Draw a single monochrome line from `(x0, y0)` to `(x1, y1)`
 /// via GP0 0x40 (single mono line, 3 words). The GPU's line
 /// rasteriser handles diagonal paths correctly -- unlike building

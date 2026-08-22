@@ -56,6 +56,7 @@
 
 pub mod angle;
 pub mod app;
+pub mod attributed_clip;
 pub mod character_motor;
 pub mod classic_affine;
 pub mod collision_query;
@@ -65,10 +66,12 @@ pub mod frames;
 pub mod game_app;
 pub mod lighting;
 pub mod movement;
+pub mod projection;
 pub mod render;
 pub mod render3d;
 pub mod scene;
 pub mod scheduler;
+pub mod scratchpad;
 pub mod sfx;
 pub mod telemetry;
 pub mod third_person_camera;
@@ -82,24 +85,26 @@ pub mod world_render;
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
-    commit_body_step, commit_body_step_with_trace_provider, BodyStep,
-    CharacterBlockerTraceProvider, CharacterCollision, CharacterCollisionAabb,
-    CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAction, CharacterMotorAnim,
-    CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
+    commit_body_direction_with_trace_provider, commit_body_step,
+    commit_body_step_with_trace_provider, BodyStep, CharacterBlockerTraceProvider,
+    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
+    CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
+    CharacterMotorInput, CharacterMotorState,
 };
 pub use classic_affine::{
     compose_classic_alias_transform, materialize_classic_affine_indexed_projected_vertices,
     materialize_classic_affine_indexed_vertices, materialize_classic_affine_word_vertices,
     project_classic_affine_indexed_vertices, submit_classic_affine_batch,
-    submit_classic_affine_fan, submit_classic_affine_packed_fan,
+    submit_classic_affine_fan, submit_classic_affine_mixed_batch, submit_classic_affine_packed_fan,
     submit_classic_affine_projected_batch, submit_classic_affine_projected_fan,
     submit_classic_affine_scoped_windowed_batch, submit_classic_affine_scoped_windowed_fan,
     submit_classic_affine_windowed_batch, submit_classic_affine_windowed_fan,
     submit_classic_alias_model, submit_classic_alias_view_model, ClassicAffineBatchSurface,
-    ClassicAffineIndexedCorner, ClassicAffinePosition, ClassicAffineProfile,
-    ClassicAffineProjectedVertex, ClassicAffineSourceVertex, ClassicAffineSubmit,
-    ClassicAffineVertex, ClassicAffineWindowedBatchSurface, ClassicAffineWordSourceVertex,
-    ClassicAliasFace, ClassicAliasProjectedVertex, ClassicAliasVertex,
+    ClassicAffineIndexedCorner, ClassicAffineMixedBatchSurface, ClassicAffinePosition,
+    ClassicAffineProfile, ClassicAffineProjectedVertex, ClassicAffineSourceVertex,
+    ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWindowedBatchSurface,
+    ClassicAffineWordSourceVertex, ClassicAliasFace, ClassicAliasProjectedVertex,
+    ClassicAliasVertex,
 };
 pub use collision_query::{
     trace_collision, CollisionQueryError, CollisionTrace, CollisionTraceProvider,
