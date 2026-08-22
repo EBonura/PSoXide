@@ -14,6 +14,7 @@ psxed-tex    = { path = "../psxed-tex" }
 psx-asset    = { path = "../../../sdk/crates/psx-asset" }
 psx-bsp      = { path = "../../../engine/crates/psx-bsp" }
 psx-engine   = { path = "../../../engine/crates/psx-engine" }
+psx-render-contract = { path = "../../../engine/crates/psx-render-contract" }
 psx-iso      = { path = "../../../crates/psx-iso" }
 psx-level    = { path = "../../../engine/crates/psx-level" }
 flate2 = "1.1"

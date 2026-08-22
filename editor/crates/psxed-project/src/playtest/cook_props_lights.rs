@@ -1447,6 +1447,10 @@ pub(crate) fn push_game_entity(
         ));
         return false;
     }
+    let mut flags = psx_level::game_entity_flags::ENABLED;
+    if state_clips.run_supported {
+        flags |= psx_level::game_entity_flags::CAN_RUN;
+    }
     game_entities.push(PlaytestGameEntity {
         room: room_index,
         kind: names.intern(archetype_name),
@@ -1454,6 +1458,9 @@ pub(crate) fn push_game_entity(
         model_instance: model_instance.unwrap_or(psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE),
         idle_clip: state_clips.idle,
         walk_clip: state_clips.walk,
+        walk_backward_clip: state_clips.walk_backward,
+        strafe_left_clip: state_clips.strafe_left,
+        strafe_right_clip: state_clips.strafe_right,
         run_clip: state_clips.run,
         attack_clip: state_clips.attack,
         stagger_clip: state_clips.stagger,
@@ -1489,7 +1496,7 @@ pub(crate) fn push_game_entity(
         poise: enemy.poise,
         touch_damage: enemy.touch_damage,
         max_health: enemy.max_health,
-        flags: psx_level::game_entity_flags::ENABLED,
+        flags,
     });
     true
 }

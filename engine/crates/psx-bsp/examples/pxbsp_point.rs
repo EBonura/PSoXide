@@ -13,7 +13,11 @@ fn main() {
     let leaves = map.leaves();
     for spec in &args[1..] {
         let v: Vec<i32> = spec.split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let point = Vec3I32 { x: v[0] << 12, y: v[1] << 12, z: v[2] << 12 };
+        let point = Vec3I32 {
+            x: v[0] << 12,
+            y: v[1] << 12,
+            z: v[2] << 12,
+        };
         match map.point_leaf_index(point) {
             Some(index) => {
                 let contents = leaves.get(index).map(|l| l.contents).unwrap_or(0);
@@ -26,7 +30,10 @@ fn main() {
                     -6 => "SKY",
                     _ => "?",
                 };
-                println!("({},{},{}) -> leaf {} contents {} {}", v[0], v[1], v[2], index, contents, name);
+                println!(
+                    "({},{},{}) -> leaf {} contents {} {}",
+                    v[0], v[1], v[2], index, contents, name
+                );
             }
             None => println!("({},{},{}) -> no leaf", v[0], v[1], v[2]),
         }

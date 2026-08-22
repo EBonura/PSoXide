@@ -465,6 +465,11 @@ pub struct CharacterMotorConfig {
     pub walk_speed: i32,
     /// Sprint speed in Q8 world units per display frame.
     pub run_speed: i32,
+    /// Whether sprint input may enter the Run state.
+    ///
+    /// Characters without an authored Run action disable this while retaining
+    /// `run_speed` as harmless authoring data.
+    pub run_enabled: bool,
     /// Turn speed per display frame.
     pub yaw_step: Angle,
     /// Downward acceleration in engine units per fixed 60 Hz tick squared.
@@ -523,6 +528,7 @@ impl CharacterMotorConfig {
             height,
             walk_speed,
             run_speed,
+            run_enabled: true,
             yaw_step,
             gravity_per_tick: GRAVITY_PER_TICK,
             weight_q8: DEFAULT_WEIGHT_Q8,
@@ -1269,7 +1275,8 @@ impl CharacterMotorState {
     }
 
     fn can_sprint(&mut self, wants_sprint: bool, config: CharacterMotorConfig) -> bool {
-        if !wants_sprint {
+        if !wants_sprint || !config.run_enabled {
+            self.sprint_latched = false;
             return false;
         }
         if self.sprint_exhausted || self.stamina_q12 <= 0 {
@@ -4816,6 +4823,28 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(64, 0, 0));
         assert_eq!(frame.anim, CharacterMotorAnim::Run);
         assert!(frame.sprinting);
+    }
+
+    #[test]
+    fn disabled_run_capability_ignores_sprint_input() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut cfg = config_instant_turn();
+        cfg.run_enabled = false;
+        let frame = motor.update(
+            None,
+            CharacterMotorInput {
+                move_x: Q12::ONE,
+                move_z: Q12::ZERO,
+                walk: 1,
+                sprint: true,
+                ..CharacterMotorInput::default()
+            },
+            cfg,
+        );
+        assert_eq!(frame.position, RoomPoint::new(32, 0, 0));
+        assert_eq!(frame.anim, CharacterMotorAnim::Walk);
+        assert!(!frame.sprinting);
+        assert_eq!(frame.stamina_q12, DEFAULT_STAMINA_MAX_Q12);
     }
 
     #[test]

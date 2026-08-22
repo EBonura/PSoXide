@@ -571,14 +571,19 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // contribution is captured while each part's matrix is live; a full
         // chunk can then amortize secondary-joint and projection-state loads
         // across the whole model instead of flushing every small part.
-        #[cfg(not(feature = "vert-debug"))]
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
         let mut blended_chunk = MaybeUninit::<[u16; BLENDED_VERTEX_CHUNK]>::uninit();
-        #[cfg(not(feature = "vert-debug"))]
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
         let blended_chunk_ptr = blended_chunk.as_mut_ptr().cast::<u16>();
-        #[cfg(not(feature = "vert-debug"))]
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
         let mut blended_view_chunk = MaybeUninit::<[ViewVertex; BLENDED_VERTEX_CHUNK]>::uninit();
-        #[cfg(not(feature = "vert-debug"))]
+        #[cfg(all(not(feature = "vert-debug"), not(target_arch = "mips")))]
         let blended_view_chunk_ptr = blended_view_chunk.as_mut_ptr().cast::<ViewVertex>();
+        #[cfg(all(not(feature = "vert-debug"), target_arch = "mips"))]
+        let blended_chunk_ptr = unsafe { crate::scratchpad::ptr_at::<u16>(0) };
+        #[cfg(all(not(feature = "vert-debug"), target_arch = "mips"))]
+        let blended_view_chunk_ptr =
+            unsafe { crate::scratchpad::ptr_at::<ViewVertex>(BLENDED_VERTEX_INDEX_BYTES) };
         #[cfg(not(feature = "vert-debug"))]
         let mut blended_len = 0usize;
         #[cfg(not(feature = "vert-debug"))]

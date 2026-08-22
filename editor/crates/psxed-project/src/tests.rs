@@ -1749,7 +1749,7 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
         .resources
         .iter()
         .find(|resource| resource.name == "Tank Boss")
-        .expect("default project catalogues the future heavy enemy");
+        .expect("default project catalogues the boss enemy");
     let ResourceData::Character(tank) = &tank_resource.data else {
         panic!("Tank Boss is a Character resource");
     };
@@ -1760,7 +1760,7 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
     let ResourceData::Model(model) = &model_resource.data else {
         panic!("Tank Boss model binding points at a Model resource");
     };
-    assert_eq!(model_resource.name, "Tank Boss Model");
+    assert_eq!(model_resource.name, "Tank Boss Animated Model");
     assert!(default_project_dir().join(&model.model_path).is_file());
     assert!(model
         .texture_path
@@ -1769,7 +1769,7 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
 
     let animation_set_id = tank
         .animation_set
-        .expect("Tank Boss keeps its future animation-set binding");
+        .expect("Tank Boss has an animation-set binding");
     let animation_set = project
         .resource(animation_set_id)
         .expect("Tank Boss animation set exists");
@@ -1778,13 +1778,24 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
     };
     assert_eq!(
         animation_set.clips.len(),
-        1,
-        "only the safe rest pose ships"
+        5,
+        "idle and four-direction locomotion ship"
     );
-    let rest_pose = project
-        .resource(animation_set.clips[0])
-        .expect("Tank Boss rest pose exists");
-    assert!(matches!(rest_pose.data, ResourceData::AnimationClip(_)));
+    for action in [
+        CharacterAnimationAction::Idle,
+        CharacterAnimationAction::Walk,
+        CharacterAnimationAction::WalkBackward,
+        CharacterAnimationAction::StrafeLeft,
+        CharacterAnimationAction::StrafeRight,
+    ] {
+        let binding = animation_set
+            .action_clips
+            .iter()
+            .find(|binding| binding.action == action)
+            .unwrap_or_else(|| panic!("Tank Boss has a {action:?} binding"));
+        let clip = project.resource(binding.clip).expect("bound clip exists");
+        assert!(matches!(clip.data, ResourceData::AnimationClip(_)));
+    }
 
     for scene in &project.scenes {
         for node in scene.nodes() {

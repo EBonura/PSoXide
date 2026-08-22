@@ -54,6 +54,65 @@ pub(super) const BSP_FALLBACK_CAMERA_CLEARANCE: i32 = 16;
 pub(super) const BSP_CAMERA_WALL_MARGIN: i32 = 12;
 pub(super) const BSP_FALLBACK_CAMERA_MARGIN: i32 = 16;
 pub(super) const BSP_USE_DISTANCE: i32 = 256;
+const BSP_BOUNDS_VISIBILITY_CACHE_SIZE: usize = 16;
+
+/// Dynamic world bounds used to link actors/instances to every BSP leaf they
+/// touch. Coordinates use the playtest's integer engine-unit convention; the
+/// BSP runtime converts them to Q20.12 only at the tree boundary.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct BspVisibilityBounds {
+    min: [i32; 3],
+    max: [i32; 3],
+}
+
+impl BspVisibilityBounds {
+    pub(super) const EMPTY: Self = Self {
+        min: [0; 3],
+        max: [0; 3],
+    };
+
+    pub(super) fn cylinder(position: [i32; 3], radius: i32, height: i32) -> Self {
+        let radius = radius.max(0);
+        let height = height.max(1);
+        Self {
+            min: [
+                position[0].saturating_sub(radius),
+                position[1],
+                position[2].saturating_sub(radius),
+            ],
+            max: [
+                position[0].saturating_add(radius),
+                position[1].saturating_add(height),
+                position[2].saturating_add(radius),
+            ],
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct BspBoundsVisibilityCacheEntry {
+    bounds: BspVisibilityBounds,
+    observer_leaf: u16,
+    visible: bool,
+    valid: bool,
+}
+
+impl BspBoundsVisibilityCacheEntry {
+    const EMPTY: Self = Self {
+        bounds: BspVisibilityBounds::EMPTY,
+        observer_leaf: 0,
+        visible: false,
+        valid: false,
+    };
+}
+
+fn bounds_visibility_cache_slot(bounds: BspVisibilityBounds, observer_leaf: usize) -> usize {
+    let mut hash = observer_leaf as u32;
+    for component in bounds.min.into_iter().chain(bounds.max) {
+        hash = hash.rotate_left(5) ^ component as u32;
+    }
+    hash as usize & (BSP_BOUNDS_VISIBILITY_CACHE_SIZE - 1)
+}
 
 #[derive(Debug)]
 pub(super) enum BspRuntimeInitError {
@@ -136,6 +195,7 @@ pub(super) struct BspRuntime {
     activation_visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     activation_leaf: Option<usize>,
     activation_visible_leaves: usize,
+    bounds_visibility_cache: [BspBoundsVisibilityCacheEntry; BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
 }
 
 impl BspRuntime {
@@ -234,6 +294,8 @@ impl BspRuntime {
             activation_visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             activation_leaf: None,
             activation_visible_leaves: 0,
+            bounds_visibility_cache: [BspBoundsVisibilityCacheEntry::EMPTY;
+                BSP_BOUNDS_VISIBILITY_CACHE_SIZE],
         })
     }
 
@@ -280,6 +342,82 @@ impl BspRuntime {
             }
             let visible_index = leaf - 1;
             if self.activation_visibility[visible_index >> 3] & (1 << (visible_index & 7)) != 0 {
+                mask |= 1u64 << index;
+            }
+        }
+        mask
+    }
+
+    /// Return one bit per actor/instance whose complete bounds touch at least
+    /// one visible BSP leaf. This mirrors Quake's multi-leaf entity linking;
+    /// origin-only PVS tests incorrectly suppress large or doorway-straddling
+    /// actors while part of their geometry is still visible.
+    // psx-numeric-allow-next-line: one bit per queried bounds; the width IS the caller's capacity
+    pub(super) fn visible_bounds_mask(
+        &mut self,
+        observer: RoomPoint,
+        bounds: &[BspVisibilityBounds],
+    ) -> u64 {
+        let q12 = |value: i32| value.saturating_mul(4096);
+        let observer = Vec3I32 {
+            x: q12(observer.x),
+            y: q12(observer.y),
+            z: q12(observer.z),
+        };
+        let Some(observer_leaf) = self.map.point_leaf_index(observer) else {
+            self.activation_leaf = None;
+            self.activation_visible_leaves = 0;
+            return 0;
+        };
+        if self.activation_leaf != Some(observer_leaf) {
+            let Some(visible_leaves) = self
+                .map
+                .leaf_visibility_into(observer_leaf, &mut self.activation_visibility)
+            else {
+                self.activation_leaf = None;
+                self.activation_visible_leaves = 0;
+                return 0;
+            };
+            self.activation_leaf = Some(observer_leaf);
+            self.activation_visible_leaves = visible_leaves;
+        }
+
+        let mut mask = 0u64;
+        for (index, bounds) in bounds.iter().enumerate().take(64) {
+            let cache_slot = bounds_visibility_cache_slot(*bounds, observer_leaf);
+            let cached = self.bounds_visibility_cache[cache_slot];
+            if cached.valid
+                && cached.observer_leaf as usize == observer_leaf
+                && cached.bounds == *bounds
+            {
+                if cached.visible {
+                    mask |= 1u64 << index;
+                }
+                continue;
+            }
+            let mins = Vec3I32 {
+                x: q12(bounds.min[0]),
+                y: q12(bounds.min[1]),
+                z: q12(bounds.min[2]),
+            };
+            let maxs = Vec3I32 {
+                x: q12(bounds.max[0]),
+                y: q12(bounds.max[1]),
+                z: q12(bounds.max[2]),
+            };
+            let visible = self.map.aabb_touches_visible_leaf(
+                mins,
+                maxs,
+                &self.activation_visibility,
+                self.activation_visible_leaves,
+            );
+            self.bounds_visibility_cache[cache_slot] = BspBoundsVisibilityCacheEntry {
+                bounds: *bounds,
+                observer_leaf: observer_leaf as u16,
+                visible,
+                valid: true,
+            };
+            if visible {
                 mask |= 1u64 << index;
             }
         }

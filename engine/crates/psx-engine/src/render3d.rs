@@ -3463,10 +3463,20 @@ fn project_gte_view_vertex_identity_loaded(
 }
 
 /// Number of deferred CPU-blend vertices flushed per batch by
-/// [`flush_blended_model_vertex_chunk`]. Sized so the stack scratch stays
-/// small while still amortizing GTE matrix reloads across a seam cluster.
+/// [`flush_blended_model_vertex_chunk`]. Console builds keep the full working
+/// set in CPU-local scratchpad, allowing a wider batch without consuming the
+/// guest stack or permanent heap.
 #[cfg(not(feature = "vert-debug"))]
-const BLENDED_VERTEX_CHUNK: usize = 32;
+const BLENDED_VERTEX_CHUNK: usize = 64;
+
+#[cfg(all(not(feature = "vert-debug"), target_arch = "mips"))]
+const BLENDED_VERTEX_INDEX_BYTES: usize = BLENDED_VERTEX_CHUNK * core::mem::size_of::<u16>();
+
+#[cfg(all(not(feature = "vert-debug"), target_arch = "mips"))]
+const _: () = assert!(
+    BLENDED_VERTEX_INDEX_BYTES + BLENDED_VERTEX_CHUNK * core::mem::size_of::<ViewVertex>()
+        <= crate::scratchpad::SIZE
+);
 
 /// Project a chunk of deferred CPU-blend model vertices in joint-grouped
 /// phases.

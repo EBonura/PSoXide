@@ -1,0 +1,10 @@
+{
+  "character": "rust_mantis",
+  "status": "in_progress",
+  "selected": {
+    "walk_backward": "backward_walk_v1/glb/backward_02.glb"
+  },
+  "notes": {
+    "walk_backward": "User selected variant 2 on 2026-08-22."
+  }
+}

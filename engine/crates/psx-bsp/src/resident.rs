@@ -55,7 +55,7 @@ pub struct IndexedVertices<'a> {
     pub positions: &'a [IndexedVertexPosition],
 }
 
-fn indexed_vertex_layout(bytes: &[u8]) -> Option<(usize, usize, usize)> {
+pub(crate) fn indexed_vertex_layout(bytes: &[u8]) -> Option<(usize, usize, usize)> {
     if bytes.len() < INDEXED_VERTEX_HEADER_BYTES
         || bytes.as_ptr() as usize & 3 != 0
         || u32::from_le_bytes(bytes[0..4].try_into().ok()?) != INDEXED_VERTEX_MAGIC
@@ -74,7 +74,7 @@ fn indexed_vertex_layout(bytes: &[u8]) -> Option<(usize, usize, usize)> {
     Some((corner_count, position_count, position_offset))
 }
 
-fn indexed_vertices_with_layout(
+pub(crate) fn indexed_vertices_with_layout(
     bytes: &[u8],
     corner_count: usize,
     position_count: usize,
@@ -92,7 +92,7 @@ fn indexed_vertices_with_layout(
     IndexedVertices { corners, positions }
 }
 
-fn validate_indexed_vertices(bytes: &[u8]) -> Option<(u16, u16)> {
+pub(crate) fn validate_indexed_vertices(bytes: &[u8]) -> Option<(u16, u16)> {
     let (corner_count, position_count, position_offset) = indexed_vertex_layout(bytes)?;
     let indexed =
         indexed_vertices_with_layout(bytes, corner_count, position_count, position_offset);

@@ -241,6 +241,15 @@ impl RuntimeCharacter {
             .unwrap_or(OptionalModelClipIndex::NONE)
     }
 
+    /// Whether this character authors the requested action.
+    ///
+    /// Optional clip fallbacks remain useful for rendering, but gameplay
+    /// features with distinct mechanics (notably sprinting) use this check so
+    /// a fallback clip cannot accidentally enable an unsupported action.
+    pub fn supports_action(&self, action: CharacterAnimationAction) -> bool {
+        self.action_clip(action).is_some()
+    }
+
     /// The authored flag byte for `action`.
     pub fn action_flags(&self, action: CharacterAnimationAction) -> u8 {
         self.action_flags
@@ -301,7 +310,9 @@ impl RuntimeCharacter {
         let walk = self
             .action_clip(CharacterAnimationAction::Walk)
             .unwrap_or(idle);
-        let run = self.action_clip(CharacterAnimationAction::Run).unwrap_or(walk);
+        let run = self
+            .action_clip(CharacterAnimationAction::Run)
+            .unwrap_or(walk);
         match anim.action() {
             CharacterAnimationAction::Idle => idle,
             CharacterAnimationAction::Walk => walk,
@@ -481,6 +492,7 @@ impl RuntimeCharacter {
             self.run_speed,
             self.yaw_step,
         );
+        config.run_enabled = self.supports_action(CharacterAnimationAction::Run);
         config.weight_q8 = self.weight_q8;
         config.stamina_max_q12 = self.stamina_max_q12;
         config.sprint_min_q12 = self.sprint_min_q12;
