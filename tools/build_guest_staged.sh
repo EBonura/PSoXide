@@ -84,10 +84,15 @@ for entry in $CLOSURE; do
     destination="$STAGE/$entry"
     if [ -d "$source" ]; then
         mkdir -p "$destination"
-        rsync -a --delete --exclude '/target/' "$source/" "$destination/"
+        # Cargo fingerprints use mtimes. `rsync -a` preserved a checkout's
+        # older source time, so changing the canonical stage from a newer
+        # worktree to older-dated DIFFERENT content could leave a newer guest
+        # artifact falsely fresh. Compare content, retain untouched files, but
+        # give every changed destination the current copy time.
+        rsync -rlp --checksum --delete --exclude '/target/' "$source/" "$destination/"
     else
         mkdir -p "$(dirname "$destination")"
-        rsync -a "$source" "$destination"
+        rsync -lp --checksum "$source" "$destination"
     fi
 done
 
