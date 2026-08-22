@@ -1,4 +1,5 @@
 #![no_std]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 
 //! Checked, allocation-free readers for the XBSP cooked map format.
 //!
@@ -410,6 +411,7 @@ pub struct Vec2I16 {
     pub y: i16,
 }
 
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Vec3I16 {
     pub x: i16,
@@ -604,6 +606,63 @@ impl CookedRecord for Plane {
             distance: i32_at(bytes, 6),
             kind: i32_at(bytes, 10),
         }
+    }
+}
+
+/// Native PXBSP plane record, matching Quake-PSX's directly addressable
+/// `mplane_t`: quantized normal, authored axial class, cached normal sign
+/// bits, then an aligned Q20.12 distance.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompactPlane {
+    pub normal: Vec3I16,
+    pub kind: u8,
+    pub sign_bits: u8,
+    pub distance: i32,
+}
+
+const _: [(); 12] = [(); core::mem::size_of::<CompactPlane>()];
+const _: [(); 4] = [(); core::mem::align_of::<CompactPlane>()];
+
+impl CompactPlane {
+    pub const fn decoded(self) -> Plane {
+        Plane {
+            normal: self.normal,
+            distance: self.distance,
+            kind: self.kind as i32,
+        }
+    }
+}
+
+impl CookedRecord for CompactPlane {
+    const SIZE: usize = 12;
+
+    fn decode(bytes: &[u8]) -> Self {
+        Self {
+            normal: vec3_i16(bytes, 0),
+            kind: bytes[6],
+            sign_bits: bytes[7],
+            distance: i32_at(bytes, 8),
+        }
+    }
+}
+
+impl<'a> RecordSlice<'a, CompactPlane> {
+    /// Borrow current PXBSP plane records without reconstructing them at each
+    /// collision or render-tree step.
+    #[cfg(target_endian = "little")]
+    pub fn as_native_compact_planes(self) -> Option<&'a [CompactPlane]> {
+        let bytes = self.as_bytes();
+        if bytes
+            .as_ptr()
+            .align_offset(core::mem::align_of::<CompactPlane>())
+            != 0
+        {
+            return None;
+        }
+        Some(unsafe {
+            core::slice::from_raw_parts(bytes.as_ptr().cast::<CompactPlane>(), self.len())
+        })
     }
 }
 
@@ -849,6 +908,9 @@ impl<'a> RecordSlice<'a, ClipNode> {
     #[cfg(target_endian = "little")]
     pub fn as_native_clip_nodes(self) -> Option<&'a [ClipNode]> {
         let bytes = self.as_bytes();
+        if bytes.is_empty() {
+            return Some(&[]);
+        }
         if bytes
             .as_ptr()
             .align_offset(core::mem::align_of::<ClipNode>())

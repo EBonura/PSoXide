@@ -501,6 +501,26 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
 }
 
 impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
+    fn can_run(record: &LevelGameEntityRecord) -> bool {
+        record.flags & game_entity_flags::CAN_RUN != 0
+    }
+
+    fn approach_clip(record: &LevelGameEntityRecord) -> u16 {
+        if Self::can_run(record) {
+            record.run_clip
+        } else {
+            record.walk_clip
+        }
+    }
+
+    fn approach_speed(record: &LevelGameEntityRecord) -> i32 {
+        if Self::can_run(record) {
+            record.run_speed
+        } else {
+            record.walk_speed
+        }
+    }
+
     /// All-zero state; `const` so the owning game can keep it in
     /// link-time-zero (`.bss`) scene storage. Not meaningful until
     /// [`Self::spawn_from_records`] runs.
@@ -684,10 +704,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             GameEntityState::Idle => looping(record.idle_clip),
             GameEntityState::Patrol => looping(record.walk_clip),
             GameEntityState::Aggro => match self.intent(index) {
-                GameEntityIntent::Approach => looping(record.run_clip),
-                GameEntityIntent::CircleLeft
-                | GameEntityIntent::CircleRight
-                | GameEntityIntent::Retreat => looping(record.walk_clip),
+                GameEntityIntent::Approach => looping(Self::approach_clip(record)),
+                GameEntityIntent::CircleLeft => looping(record.strafe_left_clip),
+                GameEntityIntent::CircleRight => looping(record.strafe_right_clip),
+                GameEntityIntent::Retreat => looping(record.walk_backward_clip),
                 GameEntityIntent::Hold => looping(record.idle_clip),
             },
             GameEntityState::Windup => one_shot(record.attack_clip, ticks),
@@ -1307,7 +1327,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 record,
                 index,
                 input.player,
-                record.run_speed.saturating_mul(i32::from(delta_ticks)),
+                Self::approach_speed(record).saturating_mul(i32::from(delta_ticks)),
                 mover,
             );
             return;
@@ -1324,7 +1344,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 record,
                 index,
                 input.player,
-                record.run_speed.saturating_mul(i32::from(delta_ticks)),
+                Self::approach_speed(record).saturating_mul(i32::from(delta_ticks)),
                 mover,
             );
             return;
@@ -1806,6 +1826,9 @@ mod tests {
             model_instance: psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE,
             idle_clip: 0,
             walk_clip: 1,
+            walk_backward_clip: 6,
+            strafe_left_clip: 7,
+            strafe_right_clip: 8,
             run_clip: 2,
             attack_clip: 3,
             stagger_clip: 4,
@@ -1842,23 +1865,40 @@ mod tests {
         }
     }
 
-    static IDLE_ENEMY: [LevelGameEntityRecord; 1] =
-        [test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)];
+    static IDLE_ENEMY: [LevelGameEntityRecord; 1] = [test_record(
+        1000,
+        1000,
+        0,
+        512,
+        game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+    )];
     static PATROL_ENEMY: [LevelGameEntityRecord; 1] = [test_record(
         1000,
         1000,
         400,
         512,
-        game_entity_flags::ENABLED,
+        game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
     )];
     static TARGETED_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
         model_instance: 7,
-        ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
+        ..test_record(
+            1000,
+            1000,
+            0,
+            512,
+            game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+        )
     }];
     static DISABLED_ENEMY: [LevelGameEntityRecord; 1] = [test_record(0, 0, 0, 512, 0)];
     static FAR_ROOM_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
         room: RoomIndex(7),
-        ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
+        ..test_record(
+            1000,
+            1000,
+            0,
+            512,
+            game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+        )
     }];
 
     const ACTIVE: [RoomIndex; 1] = [RoomIndex(0)];
@@ -2008,9 +2048,27 @@ mod tests {
     #[test]
     fn spawn_clamps_to_capacity_and_counts_overflow() {
         static MANY: [LevelGameEntityRecord; 3] = [
-            test_record(0, 0, 0, 512, game_entity_flags::ENABLED),
-            test_record(100, 0, 0, 512, game_entity_flags::ENABLED),
-            test_record(200, 0, 0, 512, game_entity_flags::ENABLED),
+            test_record(
+                0,
+                0,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            ),
+            test_record(
+                100,
+                0,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            ),
+            test_record(
+                200,
+                0,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            ),
         ];
         let mut entities = GameEntities::<2>::EMPTY;
         entities.spawn_from_records(&MANY);
@@ -2060,7 +2118,13 @@ mod tests {
     fn reaction_delay_holds_before_the_director_grants_an_attack() {
         static REACTIVE: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
             reaction_ticks: 3,
-            ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
+            ..test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            )
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&REACTIVE);
@@ -2082,8 +2146,20 @@ mod tests {
     #[test]
     fn combat_director_grants_only_one_enemy_the_attack_slot() {
         static PAIR: [LevelGameEntityRecord; 2] = [
-            test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED),
-            test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED),
+            test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            ),
+            test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            ),
         ];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PAIR);
@@ -2102,7 +2178,13 @@ mod tests {
         static PACED: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
             attack_cooldown_ticks: 5,
             group_attack_delay_ticks: 3,
-            ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
+            ..test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            )
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PACED);
@@ -2140,7 +2222,13 @@ mod tests {
             spacing_tolerance: 100,
             decision_interval_ticks: 1,
             circle_chance: 100,
-            ..test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)
+            ..test_record(
+                1000,
+                1000,
+                0,
+                512,
+                game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+            )
         }];
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&SPACED);
@@ -2149,6 +2237,11 @@ mod tests {
         entities.attack_cooldown[0] = 100;
         entities.tick(&SPACED, near_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(entities.intent(0), GameEntityIntent::Retreat);
+        assert_eq!(
+            entities.clip_for_state(&SPACED, 0).clip,
+            SPACED[0].walk_backward_clip,
+            "retreat uses the authored backward walk"
+        );
         assert!(
             entities.position(0)[0] < 1000,
             "retreat moves away from +X player"
@@ -2163,10 +2256,12 @@ mod tests {
             ..near_input(&ACTIVE)
         };
         entities.tick(&SPACED, in_band, &mut NoClipMover);
-        assert!(matches!(
-            entities.intent(0),
-            GameEntityIntent::CircleLeft | GameEntityIntent::CircleRight
-        ));
+        let expected_clip = match entities.intent(0) {
+            GameEntityIntent::CircleLeft => SPACED[0].strafe_left_clip,
+            GameEntityIntent::CircleRight => SPACED[0].strafe_right_clip,
+            other => panic!("expected circle intent, got {other:?}"),
+        };
+        assert_eq!(entities.clip_for_state(&SPACED, 0).clip, expected_clip);
         assert_ne!(entities.position(0)[2], 1000, "circling moves laterally");
         assert!(
             (i32::from(entities.yaw(0)) - 1024).abs() < 32,
@@ -2347,6 +2442,42 @@ mod tests {
             entities.position(0)[0] - before,
             IDLE_ENEMY[0].run_speed,
             "chase closes at Character run speed"
+        );
+    }
+
+    #[test]
+    fn chase_without_run_capability_walks_and_uses_walk_clip() {
+        static WALK_ONLY_ENEMY: [LevelGameEntityRecord; 1] =
+            [test_record(1000, 1000, 0, 512, game_entity_flags::ENABLED)];
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&WALK_ONLY_ENEMY);
+        let chase_input = GameEntityTickInput {
+            player: [1800, 0, 1000],
+            player_room: RoomIndex(0),
+            player_radius: 192,
+            player_invulnerable: false,
+            active_rooms: &ACTIVE,
+        };
+        entities.tick(
+            &WALK_ONLY_ENEMY,
+            GameEntityTickInput {
+                player: [1500, 0, 1000],
+                ..chase_input
+            },
+            &mut NoClipMover,
+        );
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        let before = entities.position(0)[0];
+        entities.tick(&WALK_ONLY_ENEMY, chase_input, &mut NoClipMover);
+        assert_eq!(
+            entities.position(0)[0] - before,
+            WALK_ONLY_ENEMY[0].walk_speed,
+            "a character without Run must approach at walk speed"
+        );
+        assert_eq!(
+            entities.clip_for_state(&WALK_ONLY_ENEMY, 0).clip,
+            WALK_ONLY_ENEMY[0].walk_clip,
+            "the chase must not enter the Run clip fallback as a real action"
         );
     }
 

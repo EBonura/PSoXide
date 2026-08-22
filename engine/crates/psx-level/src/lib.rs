@@ -1561,6 +1561,8 @@ pub mod logic_flags {
 pub mod game_entity_flags {
     /// Record spawns in gameplay.
     pub const ENABLED: u16 = 1 << 0;
+    /// The Character authors a Run action, enabling chase-speed locomotion.
+    pub const CAN_RUN: u16 = 1 << 1;
 }
 
 /// One cooked logic entity, shaped after hl-psx's campaign-proven
@@ -1645,15 +1647,22 @@ pub struct LevelGameEntityRecord {
     /// Index of this entity's cooked visual in `MODEL_INSTANCES`, or
     /// [`GAME_ENTITY_MODEL_INSTANCE_NONE`].
     pub model_instance: u16,
-    /// Model-local clip index played while Idle. All six state clips
+    /// Model-local clip index played while Idle. All state clips
     /// are resolved AT COOK TIME from the entity Character's
     /// AnimationSet roles; a missing role falls back at cook (attack/
-    /// stagger/death to idle, walk to idle, run to walk), so runtime
-    /// never re-resolves.
+    /// stagger/death to idle, directional walks/run to walk), so
+    /// runtime never re-resolves.
     pub idle_clip: u16,
     /// Clip while Patrol (walk role).
     pub walk_clip: u16,
-    /// Clip while Aggro (run role).
+    /// Clip while retreating from the player. Falls back to `walk_clip`.
+    pub walk_backward_clip: u16,
+    /// Clip while circling left around the player. Falls back to `walk_clip`.
+    pub strafe_left_clip: u16,
+    /// Clip while circling right around the player. Falls back to `walk_clip`.
+    pub strafe_right_clip: u16,
+    /// Clip while approaching in Aggro. Characters without
+    /// [`game_entity_flags::CAN_RUN`] carry the walk fallback here.
     pub run_clip: u16,
     /// One-shot clip spanning Windup + Attack + Recover.
     pub attack_clip: u16,
@@ -1682,8 +1691,8 @@ pub struct LevelGameEntityRecord {
     /// Patrol movement speed, engine units per 60 Hz tick
     /// (Character walk speed).
     pub walk_speed: i32,
-    /// Chase movement speed, engine units per 60 Hz tick
-    /// (Character run speed).
+    /// Chase movement speed, engine units per 60 Hz tick. Used only when
+    /// [`game_entity_flags::CAN_RUN`] is present.
     pub run_speed: i32,
     /// Patrol anchor one X (== `x` when no patrol is authored).
     pub patrol_x: i32,

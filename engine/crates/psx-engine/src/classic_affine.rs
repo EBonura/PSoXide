@@ -20,6 +20,11 @@ use psx_gte::{
     scene::{self, Projected},
 };
 
+use crate::projection::{
+    classic_quad_screen_rejected, classic_triangle_screen_rejected, project_triangle_scheduled,
+    project_vertex_scheduled,
+};
+
 const EXTRA_VERTICES: usize = 12;
 
 /// Mutable vertex layout shared with retained renderers.
@@ -506,18 +511,14 @@ fn transform_matrix_columns(columns: [Vec3I16; 3]) -> Mat3I16 {
     }
 }
 
-/// Project selected deduplicated positions through the currently loaded GTE
-/// scene state.
-///
-/// This applies the same dense-versus-indexed cache pattern used by PSoXide's
-/// native room renderer to retained polygon streams. Indices are consumed in
-/// groups of three through scheduled RTPT, with a scheduled RTPS tail.
+/// Project the indexed subset of deduplicated positions through the currently
+/// loaded GTE scene state, storing results by position index.
 ///
 /// # Safety
 /// `positions` must contain `position_count` records, every one of the
 /// `index_count` indices must be below `position_count`, and `projected` must
-/// contain `position_count` writable records. The GTE rotation, translation,
-/// projection plane, screen offset, and depth state must already be loaded.
+/// contain `position_count` writable records. The GTE scene state must already
+/// be loaded for the active camera.
 pub unsafe fn project_classic_affine_indexed_vertices(
     positions: *const ClassicAffinePosition,
     position_count: usize,
@@ -544,7 +545,7 @@ pub unsafe fn project_classic_affine_indexed_vertices(
         debug_assert!(position_indices
             .iter()
             .all(|&position_index| position_index < position_count));
-        let output = scene::project_triangle_scheduled(
+        let output = project_triangle_scheduled(
             classic_position_vec3(unsafe { *positions.add(position_indices[0]) }),
             classic_position_vec3(unsafe { *positions.add(position_indices[1]) }),
             classic_position_vec3(unsafe { *positions.add(position_indices[2]) }),
@@ -567,7 +568,7 @@ pub unsafe fn project_classic_affine_indexed_vertices(
     while index < index_count {
         let position_index = unsafe { *indices.add(index) } as usize;
         debug_assert!(position_index < position_count);
-        let output = scene::project_vertex_scheduled(classic_position_vec3(unsafe {
+        let output = project_vertex_scheduled(classic_position_vec3(unsafe {
             *positions.add(position_index)
         }));
         unsafe {
@@ -1009,7 +1010,7 @@ unsafe fn project_three_consecutive(vertices: *mut ClassicAffineVertex) {
     let a = unsafe { classic_vertex_position(vertices) };
     let b = unsafe { classic_vertex_position(vertices.add(1)) };
     let c = unsafe { classic_vertex_position(vertices.add(2)) };
-    let out = scene::project_triangle_scheduled(a, b, c);
+    let out = project_triangle_scheduled(a, b, c);
     unsafe {
         store_classic_projection(vertices, out[0]);
         store_classic_projection(vertices.add(1), out[1]);
@@ -1020,7 +1021,7 @@ unsafe fn project_three_consecutive(vertices: *mut ClassicAffineVertex) {
 #[inline(always)]
 unsafe fn project_one(vertex: *mut ClassicAffineVertex) {
     let source = unsafe { classic_vertex_position(vertex) };
-    let out = scene::project_vertex_scheduled(source);
+    let out = project_vertex_scheduled(source);
     unsafe { store_classic_projection(vertex, out) };
 }
 
@@ -1832,7 +1833,6 @@ pub unsafe fn submit_classic_affine_mixed_batch(
             hardware_triangles: 0,
         };
     }
-
     let mut vertex = 0usize;
     while vertex + 2 < vertex_count {
         unsafe { project_three_consecutive(vertices.add(vertex)) };
@@ -1842,7 +1842,6 @@ pub unsafe fn submit_classic_affine_mixed_batch(
         unsafe { project_one(vertices.add(vertex)) };
         vertex += 1;
     }
-
     let generated = unsafe { vertices.add(vertex_count) };
     let mut next = output;
     let mut packets = 0u32;
@@ -2039,7 +2038,7 @@ pub unsafe fn submit_classic_affine_packed_fan(
         let a = unsafe { ptr::read_unaligned(vertices.add(index)) };
         let b = unsafe { ptr::read_unaligned(vertices.add(index + 1)) };
         let c = unsafe { ptr::read_unaligned(vertices.add(index + 2)) };
-        let out = scene::project_triangle_scheduled(source_vec3(a), source_vec3(b), source_vec3(c));
+        let out = project_triangle_scheduled(source_vec3(a), source_vec3(b), source_vec3(c));
         projected[index] = prepare_projected(a, out[0], uv_offset, light_weights);
         projected[index + 1] = prepare_projected(b, out[1], uv_offset, light_weights);
         projected[index + 2] = prepare_projected(c, out[2], uv_offset, light_weights);
@@ -2047,7 +2046,7 @@ pub unsafe fn submit_classic_affine_packed_fan(
     }
     while index < vertex_count {
         let source = unsafe { ptr::read_unaligned(vertices.add(index)) };
-        let out = scene::project_vertex_scheduled(source_vec3(source));
+        let out = project_vertex_scheduled(source_vec3(source));
         projected[index] = prepare_projected(source, out, uv_offset, light_weights);
         index += 1;
     }
@@ -2198,7 +2197,7 @@ unsafe fn submit_classic_alias_model_inner<const SCREEN_SPACE: bool>(
 
     let mut vertex = 0usize;
     while vertex + 2 < vertex_count {
-        let out = scene::project_triangle_scheduled(
+        let out = project_triangle_scheduled(
             unsafe { alias_vec3(vertices, vertex) },
             unsafe { alias_vec3(vertices, vertex + 1) },
             unsafe { alias_vec3(vertices, vertex + 2) },
@@ -2223,7 +2222,7 @@ unsafe fn submit_classic_alias_model_inner<const SCREEN_SPACE: bool>(
         vertex += 3;
     }
     while vertex < vertex_count {
-        let out = scene::project_vertex_scheduled(unsafe { alias_vec3(vertices, vertex) });
+        let out = project_vertex_scheduled(unsafe { alias_vec3(vertices, vertex) });
         let projected_vertex = ClassicAliasProjectedVertex {
             screen: [out.sx, out.sy],
             depth: out.sz,
@@ -2382,42 +2381,29 @@ pub unsafe fn submit_classic_alias_view_model(
 
 #[inline(always)]
 fn classic_clip_code(screen: [i16; 2], profile: ClassicAffineProfile) -> u8 {
-    let x = screen[0] as i32;
-    let y = screen[1] as i32;
-    let right = profile.screen_width as i32 - 2;
-    let bottom = profile.screen_height as i32 - 2;
-
-    if (x as u32) <= right as u32 && (y as u32) <= bottom as u32 {
-        return 0;
-    }
-
-    // Projected coordinates and viewport extents fit comfortably in i32.
-    ((x as u32 >> 31) as u8)
-        | ((((right - x) as u32 >> 31) as u8) << 1)
-        | (((y as u32 >> 31) as u8) << 2)
-        | ((((bottom - y) as u32 >> 31) as u8) << 3)
+    crate::projection::zero_origin_screen_outcode(
+        screen,
+        profile.screen_width as i32 - 2,
+        profile.screen_height as i32 - 2,
+    )
 }
 
 #[inline(always)]
 fn classic_tri_screen_clipped(screens: [[i16; 2]; 3], profile: ClassicAffineProfile) -> bool {
-    let c0 = classic_clip_code(screens[0], profile);
-    let c1 = classic_clip_code(screens[1], profile);
-    let c2 = classic_clip_code(screens[2], profile);
-    (c0 & c1) != 0 && (c1 & c2) != 0 && (c2 & c0) != 0
+    classic_triangle_screen_rejected(
+        screens,
+        profile.screen_width as i32 - 2,
+        profile.screen_height as i32 - 2,
+    )
 }
 
 #[inline(always)]
 fn classic_quad_screen_clipped(screens: [[i16; 2]; 4], profile: ClassicAffineProfile) -> bool {
-    let c0 = classic_clip_code(screens[0], profile);
-    let c1 = classic_clip_code(screens[1], profile);
-    let c2 = classic_clip_code(screens[2], profile);
-    let c3 = classic_clip_code(screens[3], profile);
-    (c0 & c1) != 0
-        && (c1 & c2) != 0
-        && (c2 & c3) != 0
-        && (c3 & c0) != 0
-        && (c0 & c2) != 0
-        && (c1 & c3) != 0
+    classic_quad_screen_rejected(
+        screens,
+        profile.screen_width as i32 - 2,
+        profile.screen_height as i32 - 2,
+    )
 }
 
 #[cfg(test)]
