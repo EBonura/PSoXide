@@ -73,6 +73,22 @@ Result flags:
 - `--counter-log <csv>`: per-frame telemetry counters (room masks, stream stats, camera pose). Used for runtime diagnosis (see `docs/floors-plan.md`).
 - `--dump-guest-profile`: aggregate stage/GTE summary to stdout.
 - `--dump-hw <ppm>` and `--dump-hash`: final frame image plus vram/display hashes. Look at the frame to confirm gameplay rendered, not menu or sky-only.
+
+Low-level, emulator-owned profiling is opt-in and does not change guest RAM or
+emulated timing:
+
+- `--cpu-cycle-profile-log <csv>` writes one row per route tick with disjoint
+  issue, main-RAM load/store, MMIO, I-cache-refill, uncached-fetch, GTE-busy,
+  multiply/divide-interlock and residual cycle buckets. The
+  `stack_ram_load_stall_cycles` column is a subset of RAM-load stalls and must
+  not be added to `profiled_cpu_cycles` a second time.
+- `--pc-line-log <csv>` counts every retired instruction by canonical 16-byte
+  I-cache line. This is exact execution density rather than the periodic sample
+  emitted by `--pc-sample-log`, and is intended for conflict-aware code layout.
+- `--stack-profile-log <csv>` observes `$sp` without writing a canary into guest
+  memory. Add `--stack-profile-root-pc 0xADDRESS` to measure each completed call
+  of a render root from its entry stack pointer through its return; omit the
+  root to measure the complete run.
 - `--pc-sample-callsite-log <csv>`: out-of-band PC, `$ra`, `$sp+20`, and
   `$sp+36` samples. The two stack words recover callers through the standard
   compiler-builtins wrapper and its inner 16-byte frame, so time inside

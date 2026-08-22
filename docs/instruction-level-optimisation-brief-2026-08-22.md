@@ -83,9 +83,10 @@ above. It auto-detects the `.text` extent from `jr $ra` density and prints the
 invalid-encoding rate so a bad guess is visible (today: 0.02%, i.e. the region
 is genuinely all code).
 
-The image I measured was built at 2026-08-22 13:04 from branch
-`codex/arena-playable-slice`. `.text` runs `0x80010000..0x800d4000`, which is
-**784 KiB of code**, 200,704 instructions. Total payload is 1,616 KiB.
+The current image was rebuilt and re-censused on 2026-08-22 from branch
+`codex/arena-playable-slice`. `.text` runs `0x80010000..0x800d5000`, which is
+**788 KiB of code**, 201,728 instructions. Total payload is 1,616 KiB; 0.49% of
+the decoded words are invalid instructions, still below the script's 1% guard.
 
 The MIPS codegen samples in section 3 come from:
 
@@ -769,6 +770,11 @@ share of cycles, do not build the scratchpad stack.** Add `$sp`-relative as a
 sub-bucket of the RAM-load class; the base register is right there in the
 instruction word.
 
+Implemented in PSoXide on 2026-08-22 as the opt-in
+`--cpu-cycle-profile-log` headless output. The counters live outside save-state
+and guest state, are disabled on the normal interpreter path, and include the
+required `$sp`-relative subset.
+
 ### 7.2 Per-cache-line PC histogram
 
 Increment `hist[(pc - text_base) >> 4]` per step. Dump on exit. Gives you the
@@ -777,12 +783,21 @@ symbols are actually hot rather than which ones look hot. hl-psx did this by
 hand against a linker map; make it a first-class emulator feature so all three
 games get it.
 
+Implemented as `--pc-line-log`. RAM mirrors are canonicalised to KSEG0 and BIOS
+lines to KSEG1 so one physical cache line cannot be split across aliases.
+
 ### 7.3 Stack high-water measurement
 
 Pattern-fill the stack region at boot, scan for the lowest modified word at
 frame end, report the maximum over a tape. Needed to size the scratchpad stack
 in 4.1 and useful on its own, since `psoxide.ld` reserves a flat 32 KiB today
 with no evidence behind the number.
+
+Implemented as `--stack-profile-log`, with optional
+`--stack-profile-root-pc`. The emulator observes `$sp` at every retired
+instruction and measures each root call through its return instead of
+pattern-filling guest RAM, preserving the same information without modifying
+the program being benchmarked.
 
 ### 7.4 `IBLKSZ` sweep
 
@@ -803,15 +818,29 @@ Each phase gates the next. Do not skip ahead.
 Exit criterion: you can state the dynamic cycle split by class and the render
 subtree's stack high-water mark.
 
+Completed on 2026-08-22 against the freshly cooked E1M1 geometry project. The
+120-visual-frame run rendered at 861,000 cycles/visual with 6 deadline misses.
+During steady gameplay, issue cycles were 44.28%, main-RAM load stalls 40.42%,
+stores 3.72%, MMIO 0.75%, I-cache refills 8.50%, and multiply/divide interlocks
+2.33%. `$sp`-relative loads alone were 14.93% of total cycles and 36.94% of all
+RAM-load stalls. The complete run reached 20,664 bytes of observed stack depth;
+the 118 completed calls rooted at `Playtest::render` each reached **16,136
+bytes**. Therefore the proposed whole-render-call-chain scratchpad trampoline
+does not fit in the PS1's 1 KiB scratchpad and is rejected. Scratchpad work may
+only proceed for separately rooted leaf kernels whose measured maximum,
+including guard space and interrupt policy, fits below 1 KiB.
+
 **Phase 1, the two silicon questions.** 6.1 and 6.2 in one hardware-test disc,
 plus 6.3 in the same disc since it is a different loop in the same harness.
 These are correctness questions as much as performance ones and they invalidate
 or confirm assumptions the later phases rest on.
 
-**Phase 2, the big lever.** 4.1, gated on Phase 0's dynamic number and Phase 1's
-confirmation of the load cost. Land the trampoline in `psx-rt` with the canary
-and the depth guard. Gate on `--profile-log` deltas plus the multi-frame visual
-hash comparison that memory `perf-changes-need-multiframe-visual-gates` requires.
+**Phase 2, measured scratchpad leaves only.** The general 4.1 trampoline is
+closed by Phase 0's 16,136-byte render depth. Use the rooted stack profiler to
+identify hot leaf subtrees below 1 KiB; only those are eligible for the
+`psx-rt` trampoline, canary and depth guard. Gate on `--profile-log` deltas plus
+the multi-frame visual hash comparison that memory
+`perf-changes-need-multiframe-visual-gates` requires.
 
 **Phase 3, the cache.** 4.2 first because it is mechanical and independent, then
 4.3 using Phase 0's PC histogram. Gate on `icache_refill_stall_cycles`, not FPS.
@@ -843,15 +872,15 @@ them at implementation time.
    arguing they did not test the variable that matters. I could be wrong; the
    hot set may simply be too large for placement to help. 7.2 answers this
    before you write any linker-script code.
-3. **The scratchpad stack could be blocked outright by depth or by interrupts.**
-   1 KiB is not much. If the render subtree needs 3 KiB, the idea is dead in its
-   general form and degrades to the array-hoisting fallback, which is worth
-   much less.
-4. **I did not run the game.** Every number here comes from decoding the shipped
-   binary, reading the emulator's timing source, and compiling probe functions.
-   No tape was replayed for this document. The existing documented baselines
-   (843k-cycle render vblank, the stage split in `CLAUDE.md`) are consistent
-   with what I found, which is mild corroboration, not verification.
+3. **The scratchpad stack is blocked for the complete renderer.** Phase 0
+   measured 16,136 bytes below `Playtest::render`, far beyond the 1 KiB
+   scratchpad. Interrupt safety still has to be settled for any smaller leaf
+   trampoline.
+4. **Cross-game acceptance is not yet green.** PSoXide E1M1 was replayed and
+   measured, but the current quake-psx WIP overflows its E1M3 resident arena by
+   27,386 bytes during the canonical route build, and the current hl-psx WIP
+   exhausts the world primitive arena during the anomalous-walk proof. Those
+   are existing validation blockers, not accepted results from this phase.
 5. **The GTE-is-idle claim is imported from hl-psx**, whose renderer is not
    PSoXide's. PSoXide's own baseline says "project" is 108k of a 322k player
    stage and attributes it to scalar register shuffling around the GTE rather
