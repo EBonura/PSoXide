@@ -735,6 +735,14 @@ controlled number of NOPs, read `SXY0`, and sweep the NOP count. If the read is
 correct at zero NOPs, it interlocks. Fix whichever of the two comments is wrong,
 in the same change.
 
+**Partially settled from the archived SCPH-9902 payload.** Hardware-test record
+`0xB0` measured the two-NOP Timer-2 bracket as 9 clocks and the
+`NCLIP; MFC2 MAC0` bracket as 8 (`0x0009_0008`). There is no general GTE-busy
+interlock; the `RtptInFlight::read` documentation claiming one was wrong and is
+now corrected. This does not by itself prove when RTPT's SXY/SZ registers become
+readable, so hardware-tests v1.20 adds exact +0/+8/+16/+24 RTPT result sweeps
+against a +64 reference.
+
 ### 6.3 Is the 6-cycle RAM load stall right?
 
 Everything in section 4 is weighted by this number. The emulator cites a
@@ -748,6 +756,13 @@ rather than folklore, so I am inclined to believe it.
 Confirm it anyway before building 4.1 on top of it. A tight loop of N dependent
 `lw`s from RAM against N from the scratchpad, timed with the root counter,
 settles it in one disc.
+
+**Settled from the archived SCPH-9902 payload.** For 64 `LW; NOP` pairs, cached
+RAM record `0x03` measured a 651-clock minimum while scratchpad record `0x09`
+measured 226. The 425-clock difference is 6.64 clocks per load across the block,
+consistent with the emulator's six-wait-state model plus DRAM-refresh effects.
+The load-cost premise is retained; folklore's 4-5-cycle RAM load is not the
+model to optimise this stack against.
 
 ---
 
@@ -834,6 +849,12 @@ including guard space and interrupt policy, fits below 1 KiB.
 plus 6.3 in the same disc since it is a different loop in the same harness.
 These are correctness questions as much as performance ones and they invalidate
 or confirm assumptions the later phases rest on.
+
+The archived SCPH-9902 v1.17 payload already settles the general MFC2
+non-interlock and RAM-load cost above. Hardware-tests v1.20 adds the remaining
+exact RTPT input-commit (`0xC0`-`0xC3`) and result-read (`0xC4`-`0xC7`) sweeps.
+All eight compare equal in the emulator (`0x0240EC7E`); a new console capture is
+required before deleting the conservative RTPT NOPs or changing the emulator.
 
 **Phase 2, measured scratchpad leaves only.** The general 4.1 trampoline is
 closed by Phase 0's 16,136-byte render depth. Use the rooted stack profiler to

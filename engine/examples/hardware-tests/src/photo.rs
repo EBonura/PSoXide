@@ -29,7 +29,7 @@ use crate::{hex2, hex8, section_report, Mode, ScanReport, TestResult, TimingRepo
 /// Most pages a capture can need. Sized for the worst case a full
 /// characterisation run can produce with every conformance case failing, which
 /// is not a real console but is a real buffer.
-pub(crate) const CAPTURE_PAGE_MAX: usize = 8;
+pub(crate) const CAPTURE_PAGE_MAX: usize = 9;
 const BASE64_CHARS_PER_LINE: usize = 36;
 const BASE64_LINES_PER_PAGE: usize = 23;
 const BASE64_CHARS_PER_PAGE: usize = BASE64_CHARS_PER_LINE * BASE64_LINES_PER_PAGE;
