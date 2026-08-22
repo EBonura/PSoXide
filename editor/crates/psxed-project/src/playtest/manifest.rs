@@ -1615,7 +1615,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let _ = writeln!(out, "    &{source},");
     }
     out.push_str("];\n");
-    out.push_str("const _: () = assert!(UI_FONTS.len() <= 4);\n\n");
+    out.push_str("const _: () = assert!(UI_FONTS.len() <= 8);\n\n");
 
     out.push_str("/// Cooked UI gradient paints referenced by UI node color roles.\n");
     out.push_str("pub static UI_PAINTS: &[LevelUiPaintRecord] = &[\n");

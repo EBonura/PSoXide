@@ -221,6 +221,7 @@ fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
     assert!(src.contains(
         "pub static UI_FONTS: &[&psx_font::BitmapFont] = &[\n    &psx_font::fonts::BASIC,\n];"
     ));
+    assert!(src.contains("const _: () = assert!(UI_FONTS.len() <= 8);"));
     assert!(src.contains("pub static UI_SCENES: &[LevelUiScene] = &[\n];"));
     assert!(src.contains(
             "LevelSceneState { id: 0, name: \"Gameplay\", world: LevelWorldLayer::Gameplay, ui_scene: 65535, flags: 0 },"

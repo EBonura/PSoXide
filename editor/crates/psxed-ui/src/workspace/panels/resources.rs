@@ -551,9 +551,9 @@ impl EditorWorkspace {
                 ui.close_menu();
             }
             if ui
-                .button(icons::label(icons::MAP_PIN, "Starter Characters"))
+                .button(icons::label(icons::MAP_PIN, "Starter Content"))
                 .on_hover_text(
-                    "Sync the built-in player/enemy models, clip role maps, and character profiles into this project.",
+                    "Sync the built-in player/enemy models, animations, profiles and saved material library into this project.",
                 )
                 .clicked()
             {
@@ -561,7 +561,7 @@ impl EditorWorkspace {
                 match sync_starter_character_catalogue(&mut self.project, &self.project_dir) {
                     Ok(report) => {
                         self.status = format!(
-                            "Synced starter characters: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
+                            "Synced starter content: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
                             report.resources_added,
                             report.resources_updated,
                             report.resources_removed,
@@ -573,7 +573,7 @@ impl EditorWorkspace {
                         }
                     }
                     Err(error) => {
-                        self.status = format!("Starter character sync failed: {error}");
+                        self.status = format!("Starter content sync failed: {error}");
                     }
                 }
                 ui.close_menu();

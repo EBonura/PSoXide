@@ -2,18 +2,18 @@ use super::{
     animated_material_quad_uvs, euler_rotation_q12, face_side_visible,
     horizontal_triangle_world_points, light_face, material_blend_mode, material_color,
     material_sized_uvs, material_texture_tint, node_room_local_origin, preview_lights,
-    preview_model_reference, preview_player_reference, preview_projected_triangle_hw_safe,
-    preview_scratch, preview_shadow_radius, preview_static_model_reference,
-    preview_vertices_in_front, push_clear, push_tri, push_tri_colors, push_wall_face,
-    room_depth_slot, rotate_image_prop_local, setup_gte_for_camera, shadow_depth_slot,
-    should_draw_culled_face_outline, valid_preview_clip, wall_material_sidedness_for_edge,
-    wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
-    GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
-    PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
-    PREVIEW_WALL_UVS,
+    preview_model_reference, preview_model_surface_options, preview_player_reference,
+    preview_projected_triangle_hw_safe, preview_scratch, preview_shadow_radius,
+    preview_static_model_reference, preview_vertices_in_front, push_clear, push_tri,
+    push_tri_colors, push_wall_face, room_depth_slot, rotate_image_prop_local,
+    setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline, valid_preview_clip,
+    wall_material_sidedness_for_edge, wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot,
+    PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
+    PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
+    PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS,
 };
 use psx_engine::{Mat3I16, PointLightSample, WorldVertex};
-use psx_gpu::material::BlendMode;
+use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gte::scene::Projected;
 use psxed_project::portal_rooms::PortalEdge;
 use psxed_project::{
@@ -2124,6 +2124,24 @@ fn preview_depth_slots_share_world_geometry_band() {
     assert!(shadow_depth_slot(2048) < room_depth_slot(2048));
     assert_eq!(shadow_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
     assert_eq!(PREVIEW_SHADOW_DEPTH_BIAS, 128);
+}
+
+#[test]
+fn preview_models_share_brush_geometry_depth_scale() {
+    let options = preview_model_surface_options(
+        TextureMaterial::opaque(0, 0, (128, 128, 128)),
+        MaterialFaceSidedness::Front,
+    );
+    for depth in [0, 4, 8, 1_024, 4_096, 16_360, 16_364, 16_368, 20_000] {
+        assert_eq!(
+            options
+                .depth_band
+                .slot::<{ super::OT_DEPTH }>(options.depth_range, depth)
+                .index(),
+            room_depth_slot(depth as u32),
+            "model and brush geometry diverged at camera depth {depth}"
+        );
+    }
 }
 
 #[test]

@@ -395,6 +395,16 @@ pub(crate) fn bare_shortcuts_available(focus_taken: bool, modifiers: egui::Modif
     !focus_taken && !modifiers.command && !modifiers.ctrl
 }
 
+/// Whether a widget or selectable label owns keyboard shortcuts this frame.
+///
+/// Selectable labels intentionally do not take egui keyboard focus, but their
+/// selection state still needs to receive the platform `Copy` event.
+pub(crate) fn widget_owns_keyboard_shortcuts(ctx: &egui::Context) -> bool {
+    ctx.memory(|memory| memory.focused().is_some())
+        || ctx.wants_keyboard_input()
+        || egui::text_selection::LabelSelectionState::load(ctx).has_selection()
+}
+
 /// A text field can keep egui keyboard focus after the user has returned to
 /// editing the world. Clear that stale focus on a viewport press so the next
 /// frame's editor shortcuts are routed to the selected geometry.
