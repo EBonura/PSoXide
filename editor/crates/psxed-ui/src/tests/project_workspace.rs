@@ -1189,6 +1189,7 @@ fn viewport_3d_pan_delta_tracks_pointer_drag_plane() {
 fn orbit_camera_rotation_uses_slow_step_and_clamps_pitch() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    workspace.camera_rig.mode = ViewportCameraMode::Orbit;
     workspace.camera_rig.yaw = 0;
     workspace.camera_rig.pitch = signed_to_q12(940);
 

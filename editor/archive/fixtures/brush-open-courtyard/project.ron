@@ -22,6 +22,7 @@
     ),
     editor_visibility: (
         show_grid: true,
+        show_brush_surface_grid: true,
         show_portals: true,
         show_lights: true,
         preview_fog: true,
