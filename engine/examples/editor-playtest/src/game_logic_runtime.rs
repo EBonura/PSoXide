@@ -67,9 +67,9 @@ pub(super) struct SceneEntityMover<'a> {
     pub(super) models: &'a [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Pre-tick entity positions (entities move one at a time inside
     /// the tick; the snapshot keeps blocker order deterministic).
-    pub(super) entity_positions: [[i32; 3]; MAX_GAME_ENTITIES],
+    pub(super) entity_positions: &'a [[i32; 3]],
     /// Pre-tick dead flags: corpses stop blocking other movers.
-    pub(super) entity_dead: [bool; MAX_GAME_ENTITIES],
+    pub(super) entity_dead: &'a [bool],
     pub(super) player: RoomPoint,
     pub(super) player_room: RoomIndex,
     pub(super) player_radius: i32,
@@ -126,10 +126,16 @@ impl SceneEntityMover<'_> {
                 Some(other) => {
                     let other = other.min(MAX_GAME_ENTITIES - 1);
                     // Dead entities stop blocking (souls corpses).
-                    if self.entity_dead[other] {
+                    let Some((&dead, &live)) = self
+                        .entity_dead
+                        .get(other)
+                        .zip(self.entity_positions.get(other))
+                    else {
+                        continue;
+                    };
+                    if dead {
                         continue;
                     }
-                    let live = self.entity_positions[other];
                     RoomPoint::new(live[0], live[1], live[2])
                 }
                 None => RoomPoint::new(inst.x, inst.y, inst.z),

@@ -1,6 +1,31 @@
 use super::*;
 use crate::playtest_runtime::bsp_hazard_damage;
 
+/// Borrow the initialized prefix of a `MaybeUninit` scratch array.
+///
+/// # Safety
+///
+/// Every element below `len` must have been initialized as `T`.
+unsafe fn initialized_prefix<T>(values: &[core::mem::MaybeUninit<T>], len: usize) -> &[T] {
+    debug_assert!(len <= values.len());
+    // SAFETY: guaranteed by the caller; MaybeUninit<T> has T's layout.
+    unsafe { core::slice::from_raw_parts(values.as_ptr().cast::<T>(), len) }
+}
+
+/// Mutably borrow the initialized prefix of a `MaybeUninit` scratch array.
+///
+/// # Safety
+///
+/// Every element below `len` must have been initialized as `T`.
+unsafe fn initialized_prefix_mut<T>(
+    values: &mut [core::mem::MaybeUninit<T>],
+    len: usize,
+) -> &mut [T] {
+    debug_assert!(len <= values.len());
+    // SAFETY: guaranteed by the caller; MaybeUninit<T> has T's layout.
+    unsafe { core::slice::from_raw_parts_mut(values.as_mut_ptr().cast::<T>(), len) }
+}
+
 impl Playtest {
     /// Phase-3 gameplay layer tick: entity state machines (moved
     /// through the engine motor's collision by [`SceneEntityMover`]),
@@ -22,11 +47,12 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::GAME_LOGIC);
         // The portal-expanded active set as a compact index list; a
         // handful of loads per tick at MAX_ACTIVE_ROOMS = 16.
-        let mut active_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        let mut active_rooms =
+            [const { core::mem::MaybeUninit::<RoomIndex>::uninit() }; MAX_ACTIVE_ROOMS];
         let mut active_count = 0usize;
         for slot in self.window.rooms.iter() {
             if let Some(active) = slot {
-                active_rooms[active_count] = active.index;
+                active_rooms[active_count].write(active.index);
                 active_count += 1;
             }
         }
@@ -50,17 +76,22 @@ impl Playtest {
         } else {
             2
         };
-        let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
-        let mut entity_dead = [false; MAX_GAME_ENTITIES];
-        for (index, slot) in entity_positions
-            .iter_mut()
-            .enumerate()
-            .take(self.game_entities.count())
-        {
-            *slot = self.game_entities.position(index);
-            entity_dead[index] = self.game_entities.state(index)
-                == psx_game_runtime::entities::GameEntityState::Dead;
+        let entity_count = self.game_entities.count().min(MAX_GAME_ENTITIES);
+        let mut entity_positions =
+            [const { core::mem::MaybeUninit::<[i32; 3]>::uninit() }; MAX_GAME_ENTITIES];
+        let mut entity_dead =
+            [const { core::mem::MaybeUninit::<bool>::uninit() }; MAX_GAME_ENTITIES];
+        for index in 0..entity_count {
+            entity_positions[index].write(self.game_entities.position(index));
+            entity_dead[index].write(
+                self.game_entities.state(index)
+                    == psx_game_runtime::entities::GameEntityState::Dead,
+            );
         }
+        // SAFETY: both prefixes were initialized in the loop above.
+        let entity_positions = unsafe { initialized_prefix(&entity_positions, entity_count) };
+        // SAFETY: both prefixes were initialized in the loop above.
+        let entity_dead = unsafe { initialized_prefix(&entity_dead, entity_count) };
         let spatial_masks = self.bsp.as_mut().map(|bsp| {
             // The observer stays inside the player's body rather than on the
             // floor seam. Actors and model instances are linked by complete
@@ -70,31 +101,31 @@ impl Playtest {
                 player.y.saturating_add(player_height.max(1) >> 1),
                 player.z,
             );
-            let mut entity_activation_bounds = [BspVisibilityBounds::EMPTY; MAX_GAME_ENTITIES];
-            for (index, bounds) in entity_activation_bounds
-                .iter_mut()
-                .enumerate()
-                .take(self.game_entities.count())
-            {
+            let mut entity_activation_bounds =
+                [const { core::mem::MaybeUninit::<BspVisibilityBounds>::uninit() };
+                    MAX_GAME_ENTITIES];
+            for index in 0..entity_count {
                 let Some(record) = GAME_ENTITIES.get(index) else {
+                    // Preserve initialization even if a malformed runtime table
+                    // violates the cook's one-to-one entity contract.
+                    entity_activation_bounds[index].write(BspVisibilityBounds::EMPTY);
                     continue;
                 };
-                *bounds = BspVisibilityBounds::cylinder(
+                entity_activation_bounds[index].write(BspVisibilityBounds::cylinder(
                     entity_positions[index],
                     i32::from(record.radius),
                     i32::from(record.height),
-                );
+                ));
             }
-            let entity_mask = bsp.visible_bounds_mask(
-                observer,
-                &entity_activation_bounds[..self.game_entities.count()],
-            );
-            let mut instance_activation_bounds = [BspVisibilityBounds::EMPTY; MAX_MODEL_INSTANCES];
-            for (index, bounds) in instance_activation_bounds
-                .iter_mut()
-                .enumerate()
-                .take(MODEL_INSTANCES.len())
-            {
+            // SAFETY: every branch above writes the complete prefix.
+            let entity_activation_bounds =
+                unsafe { initialized_prefix(&entity_activation_bounds, entity_count) };
+            let entity_mask = bsp.visible_bounds_mask(observer, entity_activation_bounds);
+            let instance_count = MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES);
+            let mut instance_activation_bounds =
+                [const { core::mem::MaybeUninit::<BspVisibilityBounds>::uninit() };
+                    MAX_MODEL_INSTANCES];
+            for index in 0..instance_count {
                 let instance = &MODEL_INSTANCES[index];
                 let model = self
                     .models
@@ -103,12 +134,16 @@ impl Playtest {
                     .flatten();
                 let radius = model.map_or(0, |model| i32::from(model.collision_radius));
                 let height = model.map_or(1, |model| i32::from(model.world_height));
-                *bounds = BspVisibilityBounds::cylinder(
+                instance_activation_bounds[index].write(BspVisibilityBounds::cylinder(
                     [instance.x, instance.y, instance.z],
                     radius,
                     height,
-                );
+                ));
             }
+            // SAFETY: every element in the requested instance prefix was
+            // initialized in the loop above.
+            let instance_activation_bounds =
+                unsafe { initialized_prefix_mut(&mut instance_activation_bounds, instance_count) };
             for (entity, record) in GAME_ENTITIES.iter().enumerate() {
                 let instance = usize::from(record.model_instance);
                 let Some(bounds) = instance_activation_bounds.get_mut(instance) else {
@@ -120,18 +155,16 @@ impl Playtest {
                     i32::from(record.height),
                 );
             }
-            let instance_mask = bsp.visible_bounds_mask(
-                observer,
-                &instance_activation_bounds[..MODEL_INSTANCES.len().min(MAX_MODEL_INSTANCES)],
-            );
-            let mut logic_positions = [[0i32; 3]; MAX_LOGIC_RECORDS];
-            for (slot, record) in logic_positions.iter_mut().zip(LOGIC.iter()) {
-                *slot = [record.x, record.y, record.z];
+            let instance_mask = bsp.visible_bounds_mask(observer, instance_activation_bounds);
+            let logic_count = LOGIC.len().min(MAX_LOGIC_RECORDS);
+            let mut logic_positions =
+                [const { core::mem::MaybeUninit::<[i32; 3]>::uninit() }; MAX_LOGIC_RECORDS];
+            for (index, record) in LOGIC.iter().take(logic_count).enumerate() {
+                logic_positions[index].write([record.x, record.y, record.z]);
             }
-            let mut logic_mask = bsp.visible_points_mask(
-                observer,
-                &logic_positions[..LOGIC.len().min(MAX_LOGIC_RECORDS)],
-            );
+            // SAFETY: the complete `logic_count` prefix was initialized above.
+            let logic_positions = unsafe { initialized_prefix(&logic_positions, logic_count) };
+            let mut logic_mask = bsp.visible_points_mask(observer, logic_positions);
             // A volume may span several leaves while its representative
             // origin lies in only one. Never suppress a touch that already
             // contains the player; the logic runtime repeats this inclusive
@@ -160,11 +193,7 @@ impl Playtest {
             // this tick: their idle/patrol AI is gated and their
             // body/equipment/shadow rendering is suppressed above.
             let mut suppressed = 0u32;
-            for (index, dead) in entity_dead
-                .iter()
-                .enumerate()
-                .take(self.game_entities.count().min(64))
-            {
+            for (index, dead) in entity_dead.iter().enumerate().take(64) {
                 if !dead && entity_mask & (1u64 << index) == 0 {
                     suppressed += 1;
                 }
@@ -198,7 +227,9 @@ impl Playtest {
                     player_room: self.room_index,
                     player_radius,
                     player_invulnerable,
-                    active_rooms: &active_rooms[..active_count],
+                    // SAFETY: every active-room entry below `active_count` was
+                    // initialized while walking the resident window above.
+                    active_rooms: unsafe { initialized_prefix(&active_rooms, active_count) },
                 },
                 &mut mover,
                 npc_delta_ticks,
@@ -212,7 +243,9 @@ impl Playtest {
             psx_game_runtime::logic::LogicTickInput {
                 player: player_pos,
                 player_room: self.room_index,
-                active_rooms: &active_rooms[..active_count],
+                // SAFETY: every active-room entry below `active_count` was
+                // initialized while walking the resident window above.
+                active_rooms: unsafe { initialized_prefix(&active_rooms, active_count) },
             },
             now,
         );
