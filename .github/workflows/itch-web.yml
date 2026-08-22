@@ -72,7 +72,9 @@ jobs:
           rustup target add wasm32-unknown-unknown
 
       - name: Install Trunk 0.21.14
-        run: cargo install trunk --locked --version 0.21.14
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
+        with:
+          tool: trunk@0.21.14
 
       - name: Test the public-disc delivery guard
         run: python3 -m unittest tools/test_verify_web_dist.py
