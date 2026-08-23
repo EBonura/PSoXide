@@ -47,6 +47,12 @@ const MAX_MOTOR_CATCHUP_VBLANKS: u16 = 4;
 const TRACE_FLOOR_PROBE_DOWN: i32 = 32_767;
 /// Lift a grounded trace origin clear of the supporting plane's epsilon band.
 const TRACE_FLOOR_PROBE_LIFT: i32 = 1;
+/// Precise first-stage floor probe. A single 32K-unit sweep has only about
+/// eight world units per Q0.12 fraction step, so a shallow ramp immediately
+/// below the feet can quantize to fraction zero and lose to a lower plane.
+/// This range covers both step-down grounding and one terminal-velocity tick;
+/// only ledges/falls need the legacy long fallback.
+const TRACE_FLOOR_NEAR_PROBE_DOWN: i32 = STEP_DOWN_HEIGHT + MAX_FALL_SPEED + TRACE_FLOOR_PROBE_LIFT;
 const DIR_NORTH: u8 = 0;
 const DIR_EAST: u8 = 1;
 const DIR_SOUTH: u8 = 2;
@@ -1488,16 +1494,42 @@ fn trace_supporting_floor<P: CollisionTraceProvider + ?Sized>(
     shape: CollisionTraceShape,
 ) -> Result<Option<i32>, CollisionQueryError> {
     let start = position.with_y(position.y.saturating_add(TRACE_FLOOR_PROBE_LIFT));
-    let end = position.with_y(position.y.saturating_sub(TRACE_FLOOR_PROBE_DOWN));
-    let trace = trace_collision(provider, CollisionTraceQuery { start, end, shape })?;
-    if trace.start_solid
-        || trace.all_solid
-        || trace.fraction_q12 >= COLLISION_FRACTION_ONE_Q12
-        || trace.normal_q12[1] <= 0
+    let near_end = position.with_y(position.y.saturating_sub(TRACE_FLOOR_NEAR_PROBE_DOWN));
+    let near = trace_collision(
+        provider,
+        CollisionTraceQuery {
+            start,
+            end: near_end,
+            shape,
+        },
+    )?;
+    if near.start_solid || near.all_solid {
+        return Ok(None);
+    }
+    if near.fraction_q12 < COLLISION_FRACTION_ONE_Q12 {
+        if near.normal_q12[1] <= 0 {
+            return Ok(None);
+        }
+        return Ok(Some(near.end.y));
+    }
+
+    let far_end = position.with_y(position.y.saturating_sub(TRACE_FLOOR_PROBE_DOWN));
+    let far = trace_collision(
+        provider,
+        CollisionTraceQuery {
+            start,
+            end: far_end,
+            shape,
+        },
+    )?;
+    if far.start_solid
+        || far.all_solid
+        || far.fraction_q12 >= COLLISION_FRACTION_ONE_Q12
+        || far.normal_q12[1] <= 0
     {
         return Ok(None);
     }
-    Ok(Some(trace.end.y))
+    Ok(Some(far.end.y))
 }
 
 fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
@@ -1536,7 +1568,11 @@ fn trace_stand_position<P: CollisionTraceProvider + ?Sized>(
             shape,
         },
     )?;
-    if lift.hit() {
+    // A body exactly on an expanded slope can be classified start-solid by
+    // the plane epsilon even though the complete upward sweep exits into
+    // empty space. Accept that full escape; an all-solid or partial lift is
+    // still a real ceiling/wall obstruction and must reject the step.
+    if lift.all_solid || lift.fraction_q12 < COLLISION_FRACTION_ONE_Q12 {
         return Ok(None);
     }
     let raised_target = target.with_y(raised_start.y);
@@ -3255,6 +3291,157 @@ mod tests {
             *output = trace;
             true
         }
+    }
+
+    #[test]
+    fn floor_probe_resolves_near_slope_before_long_q12_fallback() {
+        struct NearSlopeProvider {
+            calls: u8,
+        }
+
+        impl CollisionTraceProvider for NearSlopeProvider {
+            fn trace_into(
+                &mut self,
+                query: CollisionTraceQuery,
+                output: &mut CollisionTrace,
+            ) -> bool {
+                self.calls = self.calls.saturating_add(1);
+                let span = query.start.y.saturating_sub(query.end.y);
+                *output = if span <= TRACE_FLOOR_NEAR_PROBE_DOWN + TRACE_FLOOR_PROBE_LIFT {
+                    CollisionTrace {
+                        fraction_q12: 10,
+                        end: query.start.with_y(1),
+                        normal_q12: [0, 3974, -993],
+                        ..CollisionTrace::default()
+                    }
+                } else {
+                    // This is the failure mode from the authored arena ramp:
+                    // a 32K-unit Q12 sweep quantizes the near slope away and
+                    // reports the lower flat floor instead.
+                    CollisionTrace {
+                        fraction_q12: 0,
+                        end: query.start.with_y(0),
+                        normal_q12: [0, 4096, 0],
+                        ..CollisionTrace::default()
+                    }
+                };
+                true
+            }
+        }
+
+        let mut provider = NearSlopeProvider { calls: 0 };
+        let floor = trace_supporting_floor(
+            &mut provider,
+            RoomPoint::new(689, 1, 11),
+            CollisionTraceShape::Body {
+                radius: 12,
+                height: 64,
+            },
+        )
+        .expect("floor trace");
+        assert_eq!(floor, Some(1));
+        assert_eq!(provider.calls, 1, "near contact must skip the long probe");
+    }
+
+    #[test]
+    fn floor_probe_falls_back_to_long_trace_after_near_miss() {
+        struct DistantFloorProvider {
+            calls: u8,
+        }
+
+        impl CollisionTraceProvider for DistantFloorProvider {
+            fn trace_into(
+                &mut self,
+                query: CollisionTraceQuery,
+                output: &mut CollisionTrace,
+            ) -> bool {
+                self.calls = self.calls.saturating_add(1);
+                *output = if self.calls == 1 {
+                    CollisionTrace::unobstructed(query.end)
+                } else {
+                    CollisionTrace {
+                        fraction_q12: 32,
+                        end: query.start.with_y(-255),
+                        normal_q12: [0, COLLISION_FRACTION_ONE_Q12 as i16, 0],
+                        ..CollisionTrace::default()
+                    }
+                };
+                true
+            }
+        }
+
+        let mut provider = DistantFloorProvider { calls: 0 };
+        let floor = trace_supporting_floor(
+            &mut provider,
+            RoomPoint::new(0, 0, 0),
+            CollisionTraceShape::Body {
+                radius: 12,
+                height: 64,
+            },
+        )
+        .expect("floor trace");
+        assert_eq!(floor, Some(-255));
+        assert_eq!(
+            provider.calls, 2,
+            "near miss must retain the ledge fallback"
+        );
+    }
+
+    #[test]
+    fn slope_step_accepts_complete_lift_out_of_floor_epsilon() {
+        struct SlopeStepProvider {
+            calls: u8,
+        }
+
+        impl CollisionTraceProvider for SlopeStepProvider {
+            fn trace_into(
+                &mut self,
+                query: CollisionTraceQuery,
+                output: &mut CollisionTrace,
+            ) -> bool {
+                self.calls = self.calls.saturating_add(1);
+                *output = match self.calls {
+                    1 => CollisionTrace {
+                        all_solid: true,
+                        start_solid: true,
+                        fraction_q12: COLLISION_FRACTION_ONE_Q12,
+                        end: query.end,
+                        ..CollisionTrace::default()
+                    },
+                    2 => CollisionTrace {
+                        start_solid: true,
+                        fraction_q12: COLLISION_FRACTION_ONE_Q12,
+                        end: query.end,
+                        ..CollisionTrace::default()
+                    },
+                    3 => CollisionTrace::unobstructed(query.end),
+                    4 => CollisionTrace {
+                        fraction_q12: COLLISION_FRACTION_ONE_Q12 / 2,
+                        end: query.end.with_y(5),
+                        normal_q12: [0, 3974, -993],
+                        ..CollisionTrace::default()
+                    },
+                    _ => panic!("unexpected slope-step trace"),
+                };
+                true
+            }
+        }
+
+        let mut provider = SlopeStepProvider { calls: 0 };
+        let start = RoomPoint::new(689, 0, 7);
+        let target = RoomPoint::new(689, 0, 25);
+        let position = trace_stand_position(
+            &mut provider,
+            start,
+            target,
+            CollisionTraceShape::Body {
+                radius: 12,
+                height: 64,
+            },
+        )
+        .expect("slope step trace");
+        assert_eq!(position, Some(RoomPoint::new(689, 5, 25)));
+        assert_eq!(provider.calls, 4);
     }
 
     fn config() -> CharacterMotorConfig {
