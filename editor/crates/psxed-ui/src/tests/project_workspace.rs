@@ -26,6 +26,8 @@ fn leak_path_navigation_switches_to_free_camera_and_steps_points() {
         ProjectDocument::new("pointfile navigation"),
     );
     workspace.last_bsp_leak_path = vec![[10, 20, 30], [110, 20, 30], [110, 120, 30]];
+    workspace.last_bsp_leak_opening = vec![[96, 0, 0], [96, 64, 0], [96, 64, 64], [96, 0, 64]];
+    workspace.bsp_leak_opening_path_index = Some(1);
     workspace.camera_rig.mode = ViewportCameraMode::Orbit;
 
     assert!(workspace.follow_next_bsp_leak_point());
@@ -37,6 +39,119 @@ fn leak_path_navigation_switches_to_free_camera_and_steps_points() {
     assert!(workspace.follow_next_bsp_leak_point());
     assert_eq!(workspace.camera_rig.free_position, [110, 20, 30]);
     assert_eq!(workspace.bsp_leak_cursor, 2);
+
+    workspace.camera_rig.mode = ViewportCameraMode::Orbit;
+    assert!(workspace.jump_to_bsp_leak_opening());
+    assert_eq!(workspace.camera_rig.mode, ViewportCameraMode::Free);
+    assert_eq!(workspace.camera_rig.free_position, [10, 20, 30]);
+    assert!(workspace.status.contains("framed in red"));
+}
+
+#[test]
+fn project_edit_hides_stale_pointfile_until_live_refresh_completes() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("bsp-pointfile-stale"),
+        ProjectDocument::new("pointfile stale"),
+    );
+    workspace.last_bsp_leak_path = vec![[10, 20, 30], [40, 50, 60]];
+    workspace.last_bsp_leak_opening = vec![[20, 20, 20], [20, 30, 20], [20, 30, 30]];
+    workspace.bsp_leak_path_current = true;
+    workspace.show_bsp_leak_path = true;
+    assert_eq!(workspace.visible_bsp_leak_path().len(), 2);
+
+    workspace.mark_dirty();
+
+    assert!(workspace.visible_bsp_leak_path().is_empty());
+    assert!(workspace.visible_bsp_leak_opening().is_empty());
+    assert!(workspace.bsp_leak_refresh_pending());
+    assert!(
+        !workspace.follow_next_bsp_leak_point(),
+        "camera navigation must never consume stale pointfile coordinates"
+    );
+}
+
+#[test]
+fn pointfile_fingerprint_ignores_material_uv_but_tracks_brush_planes() {
+    let mut project = ProjectDocument::new("pointfile fingerprint");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [256, 256, 256],
+        ));
+    let geometry = bsp_leak_geometry_fingerprint(&project);
+
+    let material = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    project.active_scene_mut().brushes[0].faces[0].material = Some(material);
+    project.active_scene_mut().brushes[0].faces[0]
+        .uv
+        .offset_texels = [17, -9];
+    assert_eq!(
+        bsp_leak_geometry_fingerprint(&project),
+        geometry,
+        "surface appearance cannot change portal connectivity"
+    );
+
+    project.active_scene_mut().brushes[0].faces[0].points[0][0] += 16;
+    assert_ne!(
+        bsp_leak_geometry_fingerprint(&project),
+        geometry,
+        "authored plane movement must invalidate the pointfile"
+    );
+}
+
+#[test]
+fn debounced_live_pointfile_worker_replaces_stale_cache() {
+    let dir = test_temp_dir("bsp-pointfile-live-worker");
+    let mut project = ProjectDocument::new("pointfile live worker");
+    let mut room = psxed_project::brush::Brush::cuboid([0, 0, 0], [1024, 512, 1024])
+        .hollow(64)
+        .expect("hollow room");
+    room.remove(0);
+    project.active_scene_mut().brushes = room;
+    let spawn = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Player Spawn",
+        NodeKind::SpawnPoint {
+            player: true,
+            character: None,
+        },
+    );
+    project
+        .active_scene_mut()
+        .node_mut(spawn)
+        .expect("spawn")
+        .transform
+        .translation = [512.0, 128.0, 512.0];
+
+    let mut workspace = EditorWorkspace::with_project(dir.clone(), project);
+    workspace.last_bsp_leak_path = vec![[1, 2, 3], [4, 5, 6]];
+    workspace.bsp_leak_refresh_due = Some(Instant::now());
+    let ctx = egui::Context::default();
+    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    while !workspace.bsp_leak_path_current && Instant::now() < deadline {
+        workspace.poll_bsp_leak_refresh(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(
+        workspace.bsp_leak_path_current,
+        "pointfile worker timed out"
+    );
+    assert!(workspace.last_bsp_leak_path.len() >= 3);
+    assert!(workspace.last_bsp_leak_opening.len() >= 3);
+    assert!(workspace.bsp_leak_opening_path_index.is_some());
+    assert_ne!(workspace.last_bsp_leak_path, [[1, 2, 3], [4, 5, 6]]);
+    assert!(workspace.status.contains("live"));
+    assert_eq!(
+        read_cached_bsp_leak_path(&dir).unwrap(),
+        workspace.last_bsp_leak_path
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

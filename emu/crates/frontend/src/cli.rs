@@ -3067,9 +3067,25 @@ fn headless_editor_viewport_image(
             &mut frame.overlay_lines,
         );
     }
+    // A UI dump is a single synchronous frame, so it cannot wait for the
+    // editor's debounced worker. Run the same topology-only check here to
+    // ensure headless regression captures include the current red breach
+    // marker instead of only a possibly cached green pointfile.
+    let live_leak = psxed_project::brush_world::diagnose_brush_world_leak(project.clone()).ok();
+    let leak_path = live_leak.as_ref().map_or_else(
+        || editor.visible_bsp_leak_path(),
+        |diagnostic| &diagnostic.path,
+    );
+    let leak_opening = live_leak.as_ref().map_or_else(
+        || editor.visible_bsp_leak_opening(),
+        |diagnostic| &diagnostic.likely_opening,
+    );
     crate::editor_preview::append_bsp_leak_path_overlay(
+        project,
         editor.viewport_3d_camera(),
-        editor.visible_bsp_leak_path(),
+        leak_path,
+        leak_opening,
+        &hidden,
         &mut frame.overlay_lines,
     );
 

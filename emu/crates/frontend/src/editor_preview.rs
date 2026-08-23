@@ -331,16 +331,26 @@ pub(crate) fn prepend_bsp_surface_grid_overlay(
     );
 }
 
-/// Draw the Quake pointfile route from the last successful BSP cook. Kept in
-/// the host overlay layer so the diagnostic stays bright and readable over
-/// every material without changing the PSX-style scene command stream.
+/// Draw the Quake pointfile route from the last successful BSP cook. The
+/// bright host stroke is split against the cached solid-brush geometry so
+/// walls hide it even though it is not part of the PSX command stream.
 pub(crate) fn append_bsp_leak_path_overlay(
+    project: &ProjectDocument,
     camera: ViewportCameraState,
     leak_path: &[[i32; 3]],
+    likely_opening: &[[i32; 3]],
+    hidden_scene_nodes: &HashSet<NodeId>,
     overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
 ) {
     let world_camera = setup_gte_for_camera(camera);
-    overlays::append_bsp_leak_path_overlay(world_camera, leak_path, overlay_lines);
+    overlays::append_bsp_leak_path_overlay(
+        project,
+        world_camera,
+        leak_path,
+        likely_opening,
+        hidden_scene_nodes,
+        overlay_lines,
+    );
 }
 
 /// Build a fresh preview frame rendering the active editor room window
@@ -1392,6 +1402,8 @@ pub(crate) struct PreviewBrushBounds {
 
 struct PreviewSolvedBrush {
     all_planes: Vec<psxed_project::brush::Plane>,
+    normalized_planes: Vec<([f64; 3], f64)>,
+    bounds: PreviewBrushBounds,
     pickable: bool,
 }
 
@@ -1544,9 +1556,19 @@ fn rebuild_solved_brushes(project: &ProjectDocument) -> Vec<PreviewSolvedBrush> 
                 .faces
                 .iter()
                 .filter_map(|face| Plane::from_points(face.points))
+                .collect::<Vec<_>>();
+            let normalized_planes = all_planes
+                .iter()
+                .copied()
+                .map(psxed_project::brush_compile::normalized_plane)
                 .collect();
             PreviewSolvedBrush {
                 all_planes,
+                normalized_planes,
+                bounds: PreviewBrushBounds {
+                    min: solved.min,
+                    max: solved.max,
+                },
                 pickable,
             }
         })

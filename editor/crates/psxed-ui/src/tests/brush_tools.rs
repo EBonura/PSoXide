@@ -2707,6 +2707,118 @@ fn snap_selected_brush_rounds_points() {
     assert_eq!(solved.max, [64.0, 64.0, 64.0]);
 }
 
+fn off_grid_absolute_snap_workspace(name: &str) -> EditorWorkspace {
+    let mut project = ProjectDocument::new(name);
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [10, 0, 0],
+            [138, 128, 128],
+        ));
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir(name), project);
+    workspace.active_tool = ViewTool::Select;
+    workspace.view_2d = true;
+    workspace.orthographic_view = OrthographicView::Top;
+    workspace.orthographic_focus = [64.0; 3];
+    workspace.snap_units = 16;
+    workspace.replace_brush_selection(0, None);
+    workspace
+}
+
+#[test]
+fn off_grid_vertex_and_edge_drags_snap_the_destination_not_the_delta() {
+    let mut vertex = off_grid_absolute_snap_workspace("absolute-vertex-snap");
+    assert!(vertex.begin_brush_vertex_drag_2d([10.0, 0.0], 0.5));
+    vertex.update_brush_vertex_drag_2d([15.0, 0.0]);
+    assert_eq!(
+        vertex.brush_vertex_drag.as_ref().unwrap().applied,
+        [6, 0, 0],
+        "X=10 dragged toward the 16-unit line must land at X=16"
+    );
+    assert!(crate::workspace::brush_elements::unique_vertices(
+        &vertex.project.active_scene().brushes[0].solve()
+    )
+    .iter()
+    .any(|point| point[0] == 16.0));
+
+    let mut edge = off_grid_absolute_snap_workspace("absolute-edge-snap");
+    assert!(edge.begin_brush_edge_drag_2d([10.0, 64.0], 0.5));
+    edge.update_brush_vertex_drag_2d([15.0, 64.0]);
+    assert_eq!(
+        edge.brush_vertex_drag.as_ref().unwrap().applied,
+        [6, 0, 0],
+        "the grabbed edge must share one rigid delta that puts it on X=16"
+    );
+}
+
+#[test]
+fn off_grid_face_drag_snaps_its_plane_to_the_absolute_grid() {
+    let mut workspace = off_grid_absolute_snap_workspace("absolute-face-snap");
+    assert!(workspace.begin_brush_resize_2d([138.0, 64.0], 0.5));
+    workspace.update_brush_resize_2d([143.0, 64.0]);
+    assert_eq!(
+        workspace.brush_extrude.as_ref().unwrap().applied,
+        [6, 0, 0],
+        "the X=138 face must land on the X=144 grid line"
+    );
+    assert_eq!(
+        workspace.project.active_scene().brushes[0].solve().max[0],
+        144.0
+    );
+}
+
+#[test]
+fn snap_level_quantises_every_brush_as_one_undo_step() {
+    let originals = [
+        psxed_project::brush::Brush::cuboid([1, 1, 1], [65, 65, 65]),
+        psxed_project::brush::Brush::cuboid([81, 17, -63], [145, 81, 1]),
+    ];
+    let mut project = ProjectDocument::new("snap complete level");
+    project.active_scene_mut().brushes.extend(originals.clone());
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("snap-level"), project);
+    workspace.snap_units = 16;
+
+    workspace.snap_all_brushes_to_grid();
+
+    assert!(workspace.is_dirty());
+    assert!(workspace.status.starts_with("Snapped 2 brushes"));
+    for brush in &workspace.project.active_scene().brushes {
+        for face in &brush.faces {
+            for point in face.points {
+                assert!(
+                    point
+                        .iter()
+                        .all(|coordinate| coordinate.rem_euclid(16) == 0),
+                    "level snap left {point:?} off-grid"
+                );
+            }
+        }
+        assert!(brush.solve().is_valid());
+    }
+
+    workspace.do_undo();
+    assert_eq!(workspace.project.active_scene().brushes, originals);
+}
+
+#[test]
+fn snap_level_is_atomic_when_the_grid_would_collapse_a_thin_brush() {
+    let originals = [
+        psxed_project::brush::Brush::cuboid([1, 0, 0], [7, 16, 16]),
+        psxed_project::brush::Brush::cuboid([17, 0, 0], [49, 32, 32]),
+    ];
+    let mut project = ProjectDocument::new("reject destructive level snap");
+    project.active_scene_mut().brushes.extend(originals.clone());
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("snap-level-atomic"), project);
+    workspace.snap_units = 16;
+
+    workspace.snap_all_brushes_to_grid();
+
+    assert_eq!(workspace.project.active_scene().brushes, originals);
+    assert!(workspace.status.starts_with("Snap level aborted:"));
+    assert!(workspace.status.contains("choose a finer grid"));
+}
+
 #[test]
 fn texture_lock_compensates_face_uv_on_move() {
     let mut harness = ViewportHarness::floored_room("brush_uv_lock", 4);
@@ -5108,6 +5220,61 @@ fn brush_mode_buttons_visible_and_clickable_with_3d_viewport_active() {
     // before clicking, so this proves visibility with the 3D viewport up.
     click_visible_brush_mode(&mut workspace, BrushEditMode::Vertex);
     assert_eq!(workspace.brush_edit_mode, BrushEditMode::Vertex);
+}
+
+#[test]
+fn vertex_snap_has_a_visible_latched_toolbar_button_beside_the_b_shortcut() {
+    let mut project = ProjectDocument::new("visible vertex snap toggle");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid(
+            [0, 0, 0],
+            [128, 128, 128],
+        ));
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("vertex-snap-toggle"), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.view_2d = false;
+    workspace.replace_brush_selection(0, None);
+    let (ctx, viewport) = real_egui_workspace_ctx("vertex-snap-toggle");
+    let label = "V↔V".to_string();
+    let button = locate_unique_label(&ctx, &mut workspace, &viewport, &label);
+
+    let (press, release) = press_release(button);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 1.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 2.0 / 60.0, release);
+    assert!(workspace.brush_vertex_snap_enabled);
+    assert_eq!(workspace.brush_edit_mode, BrushEditMode::Move);
+    assert!(workspace.status.starts_with("Vertex Snap enabled"));
+}
+
+#[test]
+fn snap_level_toolbar_button_runs_the_global_quantisation_command() {
+    let mut project = ProjectDocument::new("visible level snap");
+    project
+        .active_scene_mut()
+        .brushes
+        .push(psxed_project::brush::Brush::cuboid([1, 1, 1], [65, 65, 65]));
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("snap-level-button"), project);
+    workspace.active_workspace = WorkspaceView::Room;
+    workspace.active_tool = ViewTool::Select;
+    workspace.view_2d = false;
+    workspace.snap_units = 16;
+    let (ctx, viewport) = real_egui_workspace_ctx("snap-level-button");
+    let button = locate_unique_label(&ctx, &mut workspace, &viewport, "Snap level");
+
+    let (press, release) = press_release(button);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 1.0 / 60.0, press);
+    let _ = real_egui_workspace_frame(&ctx, &mut workspace, &viewport, 2.0 / 60.0, release);
+
+    assert!(workspace.status.starts_with("Snapped 1 brush"));
+    assert!(workspace.project.active_scene().brushes[0]
+        .faces
+        .iter()
+        .flat_map(|face| face.points)
+        .flatten()
+        .all(|coordinate| coordinate.rem_euclid(16) == 0));
 }
 
 #[test]
