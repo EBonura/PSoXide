@@ -9,7 +9,7 @@ use crate::brush_collision_hulls::{
 };
 use crate::brush_compile::{
     build_surface_bsp, compile_authored_surfaces, compile_csg_surfaces, pack_normalized_plane,
-    replace_bsp_render_surfaces, subdivide_surfaces_to_budget,
+    replace_bsp_render_surfaces, subdivide_surfaces_to_budget, CompiledSurface, CompiledSurfaceBsp,
 };
 use crate::brush_light::{
     bake_brush_vertex_lighting, BrushLightError, BrushMaterialTint, BrushPointLight,
@@ -19,7 +19,8 @@ use crate::brush_pack::{
     PackedBspGeometry,
 };
 use crate::brush_portal::{
-    classify_bsp_leaves, fill_outside_bsp_leaves, portalize_surface_bsp, OutsideFillResult,
+    classify_bsp_leaves, fill_outside_bsp_leaves, portalize_surface_bsp, CompiledPortal,
+    OutsideFillResult,
 };
 use crate::brush_pxbsp::{
     build_pxbsp_with_submodels, pxbsp_material_slots, CompiledPxbsp, PxbspBuildError,
@@ -496,34 +497,7 @@ pub fn compile_brush_world(
     let (lights, light_nodes) = scene_lights(scene);
     let material_tints = material_tints(project);
     let texture_dims = brush_texture_dims(project, scene, &options);
-    let occupant_points: Vec<_> = scene
-        .nodes()
-        .iter()
-        .filter(|node| match node.kind {
-            NodeKind::SpawnPoint { player: true, .. } => true,
-            NodeKind::Entity => node.children.iter().any(|&child| {
-                scene.node(child).is_some_and(|child| {
-                    matches!(
-                        child.kind,
-                        NodeKind::CharacterController { player: true, .. }
-                    )
-                })
-            }),
-            _ => false,
-        })
-        .map(|node| {
-            let mut point = node.transform.translation.map(f64::from);
-            // Player transforms use a feet pivot, while Quake's outside fill
-            // needs an occupant point strictly inside an empty leaf. A spawn
-            // resting exactly on a floor plane descends to the solid/back
-            // child (`d > 0` is Quake's front-side rule), so sample one world
-            // unit inside the authored body instead of misclassifying a
-            // sealed map as having no occupants.
-            point[1] += 1.0;
-            point
-        })
-        .filter(|point| point.iter().all(|value| value.is_finite()))
-        .collect();
+    let occupant_points = player_occupant_points(scene);
     let (mut world_geometry, world_collision, leak_path) = compile_model(
         &static_brushes,
         &all_brushes,
@@ -740,6 +714,143 @@ pub fn compile_brush_world(
     })
 }
 
+fn player_occupant_points(scene: &Scene) -> Vec<[f64; 3]> {
+    scene
+        .nodes()
+        .iter()
+        .filter(|node| match node.kind {
+            NodeKind::SpawnPoint { player: true, .. } => true,
+            NodeKind::Entity => node.children.iter().any(|&child| {
+                scene.node(child).is_some_and(|child| {
+                    matches!(
+                        child.kind,
+                        NodeKind::CharacterController { player: true, .. }
+                    )
+                })
+            }),
+            _ => false,
+        })
+        .map(|node| {
+            let mut point = node.transform.translation.map(f64::from);
+            // Player transforms use a feet pivot, while Quake's outside fill
+            // needs an occupant point strictly inside an empty leaf. A spawn
+            // resting exactly on a floor plane descends to the solid/back
+            // child (`d > 0` is Quake's front-side rule), so sample one world
+            // unit inside the authored body instead of misclassifying a
+            // sealed map as having no occupants.
+            point[1] += 1.0;
+            point
+        })
+        .filter(|point| point.iter().all(|value| value.is_finite()))
+        .collect()
+}
+
+/// Recompute only the Quake-style pointfile for an authored BSP project.
+///
+/// This is the editor's inexpensive live diagnostic path: it shares the
+/// cooker's exact CSG, BSP, portalization, leaf classification, and outside
+/// fill, but deliberately skips lighting, texture IO, collision hulls, VIS,
+/// and packing. All returned coordinates are authored/editor units.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BrushWorldLeakDiagnostic {
+    /// Complete Quake pointfile route from the occupant to the exterior.
+    pub path: Vec<[i32; 3]>,
+    /// Outer boundary of the connected coplanar empty-portal component that
+    /// contains the narrowest portal crossed by `path`. A single BSP portal
+    /// is only a leaf-partition fragment and can be much smaller than the
+    /// authored breach; merging its component makes the editor marker match
+    /// the visible empty channel while `path` remains authoritative.
+    pub likely_opening: Vec<[i32; 3]>,
+    /// Point in `path` that belongs to the seed portal inside
+    /// `likely_opening`; camera navigation uses it to approach the region.
+    pub likely_opening_path_index: Option<usize>,
+}
+
+impl BrushWorldLeakDiagnostic {
+    pub fn is_empty(&self) -> bool {
+        self.path.is_empty()
+    }
+}
+
+pub fn diagnose_brush_world_leak(
+    mut project: ProjectDocument,
+) -> Result<BrushWorldLeakDiagnostic, BrushWorldCookError> {
+    if project.world_format() != crate::ProjectWorldFormat::Bsp {
+        return Ok(BrushWorldLeakDiagnostic::default());
+    }
+    crate::units::scale_project_to_engine_units(&mut project);
+    let scene = project.active_scene();
+    let mut static_brushes = Vec::new();
+    for (brush_index, brush) in scene.brushes.iter().enumerate() {
+        let solved = brush.solve();
+        if !solved.is_valid() {
+            let face = brush.faces.iter().enumerate().find_map(|(face, authored)| {
+                (crate::brush::Plane::from_points(authored.points).is_none()
+                    || solved.polygons.get(face).is_none_or(Option::is_none))
+                .then_some(face)
+            });
+            return Err(BrushWorldCookError::InvalidBrush {
+                brush: brush_index,
+                face,
+            });
+        }
+        match brush.mover {
+            None => static_brushes.push(brush.clone()),
+            Some(node) => {
+                let Some(owner) = scene.node(node) else {
+                    return Err(BrushWorldCookError::MissingMover {
+                        brush: brush_index,
+                        node,
+                    });
+                };
+                if !matches!(
+                    &owner.kind,
+                    NodeKind::Logic {
+                        kind: LogicNodeKind::Door { .. },
+                        ..
+                    }
+                ) {
+                    return Err(BrushWorldCookError::BrushOwnerIsNotDoor {
+                        brush: brush_index,
+                        node,
+                    });
+                }
+                if !brush.contents.is_solid() {
+                    return Err(BrushWorldCookError::LiquidMover {
+                        brush: brush_index,
+                        node,
+                        contents: brush.contents,
+                    });
+                }
+            }
+        }
+    }
+    if static_brushes.is_empty() {
+        return Err(BrushWorldCookError::EmptyStaticWorld);
+    }
+
+    let occupant_points = player_occupant_points(scene);
+    let (topology_surfaces, _) = compile_model_surfaces(&static_brushes);
+    let (_, _, engine_diagnostic) =
+        compile_model_topology(&topology_surfaces, &static_brushes, &occupant_points, false);
+    let scale_point = |point: [i32; 3]| {
+        point.map(|coordinate| coordinate.saturating_mul(crate::units::WORLD_UNIT_DIVISOR))
+    };
+    Ok(BrushWorldLeakDiagnostic {
+        path: engine_diagnostic
+            .path
+            .into_iter()
+            .map(scale_point)
+            .collect(),
+        likely_opening: engine_diagnostic
+            .likely_opening
+            .into_iter()
+            .map(scale_point)
+            .collect(),
+        likely_opening_path_index: engine_diagnostic.likely_opening_path_index,
+    })
+}
+
 fn compile_model(
     brushes: &[Brush],
     light_occluders: &[Brush],
@@ -752,26 +863,9 @@ fn compile_model(
     ambient: [u8; 3],
     collision_hulls: &[CollisionHullBounds; 3],
 ) -> Result<(PackedBspGeometry, CompiledCollisionHulls, Vec<[i32; 3]>), BrushWorldCookError> {
-    let csg_surfaces = compile_csg_surfaces(brushes);
-    let authored_surfaces = compile_authored_surfaces(brushes);
-    let (topology_surfaces, render_surfaces) = if csg_surfaces.len() <= i16::MAX as usize {
-        // Keep the actual union boundary whenever it fits the resident face
-        // budget, even if retaining each authored face would be marginally
-        // smaller. Authored polygons can cross into an overlapping brush; a
-        // PS1 painter's algorithm then has no valid whole-triangle order and
-        // produces diagonal wedges around trims, arches, and pillars. The
-        // authored fallback exists only for large maps where CSG fragmentation
-        // itself exceeds the resident budget. CSG remains preferable above
-        // that threshold too when it is already the smaller representation.
-        let render = if prefer_csg_render_surfaces(csg_surfaces.len(), authored_surfaces.len()) {
-            csg_surfaces.clone()
-        } else {
-            authored_surfaces
-        };
-        (csg_surfaces, render)
-    } else {
-        (authored_surfaces.clone(), authored_surfaces)
-    };
+    let (topology_surfaces, render_surfaces) = compile_model_surfaces(brushes);
+    let (mut bsp, portals, leak_diagnostic) =
+        compile_model_topology(&topology_surfaces, brushes, occupant_points, true);
     // qbsp parity: EVERY final face is capped to SURFACE_EXTENT_UNITS,
     // lights or not. Build exact leaves from the unsplit CSG surfaces, then
     // keep the PS1-sized render surfaces as single-owner records referenced
@@ -785,36 +879,6 @@ fn compile_model(
     // light-gated LIGHT_SUBDIVISION_UNITS pass: the cap is finer than
     // the light grid was, so lit and lightless scenes now share one
     // subdivision rule.
-    let mut bsp = build_surface_bsp(&topology_surfaces);
-    let portals = portalize_surface_bsp(&bsp);
-    classify_bsp_leaves(&mut bsp, &portals, brushes);
-    let mut leak_path = Vec::new();
-    match fill_outside_bsp_leaves(&mut bsp, &portals, occupant_points) {
-        OutsideFillResult::Filled(filled) => {
-            if filled > 0 {
-                eprintln!("[brush-qbsp] filled {filled} unreachable exterior leaves");
-            }
-        }
-        OutsideFillResult::Leaked(path) => {
-            leak_path = path
-                .into_iter()
-                .map(|point| {
-                    point.map(|coordinate| {
-                        coordinate
-                            .round()
-                            .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
-                            as i32
-                    })
-                })
-                .collect();
-            eprintln!(
-                "[brush-qbsp] leak from {:?}: occupied leaf reaches the exterior through {} pointfile points; retaining portal PVS through the opening",
-                leak_path.first().copied().unwrap_or([0; 3]),
-                leak_path.len(),
-            );
-        }
-        OutsideFillResult::NoOccupants => {}
-    }
     let light_spheres: Vec<_> = lights
         .iter()
         .map(|light| (light.position, light.radius))
@@ -881,7 +945,387 @@ fn compile_model(
         )?
     };
     let collision = compile_runtime_collision_hulls(brushes, collision_hulls)?;
-    Ok((geometry, collision, leak_path))
+    Ok((geometry, collision, leak_diagnostic.path))
+}
+
+fn compile_model_surfaces(brushes: &[Brush]) -> (Vec<CompiledSurface>, Vec<CompiledSurface>) {
+    let csg_surfaces = compile_csg_surfaces(brushes);
+    let authored_surfaces = compile_authored_surfaces(brushes);
+    if csg_surfaces.len() <= i16::MAX as usize {
+        // Keep the actual union boundary whenever it fits the resident face
+        // budget, even if retaining each authored face would be marginally
+        // smaller. Authored polygons can cross into an overlapping brush; a
+        // PS1 painter's algorithm then has no valid whole-triangle order and
+        // produces diagonal wedges around trims, arches, and pillars. The
+        // authored fallback exists only for large maps where CSG fragmentation
+        // itself exceeds the resident budget. CSG remains preferable above
+        // that threshold too when it is already the smaller representation.
+        let render = if prefer_csg_render_surfaces(csg_surfaces.len(), authored_surfaces.len()) {
+            csg_surfaces.clone()
+        } else {
+            authored_surfaces
+        };
+        (csg_surfaces, render)
+    } else {
+        (authored_surfaces.clone(), authored_surfaces)
+    }
+}
+
+fn compile_model_topology(
+    topology_surfaces: &[CompiledSurface],
+    brushes: &[Brush],
+    occupant_points: &[[f64; 3]],
+    log_result: bool,
+) -> (
+    CompiledSurfaceBsp,
+    Vec<CompiledPortal>,
+    BrushWorldLeakDiagnostic,
+) {
+    let mut bsp = build_surface_bsp(&topology_surfaces);
+    let portals = portalize_surface_bsp(&bsp);
+    classify_bsp_leaves(&mut bsp, &portals, brushes);
+    let mut leak_diagnostic = BrushWorldLeakDiagnostic::default();
+    match fill_outside_bsp_leaves(&mut bsp, &portals, occupant_points) {
+        OutsideFillResult::Filled(filled) => {
+            if log_result && filled > 0 {
+                eprintln!("[brush-qbsp] filled {filled} unreachable exterior leaves");
+            }
+        }
+        OutsideFillResult::Leaked(leak) => {
+            leak_diagnostic.path = leak
+                .points
+                .into_iter()
+                .map(|point| {
+                    point.map(|coordinate| {
+                        coordinate
+                            .round()
+                            .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                            as i32
+                    })
+                })
+                .collect();
+            if let Some((path_portal_index, portal_index, portal)) = leak
+                .portal_indices
+                .iter()
+                .enumerate()
+                .filter_map(|(path_portal_index, &portal_index)| {
+                    let portal = portals.get(portal_index)?;
+                    (portal.vertices.len() >= 3).then_some((
+                        path_portal_index,
+                        portal_index,
+                        portal,
+                    ))
+                })
+                .min_by(|(_, _, a), (_, _, b)| {
+                    portal_area_measure_squared(&a.vertices)
+                        .total_cmp(&portal_area_measure_squared(&b.vertices))
+                })
+            {
+                let opening = connected_coplanar_portal_outline(&portals, portal_index, |leaf| {
+                    bsp.leaves
+                        .get(leaf)
+                        .is_some_and(|leaf| leaf.contents.is_visible())
+                });
+                let opening = if opening.len() >= 3 {
+                    opening.as_slice()
+                } else {
+                    portal.vertices.as_slice()
+                };
+                leak_diagnostic.likely_opening = opening
+                    .iter()
+                    .map(|point| {
+                        point.map(|coordinate| {
+                            coordinate
+                                .round()
+                                .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                                as i32
+                        })
+                    })
+                    .collect();
+                leak_diagnostic.likely_opening_path_index = Some(path_portal_index + 1);
+            }
+            if log_result {
+                eprintln!(
+                    "[brush-qbsp] leak from {:?}: occupied leaf reaches the exterior through {} pointfile points; retaining portal PVS through the opening",
+                    leak_diagnostic.path.first().copied().unwrap_or([0; 3]),
+                    leak_diagnostic.path.len(),
+                );
+            }
+        }
+        OutsideFillResult::NoOccupants => {}
+    }
+    (bsp, portals, leak_diagnostic)
+}
+
+/// Reconstruct the outer boundary of all visible portal fragments connected
+/// to `seed` on the same geometric plane. Portalization splits one physical
+/// opening at every descendant BSP plane, so presenting only the seed makes a
+/// large authored hole look like a tiny diagnostic square.
+fn connected_coplanar_portal_outline(
+    portals: &[CompiledPortal],
+    seed: usize,
+    leaf_visible: impl Fn(usize) -> bool,
+) -> Vec<[f64; 3]> {
+    let Some(seed_portal) = portals.get(seed) else {
+        return Vec::new();
+    };
+    let candidates: Vec<_> = portals
+        .iter()
+        .enumerate()
+        .filter_map(|(index, portal)| {
+            (portal.vertices.len() >= 3
+                && leaf_visible(portal.front_leaf)
+                && leaf_visible(portal.back_leaf)
+                && portal_planes_match(seed_portal.plane, portal.plane))
+            .then_some(index)
+        })
+        .collect();
+    let mut component = vec![seed];
+    let mut cursor = 0;
+    while cursor < component.len() {
+        let current = component[cursor];
+        for &candidate in &candidates {
+            if component.contains(&candidate)
+                || !portal_polygons_share_edge(
+                    &portals[current].vertices,
+                    &portals[candidate].vertices,
+                )
+            {
+                continue;
+            }
+            component.push(candidate);
+        }
+        cursor += 1;
+    }
+    portal_component_outer_boundary(portals, &component)
+}
+
+fn portal_planes_match(left: crate::brush::Plane, right: crate::brush::Plane) -> bool {
+    const EPSILON: f64 = 1.0e-8;
+    let (left_normal, left_distance) = crate::brush_compile::normalized_plane(left);
+    let (right_normal, right_distance) = crate::brush_compile::normalized_plane(right);
+    let direct = left_normal
+        .into_iter()
+        .zip(right_normal)
+        .all(|(left, right)| (left - right).abs() <= EPSILON)
+        && (left_distance - right_distance).abs() <= EPSILON;
+    let inverse = left_normal
+        .into_iter()
+        .zip(right_normal)
+        .all(|(left, right)| (left + right).abs() <= EPSILON)
+        && (left_distance + right_distance).abs() <= EPSILON;
+    direct || inverse
+}
+
+fn portal_polygons_share_edge(left: &[[f64; 3]], right: &[[f64; 3]]) -> bool {
+    left.iter()
+        .copied()
+        .zip(left.iter().copied().cycle().skip(1))
+        .take(left.len())
+        .any(|(left_a, left_b)| {
+            right
+                .iter()
+                .copied()
+                .zip(right.iter().copied().cycle().skip(1))
+                .take(right.len())
+                .any(|(right_a, right_b)| {
+                    collinear_segments_overlap(left_a, left_b, right_a, right_b)
+                })
+        })
+}
+
+fn collinear_segments_overlap(
+    left_a: [f64; 3],
+    left_b: [f64; 3],
+    right_a: [f64; 3],
+    right_b: [f64; 3],
+) -> bool {
+    const EPSILON: f64 = 1.0 / 1024.0;
+    let direction = subtract(left_b, left_a);
+    let length_squared = dot_f64(direction, direction);
+    if length_squared <= EPSILON * EPSILON {
+        return false;
+    }
+    let right_direction = subtract(right_b, right_a);
+    let parallel_error = cross_f64(direction, right_direction);
+    if dot_f64(parallel_error, parallel_error)
+        > EPSILON * EPSILON * length_squared * dot_f64(right_direction, right_direction)
+    {
+        return false;
+    }
+    let line_error = cross_f64(subtract(right_a, left_a), direction);
+    if dot_f64(line_error, line_error) > EPSILON * EPSILON * length_squared {
+        return false;
+    }
+    let right_t = [right_a, right_b]
+        .map(|point| dot_f64(subtract(point, left_a), direction) / length_squared);
+    let overlap_start = 0.0_f64.max(right_t[0].min(right_t[1]));
+    let overlap_end = 1.0_f64.min(right_t[0].max(right_t[1]));
+    overlap_end - overlap_start > EPSILON / length_squared.sqrt()
+}
+
+fn portal_component_outer_boundary(
+    portals: &[CompiledPortal],
+    component: &[usize],
+) -> Vec<[f64; 3]> {
+    const EPSILON: f64 = 1.0 / 1024.0;
+    let mut vertices: Vec<[f64; 3]> = Vec::new();
+    for portal in component.iter().filter_map(|&index| portals.get(index)) {
+        for &vertex in &portal.vertices {
+            if !vertices
+                .iter()
+                .any(|known| squared_distance_f64(*known, vertex) <= EPSILON * EPSILON)
+            {
+                vertices.push(vertex);
+            }
+        }
+    }
+
+    let mut edge_counts = std::collections::HashMap::<(usize, usize), usize>::new();
+    for portal in component.iter().filter_map(|&index| portals.get(index)) {
+        for (edge_a, edge_b) in portal
+            .vertices
+            .iter()
+            .copied()
+            .zip(portal.vertices.iter().copied().cycle().skip(1))
+            .take(portal.vertices.len())
+        {
+            let direction = subtract(edge_b, edge_a);
+            let length_squared = dot_f64(direction, direction);
+            if length_squared <= EPSILON * EPSILON {
+                continue;
+            }
+            let mut splits: Vec<_> = vertices
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &point)| {
+                    let t = dot_f64(subtract(point, edge_a), direction) / length_squared;
+                    if t < -EPSILON || t > 1.0 + EPSILON {
+                        return None;
+                    }
+                    let nearest = add_f64(edge_a, scale_f64(direction, t));
+                    (squared_distance_f64(nearest, point) <= EPSILON * EPSILON)
+                        .then_some((t.clamp(0.0, 1.0), index))
+                })
+                .collect();
+            splits.sort_by(|left, right| left.0.total_cmp(&right.0));
+            splits.dedup_by_key(|(_, index)| *index);
+            for pair in splits.windows(2) {
+                let left = pair[0].1;
+                let right = pair[1].1;
+                if left == right
+                    || squared_distance_f64(vertices[left], vertices[right]) <= EPSILON * EPSILON
+                {
+                    continue;
+                }
+                let edge = if left < right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                *edge_counts.entry(edge).or_default() += 1;
+            }
+        }
+    }
+
+    let mut boundary_edges: Vec<_> = edge_counts
+        .into_iter()
+        .filter_map(|(edge, count)| (count % 2 == 1).then_some(edge))
+        .collect();
+    boundary_edges.sort_unstable();
+    let mut adjacency = vec![Vec::new(); vertices.len()];
+    for &(left, right) in &boundary_edges {
+        adjacency[left].push(right);
+        adjacency[right].push(left);
+    }
+    for adjacent in &mut adjacency {
+        adjacent.sort_unstable();
+        adjacent.dedup();
+    }
+
+    let mut unused: std::collections::HashSet<_> = boundary_edges.iter().copied().collect();
+    let mut loops = Vec::new();
+    for &(start, first) in &boundary_edges {
+        if !unused.remove(&(start, first)) {
+            continue;
+        }
+        let mut indices = vec![start];
+        let mut previous = start;
+        let mut current = first;
+        while current != start && indices.len() <= boundary_edges.len() + 1 {
+            indices.push(current);
+            let Some(next) = adjacency[current].iter().copied().find(|&candidate| {
+                candidate != previous
+                    && unused.contains(&(current.min(candidate), current.max(candidate)))
+            }) else {
+                break;
+            };
+            unused.remove(&(current.min(next), current.max(next)));
+            previous = current;
+            current = next;
+        }
+        if current == start && indices.len() >= 3 {
+            loops.push(
+                indices
+                    .into_iter()
+                    .map(|index| vertices[index])
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    loops
+        .into_iter()
+        .max_by(|left, right| {
+            portal_area_measure_squared(left).total_cmp(&portal_area_measure_squared(right))
+        })
+        .unwrap_or_default()
+}
+
+fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|axis| left[axis] - right[axis])
+}
+
+fn add_f64(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|axis| left[axis] + right[axis])
+}
+
+fn scale_f64(value: [f64; 3], scale: f64) -> [f64; 3] {
+    value.map(|component| component * scale)
+}
+
+fn dot_f64(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left.into_iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum()
+}
+
+fn cross_f64(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn squared_distance_f64(left: [f64; 3], right: [f64; 3]) -> f64 {
+    dot_f64(subtract(left, right), subtract(left, right))
+}
+
+/// Squared Newell area vector. The constant scale factor is irrelevant when
+/// comparing portals, and avoiding a square root keeps the live check cheap.
+fn portal_area_measure_squared(vertices: &[[f64; 3]]) -> f64 {
+    let mut area = [0.0; 3];
+    for index in 0..vertices.len() {
+        let a = vertices[index];
+        let b = vertices[(index + 1) % vertices.len()];
+        area[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        area[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        area[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    area.into_iter()
+        .map(|component| component * component)
+        .sum()
 }
 
 fn prefer_csg_render_surfaces(csg_count: usize, authored_count: usize) -> bool {
@@ -1836,6 +2280,120 @@ mod tests {
             },
         )
         .expect("brush world")
+    }
+
+    #[test]
+    fn live_leak_diagnostic_matches_sealed_and_open_authored_geometry() {
+        let sealed = authored_project();
+        assert!(
+            diagnose_brush_world_leak(sealed)
+                .expect("sealed live pointfile check")
+                .is_empty(),
+            "the complete hollow room must be sealed"
+        );
+
+        let mut open = authored_project();
+        open.active_scene_mut().brushes.remove(0);
+        let diagnostic = diagnose_brush_world_leak(open).expect("open live pointfile check");
+        assert!(
+            diagnostic.path.len() >= 3,
+            "open room must report occupant, portal, and exterior points: {diagnostic:?}"
+        );
+        assert_eq!(
+            diagnostic.path[0],
+            [128, 144, 128],
+            "live diagnostics return authored units and preserve the cooker's one-engine-unit occupant lift"
+        );
+        assert!(
+            diagnostic.likely_opening.len() >= 3,
+            "the connected portal component should be retained as an editor target"
+        );
+        assert!(
+            diagnostic
+                .likely_opening_path_index
+                .is_some_and(|index| index > 0 && index + 1 < diagnostic.path.len()),
+            "the opening centroid must identify an interior pointfile point"
+        );
+    }
+
+    #[test]
+    fn leak_opening_merges_connected_coplanar_portal_fragments() {
+        let plane = crate::brush::Plane {
+            normal: [1, 0, 0],
+            dist: 0,
+        };
+        let portal = |front_leaf, back_leaf, vertices| CompiledPortal {
+            plane,
+            front_leaf,
+            back_leaf,
+            vertices,
+        };
+        let portals = vec![
+            portal(
+                0,
+                1,
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [0.0, 10.0, 0.0],
+                    [0.0, 10.0, 10.0],
+                    [0.0, 0.0, 10.0],
+                ],
+            ),
+            portal(
+                1,
+                2,
+                vec![
+                    [0.0, 10.0, 0.0],
+                    [0.0, 20.0, 0.0],
+                    [0.0, 20.0, 10.0],
+                    [0.0, 10.0, 10.0],
+                ],
+            ),
+            // One long edge meets the two shorter edges above. The boundary
+            // builder must split and cancel that T-junction rather than leave
+            // an internal line in the opening outline.
+            portal(
+                2,
+                3,
+                vec![
+                    [0.0, 0.0, 10.0],
+                    [0.0, 20.0, 10.0],
+                    [0.0, 20.0, 20.0],
+                    [0.0, 0.0, 20.0],
+                ],
+            ),
+            portal(
+                4,
+                5,
+                vec![
+                    [0.0, 100.0, 0.0],
+                    [0.0, 110.0, 0.0],
+                    [0.0, 110.0, 10.0],
+                    [0.0, 100.0, 10.0],
+                ],
+            ),
+        ];
+
+        let outline = connected_coplanar_portal_outline(&portals, 0, |_| true);
+        assert!(outline.len() >= 4, "merged opening needs a closed outline");
+        let minimum = std::array::from_fn::<_, 3, _>(|axis| {
+            outline
+                .iter()
+                .map(|point| point[axis])
+                .fold(f64::INFINITY, f64::min)
+        });
+        let maximum = std::array::from_fn::<_, 3, _>(|axis| {
+            outline
+                .iter()
+                .map(|point| point[axis])
+                .fold(f64::NEG_INFINITY, f64::max)
+        });
+        assert_eq!(minimum, [0.0, 0.0, 0.0]);
+        assert_eq!(maximum, [0.0, 20.0, 20.0]);
+        assert!(
+            outline.iter().all(|point| point[1] < 100.0),
+            "a disconnected coplanar opening must not be merged"
+        );
     }
 
     #[test]

@@ -61,7 +61,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
@@ -127,6 +128,10 @@ const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 /// tying the tolerance to authored world scale.
 const BRUSH_SCREEN_PICK_RADIUS: f32 = 8.0;
 const PROJECT_WATCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+/// Wait until an edit gesture has settled before rebuilding the pointfile.
+/// Repeated mouse-move updates reset this deadline, so a large map incurs one
+/// topology pass after the drag rather than one pass per pointer event.
+const BSP_LEAK_REFRESH_DEBOUNCE: Duration = Duration::from_millis(450);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WatchedFileMetadata {
@@ -151,6 +156,12 @@ struct ProjectWatchState {
     resources: BTreeMap<PathBuf, Option<WatchedFileMetadata>>,
     last_poll: Instant,
     dirty_conflict: bool,
+}
+
+struct BspLeakRefreshJob {
+    revision: u64,
+    geometry_fingerprint: u64,
+    result: Receiver<Result<psxed_project::brush_world::BrushWorldLeakDiagnostic, String>>,
 }
 
 impl ProjectWatchState {
@@ -267,6 +278,60 @@ fn cache_bsp_leak_path(project_dir: &Path, points: &[[i32; 3]]) -> Result<(), St
         writeln!(text, "{x} {y} {z}").expect("writing to String cannot fail");
     }
     std::fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+/// Hash only topology and player-occupant inputs consumed by Quake outside
+/// fill. Materials, UVs, lights, editor camera state, and resources do not
+/// affect a pointfile and therefore do not trigger an unnecessary rebuild.
+fn bsp_leak_geometry_fingerprint(project: &ProjectDocument) -> u64 {
+    fn mix(hash: &mut u64, value: u64) {
+        for byte in value.to_le_bytes() {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    let mut hash = 0xcbf29ce484222325u64;
+    mix(&mut hash, project.world_format().is_bsp() as u64);
+    let scene = project.active_scene();
+    mix(&mut hash, scene.brushes.len() as u64);
+    for brush in &scene.brushes {
+        mix(&mut hash, brush.contents as u64);
+        mix(&mut hash, brush.mover.map(NodeId::raw).unwrap_or(0));
+        mix(&mut hash, brush.faces.len() as u64);
+        for face in &brush.faces {
+            for point in face.points {
+                for coordinate in point {
+                    mix(&mut hash, coordinate as u32 as u64);
+                }
+            }
+        }
+    }
+
+    let mut occupant_count = 0u64;
+    for node in scene.nodes() {
+        let is_player_occupant = match node.kind {
+            NodeKind::SpawnPoint { player: true, .. } => true,
+            NodeKind::Entity => node.children.iter().any(|&child| {
+                scene.node(child).is_some_and(|child| {
+                    matches!(
+                        child.kind,
+                        NodeKind::CharacterController { player: true, .. }
+                    )
+                })
+            }),
+            _ => false,
+        };
+        if !is_player_occupant {
+            continue;
+        }
+        occupant_count += 1;
+        for coordinate in node.transform.translation {
+            mix(&mut hash, u64::from(coordinate.to_bits()));
+        }
+    }
+    mix(&mut hash, occupant_count);
+    hash
 }
 
 fn watched_resource_signatures(
@@ -800,11 +865,13 @@ pub struct EditorWorkspace {
     /// In-flight vertex/edge drag (Brush tool with Vertex or Edge
     /// selection mode in an orthographic view).
     brush_vertex_drag: Option<BrushVertexDrag>,
-    /// Godot-style momentary 3D vertex-snap mode. Holding B while the
-    /// pointer is over the 3D viewport highlights a source corner on the
-    /// selected brush set; dragging it moves the set and snaps that corner
-    /// to a visible corner on another brush.
+    /// Effective Godot-style 3D vertex-snap state while the pointer is over
+    /// the viewport. It is driven by either the momentary B shortcut or the
+    /// visible toolbar toggle.
     brush_vertex_snap_key_down: bool,
+    /// Latched toolbar alternative to holding B. Kept as editor-session state:
+    /// it is a tool modifier, not authored project data.
+    brush_vertex_snap_enabled: bool,
     /// Source corner currently highlighted before a vertex-snap drag. The
     /// in-flight source/target live on `BrushVertexDrag` so releasing B does
     /// not interrupt a gesture that has already started.
@@ -893,11 +960,27 @@ pub struct EditorWorkspace {
     /// Most recent host-side PSX envelope. Before a successful cook this is
     /// the authored estimate; after it, the exact emitted-package report.
     last_playtest_budget: Option<psxed_project::playtest::PlaytestBudgetReport>,
-    /// Quake-style pointfile route from the last successful BSP cook.
-    /// This stays explicitly tied to a cook, like TrenchBroom's pointfile,
-    /// instead of pretending to be a live geometry guess.
+    /// Quake-style pointfile route from the latest completed topology check.
     last_bsp_leak_path: Vec<[i32; 3]>,
-    /// Transient visibility toggle for the last-cook pointfile overlay.
+    /// Outer boundary of the connected coplanar empty-portal component around
+    /// the current pointfile bottleneck. This avoids presenting one BSP
+    /// partition fragment as the complete authored opening.
+    last_bsp_leak_opening: Vec<[i32; 3]>,
+    /// Pointfile point inside the seed portal used to approach the region.
+    bsp_leak_opening_path_index: Option<usize>,
+    /// Whether `last_bsp_leak_path` matches current authored topology. Stale
+    /// paths are hidden while the debounced background check is pending.
+    bsp_leak_path_current: bool,
+    /// Topology/occupant hash associated with `last_bsp_leak_path`.
+    bsp_leak_geometry_fingerprint: u64,
+    /// Monotonic invalidation token; completed background work with an older
+    /// token is discarded rather than overwriting newer geometry.
+    bsp_leak_refresh_revision: u64,
+    /// Debounce deadline for the next topology-only pointfile pass.
+    bsp_leak_refresh_due: Option<Instant>,
+    /// At most one pointfile worker runs at a time.
+    bsp_leak_refresh_job: Option<BspLeakRefreshJob>,
+    /// Transient visibility toggle for the current pointfile overlay.
     show_bsp_leak_path: bool,
     /// Next point visited by the Camera menu's leak-path navigator.
     bsp_leak_cursor: usize,
@@ -2681,6 +2764,10 @@ pub(crate) struct BrushMove {
     pub(crate) base: psxed_project::brush::Brush,
     pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
     pub(crate) press_ground: [f32; 3],
+    /// Original world-space point whose destination is snapped to the
+    /// absolute grid. Quantising only the pointer delta preserves an
+    /// off-grid phase forever and makes adjacent brushes difficult to seal.
+    pub(crate) snap_anchor: [f64; 3],
     pub(crate) applied: [i32; 3],
 }
 
@@ -2717,7 +2804,6 @@ pub(crate) struct BrushExtrude {
     pub(crate) face: usize,
     pub(crate) base: psxed_project::brush::Brush,
     pub(crate) axis: usize,
-    pub(crate) dir: i32,
     /// Pointer y at press (vertical faces drag by pixels).
     pub(crate) press_y: f32,
     /// Unsnapped ground point at press (horizontal drags measure here).
@@ -2728,6 +2814,9 @@ pub(crate) struct BrushExtrude {
     /// Screen direction corresponding to positive movement along normal_3d.
     pub(crate) screen_direction: Vec2,
     pub(crate) units_per_pixel: f32,
+    /// Point on the selected face used to snap the moved plane to absolute
+    /// world-grid coordinates rather than quantising only its travel.
+    pub(crate) snap_anchor: [f64; 3],
     /// Last applied integer translation, world units.
     pub(crate) applied: [i32; 3],
 }
@@ -2753,6 +2842,10 @@ pub(crate) struct BrushVertexDrag {
     pub(crate) others: Vec<(usize, psxed_project::brush::Brush)>,
     /// Solved base-brush vertices being dragged, world f64.
     pub(crate) targets: Vec<[f64; 3]>,
+    /// Deterministic selected corner used as the absolute-grid reference for
+    /// an ordinary move. Every selected element still receives one rigid
+    /// shared delta, so edges and faces cannot shear.
+    pub(crate) snap_anchor: [f64; 3],
     /// Unsnapped plane point at press.
     pub(crate) press_ground: [f32; 3],
     /// Camera-facing drag plane for 3D handles. Orthographic gestures leave
@@ -3355,6 +3448,9 @@ impl EditorWorkspace {
         let project_watch = ProjectWatchState::capture(&project_dir, &project);
         let last_bsp_leak_path = read_cached_bsp_leak_path(&project_dir).unwrap_or_default();
         let cached_bsp_leak_points = last_bsp_leak_path.len();
+        let bsp_leak_geometry_fingerprint = bsp_leak_geometry_fingerprint(&project);
+        let refresh_bsp_leak =
+            project.world_format().is_bsp() && !project.active_scene().brushes.is_empty();
         Self {
             project,
             project_dir,
@@ -3455,6 +3551,7 @@ impl EditorWorkspace {
             brush_uv_canvas_drag: None,
             brush_vertex_drag: None,
             brush_vertex_snap_key_down: false,
+            brush_vertex_snap_enabled: false,
             brush_vertex_snap_hover: None,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
@@ -3534,9 +3631,11 @@ impl EditorWorkspace {
                     "Normalized {normalized} legacy brush{}; save to keep",
                     if normalized == 1 { "" } else { "es" },
                 )
+            } else if refresh_bsp_leak {
+                "Checking BSP seal against current geometry…".to_string()
             } else if cached_bsp_leak_points > 0 {
                 format!(
-                    "BSP LEAK in last build: {cached_bsp_leak_points} point{}; green path shown",
+                    "BSP LEAK: {cached_bsp_leak_points} point{}; green path shown",
                     if cached_bsp_leak_points == 1 { "" } else { "s" },
                 )
             } else {
@@ -3544,6 +3643,20 @@ impl EditorWorkspace {
             },
             last_playtest_budget: None,
             last_bsp_leak_path,
+            last_bsp_leak_opening: Vec::new(),
+            bsp_leak_opening_path_index: None,
+            bsp_leak_path_current: !refresh_bsp_leak,
+            // Cached `.pts` files predate live fingerprints, so force one
+            // exact topology check on open before treating the cache as
+            // current. No u64 equals its own bitwise complement.
+            bsp_leak_geometry_fingerprint: if refresh_bsp_leak {
+                !bsp_leak_geometry_fingerprint
+            } else {
+                bsp_leak_geometry_fingerprint
+            },
+            bsp_leak_refresh_revision: 0,
+            bsp_leak_refresh_due: refresh_bsp_leak.then(Instant::now),
+            bsp_leak_refresh_job: None,
             show_bsp_leak_path: true,
             bsp_leak_cursor: 0,
             pending_playtest_request: None,
@@ -3741,17 +3854,153 @@ impl EditorWorkspace {
         &self.project_dir
     }
 
-    /// Pointfile route emitted by the most recent successful BSP cook.
+    /// Pointfile route emitted by the latest completed BSP topology check.
     pub fn bsp_leak_path(&self) -> &[[i32; 3]] {
         &self.last_bsp_leak_path
     }
 
     /// Pointfile route that should currently be painted in editor viewports.
     pub fn visible_bsp_leak_path(&self) -> &[[i32; 3]] {
-        if self.show_bsp_leak_path {
+        if self.show_bsp_leak_path && self.bsp_leak_path_current {
             &self.last_bsp_leak_path
         } else {
             &[]
+        }
+    }
+
+    /// Connected empty-portal region to emphasize around the likely opening.
+    pub fn visible_bsp_leak_opening(&self) -> &[[i32; 3]] {
+        if self.show_bsp_leak_path && self.bsp_leak_path_current {
+            &self.last_bsp_leak_opening
+        } else {
+            &[]
+        }
+    }
+
+    pub(crate) fn bsp_leak_refresh_pending(&self) -> bool {
+        !self.bsp_leak_path_current
+            && (self.bsp_leak_refresh_due.is_some() || self.bsp_leak_refresh_job.is_some())
+    }
+
+    fn schedule_bsp_leak_refresh(&mut self) {
+        if !self.project.world_format().is_bsp() {
+            self.last_bsp_leak_path.clear();
+            self.last_bsp_leak_opening.clear();
+            self.bsp_leak_opening_path_index = None;
+            self.bsp_leak_path_current = true;
+            self.bsp_leak_refresh_due = None;
+            return;
+        }
+        self.bsp_leak_refresh_revision = self.bsp_leak_refresh_revision.wrapping_add(1);
+        self.bsp_leak_refresh_due = Some(Instant::now() + BSP_LEAK_REFRESH_DEBOUNCE);
+        self.bsp_leak_path_current = false;
+    }
+
+    fn poll_bsp_leak_refresh(&mut self, ctx: &egui::Context) {
+        let completed =
+            self.bsp_leak_refresh_job
+                .as_ref()
+                .and_then(|job| match job.result.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("pointfile worker stopped without a result".to_string()))
+                    }
+                });
+        if let Some(result) = completed {
+            let job = self
+                .bsp_leak_refresh_job
+                .take()
+                .expect("completed pointfile job exists");
+            if job.revision == self.bsp_leak_refresh_revision {
+                match result {
+                    Ok(diagnostic) => {
+                        self.last_bsp_leak_path = diagnostic.path;
+                        self.last_bsp_leak_opening = diagnostic.likely_opening;
+                        self.bsp_leak_opening_path_index = diagnostic.likely_opening_path_index;
+                        self.bsp_leak_path_current = true;
+                        self.bsp_leak_geometry_fingerprint = job.geometry_fingerprint;
+                        self.bsp_leak_cursor = 0;
+                        self.show_bsp_leak_path = true;
+                        if let Err(error) =
+                            cache_bsp_leak_path(&self.project_dir, &self.last_bsp_leak_path)
+                        {
+                            eprintln!("[psxed-ui] could not cache live BSP pointfile: {error}");
+                        }
+                        self.status = if self.last_bsp_leak_path.is_empty() {
+                            "BSP sealed: live leak check passed".to_string()
+                        } else if !self.last_bsp_leak_opening.is_empty() {
+                            format!(
+                                "BSP LEAK: red connected empty region + live {}-point green route updated",
+                                self.last_bsp_leak_path.len()
+                            )
+                        } else {
+                            format!(
+                                "BSP LEAK: live {}-point path updated",
+                                self.last_bsp_leak_path.len()
+                            )
+                        };
+                    }
+                    Err(error) => {
+                        self.status = format!("Live BSP leak check failed: {error}");
+                    }
+                }
+            }
+        }
+
+        if self.bsp_leak_refresh_job.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+            return;
+        }
+        let Some(due) = self.bsp_leak_refresh_due else {
+            return;
+        };
+        let now = Instant::now();
+        if now < due {
+            ctx.request_repaint_after(due.saturating_duration_since(now));
+            return;
+        }
+
+        self.bsp_leak_refresh_due = None;
+        let geometry_fingerprint = bsp_leak_geometry_fingerprint(&self.project);
+        if geometry_fingerprint == self.bsp_leak_geometry_fingerprint {
+            self.bsp_leak_path_current = true;
+            return;
+        }
+        if self.project.active_scene().brushes.is_empty() {
+            self.last_bsp_leak_path.clear();
+            self.last_bsp_leak_opening.clear();
+            self.bsp_leak_opening_path_index = None;
+            self.bsp_leak_path_current = true;
+            self.bsp_leak_geometry_fingerprint = geometry_fingerprint;
+            self.bsp_leak_cursor = 0;
+            let _ = cache_bsp_leak_path(&self.project_dir, &[]);
+            self.status = "BSP has no brushes; leak path cleared".to_string();
+            return;
+        }
+
+        let revision = self.bsp_leak_refresh_revision;
+        let project = self.project.clone();
+        let (sender, result) = std::sync::mpsc::channel();
+        match std::thread::Builder::new()
+            .name("psxed-bsp-pointfile".to_string())
+            .spawn(move || {
+                let diagnosis = psxed_project::brush_world::diagnose_brush_world_leak(project)
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(diagnosis);
+            }) {
+            Ok(_) => {
+                self.bsp_leak_refresh_job = Some(BspLeakRefreshJob {
+                    revision,
+                    geometry_fingerprint,
+                    result,
+                });
+                self.status = "Recalculating BSP leak path…".to_string();
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+            Err(error) => {
+                self.status = format!("Could not start BSP leak check: {error}");
+            }
         }
     }
 
@@ -3880,6 +4129,19 @@ impl EditorWorkspace {
                 self.project_watch = ProjectWatchState::capture(&self.project_dir, &self.project);
                 self.last_bsp_leak_path =
                     read_cached_bsp_leak_path(&self.project_dir).unwrap_or_default();
+                self.last_bsp_leak_opening.clear();
+                self.bsp_leak_opening_path_index = None;
+                let fingerprint = bsp_leak_geometry_fingerprint(&self.project);
+                let refresh_bsp_leak = self.project.world_format().is_bsp()
+                    && !self.project.active_scene().brushes.is_empty();
+                self.bsp_leak_refresh_revision = self.bsp_leak_refresh_revision.wrapping_add(1);
+                self.bsp_leak_path_current = !refresh_bsp_leak;
+                self.bsp_leak_geometry_fingerprint = if refresh_bsp_leak {
+                    !fingerprint
+                } else {
+                    fingerprint
+                };
+                self.bsp_leak_refresh_due = refresh_bsp_leak.then(Instant::now);
                 self.show_bsp_leak_path = true;
                 self.bsp_leak_cursor = 0;
                 self.status = sync_status
@@ -4525,7 +4787,17 @@ impl EditorWorkspace {
                 report.error_messages().join("; ")
             ));
         }
+        let preserve_live_opening =
+            self.bsp_leak_path_current && self.last_bsp_leak_path == cooked_bsp_leak_path;
         self.last_bsp_leak_path = cooked_bsp_leak_path;
+        if !preserve_live_opening {
+            self.last_bsp_leak_opening.clear();
+            self.bsp_leak_opening_path_index = None;
+        }
+        self.bsp_leak_refresh_revision = self.bsp_leak_refresh_revision.wrapping_add(1);
+        self.bsp_leak_refresh_due = None;
+        self.bsp_leak_geometry_fingerprint = bsp_leak_geometry_fingerprint(&self.project);
+        self.bsp_leak_path_current = true;
         self.show_bsp_leak_path = true;
         self.bsp_leak_cursor = 0;
         if let Err(error) = cache_bsp_leak_path(&self.project_dir, &self.last_bsp_leak_path) {

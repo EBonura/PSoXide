@@ -291,6 +291,7 @@ impl Graphics {
         show_brush_surface_grid: bool,
         grid_units: u16,
         bsp_leak_path: &[[i32; 3]],
+        bsp_leak_opening: &[[i32; 3]],
         show_portals: bool,
         show_lights: bool,
         hidden_scene_nodes: &std::collections::HashSet<psxed_project::NodeId>,
@@ -349,8 +350,11 @@ impl Graphics {
             );
         }
         crate::editor_preview::append_bsp_leak_path_overlay(
+            project,
             camera,
             bsp_leak_path,
+            bsp_leak_opening,
+            hidden_scene_nodes,
             &mut self.editor_preview_frame.overlay_lines,
         );
         self.editor_hw_renderer.render_frame(

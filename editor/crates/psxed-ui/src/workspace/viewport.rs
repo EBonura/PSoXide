@@ -1,6 +1,7 @@
 use super::*;
 
 const BSP_LEAK_PATH_RGB: (u8, u8, u8) = (72, 236, 126);
+const BSP_LEAK_OPENING_RGB: (u8, u8, u8) = (255, 74, 52);
 
 #[derive(Clone, Copy)]
 struct CharacterControllerOverlay {
@@ -84,12 +85,13 @@ impl EditorWorkspace {
         self.brush_vertex_snap_key_down = response.hovered()
             && vertex_snap_context
             && !widget_owns_keyboard_shortcuts(ui.ctx())
-            && ui.input(|input| {
-                input.key_down(egui::Key::B)
-                    && !input.modifiers.command
-                    && !input.modifiers.ctrl
-                    && !input.modifiers.alt
-            });
+            && (self.brush_vertex_snap_enabled
+                || ui.input(|input| {
+                    input.key_down(egui::Key::B)
+                        && !input.modifiers.command
+                        && !input.modifiers.ctrl
+                        && !input.modifiers.alt
+                }));
         if self.brush_vertex_snap_key_down && !vertex_snap_was_down {
             self.status = "Vertex Snap: hover a selected brush corner, then drag".to_string();
         }
@@ -456,11 +458,14 @@ impl EditorWorkspace {
         ui.ctx().request_repaint();
     }
 
-    /// Step the editor camera along the pointfile route produced by the last
-    /// BSP cook. Each invocation moves to one point and looks toward the next,
-    /// mirroring TrenchBroom's pointfile navigation rather than merely framing
-    /// the complete (often very large) path from far away.
+    /// Step the editor camera along the latest live pointfile route. Each
+    /// invocation moves to one point and looks toward the next, mirroring
+    /// TrenchBroom's pointfile navigation rather than merely framing the
+    /// complete (often very large) path from far away.
     pub(crate) fn follow_next_bsp_leak_point(&mut self) -> bool {
+        if !self.bsp_leak_path_current {
+            return false;
+        }
         let Some(&point) = self.last_bsp_leak_path.get(
             self.bsp_leak_cursor
                 .min(self.last_bsp_leak_path.len().saturating_sub(1)),
@@ -488,6 +493,51 @@ impl EditorWorkspace {
             index + 1,
             self.last_bsp_leak_path.len()
         );
+        true
+    }
+
+    /// Put the Free camera immediately before the seed portal inside the
+    /// connected empty region and look directly at it. This makes the likely
+    /// breach the first inspection target instead of asking the user to walk
+    /// an entire route one point at a time.
+    pub(crate) fn jump_to_bsp_leak_opening(&mut self) -> bool {
+        if !self.bsp_leak_path_current || self.last_bsp_leak_opening.is_empty() {
+            return false;
+        }
+        let Some(index) = self
+            .bsp_leak_opening_path_index
+            .filter(|&index| index > 0 && index < self.last_bsp_leak_path.len())
+        else {
+            return false;
+        };
+        let target = self.last_bsp_leak_path[index];
+        let previous = self.last_bsp_leak_path[index - 1];
+        let delta: [f64; 3] =
+            std::array::from_fn(|axis| f64::from(target[axis]) - f64::from(previous[axis]));
+        let length = delta
+            .into_iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        let distance = length.min(512.0);
+        let position = if length > f64::EPSILON {
+            std::array::from_fn(|axis| {
+                (f64::from(target[axis]) - delta[axis] / length * distance).round() as i32
+            })
+        } else {
+            previous
+        };
+        let (yaw, pitch) = camera_angles_to_look_at(position, target)
+            .unwrap_or((self.camera_rig.free_yaw, self.camera_rig.free_pitch));
+        self.camera_rig.mode = ViewportCameraMode::Free;
+        self.camera_rig.free_position = position;
+        self.camera_rig.free_yaw = yaw;
+        self.camera_rig.free_pitch = pitch;
+        self.camera_rig.free_initialized = true;
+        self.bsp_leak_cursor = (index + 1) % self.last_bsp_leak_path.len();
+        self.persist_editor_camera_state();
+        self.status = "Connected BSP leak region framed in red; inspect nearby brush seams (green is full route)"
+            .to_string();
         true
     }
 
@@ -547,37 +597,84 @@ impl EditorWorkspace {
         }
         painter.circle_filled(project(path[0]), 4.0, color);
         painter.circle_stroke(project(*path.last().unwrap()), 5.0, Stroke::new(2.0, color));
+
+        let opening = self.visible_bsp_leak_opening();
+        if opening.len() < 3 {
+            return;
+        }
+        let warning = Color32::from_rgb(
+            BSP_LEAK_OPENING_RGB.0,
+            BSP_LEAK_OPENING_RGB.1,
+            BSP_LEAK_OPENING_RGB.2,
+        );
+        let projected: Vec<_> = opening.iter().copied().map(project).collect();
+        let centroid = (projected
+            .iter()
+            .fold(Vec2::ZERO, |sum, point| sum + point.to_vec2())
+            / projected.len() as f32)
+            .to_pos2();
+        let projected: Vec<_> = projected
+            .into_iter()
+            .map(|point| centroid + (point - centroid) * 0.9)
+            .collect();
+        // The merged component can be concave. A convex fill would paint
+        // across nearby solid brushes and recreate the misleading geometry
+        // selection that this diagnostic is intended to avoid.
+        painter.add(egui::Shape::closed_line(
+            projected.clone(),
+            Stroke::new(3.5, warning),
+        ));
+        painter.circle_filled(centroid, 4.5, warning);
+        painter.text(
+            centroid + Vec2::new(8.0, -8.0),
+            Align2::LEFT_BOTTOM,
+            "CONNECTED EMPTY LEAK REGION",
+            FontId::monospace(10.0),
+            warning,
+        );
     }
 
     pub(crate) fn draw_bsp_leak_notice(&self, painter: &egui::Painter, rect: Rect) {
         let point_count = self.visible_bsp_leak_path().len();
-        if point_count == 0 {
+        let pending = self.bsp_leak_refresh_pending();
+        if point_count == 0 && !pending {
             return;
         }
         let notice = Rect::from_center_size(
             rect.center_top() + Vec2::new(0.0, 20.0),
-            Vec2::new(310.0, 26.0),
+            Vec2::new(540.0, 26.0),
         );
+        let accent = if pending {
+            Color32::from_rgb(255, 190, 72)
+        } else if !self.visible_bsp_leak_opening().is_empty() {
+            Color32::from_rgb(
+                BSP_LEAK_OPENING_RGB.0,
+                BSP_LEAK_OPENING_RGB.1,
+                BSP_LEAK_OPENING_RGB.2,
+            )
+        } else {
+            Color32::from_rgb(
+                BSP_LEAK_PATH_RGB.0,
+                BSP_LEAK_PATH_RGB.1,
+                BSP_LEAK_PATH_RGB.2,
+            )
+        };
         painter.rect_filled(notice, 4.0, Color32::from_black_alpha(210));
-        painter.rect_stroke(
-            notice,
-            4.0,
-            Stroke::new(
-                1.25,
-                Color32::from_rgb(
-                    BSP_LEAK_PATH_RGB.0,
-                    BSP_LEAK_PATH_RGB.1,
-                    BSP_LEAK_PATH_RGB.2,
-                ),
-            ),
-            StrokeKind::Inside,
-        );
+        painter.rect_stroke(notice, 4.0, Stroke::new(1.25, accent), StrokeKind::Inside);
+        let label = if pending {
+            "BSP LEAK PATH · geometry changed · recalculating…".to_string()
+        } else if !self.visible_bsp_leak_opening().is_empty() {
+            "BSP LEAK · RED = CONNECTED EMPTY REGION · green = route · Camera → Jump there"
+                .to_string()
+        } else {
+            format!("BSP LEAK · live · {point_count}-point green path")
+        };
         painter.text(
             notice.center(),
             Align2::CENTER_CENTER,
-            format!("BSP LEAK · last build · {point_count}-point green path"),
+            label,
             FontId::monospace(11.0),
-            Color32::from_rgb(184, 255, 205),
+            accent,
         );
     }
 
