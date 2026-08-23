@@ -351,6 +351,22 @@ pub trait Scene {
         None
     }
 
+    /// Resolve a tagged UI node's live text. Untagged nodes and unknown tags
+    /// keep their authored copy. Returning static strings preserves the
+    /// runtime's allocation-free UI contract while still allowing compact
+    /// inventory controls to reflect gameplay-owned state.
+    #[inline]
+    fn ui_text(&self, _tag: &str) -> Option<&'static str> {
+        None
+    }
+
+    /// Handle an authored game-specific UI action. The flow driver owns
+    /// navigation actions; opaque `Game` ids are deliberately dispatched to
+    /// the gameplay scene so projects can implement inventory assignment and
+    /// other domain controls without teaching the engine their semantics.
+    #[allow(unused_variables)]
+    fn game_ui_action(&mut self, id: u16, ctx: &mut Ctx) {}
+
     /// Receive the current project-option values. The flow driver calls this
     /// when a UI entry applies defaults, after front-end option edits, and each
     /// time it enters the gameplay state, handing the cooked [`LevelOptionDef`]

@@ -362,8 +362,11 @@ impl Playtest {
         self.deferred_enemy_attacks.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
-        self.player_health = PLAYER_MAX_HEALTH;
-        self.player_health_max = PLAYER_MAX_HEALTH;
+        self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        self.power_up_loadout = PowerUpLoadout::DEFAULT;
+        self.power_up_inventory = BoostInventory::STARTER;
+        self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
+        self.selected_power_up_item = BoostProtocol::Rupture;
         self.hazard_death_ticks_remaining = 0;
         self.death_by_combat = false;
         self.weapon_attach_reported = false;
@@ -731,19 +734,14 @@ impl Playtest {
             {
                 let damage = bsp_hazard_damage(sample.contents, now.as_u32());
                 if damage > 0 {
-                    let outcome = psx_game_runtime::character::apply_player_damage(
-                        self.player_health,
-                        false,
-                        damage,
-                    );
-                    self.player_health = outcome.health;
+                    let died = self.apply_untyped_player_damage(damage);
                     telemetry::counter(telemetry::counter::PLAYER_LIQUID_DAMAGE_EVENTS, 1);
                     telemetry::debug_log(match sample.contents {
                         psx_bsp::collision::CONTENTS_LAVA => "player bsp:lava",
                         psx_bsp::collision::CONTENTS_SLIME => "player bsp:slime",
                         _ => "player bsp:liquid",
                     });
-                    if outcome.died {
+                    if died {
                         self.arm_player_death(false, BSP_HAZARD_DEATH_TICKS, now, ctx.video_hz);
                     }
                 }
@@ -765,7 +763,7 @@ impl Playtest {
                         .surface_y
                         .saturating_sub(i32::from(water.death_submerge_depth));
                 if water.depth >= water.lethal_depth && submerged {
-                    self.player_health = 0;
+                    self.player_vitality.empty_all();
                     self.arm_player_death(false, water.death_delay_ticks, now, ctx.video_hz);
                     telemetry::debug_log("player water:death");
                 }

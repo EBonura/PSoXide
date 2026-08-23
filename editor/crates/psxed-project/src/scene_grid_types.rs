@@ -41,6 +41,10 @@ pub struct ProjectSceneState {
     /// Whether the world layer is paused while the UI overlay is active.
     #[serde(default)]
     pub pause_world: bool,
+    /// Optional composed state entered by a fresh controller START press.
+    /// `None` leaves START to the active UI scene's legacy confirm shortcut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_state: Option<SceneStateId>,
 }
 
 impl ProjectSceneState {
@@ -53,6 +57,7 @@ impl ProjectSceneState {
             ui_scene: Some(ui_scene),
             ui_input: true,
             pause_world: false,
+            start_state: None,
         }
     }
 
@@ -65,6 +70,7 @@ impl ProjectSceneState {
             ui_scene,
             ui_input: false,
             pause_world: false,
+            start_state: None,
         }
     }
 }

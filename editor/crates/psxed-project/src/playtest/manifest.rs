@@ -1756,8 +1756,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelSceneState {{ id: {}, name: {:?}, world: {}, ui_scene: {}, flags: {} }},",
-            state.id, state.name, world, state.ui_scene, state.flags,
+            "    LevelSceneState {{ id: {}, name: {:?}, world: {}, ui_scene: {}, flags: {}, start_state: {} }},",
+            state.id, state.name, world, state.ui_scene, state.flags, state.start_state,
         );
     }
     out.push_str("];\n\n");
@@ -3355,6 +3355,8 @@ fn render_ui_font_source(font: UiFontChoice) -> &'static str {
         UiFontChoice::ShareTechMono => "psx_font::fonts::SHARE_TECH_MONO",
         UiFontChoice::Jura => "psx_font::fonts::JURA",
         UiFontChoice::ZenDotsDisplay => "psx_font::fonts::ZEN_DOTS_DISPLAY",
+        UiFontChoice::Spleen5x8 => "psx_font::fonts::SPLEEN_5X8",
+        UiFontChoice::Spleen5x8Italic => "psx_font::fonts::SPLEEN_5X8_ITALIC",
     }
 }
 
@@ -3473,6 +3475,24 @@ fn render_ui_value_binding(binding: UiValueBinding) -> String {
         }
         UiValueBinding::PlayerHealth => "LevelUiValueBinding::PlayerHealth".to_string(),
         UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
+        UiValueBinding::PlayerHealthSecondary => {
+            "LevelUiValueBinding::PlayerHealthSecondary".to_string()
+        }
+        UiValueBinding::PlayerHealthSecondaryMax => {
+            "LevelUiValueBinding::PlayerHealthSecondaryMax".to_string()
+        }
+        UiValueBinding::PlayerHealthEmptyInfluence => {
+            "LevelUiValueBinding::PlayerHealthEmptyInfluence".to_string()
+        }
+        UiValueBinding::PlayerHealthFullInfluence => {
+            "LevelUiValueBinding::PlayerHealthFullInfluence".to_string()
+        }
+        UiValueBinding::PlayerHealthSecondaryEmptyInfluence => {
+            "LevelUiValueBinding::PlayerHealthSecondaryEmptyInfluence".to_string()
+        }
+        UiValueBinding::PlayerHealthSecondaryFullInfluence => {
+            "LevelUiValueBinding::PlayerHealthSecondaryFullInfluence".to_string()
+        }
         UiValueBinding::PlayerStamina => "LevelUiValueBinding::PlayerStamina".to_string(),
         UiValueBinding::PlayerStaminaMax => "LevelUiValueBinding::PlayerStaminaMax".to_string(),
         UiValueBinding::LoadingProgress => "LevelUiValueBinding::LoadingProgress".to_string(),

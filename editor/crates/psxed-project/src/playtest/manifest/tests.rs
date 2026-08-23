@@ -224,7 +224,7 @@ fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
     assert!(src.contains("const _: () = assert!(UI_FONTS.len() <= 8);"));
     assert!(src.contains("pub static UI_SCENES: &[LevelUiScene] = &[\n];"));
     assert!(src.contains(
-            "LevelSceneState { id: 0, name: \"Gameplay\", world: LevelWorldLayer::Gameplay, ui_scene: 65535, flags: 0 },"
+            "LevelSceneState { id: 0, name: \"Gameplay\", world: LevelWorldLayer::Gameplay, ui_scene: 65535, flags: 0, start_state: 65535 },"
         ));
     assert!(src.contains(
             "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::SceneState { state: 0 },\n    ],\n    scene_states: SCENE_STATES,\n    entry: 0,\n};"
@@ -286,6 +286,7 @@ fn ui_scene_table_and_flow_emit_addressable_scenes() {
                     world: PlaytestWorldLayer::None,
                     ui_scene: 7,
                     flags: psx_level::scene_state_flags::UI_INPUT,
+                    start_state: 0,
                 },
             ],
             entry: 0,
@@ -299,7 +300,7 @@ fn ui_scene_table_and_flow_emit_addressable_scenes() {
          LevelUiFocusStyle { effect: LevelUiFocusEffect::Solid, color_a: (248, 224, 96), \
          color_b: (96, 88, 40), period: 96, thickness: 1, margin: 1, corner_len: 8 } },"
     ));
-    assert!(src.contains("LevelSceneState { id: 1, name: \"Pause\", world: LevelWorldLayer::None, ui_scene: 7, flags: 1 },"));
+    assert!(src.contains("LevelSceneState { id: 1, name: \"Pause\", world: LevelWorldLayer::None, ui_scene: 7, flags: 1, start_state: 0 },"));
     assert!(src.contains("FlowState::SceneState { state: 1 },"));
     assert!(src.contains("FlowState::SceneState { state: 0 },"));
     assert!(src.contains("entry: 0,"));
@@ -314,6 +315,7 @@ fn button_and_slider_nodes_render_action_accent_and_option_fields() {
                 kind: UiNodeKind::Button {
                     rect: crate::UiRect::new(0, 0, 80, 18),
                     label: "Play".to_string(),
+                    tag: "menu.play".to_string(),
                     align: UiTextAlign::Center,
                     font: crate::UiFontChoice::Basic8x16,
                     font_scale: crate::default_ui_font_scale(),
@@ -343,7 +345,7 @@ fn button_and_slider_nodes_render_action_accent_and_option_fields() {
                 texture_asset: None,
                 image_effect: UiImageEffect::None,
                 text: "Play".to_string(),
-                tag: String::new(),
+                tag: "menu.play".to_string(),
                 action: PlaytestUiAction::GotoScene { scene: 7 },
                 option: psx_level::UI_OPTION_NONE,
                 rotation_degrees: 0,
@@ -405,6 +407,7 @@ fn button_and_slider_nodes_render_action_accent_and_option_fields() {
     assert!(src.contains("font: 0"));
     assert!(src.contains("font_scale: 512"));
     assert!(src.contains("letter_spacing: 3"));
+    assert!(src.contains("tag: \"menu.play\""));
     assert!(src.contains("kind: LevelUiNodeKind::Slider"));
     assert!(src.contains("accent: [31, 32, 33]"));
     assert!(src.contains("option: 3"));

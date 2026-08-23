@@ -1705,6 +1705,30 @@ pub(crate) fn draw_ui_value_binding_editor(
             for (candidate_label, candidate) in [
                 ("Player Health", UiValueBinding::PlayerHealth),
                 ("Player Health Max", UiValueBinding::PlayerHealthMax),
+                (
+                    "Player Secondary Health",
+                    UiValueBinding::PlayerHealthSecondary,
+                ),
+                (
+                    "Player Secondary Health Max",
+                    UiValueBinding::PlayerHealthSecondaryMax,
+                ),
+                (
+                    "Player Health Empty Influence",
+                    UiValueBinding::PlayerHealthEmptyInfluence,
+                ),
+                (
+                    "Player Health Full Influence",
+                    UiValueBinding::PlayerHealthFullInfluence,
+                ),
+                (
+                    "Secondary Empty Influence",
+                    UiValueBinding::PlayerHealthSecondaryEmptyInfluence,
+                ),
+                (
+                    "Secondary Full Influence",
+                    UiValueBinding::PlayerHealthSecondaryFullInfluence,
+                ),
                 ("Player Stamina", UiValueBinding::PlayerStamina),
                 ("Player Stamina Max", UiValueBinding::PlayerStaminaMax),
                 ("Constant", UiValueBinding::ConstantQ12(4096)),
@@ -1751,6 +1775,30 @@ pub(crate) fn ui_value_binding_same_variant(a: UiValueBinding, b: UiValueBinding
             | (
                 UiValueBinding::PlayerHealthMax,
                 UiValueBinding::PlayerHealthMax
+            )
+            | (
+                UiValueBinding::PlayerHealthSecondary,
+                UiValueBinding::PlayerHealthSecondary
+            )
+            | (
+                UiValueBinding::PlayerHealthSecondaryMax,
+                UiValueBinding::PlayerHealthSecondaryMax
+            )
+            | (
+                UiValueBinding::PlayerHealthEmptyInfluence,
+                UiValueBinding::PlayerHealthEmptyInfluence
+            )
+            | (
+                UiValueBinding::PlayerHealthFullInfluence,
+                UiValueBinding::PlayerHealthFullInfluence
+            )
+            | (
+                UiValueBinding::PlayerHealthSecondaryEmptyInfluence,
+                UiValueBinding::PlayerHealthSecondaryEmptyInfluence
+            )
+            | (
+                UiValueBinding::PlayerHealthSecondaryFullInfluence,
+                UiValueBinding::PlayerHealthSecondaryFullInfluence
             )
             | (UiValueBinding::PlayerStamina, UiValueBinding::PlayerStamina)
             | (

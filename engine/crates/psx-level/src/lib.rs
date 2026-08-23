@@ -2342,6 +2342,8 @@ pub enum LevelWorldLayer {
 
 /// Sentinel meaning "this scene state has no UI overlay".
 pub const UI_SCENE_NONE: u16 = u16::MAX;
+/// Sentinel meaning "START has no authored composed-state target".
+pub const SCENE_STATE_NONE: u16 = u16::MAX;
 
 /// Runtime flags for [`LevelSceneState`].
 pub mod scene_state_flags {
@@ -2367,6 +2369,9 @@ pub struct LevelSceneState {
     pub ui_scene: u16,
     /// Runtime flags from [`scene_state_flags`].
     pub flags: u16,
+    /// Optional state id entered on a fresh controller START press, or
+    /// [`SCENE_STATE_NONE`] when the state leaves START unbound.
+    pub start_state: u16,
 }
 
 /// One state in the game flow graph. `SceneState` is the modern
@@ -2499,6 +2504,18 @@ pub enum LevelUiValueBinding {
     PlayerHealth,
     /// Player health maximum.
     PlayerHealthMax,
+    /// Player secondary health value.
+    PlayerHealthSecondary,
+    /// Player secondary health maximum.
+    PlayerHealthSecondaryMax,
+    /// Empty-end influence of the primary health channel (Q12).
+    PlayerHealthEmptyInfluence,
+    /// Full-end influence of the primary health channel (Q12).
+    PlayerHealthFullInfluence,
+    /// Empty-end influence of the secondary health channel (Q12).
+    PlayerHealthSecondaryEmptyInfluence,
+    /// Full-end influence of the secondary health channel (Q12).
+    PlayerHealthSecondaryFullInfluence,
     /// Player stamina value.
     PlayerStamina,
     /// Player stamina maximum.

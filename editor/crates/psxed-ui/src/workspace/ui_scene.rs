@@ -3,7 +3,9 @@ use super::*;
 impl EditorWorkspace {
     /// Select a UI scene by exact/case-insensitive name or zero-based index.
     /// Intended for deterministic headless captures and other scripted editor
-    /// entry points; this only changes transient workspace state.
+    /// entry points; this only changes transient workspace state. When a
+    /// screen state owns the selected overlay, keep the arranger selection in
+    /// sync so its world/pause/START controls describe the previewed scene.
     pub fn focus_ui_scene(&mut self, selector: &str) -> bool {
         let numeric_index = selector.parse::<usize>().ok();
         let index = self
@@ -20,6 +22,15 @@ impl EditorWorkspace {
         let Some(index) = index else {
             return false;
         };
+        let scene_id = self.project.ui_scenes[index].id;
+        if let Some(state_index) = self
+            .project
+            .scene_states
+            .iter()
+            .position(|state| state.ui_scene == Some(scene_id))
+        {
+            self.active_scene_state_index = state_index;
+        }
         self.switch_ui_scene(index);
         true
     }
