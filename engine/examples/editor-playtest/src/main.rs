@@ -82,6 +82,10 @@ use psx_engine::{
     GridVisibility,
 };
 use psx_font::FontAtlas;
+use psx_game_runtime::vitality::{
+    BoostInventory, BoostProtocol, BoostSlotId, DualVitality, PowerUpLoadout, VitalityChannelId,
+    VitalityModifiers,
+};
 use psx_gpu::{
     draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
@@ -378,13 +382,18 @@ struct Playtest {
     /// Rolling fired total already reported to telemetry, so the
     /// LOGIC_RECORDS_FIRED counter emits per-tick deltas.
     logic_fired_reported: u16,
-    /// Player health (phase-3 combat slice). Stamped to
-    /// `PLAYER_MAX_HEALTH` at gameplay init; entity attack
-    /// connections subtract from it; floors at 0 (death/respawn is
-    /// phase 4).
-    player_health: u16,
-    /// See [`Self::player_health`].
-    player_health_max: u16,
+    /// Horizon and Zenith health pools. Both must reach zero before the shared
+    /// death sequence arms; legacy untyped damage drains Horizon first and
+    /// spills its excess into Zenith.
+    player_vitality: DualVitality,
+    /// Four runtime-assignable protocols around the two health endpoints.
+    power_up_loadout: PowerUpLoadout,
+    /// Collected protocol copies which are not currently installed in a socket.
+    power_up_inventory: BoostInventory,
+    /// Socket targeted by the inventory detail/assignment flow.
+    selected_power_up_slot: u8,
+    /// Collected item highlighted in the inventory browser.
+    selected_power_up_item: BoostProtocol,
     /// Remaining death-sequence ticks, shared by every death cause
     /// (combat damage, BSP liquid hazards, lethal water). Non-zero locks
     /// player input until the shared checkpoint/spawn respawn completes.
@@ -648,6 +657,11 @@ impl Playtest {
             *material = room_material_fallback();
         }
         self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);
+        self.power_up_loadout = PowerUpLoadout::DEFAULT;
+        self.power_up_inventory = BoostInventory::STARTER;
+        self.selected_power_up_slot = BoostSlotId::HorizonEmpty as u8;
+        self.selected_power_up_item = BoostProtocol::Rupture;
         // Zero bytes already decode as `Idle`; stamped for self-documentation.
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;
