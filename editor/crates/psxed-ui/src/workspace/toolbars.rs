@@ -668,7 +668,7 @@ impl EditorWorkspace {
                     index + 1,
                     match mode {
                         BspToolbarMode::Select => {
-                            "Select and transform whole brushes or entities\nHold B and drag a yellow brush corner to vertex-snap"
+                            "Select and transform whole brushes or entities\nUse the Vertex Snap button or hold B, then drag a yellow corner"
                         }
                         BspToolbarMode::Draw => {
                             "Drag the selected brush primitive in an orthographic or 3D view"
@@ -682,6 +682,27 @@ impl EditorWorkspace {
                 ));
             if response.clicked() {
                 self.set_bsp_toolbar_mode(mode);
+            }
+        }
+        let vertex_snap = ui
+            .add(
+                egui::Button::new(RichText::new("V↔V").monospace().size(11.0))
+                    .selected(self.brush_vertex_snap_enabled)
+                    .min_size(Vec2::new(32.0, 23.0)),
+            )
+            .on_hover_text(
+                "Vertex Snap (B)\nToggle, then drag a yellow corner of the selected brush onto a green corner of another brush. Hold B for momentary use.",
+            );
+        if vertex_snap.clicked() {
+            self.brush_vertex_snap_enabled = !self.brush_vertex_snap_enabled;
+            if self.brush_vertex_snap_enabled {
+                self.set_bsp_toolbar_mode(BspToolbarMode::Select);
+                self.status = "Vertex Snap enabled: drag a yellow corner onto another brush corner"
+                    .to_string();
+            } else {
+                self.brush_vertex_snap_key_down = false;
+                self.brush_vertex_snap_hover = None;
+                self.status = "Vertex Snap disabled (hold B for momentary use)".to_string();
             }
         }
     }
@@ -1024,6 +1045,22 @@ impl EditorWorkspace {
                 ui.weak("Brush geometry always snaps to this interval.");
             },
         );
+        let can_snap_level =
+            self.project.world_format().is_bsp() && !self.project.active_scene().brushes.is_empty();
+        if ui
+            .add_enabled(
+                can_snap_level,
+                egui::Button::new(RichText::new("Snap level").size(11.0))
+                    .min_size(Vec2::new(68.0, 23.0)),
+            )
+            .on_hover_text(format!(
+                "Snap every BSP brush vertex in this level to the nearest {}-unit grid line. Preflights the entire level, changes everything as one undo step, and aborts rather than creating an invalid brush.",
+                self.snap_units.max(1)
+            ))
+            .clicked()
+        {
+            self.snap_all_brushes_to_grid();
+        }
     }
 
     pub(crate) fn toggle_grid_overlays(&mut self) {
@@ -1354,11 +1391,11 @@ impl EditorWorkspace {
                     "Brush wireframes",
                     &mut self.show_brush_wireframes,
                 );
-                if !self.last_bsp_leak_path.is_empty() {
+                if self.bsp_leak_path_current && !self.last_bsp_leak_path.is_empty() {
                     changed |= visibility_menu_row(
                         ui,
                         "bsp-leak-path",
-                        "Leak path (last build)",
+                        "Live leak path",
                         &mut self.show_bsp_leak_path,
                     );
                 }
@@ -1392,8 +1429,19 @@ impl EditorWorkspace {
                 .small()
                 .color(STUDIO_TEXT_WEAK),
         );
-        if !self.last_bsp_leak_path.is_empty() {
+        if self.bsp_leak_path_current && !self.last_bsp_leak_path.is_empty() {
             ui.separator();
+            if !self.last_bsp_leak_opening.is_empty()
+                && ui
+                    .button(icons::label(icons::FOCUS, "Jump to leak region"))
+                    .on_hover_text(
+                        "Frame the connected coplanar empty-portal region around the route bottleneck; red shows the merged region and green remains the authoritative route",
+                    )
+                    .clicked()
+            {
+                self.jump_to_bsp_leak_opening();
+                ui.close_menu();
+            }
             let next = self.bsp_leak_cursor.min(self.last_bsp_leak_path.len() - 1) + 1;
             if ui
                 .button(icons::label(

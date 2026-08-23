@@ -280,8 +280,20 @@ pub fn classify_bsp_leaves(
 pub enum OutsideFillResult {
     Filled(usize),
     /// Portal-centroid pointfile from one occupant to the infinite exterior.
-    Leaked(Vec<[f64; 3]>),
+    Leaked(CompiledLeakPath),
     NoOccupants,
+}
+
+/// Exact route from an occupied leaf to the infinite exterior.
+///
+/// `portal_indices` is parallel to the interior points in `points`: portal
+/// zero owns `points[1]`, portal one owns `points[2]`, and so on. Retaining
+/// this topology lets editor diagnostics identify and outline a likely breach
+/// instead of presenting every pointfile segment with equal visual weight.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompiledLeakPath {
+    pub points: Vec<[f64; 3]>,
+    pub portal_indices: Vec<usize>,
 }
 
 pub fn fill_outside_bsp_leaves(
@@ -451,7 +463,7 @@ fn leak_path(
     occupant_points: &[[f64; 3]],
     exterior_leaf: usize,
     exterior_point: [f64; 3],
-) -> Vec<[f64; 3]> {
+) -> CompiledLeakPath {
     let mut parent = vec![None; adjacency.len()];
     let mut root = vec![None; adjacency.len()];
     let mut pending = std::collections::VecDeque::new();
@@ -475,7 +487,10 @@ fn leak_path(
     }
 
     let Some(occupant_index) = root[exterior_leaf] else {
-        return vec![exterior_point];
+        return CompiledLeakPath {
+            points: vec![exterior_point],
+            portal_indices: Vec::new(),
+        };
     };
     let mut portal_path = Vec::new();
     let mut leaf = exterior_leaf;
@@ -486,10 +501,12 @@ fn leak_path(
     portal_path.reverse();
 
     let mut path = Vec::with_capacity(portal_path.len() + 2);
+    let mut crossed_portals = Vec::with_capacity(portal_path.len());
     path.push(occupant_points[occupant_index]);
     for portal in portal_path {
         let vertices = &portals[portal].vertices;
         if !vertices.is_empty() {
+            crossed_portals.push(portal);
             path.push(scale(
                 vertices.iter().copied().fold([0.0; 3], add),
                 1.0 / vertices.len() as f64,
@@ -497,7 +514,10 @@ fn leak_path(
         }
     }
     path.push(exterior_point);
-    path
+    CompiledLeakPath {
+        points: path,
+        portal_indices: crossed_portals,
+    }
 }
 
 fn leaf_sample(leaf_index: usize, portals: &[CompiledPortal]) -> Option<[f64; 3]> {
@@ -691,12 +711,18 @@ mod tests {
         let (mut bsp, portals) = compiled(&brushes);
         let contents_before: Vec<_> = bsp.leaves.iter().map(|leaf| leaf.contents).collect();
 
-        let OutsideFillResult::Leaked(path) =
+        let OutsideFillResult::Leaked(leak) =
             fill_outside_bsp_leaves(&mut bsp, &portals, &[[512.0, 256.0, 512.0]])
         else {
             panic!("open room must report its pointfile");
         };
+        let path = &leak.points;
         assert!(path.len() >= 3, "entity, portal and exterior points");
+        assert_eq!(
+            leak.portal_indices.len() + 2,
+            path.len(),
+            "each interior point must retain the exact crossed portal"
+        );
         assert_eq!(path[0], [512.0, 256.0, 512.0]);
         let exterior = path.last().expect("exterior");
         assert!(

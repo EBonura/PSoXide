@@ -1819,6 +1819,7 @@ impl ApplicationHandler for Shell {
                         state.editor.show_brush_surface_grid_enabled();
                     let editor_grid_units = state.editor.grid_snap_units();
                     let editor_bsp_leak_path = state.editor.visible_bsp_leak_path();
+                    let editor_bsp_leak_opening = state.editor.visible_bsp_leak_opening();
                     let editor_show_portals = state.editor.show_portals_enabled();
                     let editor_show_lights = state.editor.show_lights_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
@@ -1848,6 +1849,7 @@ impl ApplicationHandler for Shell {
                         editor_show_brush_surface_grid,
                         editor_grid_units,
                         editor_bsp_leak_path,
+                        editor_bsp_leak_opening,
                         editor_show_portals,
                         editor_show_lights,
                         editor_hidden_scene_nodes,

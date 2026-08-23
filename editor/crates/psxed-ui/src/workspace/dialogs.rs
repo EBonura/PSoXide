@@ -13,6 +13,7 @@ impl EditorWorkspace {
         playtest_status: EditorPlaytestStatus,
     ) {
         self.poll_project_watch(false);
+        self.poll_bsp_leak_refresh(ctx);
         apply_studio_visuals(ctx);
         if self.character_motion_preview().is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));

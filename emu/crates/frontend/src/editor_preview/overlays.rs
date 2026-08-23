@@ -23,6 +23,15 @@ const GRID_INTERSECTION_EPSILON: f64 = 1.0 / 4096.0;
 const GRID_INTERSECTION_CAP: usize = 8;
 const BSP_LEAK_PATH_RGB: (u8, u8, u8) = (72, 236, 126);
 const BSP_LEAK_PATH_WIDTH: f32 = 2.5;
+const BSP_LEAK_OPENING_RGB: (u8, u8, u8) = (255, 74, 52);
+const BSP_LEAK_OPENING_WIDTH: f32 = 4.5;
+/// Occlusion is evaluated at the centre of short screen-space spans. Two
+/// pixels keeps a covered path visually continuous at brush silhouettes
+/// without turning a ten-point pointfile into an expensive per-pixel trace.
+const BSP_LEAK_OCCLUSION_SAMPLE_PIXELS: f32 = 2.0;
+const BSP_LEAK_OCCLUSION_SEGMENT_CAP: usize = 256;
+const BSP_LEAK_OCCLUSION_EPSILON: f64 = 1.0 / 1024.0;
+const BSP_LEAK_ENDPOINT_NUDGE: f64 = 0.25;
 
 struct GridIntersections {
     points: [[f64; 3]; GRID_INTERSECTION_CAP],
@@ -56,35 +65,296 @@ impl GridIntersections {
 }
 
 /// Append the Quake pointfile route from an occupied leaf to the exterior.
-/// The line is opaque green to match TrenchBroom's pointfile convention and
-/// is near-clipped per segment so walking the camera along it never makes the
-/// whole diagnostic disappear when one endpoint passes behind the viewer.
+/// The line is opaque green to match TrenchBroom's pointfile convention,
+/// near-clipped per segment, and visibility-tested against every rendered
+/// solid brush. This is necessary because host overlay strokes otherwise
+/// paint through walls regardless of the scene ordering table.
 pub(super) fn append_bsp_leak_path_overlay(
+    project: &ProjectDocument,
     camera: psx_engine::WorldCamera,
     leak_path: &[[i32; 3]],
+    likely_opening: &[[i32; 3]],
+    hidden_scene_nodes: &HashSet<NodeId>,
     overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
 ) {
+    if leak_path.len() < 2 && likely_opening.len() < 3 {
+        return;
+    }
     let color = egui::Color32::from_rgb(
         BSP_LEAK_PATH_RGB.0,
         BSP_LEAK_PATH_RGB.1,
         BSP_LEAK_PATH_RGB.2,
     );
-    for points in leak_path.windows(2) {
-        let Some((a, b)) = project_clipped_world_segment(camera, points[0], points[1]) else {
-            continue;
-        };
-        let dx = b.x - a.x;
-        let dy = b.y - a.y;
-        if dx * dx + dy * dy < 0.25 {
+    with_cached_solved_brushes(project, |solved_brushes| {
+        let scene = project.active_scene();
+        for points in leak_path.windows(2) {
+            append_occluded_bsp_segment(
+                scene,
+                solved_brushes,
+                hidden_scene_nodes,
+                camera,
+                points[0],
+                points[1],
+                color,
+                BSP_LEAK_PATH_WIDTH,
+                overlay_lines,
+            );
+        }
+
+        if likely_opening.len() >= 3 {
+            let warning = egui::Color32::from_rgb(
+                BSP_LEAK_OPENING_RGB.0,
+                BSP_LEAK_OPENING_RGB.1,
+                BSP_LEAK_OPENING_RGB.2,
+            );
+            let centroid: [i32; 3] = std::array::from_fn(|axis| {
+                likely_opening
+                    .iter()
+                    .map(|point| i64::from(point[axis]))
+                    .sum::<i64>()
+                    .checked_div(likely_opening.len() as i64)
+                    .unwrap_or(0)
+                    .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+            });
+            // The exact component boundary commonly coincides with adjacent
+            // sealing brushes. Inset the visual marker slightly, but retain
+            // most of its authored extent: this polygon is already the merged
+            // outer boundary, not one tiny BSP partition fragment.
+            let marker_vertices: Vec<_> = likely_opening
+                .iter()
+                .map(|vertex| {
+                    std::array::from_fn(|axis| {
+                        let center = i64::from(centroid[axis]);
+                        (center + (i64::from(vertex[axis]) - center) * 9 / 10)
+                            .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+                            as i32
+                    })
+                })
+                .collect();
+            for index in 0..marker_vertices.len() {
+                let vertex = marker_vertices[index];
+                let next = marker_vertices[(index + 1) % marker_vertices.len()];
+                append_occluded_bsp_segment(
+                    scene,
+                    solved_brushes,
+                    hidden_scene_nodes,
+                    camera,
+                    vertex,
+                    next,
+                    warning,
+                    BSP_LEAK_OPENING_WIDTH,
+                    overlay_lines,
+                );
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_occluded_bsp_segment(
+    scene: &Scene,
+    solved_brushes: &[PreviewSolvedBrush],
+    hidden_scene_nodes: &HashSet<NodeId>,
+    camera: psx_engine::WorldCamera,
+    segment_a: [i32; 3],
+    segment_b: [i32; 3],
+    color: egui::Color32,
+    width: f32,
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    let Some((projected_a, projected_b)) =
+        project_clipped_world_segment(camera, segment_a, segment_b)
+    else {
+        return;
+    };
+    let dx = projected_b.x - projected_a.x;
+    let dy = projected_b.y - projected_a.y;
+    let screen_length = (dx * dx + dy * dy).sqrt();
+    if screen_length < 0.5 {
+        return;
+    }
+    let steps = ((screen_length / BSP_LEAK_OCCLUSION_SAMPLE_PIXELS).ceil() as usize)
+        .clamp(1, BSP_LEAK_OCCLUSION_SEGMENT_CAP);
+    let mut visible_run_start = None;
+    for step in 0..steps {
+        let midpoint = interpolate_world_point(segment_a, segment_b, step * 2 + 1, steps * 2);
+        let in_front = camera.view_vertex(world_vertex_from_f64(midpoint)).z
+            >= camera.projection.near_z.max(1);
+        let visible = in_front
+            && !leak_point_occluded(
+                scene,
+                solved_brushes,
+                hidden_scene_nodes,
+                camera.position,
+                midpoint,
+            );
+        match (visible_run_start, visible) {
+            (None, true) => visible_run_start = Some(step),
+            (Some(start), false) => {
+                push_bsp_leak_visible_run(
+                    camera,
+                    segment_a,
+                    segment_b,
+                    start,
+                    step,
+                    steps,
+                    color,
+                    width,
+                    overlay_lines,
+                );
+                visible_run_start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(start) = visible_run_start {
+        push_bsp_leak_visible_run(
+            camera,
+            segment_a,
+            segment_b,
+            start,
+            steps,
+            steps,
+            color,
+            width,
+            overlay_lines,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_bsp_leak_visible_run(
+    camera: psx_engine::WorldCamera,
+    segment_a: [i32; 3],
+    segment_b: [i32; 3],
+    start_step: usize,
+    end_step: usize,
+    steps: usize,
+    color: egui::Color32,
+    width: f32,
+    overlay_lines: &mut Vec<psxed_ui::EditorViewportOverlayLine>,
+) {
+    let a = interpolate_world_point(segment_a, segment_b, start_step, steps)
+        .map(|value| value.round() as i32);
+    let b = interpolate_world_point(segment_a, segment_b, end_step, steps)
+        .map(|value| value.round() as i32);
+    let Some((a, b)) = project_clipped_world_segment(camera, a, b) else {
+        return;
+    };
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    if dx * dx + dy * dy < 0.25 {
+        return;
+    }
+    overlay_lines.push(psxed_ui::EditorViewportOverlayLine::new(a, b, color, width));
+}
+
+fn interpolate_world_point(
+    a: [i32; 3],
+    b: [i32; 3],
+    numerator: usize,
+    denominator: usize,
+) -> [f64; 3] {
+    let amount = numerator as f64 / denominator.max(1) as f64;
+    std::array::from_fn(|axis| {
+        f64::from(a[axis]) + (f64::from(b[axis]) - f64::from(a[axis])) * amount
+    })
+}
+
+fn world_vertex_from_f64(point: [f64; 3]) -> psx_engine::WorldVertex {
+    psx_engine::WorldVertex::new(
+        point[0].round() as i32,
+        point[1].round() as i32,
+        point[2].round() as i32,
+    )
+}
+
+fn leak_point_occluded(
+    scene: &Scene,
+    solved_brushes: &[PreviewSolvedBrush],
+    hidden_scene_nodes: &HashSet<NodeId>,
+    camera: psx_engine::WorldVertex,
+    target: [f64; 3],
+) -> bool {
+    let start = [
+        f64::from(camera.x),
+        f64::from(camera.y),
+        f64::from(camera.z),
+    ];
+    let direction = std::array::from_fn(|axis| target[axis] - start[axis]);
+    scene
+        .brushes
+        .iter()
+        .zip(solved_brushes)
+        .any(|(brush, solved)| {
+            brush.contents.is_solid()
+                && solved.pickable
+                && !brush_group_hidden(scene, hidden_scene_nodes, brush)
+                && segment_intersects_bounds(start, direction, solved.bounds)
+                && segment_intersects_convex_brush(start, direction, &solved.normalized_planes)
+        })
+}
+
+fn segment_intersects_bounds(
+    start: [f64; 3],
+    direction: [f64; 3],
+    bounds: PreviewBrushBounds,
+) -> bool {
+    let mut enter = 0.0f64;
+    let mut exit = 1.0f64;
+    for axis in 0..3 {
+        if direction[axis].abs() <= BSP_LEAK_OCCLUSION_EPSILON {
+            if start[axis] < bounds.min[axis] - BSP_LEAK_OCCLUSION_EPSILON
+                || start[axis] > bounds.max[axis] + BSP_LEAK_OCCLUSION_EPSILON
+            {
+                return false;
+            }
             continue;
         }
-        overlay_lines.push(psxed_ui::EditorViewportOverlayLine::new(
-            a,
-            b,
-            color,
-            BSP_LEAK_PATH_WIDTH,
-        ));
+        let a = (bounds.min[axis] - start[axis]) / direction[axis];
+        let b = (bounds.max[axis] - start[axis]) / direction[axis];
+        enter = enter.max(a.min(b));
+        exit = exit.min(a.max(b));
+        if enter > exit {
+            return false;
+        }
     }
+    exit > 0.0 && enter < 1.0
+}
+
+fn segment_intersects_convex_brush(
+    start: [f64; 3],
+    direction: [f64; 3],
+    planes: &[([f64; 3], f64)],
+) -> bool {
+    let mut enter = 0.0f64;
+    let mut exit = 1.0f64;
+    for &(normal, distance) in planes {
+        let start_distance = dot_f64(normal, start) - distance;
+        let denominator = dot_f64(normal, direction);
+        if denominator.abs() <= BSP_LEAK_OCCLUSION_EPSILON {
+            if start_distance > BSP_LEAK_OCCLUSION_EPSILON {
+                return false;
+            }
+            continue;
+        }
+        let crossing = -start_distance / denominator;
+        if denominator < 0.0 {
+            enter = enter.max(crossing);
+        } else {
+            exit = exit.min(crossing);
+        }
+        if enter > exit {
+            return false;
+        }
+    }
+    let segment_length = dot_f64(direction, direction).sqrt();
+    let endpoint_nudge = (BSP_LEAK_ENDPOINT_NUDGE / segment_length.max(1.0)).min(0.25);
+    exit > endpoint_nudge && enter < 1.0 - endpoint_nudge
+}
+
+fn dot_f64(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 fn project_clipped_world_segment(
@@ -1754,8 +2024,16 @@ mod surface_grid_tests {
 
     #[test]
     fn bsp_pointfile_draws_an_opaque_green_segment() {
+        let project = ProjectDocument::new("pointfile overlay");
         let mut lines = Vec::new();
-        append_bsp_leak_path_overlay(leak_test_camera(), &[[-64, 0, 0], [64, 0, 0]], &mut lines);
+        append_bsp_leak_path_overlay(
+            &project,
+            leak_test_camera(),
+            &[[-64, 0, 0], [64, 0, 0]],
+            &[],
+            &HashSet::new(),
+            &mut lines,
+        );
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].color, egui::Color32::from_rgb(72, 236, 126));
         assert_eq!(lines[0].width, BSP_LEAK_PATH_WIDTH);
@@ -1763,9 +2041,153 @@ mod surface_grid_tests {
 
     #[test]
     fn bsp_pointfile_near_clips_instead_of_dropping_a_crossing_segment() {
+        let project = ProjectDocument::new("pointfile near clip");
         let mut lines = Vec::new();
-        append_bsp_leak_path_overlay(leak_test_camera(), &[[0, 0, 600], [64, 0, 0]], &mut lines);
+        append_bsp_leak_path_overlay(
+            &project,
+            leak_test_camera(),
+            &[[0, 0, 600], [64, 0, 0]],
+            &[],
+            &HashSet::new(),
+            &mut lines,
+        );
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn bsp_pointfile_is_hidden_by_solid_brush_geometry() {
+        let mut project = ProjectDocument::new("pointfile occlusion");
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [-128, -128, 128],
+                [128, 128, 256],
+            ));
+        let mut lines = Vec::new();
+        append_bsp_leak_path_overlay(
+            &project,
+            leak_test_camera(),
+            &[[-64, 0, 0], [64, 0, 0]],
+            &[],
+            &HashSet::new(),
+            &mut lines,
+        );
+        assert!(
+            lines.is_empty(),
+            "the wall between camera and path must occlude it"
+        );
+    }
+
+    #[test]
+    fn bsp_pointfile_splits_around_a_partial_brush_occluder() {
+        let mut project = ProjectDocument::new("partial pointfile occlusion");
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [-32, -128, 128],
+                [32, 128, 256],
+            ));
+        let mut lines = Vec::new();
+        append_bsp_leak_path_overlay(
+            &project,
+            leak_test_camera(),
+            &[[-256, 0, 0], [256, 0, 0]],
+            &[],
+            &HashSet::new(),
+            &mut lines,
+        );
+        assert_eq!(
+            lines.len(),
+            2,
+            "the visible path should stop on both wall edges"
+        );
+        assert!(lines[0].b.x < 160.0);
+        assert!(lines[1].a.x > 160.0);
+    }
+
+    #[test]
+    fn hidden_brush_group_does_not_occlude_the_pointfile() {
+        let mut project = ProjectDocument::new("hidden pointfile occluder");
+        let root = project.active_scene().root;
+        let group = project
+            .active_scene_mut()
+            .add_node(root, "Hidden shell", NodeKind::Group);
+        let mut brush = psxed_project::brush::Brush::cuboid([-128, -128, 128], [128, 128, 256]);
+        brush.group = Some(group);
+        project.active_scene_mut().brushes.push(brush);
+        let mut hidden = HashSet::new();
+        hidden.insert(group);
+        let mut lines = Vec::new();
+        append_bsp_leak_path_overlay(
+            &project,
+            leak_test_camera(),
+            &[[-64, 0, 0], [64, 0, 0]],
+            &[],
+            &hidden,
+            &mut lines,
+        );
+        assert_eq!(
+            lines.len(),
+            1,
+            "hidden editor geometry must not cast an overlay shadow"
+        );
+    }
+
+    #[test]
+    fn bsp_likely_opening_draws_a_prominent_red_outline() {
+        let project = ProjectDocument::new("likely opening overlay");
+        let mut lines = Vec::new();
+        append_bsp_leak_path_overlay(
+            &project,
+            leak_test_camera(),
+            &[],
+            &[[-64, -64, 0], [64, -64, 0], [64, 64, 0], [-64, 64, 0]],
+            &HashSet::new(),
+            &mut lines,
+        );
+        assert_eq!(
+            lines.len(),
+            4,
+            "the marker must not obscure the map with spokes"
+        );
+        assert!(lines.iter().all(|line| {
+            line.color
+                == egui::Color32::from_rgb(
+                    BSP_LEAK_OPENING_RGB.0,
+                    BSP_LEAK_OPENING_RGB.1,
+                    BSP_LEAK_OPENING_RGB.2,
+                )
+        }));
+        assert!(lines
+            .iter()
+            .any(|line| line.width == BSP_LEAK_OPENING_WIDTH));
+    }
+
+    #[test]
+    fn bsp_likely_opening_is_hidden_by_solid_brush_geometry() {
+        let mut project = ProjectDocument::new("likely opening occlusion");
+        project
+            .active_scene_mut()
+            .brushes
+            .push(psxed_project::brush::Brush::cuboid(
+                [-128, -128, 128],
+                [128, 128, 256],
+            ));
+        let mut lines = Vec::new();
+        append_bsp_leak_path_overlay(
+            &project,
+            leak_test_camera(),
+            &[],
+            &[[-64, -64, 0], [64, -64, 0], [64, 64, 0], [-64, 64, 0]],
+            &HashSet::new(),
+            &mut lines,
+        );
+        assert!(
+            lines.is_empty(),
+            "the likely-opening marker must obey the same wall occlusion as the route"
+        );
     }
 
     #[test]

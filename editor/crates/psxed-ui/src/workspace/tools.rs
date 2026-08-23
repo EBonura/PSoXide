@@ -1900,6 +1900,89 @@ impl EditorWorkspace {
         self.mark_dirty();
     }
 
+    /// Snap every authored BSP brush point in the active level to the current
+    /// absolute grid. This is deliberately atomic: coarse grids can collapse
+    /// thin brushes or make a convex plane set invalid, and applying only the
+    /// surviving subset would replace small existing seams with much larger
+    /// ones. Authors can lower the grid interval and retry without any partial
+    /// mutation. A successful repair is one undo step.
+    pub(crate) fn snap_all_brushes_to_grid(&mut self) {
+        if !self.project.world_format().is_bsp() {
+            self.status = "Snap level is available for BSP brush projects".to_string();
+            return;
+        }
+        let step = i32::from(self.snap_units.max(1));
+        let brushes = &self.project.active_scene().brushes;
+        if brushes.is_empty() {
+            self.status = "Snap level: no BSP brushes to quantise".to_string();
+            return;
+        }
+
+        let mut replacements = Vec::new();
+        let mut invalid = Vec::new();
+        let mut changed_points = 0usize;
+        let mut changed_coordinates = 0usize;
+        for (index, current) in brushes.iter().enumerate() {
+            let mut snapped = current.clone();
+            snapped.snap_to_grid(step);
+            if snapped == *current {
+                continue;
+            }
+            if !brush_preview_ok(&snapped) {
+                invalid.push(index);
+                continue;
+            }
+            for (before_face, after_face) in current.faces.iter().zip(&snapped.faces) {
+                for (before, after) in before_face.points.iter().zip(after_face.points.iter()) {
+                    if before != after {
+                        changed_points += 1;
+                    }
+                    changed_coordinates += before
+                        .iter()
+                        .zip(after)
+                        .filter(|(before, after)| **before != **after)
+                        .count();
+                }
+            }
+            replacements.push((index, snapped));
+        }
+
+        if !invalid.is_empty() {
+            let preview = invalid
+                .iter()
+                .take(8)
+                .map(|index| (index + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let remaining = invalid.len().saturating_sub(8);
+            let more = (remaining > 0)
+                .then(|| format!(" (+{remaining} more)"))
+                .unwrap_or_default();
+            self.status = format!(
+                "Snap level aborted: {step}-unit grid would invalidate {} brush{} ({preview}{more}); choose a finer grid",
+                invalid.len(),
+                if invalid.len() == 1 { "" } else { "es" },
+            );
+            return;
+        }
+        if replacements.is_empty() {
+            self.status = format!("Snap level: every brush is already on the {step}-unit grid");
+            return;
+        }
+
+        self.push_undo();
+        let changed_brushes = replacements.len();
+        for (index, snapped) in replacements {
+            self.project.active_scene_mut().brushes[index] = snapped;
+        }
+        self.reconcile_brush_elements();
+        self.mark_dirty();
+        self.status = format!(
+            "Snapped {changed_brushes} brush{} to the {step}-unit grid ({changed_points} authored points, {changed_coordinates} coordinates); one undo step",
+            if changed_brushes == 1 { "" } else { "es" },
+        );
+    }
+
     /// Cancel every in-flight brush gesture: the create drag, a pending
     /// clip point, and live extrude/move/vertex previews (restoring
     /// their base).
@@ -4230,6 +4313,7 @@ impl EditorWorkspace {
         };
         let others = self.brush_move_others(index);
         let base = self.project.active_scene().brushes[index].clone();
+        let snap_anchor = base.solve().min;
         if others.is_empty() {
             self.replace_brush_selection(index, Some(face));
         } else {
@@ -4243,6 +4327,7 @@ impl EditorWorkspace {
             press_ground: self
                 .orthographic_view
                 .unproject(world, self.orthographic_focus),
+            snap_anchor,
             applied: [0; 3],
         });
         true
@@ -4255,11 +4340,13 @@ impl EditorWorkspace {
         let current = self
             .orthographic_view
             .unproject(world, self.orthographic_focus);
-        let step = self.snap_units.max(1) as f32;
-        let snap = |value: f32| ((value / step).round() * step) as i32;
         let mut applied = [0; 3];
         for axis in self.orthographic_view.plane_axes() {
-            applied[axis] = snap(current[axis] - mv.press_ground[axis]);
+            applied[axis] = absolute_grid_translation_delta(
+                mv.snap_anchor[axis],
+                f64::from(current[axis] - mv.press_ground[axis]),
+                self.snap_units,
+            );
         }
         if applied == mv.applied {
             return;
@@ -4306,7 +4393,7 @@ impl EditorWorkspace {
         let view = self.orthographic_view;
         let point = world.map(f64::from);
         let tolerance2 = f64::from(tolerance.max(0.0)).powi(2);
-        let mut best: Option<(f64, bool, usize, usize, usize, i32)> = None;
+        let mut best: Option<(f64, bool, usize, usize, usize)> = None;
 
         for (index, brush) in self.project.active_scene().brushes.iter().enumerate() {
             if self.brush_effectively_hidden(index)
@@ -4337,38 +4424,36 @@ impl EditorWorkspace {
                     continue;
                 }
                 let selected = self.selected_brush == Some(index);
-                let dir = if plane.normal[axis] >= 0 { 1 } else { -1 };
-                if best.is_none_or(
-                    |(best_distance, best_selected, best_index, best_face, _, _)| {
-                        distance2 < best_distance
-                            || (distance2 == best_distance
-                                && (selected && !best_selected
-                                    || (selected == best_selected
-                                        && (index < best_index
-                                            || (index == best_index && face < best_face)))))
-                    },
-                ) {
-                    best = Some((distance2, selected, index, face, axis, dir));
+                if best.is_none_or(|(best_distance, best_selected, best_index, best_face, _)| {
+                    distance2 < best_distance
+                        || (distance2 == best_distance
+                            && (selected && !best_selected
+                                || (selected == best_selected
+                                    && (index < best_index
+                                        || (index == best_index && face < best_face)))))
+                }) {
+                    best = Some((distance2, selected, index, face, axis));
                 }
             }
         }
 
-        let Some((_, _, index, face, axis, dir)) = best else {
+        let Some((_, _, index, face, axis)) = best else {
             return false;
         };
         let base = self.project.active_scene().brushes[index].clone();
+        let snap_anchor = base.faces[face].points[0].map(f64::from);
         self.replace_brush_selection(index, Some(face));
         self.brush_extrude = Some(BrushExtrude {
             index,
             face,
             base,
             axis,
-            dir,
             press_y: 0.0,
             press_ground: view.unproject(world, self.orthographic_focus),
             normal_3d: None,
             screen_direction: egui::Vec2::ZERO,
             units_per_pixel: 0.0,
+            snap_anchor,
             applied: [0; 3],
         });
         true
@@ -4381,11 +4466,13 @@ impl EditorWorkspace {
         let current = self
             .orthographic_view
             .unproject(world, self.orthographic_focus);
-        let step = self.snap_units.max(1) as f32;
         let raw = current[extrude.axis] - extrude.press_ground[extrude.axis];
-        let snapped = ((raw / step).round() * step) as i32;
         let mut delta = [0; 3];
-        delta[extrude.axis] = snapped;
+        delta[extrude.axis] = absolute_grid_translation_delta(
+            extrude.snap_anchor[extrude.axis],
+            f64::from(raw),
+            self.snap_units,
+        );
         if delta == extrude.applied {
             return;
         }
@@ -4528,12 +4615,18 @@ impl EditorWorkspace {
             }
         }
         let base = self.project.active_scene().brushes[index].clone();
+        let snap_anchor = targets.first().copied().unwrap_or_else(|| {
+            self.orthographic_view
+                .unproject(world, self.orthographic_focus)
+                .map(f64::from)
+        });
         self.selected_brush = Some(index);
         self.brush_vertex_drag = Some(BrushVertexDrag {
             index,
             base,
             others: Vec::new(),
             targets,
+            snap_anchor,
             press_ground: self
                 .orthographic_view
                 .unproject(world, self.orthographic_focus),
@@ -4556,11 +4649,13 @@ impl EditorWorkspace {
         let current = self
             .orthographic_view
             .unproject(world, self.orthographic_focus);
-        let step = self.snap_units.max(1) as f32;
-        let snap = |value: f32| ((value / step).round() * step) as i32;
         let mut applied = [0; 3];
         for axis in self.orthographic_view.plane_axes() {
-            applied[axis] = snap(current[axis] - drag.press_ground[axis]);
+            applied[axis] = absolute_grid_translation_delta(
+                drag.snap_anchor[axis],
+                f64::from(current[axis] - drag.press_ground[axis]),
+                self.snap_units,
+            );
         }
         if applied == drag.applied {
             return;
@@ -5360,6 +5455,26 @@ const VERTEX_SNAP_RADIUS_PX: f32 = 30.0;
 const VERTEX_SNAP_SOURCE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 232, 64);
 const VERTEX_SNAP_TARGET_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 232, 112);
 
+/// Translation snapping must quantise the selected geometry's destination,
+/// not merely the distance travelled by the pointer. For example, moving an
+/// off-grid X=10 corner by roughly six units on a 16-unit grid must apply +6
+/// and land at X=16; rounding the delta would apply either 0 or 16 and retain
+/// the original ten-unit phase forever.
+fn absolute_grid_translation_delta(anchor: f64, raw_delta: f64, step: u16) -> i32 {
+    if !anchor.is_finite() || !raw_delta.is_finite() {
+        return 0;
+    }
+    let step = i64::from(step.max(1));
+    let destination = (anchor + raw_delta)
+        .round()
+        .clamp(i32::MIN as f64, i32::MAX as f64) as i64;
+    let snapped = ((destination + step / 2).div_euclid(step) * step)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    (snapped as f64 - anchor)
+        .round()
+        .clamp(i32::MIN as f64, i32::MAX as f64) as i32
+}
+
 /// BSP authored points translate in whole world units. Only advertise a
 /// green target when the selected source can land on it exactly in that
 /// representation; otherwise the ordinary grid drag remains active instead
@@ -5859,11 +5974,13 @@ impl EditorWorkspace {
             return false;
         };
         plane.press_world = press_world;
+        let snap_anchor = targets.first().copied().unwrap_or(anchor);
         self.brush_vertex_drag = Some(BrushVertexDrag {
             index,
             base: self.project.active_scene().brushes[index].clone(),
             others: Vec::new(),
             targets,
+            snap_anchor,
             press_ground: [pointer.x, 0.0, 0.0],
             plane_3d: Some(plane),
             applied: [0; 3],
@@ -5902,20 +6019,26 @@ impl EditorWorkspace {
                 std::array::from_fn(|axis| drag.axis_mask[axis].then_some(exact[axis]).unwrap_or(0))
             } else {
                 self.status = "Vertex Snap: drag onto another brush corner".to_string();
-                let step = self.snap_units.max(1) as f32;
                 std::array::from_fn(|axis| {
                     if drag.axis_mask[axis] {
-                        (((current[axis] - plane.press_world[axis]) / step).round() * step) as i32
+                        absolute_grid_translation_delta(
+                            source[axis],
+                            f64::from(current[axis] - plane.press_world[axis]),
+                            self.snap_units,
+                        )
                     } else {
                         0
                     }
                 })
             }
         } else {
-            let step = self.snap_units.max(1) as f32;
             std::array::from_fn(|axis| {
                 if drag.axis_mask[axis] {
-                    (((current[axis] - plane.press_world[axis]) / step).round() * step) as i32
+                    absolute_grid_translation_delta(
+                        drag.snap_anchor[axis],
+                        f64::from(current[axis] - plane.press_world[axis]),
+                        self.snap_units,
+                    )
                 } else {
                     0
                 }
@@ -5955,13 +6078,14 @@ impl EditorWorkspace {
         let axis_aligned =
             (0..3).all(|candidate| candidate == axis || normal[candidate].abs() <= f64::EPSILON);
         if axis_aligned {
+            let snap_anchor =
+                self.project.active_scene().brushes[index].faces[face].points[0].map(f64::from);
             self.replace_brush_selection(index, Some(face));
             self.brush_extrude = Some(BrushExtrude {
                 index,
                 face,
                 base: self.project.active_scene().brushes[index].clone(),
                 axis,
-                dir: if normal[axis] >= 0.0 { 1 } else { -1 },
                 press_y: pointer.y,
                 press_ground: self
                     .brush_ground_point_raw(rect, pointer)
@@ -5969,6 +6093,7 @@ impl EditorWorkspace {
                 normal_3d: None,
                 screen_direction: egui::Vec2::ZERO,
                 units_per_pixel: 0.0,
+                snap_anchor,
                 applied: [0; 3],
             });
             return;
@@ -5988,18 +6113,20 @@ impl EditorWorkspace {
             ),
             _ => (egui::Vec2::new(0.0, -1.0), EXTRUDE_UNITS_PER_PIXEL),
         };
+        let snap_anchor =
+            self.project.active_scene().brushes[index].faces[face].points[0].map(f64::from);
         self.replace_brush_selection(index, Some(face));
         self.brush_extrude = Some(BrushExtrude {
             index,
             face,
             base: self.project.active_scene().brushes[index].clone(),
             axis,
-            dir: 1,
             press_y: pointer.y,
             press_ground: [pointer.x, 0.0, 0.0],
             normal_3d: Some(normal),
             screen_direction,
             units_per_pixel,
+            snap_anchor,
             applied: [0; 3],
         });
     }
@@ -6118,12 +6245,18 @@ impl ViewportTool3d for BrushTool {
             let Some(ground) = ws.brush_ground_point_raw(frame.rect, pointer) else {
                 return;
             };
-            let step = (ws.snap_units.max(1)) as f32;
-            let snap = |v: f32| ((v / step).round() * step) as i32;
             let applied = [
-                snap(ground[0] - mv.press_ground[0]),
+                absolute_grid_translation_delta(
+                    mv.snap_anchor[0],
+                    f64::from(ground[0] - mv.press_ground[0]),
+                    ws.snap_units,
+                ),
                 0,
-                snap(ground[2] - mv.press_ground[2]),
+                absolute_grid_translation_delta(
+                    mv.snap_anchor[2],
+                    f64::from(ground[2] - mv.press_ground[2]),
+                    ws.snap_units,
+                ),
             ];
             if applied != mv.applied {
                 ws.apply_brush_move_preview(&mv, applied);
@@ -6131,16 +6264,24 @@ impl ViewportTool3d for BrushTool {
             return;
         }
         if let Some(extrude) = ws.brush_extrude.clone() {
-            let step = (ws.snap_units.max(1)) as f32;
             if let Some(normal) = extrude.normal_3d {
                 let press = egui::Pos2::new(extrude.press_ground[0], extrude.press_y);
-                let raw_units =
+                let raw_distance =
                     (pointer - press).dot(extrude.screen_direction) * extrude.units_per_pixel;
-                let snapped = ((raw_units / step).round() * step) as i32;
+                let axis = extrude.axis;
+                let snapped_axis_delta = absolute_grid_translation_delta(
+                    extrude.snap_anchor[axis],
+                    f64::from(raw_distance) * normal[axis],
+                    ws.snap_units,
+                );
+                if normal[axis].abs() <= f64::EPSILON {
+                    return;
+                }
+                let snapped_distance = f64::from(snapped_axis_delta) / normal[axis];
                 let applied = [
-                    (normal[0] * snapped as f64).round() as i32,
-                    (normal[1] * snapped as f64).round() as i32,
-                    (normal[2] * snapped as f64).round() as i32,
+                    (normal[0] * snapped_distance).round() as i32,
+                    (normal[1] * snapped_distance).round() as i32,
+                    (normal[2] * snapped_distance).round() as i32,
                 ];
                 if applied == extrude.applied {
                     return;
@@ -6155,9 +6296,9 @@ impl ViewportTool3d for BrushTool {
                 }
                 return;
             }
-            let raw_units = if extrude.axis == 1 {
+            let raw_axis_delta = if extrude.axis == 1 {
                 // Vertical faces follow pixel drag (up = out for +Y).
-                (extrude.press_y - pointer.y) * EXTRUDE_UNITS_PER_PIXEL * extrude.dir as f32
+                (extrude.press_y - pointer.y) * EXTRUDE_UNITS_PER_PIXEL
             } else {
                 // Horizontal faces follow the ground-plane pointer along
                 // the face's dominant axis.
@@ -6166,13 +6307,12 @@ impl ViewportTool3d for BrushTool {
                     None => return,
                 }
             };
-            let snapped = ((raw_units / step).round() * step) as i32;
             let mut delta = [0i32; 3];
-            delta[extrude.axis] = if extrude.axis == 1 {
-                snapped * extrude.dir
-            } else {
-                snapped
-            };
+            delta[extrude.axis] = absolute_grid_translation_delta(
+                extrude.snap_anchor[extrude.axis],
+                f64::from(raw_axis_delta),
+                ws.snap_units,
+            );
             if delta == extrude.applied {
                 return;
             }
