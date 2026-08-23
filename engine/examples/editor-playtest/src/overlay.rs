@@ -7,6 +7,38 @@
 use super::*;
 use psx_gpu::draw_quad_flat;
 
+/// Apply the six-step demo-disc brightness control as a native PS1 blend over
+/// the composed frame. This costs two flat triangles and no VRAM. Level one
+/// matches the old level three, level four is the authored image, and the top
+/// two levels lift the image above neutral.
+pub(crate) fn draw_brightness_overlay(level: u8) {
+    let (amount, blend_mode) = match level.clamp(1, BRIGHTNESS_LEVELS) {
+        1 => (24, BlendMode::Subtract),
+        2 => (14, BlendMode::Subtract),
+        3 => (6, BlendMode::Subtract),
+        4 => (0, BlendMode::Opaque),
+        5 => (6, BlendMode::Add),
+        _ => (14, BlendMode::Add),
+    };
+    if amount == 0 {
+        return;
+    }
+    draw_tri_flat_blended(
+        [(0, 0), (SCREEN_W, 0), (0, SCREEN_H)],
+        amount,
+        amount,
+        amount,
+        blend_mode,
+    );
+    draw_tri_flat_blended(
+        [(SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
+        amount,
+        amount,
+        amount,
+        blend_mode,
+    );
+}
+
 pub(crate) fn draw_analog_required_prompt(font: &FontAtlas) {
     const BOX_X0: i16 = 32;
     const BOX_Y0: i16 = (SCREEN_H - 64) / 2;

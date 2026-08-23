@@ -486,18 +486,19 @@ impl Playtest {
             return;
         }
         if self.free_orbit {
-            let (right_x, right_y) = ctx.pad.sticks.right_centered();
-            self.camera_turning_last_tick = abs_i16(right_x) >= CAMERA_STICK_DEADZONE;
+            let (right_x, right_y) = camera_stick_axes(ctx, self.analog_deadzone);
+            self.camera_turning_last_tick = right_x != 0 || right_y != 0;
             self.orbit_yaw = self.orbit_yaw.add_signed_q12(scale_i16_by_vblanks(
                 stick_to_yaw_delta(
                     psx_engine::InputAxis::new(right_x.saturating_neg()),
                     self.camera_orbit_speed_level(),
+                    0,
                 ),
                 delta_vblanks,
             ));
             self.orbit_radius = (self.orbit_radius
                 + scale_i32_by_vblanks(
-                    stick_to_radius_delta(psx_engine::InputAxis::new(right_y)),
+                    stick_to_radius_delta(psx_engine::InputAxis::new(right_y), 0),
                     delta_vblanks,
                 ))
             .clamp(CAMERA_RADIUS_MIN, CAMERA_RADIUS_MAX);
@@ -568,6 +569,7 @@ impl Playtest {
             motor_input(
                 ctx,
                 self.camera.yaw(),
+                self.analog_deadzone,
                 circle.sprint,
                 circle.evade,
                 lock_facing_yaw,
@@ -813,9 +815,10 @@ impl Playtest {
                 self.lock_invalid_ticks = self.lock_invalid_ticks.saturating_add(1);
             }
         }
-        let (camera_right_x, _) = ctx.pad.sticks.right_centered();
-        self.camera_turning_last_tick =
-            !self.is_locked() && abs_i16(camera_right_x) >= CAMERA_STICK_DEADZONE;
+        let (camera_right_x, camera_right_y) = ctx.pad.sticks.right_centered();
+        self.camera_turning_last_tick = !self.is_locked()
+            && psx_engine::Deadzone::new(self.analog_deadzone)
+                .outside(camera_right_x, camera_right_y);
         if SOFT_LOCK_ENABLED {
             self.update_soft_lock(ctx);
         } else {
