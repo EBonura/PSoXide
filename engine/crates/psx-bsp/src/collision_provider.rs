@@ -182,6 +182,7 @@ impl CollisionTraceProvider for CollisionHullTraceProvider<'_, '_, '_> {
 /// `false` without modifying the caller's output.
 pub struct PxbspCollisionProvider<'map, 'models, 'scratch> {
     map: &'map PxbspResidentMap,
+    world: CollisionHull<'map>,
     hull_index: usize,
     models: &'models [PxbspCollisionModel],
     supported_shape: CollisionTraceShape,
@@ -197,9 +198,9 @@ impl<'map, 'models, 'scratch> PxbspCollisionProvider<'map, 'models, 'scratch> {
         supported_shape: CollisionTraceShape,
         scratch: &'scratch mut TraceScratch,
     ) -> Option<Self> {
+        let world = map.model_collision_hull(0, hull_index)?;
         if !valid_shape(supported_shape)
             || models.len() > MAX_COMPOSED_COLLISION_MODELS
-            || map.model_collision_hull(0, hull_index).is_none()
             || models.iter().any(|model| {
                 map.model_collision_hull(model.model_index as usize, hull_index)
                     .is_none()
@@ -209,6 +210,7 @@ impl<'map, 'models, 'scratch> PxbspCollisionProvider<'map, 'models, 'scratch> {
         }
         Some(Self {
             map,
+            world,
             hull_index,
             models,
             supported_shape,
@@ -224,11 +226,8 @@ impl CollisionTraceProvider for PxbspCollisionProvider<'_, '_, '_> {
         }
         let start = point_to_q12(query.start);
         let end = point_to_q12(query.end);
-        let Some(world) = self.map.model_collision_hull(0, self.hull_index) else {
-            return false;
-        };
         let mut best = Trace::default();
-        if !world.trace_into(&start, &end, self.scratch, &mut best) {
+        if !self.world.trace_into(&start, &end, self.scratch, &mut best) {
             return false;
         }
         for model in self.models.iter() {

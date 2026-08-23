@@ -153,6 +153,41 @@ pub unsafe fn materialize_classic_affine_word_vertices(
     }
 }
 
+/// Expand the common cooked-brush vertex form into projection scratch.
+///
+/// Cooked brush vertices commonly carry material-relative UVs and baked RGB.
+/// Selecting that contract once per face avoids testing both format flags for
+/// every vertex in the generic compatibility path.
+///
+/// # Safety
+/// The source, destination, alignment, length, and non-overlap requirements
+/// match [`materialize_classic_affine_word_vertices`].
+pub unsafe fn materialize_classic_affine_baked_light_vertices(
+    source: *const ClassicAffineWordSourceVertex,
+    vertex_count: usize,
+    destination: *mut ClassicAffineVertex,
+    uv_offset: [u8; 2],
+) {
+    let mut index = 0usize;
+    while index < vertex_count {
+        let source_words = unsafe { source.add(index).cast::<u32>() };
+        let destination_words = unsafe { destination.add(index).cast::<u32>() };
+        let position_xy = unsafe { ptr::read(source_words) };
+        let mut position_z_uv = unsafe { ptr::read(source_words.add(1)) };
+        let u = ((position_z_uv >> 16) as u8).wrapping_add(uv_offset[0]);
+        let v = ((position_z_uv >> 24) as u8).wrapping_add(uv_offset[1]);
+        position_z_uv = (position_z_uv & 0x0000_ffff) | ((u as u32) << 16) | ((v as u32) << 24);
+        let color = unsafe { ptr::read(source_words.add(2)) };
+
+        unsafe {
+            ptr::write(destination_words, position_xy);
+            ptr::write(destination_words.add(1), position_z_uv);
+            ptr::write(destination_words.add(2), color);
+        }
+        index += 1;
+    }
+}
+
 /// Expand indexed corners and shared positions into projection scratch.
 ///
 /// # Safety
@@ -2493,6 +2528,27 @@ mod tests {
         assert_eq!(output[1].position, [31, -19, 5]);
         assert_eq!(output[1].uv, [9, 17]);
         assert_eq!(output[1].color, 0x00ab_cdef);
+
+        let mut generic = [ClassicAffineVertex::default(); 2];
+        let mut specialized = [ClassicAffineVertex::default(); 2];
+        unsafe {
+            materialize_classic_affine_word_vertices(
+                source.as_ptr(),
+                source.len(),
+                generic.as_mut_ptr(),
+                [10, 252],
+                [123, 456],
+                false,
+                true,
+            );
+            materialize_classic_affine_baked_light_vertices(
+                source.as_ptr(),
+                source.len(),
+                specialized.as_mut_ptr(),
+                [10, 252],
+            );
+        }
+        assert_eq!(specialized, generic);
     }
 
     #[test]

@@ -1588,7 +1588,7 @@ fn brush_texture_dims(
     dims
 }
 
-const PAGE_LOCAL_PROMOTION_BUDGET_BYTES: usize = 2 * 1024;
+const PAGE_LOCAL_PROMOTION_BUDGET_BYTES: usize = 8 * 1024;
 const PAGE_LOCAL_PROMOTION_MIN_FACE_GAIN: usize = 32;
 
 #[derive(Clone, Copy, Debug)]

@@ -93,7 +93,8 @@ pub use character_motor::{
     CharacterMotorInput, CharacterMotorState,
 };
 pub use classic_affine::{
-    compose_classic_alias_transform, materialize_classic_affine_indexed_projected_vertices,
+    compose_classic_alias_transform, materialize_classic_affine_baked_light_vertices,
+    materialize_classic_affine_indexed_projected_vertices,
     materialize_classic_affine_indexed_vertices, materialize_classic_affine_word_vertices,
     project_classic_affine_indexed_vertices, submit_classic_affine_batch,
     submit_classic_affine_fan, submit_classic_affine_mixed_batch, submit_classic_affine_packed_fan,
