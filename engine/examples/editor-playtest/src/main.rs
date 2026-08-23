@@ -545,6 +545,10 @@ struct Playtest {
     show_collision_debug: bool,
     /// Cooperative background policy for room-window and VRAM upload work.
     streaming_jobs: RuntimeStreamingJobs,
+    /// Live scaled-radial threshold selected by the front-end Settings scene.
+    analog_deadzone: i16,
+    /// User-facing 1..=6 presentation brightness level.
+    brightness_level: u8,
     /// Host-visible render breadcrumbs emitted for a few frames after
     /// crossing into another room.
     post_cross_debug_frames: u8,
@@ -674,6 +678,8 @@ impl Playtest {
             *vertex = ModelVertex::ZERO;
         }
         self.streaming_jobs = RuntimeStreamingJobs::new();
+        self.analog_deadzone = ANALOG_DEADZONE_DEFAULT;
+        self.brightness_level = BRIGHTNESS_DEFAULT;
         self.room_materials_unresolved = true;
         self.bsp_instance_visible_mask = u16::MAX;
     }

@@ -297,6 +297,15 @@ pub trait Scene {
     #[allow(unused_variables)]
     fn render_overlay(&mut self, ctx: &mut Ctx) {}
 
+    /// Draw a final presentation pass over the fully composed frame.
+    ///
+    /// The game-flow wrapper calls this for both gameplay-backed and UI-only
+    /// states after ordinary overlays have finished. Projects can use it for
+    /// global presentation settings such as a PS1-native brightness curve
+    /// without teaching the generic flow driver about project option ids.
+    #[allow(unused_variables)]
+    fn render_post_process(&mut self, ctx: &mut Ctx) {}
+
     /// Font the flow driver uses to draw front-end UI scene text (menu
     /// labels and buttons). The gameplay scene owns the font atlas it
     /// uploads in [`init`](Scene::init), so it lends it here for the menu

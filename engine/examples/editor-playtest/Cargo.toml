@@ -102,5 +102,6 @@ psx-io     = { path = "../../../sdk/crates/psx-io", optional = true }
 psx-level  = { path = "../../crates/psx-level" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
 psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["alloc"] }
+psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
 psxed-format = { path = "../../../editor/crates/psxed-format" }
