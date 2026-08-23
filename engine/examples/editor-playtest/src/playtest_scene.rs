@@ -136,8 +136,21 @@ impl Scene for Playtest {
                     psx_gpu::VideoMode::Ntsc,
                     psx_gpu::Resolution::R320X240,
                 );
+            } else if option.id == SFX_VOLUME_OPTION_ID {
+                let percent = (*value).clamp(0, SFX_VOLUME_MAX) as u16;
+                let volume = psx_spu::Volume::linear(percent, SFX_VOLUME_MAX as u16);
+                psx_spu::set_main_volume(volume, volume);
+            } else if option.id == ANALOG_DEADZONE_OPTION_ID {
+                self.analog_deadzone =
+                    (*value).clamp(ANALOG_DEADZONE_MIN.into(), ANALOG_DEADZONE_MAX.into()) as i16;
+            } else if option.id == BRIGHTNESS_OPTION_ID {
+                self.brightness_level = (*value).clamp(1, i32::from(BRIGHTNESS_LEVELS)) as u8;
             }
         }
+    }
+
+    fn render_post_process(&mut self, _ctx: &mut Ctx) {
+        draw_brightness_overlay(self.brightness_level);
     }
 
     fn init(&mut self, _ctx: &mut Ctx) {

@@ -812,7 +812,7 @@ impl Playtest {
                 recenter: ctx.is_held(button::L1),
             }
         } else {
-            camera_input(ctx, self.camera_orbit_speed_level())
+            camera_input(ctx, self.camera_orbit_speed_level(), self.analog_deadzone)
         };
         let lock_target = self
             .lock_target_position()

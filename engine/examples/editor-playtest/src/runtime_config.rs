@@ -122,9 +122,16 @@ pub(super) const CAMERA_SWEEP_RADIUS: i32 = if CAMERA_SWEEP_WIDE_ENABLED {
 } else {
     CAMERA_START_RADIUS
 };
-pub(super) const MOVE_STICK_DEADZONE: i16 = 18;
 pub(super) const STICK_MAX: i16 = 127;
-pub(super) const CAMERA_STICK_DEADZONE: i16 = 18;
+/// Demo-disc shared scaled-radial deadzone choices (HL-PSX / Quake-PSX).
+pub(super) const ANALOG_DEADZONE_MIN: i16 = 12;
+pub(super) const ANALOG_DEADZONE_DEFAULT: i16 = 28;
+pub(super) const ANALOG_DEADZONE_MAX: i16 = 44;
+/// Six user-facing brightness levels. Level four preserves the authored image;
+/// lower levels subtract light and higher levels add light in the final pass.
+pub(super) const BRIGHTNESS_LEVELS: u8 = 6;
+pub(super) const BRIGHTNESS_DEFAULT: u8 = BRIGHTNESS_LEVELS;
+pub(super) const SFX_VOLUME_MAX: i32 = 100;
 pub(super) const CAMERA_STICK_YAW_STEP: i16 = 64;
 pub(super) const CAMERA_STICK_PITCH_STEP: i16 = 48;
 pub(super) const MIN_CAMERA_ORBIT_SPEED_LEVEL: u8 = 1;
@@ -266,6 +273,9 @@ pub(super) fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
 /// overscan without clipping.
 pub(super) const SCREEN_OFFSET_X_OPTION_ID: u16 = 1;
 pub(super) const SCREEN_OFFSET_Y_OPTION_ID: u16 = 2;
+pub(super) const SFX_VOLUME_OPTION_ID: u16 = 4;
+pub(super) const ANALOG_DEADZONE_OPTION_ID: u16 = 5;
+pub(super) const BRIGHTNESS_OPTION_ID: u16 = 6;
 
 /// Cortex tiles are smaller than the reference engine room sectors, so one four-way split gives
 /// the desired affine correction without paying for the 16-leaf near band.
