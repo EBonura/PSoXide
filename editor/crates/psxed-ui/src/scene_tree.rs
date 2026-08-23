@@ -1566,6 +1566,7 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
             UiNodeKind::Button {
                 rect: UiRect::new(24, 24, 96, 18),
                 label: "Button".to_string(),
+                tag: String::new(),
                 align: UiTextAlign::Center,
                 font: UiFontChoice::Basic,
                 font_scale: default_ui_font_scale(),

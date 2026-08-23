@@ -747,6 +747,16 @@ impl ProjectDocument {
                 .push(ProjectSceneState::gameplay("Gameplay", None));
         }
         self.assign_scene_state_ids();
+        let valid_state_ids: HashSet<SceneStateId> =
+            self.scene_states.iter().map(|state| state.id).collect();
+        for state in &mut self.scene_states {
+            if state
+                .start_state
+                .is_some_and(|target| target == state.id || !valid_state_ids.contains(&target))
+            {
+                state.start_state = None;
+            }
+        }
         match self.boot {
             BootTarget::SceneState(id) => {
                 if !self.scene_states.iter().any(|state| state.id == id) {
@@ -807,6 +817,7 @@ impl ProjectDocument {
             ui_scene: self.ui_scenes.first().map(|scene| scene.id),
             ui_input: true,
             pause_world: false,
+            start_state: None,
         });
         self.assign_scene_state_ids();
         self.scene_states
@@ -822,6 +833,11 @@ impl ProjectDocument {
             return false;
         }
         let removed = self.scene_states.remove(index);
+        for state in &mut self.scene_states {
+            if state.start_state == Some(removed.id) {
+                state.start_state = None;
+            }
+        }
         if self.boot == BootTarget::SceneState(removed.id) {
             self.boot = BootTarget::Gameplay;
         }

@@ -51,10 +51,10 @@ use psx_level::{
     first_focus, next_focus, scene_state_flags, ui_node_flags, FlowState, GameFlow, LevelOptionDef,
     LevelSceneState, LevelTransition, LevelTransitionKind, LevelUiAction, LevelUiNodeKind,
     LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
-    LevelUiValueBinding, LevelWorldLayer, NavDir, NavRect, UI_OPTION_NONE, UI_SCENE_NONE,
-    UI_SFX_NONE,
+    LevelUiValueBinding, LevelWorldLayer, NavDir, NavRect, SCENE_STATE_NONE, UI_OPTION_NONE,
+    UI_SCENE_NONE, UI_SFX_NONE,
 };
-use psx_pad::button;
+use psx_pad::{button, PadState};
 
 use crate::scene::{Ctx, RenderSubmission, Scene, SceneStateRef};
 use crate::transitions::render_transition_overlay;
@@ -1089,6 +1089,22 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .map(|index| index as u16)
     }
 
+    /// Resolve the active composed state's authored START target to a flow
+    /// cursor index. Compatibility `Gameplay` / `UiScene` entries have no
+    /// binding and keep their existing input behavior.
+    fn current_start_state_index(&self) -> Option<u16> {
+        let FlowState::SceneState { state } =
+            *self.flow.states.get(self.cursor.current as usize)?
+        else {
+            return None;
+        };
+        let target = self.scene_state(state)?.start_state;
+        if target == SCENE_STATE_NONE || target == state {
+            return None;
+        }
+        self.flow_index_for_scene_state(target)
+    }
+
     /// Move the cursor onto `state_index`, running gameplay init exactly
     /// once if the target state carries a gameplay/world layer.
     ///
@@ -1366,6 +1382,19 @@ impl<'a, S: Scene> GameApp<'a, S> {
         if current_ok {
             return Some(focus);
         }
+        // Authored tab scenes describe their active category with the
+        // `.selected` tag. Prefer it when a freshly entered scene seeds
+        // focus so the first shoulder press advances from the content the
+        // player is actually looking at, not merely the first button in
+        // node order.
+        if let Some(selected) = (first..end).find(|&index| {
+            self.nodes.get(index).is_some_and(|node| {
+                ui::is_focusable(node.kind) && node.tag.ends_with(".selected")
+            })
+        }) {
+            self.cursor.menu_focus = selected as u16;
+            return Some(selected);
+        }
         let mut rects = [NavRect {
             x: 0,
             y: 0,
@@ -1450,6 +1479,75 @@ impl<'a, S: Scene> GameApp<'a, S> {
         );
     }
 
+    /// Activate the previous/next authored tab button, wrapping at the ends.
+    ///
+    /// A button opts into this rail by using a `tab.*` runtime tag. One tab in
+    /// each scene may append `.selected`; that becomes the shoulder-navigation
+    /// origin while focus is down in the submenu. Scenes without tagged tabs
+    /// keep the legacy shoulder-as-horizontal-focus behaviour.
+    fn shoulder_tab_press(
+        &mut self,
+        first: usize,
+        count: usize,
+        right: bool,
+        ctx: &mut Ctx,
+    ) -> bool {
+        let end = first.saturating_add(count).min(self.nodes.len());
+        let focused = self.resolved_focus(first, count);
+        let mut first_tab = None;
+        let mut last_tab = None;
+        let mut selected_tab = None;
+        let mut focused_tab = None;
+
+        for index in first..end {
+            let Some(node) = self.nodes.get(index) else {
+                continue;
+            };
+            if !matches!(node.kind, LevelUiNodeKind::Button) || !node.tag.starts_with("tab.") {
+                continue;
+            }
+            first_tab.get_or_insert(index);
+            last_tab = Some(index);
+            if node.tag.ends_with(".selected") {
+                selected_tab = Some(index);
+            }
+            if focused == Some(index) {
+                focused_tab = Some(index);
+            }
+        }
+
+        let (Some(first_tab), Some(last_tab)) = (first_tab, last_tab) else {
+            return false;
+        };
+        let current = focused_tab.or(selected_tab).unwrap_or(first_tab);
+        let next = if right {
+            ((current + 1)..=last_tab)
+                .find(|&index| {
+                    self.nodes.get(index).is_some_and(|node| {
+                        matches!(node.kind, LevelUiNodeKind::Button) && node.tag.starts_with("tab.")
+                    })
+                })
+                .unwrap_or(first_tab)
+        } else {
+            (first_tab..current)
+                .rev()
+                .find(|&index| {
+                    self.nodes.get(index).is_some_and(|node| {
+                        matches!(node.kind, LevelUiNodeKind::Button) && node.tag.starts_with("tab.")
+                    })
+                })
+                .unwrap_or(last_tab)
+        };
+
+        self.cursor.menu_focus = next as u16;
+        if let Some(node) = self.nodes.get(next).copied() {
+            self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
+            self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
+            self.perform_action(node.action, ctx);
+        }
+        true
+    }
+
     /// Step size of the option with id `option_id`, or `0` when the id is
     /// unbound or unknown. A zero step makes a LEFT/RIGHT press a no-op
     /// rather than panicking on a stray binding.
@@ -1466,7 +1564,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
 
     /// Fire the focused control's action. `GotoScene` / `StartGameplay`
     /// / `Back` drive the flow cursor; `SetOption` nudges the bound option
-    /// in the value store; `Game` is a no-op until game dispatch lands.
+    /// in the value store; `Game` dispatches its opaque id to the scene.
     fn activate_focus(&mut self, first: usize, count: usize, ctx: &mut Ctx) {
         let Some(node_index) = self.resolved_focus(first, count) else {
             return;
@@ -1524,8 +1622,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelUiAction::SetOption { option, delta } => {
                 let _ = self.adjust_option(option, delta);
             }
-            // TODO(menu-step3): dispatch game-specific actions by id.
-            LevelUiAction::Game { .. } => {}
+            LevelUiAction::Game { id } => self.gameplay.game_ui_action(id, ctx),
         }
     }
 
@@ -1565,6 +1662,15 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
         if ctx.just_pressed(button::RIGHT) {
             self.horizontal_press(first, count, true);
+        }
+        // Shoulder navigation is reserved for menu/category focus rather
+        // than slider adjustment. This lets a PS1 L1/R1 tab rail remain
+        // usable even when the current submenu contains option sliders.
+        if ctx.just_pressed(button::L1) && !self.shoulder_tab_press(first, count, false, ctx) {
+            self.move_focus(first, count, NavDir::Left);
+        }
+        if ctx.just_pressed(button::R1) && !self.shoulder_tab_press(first, count, true, ctx) {
+            self.move_focus(first, count, NavDir::Right);
         }
 
         // CROSS activates the focused control. CIRCLE is a dedicated
@@ -1681,6 +1787,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 &|binding| gameplay.ui_value(binding),
             )
         };
+        let text = |tag: &str| gameplay.ui_text(tag);
         // Slider fill reads the live option value by id from the copied
         // store, through the same resolver the input path uses so the knob
         // position matches what scrubbing changed.
@@ -1712,6 +1819,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             options,
             &option_value,
             &visible,
+            &text,
         );
         crate::app::boot_visual_checkpoint(&mut ctx.fb, (80, 220, 220), "37 UI DRAW OK");
     }
@@ -1825,6 +1933,12 @@ fn resolve_ui_value(
         LevelUiValueBinding::LoadingProgress => loading_progress_q12,
         LevelUiValueBinding::PlayerHealth
         | LevelUiValueBinding::PlayerHealthMax
+        | LevelUiValueBinding::PlayerHealthSecondary
+        | LevelUiValueBinding::PlayerHealthSecondaryMax
+        | LevelUiValueBinding::PlayerHealthEmptyInfluence
+        | LevelUiValueBinding::PlayerHealthFullInfluence
+        | LevelUiValueBinding::PlayerHealthSecondaryEmptyInfluence
+        | LevelUiValueBinding::PlayerHealthSecondaryFullInfluence
         | LevelUiValueBinding::PlayerStamina
         | LevelUiValueBinding::PlayerStaminaMax => gameplay_value(binding).unwrap_or(0),
     }
@@ -1899,9 +2013,35 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         if self.update_transition(ctx) {
             return;
         }
+        // A composed state's START binding is evaluated before either world
+        // simulation or UI navigation. This is what lets a gameplay+HUD state
+        // open a paused gameplay+menu state even though its HUD does not capture
+        // input. States without a binding retain the title-screen START shortcut
+        // in `update_ui_scene` below.
+        if ctx.just_pressed(button::START) {
+            if let Some(target) = self.current_start_state_index() {
+                let return_to = Some(self.cursor.current);
+                self.request_flow_state(target, return_to, ctx);
+                return;
+            }
+        }
         let tag = self.current_tag();
         if tag.has_gameplay() && !tag.world_is_paused() {
-            self.gameplay.update(ctx);
+            if tag.ui_accepts_input() {
+                // A live inventory keeps simulation running but owns the pad:
+                // L1/R1 must switch tabs, not also fire gameplay attacks. The
+                // world receives a neutral sample while the UI reads the real
+                // sample immediately afterwards.
+                let pad = ctx.pad;
+                let pad_prev = ctx.pad_prev;
+                ctx.pad = PadState::NONE;
+                ctx.pad_prev = PadState::NONE;
+                self.gameplay.update(ctx);
+                ctx.pad = pad;
+                ctx.pad_prev = pad_prev;
+            } else {
+                self.gameplay.update(ctx);
+            }
         }
         if let Some(scene) = tag.ui_scene() {
             let state = self.state_ref_at(self.cursor.current);
@@ -2008,7 +2148,7 @@ mod tests {
     use super::*;
     use crate::frames::{SimTick, VideoHz, VisualFrame};
     use psx_gpu::framebuf::FrameBuffer;
-    use psx_pad::{ButtonState, PadState};
+    use psx_pad::ButtonState;
 
     #[test]
     fn ui_font_table_requests_every_cooked_slot() {
@@ -2035,6 +2175,9 @@ mod tests {
         enters: u32,
         exits: u32,
         loading_prepares: u32,
+        game_actions: u32,
+        last_game_action: u16,
+        last_update_buttons: u16,
         enter_ran_before_init: bool,
         /// When `Some`, returned as the resource key for every state (a shared
         /// set); when `None`, the trait default (`state.id`) applies.
@@ -2048,8 +2191,9 @@ mod tests {
             }
             self.inits += 1;
         }
-        fn update(&mut self, _ctx: &mut Ctx) {
+        fn update(&mut self, ctx: &mut Ctx) {
             self.updates += 1;
+            self.last_update_buttons = ctx.pad.buttons.bits();
         }
         fn render(&mut self, _ctx: &mut Ctx) {
             self.renders += 1;
@@ -2070,6 +2214,10 @@ mod tests {
         }
         fn prepare_loading_assets(&mut self, _scene: u16) {
             self.loading_prepares += 1;
+        }
+        fn game_ui_action(&mut self, id: u16, _ctx: &mut Ctx) {
+            self.game_actions += 1;
+            self.last_game_action = id;
         }
         fn state_resource_key(&self, state: SceneStateRef) -> u32 {
             self.shared_resource_key.unwrap_or(state.id as u32)
@@ -2093,6 +2241,8 @@ mod tests {
         let gameplay_value = |binding| match binding {
             LevelUiValueBinding::PlayerHealth => Some(3072),
             LevelUiValueBinding::PlayerHealthMax => Some(4096),
+            LevelUiValueBinding::PlayerHealthSecondary => Some(2048),
+            LevelUiValueBinding::PlayerHealthSecondaryMax => Some(4096),
             _ => None,
         };
 
@@ -2117,6 +2267,17 @@ mod tests {
                 &gameplay_value,
             ),
             4096,
+        );
+        assert_eq!(
+            resolve_ui_value(
+                LevelUiValueBinding::PlayerHealthSecondary,
+                &[],
+                &values,
+                0,
+                1234,
+                &gameplay_value,
+            ),
+            2048,
         );
         assert_eq!(
             resolve_ui_value(
@@ -2179,6 +2340,28 @@ mod tests {
         assert_eq!(app.gameplay.inits, 1, "gameplay.init runs exactly once");
         assert_eq!(app.gameplay.updates, 2, "each update forwards to gameplay");
         assert_eq!(app.gameplay.renders, 2, "each render forwards to gameplay");
+    }
+
+    #[test]
+    fn opaque_game_ui_actions_dispatch_to_the_gameplay_scene() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.perform_action(LevelUiAction::Game { id: 203 }, &mut ctx);
+
+        assert_eq!(app.gameplay.game_actions, 1);
+        assert_eq!(app.gameplay.last_game_action, 203);
     }
 
     #[test]
@@ -2465,6 +2648,17 @@ mod tests {
         }
     }
 
+    const fn tagged_button(
+        x: i16,
+        y: i16,
+        tag: &'static str,
+        action: LevelUiAction,
+    ) -> LevelUiNodeRecord {
+        let mut node = button(x, y, action);
+        node.tag = tag;
+        node
+    }
+
     const CANVAS: LevelUiNodeRecord = LevelUiNodeRecord {
         parent: None,
         kind: LevelUiNodeKind::Canvas,
@@ -2532,16 +2726,87 @@ mod tests {
         entry: 0,
     };
 
+    static HORIZONTAL_MENU_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        button(40, 80, LevelUiAction::Game { id: 1 }),
+        button(140, 80, LevelUiAction::Game { id: 2 }),
+    ];
+    static HORIZONTAL_MENU_SCENES: &[LevelUiScene] = &[LevelUiScene {
+        id: 3,
+        name: "tabs",
+        node_first: 0,
+        node_count: 3,
+        focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+    }];
+    static HORIZONTAL_MENU_FLOW: GameFlow = GameFlow {
+        states: &[FlowState::UiScene { scene: 3 }],
+        scene_states: &[],
+        entry: 0,
+    };
+
+    static TAGGED_TAB_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        button(40, 100, LevelUiAction::Game { id: 99 }),
+        tagged_button(200, 20, "tab.player", LevelUiAction::Game { id: 10 }),
+        tagged_button(
+            230,
+            20,
+            "tab.armament.selected",
+            LevelUiAction::Game { id: 11 },
+        ),
+        tagged_button(260, 20, "tab.system", LevelUiAction::Game { id: 12 }),
+    ];
+    static TAGGED_TAB_SCENES: &[LevelUiScene] = &[LevelUiScene {
+        id: 4,
+        name: "tagged-tabs",
+        node_first: 0,
+        node_count: 5,
+        focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+    }];
+    static TAGGED_TAB_FLOW: GameFlow = GameFlow {
+        states: &[FlowState::UiScene { scene: 4 }],
+        scene_states: &[],
+        entry: 0,
+    };
+
     static COMPOSED_STATES: &[LevelSceneState] = &[LevelSceneState {
         id: 42,
         name: "gameplay-with-ui",
         world: LevelWorldLayer::Gameplay,
         ui_scene: 1,
         flags: scene_state_flags::UI_INPUT,
+        start_state: SCENE_STATE_NONE,
     }];
     static COMPOSED_FLOW: GameFlow = GameFlow {
         states: &[FlowState::SceneState { state: 42 }],
         scene_states: COMPOSED_STATES,
+        entry: 0,
+    };
+
+    static PAUSE_COMPOSED_STATES: &[LevelSceneState] = &[
+        LevelSceneState {
+            id: 42,
+            name: "gameplay",
+            world: LevelWorldLayer::Gameplay,
+            ui_scene: UI_SCENE_NONE,
+            flags: 0,
+            start_state: 43,
+        },
+        LevelSceneState {
+            id: 43,
+            name: "pause",
+            world: LevelWorldLayer::Gameplay,
+            ui_scene: 1,
+            flags: scene_state_flags::UI_INPUT | scene_state_flags::PAUSE_WORLD,
+            start_state: 42,
+        },
+    ];
+    static PAUSE_COMPOSED_FLOW: GameFlow = GameFlow {
+        states: &[
+            FlowState::SceneState { state: 42 },
+            FlowState::SceneState { state: 43 },
+        ],
+        scene_states: PAUSE_COMPOSED_STATES,
         entry: 0,
     };
 
@@ -2567,9 +2832,66 @@ mod tests {
         complete_loading(&mut app, &mut ctx);
         assert_eq!(app.gameplay.inits, 1);
 
+        press(&mut ctx, button::R1);
         app.update(&mut ctx);
         assert_eq!(app.gameplay.updates, 1);
+        assert_eq!(app.gameplay.last_update_buttons, 0);
+        assert!(ctx.pad.buttons.is_held(button::R1));
         assert_eq!(app.cursor.focused_node(), Some(1));
+    }
+
+    #[test]
+    fn authored_start_target_opens_and_resumes_a_paused_world_overlay() {
+        let mut scene = CountingScene {
+            shared_resource_key: Some(7),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(
+            &PAUSE_COMPOSED_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.current, 0);
+        assert_eq!(app.gameplay.inits, 1);
+        assert_eq!(app.gameplay.updates, 1);
+
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 1, "START should enter Pause Menu");
+        assert_eq!(
+            app.gameplay.updates, 1,
+            "the opening tick must not advance gameplay"
+        );
+
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.focused_node(), Some(1));
+        assert_eq!(
+            app.gameplay.updates, 1,
+            "paused states keep the world frozen"
+        );
+
+        press(&mut ctx, button::START);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.current, 0, "START should resume Gameplay");
+        assert_eq!(
+            app.gameplay.inits, 1,
+            "shared gameplay resources stay resident"
+        );
+        assert_eq!(app.gameplay.updates, 1);
+
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.gameplay.updates, 2);
     }
 
     /// One UI update tick with no buttons held, so focus seeds without
@@ -2773,6 +3095,76 @@ mod tests {
         press(&mut ctx, button::UP);
         app.update(&mut ctx);
         assert_eq!(app.cursor.menu_focus, 1);
+    }
+
+    #[test]
+    fn shoulder_buttons_move_focus_across_menu_tabs() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &HORIZONTAL_MENU_FLOW,
+            HORIZONTAL_MENU_SCENES,
+            HORIZONTAL_MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.menu_focus, 1);
+
+        press(&mut ctx, button::R1);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.menu_focus, 2);
+
+        press(&mut ctx, button::L1);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.menu_focus, 1);
+    }
+
+    #[test]
+    fn tagged_shoulder_tabs_activate_immediately_and_wrap() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &TAGGED_TAB_FLOW,
+            TAGGED_TAB_SCENES,
+            TAGGED_TAB_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            UI_SCENE_NONE,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(
+            app.cursor.menu_focus, 3,
+            "a fresh tab scene must focus its authored selected category"
+        );
+
+        // Focus is inside the submenu, so the selected tag anchors shoulder
+        // navigation at the middle tab rather than stealing submenu focus.
+        app.cursor.menu_focus = 1;
+        press(&mut ctx, button::R1);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.menu_focus, 4);
+        assert_eq!(app.gameplay.last_game_action, 12);
+
+        press(&mut ctx, button::R1);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.menu_focus, 2);
+        assert_eq!(app.gameplay.last_game_action, 10);
+
+        press(&mut ctx, button::L1);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.menu_focus, 4);
+        assert_eq!(app.gameplay.last_game_action, 12);
+        assert_eq!(app.gameplay.game_actions, 3);
     }
 
     #[test]
