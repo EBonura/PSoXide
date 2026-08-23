@@ -35,6 +35,7 @@ pub mod room_window;
 pub mod save;
 pub mod schedule;
 pub mod sky;
+pub mod vitality;
 pub mod vram;
 pub mod water;
 pub mod world_cells;
