@@ -147,12 +147,18 @@ pub(crate) fn cook_game_flow(
         if authored.pause_world {
             flags |= psx_level::scene_state_flags::PAUSE_WORLD;
         }
+        let start_state = authored
+            .start_state
+            .filter(|target| project.scene_states.iter().any(|state| state.id == *target))
+            .map(cook_scene_state_id)
+            .unwrap_or(psx_level::SCENE_STATE_NONE);
         scene_states.push(PlaytestSceneState {
             id: state_id,
             name: authored.name.clone(),
             world,
             ui_scene,
             flags,
+            start_state,
         });
         states.push(PlaytestFlowState::SceneState { state: state_id });
     }
@@ -473,6 +479,7 @@ pub(crate) fn cook_ui_scene_nodes(
             UiNodeKind::Button {
                 rect,
                 label,
+                tag,
                 align,
                 font,
                 font_scale,
@@ -503,7 +510,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 UiValueBinding::ConstantQ12(0),
                 None,
                 label.clone(),
-                String::new(),
+                tag.clone(),
                 cook_ui_action(*action),
                 cook_ui_shape_option(*shape, *transparent),
                 ui_node_flags(rect.anchor, *align, false)

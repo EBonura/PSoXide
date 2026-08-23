@@ -1210,6 +1210,8 @@ pub(crate) fn ui_preview_font_source(font: UiFontChoice) -> &'static psx_font::B
         UiFontChoice::ShareTechMono => &psx_font::fonts::SHARE_TECH_MONO,
         UiFontChoice::Jura => &psx_font::fonts::JURA,
         UiFontChoice::ZenDotsDisplay => &psx_font::fonts::ZEN_DOTS_DISPLAY,
+        UiFontChoice::Spleen5x8 => &psx_font::fonts::SPLEEN_5X8,
+        UiFontChoice::Spleen5x8Italic => &psx_font::fonts::SPLEEN_5X8_ITALIC,
     }
 }
 
@@ -1801,6 +1803,12 @@ pub(crate) fn ui_binding_preview_q12(binding: UiValueBinding) -> i32 {
         UiValueBinding::Option(_) => 4096,
         UiValueBinding::PlayerHealth => 4096,
         UiValueBinding::PlayerHealthMax => 4096,
+        UiValueBinding::PlayerHealthSecondary => 3072,
+        UiValueBinding::PlayerHealthSecondaryMax => 4096,
+        UiValueBinding::PlayerHealthEmptyInfluence => 0,
+        UiValueBinding::PlayerHealthFullInfluence => 4096,
+        UiValueBinding::PlayerHealthSecondaryEmptyInfluence => 2048,
+        UiValueBinding::PlayerHealthSecondaryFullInfluence => 0,
         UiValueBinding::PlayerStamina => 3072,
         UiValueBinding::PlayerStaminaMax => 4096,
         // Preview a load two-thirds done so the bar reads as a bar.

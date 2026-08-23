@@ -2268,15 +2268,13 @@ fn deleting_a_sprite_bar_material_clears_the_ui_reference() {
 }
 
 #[test]
-fn tracked_projects_use_the_segmented_health_gauge_without_a_stamina_bar() {
+fn legacy_sample_projects_keep_the_segmented_health_gauge_without_a_stamina_bar() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let project_dirs = [
-        manifest.join("../../projects/default"),
         manifest.join("../../projects/mantis"),
         manifest.join("../../projects/quake-e1m1-geometry"),
         manifest.join("../../projects/tech-demo"),
         manifest.join("../../samples/cortex_v1"),
-        manifest.join("../../archive/fixtures/brush-open-courtyard"),
     ];
     for project_dir in project_dirs {
         let project_path = project_dir.join("project.ron");
@@ -2361,6 +2359,326 @@ fn tracked_projects_use_the_segmented_health_gauge_without_a_stamina_bar() {
 }
 
 #[test]
+fn default_project_uses_the_texture_free_twin_ladder_hud() {
+    let project_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+    let project = ProjectDocument::load_from_path(&project_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+    let hud = project
+        .ui_scenes
+        .iter()
+        .find(|scene| scene.name == "HUD")
+        .expect("default HUD scene");
+
+    let bar = |name: &str| {
+        hud.nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Bar {
+                    rect,
+                    value,
+                    max,
+                    texture,
+                    frame_count,
+                    ..
+                } => Some((rect, value, max, texture, frame_count)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing geometric {name}"))
+    };
+    let horizon = bar("Horizon Fill");
+    assert_eq!((horizon.0.width, horizon.0.height), (82, 2));
+    assert_eq!(horizon.1, UiValueBinding::PlayerHealth);
+    assert_eq!(horizon.2, UiValueBinding::PlayerHealthMax);
+    assert_eq!((horizon.3, horizon.4), (None, 0));
+    let zenith = bar("Zenith Fill");
+    assert_eq!((zenith.0.width, zenith.0.height), (82, 2));
+    assert_eq!(zenith.1, UiValueBinding::PlayerHealthSecondary);
+    assert_eq!(zenith.2, UiValueBinding::PlayerHealthSecondaryMax);
+    assert_eq!((zenith.3, zenith.4), (None, 0));
+
+    for (name, text) in [("Horizon Name", "HRZ"), ("Zenith Name", "ZNT")] {
+        let authored = hud
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Label { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(authored, text);
+    }
+
+    for (name, y) in [("Horizon Shell", 12), ("Zenith Shell", 21)] {
+        let (rect, shape) = hud
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Rect {
+                    rect,
+                    shape: Some(shape),
+                    ..
+                } => Some((rect, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), (52, y, 88, 8));
+        assert_eq!(shape.corner_cut, 2);
+        assert!(shape.cut_top_left && shape.cut_bottom_right);
+    }
+    assert_eq!(
+        hud.nodes()
+            .iter()
+            .filter(|node| node.name.contains(" Divider "))
+            .count(),
+        14
+    );
+    assert!(!project.resources.iter().any(|resource| {
+        matches!(
+            &resource.data,
+            ResourceData::Material(material)
+                if material
+                    .psxt_path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("health_bar_clean_slim.psxt"))
+        )
+    }));
+}
+
+#[test]
+fn default_project_inventory_routes_four_continuous_vitality_poles() {
+    let project_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+    let project = ProjectDocument::load_from_path(&project_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+    let inventory = project
+        .ui_scenes
+        .iter()
+        .find(|scene| scene.name == "Dual Vitality Inventory")
+        .expect("Dual Vitality Inventory UI scene");
+
+    for (name, action, tag) in [
+        ("Horizon Empty Boost", 200, "boost.horizon.empty"),
+        ("Horizon Full Boost", 201, "boost.horizon.full"),
+        ("Zenith Empty Boost", 202, "boost.zenith.empty"),
+        ("Zenith Full Boost", 203, "boost.zenith.full"),
+        ("Rupture Inventory Item", 210, "inventory.rupture"),
+        ("Shell Inventory Item", 211, "inventory.shell"),
+        ("Surge Inventory Item", 212, "inventory.surge"),
+    ] {
+        let (authored_action, authored_tag) = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Button { action, tag, .. } => Some((action, tag.as_str())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(authored_action, &UiAction::Game(action));
+        assert_eq!(authored_tag, tag);
+    }
+
+    for (name, value, flip_x) in [
+        ("Horizon Health", UiValueBinding::PlayerHealth, true),
+        (
+            "Zenith Health",
+            UiValueBinding::PlayerHealthSecondary,
+            false,
+        ),
+    ] {
+        let (rect, authored_value) = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Bar { rect, value, .. } => Some((rect, value)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(authored_value, value);
+        assert_eq!(rect.flip_x, flip_x);
+        assert_eq!((rect.width, rect.height), (133, 4));
+    }
+
+    for (name, value) in [
+        (
+            "Horizon Empty Influence",
+            UiValueBinding::PlayerHealthEmptyInfluence,
+        ),
+        (
+            "Horizon Full Influence",
+            UiValueBinding::PlayerHealthFullInfluence,
+        ),
+        (
+            "Zenith Empty Influence",
+            UiValueBinding::PlayerHealthSecondaryEmptyInfluence,
+        ),
+        (
+            "Zenith Full Influence",
+            UiValueBinding::PlayerHealthSecondaryFullInfluence,
+        ),
+    ] {
+        let (authored_value, max) = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Bar { value, max, .. } => Some((value, max)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(authored_value, value);
+        assert_eq!(max, UiValueBinding::ConstantQ12(4096));
+    }
+
+    for name in ["Horizon Pole Caption", "Zenith Pole Caption"] {
+        let text = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Label { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(text.is_empty(), "{name} must not render FULL/EMPTY copy");
+    }
+
+    for (name, endpoint_x) in [
+        ("Horizon Full Trace", 19),
+        ("Horizon Empty Trace", 151),
+        ("Zenith Empty Trace", 168),
+        ("Zenith Full Trace", 300),
+    ] {
+        let rect = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Rect { rect, .. } => Some(rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(rect.x, endpoint_x, "{name} must meet its health endpoint");
+        assert_eq!((rect.y, rect.width, rect.height), (76, 2, 16));
+    }
+
+    assert!(inventory.nodes().iter().all(|node| !matches!(
+        node.name.as_str(),
+        "Inventory Title" | "Inventory Rule" | "Footer Line" | "Footer"
+    )));
+    for (name, tag) in [
+        ("Inventory Player Tab", "tab.player.selected"),
+        ("Inventory Armament Tab", "tab.armament"),
+        ("Inventory System Tab", "tab.system"),
+    ] {
+        let authored_tag = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Button { tag, .. } => Some(tag.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(authored_tag, tag);
+    }
+    for name in [
+        "Inventory L1 Glyph Housing",
+        "Inventory L1 Glyph Text",
+        "Inventory R1 Glyph Housing",
+        "Inventory R1 Glyph Text",
+    ] {
+        assert!(
+            inventory.nodes().iter().any(|node| node.name == name),
+            "missing {name}"
+        );
+    }
+}
+
+#[test]
+fn default_project_pause_menu_is_a_paused_live_overlay_with_ps1_shoulder_glyphs() {
+    let project_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
+    let project = ProjectDocument::load_from_path(&project_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
+    let pause_scene = project
+        .ui_scenes
+        .iter()
+        .find(|scene| scene.name == "Pause Menu")
+        .expect("Pause Menu UI scene");
+    let gameplay = project
+        .scene_states
+        .iter()
+        .find(|state| state.name == "Gameplay")
+        .expect("Gameplay state");
+    let pause = project
+        .scene_states
+        .iter()
+        .find(|state| state.name == "Pause Menu")
+        .expect("Pause Menu state");
+
+    assert_eq!(gameplay.start_state, Some(pause.id));
+    assert_eq!(pause.start_state, Some(gameplay.id));
+    assert_eq!(pause.world, SceneWorldLayer::Gameplay);
+    assert_eq!(pause.ui_scene, Some(pause_scene.id));
+    assert!(pause.ui_input);
+    assert!(pause.pause_world);
+
+    let node_names: HashSet<&str> = pause_scene
+        .nodes()
+        .iter()
+        .map(|node| node.name.as_str())
+        .collect();
+    assert!(node_names.contains("Player Tab"));
+    assert!(node_names.contains("Armament Tab"));
+    assert!(node_names.contains("System Tab"));
+    assert!(!node_names.contains("Inventory Tab"));
+    assert!(!node_names.contains("Resume"));
+    assert!(node_names.contains("Settings"));
+    assert!(node_names.contains("Return To Title"));
+    assert_eq!(
+        pause_scene
+            .default_focus
+            .and_then(|id| pause_scene.node(id))
+            .map(|node| node.name.as_str()),
+        Some("System Tab")
+    );
+
+    let housing = |name: &str| {
+        pause_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Rect {
+                    shape: Some(shape), ..
+                } => Some(shape),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing geometric {name}"))
+    };
+    let left = housing("L1 Glyph Housing");
+    assert_eq!(left.corner_cut, 2);
+    assert!(left.cut_top_left && left.cut_bottom_right);
+    assert!(!left.cut_top_right && !left.cut_bottom_left);
+    let right = housing("R1 Glyph Housing");
+    assert_eq!(right.corner_cut, 2);
+    assert!(right.cut_top_right && right.cut_bottom_left);
+    assert!(!right.cut_top_left && !right.cut_bottom_right);
+
+    for name in ["Top Right Tab Rail", "System Submenu Panel"] {
+        let frame = housing(name);
+        assert_eq!(frame.border_color, [79, 77, 73]);
+        assert_eq!(frame.border_gradient, None);
+    }
+}
+
+#[test]
 fn normalize_loaded_restores_missing_ui_scenes() {
     let mut project = ProjectDocument::new("legacy");
     project.ui_scenes.clear();
@@ -2399,6 +2717,43 @@ fn normalize_loaded_creates_screen_states_for_ui_scenes() {
     let ids: HashSet<SceneStateId> = project.scene_states.iter().map(|state| state.id).collect();
     assert_eq!(ids.len(), project.scene_states.len());
     assert!(ids.iter().all(|id| *id != SceneStateId::UNASSIGNED));
+}
+
+#[test]
+fn screen_state_start_targets_survive_normalization_and_clear_when_invalid() {
+    let mut project = ProjectDocument::new("pause flow");
+    let gameplay = project
+        .scene_states
+        .iter()
+        .find(|state| state.world == SceneWorldLayer::Gameplay)
+        .expect("default gameplay state")
+        .id;
+    let pause = project.add_scene_state("Pause Menu");
+    project.scene_state_mut(gameplay).unwrap().start_state = Some(pause);
+    project.scene_state_mut(pause).unwrap().start_state = Some(gameplay);
+
+    project.normalize_loaded();
+    assert_eq!(
+        project.scene_state(gameplay).unwrap().start_state,
+        Some(pause)
+    );
+    assert_eq!(
+        project.scene_state(pause).unwrap().start_state,
+        Some(gameplay)
+    );
+
+    project.scene_state_mut(pause).unwrap().start_state = Some(pause);
+    project.normalize_loaded();
+    assert_eq!(project.scene_state(pause).unwrap().start_state, None);
+
+    project.scene_state_mut(gameplay).unwrap().start_state = Some(pause);
+    let pause_index = project
+        .scene_states
+        .iter()
+        .position(|state| state.id == pause)
+        .unwrap();
+    assert!(project.remove_scene_state(pause_index));
+    assert_eq!(project.scene_state(gameplay).unwrap().start_state, None);
 }
 
 #[test]

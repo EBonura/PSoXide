@@ -342,8 +342,7 @@ mod projects_dir_tests {
             material_paths,
             [
                 "assets/textures/courtyard_cobbles.psxt",
-                "assets/textures/courtyard_brick.psxt",
-                "assets/ui/health_bar_clean_slim.psxt"
+                "assets/textures/courtyard_brick.psxt"
             ]
         );
         assert!(material_paths

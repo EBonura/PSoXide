@@ -1281,6 +1281,8 @@ pub struct PlaytestSceneState {
     pub ui_scene: u16,
     /// Runtime flags from [`psx_level::scene_state_flags`].
     pub flags: u16,
+    /// Cooked START target state id, or [`psx_level::SCENE_STATE_NONE`].
+    pub start_state: u16,
 }
 
 impl PlaytestSceneState {
@@ -1293,6 +1295,7 @@ impl PlaytestSceneState {
             world: PlaytestWorldLayer::Gameplay,
             ui_scene: psx_level::UI_SCENE_NONE,
             flags: 0,
+            start_state: psx_level::SCENE_STATE_NONE,
         }
     }
 }

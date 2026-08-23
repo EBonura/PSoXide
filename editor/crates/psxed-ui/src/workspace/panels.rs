@@ -557,6 +557,14 @@ impl EditorWorkspace {
             .iter()
             .map(|scene| (scene.id, scene.name.clone()))
             .collect();
+        let active_state_id = self.project.scene_state_at(active).map(|state| state.id);
+        let start_state_options: Vec<(SceneStateId, String)> = self
+            .project
+            .scene_states
+            .iter()
+            .filter(|state| Some(state.id) != active_state_id)
+            .map(|state| (state.id, state.name.clone()))
+            .collect();
         let boot_state = self
             .project
             .scene_state_at(active)
@@ -616,6 +624,27 @@ impl EditorWorkspace {
                 .checkbox(&mut state.ui_input, "UI captures input")
                 .changed();
             changed |= ui.checkbox(&mut state.pause_world, "Pause world").changed();
+            ui.horizontal(|ui| {
+                ui.label("START opens");
+                let preview = state
+                    .start_state
+                    .and_then(|id| {
+                        start_state_options
+                            .iter()
+                            .find(|(state_id, _)| *state_id == id)
+                            .map(|(_, name)| name.as_str())
+                    })
+                    .unwrap_or("None");
+                changed |= searchable_picker(
+                    ui,
+                    ui.id().with("scene_state_start_target"),
+                    &mut state.start_state,
+                    preview,
+                    &start_state_options,
+                    SearchablePickerConfig::optional("None")
+                        .with_search_hint("Search screen states…"),
+                );
+            });
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(!boot_state, egui::Button::new("Boot Here"))
@@ -1410,6 +1439,7 @@ impl EditorWorkspace {
             UiNodeKind::Button {
                 rect,
                 label,
+                tag,
                 align,
                 font,
                 font_scale,
@@ -1436,6 +1466,10 @@ impl EditorWorkspace {
                     |ui| {
                         changed |= inspector_property_row(ui, "Label", |ui| {
                             ui.add(egui::TextEdit::singleline(label).desired_width(f32::INFINITY))
+                                .changed()
+                        });
+                        changed |= inspector_property_row(ui, "Runtime tag", |ui| {
+                            ui.add(egui::TextEdit::singleline(tag).desired_width(f32::INFINITY))
                                 .changed()
                         });
                     },

@@ -40,17 +40,118 @@ impl Scene for Playtest {
     }
 
     fn ui_value(&self, binding: LevelUiValueBinding) -> Option<i32> {
-        match binding {
-            LevelUiValueBinding::PlayerHealth => Some(if self.player_health_max == 0 {
+        let horizon = self.player_vitality.pool(VitalityChannelId::One);
+        let zenith = self.player_vitality.pool(VitalityChannelId::Two);
+        let health_q12 = |current: u16, maximum: u16| {
+            if maximum == 0 {
                 PLAYER_HEALTH_MAX_Q12
             } else {
-                (i32::from(self.player_health) * PLAYER_HEALTH_MAX_Q12)
-                    / i32::from(self.player_health_max)
-            }),
+                (i32::from(current) * PLAYER_HEALTH_MAX_Q12) / i32::from(maximum)
+            }
+        };
+        match binding {
+            LevelUiValueBinding::PlayerHealth => {
+                Some(health_q12(horizon.current(), horizon.maximum()))
+            }
             LevelUiValueBinding::PlayerHealthMax => Some(PLAYER_HEALTH_MAX_Q12),
+            LevelUiValueBinding::PlayerHealthSecondary => {
+                Some(health_q12(zenith.current(), zenith.maximum()))
+            }
+            LevelUiValueBinding::PlayerHealthSecondaryMax => Some(PLAYER_HEALTH_MAX_Q12),
+            LevelUiValueBinding::PlayerHealthEmptyInfluence => {
+                Some(i32::from(horizon.polarity().empty_q12))
+            }
+            LevelUiValueBinding::PlayerHealthFullInfluence => {
+                Some(i32::from(horizon.polarity().full_q12))
+            }
+            LevelUiValueBinding::PlayerHealthSecondaryEmptyInfluence => {
+                Some(i32::from(zenith.polarity().empty_q12))
+            }
+            LevelUiValueBinding::PlayerHealthSecondaryFullInfluence => {
+                Some(i32::from(zenith.polarity().full_q12))
+            }
             LevelUiValueBinding::PlayerStamina => Some(self.motor.stamina_q12()),
             LevelUiValueBinding::PlayerStaminaMax => Some(self.motor_config().stamina_max_q12),
             _ => None,
+        }
+    }
+
+    fn ui_text(&self, tag: &str) -> Option<&'static str> {
+        let selected = BoostSlotId::from_index(self.selected_power_up_slot);
+        let selected_item = self.selected_power_up_item;
+        match tag {
+            "boost.horizon.empty" => Some(
+                self.power_up_loadout
+                    .protocol(BoostSlotId::HorizonEmpty)
+                    .slot_label(BoostSlotId::HorizonEmpty.pole()),
+            ),
+            "boost.horizon.full" => Some(
+                self.power_up_loadout
+                    .protocol(BoostSlotId::HorizonFull)
+                    .slot_label(BoostSlotId::HorizonFull.pole()),
+            ),
+            "boost.zenith.empty" => Some(
+                self.power_up_loadout
+                    .protocol(BoostSlotId::ZenithEmpty)
+                    .slot_label(BoostSlotId::ZenithEmpty.pole()),
+            ),
+            "boost.zenith.full" => Some(
+                self.power_up_loadout
+                    .protocol(BoostSlotId::ZenithFull)
+                    .slot_label(BoostSlotId::ZenithFull.pole()),
+            ),
+            "inventory.rupture" => Some(
+                BoostProtocol::Rupture
+                    .inventory_label(self.power_up_inventory.count(BoostProtocol::Rupture)),
+            ),
+            "inventory.shell" => Some(
+                BoostProtocol::Shell
+                    .inventory_label(self.power_up_inventory.count(BoostProtocol::Shell)),
+            ),
+            "inventory.surge" => Some(
+                BoostProtocol::Surge
+                    .inventory_label(self.power_up_inventory.count(BoostProtocol::Surge)),
+            ),
+            "boost.inventory.selected.name" => Some(selected_item.label()),
+            "boost.inventory.selected.stat" => Some(selected_item.stat_label()),
+            "boost.inventory.selected.count" => {
+                Some(self.power_up_inventory.owned_label(selected_item))
+            }
+            "boost.selected.name" => Some(selected_item.label()),
+            "boost.selected.effect" => Some(selected_item.effect_label(selected.pole())),
+            "boost.selected.pole" => Some(match selected.pole() {
+                psx_game_runtime::vitality::VitalityPole::Empty => "TARGET // HIGH GAIN",
+                psx_game_runtime::vitality::VitalityPole::Full => "TARGET // STABLE",
+            }),
+            _ => None,
+        }
+    }
+
+    fn game_ui_action(&mut self, id: u16, _ctx: &mut Ctx) {
+        if let Some(protocol) = match id {
+            210 => Some(BoostProtocol::Rupture),
+            211 => Some(BoostProtocol::Shell),
+            212 => Some(BoostProtocol::Surge),
+            _ => None,
+        } {
+            self.selected_power_up_item = protocol;
+            return;
+        }
+
+        let slot = match id {
+            200 => Some(BoostSlotId::HorizonEmpty),
+            201 => Some(BoostSlotId::HorizonFull),
+            202 => Some(BoostSlotId::ZenithEmpty),
+            203 => Some(BoostSlotId::ZenithFull),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            self.selected_power_up_slot = slot as u8;
+            let _ = self.power_up_inventory.assign(
+                &mut self.power_up_loadout,
+                slot,
+                self.selected_power_up_item,
+            );
         }
     }
 

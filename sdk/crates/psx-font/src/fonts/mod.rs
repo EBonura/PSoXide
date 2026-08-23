@@ -133,4 +133,4 @@ pub use zen_dots_display::ZEN_DOTS_DISPLAY;
 /// Spleen 5x8, hand-maintained: no `psoxide-dev gen-fonts` entry, so
 /// unlike its siblings in this module it is edited directly.
 pub mod spleen_5x8;
-pub use spleen_5x8::SPLEEN_5X8;
+pub use spleen_5x8::{SPLEEN_5X8, SPLEEN_5X8_ITALIC};

@@ -115,3 +115,55 @@ pub const SPLEEN_5X8: BitmapFont = BitmapFont {
     line_height: 8,
     bit_order: BitOrder::Msb,
 };
+
+/// Shear the upper half of each 5x8 glyph one pixel to the right.
+///
+/// The result occupies a 6x8 cell but keeps the original five-pixel advance,
+/// so it reads as a compact italic face rather than a wider font. The one-pixel
+/// overhang is intentional and costs no extra runtime geometry.
+const fn italicize_spleen_5x8() -> [u8; 760] {
+    let mut italic = SPLEEN_5X8_BITMAP;
+    let mut glyph = 0;
+    while glyph < 95 {
+        let mut row = 0;
+        while row < 4 {
+            let offset = glyph * 8 + row;
+            italic[offset] >>= 1;
+            row += 1;
+        }
+        glyph += 1;
+    }
+    italic
+}
+
+/// ASCII U+0020..U+007E using Spleen's 5x8 forms with a one-pixel italic
+/// overhang. Pixels remain MSB-first; the sixth column contains the shear.
+pub const SPLEEN_5X8_ITALIC_BITMAP: [u8; 760] = italicize_spleen_5x8();
+
+/// Compact italic Spleen descriptor. Glyph cells are 6x8 to preserve the
+/// sheared edge, while the five-pixel advance keeps text metrics unchanged.
+pub const SPLEEN_5X8_ITALIC: BitmapFont = BitmapFont {
+    glyph_w: 6,
+    glyph_h: 8,
+    first_char: 0x0020,
+    glyph_count: 95,
+    bitmap: &SPLEEN_5X8_ITALIC_BITMAP,
+    glyph_advances: None,
+    advance_x: 5,
+    line_height: 8,
+    bit_order: BitOrder::Msb,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn italic_face_shears_the_upper_half_without_widening_text_metrics() {
+        let h = ('H' as usize - 0x20) * 8;
+        assert_eq!(SPLEEN_5X8_ITALIC_BITMAP[h + 1], SPLEEN_5X8_BITMAP[h + 1] >> 1);
+        assert_eq!(SPLEEN_5X8_ITALIC_BITMAP[h + 4], SPLEEN_5X8_BITMAP[h + 4]);
+        assert_eq!(SPLEEN_5X8_ITALIC.glyph_w, 6);
+        assert_eq!(SPLEEN_5X8_ITALIC.text_width("HORIZON"), 35);
+    }
+}

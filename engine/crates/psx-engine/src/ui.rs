@@ -416,13 +416,21 @@ pub fn draw_scene(
     options: &[LevelOptionDef],
     option_value: &impl Fn(u16) -> i32,
     visible: &impl Fn(&LevelUiNodeRecord) -> bool,
+    text: &impl Fn(&str) -> Option<&'static str>,
 ) {
     let end = first.saturating_add(count).min(nodes.len());
     for index in first..end {
-        let node = &nodes[index];
+        let authored_node = &nodes[index];
         if !node_visible_in_tree(nodes, index, visible) {
             continue;
         }
+        let mut live_node = *authored_node;
+        if !live_node.tag.is_empty() {
+            if let Some(resolved_text) = text(live_node.tag) {
+                live_node.text = resolved_text;
+            }
+        }
+        let node = &live_node;
         let resolved = node_resolved(nodes, index).unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
         match node.kind {

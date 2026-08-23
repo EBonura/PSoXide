@@ -349,6 +349,18 @@ pub enum UiValueBinding {
     PlayerHealth,
     /// Player health maximum.
     PlayerHealthMax,
+    /// Player secondary health value.
+    PlayerHealthSecondary,
+    /// Player secondary health maximum.
+    PlayerHealthSecondaryMax,
+    /// Empty-end influence of the primary health channel (Q12).
+    PlayerHealthEmptyInfluence,
+    /// Full-end influence of the primary health channel (Q12).
+    PlayerHealthFullInfluence,
+    /// Empty-end influence of the secondary health channel (Q12).
+    PlayerHealthSecondaryEmptyInfluence,
+    /// Full-end influence of the secondary health channel (Q12).
+    PlayerHealthSecondaryFullInfluence,
     /// Player stamina value.
     PlayerStamina,
     /// Player stamina maximum.
@@ -366,6 +378,16 @@ impl UiValueBinding {
             Self::Option(_) => "Option",
             Self::PlayerHealth => "Player Health",
             Self::PlayerHealthMax => "Player Health Max",
+            Self::PlayerHealthSecondary => "Player Secondary Health",
+            Self::PlayerHealthSecondaryMax => "Player Secondary Health Max",
+            Self::PlayerHealthEmptyInfluence => "Player Health Empty Influence",
+            Self::PlayerHealthFullInfluence => "Player Health Full Influence",
+            Self::PlayerHealthSecondaryEmptyInfluence => {
+                "Player Secondary Health Empty Influence"
+            }
+            Self::PlayerHealthSecondaryFullInfluence => {
+                "Player Secondary Health Full Influence"
+            }
             Self::PlayerStamina => "Player Stamina",
             Self::PlayerStaminaMax => "Player Stamina Max",
             Self::LoadingProgress => "Loading Progress",
@@ -721,11 +743,15 @@ pub enum UiFontChoice {
     Jura,
     /// Zen Dots uppercase face rasterized natively for large titles.
     ZenDotsDisplay,
+    /// Spleen 5x8 native bitmap UI font.
+    Spleen5x8,
+    /// Spleen 5x8 native bitmap UI font with a one-pixel italic shear.
+    Spleen5x8Italic,
 }
 
 impl UiFontChoice {
     /// All editor-selectable built-in UI fonts.
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 39] = [
         Self::Basic,
         Self::Basic8x16,
         Self::KenneyBlocks,
@@ -763,6 +789,8 @@ impl UiFontChoice {
         Self::ShareTechMono,
         Self::Jura,
         Self::ZenDotsDisplay,
+        Self::Spleen5x8,
+        Self::Spleen5x8Italic,
     ];
 
     /// Editor-facing label for this font.
@@ -805,6 +833,8 @@ impl UiFontChoice {
             Self::ShareTechMono => "Share Tech Mono",
             Self::Jura => "Jura",
             Self::ZenDotsDisplay => "Zen Dots Display",
+            Self::Spleen5x8 => "Spleen 5x8",
+            Self::Spleen5x8Italic => "Spleen 5x8 Italic",
         }
     }
 
@@ -848,6 +878,8 @@ impl UiFontChoice {
             Self::ShareTechMono => "share-tech-mono",
             Self::Jura => "jura",
             Self::ZenDotsDisplay => "zen-dots-display",
+            Self::Spleen5x8 => "spleen-5x8",
+            Self::Spleen5x8Italic => "spleen-5x8-italic",
         }
     }
 
@@ -891,6 +923,8 @@ impl UiFontChoice {
             Self::ShareTechMono => 34,
             Self::Jura => 35,
             Self::ZenDotsDisplay => 36,
+            Self::Spleen5x8 => 37,
+            Self::Spleen5x8Italic => 38,
         }
     }
 }
@@ -1214,6 +1248,9 @@ pub enum UiNodeKind {
         /// Centered label text.
         #[serde(default)]
         label: String,
+        /// Optional runtime lookup tag for game-controlled button text.
+        #[serde(default)]
+        tag: String,
         /// Label alignment inside `rect`.
         #[serde(default)]
         align: UiTextAlign,
