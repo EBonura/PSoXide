@@ -12,12 +12,12 @@ use psx_engine::{
         clip_convex_plane, crossing_fraction_q16_i64, lerp_q16_i32, AttributedClipPlane,
         ClipTraversal,
     },
-    compose_classic_alias_transform, materialize_classic_affine_word_vertices,
-    submit_classic_affine_batch, submit_classic_affine_mixed_batch,
-    submit_classic_affine_scoped_windowed_fan, submit_classic_alias_model,
-    ClassicAffineBatchSurface, ClassicAffineMixedBatchSurface, ClassicAffineProfile,
-    ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWordSourceVertex, ClassicAliasFace,
-    ClassicAliasProjectedVertex, ClassicAliasVertex,
+    compose_classic_alias_transform, materialize_classic_affine_baked_light_vertices,
+    materialize_classic_affine_word_vertices, submit_classic_affine_batch,
+    submit_classic_affine_mixed_batch, submit_classic_affine_scoped_windowed_fan,
+    submit_classic_alias_model, ClassicAffineBatchSurface, ClassicAffineMixedBatchSurface,
+    ClassicAffineProfile, ClassicAffineSubmit, ClassicAffineVertex, ClassicAffineWordSourceVertex,
+    ClassicAliasFace, ClassicAliasProjectedVertex, ClassicAliasVertex,
 };
 use psx_gpu::material::TextureWindow;
 use psx_gpu::prim::ClassicTriTextured;
@@ -1281,16 +1281,27 @@ impl Renderer {
         let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
         let source_ptr = unsafe { source.as_ptr().add(source_offset) };
         debug_assert_eq!(source_ptr as usize & 3, 0);
-        unsafe {
-            materialize_classic_affine_word_vertices(
-                source_ptr.cast::<ClassicAffineWordSourceVertex>(),
-                output.len(),
-                output.as_mut_ptr(),
-                [texture.atlas.x, texture.atlas.y],
-                [style0, style1],
-                baked_uv,
-                baked_light,
-            );
+        if baked_light && !baked_uv {
+            unsafe {
+                materialize_classic_affine_baked_light_vertices(
+                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
+                    output.len(),
+                    output.as_mut_ptr(),
+                    [texture.atlas.x, texture.atlas.y],
+                );
+            }
+        } else {
+            unsafe {
+                materialize_classic_affine_word_vertices(
+                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
+                    output.len(),
+                    output.as_mut_ptr(),
+                    [texture.atlas.x, texture.atlas.y],
+                    [style0, style1],
+                    baked_uv,
+                    baked_light,
+                );
+            }
         }
         if baked_light {
             // ponytail: commit 83a6349 maps can carry grayscale bake overflow
@@ -1318,16 +1329,27 @@ impl Renderer {
         let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
         let source_ptr = unsafe { source.as_ptr().add(source_offset) };
         debug_assert_eq!(source_ptr as usize & 3, 0);
-        unsafe {
-            materialize_classic_affine_word_vertices(
-                source_ptr.cast::<ClassicAffineWordSourceVertex>(),
-                output.len(),
-                output.as_mut_ptr(),
-                uv_offset,
-                [style0, style1],
-                baked_uv,
-                baked_light,
-            );
+        if baked_light && !baked_uv {
+            unsafe {
+                materialize_classic_affine_baked_light_vertices(
+                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
+                    output.len(),
+                    output.as_mut_ptr(),
+                    uv_offset,
+                );
+            }
+        } else {
+            unsafe {
+                materialize_classic_affine_word_vertices(
+                    source_ptr.cast::<ClassicAffineWordSourceVertex>(),
+                    output.len(),
+                    output.as_mut_ptr(),
+                    uv_offset,
+                    [style0, style1],
+                    baked_uv,
+                    baked_light,
+                );
+            }
         }
         if baked_light {
             for vertex in output {
