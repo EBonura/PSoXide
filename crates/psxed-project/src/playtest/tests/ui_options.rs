@@ -114,13 +114,13 @@ fn starter_project_validates_and_cooks() {
 }
 
 #[test]
-fn default_health_gauge_cooks_as_one_resident_seven_frame_texture() {
+fn default_twin_ladder_cooks_without_a_ui_texture_asset() {
     let project = ProjectDocument::starter();
     let mut texture_asset_for_resource = HashMap::new();
     let mut assets = Vec::new();
     let mut used_ui_source_paths = Vec::new();
     let mut report = PlaytestValidationReport::default();
-    let (nodes, _paints, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+    let (nodes, _paints, scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
         &project,
         &crate::default_project_dir(),
         &mut texture_asset_for_resource,
@@ -129,30 +129,35 @@ fn default_health_gauge_cooks_as_one_resident_seven_frame_texture() {
         &mut report,
     );
     assert!(report.is_ok(), "errors: {:?}", report.errors);
-    let gauge = nodes
+    let hud = scenes
         .iter()
-        .find(|node| {
+        .find(|scene| scene.name == "HUD")
+        .expect("default HUD scene cooked");
+    let hud_nodes = &nodes[usize::from(hud.node_first)
+        ..usize::from(hud.node_first.saturating_add(hud.node_count))];
+    let bars = hud_nodes
+        .iter()
+        .filter(|node| {
             matches!(
-                node.kind,
-                UiNodeKind::Bar {
-                    value: UiValueBinding::PlayerHealth,
-                    ..
-                }
+                node.value,
+                UiValueBinding::PlayerHealth | UiValueBinding::PlayerHealthSecondary
             )
         })
-        .expect("health gauge cooked");
-    assert_eq!(gauge.option, 7);
-    assert_eq!((gauge.width, gauge.height), (106, 29));
-    let asset_index = gauge.texture_asset.expect("gauge has texture asset");
-    let asset = &assets[asset_index];
-    assert_eq!(asset.streamed_class, StreamedClass::None);
-    let texture = psx_asset::Texture::from_bytes(&asset.bytes).expect("parse gauge atlas");
-    assert_eq!((texture.width(), texture.height()), (106, 203));
-    assert_eq!(texture.depth(), TextureDepth::Bit4);
-    assert_eq!(texture.clut_entries(), 16);
-    assert!(used_ui_source_paths
+        .collect::<Vec<_>>();
+    assert_eq!(bars.len(), 2);
+    assert!(bars.iter().all(|bar| {
+        matches!(bar.kind, UiNodeKind::Bar { .. })
+            && (bar.width, bar.height) == (82, 2)
+            && bar.texture_asset.is_none()
+            && bar.option == psx_level::UI_OPTION_NONE
+    }));
+    assert!(!used_ui_source_paths
         .iter()
         .any(|path| path.ends_with("assets/ui/health_bar_clean_slim.psxt")));
+    assert!(!assets.iter().any(|asset| {
+        psx_asset::Texture::from_bytes(&asset.bytes)
+            .is_ok_and(|texture| (texture.width(), texture.height()) == (106, 203))
+    }));
 }
 
 #[test]
@@ -372,6 +377,7 @@ fn clipped_transparent_rect_cooks_border_and_compact_shape_style() {
         UiNodeKind::Button {
             rect: UiRect::new(24, 80, 72, 18),
             label: "PLAY".to_string(),
+            tag: String::new(),
             align: UiTextAlign::Center,
             font: crate::UiFontChoice::Basic,
             font_scale: crate::default_ui_font_scale(),
@@ -575,6 +581,66 @@ fn boot_target_sets_game_flow_entry_to_the_chosen_scene() {
 }
 
 #[test]
+fn authored_start_targets_cook_with_pause_state_flags() {
+    let mut project = ProjectDocument::new("pause flow");
+    let pause_scene = project.add_ui_scene("Pause Menu");
+    let gameplay = project
+        .scene_states
+        .iter()
+        .find(|state| state.world == SceneWorldLayer::Gameplay)
+        .expect("gameplay state")
+        .id;
+    let pause = project
+        .scene_states
+        .iter()
+        .find(|state| state.ui_scene == Some(pause_scene))
+        .expect("pause state")
+        .id;
+
+    project.scene_state_mut(gameplay).unwrap().start_state = Some(pause);
+    let pause_state = project.scene_state_mut(pause).unwrap();
+    pause_state.world = SceneWorldLayer::Gameplay;
+    pause_state.ui_input = true;
+    pause_state.pause_world = true;
+    pause_state.start_state = Some(gameplay);
+
+    let mut texture_asset_for_resource = HashMap::new();
+    let mut assets = Vec::new();
+    let mut report = PlaytestValidationReport::default();
+    let (_nodes, _paints, _scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
+        &project,
+        Path::new("."),
+        &mut texture_asset_for_resource,
+        &mut assets,
+        &mut Vec::new(),
+        &mut report,
+    );
+
+    assert!(report.is_ok(), "warnings/errors: {:?}", report);
+    let cooked_gameplay = flow
+        .scene_states
+        .iter()
+        .find(|state| state.name == "Gameplay")
+        .expect("cooked gameplay state");
+    let cooked_pause = flow
+        .scene_states
+        .iter()
+        .find(|state| state.name == "Pause Menu")
+        .expect("cooked pause state");
+    assert_eq!(cooked_gameplay.start_state, cooked_pause.id);
+    assert_eq!(cooked_pause.start_state, cooked_gameplay.id);
+    assert_eq!(cooked_pause.world, PlaytestWorldLayer::Gameplay);
+    assert_ne!(
+        cooked_pause.flags & psx_level::scene_state_flags::UI_INPUT,
+        0
+    );
+    assert_ne!(
+        cooked_pause.flags & psx_level::scene_state_flags::PAUSE_WORLD,
+        0
+    );
+}
+
+#[test]
 fn boot_target_falls_back_to_gameplay_when_scene_missing() {
     // A boot target pointing at a non-existent scene must not wedge boot:
     // entry falls back to the gameplay state.
@@ -621,6 +687,7 @@ fn button_and_slider_cook_action_colours_and_option_binding() {
         UiNodeKind::Button {
             rect: UiRect::new(10, 12, 80, 18),
             label: "Play".to_string(),
+            tag: "menu.play".to_string(),
             align: UiTextAlign::Center,
             font: crate::UiFontChoice::Basic8x16,
             font_scale: crate::default_ui_font_scale(),
@@ -669,6 +736,7 @@ fn button_and_slider_cook_action_colours_and_option_binding() {
         .find(|node| matches!(node.kind, UiNodeKind::Button { .. }))
         .expect("button cooked");
     assert_eq!(button.text, "Play");
+    assert_eq!(button.tag, "menu.play");
     assert_eq!(button.font, 1);
     assert_eq!(button.letter_spacing, 4);
     assert_eq!(button.color, [50, 60, 70]);
@@ -707,6 +775,7 @@ fn button_sfx_cooks_wav_to_sample_and_cue_range() {
         UiNodeKind::Button {
             rect: UiRect::new(10, 12, 80, 18),
             label: "Play".to_string(),
+            tag: String::new(),
             align: UiTextAlign::Center,
             font: crate::UiFontChoice::Basic,
             font_scale: crate::default_ui_font_scale(),
@@ -770,6 +839,7 @@ fn button_set_option_and_back_actions_lower_to_runtime_ids() {
         UiNodeKind::Button {
             rect: UiRect::new(0, 0, 40, 16),
             label: "+".to_string(),
+            tag: String::new(),
             align: UiTextAlign::Center,
             font: crate::UiFontChoice::Basic,
             font_scale: crate::default_ui_font_scale(),
@@ -791,6 +861,7 @@ fn button_set_option_and_back_actions_lower_to_runtime_ids() {
         UiNodeKind::Button {
             rect: UiRect::new(0, 20, 40, 16),
             label: "Back".to_string(),
+            tag: String::new(),
             align: UiTextAlign::Center,
             font: crate::UiFontChoice::Basic,
             font_scale: crate::default_ui_font_scale(),
