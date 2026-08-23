@@ -67,6 +67,17 @@ use crate::ui;
 /// in practice carry a handful of buttons, so the cap is generous.
 const MAX_FOCUSABLE_NODES: usize = 64;
 
+/// Cooked manifests compact their used UI fonts into at most eight slots.
+/// Keep the flow driver's borrowed table at the same capacity: shortening it
+/// makes valid higher selectors silently fall back to slot zero in `ui::draw_scene`.
+const MAX_UI_FONT_SLOTS: usize = 8;
+
+fn collect_ui_font_table<'font>(
+    mut resolve: impl FnMut(u8) -> Option<&'font psx_font::FontAtlas>,
+) -> [Option<&'font psx_font::FontAtlas>; MAX_UI_FONT_SLOTS] {
+    core::array::from_fn(|index| resolve(index as u8))
+}
+
 /// Sentinel [`FlowCursor::menu_focus`] value meaning "no focus
 /// resolved yet". Real focus is a node-slice index, always far below
 /// this, so the entry path can tell an uninitialised cursor from a
@@ -1684,12 +1695,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // The gameplay scene lends its uploaded font atlases so menu labels
         // and buttons draw with the same glyphs the HUD uses. Empty slots
         // skip text or fall back to slot 0 in the renderer.
-        let font_table = [
-            self.gameplay.ui_font_at(0),
-            self.gameplay.ui_font_at(1),
-            self.gameplay.ui_font_at(2),
-            self.gameplay.ui_font_at(3),
-        ];
+        let font_table = collect_ui_font_table(|index| self.gameplay.ui_font_at(index));
         crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 200, 220), "37 UI DRAW BEGIN");
         ui::draw_scene(
             nodes,
@@ -1926,6 +1932,7 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 self.loading_progress_q12 = 0;
             }
             self.render_loading_screen(ctx);
+            self.gameplay.render_post_process(ctx);
             if let Some(transition) = self.loading_exit_transition {
                 render_transition_overlay(transition);
             } else {
@@ -1986,6 +1993,7 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 self.render_ui_scene(scene, ctx);
             }
         }
+        self.gameplay.render_post_process(ctx);
         if let Some(transition) = self.transition {
             render_transition_overlay(transition);
         }
@@ -2001,6 +2009,18 @@ mod tests {
     use crate::frames::{SimTick, VideoHz, VisualFrame};
     use psx_gpu::framebuf::FrameBuffer;
     use psx_pad::{ButtonState, PadState};
+
+    #[test]
+    fn ui_font_table_requests_every_cooked_slot() {
+        let mut requested = [false; MAX_UI_FONT_SLOTS];
+        let table = collect_ui_font_table(|index| {
+            requested[index as usize] = true;
+            None
+        });
+
+        assert!(requested.iter().all(|requested| *requested));
+        assert!(table.iter().all(Option::is_none));
+    }
 
     /// Gameplay scene that records how many times each hook ran and in
     /// what order, so tests can assert the gameplay-only path matches
