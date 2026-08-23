@@ -356,65 +356,13 @@ impl FrustumPlanes {
             + plane.1
     }
 
-    /// Exact sign of [`Self::distance`] without materializing a Rust `i64`
-    /// expression on MIPS-I. The R3000 already produces each signed product
-    /// in HI:LO; accumulating the three pairs and carries directly avoids the
-    /// compiler's generic wide-integer scaffolding. Put the small coordinate
-    /// in `rs` so the console's operand-sensitive multiply completes sooner.
+    /// Exact sign of [`Self::distance`]. Keep this expression shared between
+    /// host validation and the MIPS guest: a previous hand-written HI:LO
+    /// accumulator returned false signs on real guest inputs and caused
+    /// visible world polygons to be rejected as outside the frustum.
     #[inline(always)]
     fn distance_negative(plane: &([i32; 3], i64), position: [i16; 3]) -> bool {
-        #[cfg(target_arch = "mips")]
-        unsafe {
-            let lo = plane.1 as u32;
-            let mut hi = (plane.1 >> 32) as u32;
-            core::arch::asm!(
-                ".set push",
-                ".set noat",
-                ".set noreorder",
-                "mult {px}, {nx}",
-                "mflo {product_lo}",
-                "mfhi {product_hi}",
-                "addu {product_lo}, {lo}, {product_lo}",
-                "sltu {carry}, {product_lo}, {lo}",
-                "addu {hi}, {hi}, {product_hi}",
-                "addu {hi}, {hi}, {carry}",
-                "move {lo}, {product_lo}",
-                "mult {py}, {ny}",
-                "mflo {product_lo}",
-                "mfhi {product_hi}",
-                "addu {product_lo}, {lo}, {product_lo}",
-                "sltu {carry}, {product_lo}, {lo}",
-                "addu {hi}, {hi}, {product_hi}",
-                "addu {hi}, {hi}, {carry}",
-                "move {lo}, {product_lo}",
-                "mult {pz}, {nz}",
-                "mflo {product_lo}",
-                "mfhi {product_hi}",
-                "addu {product_lo}, {lo}, {product_lo}",
-                "sltu {carry}, {product_lo}, {lo}",
-                "addu {hi}, {hi}, {product_hi}",
-                "addu {hi}, {hi}, {carry}",
-                ".set pop",
-                lo = inout(reg) lo => _,
-                hi = inout(reg) hi,
-                nx = in(reg) plane.0[0],
-                ny = in(reg) plane.0[1],
-                nz = in(reg) plane.0[2],
-                px = in(reg) i32::from(position[0]),
-                py = in(reg) i32::from(position[1]),
-                pz = in(reg) i32::from(position[2]),
-                product_lo = out(reg) _,
-                product_hi = out(reg) _,
-                carry = out(reg) _,
-                options(nostack, nomem, preserves_flags),
-            );
-            return (hi as i32) < 0;
-        }
-
-        #[cfg(not(target_arch = "mips"))]
-        {
-            Self::distance(plane, position) < 0
-        }
+        Self::distance(plane, position) < 0
     }
 
     /// True when the whole axis-aligned box lies outside any clip plane.
