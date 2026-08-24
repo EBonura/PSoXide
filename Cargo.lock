@@ -3503,6 +3503,7 @@ name = "psxed-project"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "image",
  "psx-asset",
  "psx-bsp",
  "psx-engine",

@@ -18,6 +18,7 @@ psx-render-contract = { path = "../../../engine/crates/psx-render-contract" }
 psx-iso      = { path = "../../../crates/psx-iso" }
 psx-level    = { path = "../../../engine/crates/psx-level" }
 flate2 = "1.1"
+image.workspace = true
 ron = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 
