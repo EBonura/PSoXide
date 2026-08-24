@@ -548,6 +548,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         PlaytestWorldGeometry::Grid => {
             out.push_str("pub const PLAYTEST_USES_PXBSP: bool = false;\n");
             out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [0; 3];\n");
+            out.push_str("pub const PXBSP_FACE_CHAIN_CAPACITY: usize = 0;\n");
             out.push_str("pub static PXBSP_WORLD: &[u8] = &[];\n");
             out.push_str("pub static PXBSP_MOVER_NODE_IDS: &[u32] = &[];\n");
             out.push_str("pub static PXBSP_MOVER_MODEL_INDICES: &[u16] = &[];\n");
@@ -562,6 +563,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             // dynamic world content consumes this generated constant instead
             // of depending on a synthetic PSXW room header.
             out.push_str("pub const PXBSP_AMBIENT_RGB: [u8; 3] = [32; 3];\n");
+            let _ = writeln!(
+                out,
+                "pub const PXBSP_FACE_CHAIN_CAPACITY: usize = {};",
+                world.max_visible_faces,
+            );
             write_aligned_asset_bytes_static(
                 &mut out,
                 "PXBSP_WORLD",
