@@ -128,7 +128,7 @@ impl<const LEN: usize> FontPackScratch<LEN> {
     /// u32-aligned staging view of the first `words` u32s, for whole-sector
     /// CD reads. `None` when the request does not fit the buffer.
     #[cfg(feature = "cd-stream-bench")]
-    fn stage_words_mut(&mut self, words: usize) -> Option<&mut [u32]> {
+    pub fn stage_words_mut(&mut self, words: usize) -> Option<&mut [u32]> {
         if words.checked_mul(4)? > LEN.saturating_mul(2) {
             return None;
         }
@@ -145,7 +145,7 @@ impl<const LEN: usize> FontPackScratch<LEN> {
     /// valid until the next read overwrites the buffer; consume them
     /// synchronously.
     #[cfg(feature = "cd-stream-bench")]
-    fn staged_bytes(&self, bytes: usize) -> Option<&[u8]> {
+    pub fn staged_bytes(&self, bytes: usize) -> Option<&[u8]> {
         if bytes > LEN.saturating_mul(2) {
             return None;
         }

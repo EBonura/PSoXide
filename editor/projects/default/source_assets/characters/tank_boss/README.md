@@ -1,7 +1,12 @@
 # Tank Boss source
 
-`Enemy_02.fbx` is the project copy of the artist-delivered boss model. The
-delivery calls this character "Tank". `Diffuse_Enemy01_256px.png` is the
+Generated animation candidates and review renders are local working inputs
+kept outside version control under `local-assets/`. The repository retains the
+model sources and the cooked runtime `.psxanim` clips.
+
+`Enemy_02.fbx` is retained only as provenance for the artist delivery, which
+calls this character "Tank". It is not registered as a second engine model and
+is not copied into newly created projects. `Diffuse_Enemy01_256px.png` is the
 matching 256 x 256 source texture; the FBX also embeds it.
 
 Legacy FBX import settings:
@@ -19,16 +24,22 @@ quaternion and make the model disappear. The registered `Tank Boss / Rest
 Pose` is the first frame of that take only.
 
 The FBX bind basis does not survive an FBX/GLB animation round trip cleanly.
-Keep `Tank Boss Model` and its 21-joint rest clip as the delivered-model
-backup, but do not retarget generated GLB clips onto it.
+The obsolete 21-joint `Tank Boss Model`, rest clip, and placeholder animation
+set were therefore removed. All runtime animation targets the native model
+below.
 
 ## Native animated model
 
-The GLBs in `animations/heavy_walk_pack/` contain the same boss mesh, texture,
-and 27-joint rig. They are cooked together as `Tank Boss Animated Model`, so
-the model and clips share one native bind basis. The boss Character resource
-uses its one-frame idle plus forward, backward, and left/right heavy walks;
-the old FBX resources remain in the project as a reversible backup.
+The GLBs in `animations/heavy_walk_pack/` and the selected core-animation
+candidates contain the same boss mesh, texture, and 27-joint rig. Selected
+Idle 2 is the authoritative model source; it and all seven additional takes
+are cooked in one native bundle against Idle 2's fixed model bounds. This is
+important because `.psxanim` does not carry a quantisation frame of its own:
+letting a high-travel death take enlarge the model bounds would shrink the
+standing boss, while cooking later clips against a different frame would pull
+its rigid armour sections apart. The boss Character resource uses Idle 2 plus
+forward, backward, and left/right heavy walks, selected Attack 1 as Light
+Attack, selected Hit 2, and selected Death 2.
 
 The heavy walk was generated locally with MoMask on CPU from:
 
@@ -46,7 +57,7 @@ The heavy walk was generated locally with MoMask on CPU from:
   retained at 34%, torso motion at 42-46%, and upper-body counter-swing at
   50-68% to produce a slower, clunkier silhouette.
 - Cooked output: 51 frames at 12 Hz
-- Review render: `animations/previews/tank_boss_heavy_walk_ai.mp4`
+- Review render: local-only (not tracked)
 
 The directional extension keeps the approved 4.2-second forward/backward
 cadence, while the more reactive strafes use a 2.0-second cycle:
@@ -63,14 +74,13 @@ cadence, while the more reactive strafes use a 2.0-second cycle:
   mechanically identical.
 - Raw selected strafe:
   `animations/source/tank_boss_heavy_strafe_right_momask_seed_10107_repeat2.bvh`
-- Four-way review grid (forward, backward, left, right):
-  `animations/previews/tank_boss_heavy_directional_walks_ai.mp4`
+- Four-way review grid (forward, backward, left, right): local-only (not
+  tracked)
 
 There is deliberately no `run_fwd.glb`. An absent Run action is a gameplay
 capability: the player motor refuses sprint state, and enemy pursuit uses the
 walk clip and walk speed instead of treating the visual fallback as a run.
 
 The looser 2.8-second first pass is retained as
-`animations/source/tank_boss_heavy_walk_ai_first_pass.glb`, with its render at
-`animations/previews/tank_boss_heavy_walk_ai_first_pass.mp4`, so the direction
-change remains directly reversible.
+`animations/source/tank_boss_heavy_walk_ai_first_pass.glb`; its review render
+is local-only, so the direction change remains directly reversible.

@@ -86,14 +86,35 @@ fn character_combat_capsules_cook_to_bounded_contiguous_runtime_slice() {
                 poise_damage: 20,
             },
         },
+        crate::CharacterCombatCapsule {
+            name: "Palm Bolt".to_string(),
+            joint: 0,
+            capsule: crate::JointCapsule {
+                start: [32, 16, 0],
+                end: [32, 16, 0],
+                radius: 36,
+            },
+            role: crate::CombatCapsuleRole::ProjectileEmitter {
+                action: CharacterAnimationAction::LightAttack,
+                active_start_frame: 6,
+                active_end_frame: 9,
+                speed: 180,
+                lifetime_ticks: 120,
+                min_range: 512,
+                max_range: 4096,
+                damage: 24,
+                poise_damage: 12,
+                tint_rgb: [80, 180, 255],
+            },
+        },
     ];
 
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let package = package.expect("package returned on ok report");
-    assert_eq!(package.combat_capsules.len(), 2);
+    assert_eq!(package.combat_capsules.len(), 3);
     assert_eq!(package.characters[0].combat_capsule_first, 0);
-    assert_eq!(package.characters[0].combat_capsule_count, 2);
+    assert_eq!(package.characters[0].combat_capsule_count, 3);
     assert_eq!(
         package.combat_capsules[0].flags,
         psx_level::combat_capsule_flags::HURTBOX
@@ -104,6 +125,24 @@ fn character_combat_capsules_cook_to_bounded_contiguous_runtime_slice() {
     );
     assert_eq!(package.combat_capsules[1].active_start_frame, 4);
     assert_eq!(package.combat_capsules[1].active_end_frame, 8);
+    assert_eq!(
+        package.combat_capsules[2].flags,
+        psx_level::combat_capsule_flags::PROJECTILE_EMITTER
+    );
+    assert_eq!(package.combat_capsules[2].projectile_speed, 180);
+    assert_eq!(package.combat_capsules[2].projectile_lifetime_ticks, 120);
+    assert_eq!(package.combat_capsules[2].projectile_min_range, 512);
+    assert_eq!(package.combat_capsules[2].projectile_max_range, 4096);
+    assert_eq!(
+        package.combat_capsules[2].projectile_tint_rgb,
+        [80, 180, 255]
+    );
+    let source = render_manifest_source(&package);
+    assert!(source.contains("projectile_speed: 180"));
+    assert!(source.contains("projectile_lifetime_ticks: 120"));
+    assert!(source.contains("projectile_min_range: 512"));
+    assert!(source.contains("projectile_max_range: 4096"));
+    assert!(source.contains("projectile_tint_rgb: [80, 180, 255]"));
 }
 
 #[test]
@@ -545,12 +584,12 @@ fn player_character_model_is_deduplicated_with_renderer_component() {
 }
 
 #[test]
-fn player_character_model_lands_in_room_residency_without_placed_meshinstance() {
+fn player_character_model_streams_transiently_without_placed_meshinstance() {
     // Simulate a project where the player Character points
     // at a Model that *isn't* also placed as a MeshInstance.
     // The starter has both, so we delete the placed renderer
-    // before cooking and assert residency still picks up the
-    // Wraith mesh + atlas + clips via the player path.
+    // before cooking and assert the player path still registers the
+    // transient mesh plus the room atlas and persistent clips.
     let mut project = project_with_one_room();
     remove_model_renderer_components(&mut project);
     let (package, report) = build_package(&project, &starter_project_root());
@@ -563,14 +602,18 @@ fn player_character_model_lands_in_room_residency_without_placed_meshinstance() 
     assert_eq!(package.characters.len(), 1);
 
     let manifest = render_manifest_source(&package);
-    // Asset indexes for the player mesh, atlas, and clips
-    // come straight from `package.assets` -- every one of
-    // them must show up in ROOM_0_REQUIRED_RAM/VRAM.
+    // Mesh source bytes are decoded from transient loading scratch into the
+    // fixed geometry pools, so they must not consume room-resident RAM.
+    // The atlas is needed in room VRAM and clips stay persistently resident.
     let wraith = &package.models[0];
     let mesh_token = format!("AssetId({})", wraith.mesh_asset_index);
+    assert_eq!(
+        package.assets[wraith.mesh_asset_index].streamed_class,
+        StreamedClass::Gameplay
+    );
     assert!(
-        manifest_contains_required(&manifest, "RAM", 0, &mesh_token),
-        "RAM missing player mesh: {mesh_token}"
+        !manifest_contains_required(&manifest, "RAM", 0, &mesh_token),
+        "transient player mesh leaked into RAM residency: {mesh_token}"
     );
     let atlas_token = format!(
         "AssetId({})",
@@ -597,9 +640,9 @@ fn player_character_model_lands_in_room_residency_without_placed_meshinstance() 
 #[test]
 fn player_character_model_assets_dedupe_with_placed_meshinstance() {
     // Starter's player model is referenced twice: by the
-    // placed renderer and by the Character. Each asset still
-    // shows up exactly once in the manifest's residency
-    // slice -- the player path mustn't double-add.
+    // placed renderer and by the Character. The transient mesh must remain
+    // one package asset without entering room RAM residency, while the atlas
+    // still appears exactly once in the room's VRAM slice.
     let project = project_with_one_room();
     let (package, _) = build_package(&project, &starter_project_root());
     let package = package.expect("starter cooks");
@@ -609,8 +652,12 @@ fn player_character_model_assets_dedupe_with_placed_meshinstance() {
     let mesh_token = format!("AssetId({})", wraith.mesh_asset_index);
     assert_eq!(
         count_required_occurrences(&manifest, "RAM", 0, &mesh_token),
-        1,
-        "player mesh appears more than once in RAM residency"
+        0,
+        "transient player mesh entered RAM residency"
+    );
+    assert_eq!(
+        package.assets[wraith.mesh_asset_index].streamed_class,
+        StreamedClass::Gameplay
     );
     let atlas = wraith.texture_asset_index.unwrap();
     let atlas_token = format!("AssetId({atlas})");

@@ -6,6 +6,11 @@
 !tech-demo/**
 !mantis/
 !mantis/**
+
+# Animation-generation auditions and review renders are local working inputs.
+# Cooked runtime clips under assets/animations remain tracked.
+default/source_assets/**/animations/candidates/
+default/source_assets/**/animations/previews/
 **/cooked/
 **/baked/
 **/logs/

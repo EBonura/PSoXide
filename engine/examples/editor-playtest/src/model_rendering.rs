@@ -285,6 +285,7 @@ impl Playtest {
 
     #[inline(never)]
     pub(super) fn load_runtime_models(&mut self) {
+        #[cfg(not(feature = "cd-stream-bench"))]
         mr::load_runtime_models(
             MODELS,
             MODEL_CLIPS,
@@ -299,7 +300,61 @@ impl Playtest {
             runtime_model_asset_bytes,
             ensure_model_atlas_uploaded,
         );
+        #[cfg(feature = "cd-stream-bench")]
+        self.load_streamed_runtime_models();
         self.sort_weapon_faces_hilt_first();
+    }
+
+    /// Decode model source blobs from the shared loading scratch, retaining
+    /// only compact geometry pools and VRAM atlas slots for gameplay.
+    #[cfg(feature = "cd-stream-bench")]
+    fn load_streamed_runtime_models(&mut self) {
+        mr::reset_runtime_model_tables(
+            &mut self.models,
+            &mut self.clips,
+            &mut self.model_face_count,
+            &mut self.model_part_count,
+            &mut self.model_vertex_count,
+        );
+        mr::load_runtime_model_clips(MODEL_CLIPS, &mut self.clips, runtime_model_asset_bytes);
+
+        for (index, record) in MODELS.iter().enumerate() {
+            if index >= self.models.len() {
+                break;
+            }
+            let Some(texture_asset) = record.texture_asset else {
+                continue;
+            };
+            let Some(atlas_slot) = with_transient_gameplay_asset_bytes(
+                texture_asset,
+                AssetKind::Texture,
+                |atlas_bytes| ensure_model_atlas_uploaded(texture_asset, atlas_bytes),
+            )
+            .flatten()
+            else {
+                continue;
+            };
+            let decoded = with_transient_gameplay_asset_bytes(
+                record.mesh_asset,
+                AssetKind::ModelMesh,
+                |mesh_bytes| {
+                    RuntimeModelAsset::from_record_bytes(
+                        psx_level::ModelIndex::new(index as u16),
+                        record,
+                        mesh_bytes,
+                        atlas_slot,
+                        &mut self.model_faces,
+                        &mut self.model_face_count,
+                        &mut self.model_parts,
+                        &mut self.model_part_count,
+                        &mut self.model_vertices,
+                        &mut self.model_vertex_count,
+                    )
+                },
+            )
+            .flatten();
+            self.models[index] = decoded;
+        }
     }
 
     /// Drop every parsed view into the scene-lifetime gameplay asset arena.
@@ -375,6 +430,39 @@ fn runtime_model_asset_bytes(asset_id: AssetId, kind: AssetKind) -> Option<&'sta
     {
         None
     }
+}
+
+/// Read one transient gameplay asset through the shared loading scratch and
+/// consume it before the next staged read overwrites that memory.
+#[cfg(feature = "cd-stream-bench")]
+fn with_transient_gameplay_asset_bytes<R>(
+    asset_id: AssetId,
+    kind: AssetKind,
+    consume: impl FnOnce(&[u8]) -> R,
+) -> Option<R> {
+    let asset = find_asset_of_kind(ASSETS, asset_id, kind)?;
+    if !asset.bytes.is_empty() {
+        return Some(consume(asset.bytes));
+    }
+    if asset.flags & psx_level::asset_flags::STREAMED_GAMEPLAY_TRANSIENT == 0 {
+        return None;
+    }
+    let byte_count = asset.ram_bytes as usize;
+    let scratch = font_scratch_arena();
+    let stage = scratch.stage_words_mut(byte_count.div_ceil(4))?;
+    let result = psx_game_runtime::cd_stream::read_chunk_blocking(
+        cd_arena(),
+        UI_PACK_START_LBA,
+        UI_PACK_TOC,
+        asset.id.0 as u32,
+        stage,
+    );
+    if result.status != psx_game_runtime::cd_stream::ROOM_CHUNK_STATUS_OK
+        || result.bytes != byte_count
+    {
+        return None;
+    }
+    Some(consume(scratch.staged_bytes(result.bytes)?))
 }
 
 fn room_reflection_probe_slot(room: RoomIndex) -> Option<VramSlot> {

@@ -139,10 +139,11 @@ pub use render3d::{
     AdaptiveSubdivisionKindMask, AdaptiveSubdivisionProfile, CullMode, DepthPolicy,
     GouraudMeshOptions, GouraudRenderPass, GouraudTriCommand, JointViewTransform,
     JointWorldTransform, LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats,
-    ModelPoseTranslation, ModelUvMapping, ModelUvOffset, ProjectedTexturedVertex, ProjectedVertex,
-    SkyDirectionProjector, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
-    TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection,
-    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+    ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PredecodedModelInfo,
+    ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
+    TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex,
+    ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
+    WorldSurfaceOptions, WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,

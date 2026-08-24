@@ -19,8 +19,7 @@ does not change its geometry, skeleton, UVs, or animation compatibility.
 
 ## Selected animations
 
-`WalkBackward` uses candidate 2 from
-`animations/candidates/backward_walk_v1/glb/backward_02.glb`. It is cooked at
-12 Hz to `assets/animations/rust_mantis_starter/walk_bwd.psxanim` and bound in
-the Rust Mantis Starter Animation Set. The original MoMask prompt, seed, BVH,
-other auditions, and rebuild scripts remain under `animations/candidates/`.
+`WalkBackward` uses locally selected MoMask candidate 2. It is cooked at 12 Hz
+to `assets/animations/rust_mantis_starter/walk_bwd.psxanim` and bound in the
+Rust Mantis Starter Animation Set. Generated candidates and review media are
+kept outside version control under `local-assets/`.

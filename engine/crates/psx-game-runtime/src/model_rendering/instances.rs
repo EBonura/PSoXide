@@ -769,7 +769,7 @@ mod tests {
     fn runtime_model() -> RuntimeModelAsset {
         RuntimeModelAsset {
             index: ModelIndex::new(0),
-            model: one_joint_model(),
+            model_info: one_joint_model().into(),
             material: TextureMaterial::opaque(0, 0, (128, 128, 128)),
             clip_first: ModelClipTableIndex::new(0),
             clip_count: 2,
@@ -951,6 +951,12 @@ mod tests {
                 active_end_frame: 2,
                 damage: 5,
                 poise_damage: 2,
+                projectile_speed: 0,
+                projectile_lifetime_ticks: 0,
+                projectile_min_range: 0,
+                projectile_max_range: 0,
+                projectile_tint_rgb: [0; 3],
+                projectile_reserved: 0,
             },
             snapshot.pose(),
         )

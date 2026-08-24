@@ -153,6 +153,49 @@ pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
     submitted
 }
 
+/// Draw one live combat projectile as a camera-facing additive bolt.
+/// Collision owns the projectile state; this function is deliberately a
+/// stateless presentation view over its current center/radius/tint.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_projectile_bolt<const OT_DEPTH: usize>(
+    position: [i32; 3],
+    radius: u16,
+    tint_rgb: [u8; 3],
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    if radius == 0 {
+        return 0;
+    }
+    let position = WorldVertex::new(position[0], position[1], position[2]);
+    let center = if let Some(projector) = projector {
+        projector.project_world(position)
+    } else {
+        camera.project_world(position)
+    };
+    let Some(center) = center else {
+        return 0;
+    };
+    let half = ((i32::from(radius) * camera.projection.focal_length) / center.sz.max(1)).clamp(
+        i32::from(PARTICLE_MIN_SCREEN_SIZE),
+        i32::from(PARTICLE_MAX_SCREEN_SIZE),
+    ) as i16;
+    draw_particle_quad(
+        center,
+        half,
+        particle_material
+            .with_tint((tint_rgb[0], tint_rgb[1], tint_rgb[2]))
+            .with_blend_mode(BlendMode::Add),
+        depth_range.slot::<OT_DEPTH>(center.sz),
+        ot,
+        primitive_packets,
+    )
+}
+
 fn draw_particle_sample<const OT_DEPTH: usize>(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,

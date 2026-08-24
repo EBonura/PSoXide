@@ -53,6 +53,31 @@ pub(super) fn draw_water_wade_splash(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_projectile_bolt(
+    position: [i32; 3],
+    radius: u16,
+    tint_rgb: [u8; 3],
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    psx_game_runtime::particles::draw_projectile_bolt(
+        position,
+        radius,
+        tint_rgb,
+        camera,
+        projector,
+        depth_range,
+        particle_material,
+        ot,
+        primitive_packets,
+    )
+}
+
 /// Draw the room's screen-space atmosphere motes over the frame.
 pub(super) fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_tick: SimTick) {
     psx_game_runtime::particles::draw_room_atmosphere_overlay(

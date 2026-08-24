@@ -1153,9 +1153,10 @@ pub(crate) const fn default_combat_capsule_radius() -> u16 {
 /// Gameplay role of a rig-attached combat capsule.
 ///
 /// Receiving volumes are continuously present (invulnerability remains an
-/// action-state decision). Dealing volumes are enabled only for the authored
-/// inclusive frame range of one character action, mirroring Souls TimeAct
-/// attack events while keeping damage data separate from animation files.
+/// action-state decision). Dealing volumes and projectile emitters are enabled
+/// only for the authored inclusive frame range of one character action,
+/// mirroring Souls TimeAct attack events while keeping gameplay data separate
+/// from animation files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CombatCapsuleRole {
     /// Receives damage when an active opposing attack capsule overlaps it.
@@ -1173,6 +1174,34 @@ pub enum CombatCapsuleRole {
         damage: u16,
         /// Poise damage applied on a new connection.
         poise_damage: u16,
+    },
+    /// Releases one swept-sphere projectile from this joint-local point.
+    ///
+    /// The owning [`CharacterCombatCapsule`] must be a sphere (equal segment
+    /// endpoints): its center is the muzzle and its radius becomes the
+    /// projectile collision radius. The active range is a release window, not
+    /// a continuous stream; the attack state latches after the first spawn.
+    ProjectileEmitter {
+        /// Character action whose clip drives the release.
+        action: CharacterAnimationAction,
+        /// First animation frame in which the projectile may release.
+        active_start_frame: u16,
+        /// Last animation frame in which the projectile may release.
+        active_end_frame: u16,
+        /// Projectile displacement per 60 Hz simulation tick.
+        speed: u16,
+        /// Maximum lifetime in 60 Hz simulation ticks.
+        lifetime_ticks: u16,
+        /// Closest range at which enemy AI should choose this attack.
+        min_range: u16,
+        /// Furthest range at which enemy AI should choose this attack.
+        max_range: u16,
+        /// Health damage delivered on contact.
+        damage: u16,
+        /// Poise damage delivered on contact.
+        poise_damage: u16,
+        /// Additive render tint.
+        tint_rgb: [u8; 3],
     },
 }
 

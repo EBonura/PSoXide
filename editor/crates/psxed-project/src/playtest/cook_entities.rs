@@ -420,42 +420,122 @@ pub(crate) fn cook_character_combat_capsules(
             ));
             return None;
         };
-        let (flags, action, active_start_frame, active_end_frame, damage, poise_damage) =
-            match volume.role {
-                crate::CombatCapsuleRole::Hurtbox => {
-                    (psx_level::combat_capsule_flags::HURTBOX, 0, 0, 0, 0, 0)
+        let (
+            flags,
+            action,
+            active_start_frame,
+            active_end_frame,
+            damage,
+            poise_damage,
+            projectile_speed,
+            projectile_lifetime_ticks,
+            projectile_min_range,
+            projectile_max_range,
+            projectile_tint_rgb,
+        ) = match volume.role {
+            crate::CombatCapsuleRole::Hurtbox => (
+                psx_level::combat_capsule_flags::HURTBOX,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [0; 3],
+            ),
+            crate::CombatCapsuleRole::Hitbox {
+                action,
+                active_start_frame,
+                active_end_frame,
+                damage,
+                poise_damage,
+            } => {
+                if active_end_frame < active_start_frame {
+                    report.error(format!(
+                        "Character '{character_name}' combat volume '{}' ends before it starts",
+                        volume.name
+                    ));
+                    return None;
                 }
-                crate::CombatCapsuleRole::Hitbox {
-                    action,
+                if damage == 0 {
+                    report.error(format!(
+                        "Character '{character_name}' combat volume '{}' deals zero damage",
+                        volume.name
+                    ));
+                    return None;
+                }
+                (
+                    psx_level::combat_capsule_flags::HITBOX,
+                    action.to_index() as u8,
                     active_start_frame,
                     active_end_frame,
                     damage,
                     poise_damage,
-                } => {
-                    if active_end_frame < active_start_frame {
-                        report.error(format!(
-                            "Character '{character_name}' combat volume '{}' ends before it starts",
+                    0,
+                    0,
+                    0,
+                    0,
+                    [0; 3],
+                )
+            }
+            crate::CombatCapsuleRole::ProjectileEmitter {
+                action,
+                active_start_frame,
+                active_end_frame,
+                speed,
+                lifetime_ticks,
+                min_range,
+                max_range,
+                damage,
+                poise_damage,
+                tint_rgb,
+            } => {
+                if start != end {
+                    report.error(format!(
+                            "Character '{character_name}' projectile emitter '{}' must be a sphere (Start and End must match)",
                             volume.name
                         ));
-                        return None;
-                    }
-                    if damage == 0 {
-                        report.error(format!(
-                            "Character '{character_name}' combat volume '{}' deals zero damage",
-                            volume.name
-                        ));
-                        return None;
-                    }
-                    (
-                        psx_level::combat_capsule_flags::HITBOX,
-                        action.to_index() as u8,
-                        active_start_frame,
-                        active_end_frame,
-                        damage,
-                        poise_damage,
-                    )
+                    return None;
                 }
-            };
+                if active_end_frame < active_start_frame {
+                    report.error(format!(
+                            "Character '{character_name}' projectile emitter '{}' release window ends before it starts",
+                            volume.name
+                        ));
+                    return None;
+                }
+                if speed == 0 || lifetime_ticks == 0 || damage == 0 {
+                    report.error(format!(
+                            "Character '{character_name}' projectile emitter '{}' requires positive speed, lifetime, and damage",
+                            volume.name
+                        ));
+                    return None;
+                }
+                if max_range == 0 || min_range > max_range {
+                    report.error(format!(
+                            "Character '{character_name}' projectile emitter '{}' has invalid AI range {}..{}",
+                            volume.name, min_range, max_range
+                        ));
+                    return None;
+                }
+                (
+                    psx_level::combat_capsule_flags::PROJECTILE_EMITTER,
+                    action.to_index() as u8,
+                    active_start_frame,
+                    active_end_frame,
+                    damage,
+                    poise_damage,
+                    speed,
+                    lifetime_ticks,
+                    min_range,
+                    max_range,
+                    tint_rgb,
+                )
+            }
+        };
         cooked.push(PlaytestCombatCapsule {
             joint,
             flags,
@@ -467,6 +547,11 @@ pub(crate) fn cook_character_combat_capsules(
             active_end_frame,
             damage,
             poise_damage,
+            projectile_speed,
+            projectile_lifetime_ticks,
+            projectile_min_range,
+            projectile_max_range,
+            projectile_tint_rgb,
         });
     }
     let count = u8::try_from(cooked.len()).ok()?;
@@ -1005,7 +1090,7 @@ pub(crate) fn register_model_for_instance(
         bytes: mesh_bytes.clone(),
         filename: format!("{folder}/mesh.psxmdl"),
         source_label: resource.name.clone(),
-        streamed_class: StreamedClass::PersistentGameplay,
+        streamed_class: StreamedClass::Gameplay,
     });
 
     // Atlas asset (optional).
@@ -1096,12 +1181,12 @@ pub(crate) fn register_model_for_instance(
             return None;
         }
         // Models sharing one atlas (the sword pair reuses a single .psxt)
-        // must share one cooked asset: duplicate payloads waste persistent
-        // stream bytes, residency slots, and VRAM uploads. Content identity
+        // must share one cooked asset: duplicate payloads waste stream bytes,
+        // staging bandwidth, and VRAM uploads. Content identity
         // is the contract; it also collapses byte-identical file copies.
         let idx = if let Some(existing) = assets.iter().position(|asset| {
             asset.kind == PlaytestAssetKind::Texture
-                && asset.streamed_class == StreamedClass::PersistentGameplay
+                && asset.streamed_class == StreamedClass::Gameplay
                 && asset.bytes == bytes
         }) {
             existing
@@ -1112,7 +1197,7 @@ pub(crate) fn register_model_for_instance(
                 bytes,
                 filename: format!("{folder}/atlas.psxt"),
                 source_label: format!("{} atlas", resource.name),
-                streamed_class: StreamedClass::PersistentGameplay,
+                streamed_class: StreamedClass::Gameplay,
             });
             idx
         };

@@ -505,6 +505,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         record.flags & game_entity_flags::CAN_RUN != 0
     }
 
+    fn has_ranged_attack(record: &LevelGameEntityRecord) -> bool {
+        record.flags & game_entity_flags::RANGED_ATTACK != 0
+    }
+
     fn approach_clip(record: &LevelGameEntityRecord) -> u16 {
         if Self::can_run(record) {
             record.run_clip
@@ -1031,6 +1035,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             return false;
         }
         let record = &records[index];
+        if Self::has_ranged_attack(record) {
+            return false;
+        }
         let arc = MeleeArc {
             room: attack.room,
             x: attack.position[0],
@@ -1048,6 +1055,14 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// a swing that already connected, preserving one-hit-per-swing even if a
     /// caller accidentally evaluates the same frame twice.
     pub fn connect_deferred_attack(&mut self, attack: DeferredGameEntityAttack) -> bool {
+        self.commit_deferred_attack(attack)
+    }
+
+    /// Consume one verified deferred attack after its committed effect is
+    /// created. Melee calls this on contact; ranged attacks call it after a
+    /// projectile successfully enters the fixed pool. Pool overflow therefore
+    /// leaves the release retryable for the rest of its authored frame window.
+    pub fn commit_deferred_attack(&mut self, attack: DeferredGameEntityAttack) -> bool {
         if !self.deferred_attack_can_connect(attack) {
             return false;
         }
@@ -1191,7 +1206,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         input: GameEntityTickInput<'_>,
         stats: &mut GameEntityTickStats,
     ) {
-        if self.attack_hit[index] != 0
+        if Self::has_ranged_attack(record)
+            || self.attack_hit[index] != 0
             || input.player_invulnerable
             || input.player_room != record.room
         {
@@ -1225,12 +1241,26 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         )
     }
 
-    /// Character-derived melee reach: both body radii plus the
-    /// close-in margin (see [`GAME_ENTITY_ATTACK_REACH_MARGIN`]).
+    /// Attack-band outer edge. Ranged attacks use their authored maximum;
+    /// melee uses both body radii plus the close-in margin.
     fn attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
-        i32::from(record.radius)
-            .saturating_add(input.player_radius.max(0))
-            .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
+        if Self::has_ranged_attack(record) {
+            i32::from(record.attack_max_range)
+        } else {
+            i32::from(record.radius)
+                .saturating_add(input.player_radius.max(0))
+                .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
+        }
+    }
+
+    fn attack_too_close(
+        &self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        input: GameEntityTickInput<'_>,
+    ) -> bool {
+        Self::has_ranged_attack(record)
+            && self.player_within(index, input, i32::from(record.attack_min_range))
     }
 
     /// Aggro notice test: distance AND same room. Cooked positions
@@ -1317,6 +1347,19 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
 
         if self.attack_owner() == Some(index) {
+            if self.attack_too_close(record, index, input) {
+                self.set_intent(index, GameEntityIntent::Retreat);
+                self.step_relative_to_player(
+                    record,
+                    index,
+                    input,
+                    GAME_ENTITY_HALF_TURN,
+                    record.walk_speed.saturating_mul(i32::from(delta_ticks)),
+                    mover,
+                );
+                stats.retreating = stats.retreating.saturating_add(1);
+                return;
+            }
             self.set_intent(index, GameEntityIntent::Approach);
             if self.player_within(index, input, Self::attack_reach(record, input)) {
                 self.face_toward(index, input.player);
@@ -1858,6 +1901,8 @@ mod tests {
             group_attack_delay_ticks: 0,
             windup_ticks: 3,
             recovery_ticks: 4,
+            attack_min_range: 0,
+            attack_max_range: 0,
             poise: 50,
             touch_damage: 10,
             max_health: 100,
@@ -1898,6 +1943,24 @@ mod tests {
             0,
             512,
             game_entity_flags::ENABLED | game_entity_flags::CAN_RUN,
+        )
+    }];
+    static RANGED_ENEMY: [LevelGameEntityRecord; 1] = [LevelGameEntityRecord {
+        aggro_radius: 4096,
+        preferred_distance: 1200,
+        attack_min_range: 500,
+        attack_max_range: 1600,
+        flags: game_entity_flags::ENABLED
+            | game_entity_flags::CAN_RUN
+            | game_entity_flags::RANGED_ATTACK,
+        ..test_record(
+            1000,
+            1000,
+            0,
+            4096,
+            game_entity_flags::ENABLED
+                | game_entity_flags::CAN_RUN
+                | game_entity_flags::RANGED_ATTACK,
         )
     }];
 
@@ -2016,6 +2079,31 @@ mod tests {
 
         entities.spawn_from_records(&DISABLED_ENEMY);
         assert_eq!(entities.state(0), GameEntityState::Dead);
+    }
+
+    #[test]
+    fn ranged_owner_retreats_inside_minimum_and_commits_inside_band() {
+        let mut close = GameEntities::<8>::EMPTY;
+        close.spawn_from_records(&RANGED_ENEMY);
+        let close_input = GameEntityTickInput {
+            player: [1200, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
+        close.tick(&RANGED_ENEMY, close_input, &mut NoClipMover);
+        assert_eq!(close.state(0), GameEntityState::Aggro);
+        assert_eq!(close.intent(0), GameEntityIntent::Retreat);
+        assert!(close.position(0)[0] < 1000, "ranged owner creates space");
+
+        let mut in_band = GameEntities::<8>::EMPTY;
+        in_band.spawn_from_records(&RANGED_ENEMY);
+        let band_input = GameEntityTickInput {
+            player: [2200, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        in_band.tick(&RANGED_ENEMY, band_input, &mut NoClipMover);
+        in_band.tick(&RANGED_ENEMY, band_input, &mut NoClipMover);
+        assert_eq!(in_band.state(0), GameEntityState::Windup);
     }
 
     #[test]

@@ -564,6 +564,9 @@ pub(crate) fn draw_model_animation_viewer(
                         psxed_project::CombatCapsuleRole::Hitbox { .. } => {
                             Color32::from_rgb(238, 102, 82)
                         }
+                        psxed_project::CombatCapsuleRole::ProjectileEmitter { .. } => {
+                            Color32::from_rgb(214, 118, 255)
+                        }
                     },
                     selected: index == state.selected_combat_capsule,
                 },
@@ -673,7 +676,10 @@ pub(crate) fn draw_model_animation_viewer(
         capsules
             .get(state.selected_combat_capsule)
             .and_then(|capsule| match capsule.role {
-                psxed_project::CombatCapsuleRole::Hitbox { action, .. } => Some(action),
+                psxed_project::CombatCapsuleRole::Hitbox { action, .. }
+                | psxed_project::CombatCapsuleRole::ProjectileEmitter { action, .. } => {
+                    Some(action)
+                }
                 psxed_project::CombatCapsuleRole::Hurtbox => None,
             })
             .and_then(|action| assigned_action_clip(project, character_id, action, &clip_options))
@@ -1721,15 +1727,22 @@ fn timeline_hitboxes(
                     .iter()
                     .enumerate()
                     .filter_map(|(index, capsule)| {
-                        let psxed_project::CombatCapsuleRole::Hitbox {
-                            action: capsule_action,
-                            active_start_frame,
-                            active_end_frame,
-                            ..
-                        } = capsule.role
-                        else {
-                            return None;
-                        };
+                        let (capsule_action, active_start_frame, active_end_frame) =
+                            match capsule.role {
+                                psxed_project::CombatCapsuleRole::Hitbox {
+                                    action,
+                                    active_start_frame,
+                                    active_end_frame,
+                                    ..
+                                }
+                                | psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                                    action,
+                                    active_start_frame,
+                                    active_end_frame,
+                                    ..
+                                } => (action, active_start_frame, active_end_frame),
+                                psxed_project::CombatCapsuleRole::Hurtbox => return None,
+                            };
                         (capsule_action == action).then(|| TimelineHitbox {
                             index,
                             name: capsule.name.clone(),
@@ -1795,14 +1808,20 @@ fn store_timeline_hitbox_range(
     let Some(capsule) = character.combat_capsules.get_mut(index) else {
         return false;
     };
-    let psxed_project::CombatCapsuleRole::Hitbox {
-        action: capsule_action,
-        active_start_frame,
-        active_end_frame,
-        ..
-    } = &mut capsule.role
-    else {
-        return false;
+    let (capsule_action, active_start_frame, active_end_frame) = match &mut capsule.role {
+        psxed_project::CombatCapsuleRole::Hitbox {
+            action,
+            active_start_frame,
+            active_end_frame,
+            ..
+        }
+        | psxed_project::CombatCapsuleRole::ProjectileEmitter {
+            action,
+            active_start_frame,
+            active_end_frame,
+            ..
+        } => (action, active_start_frame, active_end_frame),
+        psxed_project::CombatCapsuleRole::Hurtbox => return false,
     };
     if *capsule_action != action || (*active_start_frame == start && *active_end_frame == end) {
         return false;
@@ -2037,11 +2056,12 @@ fn draw_combat_capsule_editor(
             let role = match capsule.role {
                 psxed_project::CombatCapsuleRole::Hurtbox => "Hurt",
                 psxed_project::CombatCapsuleRole::Hitbox { .. } => "Hit",
+                psxed_project::CombatCapsuleRole::ProjectileEmitter { .. } => "Shot",
             };
             (index, format!("{} · {role}", capsule.name))
         })
         .collect::<Vec<_>>();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let selected_label = character
             .combat_capsules
             .get(state.selected_combat_capsule)
@@ -2078,7 +2098,7 @@ fn draw_combat_capsule_editor(
             changed = true;
         }
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button(icons::label(icons::PLUS, "Hurtbox")).clicked() {
             character
                 .combat_capsules
@@ -2097,6 +2117,33 @@ fn draw_combat_capsule_editor(
                         active_end_frame: 14,
                         damage: 25,
                         poise_damage: 25,
+                    },
+                    ..psxed_project::CharacterCombatCapsule::default()
+                });
+            state.selected_combat_capsule = character.combat_capsules.len() - 1;
+            changed = true;
+        }
+        if ui.button(icons::label(icons::PLUS, "Projectile")).clicked() {
+            character
+                .combat_capsules
+                .push(psxed_project::CharacterCombatCapsule {
+                    name: "Projectile Muzzle".to_string(),
+                    capsule: psxed_project::JointCapsule {
+                        start: [0; 3],
+                        end: [0; 3],
+                        radius: 48,
+                    },
+                    role: psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                        action: psxed_project::CharacterAnimationAction::LightAttack,
+                        active_start_frame: 8,
+                        active_end_frame: 12,
+                        speed: 160,
+                        lifetime_ticks: 180,
+                        min_range: 512,
+                        max_range: 4096,
+                        damage: 20,
+                        poise_damage: 10,
+                        tint_rgb: [120, 210, 255],
                     },
                     ..psxed_project::CharacterCombatCapsule::default()
                 });
@@ -2146,35 +2193,58 @@ fn draw_combat_capsule_editor(
         .color(STUDIO_TEXT_WEAK),
     );
 
-    let mut role_kind = usize::from(matches!(
-        capsule.role,
-        psxed_project::CombatCapsuleRole::Hitbox { .. }
-    ));
+    let mut role_kind = match capsule.role {
+        psxed_project::CombatCapsuleRole::Hurtbox => 0,
+        psxed_project::CombatCapsuleRole::Hitbox { .. } => 1,
+        psxed_project::CombatCapsuleRole::ProjectileEmitter { .. } => 2,
+    };
     ui.horizontal(|ui| {
         ui.label("Role");
         egui::ComboBox::from_id_salt("animation-combat-capsule-role")
-            .selected_text(if role_kind == 0 {
-                "Receive damage (Hurtbox)"
-            } else {
-                "Deal damage (Hitbox)"
+            .selected_text(match role_kind {
+                0 => "Receive damage (Hurtbox)",
+                1 => "Deal damage (Hitbox)",
+                _ => "Release projectile (Emitter)",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut role_kind, 0, "Receive damage (Hurtbox)");
                 ui.selectable_value(&mut role_kind, 1, "Deal damage (Hitbox)");
+                ui.selectable_value(&mut role_kind, 2, "Release projectile (Emitter)");
             });
     });
     match (role_kind, capsule.role) {
-        (0, psxed_project::CombatCapsuleRole::Hitbox { .. }) => {
+        (0, role) if !matches!(role, psxed_project::CombatCapsuleRole::Hurtbox) => {
             capsule.role = psxed_project::CombatCapsuleRole::Hurtbox;
             changed = true;
         }
-        (1, psxed_project::CombatCapsuleRole::Hurtbox) => {
+        (1, role) if !matches!(role, psxed_project::CombatCapsuleRole::Hitbox { .. }) => {
             capsule.role = psxed_project::CombatCapsuleRole::Hitbox {
                 action: psxed_project::CharacterAnimationAction::LightAttack,
                 active_start_frame: 8,
                 active_end_frame: 14,
                 damage: 25,
                 poise_damage: 25,
+            };
+            changed = true;
+        }
+        (2, role)
+            if !matches!(
+                role,
+                psxed_project::CombatCapsuleRole::ProjectileEmitter { .. }
+            ) =>
+        {
+            capsule.capsule.end = capsule.capsule.start;
+            capsule.role = psxed_project::CombatCapsuleRole::ProjectileEmitter {
+                action: psxed_project::CharacterAnimationAction::LightAttack,
+                active_start_frame: 8,
+                active_end_frame: 12,
+                speed: 160,
+                lifetime_ticks: 180,
+                min_range: 512,
+                max_range: 4096,
+                damage: 20,
+                poise_damage: 10,
+                tint_rgb: [120, 210, 255],
             };
             changed = true;
         }
@@ -2232,8 +2302,26 @@ fn draw_combat_capsule_editor(
 
     ui.add_space(6.0);
     ui.label(RichText::new("Joint-local shape").strong());
-    changed |= combat_vec3_editor(ui, "Start", &mut capsule.capsule.start);
-    changed |= combat_vec3_editor(ui, "End", &mut capsule.capsule.end);
+    if matches!(
+        capsule.role,
+        psxed_project::CombatCapsuleRole::ProjectileEmitter { .. }
+    ) {
+        changed |= combat_vec3_editor(ui, "Muzzle offset", &mut capsule.capsule.start);
+        if capsule.capsule.end != capsule.capsule.start {
+            capsule.capsule.end = capsule.capsule.start;
+            changed = true;
+        }
+        ui.label(
+            RichText::new(
+                "Projectile emitters are spheres; the point is both muzzle and collision center.",
+            )
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+    } else {
+        changed |= combat_vec3_editor(ui, "Start", &mut capsule.capsule.start);
+        changed |= combat_vec3_editor(ui, "End", &mut capsule.capsule.end);
+    }
     ui.horizontal(|ui| {
         ui.label("Radius");
         changed |= ui
@@ -2291,6 +2379,71 @@ fn draw_combat_capsule_editor(
         }
         changed |= combat_u16_editor(ui, "Damage", damage, 1, 9999);
         changed |= combat_u16_editor(ui, "Poise damage", poise_damage, 0, 9999);
+    }
+
+    if let psxed_project::CombatCapsuleRole::ProjectileEmitter {
+        action,
+        active_start_frame,
+        active_end_frame,
+        speed,
+        lifetime_ticks,
+        min_range,
+        max_range,
+        damage,
+        poise_damage,
+        tint_rgb,
+    } = &mut capsule.role
+    {
+        ui.separator();
+        egui::ComboBox::from_label("Action")
+            .selected_text(action.label())
+            .show_ui(ui, |ui| {
+                for candidate in psxed_project::CharacterAnimationAction::ALL {
+                    changed |= ui
+                        .selectable_value(action, candidate, candidate.label())
+                        .changed();
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.label("Assigned clip");
+            if let Some(clip) = assigned_action_clip {
+                ui.label(RichText::new(&clip.label).color(STUDIO_TEXT_WEAK));
+                if ui
+                    .small_button(icons::label(icons::PLAY, "Preview"))
+                    .on_hover_text("Switch the Animation Studio preview to this action's clip")
+                    .clicked()
+                {
+                    state.selected_clip_path = Some(clip.path.clone());
+                    state.invalidate_clip_cache();
+                    state.reset_clip_clock();
+                }
+            } else {
+                ui.colored_label(
+                    Color32::from_rgb(220, 160, 80),
+                    "No clip assigned in the Animation Set",
+                );
+            }
+        });
+        changed |= combat_u16_editor(ui, "Release start", active_start_frame, 0, u16::MAX);
+        changed |= combat_u16_editor(ui, "Release end", active_end_frame, 0, u16::MAX);
+        if *active_end_frame < *active_start_frame {
+            *active_end_frame = *active_start_frame;
+            changed = true;
+        }
+        changed |= combat_u16_editor(ui, "Speed / tick", speed, 1, 8192);
+        changed |= combat_u16_editor(ui, "Lifetime ticks", lifetime_ticks, 1, 3600);
+        changed |= combat_u16_editor(ui, "Minimum range", min_range, 0, u16::MAX);
+        changed |= combat_u16_editor(ui, "Maximum range", max_range, 1, u16::MAX);
+        if *max_range < *min_range {
+            *max_range = *min_range;
+            changed = true;
+        }
+        changed |= combat_u16_editor(ui, "Damage", damage, 1, 9999);
+        changed |= combat_u16_editor(ui, "Poise damage", poise_damage, 0, 9999);
+        ui.horizontal(|ui| {
+            ui.label("Tint");
+            changed |= ui.color_edit_button_srgb(tint_rgb).changed();
+        });
     }
 
     changed

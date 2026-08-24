@@ -360,6 +360,7 @@ impl Playtest {
         // begin open without a fire event).
         self.game_entities.spawn_from_records(GAME_ENTITIES);
         self.deferred_enemy_attacks.clear();
+        self.combat_projectiles.clear();
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
         self.player_vitality = DualVitality::equal(PLAYER_MAX_HEALTH);

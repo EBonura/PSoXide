@@ -238,7 +238,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     pub fn submit_textured_model_predecoded_geometry_faces(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
-        model: Model<'_>,
+        model: impl Into<PredecodedModelInfo>,
         animation: Animation<'_>,
         frame_q12: u32,
         camera: WorldCamera,
@@ -255,7 +255,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
-            model,
+            model.into(),
             animation,
             frame_q12,
             None,
@@ -280,7 +280,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     pub fn submit_textured_model_predecoded_geometry_faces_layered(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
-        model: Model<'_>,
+        model: impl Into<PredecodedModelInfo>,
         animation: Animation<'_>,
         frame_q12: u32,
         camera: WorldCamera,
@@ -299,7 +299,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
-            model,
+            model.into(),
             animation,
             frame_q12,
             blend_from,
@@ -327,7 +327,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     pub fn submit_textured_model_primary_joints_predecoded_geometry_faces(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
-        model: Model<'_>,
+        model: impl Into<PredecodedModelInfo>,
         animation: Animation<'_>,
         frame_q12: u32,
         camera: WorldCamera,
@@ -344,7 +344,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
-            model,
+            model.into(),
             animation,
             frame_q12,
             None,
@@ -369,7 +369,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     pub fn submit_textured_model_primary_joints_predecoded_geometry_faces_layered(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
-        model: Model<'_>,
+        model: impl Into<PredecodedModelInfo>,
         animation: Animation<'_>,
         frame_q12: u32,
         camera: WorldCamera,
@@ -388,7 +388,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
-            model,
+            model.into(),
             animation,
             frame_q12,
             blend_from,
@@ -411,7 +411,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn submit_textured_model_geometry_impl(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
-        model: Model<'_>,
+        model: PredecodedModelInfo,
         animation: Animation<'_>,
         frame_q12: u32,
         blend_from: Option<ModelPoseBlend<'_>>,

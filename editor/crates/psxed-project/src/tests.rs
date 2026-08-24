@@ -171,6 +171,27 @@ fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
                 poise_damage: 20,
             },
         },
+        CharacterCombatCapsule {
+            name: "Right Palm Bolt".to_string(),
+            joint: 14,
+            capsule: JointCapsule {
+                start: [30, 0, 0],
+                end: [30, 0, 0],
+                radius: 36,
+            },
+            role: CombatCapsuleRole::ProjectileEmitter {
+                action: CharacterAnimationAction::LightAttack,
+                active_start_frame: 10,
+                active_end_frame: 13,
+                speed: 192,
+                lifetime_ticks: 150,
+                min_range: 600,
+                max_range: 5000,
+                damage: 26,
+                poise_damage: 18,
+                tint_rgb: [120, 210, 255],
+            },
+        },
     ];
 
     let ron = ron::to_string(&character).expect("combat capsules serialize");
@@ -1743,7 +1764,7 @@ fn embedded_default_project_ron_deserializes() {
 }
 
 #[test]
-fn default_project_catalogues_tank_boss_without_instantiating_it() {
+fn default_project_instantiates_the_single_animated_tank_boss() {
     let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
     let tank_resource = project
         .resources
@@ -1761,6 +1782,10 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
         panic!("Tank Boss model binding points at a Model resource");
     };
     assert_eq!(model_resource.name, "Tank Boss Animated Model");
+    assert!(
+        model.source_path.is_none(),
+        "generated Tank Boss animation sources remain local-only"
+    );
     assert!(default_project_dir().join(&model.model_path).is_file());
     assert!(model
         .texture_path
@@ -1778,8 +1803,8 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
     };
     assert_eq!(
         animation_set.clips.len(),
-        5,
-        "idle and four-direction locomotion ship"
+        8,
+        "idle, four-direction locomotion, attack, hit and death ship"
     );
     for action in [
         CharacterAnimationAction::Idle,
@@ -1787,6 +1812,9 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
         CharacterAnimationAction::WalkBackward,
         CharacterAnimationAction::StrafeLeft,
         CharacterAnimationAction::StrafeRight,
+        CharacterAnimationAction::LightAttack,
+        CharacterAnimationAction::HitReact,
+        CharacterAnimationAction::Death,
     ] {
         let binding = animation_set
             .action_clips
@@ -1797,32 +1825,69 @@ fn default_project_catalogues_tank_boss_without_instantiating_it() {
         assert!(matches!(clip.data, ResourceData::AnimationClip(_)));
     }
 
-    for scene in &project.scenes {
-        for node in scene.nodes() {
-            let references_character = matches!(
+    let scene = project.active_scene();
+    let tank_entity = scene
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Tank Boss" && matches!(node.kind, NodeKind::Entity))
+        .expect("animated Tank Boss is placed in the default level");
+    assert!(tank_entity.children.iter().any(|child| {
+        scene.node(*child).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::ModelRenderer {
+                    model: Some(id), ..
+                } if *id == model_id
+            )
+        })
+    }));
+    assert!(tank_entity.children.iter().any(|child| {
+        scene.node(*child).is_some_and(|node| {
+            matches!(
                 &node.kind,
                 NodeKind::CharacterController {
                     character: Some(id),
-                    ..
-                } | NodeKind::SpawnPoint {
-                    character: Some(id),
+                    player: false,
                     ..
                 } if *id == tank_resource.id
-            );
-            let references_model = matches!(
-                &node.kind,
-                NodeKind::MeshInstance {
-                    mesh: Some(id), ..
-                } | NodeKind::ModelRenderer {
-                    model: Some(id), ..
-                } if *id == model_id
-            );
-            assert!(
-                !references_character && !references_model,
-                "Tank Boss stays available in the catalogue but out of the demo scene"
-            );
-        }
+            )
+        })
+    }));
+
+    for removed in [
+        "Tank Boss Model",
+        "Tank Boss Animation Set",
+        "Tank Boss / Rest Pose",
+        "Tank Boss Skeleton",
+    ] {
+        assert!(
+            project
+                .resources
+                .iter()
+                .all(|resource| resource.name != removed),
+            "obsolete duplicate resource '{removed}' should be gone"
+        );
     }
+
+    let (package, report) = playtest::build_package(&project, &default_project_dir());
+    assert!(
+        report.is_ok(),
+        "default project with the animated Tank Boss must cook: {:?}",
+        report.errors
+    );
+    let package = package.expect("default project produces a playtest package");
+    assert!(
+        package.models.iter().any(|cooked| cooked.clip_count == 8),
+        "the cooked Tank Boss model carries all eight selected clips"
+    );
+    assert!(
+        package.game_entities.iter().any(|entity| {
+            entity.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0
+                && entity.attack_min_range == 768
+                && entity.attack_max_range == 4608
+        }),
+        "the placed Tank Boss cooks its projectile-driven AI attack band"
+    );
 }
 
 #[test]

@@ -581,6 +581,18 @@ fn model_details(
 /// natively means the clips already live on the skeleton they were authored
 /// for. Model and clips come out of a single `convert` call, so they share one
 /// set of quantisation bounds by construction rather than by agreement.
+fn native_bundle_config(fps: u16, world_height: u16) -> psxed_gltf::RigidModelConfig {
+    psxed_gltf::RigidModelConfig {
+        animation_fps: fps,
+        world_height,
+        // Keep the model source authoritative. Extra clips are quantized through
+        // this same frame, but high-travel one-shots must not inflate the bounds
+        // and shrink the character's standing size.
+        extra_animations_affect_bounds: false,
+        ..Default::default()
+    }
+}
+
 fn build_native_model(
     project: &mut ProjectDocument,
     clips_dir: &Path,
@@ -620,14 +632,7 @@ fn build_native_model(
     let model_source = jobs[0].3.clone();
     let extras: Vec<PathBuf> = jobs[1..].iter().map(|job| job.3.clone()).collect();
 
-    let config = psxed_gltf::RigidModelConfig {
-        animation_fps: fps,
-        world_height,
-        // Full bundle import: every clip must be inside the model's bounds, so
-        // the clips DO get a vote on them here (the opposite of an add-on bake).
-        extra_animations_affect_bounds: true,
-        ..Default::default()
-    };
+    let config = native_bundle_config(fps, world_height);
     let package = preview_model_with_animation_sources(&model_source, &extras, config.clone())
         .unwrap_or_else(|e| fail(format!("{}: cook failed: {e:?}", model_source.display())));
     if package.clips.len() != jobs.len() {
@@ -1285,6 +1290,14 @@ mod tests {
     use psxed_format::animation::{
         encode_rotation_q11, MAGIC, POSE_RECORD_SIZE_V3, POSE_ROTATION_BLOCK_SIZE_V3, VERSION_V3,
     };
+
+    #[test]
+    fn native_bundle_keeps_the_model_source_bounds_authoritative() {
+        let config = native_bundle_config(12, 1536);
+        assert_eq!(config.animation_fps, 12);
+        assert_eq!(config.world_height, 1536);
+        assert!(!config.extra_animations_affect_bounds);
+    }
 
     /// One-joint v3 clip whose translation repeats every `period` frames.
     fn synthetic_clip(frames: u16, period: u16) -> Vec<u8> {

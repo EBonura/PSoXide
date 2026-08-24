@@ -38,6 +38,9 @@ discs/
 # Keep this near the repo for organization, but never commit it.
 local-assets/
 
+# Local repository snapshots are redundant with the canonical Git tree.
+/psoxide-tree.tar.gz
+
 # Local share/export packages for external review.
 handoff/
 
