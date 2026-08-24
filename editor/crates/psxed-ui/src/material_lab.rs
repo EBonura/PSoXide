@@ -477,6 +477,7 @@ pub(crate) fn draw_material_settings(
         ui.separator();
         ui.heading("Surface");
         draw_material_sidedness(ui, material);
+        draw_layered_sky_mode(ui, material);
     });
     *material != original
 }
@@ -1031,6 +1032,42 @@ fn draw_material_sidedness(ui: &mut egui::Ui, material: &mut MaterialResource) {
     material.sync_legacy_sidedness();
 }
 
+fn draw_layered_sky_mode(ui: &mut egui::Ui, material: &mut MaterialResource) {
+    ui.add_space(6.0);
+    let has_image_source =
+        material.texture_mode == MaterialTextureMode::SimpleImage && material.psxt_path.is_some();
+    let response = ui.add_enabled(
+        has_image_source || material.layered_sky,
+        egui::Checkbox::new(&mut material.layered_sky, "Layered sky aperture"),
+    );
+    if !has_image_source && !material.layered_sky {
+        response.on_disabled_hover_text(
+            "Choose a Simple Image source before enabling the layered sky.",
+        );
+    } else {
+        response.on_hover_text(
+            "Brush faces keep their collision but reveal a camera-relative Quake-style sky.",
+        );
+    }
+
+    if material.layered_sky {
+        ui.label(
+            RichText::new(
+                "Requires a 4bpp atlas containing two equal square layers side by side (for example 256×128). Palette index 0 masks the foreground layer.",
+            )
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+        if !has_image_source {
+            ui.label(
+                RichText::new("Select a Simple Image atlas before building this material.")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
+        }
+    }
+}
+
 fn draw_material_lab_preview(
     workspace: &mut EditorWorkspace,
     ui: &mut egui::Ui,
@@ -1465,6 +1502,7 @@ mod tests {
         material.texture_mode = MaterialTextureMode::Generated;
         material.generated.noise_enabled = true;
         material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
+        material.layered_sky = true;
         material
             .secondary_layer
             .as_mut()
@@ -1525,6 +1563,19 @@ mod tests {
                 )
             })
             .collect();
+        let rendered_text = text_shapes
+            .iter()
+            .map(|text| text.galley.job.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            rendered_text.contains("Layered sky aperture"),
+            "shared material editors must expose the Quake sky material flag"
+        );
+        assert!(
+            rendered_text.contains("two equal square layers side by side"),
+            "the authoring control must state the required PS1 atlas layout"
+        );
         assert_eq!(
             compact_grid_labels.len(),
             36,

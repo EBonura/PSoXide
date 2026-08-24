@@ -847,6 +847,10 @@ pub struct MaterialVersionRecipe {
     pub secondary_layer: Option<ModelSecondaryLayer>,
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
+    /// Whether brush faces using this recipe reveal the camera-relative,
+    /// two-layer Quake sky instead of drawing their authored polygons.
+    #[serde(default)]
+    pub layered_sky: bool,
 }
 
 fn default_material_version_id() -> MaterialVersionId {
@@ -1305,6 +1309,7 @@ impl From<&MaterialResource> for MaterialVersionRecipe {
             animation: material.animation,
             secondary_layer: material.secondary_layer.clone(),
             face_sidedness: material.sidedness(),
+            layered_sky: material.layered_sky,
         }
     }
 }
@@ -1321,6 +1326,7 @@ impl MaterialVersionRecipe {
         material.animation = self.animation;
         material.secondary_layer = self.secondary_layer;
         material.face_sidedness = self.face_sidedness;
+        material.layered_sky = self.layered_sky;
         material.legacy_texture = None;
         material.sync_legacy_sidedness();
     }
