@@ -709,6 +709,15 @@ pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<M
 pub(super) type RuntimeDeferredEnemyAttacks =
     psx_game_runtime::entities::DeferredGameEntityAttacks<MAX_GAME_ENTITIES>;
 
+/// Simultaneous combat bolts. Twenty-four leaves room for a readable enemy
+/// volley while bounding collision and draw work on original hardware.
+pub(super) const MAX_COMBAT_PROJECTILES: usize = 24;
+/// The arena can consume at most one projectile per slot in one tick.
+pub(super) const MAX_PROJECTILE_IMPACTS: usize = MAX_COMBAT_PROJECTILES;
+/// Fixed projectile state owned by the gameplay scene.
+pub(super) type RuntimeCombatProjectiles =
+    psx_game_runtime::projectiles::CombatProjectiles<MAX_COMBAT_PROJECTILES>;
+
 /// The crate logic-entity runtime instantiated with this example's
 /// record/word/event caps.
 pub(super) type RuntimeLogic =

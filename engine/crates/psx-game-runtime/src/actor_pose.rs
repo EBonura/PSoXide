@@ -222,6 +222,12 @@ mod tests {
             active_end_frame: 0,
             damage: 0,
             poise_damage: 0,
+            projectile_speed: 0,
+            projectile_lifetime_ticks: 0,
+            projectile_min_range: 0,
+            projectile_max_range: 0,
+            projectile_tint_rgb: [0; 3],
+            projectile_reserved: 0,
         };
         let capsule = transform_actor_combat_capsule(&record, pose).expect("combat capsule");
         assert_eq!(capsule.start, [1_260, 2_000, 3_000]);
@@ -290,6 +296,12 @@ mod tests {
                         active_end_frame: 0,
                         damage: 0,
                         poise_damage: 0,
+                        projectile_speed: 0,
+                        projectile_lifetime_ticks: 0,
+                        projectile_min_range: 0,
+                        projectile_max_range: 0,
+                        projectile_tint_rgb: [0; 3],
+                        projectile_reserved: 0,
                     };
                     let capsule =
                         transform_actor_combat_capsule(&record, pose).expect("extreme capsule");

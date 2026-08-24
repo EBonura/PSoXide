@@ -1563,6 +1563,9 @@ pub mod game_entity_flags {
     pub const ENABLED: u16 = 1 << 0;
     /// The Character authors a Run action, enabling chase-speed locomotion.
     pub const CAN_RUN: u16 = 1 << 1;
+    /// The LightAttack action releases an authored projectile and uses the
+    /// cooked ranged attack band instead of body-radius melee reach.
+    pub const RANGED_ATTACK: u16 = 1 << 2;
 }
 
 /// One cooked logic entity, shaped after hl-psx's campaign-proven
@@ -1724,6 +1727,10 @@ pub struct LevelGameEntityRecord {
     pub windup_ticks: u8,
     /// 60 Hz ticks of post-attack recovery (the punish window).
     pub recovery_ticks: u8,
+    /// Closest XZ distance at which a ranged attack may begin. Zero for melee.
+    pub attack_min_range: u16,
+    /// Furthest XZ distance at which a ranged attack may begin. Zero for melee.
+    pub attack_max_range: u16,
     /// Poise pool; poise damage past it staggers the entity.
     pub poise: u16,
     /// Damage dealt by a connecting touch/melee attack.
@@ -2988,6 +2995,8 @@ pub mod combat_capsule_flags {
     pub const HURTBOX: u8 = 1 << 0;
     /// Volume deals damage during its action/frame window.
     pub const HITBOX: u8 = 1 << 1;
+    /// Volume is a rig-attached projectile muzzle/release event.
+    pub const PROJECTILE_EMITTER: u8 = 1 << 2;
 }
 
 /// Compact rig-attached combat capsule. Endpoints are signed 16-bit because
@@ -3017,6 +3026,18 @@ pub struct CombatCapsuleRecord {
     pub damage: u16,
     /// Poise damage dealt by a hitbox.
     pub poise_damage: u16,
+    /// Projectile displacement per 60 Hz tick. Zero for non-emitters.
+    pub projectile_speed: u16,
+    /// Projectile lifetime in 60 Hz ticks. Zero for non-emitters.
+    pub projectile_lifetime_ticks: u16,
+    /// Minimum AI attack range. Zero for non-emitters.
+    pub projectile_min_range: u16,
+    /// Maximum AI attack range. Zero for non-emitters.
+    pub projectile_max_range: u16,
+    /// Additive projectile tint. Black for non-emitters.
+    pub projectile_tint_rgb: [u8; 3],
+    /// Reserved/alignment byte.
+    pub projectile_reserved: u8,
 }
 
 /// Cooked weapon-local hit shape.

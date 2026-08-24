@@ -1387,6 +1387,7 @@ impl Scene for Playtest {
             &mut ot,
             &mut primitive_packets,
         );
+        let _ = self.draw_combat_projectiles(camera, &mut ot, &mut primitive_packets);
         let _ = self.draw_player_water_wade_splash(
             camera,
             self.gameplay_tick(ctx.sim_tick),

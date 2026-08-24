@@ -1388,9 +1388,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // player is actually looking at, not merely the first button in
         // node order.
         if let Some(selected) = (first..end).find(|&index| {
-            self.nodes.get(index).is_some_and(|node| {
-                ui::is_focusable(node.kind) && node.tag.ends_with(".selected")
-            })
+            self.nodes
+                .get(index)
+                .is_some_and(|node| ui::is_focusable(node.kind) && node.tag.ends_with(".selected"))
         }) {
             self.cursor.menu_focus = selected as u16;
             return Some(selected);
