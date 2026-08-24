@@ -405,17 +405,12 @@ impl Playtest {
             }
         }
         if damage_total > 0 {
-            // Combat damage reaching zero arms the SAME delayed
-            // death/respawn sequence the environmental hazards use; a
-            // hit landing during the countdown keeps health floored
-            // without re-arming it.
-            let outcome = psx_game_runtime::character::apply_player_damage(
-                self.player_health,
-                self.hazard_death_ticks_remaining > 0,
-                damage_total,
-            );
-            self.player_health = outcome.health;
-            if outcome.died {
+            // Legacy enemy attacks use the default vitality channel and spill
+            // into the second pool. Only emptying both arms the existing
+            // delayed death/respawn sequence.
+            let died = self.hazard_death_ticks_remaining == 0
+                && self.apply_untyped_player_damage(damage_total);
+            if died {
                 self.arm_player_death(true, BSP_HAZARD_DEATH_TICKS, ctx.sim_tick, ctx.video_hz);
             }
         }

@@ -51,6 +51,14 @@ fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
 }
 
 impl Playtest {
+    /// Apply a legacy, untyped incoming hit to the default vitality channel,
+    /// spilling excess damage into the second pool.
+    pub(super) fn apply_untyped_player_damage(&mut self, damage: u16) -> bool {
+        self.player_vitality
+            .apply_spill(VitalityChannelId::One, damage)
+            .actor_defeated
+    }
+
     pub(super) fn water_cell_at(
         &self,
         room: RoomIndex,
@@ -116,7 +124,7 @@ impl Playtest {
         }
         self.room_index = room;
         self.motor.snap_to(position, yaw);
-        self.player_health = self.player_health_max;
+        self.player_vitality.refill();
         self.hazard_death_ticks_remaining = 0;
         self.anim_state = PlayerAnim::Idle;
         self.anim_blend_from = None;
