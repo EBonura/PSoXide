@@ -2598,6 +2598,166 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
             "missing {name}"
         );
     }
+
+    for (name, expected_rect, expected_color) in [
+        (
+            "Collected Module Inset Rail",
+            (15, 119, 176, 22),
+            [126, 34, 26],
+        ),
+        (
+            "Selected Module Inset Rail",
+            (198, 119, 107, 22),
+            [18, 88, 80],
+        ),
+    ] {
+        let (rect, color, shape) = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Rect {
+                    rect,
+                    color,
+                    shape: Some(shape),
+                    ..
+                } => Some((rect, color, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            expected_rect,
+            "{name} must share its panel perimeter"
+        );
+        assert_eq!(*color, expected_color);
+        assert_eq!(shape.corner_cut, 5);
+        assert!(shape.cut_top_left);
+        assert!(!shape.cut_top_right && !shape.cut_bottom_right && !shape.cut_bottom_left);
+        assert_eq!(shape.border_width, 1);
+        assert!(!shape.semi_transparent_fill);
+    }
+
+    for (name, expected_rect) in [
+        ("Collected Module Inset Rail Rule", (15, 140, 176, 1)),
+        ("Selected Module Inset Rail Rule", (198, 140, 107, 1)),
+    ] {
+        let rect = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Rect { rect, .. } => Some(rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), expected_rect);
+    }
+
+    for name in ["Live World Dimmer", "Live World Quarter Scrim"] {
+        let (rect, color, shape) = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Rect {
+                    rect,
+                    color,
+                    shape: Some(shape),
+                    ..
+                } => Some((rect, color, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), (0, 0, 320, 240));
+        assert_eq!(*color, [0, 0, 0]);
+        assert!(shape.semi_transparent_fill);
+        assert_eq!((shape.corner_cut, shape.border_width), (0, 0));
+    }
+
+    for name in [
+        "Inventory Tab Rail",
+        "Horizon Ladder Shell",
+        "Zenith Ladder Shell",
+        "Collected Module Panel",
+        "Module Detail Panel",
+    ] {
+        let shape = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Rect {
+                    shape: Some(shape), ..
+                } => Some(shape),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(
+            !shape.semi_transparent_fill,
+            "{name} must mask the world like the approved mockup"
+        );
+    }
+
+    for name in [
+        "Horizon Empty Boost",
+        "Horizon Full Boost",
+        "Zenith Empty Boost",
+        "Zenith Full Boost",
+    ] {
+        let (focus_chrome, shape) = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Button {
+                    focus_chrome,
+                    shape: Some(shape),
+                    ..
+                } => Some((focus_chrome, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(!focus_chrome, "{name} must remain visible when unfocused");
+        assert!(
+            !shape.semi_transparent_fill,
+            "{name} must use the mockup's solid socket treatment"
+        );
+    }
+
+    for (name, expected_y) in [
+        ("Rupture Inventory Item", 145),
+        ("Shell Inventory Item", 170),
+        ("Surge Inventory Item", 195),
+    ] {
+        let (rect, focus_chrome) = inventory
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match node.kind {
+                UiNodeKind::Button {
+                    rect, focus_chrome, ..
+                } => Some((rect, focus_chrome)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (24, expected_y, 158, 17)
+        );
+        assert!(
+            focus_chrome,
+            "{name} must only draw selection chrome while focused"
+        );
+    }
+
+    assert!(
+        inventory
+            .nodes()
+            .iter()
+            .all(|node| node.name != "Assign Hint"),
+        "the redundant X PICK // X SOCKET prompt must stay removed"
+    );
 }
 
 #[test]
