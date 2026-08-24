@@ -1356,6 +1356,11 @@ pub struct PlaytestCombatCapsule {
     pub active_end_frame: u16,
     pub damage: u16,
     pub poise_damage: u16,
+    pub projectile_speed: u16,
+    pub projectile_lifetime_ticks: u16,
+    pub projectile_min_range: u16,
+    pub projectile_max_range: u16,
+    pub projectile_tint_rgb: [u8; 3],
 }
 
 /// Weapon-local hit shape, ready for manifest emission.
@@ -1689,6 +1694,10 @@ pub struct PlaytestGameEntity {
     pub windup_ticks: u8,
     /// Post-attack recovery ticks.
     pub recovery_ticks: u8,
+    /// Closest ranged-attack distance. Zero for melee entities.
+    pub attack_min_range: u16,
+    /// Furthest ranged-attack distance. Zero for melee entities.
+    pub attack_max_range: u16,
     /// Poise pool.
     pub poise: u16,
     /// Touch/melee damage.
