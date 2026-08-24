@@ -44,7 +44,8 @@ const DIR_NORTH_EAST_SOUTH_WEST: u8 = 5;
 pub struct ThirdPersonCameraConfig {
     /// Preferred trailing distance from focus to camera.
     pub distance: i32,
-    /// Closest the collision solver may pull the camera.
+    /// Preferred closest camera distance when unobstructed. A blocking surface
+    /// closer than this still wins so the camera never crosses into solid space.
     pub min_distance: i32,
     /// Furthest distance the camera may ease back out to.
     pub max_distance: i32,
@@ -853,7 +854,7 @@ fn solve_camera_collision_trace<P: CollisionTraceProvider + ?Sized>(
     };
     let distance = clear
         .saturating_sub(config.collision_margin)
-        .clamp(config.min_distance, config.distance);
+        .clamp(0, config.distance);
     Ok(CollisionSolve {
         distance,
         pull_in: distance < config.distance,
@@ -986,7 +987,7 @@ fn solve_camera_collision(
 
     let desired = camera_position_at_height(focus, config.distance, yaw, pitch_q12, camera_y);
     let clear = probe_clear_distance(room, focus, desired, config.distance, config);
-    let distance = clear.clamp(config.min_distance, config.distance);
+    let distance = clear.clamp(0, config.distance);
     CollisionSolve {
         distance,
         pull_in: distance < config.distance,
@@ -1028,7 +1029,7 @@ fn solve_camera_collision_rooms(
 
     let desired = camera_position_at_height(focus, config.distance, yaw, pitch_q12, camera_y);
     let clear = probe_clear_distance_rooms(rooms, focus, desired, config.distance, config);
-    let distance = clear.clamp(config.min_distance, config.distance);
+    let distance = clear.clamp(0, config.distance);
     CollisionSolve {
         distance,
         pull_in: distance < config.distance,
@@ -1081,7 +1082,7 @@ fn probe_clear_distance(
 
     nearest
         .saturating_sub(config.collision_margin)
-        .clamp(config.min_distance, config.distance)
+        .clamp(0, config.distance)
 }
 
 fn probe_clear_distance_rooms(
@@ -1128,7 +1129,7 @@ fn probe_clear_distance_rooms(
 
     nearest
         .saturating_sub(config.collision_margin)
-        .clamp(config.min_distance, config.distance)
+        .clamp(0, config.distance)
 }
 
 fn first_collision_room_sector_size(rooms: &[CharacterCollisionRoom<'_>]) -> Option<i32> {
@@ -1657,6 +1658,26 @@ mod tests {
         }
     }
 
+    struct CloseDistanceTraceProvider;
+
+    impl CollisionTraceProvider for CloseDistanceTraceProvider {
+        fn trace_into(
+            &mut self,
+            query: CollisionTraceQuery,
+            output: &mut crate::CollisionTrace,
+        ) -> bool {
+            let mut trace = crate::CollisionTrace::unobstructed(query.end);
+            trace.fraction_q12 = COLLISION_FRACTION_ONE_Q12 / 64;
+            trace.end = RoomPoint::new(
+                query.start.x + (query.end.x - query.start.x) / 64,
+                query.start.y + (query.end.y - query.start.y) / 64,
+                query.start.z + (query.end.z - query.start.z) / 64,
+            );
+            *output = trace;
+            true
+        }
+    }
+
     fn trace_target() -> ThirdPersonCameraTarget {
         ThirdPersonCameraTarget {
             player: RoomPoint::ZERO,
@@ -1686,6 +1707,29 @@ mod tests {
         assert!(frame.collision_pull_in);
         assert_eq!(frame.distance, 690);
         assert_eq!(provider.calls, 1);
+    }
+
+    #[test]
+    fn close_obstruction_overrides_preferred_minimum_distance() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        config.collision_margin = 0;
+        assert_eq!(config.min_distance, 24);
+
+        let frame = camera
+            .update_vblanks_with_trace_provider(
+                WorldProjection::new(160, 120, 320, 64),
+                &mut CloseDistanceTraceProvider,
+                trace_target(),
+                ThirdPersonCameraInput::default(),
+                config,
+                1,
+            )
+            .expect("trace camera update");
+
+        assert!(frame.collision_pull_in);
+        assert_eq!(frame.distance, 21);
+        assert!(frame.distance < config.min_distance);
     }
 
     #[test]

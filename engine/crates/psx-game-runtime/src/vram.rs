@@ -747,23 +747,37 @@ impl<
 
     /// Reserve the static VRAM regions on first call, then pack every UI
     /// font into one combined atlas and upload it in a single `GP0(A0h)`
-    /// transfer.
+    /// transfer. Returns `true` only when the complete requested set is
+    /// available; every `false` result leaves all output slots empty.
+    #[must_use = "a false result means no complete font set is available"]
     pub fn acquire_shared_ui_fonts<const LEN: usize>(
         &mut self,
         layout: VramLayout,
         scratch: &mut FontPackScratch<LEN>,
         fonts: &[&'static BitmapFont],
         ui_fonts: &mut [Option<FontAtlas>],
-    ) {
+    ) -> bool {
         if !self.regions_reserved {
             self.reserve_static_vram_regions(layout);
             self.regions_reserved = true;
         }
-        if ui_fonts[0].is_none() && !fonts.is_empty() {
-            // Fonts are uploaded once and never torn down (menu and gameplay HUD
-            // share them), so the returned VRAM handle is not retained.
-            let _ = upload_fonts(fonts, &mut self.allocator, scratch.words_mut(), ui_fonts);
+        if fonts.is_empty() {
+            return true;
         }
+        if fonts.len() > ui_fonts.len() {
+            ui_fonts.fill(None);
+            return false;
+        }
+        if ui_fonts[..fonts.len()].iter().all(Option::is_some) {
+            return true;
+        }
+
+        // Fonts are uploaded once and never torn down (menu and gameplay HUD
+        // share them), so the returned VRAM handle is not retained. The SDK
+        // clears every output slot before planning, making any false result a
+        // complete, observable failure rather than a partial font set.
+        upload_fonts(fonts, &mut self.allocator, scratch.words_mut(), ui_fonts).is_some()
+            && ui_fonts[..fonts.len()].iter().all(Option::is_some)
     }
 
     /// Advance the upload queue by up to `row_budget` texture rows,
@@ -1899,4 +1913,66 @@ fn upload_clut_with_mode(rect: VramRect, bytes: &[u8], force_zero_opaque: bool) 
     }
 
     upload_bytes(rect, &marked[..bytes.len()]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use psx_font::font_pack_metrics;
+
+    const ARENA_FONTS: &[&BitmapFont] = &[
+        &psx_font::fonts::ZEN_DOTS_DISPLAY,
+        &psx_font::fonts::ZEN_DOTS,
+        &psx_font::fonts::KENNEY_FUTURE_NARROW,
+        &psx_font::fonts::KENNEY_PIXEL,
+        &psx_font::fonts::KENNEY_FUTURE,
+        &psx_font::fonts::BASIC,
+    ];
+
+    const ARENA_LAYOUT: VramLayout = VramLayout {
+        framebuffer: VramRect::new(0, 0, 320, 480),
+        room_tpage_base_x: 640,
+        shared_tpage: Tpage::new(640, 0, TexDepth::Bit4),
+        room_tpage_stride_hw: 64,
+        room_tile_texels: 256,
+        model_tpage: Tpage::new(384, 256, TexDepth::Bit4),
+        model_tpage_max_halfwords: 64,
+        clut_base_y: 480,
+    };
+
+    type TestVram = VramRuntime<1, 1, 6, 16>;
+
+    #[test]
+    fn arena_static_layout_accepts_packed_six_fonts_but_not_six_pages() {
+        let metrics = font_pack_metrics(ARENA_FONTS).unwrap();
+        assert_eq!(metrics.pages, 2);
+
+        let mut vram = TestVram::new(ARENA_LAYOUT);
+        vram.reserve_static_vram_regions(ARENA_LAYOUT);
+        assert!(
+            vram.allocator
+                .alloc_page_run(6, TexDepth::Bit4, 0)
+                .is_none(),
+            "the historical one-page-per-font request reproduces the failure"
+        );
+        assert!(
+            vram.allocator
+                .alloc_page_run(metrics.pages, TexDepth::Bit4, 0)
+                .is_some(),
+            "the packed request must fit the five-page free band"
+        );
+    }
+
+    #[test]
+    fn acquire_reports_failure_and_never_leaves_a_partial_font_set() {
+        let mut vram = TestVram::new(ARENA_LAYOUT);
+        let mut scratch = FontPackScratch::<1>::new();
+        let mut ui_fonts = [None; 6];
+
+        let ready =
+            vram.acquire_shared_ui_fonts(ARENA_LAYOUT, &mut scratch, ARENA_FONTS, &mut ui_fonts);
+        assert!(!ready, "a too-small staging arena must be reported");
+        assert!(ui_fonts.iter().all(Option::is_none));
+        assert!(ui_fonts[0].is_none());
+    }
 }

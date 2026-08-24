@@ -378,7 +378,7 @@ impl FrustumPlanes {
                 if plane.0[1] >= 0 { maxs[1] } else { mins[1] },
                 if plane.0[2] >= 0 { maxs[2] } else { mins[2] },
             ];
-            Self::distance(plane, positive) < 0
+            Self::distance_negative(plane, positive)
         })
     }
 
@@ -613,6 +613,8 @@ pub struct Renderer {
     /// unchanged. `pxbsp_face_state` remains the packed deduplication table.
     visible_pxbsp_faces: Vec<u16>,
     /// Per-frame subset left after hierarchical node-frustum rejection.
+    /// `draw_pxbsp_world` always retires this chain before returning, because
+    /// external runtimes may overlay its backing bytes with model scratch.
     frame_pxbsp_faces: Vec<u16>,
     /// Two-bit per-face frame selection: 0 hidden, 1/2 node-owned back/front,
     /// 3 leaf/staticized fallback. The node states retain the camera-side
@@ -627,6 +629,10 @@ pub struct Renderer {
     /// Node ranges are empty, so visible faces are gathered from the marked
     /// leaves reached by the bounds traversal instead of node-owned ranges.
     pxbsp_node_leaf_marks: bool,
+    /// Caller-owned frame-chain backing. A Vec facade is attached only for
+    /// the duration of `draw_pxbsp_world`, then detached before model scratch
+    /// reuses these bytes. Null means both face chains are ordinary Vecs.
+    external_frame_pxbsp_faces: *mut u16,
     visibility: [u8; PXBSP_MAX_VISIBILITY_BYTES],
     visible_leaf_count: usize,
     cached_visibility: Option<(u32, usize)>,
@@ -663,16 +669,70 @@ impl Renderer {
     /// Construct PXBSP scratch with the render-tree capacity known up front,
     /// avoiding heap growth on the first PVS rebuild during gameplay.
     pub fn new_pxbsp_with_nodes(face_count: usize, node_count: usize) -> Self {
+        Self::new_pxbsp_with_capacities(face_count, node_count, face_count)
+    }
+
+    /// Construct PXBSP scratch from cooker-proven world capacities.
+    ///
+    /// `visible_face_capacity` bounds both the persistent PVS chain and its
+    /// per-frame frustum-filtered subset. Runtime never grows either vector:
+    /// an invalid undersized cook fails the frame closed instead of leaking a
+    /// second allocation from the PS1 bump heap.
+    pub fn new_pxbsp_with_capacities(
+        face_count: usize,
+        node_count: usize,
+        visible_face_capacity: usize,
+    ) -> Self {
+        let chain_capacity = visible_face_capacity.min(face_count);
+        Self::new_pxbsp_with_face_chains(
+            face_count,
+            node_count,
+            Vec::with_capacity(chain_capacity),
+            Vec::with_capacity(chain_capacity),
+        )
+    }
+
+    /// Construct PXBSP scratch with caller-owned, session-lifetime face
+    /// chains. This is the no-heap path used by project runtimes whose grid
+    /// streaming and model-projection arenas are inactive while the BSP world
+    /// chain is live.
+    ///
+    /// The visible-chain reference is consumed for the renderer's complete
+    /// lifetime. The frame-chain reference is reduced to raw backing storage:
+    /// a bounded `Vec` facade exists only during
+    /// [`draw_pxbsp_world`](Self::draw_pxbsp_world), and is retired and
+    /// detached before the caller may reuse those bytes. [`Drop`] never sends
+    /// either caller-owned allocation to the global allocator.
+    pub fn new_pxbsp_with_external_face_chains(
+        face_count: usize,
+        node_count: usize,
+        visible_faces: &'static mut [u16],
+        frame_faces: &'static mut [u16],
+    ) -> Self {
+        let capacity = visible_faces.len().min(frame_faces.len()).min(face_count);
+        let visible_faces = external_face_chain(&mut visible_faces[..capacity]);
+        let frame_faces = &mut frame_faces[..capacity];
+        let mut renderer =
+            Self::new_pxbsp_with_face_chains(face_count, node_count, visible_faces, Vec::new());
+        renderer.external_frame_pxbsp_faces = frame_faces.as_mut_ptr();
+        renderer
+    }
+
+    fn new_pxbsp_with_face_chains(
+        face_count: usize,
+        node_count: usize,
+        visible_pxbsp_faces: Vec<u16>,
+        frame_pxbsp_faces: Vec<u16>,
+    ) -> Self {
         let mut renderer = Self::with_capacities(0, 0, 0);
         // These chains are persistent world scratch. Allocate their exact
         // upper bound once: a first full-level PVS can exceed a small starter
         // capacity, and repeated Vec growth leaks peak space from the PS1's
         // bump-style boot heap before the first frame is presented.
-        let chain_capacity = face_count;
         renderer.pxbsp_face_state = vec![0; face_count.div_ceil(4)];
         renderer.pxbsp_face_count = face_count;
-        renderer.visible_pxbsp_faces = Vec::with_capacity(chain_capacity);
-        renderer.frame_pxbsp_faces = Vec::with_capacity(chain_capacity);
+        renderer.visible_pxbsp_faces = visible_pxbsp_faces;
+        renderer.frame_pxbsp_faces = frame_pxbsp_faces;
         renderer.frame_pxbsp_face_state = vec![0; face_count.div_ceil(4)];
         renderer.pxbsp_node_visible = vec![0; node_count.div_ceil(8)];
         renderer.pxbsp_node_discovered = vec![0; node_count.div_ceil(8)];
@@ -702,6 +762,7 @@ impl Renderer {
             pxbsp_node_stack: Vec::new(),
             pxbsp_node_metadata_valid: false,
             pxbsp_node_leaf_marks: false,
+            external_frame_pxbsp_faces: core::ptr::null_mut(),
             visibility: [0; PXBSP_MAX_VISIBILITY_BYTES],
             visible_leaf_count: 0,
             cached_visibility: None,
@@ -932,6 +993,7 @@ impl Renderer {
         material_tick: u32,
         packet_storage: &mut [u32],
     ) -> RenderFrame {
+        self.attach_external_frame_pxbsp_faces();
         scene::load_rotation(&view.rotation);
         scene::load_translation(view.translation);
 
@@ -953,6 +1015,12 @@ impl Renderer {
         } else {
             RenderFrame::default()
         };
+        // The runtime overlays the frame chain with model projection scratch
+        // immediately after this pass. Retire both its logical length and the
+        // corresponding face marks while the selected indices are still
+        // intact, so the next frame never reads overwritten model data.
+        self.retire_frame_pxbsp_selection();
+        self.detach_external_frame_pxbsp_faces();
         self.frame = self.frame.wrapping_add(1);
         frame
     }
@@ -1015,7 +1083,7 @@ impl Renderer {
     }
 
     fn draw_pxbsp_faces(
-        &self,
+        &mut self,
         map: &PxbspResidentMap,
         camera_origin: Vec3I32,
         frustum: &FrustumPlanes,
@@ -1166,7 +1234,6 @@ impl Renderer {
                 stats.packet_overflow_avoided = true;
                 break;
             }
-
             batch_surfaces[batch_surface_count] = ClassicAffineMixedBatchSurface {
                 first_vertex: batch_vertex_count as u16,
                 vertex_count: vertex_count as u16,
@@ -1397,7 +1464,6 @@ impl Renderer {
     ) -> bool {
         let first = face.first_vertex as usize;
         let count = face.vertex_count as usize;
-        let near = &frustum.planes[0];
         let source_offset = first * core::mem::size_of::<ClassicAffineWordSourceVertex>();
         let source = unsafe {
             map.vertex_data()
@@ -1408,7 +1474,7 @@ impl Renderer {
         let mut index = 0usize;
         while index < count {
             let position = unsafe { core::ptr::read(source.add(index).cast::<[i16; 3]>()) };
-            if FrustumPlanes::distance_negative(near, position) {
+            if FrustumPlanes::distance_negative(&frustum.planes[0], position) {
                 return true;
             }
             index += 1;
@@ -1678,6 +1744,12 @@ impl Renderer {
             for mark_index in start..end {
                 let face = marks.get(mark_index).expect("validated mark surface") as usize;
                 if packed_face_state(&self.pxbsp_face_state, face) == 0 {
+                    if self.visible_pxbsp_faces.len() == self.visible_pxbsp_faces.capacity() {
+                        self.cached_pxbsp_visibility = None;
+                        self.visible_pxbsp_faces.clear();
+                        self.visible_leaf_count = 0;
+                        return false;
+                    }
                     set_packed_face_state(&mut self.pxbsp_face_state, face, 1);
                     self.visible_pxbsp_faces.push(face as u16);
                 }
@@ -1781,10 +1853,7 @@ impl Renderer {
         camera_origin: Vec3I32,
         frustum: &FrustumPlanes,
     ) -> bool {
-        for &face in &self.frame_pxbsp_faces {
-            set_packed_face_state(&mut self.frame_pxbsp_face_state, face as usize, 0);
-        }
-        self.frame_pxbsp_faces.clear();
+        self.retire_frame_pxbsp_selection();
         if !self.pxbsp_node_metadata_valid {
             for &face in &self.visible_pxbsp_faces {
                 set_packed_face_state(
@@ -1893,10 +1962,74 @@ impl Renderer {
         // without Quake's per-frame linked-list rebuild or a comparison sort.
         for &face in &self.visible_pxbsp_faces {
             if packed_face_state(&self.frame_pxbsp_face_state, face as usize) != 0 {
+                if self.frame_pxbsp_faces.len() == self.frame_pxbsp_faces.capacity() {
+                    // Traversal may already have marked faces which did not
+                    // fit in the bounded output chain. This invalid-cook path
+                    // is rare, so clear the complete packed table rather than
+                    // leaving untracked marks for the next frame.
+                    self.frame_pxbsp_face_state.fill(0);
+                    self.frame_pxbsp_faces.clear();
+                    return false;
+                }
                 self.frame_pxbsp_faces.push(face);
             }
         }
         true
+    }
+
+    fn retire_frame_pxbsp_selection(&mut self) {
+        for &face in &self.frame_pxbsp_faces {
+            set_packed_face_state(&mut self.frame_pxbsp_face_state, face as usize, 0);
+        }
+        self.frame_pxbsp_faces.clear();
+    }
+
+    fn attach_external_frame_pxbsp_faces(&mut self) {
+        if self.external_frame_pxbsp_faces.is_null() {
+            return;
+        }
+        debug_assert!(self.frame_pxbsp_faces.is_empty());
+        debug_assert_eq!(self.frame_pxbsp_faces.capacity(), 0);
+        self.frame_pxbsp_faces = unsafe {
+            Vec::from_raw_parts(
+                self.external_frame_pxbsp_faces,
+                0,
+                self.visible_pxbsp_faces.capacity(),
+            )
+        };
+    }
+
+    fn detach_external_frame_pxbsp_faces(&mut self) {
+        if self.external_frame_pxbsp_faces.is_null() || self.frame_pxbsp_faces.capacity() == 0 {
+            return;
+        }
+        debug_assert!(self.frame_pxbsp_faces.is_empty());
+        debug_assert_eq!(
+            self.frame_pxbsp_faces.as_mut_ptr(),
+            self.external_frame_pxbsp_faces
+        );
+        let frame = core::mem::take(&mut self.frame_pxbsp_faces);
+        core::mem::forget(frame);
+    }
+}
+
+fn external_face_chain(storage: &'static mut [u16]) -> Vec<u16> {
+    // SAFETY: the caller gives this storage exclusively to the renderer for
+    // the session. Length starts at zero, capacity is the complete slice, all
+    // writes stay capacity-checked, and Renderer::drop forgets the facade so
+    // the global allocator never sees caller-owned memory.
+    unsafe { Vec::from_raw_parts(storage.as_mut_ptr(), 0, storage.len()) }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        if self.external_frame_pxbsp_faces.is_null() {
+            return;
+        }
+        self.retire_frame_pxbsp_selection();
+        self.detach_external_frame_pxbsp_faces();
+        let visible = core::mem::take(&mut self.visible_pxbsp_faces);
+        core::mem::forget(visible);
     }
 }
 
@@ -2225,6 +2358,7 @@ mod tests {
     use crate::pxbsp::PxbspLumpKind;
     use crate::pxbsp_resident::tests::{valid_lumps, write_file};
     use crate::SliceReader;
+    use alloc::boxed::Box;
     use psx_engine::OtFrame;
     use psx_gpu::ot::OrderingTable;
 
@@ -2428,8 +2562,10 @@ mod tests {
         assert_eq!(packed_face_state(&renderer.pxbsp_face_state, 0), 2);
         assert_eq!(
             packed_face_state(&renderer.frame_pxbsp_face_state, 0),
-            PXBSP_FRAME_NODE_FRONT
+            0,
+            "world draw must retire per-frame marks before model scratch reuse"
         );
+        assert!(renderer.frame_pxbsp_faces.is_empty());
         assert_eq!(frame.stats.visible_faces, 1);
         assert_eq!(frame.stats.unresolved_material_faces, 0);
         assert!(frame.stats.packets > 0);
@@ -2601,19 +2737,187 @@ mod tests {
 
     #[test]
     fn pxbsp_renderer_allocates_exact_world_scratch() {
-        let renderer = Renderer::new_pxbsp_with_nodes(37, 11);
+        let renderer = Renderer::new_pxbsp_with_capacities(37, 11, 9);
         assert!(renderer.face_visible.is_empty());
         assert_eq!(renderer.pxbsp_face_count, 37);
         assert_eq!(renderer.pxbsp_face_state.len(), 10);
         assert_eq!(renderer.visible_pxbsp_faces.len(), 0);
-        assert!(renderer.visible_pxbsp_faces.capacity() >= 37);
+        assert_eq!(renderer.visible_pxbsp_faces.capacity(), 9);
         assert_eq!(renderer.frame_pxbsp_faces.len(), 0);
-        assert!(renderer.frame_pxbsp_faces.capacity() >= 37);
+        assert_eq!(renderer.frame_pxbsp_faces.capacity(), 9);
         assert_eq!(renderer.frame_pxbsp_face_state.len(), 10);
         assert_eq!(renderer.pxbsp_node_visible.len(), 2);
         assert_eq!(renderer.pxbsp_node_discovered.len(), 2);
         assert!(renderer.alias_projected.is_empty());
         assert_eq!(renderer.visible_entity_indices.capacity(), 0);
+    }
+
+    #[test]
+    fn undersized_cooked_face_chain_fails_closed_without_heap_growth() {
+        let bytes = write_file(&valid_lumps());
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(3, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        let mut renderer =
+            Renderer::new_pxbsp_with_capacities(map.faces().len(), map.nodes().len(), 0);
+        let origin = Vec3I32 {
+            x: 1 << 12,
+            y: 0,
+            z: 0,
+        };
+
+        assert!(!renderer.mark_visible_pxbsp_faces(&map, origin));
+        assert_eq!(renderer.visible_pxbsp_faces.capacity(), 0);
+        assert!(renderer.visible_pxbsp_faces.is_empty());
+        assert_eq!(renderer.cached_pxbsp_visibility, None);
+    }
+
+    #[test]
+    fn external_face_chains_use_exact_caller_owned_storage() {
+        let visible = Box::leak(vec![0u16; 17].into_boxed_slice());
+        let frame = Box::leak(vec![0u16; 17].into_boxed_slice());
+        let visible_ptr = visible.as_mut_ptr();
+        let frame_ptr = frame.as_mut_ptr();
+
+        let renderer = Renderer::new_pxbsp_with_external_face_chains(23, 5, visible, frame);
+
+        assert_eq!(renderer.visible_pxbsp_faces.capacity(), 17);
+        assert_eq!(renderer.frame_pxbsp_faces.capacity(), 0);
+        assert_eq!(renderer.visible_pxbsp_faces.as_ptr(), visible_ptr);
+        assert_eq!(renderer.external_frame_pxbsp_faces, frame_ptr);
+        drop(renderer);
+    }
+
+    #[test]
+    fn external_frame_chain_can_be_overwritten_between_identical_world_draws() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(19, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        let face_capacity = map.faces().len();
+        let visible = Box::leak(vec![0u16; face_capacity].into_boxed_slice());
+        let frame = Box::leak(vec![0u16; face_capacity].into_boxed_slice());
+        let frame_ptr = frame.as_mut_ptr();
+        let mut renderer = Renderer::new_pxbsp_with_external_face_chains(
+            face_capacity,
+            map.nodes().len(),
+            visible,
+            frame,
+        );
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let binding = PxbspTextureBinding {
+            texture_page: 0x0105,
+            clut: 0x1234,
+            texture_window_word: 0xe200_0000,
+            uv_origin: [0; 2],
+            page_uv_origin: [0; 2],
+            texture_size: [64; 2],
+        };
+        let mut first_packets = [0u32; 512];
+        let first = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[Some(binding)],
+            0,
+            &mut first_packets,
+        );
+        assert!(first.packet_words != 0);
+        assert!(renderer.frame_pxbsp_faces.is_empty());
+        assert_eq!(renderer.frame_pxbsp_faces.capacity(), 0);
+        assert!(renderer
+            .frame_pxbsp_face_state
+            .iter()
+            .all(|&state| state == 0));
+
+        // Model projection owns the same bytes after the BSP pass. Hostile
+        // values reproduce the former failure deterministically: a retained
+        // Vec length made the next frame interpret these as face indices.
+        for index in 0..face_capacity {
+            unsafe { frame_ptr.add(index).write(u16::MAX) };
+        }
+
+        let mut second_packets = [0u32; 512];
+        let second = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[Some(binding)],
+            0,
+            &mut second_packets,
+        );
+        assert_eq!(second.packet_words, first.packet_words);
+        assert_eq!(
+            &second_packets[..second.packet_words],
+            &first_packets[..first.packet_words]
+        );
+        assert!(renderer.frame_pxbsp_faces.is_empty());
+        assert_eq!(renderer.frame_pxbsp_faces.capacity(), 0);
+        assert!(renderer
+            .frame_pxbsp_face_state
+            .iter()
+            .all(|&state| state == 0));
+    }
+
+    #[test]
+    fn undersized_frame_chain_failure_clears_untracked_marks() {
+        configure_projection();
+        let bytes = write_file(&valid_lumps());
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(23, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+        let mut renderer = Renderer::new_pxbsp_with_face_chains(
+            map.faces().len(),
+            map.nodes().len(),
+            Vec::with_capacity(map.faces().len()),
+            Vec::new(),
+        );
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let mut packets = [0u32; 32];
+
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[None],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.packet_words, 0);
+        assert!(renderer.frame_pxbsp_faces.is_empty());
+        assert!(renderer
+            .frame_pxbsp_face_state
+            .iter()
+            .all(|&state| state == 0));
     }
 
     #[test]
