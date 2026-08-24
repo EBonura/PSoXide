@@ -1383,6 +1383,7 @@ pub(crate) fn push_game_entity(
     state_clips: GameEntityStateClips,
     combat_capsule_first: u16,
     combat_capsule_count: u8,
+    projectile_attack_range: Option<(u16, u16)>,
     names: &mut NameInterner,
     game_entities: &mut Vec<PlaytestGameEntity>,
     report: &mut PlaytestValidationReport,
@@ -1451,6 +1452,10 @@ pub(crate) fn push_game_entity(
     if state_clips.run_supported {
         flags |= psx_level::game_entity_flags::CAN_RUN;
     }
+    if projectile_attack_range.is_some() {
+        flags |= psx_level::game_entity_flags::RANGED_ATTACK;
+    }
+    let (attack_min_range, attack_max_range) = projectile_attack_range.unwrap_or((0, 0));
     game_entities.push(PlaytestGameEntity {
         room: room_index,
         kind: names.intern(archetype_name),
@@ -1493,6 +1498,8 @@ pub(crate) fn push_game_entity(
         group_attack_delay_ticks: enemy.group_attack_delay_ticks,
         windup_ticks: enemy.windup_ticks,
         recovery_ticks: enemy.recovery_ticks,
+        attack_min_range,
+        attack_max_range,
         poise: enemy.poise,
         touch_damage: enemy.touch_damage,
         max_health: enemy.max_health,

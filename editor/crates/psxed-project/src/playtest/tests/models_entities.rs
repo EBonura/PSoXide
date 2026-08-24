@@ -848,11 +848,11 @@ fn rendered_manifest_emits_model_records() {
     for model in &package.models {
         assert_eq!(
             package.assets[model.mesh_asset_index].streamed_class,
-            StreamedClass::PersistentGameplay
+            StreamedClass::Gameplay
         );
         assert_eq!(
             package.assets[model.texture_asset_index.expect("atlas")].streamed_class,
-            StreamedClass::PersistentGameplay
+            StreamedClass::Gameplay
         );
     }
     for clip in &package.model_clips {

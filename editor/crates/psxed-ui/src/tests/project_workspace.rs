@@ -3594,16 +3594,17 @@ fn new_project_starts_with_verified_character_and_material_content() {
         "assets/models/rust_mantis/rust_mantis.psxmdl",
         "assets/animations/aletha_delivered/aletha_light_wpn_light_atk_a.psxanim",
         "assets/animations/rust_mantis_starter/idle.psxanim",
-        "assets/models/tank_boss_model/tank_boss_model.psxmdl",
         "assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl",
+        "assets/animations/tank_boss_ai/idle.psxanim",
         "assets/animations/tank_boss_ai/walk_fwd.psxanim",
         "assets/animations/tank_boss_ai/walk_bwd.psxanim",
+        "assets/animations/tank_boss_ai/light_attack.psxanim",
+        "assets/animations/tank_boss_ai/hit_react.psxanim",
+        "assets/animations/tank_boss_ai/death.psxanim",
         "assets/textures/brick_1a_v2.psxt",
         "assets/textures/tech_5f_v2.psxt",
         "source_assets/characters/aletha/Aletha.glb",
         "source_assets/characters/rust_mantis.glb",
-        "source_assets/characters/tank_boss/Enemy_02.fbx",
-        "source_assets/characters/tank_boss/animations/heavy_walk_pack/idle.glb",
     ] {
         assert_eq!(
             std::fs::read(project_dir.join(relative)).unwrap(),
@@ -3744,15 +3745,15 @@ fn new_project_starts_with_verified_character_and_material_content() {
     let aletha_material = project.resource(aletha.material.unwrap()).unwrap();
     assert_eq!(aletha_material.name, "Aletha Crystal");
 
-    // The verified Mantis enemy: torso hurtbox only (reciprocal damage is the
-    // documented legacy-arc fallback), armed model socket for equipment.
+    // The verified Mantis enemy: torso hurtbox plus an animation-timed palm
+    // projectile emitter, armed model socket for equipment.
     let mantis = resource_by_name("Rust Mantis Enemy", |data| {
         matches!(data, ResourceData::Character(_))
     });
     let ResourceData::Character(mantis) = &mantis.data else {
         unreachable!();
     };
-    assert_eq!(mantis.combat_capsules.len(), 1);
+    assert_eq!(mantis.combat_capsules.len(), 2);
     assert_eq!(mantis.combat_capsules[0].name, "Torso Hurtbox");
     assert_eq!(mantis.combat_capsules[0].joint, 3);
     assert_eq!(mantis.combat_capsules[0].capsule.radius, 184);
@@ -3760,6 +3761,26 @@ fn new_project_starts_with_verified_character_and_material_content() {
         mantis.combat_capsules[0].role,
         psxed_project::CombatCapsuleRole::Hurtbox
     );
+    assert_eq!(mantis.combat_capsules[1].name, "Right Palm Bolt");
+    assert_eq!(mantis.combat_capsules[1].joint, 13);
+    assert_eq!(mantis.combat_capsules[1].capsule.start, [0; 3]);
+    assert_eq!(mantis.combat_capsules[1].capsule.end, [0; 3]);
+    assert_eq!(mantis.combat_capsules[1].capsule.radius, 48);
+    assert!(matches!(
+        mantis.combat_capsules[1].role,
+        psxed_project::CombatCapsuleRole::ProjectileEmitter {
+            action: psxed_project::CharacterAnimationAction::LightAttack,
+            active_start_frame: 4,
+            active_end_frame: 6,
+            speed: 112,
+            lifetime_ticks: 180,
+            min_range: 512,
+            max_range: 4096,
+            damage: 18,
+            poise_damage: 8,
+            tint_rgb: [96, 214, 255],
+        }
+    ));
     assert_eq!(mantis.spawn_role, psxed_project::CharacterSpawnRole::Enemy);
     let behavior = mantis.enemy_behavior.expect("mantis enemy behavior");
     assert_eq!(behavior.poise, 100);
@@ -3774,9 +3795,8 @@ fn new_project_starts_with_verified_character_and_material_content() {
         .iter()
         .any(|socket| socket.name == "right_hand_grip" && socket.joint == 13));
 
-    // The heavy enemy keeps both imports: the delivered FBX backup and the
-    // native animated model used by the Character. Its missing Run binding is
-    // deliberate capability data, not a dangling resource.
+    // The heavy enemy has one canonical native animated model. Its missing
+    // Run binding is deliberate capability data, not a dangling resource.
     let tank = resource_by_name("Tank Boss", |data| {
         matches!(data, ResourceData::Character(_))
     });
@@ -3784,6 +3804,16 @@ fn new_project_starts_with_verified_character_and_material_content() {
         unreachable!();
     };
     assert_eq!(tank.spawn_role, psxed_project::CharacterSpawnRole::Enemy);
+    assert_eq!(tank.combat_capsules.len(), 1);
+    assert!(matches!(
+        tank.combat_capsules[0].role,
+        psxed_project::CombatCapsuleRole::ProjectileEmitter {
+            action: psxed_project::CharacterAnimationAction::LightAttack,
+            speed: 80,
+            damage: 28,
+            ..
+        }
+    ));
     let tank_model = project.resource(tank.model.unwrap()).unwrap();
     assert_eq!(tank_model.name, "Tank Boss Animated Model");
     let tank_set = project.resource(tank.animation_set.unwrap()).unwrap();
@@ -3807,10 +3837,21 @@ fn new_project_starts_with_verified_character_and_material_content() {
     assert!(has_action(
         psxed_project::CharacterAnimationAction::StrafeRight
     ));
+    assert!(has_action(
+        psxed_project::CharacterAnimationAction::LightAttack
+    ));
+    assert!(has_action(
+        psxed_project::CharacterAnimationAction::HitReact
+    ));
+    assert!(has_action(psxed_project::CharacterAnimationAction::Death));
     assert!(!has_action(psxed_project::CharacterAnimationAction::Run));
-    resource_by_name("Tank Boss Model", |data| {
-        matches!(data, ResourceData::Model(_))
-    });
+    assert!(project
+        .resources
+        .iter()
+        .all(|resource| resource.name != "Tank Boss Model"
+            && resource.name != "Tank Boss Animation Set"
+            && resource.name != "Tank Boss / Rest Pose"
+            && resource.name != "Tank Boss Skeleton"));
 
     // Every saved default-project texture has a Material in the new project
     // and a project-owned file at the exact same relative path.

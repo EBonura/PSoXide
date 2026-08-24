@@ -625,13 +625,61 @@ pub struct TexturedModelGeometry<'a> {
     pub vertices: &'a [ModelVertex],
 }
 
+/// Counts retained after a cooked model has been decoded into runtime geometry.
+///
+/// The renderer's predecoded path no longer needs the original `.psxmdl` byte
+/// tables after loading. Keeping these three counts lets callers release that
+/// staging payload while preserving the exact same projection and draw path.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PredecodedModelInfo {
+    joint_count: u16,
+    part_count: u16,
+    vertex_count: u16,
+}
+
+impl PredecodedModelInfo {
+    /// Build a descriptor from decoded table counts.
+    pub const fn new(joint_count: u16, part_count: u16, vertex_count: u16) -> Self {
+        Self {
+            joint_count,
+            part_count,
+            vertex_count,
+        }
+    }
+
+    /// Number of animated joints sampled for this model.
+    pub const fn joint_count(self) -> u16 {
+        self.joint_count
+    }
+
+    /// Number of predecoded model parts consumed by projection.
+    pub const fn part_count(self) -> u16 {
+        self.part_count
+    }
+
+    /// Number of predecoded model vertices consumed by projection.
+    pub const fn vertex_count(self) -> u16 {
+        self.vertex_count
+    }
+}
+
+impl From<Model<'_>> for PredecodedModelInfo {
+    fn from(model: Model<'_>) -> Self {
+        Self::new(
+            model.joint_count(),
+            model.part_count(),
+            model.vertex_count(),
+        )
+    }
+}
+
 impl<'a> TexturedModelGeometry<'a> {
     /// Build a predecoded geometry view.
     pub const fn new(parts: &'a [ModelPart], vertices: &'a [ModelVertex]) -> Self {
         Self { parts, vertices }
     }
 
-    fn usable_for(self, model: Model<'_>) -> bool {
+    fn usable_for(self, model: PredecodedModelInfo) -> bool {
         self.parts.len() >= model.part_count() as usize
             && self.vertices.len() >= model.vertex_count() as usize
     }

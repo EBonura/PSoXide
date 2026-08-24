@@ -23,6 +23,51 @@
 use super::*;
 use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
 use psx_game_runtime::entities::MeleeArcStats;
+use psx_game_runtime::projectiles::{
+    CombatTeam, ProjectileImpactKind, ProjectileImpacts, ProjectileSpawn, ProjectileTarget,
+    ProjectileWorldTrace, ProjectileWorldTracer,
+};
+
+const PLAYER_PROJECTILE_TARGET: u16 = u16::MAX - 1;
+
+struct SceneProjectileWorldTracer<'a> {
+    bsp: Option<&'a mut BspRuntime>,
+    prop_blockers: &'a [CharacterCollisionAabb],
+    valid: bool,
+}
+
+impl ProjectileWorldTracer for SceneProjectileWorldTracer<'_> {
+    fn trace_projectile(
+        &mut self,
+        _room: RoomIndex,
+        start: [i32; 3],
+        end: [i32; 3],
+        _radius: u16,
+    ) -> ProjectileWorldTrace {
+        if !self.valid {
+            return ProjectileWorldTrace::Failed;
+        }
+        let Some(bsp) = self.bsp.as_deref_mut() else {
+            // Legacy grid projects have no arbitrary 3D segment provider. The
+            // current editor authors BSP worlds; keep old projects playable
+            // while actor collision remains fully swept and deterministic.
+            return ProjectileWorldTrace::Clear { end };
+        };
+        match bsp.trace_point_segment(
+            RoomPoint::new(start[0], start[1], start[2]),
+            RoomPoint::new(end[0], end[1], end[2]),
+            self.prop_blockers,
+        ) {
+            Ok(trace) if trace.hit() => ProjectileWorldTrace::Hit {
+                end: [trace.end.x, trace.end.y, trace.end.z],
+            },
+            Ok(trace) => ProjectileWorldTrace::Clear {
+                end: [trace.end.x, trace.end.y, trace.end.z],
+            },
+            Err(_) => ProjectileWorldTrace::Failed,
+        }
+    }
+}
 
 /// Melee occlusion segments trace at collision scale, not model scale: the
 /// cooked player hull is 56 units tall while character models render far
@@ -298,17 +343,17 @@ impl Playtest {
     /// authored frames, invalid authored joints, and authored geometric misses
     /// stay misses.
     pub(super) fn resolve_enemy_melee(&mut self, ctx: &Ctx) {
-        if self.deferred_enemy_attacks.is_empty() {
+        if self.deferred_enemy_attacks.is_empty() && self.combat_projectiles.is_empty() {
             return;
         }
         let player = self.motor.position();
         let player_position = [player.x, player.y, player.z];
         // The same body-radius source the entity tick input uses, so the
         // legacy fallback arc keeps its Character-derived reach.
-        let player_radius = match self.character {
-            Some(character) => character.radius,
-            None if self.bsp.is_some() => BSP_PLAYER_RADIUS,
-            None => 0,
+        let (player_radius, player_height) = match self.character {
+            Some(character) => (character.radius, character.height),
+            None if self.bsp.is_some() => (BSP_PLAYER_RADIUS, BSP_PLAYER_HEIGHT),
+            None => (0, 0),
         };
         let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
         let player_capsules = self
@@ -323,15 +368,10 @@ impl Playtest {
         let mut prop_blockers =
             psx_engine::FixedScratch::<CharacterCollisionAabb, MAX_STATIC_PROP_AABB_BLOCKERS>::new(
             );
-        if self.bsp.is_some()
-            && self
+        let prop_blockers_valid = self.bsp.is_none()
+            || self
                 .collect_static_prop_aabb_blockers_checked_into(&mut prop_blockers)
-                .is_none()
-        {
-            // Malformed or overflowing authored collision cannot grant a
-            // combat connection. Deferred tokens stay available to retry.
-            return;
-        }
+                .is_some();
         let mut hits = 0u16;
         let mut damage_total = 0u16;
         let mut attack_index = 0usize;
@@ -340,8 +380,7 @@ impl Playtest {
                 break;
             };
             attack_index += 1;
-            if player_invulnerable
-                || attack.room() != self.room_index
+            if attack.room() != self.room_index
                 || !self.game_entities.deferred_attack_can_connect(attack)
             {
                 continue;
@@ -358,6 +397,46 @@ impl Playtest {
                 .copied()
                 .flatten()
                 .map(|snapshot| snapshot.pose());
+            if entity.flags & psx_level::game_entity_flags::RANGED_ATTACK != 0 {
+                if let Some(release) = combat::authored_projectile_release(
+                    attacker_capsules,
+                    CharacterAnimationAction::LightAttack,
+                    attacker_pose,
+                ) {
+                    let aim = [
+                        player_position[0],
+                        player_position[1].saturating_add(player_height.max(0) / 2),
+                        player_position[2],
+                    ];
+                    let velocity = psx_game_runtime::projectiles::velocity_toward(
+                        release.position,
+                        aim,
+                        release.speed,
+                    );
+                    let spawn = ProjectileSpawn {
+                        position: release.position,
+                        velocity,
+                        radius: release.radius,
+                        damage: release.damage,
+                        poise_damage: release.poise_damage,
+                        lifetime_ticks: release.lifetime_ticks,
+                        room: attack.room(),
+                        team: CombatTeam::Enemy,
+                        owner: attack.entity().min(u16::MAX as usize) as u16,
+                        tint_rgb: release.tint_rgb,
+                    };
+                    if self.combat_projectiles.spawn(spawn).is_ok() {
+                        let _ = self.game_entities.commit_deferred_attack(attack);
+                    }
+                }
+                // An authored ranged attack never falls through to the legacy
+                // body-radius melee arc, including frames outside its release
+                // window and pool-full retries.
+                continue;
+            }
+            if player_invulnerable {
+                continue;
+            }
             let contact = combat::resolve_authored_actor_contact(
                 attacker_capsules,
                 CharacterAnimationAction::LightAttack,
@@ -390,6 +469,9 @@ impl Playtest {
             // attacker position and the player blocks the connection. The
             // token is deliberately not consumed, mirroring an i-frame whiff.
             let attacker = attack.position();
+            if !prop_blockers_valid {
+                continue;
+            }
             if let Some(bsp) = self.bsp.as_mut() {
                 if !bsp.melee_segment_clear(
                     melee_eye_point(attacker),
@@ -404,10 +486,78 @@ impl Playtest {
                 damage_total = damage_total.saturating_add(damage);
             }
         }
+        let mut projectile_targets = psx_engine::FixedScratch::<
+            ProjectileTarget,
+            { psx_level::MAX_CHARACTER_COMBAT_CAPSULES },
+        >::new();
+        if !player_invulnerable {
+            if let Some(pose) = player_pose {
+                for record in player_capsules
+                    .iter()
+                    .take(psx_level::MAX_CHARACTER_COMBAT_CAPSULES)
+                {
+                    if record.flags & psx_level::combat_capsule_flags::HURTBOX == 0 {
+                        continue;
+                    }
+                    let Some(hurtbox) = combat::transform_actor_combat_capsule(record, pose) else {
+                        continue;
+                    };
+                    let _ = projectile_targets.try_push(ProjectileTarget {
+                        target: PLAYER_PROJECTILE_TARGET,
+                        team: CombatTeam::Player,
+                        room: self.room_index,
+                        hurtbox,
+                    });
+                }
+            }
+            if projectile_targets.is_empty() && player_radius > 0 && player_height > 0 {
+                let radius = player_radius.min(i32::from(u16::MAX)) as u16;
+                let segment_start_y = player_position[1].saturating_add(player_radius);
+                let segment_end_y = player_position[1]
+                    .saturating_add(player_height)
+                    .saturating_sub(player_radius)
+                    .max(segment_start_y);
+                let _ = projectile_targets.try_push(ProjectileTarget {
+                    target: PLAYER_PROJECTILE_TARGET,
+                    team: CombatTeam::Player,
+                    room: self.room_index,
+                    hurtbox: WorldCombatCapsule {
+                        start: [player_position[0], segment_start_y, player_position[2]],
+                        end: [player_position[0], segment_end_y, player_position[2]],
+                        radius,
+                    },
+                });
+            }
+        }
+        let mut projectile_impacts =
+            ProjectileImpacts::<MAX_PROJECTILE_IMPACTS>::new();
+        {
+            let mut tracer = SceneProjectileWorldTracer {
+                bsp: self.bsp.as_mut(),
+                prop_blockers: prop_blockers.as_slice(),
+                valid: prop_blockers_valid,
+            };
+            let _ = self.combat_projectiles.tick(
+                projectile_targets.as_slice(),
+                &mut tracer,
+                &mut projectile_impacts,
+            );
+        }
+        for impact in projectile_impacts.as_slice() {
+            if impact.kind
+                == (ProjectileImpactKind::Target {
+                    target: PLAYER_PROJECTILE_TARGET,
+                })
+            {
+                hits = hits.saturating_add(1);
+                damage_total = damage_total.saturating_add(impact.damage);
+            }
+        }
         if damage_total > 0 {
-            // Legacy enemy attacks use the default vitality channel and spill
-            // into the second pool. Only emptying both arms the existing
-            // delayed death/respawn sequence.
+            // Legacy enemy attacks are not axis-authored yet, so Horizon is
+            // their deterministic migration channel and excess damage spills
+            // into Zenith. Shell reduction is applied before routing; only
+            // emptying BOTH pools arms the existing shared death sequence.
             let died = self.hazard_death_ticks_remaining == 0
                 && self.apply_untyped_player_damage(damage_total);
             if died {
@@ -490,12 +640,13 @@ impl Playtest {
         // has no blade geometry, so a closed door inside its reach must
         // still block the connection on BSP worlds.
         let player_eye = melee_eye_point([player.x, player.y, player.z]);
+        let outgoing_damage = self.vitality_modifiers().outgoing_damage(spec.damage);
         let entities = &mut self.game_entities;
         let mut bsp = self.bsp.as_mut();
         let stats = entities.apply_melee_arc_occluded(
             GAME_ENTITIES,
             &arc,
-            spec.damage,
+            outgoing_damage,
             spec.poise_damage,
             &mut self.swing_hit_mask,
             |_, target| match bsp.as_deref_mut() {
@@ -548,7 +699,7 @@ impl Playtest {
             };
             active[active_count] = ActivePlayerCapsule {
                 capsule,
-                damage: record.damage,
+                damage: self.vitality_modifiers().outgoing_damage(record.damage),
                 poise_damage: record.poise_damage,
             };
             active_count += 1;

@@ -80,6 +80,69 @@ pub fn transform_actor_combat_capsule(
     ))
 }
 
+/// Animation-timed rig attachment which releases one projectile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthoredProjectileRelease {
+    /// Room-local muzzle center sampled from the retained actor pose.
+    pub position: [i32; 3],
+    /// Projectile swept-sphere radius.
+    pub radius: u16,
+    /// Displacement per 60 Hz simulation tick.
+    pub speed: u16,
+    /// Lifetime in 60 Hz simulation ticks.
+    pub lifetime_ticks: u16,
+    /// AI minimum attack range.
+    pub min_range: u16,
+    /// AI maximum attack range.
+    pub max_range: u16,
+    /// Health damage on contact.
+    pub damage: u16,
+    /// Poise damage on contact.
+    pub poise_damage: u16,
+    /// Additive render tint.
+    pub tint_rgb: [u8; 3],
+}
+
+/// Resolve the first projectile emitter active on an actor's retained pose.
+///
+/// Release windows are deliberately inclusive and may span several frames so
+/// a 30 Hz NPC tick cannot skip over a high-rate source animation. The attack
+/// state owns the one-shot latch; this function is a pure pose query and can be
+/// retried if the fixed projectile pool is temporarily full.
+pub fn authored_projectile_release(
+    capsules: &[CombatCapsuleRecord],
+    action: CharacterAnimationAction,
+    pose: Option<ActorPoseSnapshot>,
+) -> Option<AuthoredProjectileRelease> {
+    let pose = pose?;
+    let frame = (pose.phase_q12() >> 12).min(u32::from(u16::MAX)) as u16;
+    let action = action.to_index() as u8;
+    capsules
+        .iter()
+        .take(MAX_CHARACTER_COMBAT_CAPSULES)
+        .find_map(|record| {
+            if record.flags & combat_capsule_flags::PROJECTILE_EMITTER == 0
+                || record.action != action
+                || frame < record.active_start_frame
+                || frame > record.active_end_frame
+            {
+                return None;
+            }
+            let muzzle = transform_actor_combat_capsule(record, pose)?;
+            Some(AuthoredProjectileRelease {
+                position: muzzle.start,
+                radius: muzzle.radius,
+                speed: record.projectile_speed,
+                lifetime_ticks: record.projectile_lifetime_ticks,
+                min_range: record.projectile_min_range,
+                max_range: record.projectile_max_range,
+                damage: record.damage,
+                poise_damage: record.poise_damage,
+                tint_rgb: record.projectile_tint_rgb,
+            })
+        })
+}
+
 /// Result of resolving one retained-pose actor attack against another.
 ///
 /// `FallbackRequired` has deliberately narrow semantics: it means either the
@@ -231,6 +294,61 @@ pub fn combat_capsules_overlap(a: &WorldCombatCapsule, b: &WorldCombatCapsule) -
     let distance_sq = square_sum_saturating(delta);
     let radii = i32::from(a.radius).saturating_add(i32::from(b.radius));
     distance_sq <= radii.saturating_mul(radii)
+}
+
+/// Return the earliest Q12 phase at which a swept capsule reaches `target`.
+///
+/// `sweep.start` is the moving sphere's position before a simulation tick and
+/// `sweep.end` is its position afterwards. Each probe keeps the start fixed and
+/// shortens only the end, so overlap is monotonic: once the accumulated sweep
+/// touches the target, every longer prefix also touches it. Twelve bounded
+/// probes therefore find the first engine-visible contact without floating
+/// point or 64-bit division. This is shared by projectiles and any later
+/// continuous hit-volume query that must not tunnel between ticks.
+pub fn combat_capsule_sweep_contact_fraction_q12(
+    sweep: &WorldCombatCapsule,
+    target: &WorldCombatCapsule,
+) -> Option<u16> {
+    if !combat_capsules_overlap(sweep, target) {
+        return None;
+    }
+    let start = WorldCombatCapsule {
+        start: sweep.start,
+        end: sweep.start,
+        radius: sweep.radius,
+    };
+    if combat_capsules_overlap(&start, target) {
+        return Some(0);
+    }
+
+    // Phase zero is known clear and phases 1..=4096 contain exactly 4096
+    // candidates, so this search always finishes in twelve iterations.
+    let mut low = 1u16;
+    let mut high = 4096u16;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let prefix = WorldCombatCapsule {
+            start: sweep.start,
+            end: interpolate3_q12(sweep.start, sweep.end, mid),
+            radius: sweep.radius,
+        };
+        if combat_capsules_overlap(&prefix, target) {
+            high = mid;
+        } else {
+            low = mid.saturating_add(1);
+        }
+    }
+    Some(low)
+}
+
+fn interpolate3_q12(start: [i32; 3], end: [i32; 3], phase_q12: u16) -> [i32; 3] {
+    let delta = sub3(end, start);
+    let phase = i32::from(phase_q12.min(4096));
+    [
+        start[0].saturating_add(mul_q12(delta[0], phase)),
+        start[1].saturating_add(mul_q12(delta[1], phase)),
+        start[2].saturating_add(mul_q12(delta[2], phase)),
+    ]
 }
 
 fn closest_point_on_segment(point: [i32; 3], start: [i32; 3], delta: [i32; 3]) -> [i32; 3] {
@@ -557,6 +675,29 @@ mod tests {
     }
 
     #[test]
+    fn swept_capsule_reports_first_contact_in_q12() {
+        let sweep = capsule([0, 0, 0], [1_000, 0, 0], 10);
+        let target = capsule([500, 0, 0], [500, 0, 0], 40);
+        let phase = combat_capsule_sweep_contact_fraction_q12(&sweep, &target)
+            .expect("sweep reaches target");
+        // First contact is x=450, or 45% of the path. Q12 rounding may move
+        // the reconstructed position by one engine unit.
+        let x = i32::from(phase) * 1_000 / 4096;
+        assert!((449..=451).contains(&x), "phase={phase}, x={x}");
+
+        let starts_inside = capsule([490, 0, 0], [1_000, 0, 0], 10);
+        assert_eq!(
+            combat_capsule_sweep_contact_fraction_q12(&starts_inside, &target),
+            Some(0)
+        );
+        let miss = capsule([0, 100, 0], [1_000, 100, 0], 10);
+        assert_eq!(
+            combat_capsule_sweep_contact_fraction_q12(&miss, &target),
+            None
+        );
+    }
+
+    #[test]
     fn arc_hits_target_dead_ahead_and_respects_reach() {
         // Yaw 0 faces +Z (x = sin, z = cos).
         let swing = arc(0, 640, 683);
@@ -788,6 +929,12 @@ mod tests {
                 active_end_frame: 4,
                 damage: 25,
                 poise_damage: 35,
+                projectile_speed: 0,
+                projectile_lifetime_ticks: 0,
+                projectile_min_range: 0,
+                projectile_max_range: 0,
+                projectile_tint_rgb: [0; 3],
+                projectile_reserved: 0,
             }
         }
 
@@ -803,6 +950,45 @@ mod tests {
         const ACTIVE_PHASE: u32 = 3 << 12;
         /// Before the window opens.
         const INACTIVE_PHASE: u32 = 1 << 12;
+
+        #[test]
+        fn projectile_release_uses_the_retained_pose_and_inclusive_window() {
+            const EMITTERS: [CombatCapsuleRecord; 1] = [CombatCapsuleRecord {
+                flags: combat_capsule_flags::PROJECTILE_EMITTER,
+                start: [20, 30, 40],
+                end: [20, 30, 40],
+                radius: 36,
+                damage: 24,
+                poise_damage: 12,
+                projectile_speed: 180,
+                projectile_lifetime_ticks: 120,
+                projectile_min_range: 512,
+                projectile_max_range: 4096,
+                projectile_tint_rgb: [80, 180, 255],
+                ..capsule_record(0, combat_capsule_flags::PROJECTILE_EMITTER, ATTACK)
+            }];
+            let release = authored_projectile_release(
+                &EMITTERS,
+                ATTACK,
+                Some(pose_at([1000, 2000, 3000], ACTIVE_PHASE)),
+            )
+            .expect("active emitter releases");
+            assert_eq!(release.position, [1020, 2030, 3040]);
+            assert_eq!(release.radius, 36);
+            assert_eq!(release.speed, 180);
+            assert_eq!(release.lifetime_ticks, 120);
+            assert_eq!((release.min_range, release.max_range), (512, 4096));
+            assert_eq!((release.damage, release.poise_damage), (24, 12));
+            assert_eq!(release.tint_rgb, [80, 180, 255]);
+            assert_eq!(
+                authored_projectile_release(
+                    &EMITTERS,
+                    ATTACK,
+                    Some(pose_at([1000, 2000, 3000], INACTIVE_PHASE)),
+                ),
+                None
+            );
+        }
 
         #[test]
         fn fallback_is_offered_only_while_a_side_is_unauthored() {
