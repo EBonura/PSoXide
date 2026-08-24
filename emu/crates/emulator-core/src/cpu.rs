@@ -124,6 +124,43 @@ pub struct InstructionCacheProfileSnapshot {
     pub refill_stall_cycles: u64,
 }
 
+/// Why an instruction-cache fetch had to refill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstructionCacheMissKind {
+    /// The selected direct-mapped set contained a different physical tag.
+    Tag,
+    /// The tag matched, but the requested word's valid bit was clear.
+    InvalidWord,
+}
+
+/// One exact instruction-cache refill observed by the emulator.
+///
+/// This is diagnostic metadata only. It is excluded from save states and does
+/// not affect guest-visible state or timing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstructionCacheRefillEvent {
+    /// Virtual PC whose fetch triggered the refill.
+    pub fetch_pc: u32,
+    /// Direct-mapped cache set, in the range 0..=255.
+    pub cache_set: u8,
+    /// Incoming physical 16-byte cache-line address.
+    pub incoming_line: u32,
+    /// Incoming physical tag bits.
+    pub incoming_tag: u32,
+    /// Previous physical line reconstructed from the victim tag and set.
+    pub victim_line: u32,
+    /// Previous physical tag bits.
+    pub victim_tag: u32,
+    /// Victim per-word valid mask before replacement/refill.
+    pub victim_valid_mask: u8,
+    /// Whether this was a tag replacement or an invalid-word refill.
+    pub miss_kind: InstructionCacheMissKind,
+    /// Number of words fetched from the instruction bus.
+    pub fill_words: u8,
+    /// CPU stall cycles already charged for the refill.
+    pub stall_cycles: u32,
+}
+
 /// Emulator-owned breakdown of CPU cycles charged while retiring guest code.
 ///
 /// The buckets are observational only: enabling them does not alter guest
@@ -199,6 +236,118 @@ impl CpuCycleProfileSnapshot {
             other_stall_cycles: self
                 .other_stall_cycles
                 .saturating_sub(earlier.other_stall_cycles),
+        }
+    }
+}
+
+/// Emulator-owned exact dynamic instruction-class counts.
+///
+/// All fields are observational and excluded from save states. Memory access
+/// widths and regions are classified from the pre-execution register state,
+/// matching the effective address used by the instruction itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InstructionClassProfileSnapshot {
+    /// Retired instructions observed while profiling was enabled.
+    pub instructions: u64,
+    /// Canonical zero-word NOP instructions.
+    pub nops: u64,
+    /// Instructions executed in a branch or jump delay slot.
+    pub delay_slot_instructions: u64,
+    /// Zero-word NOPs executed in a delay slot.
+    pub delay_slot_nops: u64,
+    /// Loads executed in a delay slot.
+    pub delay_slot_loads: u64,
+    /// Stores executed in a delay slot.
+    pub delay_slot_stores: u64,
+    /// Control-flow instructions executed in a delay slot.
+    pub delay_slot_control_flow: u64,
+    /// Byte-width loads (`LB`/`LBU`).
+    pub byte_loads: u64,
+    /// Halfword-width loads (`LH`/`LHU`).
+    pub halfword_loads: u64,
+    /// Aligned word loads, including `LWC2`.
+    pub word_loads: u64,
+    /// Unaligned merge loads (`LWL`/`LWR`).
+    pub unaligned_loads: u64,
+    /// Byte-width stores (`SB`).
+    pub byte_stores: u64,
+    /// Halfword-width stores (`SH`).
+    pub halfword_stores: u64,
+    /// Aligned word stores, including `SWC2`.
+    pub word_stores: u64,
+    /// Unaligned merge stores (`SWL`/`SWR`).
+    pub unaligned_stores: u64,
+    /// Data accesses targeting mirrored main RAM.
+    pub ram_accesses: u64,
+    /// Data accesses targeting the mapped scratchpad alias.
+    pub scratchpad_accesses: u64,
+    /// Data accesses targeting peripheral/expansion MMIO.
+    pub mmio_accesses: u64,
+    /// Data accesses outside the preceding regions.
+    pub other_accesses: u64,
+    /// Loads whose effective-address base register is `$sp`.
+    pub sp_relative_loads: u64,
+    /// Stores whose effective-address base register is `$sp`.
+    pub sp_relative_stores: u64,
+    /// `LUI` instructions.
+    pub lui: u64,
+    /// Non-linking direct `J` instructions.
+    pub direct_jumps: u64,
+    /// Direct linking `JAL` instructions.
+    pub jal: u64,
+    /// Register-indirect linking `JALR` instructions.
+    pub jalr: u64,
+    /// Conditional branch instructions, including REGIMM forms.
+    pub conditional_branches: u64,
+    /// Signed and unsigned multiply instructions.
+    pub multiply: u64,
+    /// Signed and unsigned divide instructions.
+    pub divide: u64,
+    /// COP2 register transfer instructions.
+    pub gte_register_transfers: u64,
+    /// COP2 GTE command instructions.
+    pub gte_commands: u64,
+}
+
+impl InstructionClassProfileSnapshot {
+    /// Saturating per-field difference from an earlier snapshot.
+    pub fn delta_since(self, earlier: Self) -> Self {
+        macro_rules! delta {
+            ($field:ident) => {
+                self.$field.saturating_sub(earlier.$field)
+            };
+        }
+        Self {
+            instructions: delta!(instructions),
+            nops: delta!(nops),
+            delay_slot_instructions: delta!(delay_slot_instructions),
+            delay_slot_nops: delta!(delay_slot_nops),
+            delay_slot_loads: delta!(delay_slot_loads),
+            delay_slot_stores: delta!(delay_slot_stores),
+            delay_slot_control_flow: delta!(delay_slot_control_flow),
+            byte_loads: delta!(byte_loads),
+            halfword_loads: delta!(halfword_loads),
+            word_loads: delta!(word_loads),
+            unaligned_loads: delta!(unaligned_loads),
+            byte_stores: delta!(byte_stores),
+            halfword_stores: delta!(halfword_stores),
+            word_stores: delta!(word_stores),
+            unaligned_stores: delta!(unaligned_stores),
+            ram_accesses: delta!(ram_accesses),
+            scratchpad_accesses: delta!(scratchpad_accesses),
+            mmio_accesses: delta!(mmio_accesses),
+            other_accesses: delta!(other_accesses),
+            sp_relative_loads: delta!(sp_relative_loads),
+            sp_relative_stores: delta!(sp_relative_stores),
+            lui: delta!(lui),
+            direct_jumps: delta!(direct_jumps),
+            jal: delta!(jal),
+            jalr: delta!(jalr),
+            conditional_branches: delta!(conditional_branches),
+            multiply: delta!(multiply),
+            divide: delta!(divide),
+            gte_register_transfers: delta!(gte_register_transfers),
+            gte_commands: delta!(gte_commands),
         }
     }
 }
@@ -377,6 +526,13 @@ pub struct Cpu {
     /// states because it is diagnostic history, not emulated hardware state.
     #[serde(skip)]
     instruction_cache_profile: InstructionCacheProfileSnapshot,
+    /// Opt-in exact refill-event capture. Disabled during ordinary play.
+    #[serde(skip)]
+    instruction_cache_event_profile_enabled: bool,
+    /// Most recent refill, drained by an emulator-owned profiler after each
+    /// step. At most one instruction fetch occurs per interpreter step.
+    #[serde(skip)]
+    last_instruction_cache_refill: Option<InstructionCacheRefillEvent>,
     /// Opt-in CPU cycle attribution. Kept off on the normal interpreter path
     /// so profiling cannot become a host-performance tax for regular play.
     #[serde(skip)]
@@ -384,6 +540,12 @@ pub struct Cpu {
     /// Emulator-owned CPU cycle attribution history. Diagnostic only.
     #[serde(skip)]
     cpu_cycle_profile: CpuCycleProfileSnapshot,
+    /// Opt-in exact instruction-class profiler.
+    #[serde(skip)]
+    instruction_class_profile_enabled: bool,
+    /// Dynamic instruction-class totals. Diagnostic only.
+    #[serde(skip)]
+    instruction_class_profile: InstructionClassProfileSnapshot,
     /// COP2 -- Geometry Transformation Engine. Holds 32 data + 32
     /// control registers and dispatches the GTE function set.
     cop2: Gte,
@@ -478,8 +640,12 @@ impl Cpu {
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
             instruction_cache_profile: InstructionCacheProfileSnapshot::default(),
+            instruction_cache_event_profile_enabled: false,
+            last_instruction_cache_refill: None,
             cpu_cycle_profile_enabled: false,
             cpu_cycle_profile: CpuCycleProfileSnapshot::default(),
+            instruction_class_profile_enabled: false,
+            instruction_class_profile: InstructionClassProfileSnapshot::default(),
             cop2: Gte::new(),
             freelook: FreelookState::default(),
             isr_depth: 0,
@@ -668,6 +834,18 @@ impl Cpu {
         self.instruction_cache_profile
     }
 
+    /// Enable or disable exact instruction-cache refill event capture.
+    pub fn set_instruction_cache_event_profile_enabled(&mut self, enabled: bool) {
+        self.instruction_cache_event_profile_enabled = enabled;
+        self.last_instruction_cache_refill = None;
+    }
+
+    /// Drain the refill produced by the most recent interpreter step.
+    #[inline]
+    pub fn take_instruction_cache_refill_event(&mut self) -> Option<InstructionCacheRefillEvent> {
+        self.last_instruction_cache_refill.take()
+    }
+
     /// Enable or disable CPU cycle attribution, resetting prior observations.
     pub fn set_cpu_cycle_profile_enabled(&mut self, enabled: bool) {
         self.cpu_cycle_profile_enabled = enabled;
@@ -678,6 +856,18 @@ impl Cpu {
     #[inline]
     pub fn cpu_cycle_profile(&self) -> CpuCycleProfileSnapshot {
         self.cpu_cycle_profile
+    }
+
+    /// Enable or disable exact instruction-class profiling and reset totals.
+    pub fn set_instruction_class_profile_enabled(&mut self, enabled: bool) {
+        self.instruction_class_profile_enabled = enabled;
+        self.instruction_class_profile = InstructionClassProfileSnapshot::default();
+    }
+
+    /// Snapshot dynamic instruction-class totals.
+    #[inline]
+    pub fn instruction_class_profile(&self) -> InstructionClassProfileSnapshot {
+        self.instruction_class_profile
     }
 
     /// Write a general-purpose register, enforcing the MIPS invariant
@@ -719,6 +909,9 @@ impl Cpu {
 
     #[inline]
     fn fetch_instruction(&mut self, addr: u32, bus: &mut Bus) -> u32 {
+        if self.instruction_cache_event_profile_enabled {
+            self.last_instruction_cache_refill = None;
+        }
         if !self.instruction_cache_enabled_at(addr) {
             let stalls = bus.instruction_read_stalls(addr);
             if self.cpu_cycle_profile_enabled {
@@ -733,7 +926,12 @@ impl Cpu {
         let phys = memory::to_physical(addr);
         let iblksz =
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
-        let (instruction, filled_words) = self.instruction_cache.fetch(phys, iblksz, bus);
+        let (instruction, filled_words, refill) = self.instruction_cache.fetch(
+            phys,
+            iblksz,
+            bus,
+            self.instruction_cache_event_profile_enabled,
+        );
         let stalls = bus.icache_fill_stalls(phys, filled_words);
         if filled_words != 0 {
             self.instruction_cache_profile.refill_events = self
@@ -755,8 +953,36 @@ impl Cpu {
                 .icache_refill_stall_cycles
                 .saturating_add(stalls as u64);
         }
+        if self.instruction_cache_event_profile_enabled {
+            self.last_instruction_cache_refill = refill.map(|event| InstructionCacheRefillEvent {
+                fetch_pc: addr,
+                cache_set: event.set,
+                incoming_line: event.incoming_line,
+                incoming_tag: event.incoming_tag,
+                victim_line: event.victim_line,
+                victim_tag: event.victim_tag,
+                victim_valid_mask: event.victim_valid_mask,
+                miss_kind: if event.tag_miss {
+                    InstructionCacheMissKind::Tag
+                } else {
+                    InstructionCacheMissKind::InvalidWord
+                },
+                fill_words: event.fill_words,
+                stall_cycles: stalls,
+            });
+        }
         bus.add_cycles(stalls);
         instruction
+    }
+
+    #[inline]
+    fn instruction_address_is_executable(addr: u32) -> bool {
+        if addr >= 0xC000_0000 {
+            return false;
+        }
+        let phys = memory::to_physical(addr);
+        phys < memory::ram::MIRROR_END
+            || (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32).contains(&phys)
     }
 
     #[inline]
@@ -793,6 +1019,102 @@ impl Cpu {
             return Some(ProfiledDataAccess::Mmio);
         }
         Some(ProfiledDataAccess::Other)
+    }
+
+    fn profile_instruction_class(&mut self, instr: u32, in_delay_slot: bool) {
+        let opcode = ((instr >> 26) & 0x3F) as u8;
+        let funct = (instr & 0x3F) as u8;
+        let base = ((instr >> 21) & 0x1F) as u8;
+        let is_load = matches!(opcode, 0x20..=0x26 | 0x32);
+        let is_store = matches!(opcode, 0x28 | 0x29 | 0x2A | 0x2B | 0x2E | 0x3A);
+        let is_control_flow =
+            matches!(opcode, 0x01..=0x07) || (opcode == 0 && matches!(funct, 0x08 | 0x09));
+        let profile = &mut self.instruction_class_profile;
+
+        macro_rules! increment {
+            ($field:ident) => {
+                profile.$field = profile.$field.saturating_add(1)
+            };
+        }
+
+        increment!(instructions);
+        if instr == 0 {
+            increment!(nops);
+        }
+        if in_delay_slot {
+            increment!(delay_slot_instructions);
+            if instr == 0 {
+                increment!(delay_slot_nops);
+            }
+            if is_load {
+                increment!(delay_slot_loads);
+            }
+            if is_store {
+                increment!(delay_slot_stores);
+            }
+            if is_control_flow {
+                increment!(delay_slot_control_flow);
+            }
+        }
+
+        match opcode {
+            0x20 | 0x24 => increment!(byte_loads),
+            0x21 | 0x25 => increment!(halfword_loads),
+            0x22 | 0x26 => increment!(unaligned_loads),
+            0x23 | 0x32 => increment!(word_loads),
+            0x28 => increment!(byte_stores),
+            0x29 => increment!(halfword_stores),
+            0x2A | 0x2E => increment!(unaligned_stores),
+            0x2B | 0x3A => increment!(word_stores),
+            _ => {}
+        }
+
+        if is_load || is_store {
+            let offset = (instr as i16) as i32 as u32;
+            let address = self.gprs[(base & 31) as usize].wrapping_add(offset);
+            let physical = memory::to_physical(address);
+            if physical < memory::ram::MIRROR_END {
+                increment!(ram_accesses);
+            } else if !(0xA000_0000..0xC000_0000).contains(&address)
+                && (memory::scratchpad::BASE
+                    ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+                    .contains(&physical)
+            {
+                increment!(scratchpad_accesses);
+            } else if (memory::expansion1::BASE..memory::bios::BASE).contains(&physical) {
+                increment!(mmio_accesses);
+            } else {
+                increment!(other_accesses);
+            }
+            if base == 29 {
+                if is_load {
+                    increment!(sp_relative_loads);
+                } else {
+                    increment!(sp_relative_stores);
+                }
+            }
+        }
+
+        match opcode {
+            0x02 => increment!(direct_jumps),
+            0x03 => increment!(jal),
+            0x01 | 0x04..=0x07 => increment!(conditional_branches),
+            0x0F => increment!(lui),
+            0x12 => {
+                if instr & (1 << 25) != 0 {
+                    increment!(gte_commands);
+                } else {
+                    increment!(gte_register_transfers);
+                }
+            }
+            0 => match funct {
+                0x09 => increment!(jalr),
+                0x18 | 0x19 => increment!(multiply),
+                0x1A | 0x1B => increment!(divide),
+                _ => {}
+            },
+            _ => {}
+        }
     }
 
     #[inline]
@@ -1142,6 +1464,41 @@ impl Cpu {
         }
 
         let pc_before = self.pc;
+        if pc_before & 3 != 0 || !Self::instruction_address_is_executable(pc_before) {
+            // The PS1 scratchpad is the repurposed data cache and cannot
+            // supply instructions. Reject it (and every other unmapped
+            // instruction address) before consulting the I-cache, otherwise
+            // an emulator-only scratchpad code kernel can appear to work.
+            let in_delay_slot = self.pending_pc.is_some();
+            self.cop0[8] = pc_before;
+            let code = if pc_before & 3 != 0 {
+                ExceptionCode::AddressErrorLoad
+            } else {
+                ExceptionCode::InstructionBusError
+            };
+            self.enter_exception(code, pc_before, in_delay_slot);
+            self.stage_hle_unresolved_exception(bus);
+            self.pending_pc = None;
+            if let Some((reg, value)) = self.pending_load.take() {
+                let index = (reg & 31) as usize;
+                if index != 0 {
+                    self.gprs[index] = value;
+                }
+            }
+            self.committing_load = None;
+            if self.instruction_cache_event_profile_enabled {
+                self.last_instruction_cache_refill = None;
+            }
+            self.pc = self
+                .pending_exception_pc
+                .take()
+                .expect("instruction fetch fault staged an exception vector");
+            bus.tick(2);
+            return Ok(ExecutedInstruction {
+                record_pc: pc_before,
+                record_instr: 0,
+            });
+        }
         let instr = self.fetch_instruction(pc_before, bus);
 
         // BIAS charged BEFORE the opcode runs -- matches Redux's
@@ -1167,6 +1524,10 @@ impl Cpu {
         // the branch target instead of the usual `pc + 4`.
         let branch_after_this = self.pending_pc.take();
         let in_delay_slot = branch_after_this.is_some();
+
+        if self.instruction_class_profile_enabled {
+            self.profile_instruction_class(instr, in_delay_slot);
+        }
 
         // The load delay queued by the *previous* instruction is held
         // in `committing_load` for the duration of `execute`. The
@@ -2925,6 +3286,10 @@ enum ExceptionCode {
     /// AdES -- store-side address error. Raised by `SH`/`SW` for
     /// the equivalent misalignment cases.
     AddressErrorStore = 5,
+    /// IBE -- instruction fetch from a non-executable physical region. The
+    /// PS1 scratchpad is data-only, so attempting to run a scratch-resident
+    /// kernel enters this exception rather than reading its bytes as code.
+    InstructionBusError = 6,
     Syscall = 8,
     Break = 9,
     /// CpU -- selected coprocessor is unavailable. CAUSE.CE is filled by
@@ -3913,5 +4278,111 @@ mod tests {
         // before the memory transaction.
         let (_cpu, bus) = step_one_load_store(0x8C89_0001, 0xBFC0_0000);
         assert_eq!(bus.cycles(), 32 + cycle_cost(0) as u64);
+    }
+
+    #[test]
+    fn scratchpad_instruction_fetch_raises_ibe_before_icache_lookup() {
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x1F80_0000;
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+
+        // Seed the matching cache line with a valid NOP. The architectural
+        // executable-region check must win even over an apparent cache hit.
+        cpu.instruction_cache.write_data(cpu.pc, 0);
+        cpu.instruction_cache.write_tag(cpu.pc, 0xF);
+
+        cpu.step(&mut bus).expect("IBE enters the exception vector");
+
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 6);
+        assert_eq!(cpu.cop0[8], 0x1F80_0000);
+        assert_eq!(cpu.cop0[14], 0x1F80_0000);
+        assert_eq!(cpu.pc(), 0x8000_0080);
+        assert_eq!(cpu.exception_counts()[6], 1);
+    }
+
+    #[test]
+    fn instruction_fetch_fault_in_delay_slot_sets_bd_and_branch_epc() {
+        let mut bus = Bus::new_without_bios();
+        // Last executable word of the 8 MiB RAM mirror: J 0x80001000.
+        // Its sequential delay-slot address is 0x80800000, just outside the
+        // mirror and therefore raises IBE before the pending jump commits.
+        let jump = 0x0800_0000 | ((0x8000_1000u32 >> 2) & 0x03FF_FFFF);
+        bus.write32(0x001F_FFFC, jump);
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x807F_FFFC;
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+
+        cpu.step(&mut bus).expect("jump");
+        assert_eq!(cpu.pc(), 0x8080_0000);
+        cpu.step(&mut bus).expect("delay-slot IBE");
+
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 6);
+        assert_ne!(cpu.cop0[13] & (1 << 31), 0, "CAUSE.BD");
+        assert_eq!(cpu.cop0[8], 0x8080_0000);
+        assert_eq!(cpu.cop0[14], 0x807F_FFFC);
+        assert_eq!(cpu.pc(), 0x8000_0080);
+    }
+
+    #[test]
+    fn exact_icache_refill_event_reports_victim_and_miss_kind() {
+        let mut bus = Bus::new_without_bios();
+        bus.write32(0x0000_1000, 0);
+        bus.write32(0x0000_2000, 0);
+        let mut cpu = Cpu::new();
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        cpu.set_instruction_cache_event_profile_enabled(true);
+
+        cpu.pc = 0x8000_1000;
+        cpu.step(&mut bus).expect("first cached NOP");
+        let first = cpu
+            .take_instruction_cache_refill_event()
+            .expect("first tag refill");
+        assert_eq!(first.fetch_pc, 0x8000_1000);
+        assert_eq!(first.cache_set, 0);
+        assert_eq!(first.incoming_line, 0x0000_1000);
+        assert_eq!(first.victim_valid_mask, 0);
+        assert_eq!(first.miss_kind, InstructionCacheMissKind::Tag);
+        assert_eq!(first.fill_words, 4);
+
+        cpu.pc = 0x8000_2000;
+        cpu.step(&mut bus).expect("same-set replacement NOP");
+        let second = cpu
+            .take_instruction_cache_refill_event()
+            .expect("replacement refill");
+        assert_eq!(second.incoming_line, 0x0000_2000);
+        assert_eq!(second.victim_line, 0x0000_1000);
+        assert_eq!(second.victim_valid_mask, 0xF);
+        assert_eq!(second.miss_kind, InstructionCacheMissKind::Tag);
+        assert!(second.stall_cycles > 0);
+    }
+
+    #[test]
+    fn instruction_class_profile_counts_delay_width_region_and_units() {
+        let mut cpu = Cpu::new();
+        cpu.gprs[29] = memory::scratchpad::BASE;
+
+        // LB $t0, 0($sp), followed by a delay-slot NOP observation.
+        let lb_sp = (0x20u32 << 26) | (29u32 << 21) | (8u32 << 16);
+        cpu.profile_instruction_class(lb_sp, false);
+        cpu.profile_instruction_class(0, true);
+        // One GTE command, one LUI, one JALR and one MULT.
+        cpu.profile_instruction_class(0x4A00_0001, false);
+        cpu.profile_instruction_class(0x3C08_1234, false);
+        cpu.profile_instruction_class((8u32 << 21) | (31u32 << 11) | 0x09, false);
+        cpu.profile_instruction_class((8u32 << 21) | (9u32 << 16) | 0x18, false);
+
+        let profile = cpu.instruction_class_profile();
+        assert_eq!(profile.instructions, 6);
+        assert_eq!(profile.byte_loads, 1);
+        assert_eq!(profile.scratchpad_accesses, 1);
+        assert_eq!(profile.sp_relative_loads, 1);
+        assert_eq!(profile.nops, 1);
+        assert_eq!(profile.delay_slot_instructions, 1);
+        assert_eq!(profile.delay_slot_nops, 1);
+        assert_eq!(profile.gte_commands, 1);
+        assert_eq!(profile.lui, 1);
+        assert_eq!(profile.jalr, 1);
+        assert_eq!(profile.multiply, 1);
     }
 }

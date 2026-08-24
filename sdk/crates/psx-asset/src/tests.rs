@@ -335,6 +335,129 @@ fn animation_round_trip_pose_table() {
     assert_eq!(halfword_animation.pose(1, 0), Some(pose));
 }
 
+fn pack_q11_codes(codes: [u16; 9]) -> [u8; 14] {
+    let mut packed = [0u8; 14];
+    let mut lane = 0usize;
+    while lane < codes.len() {
+        let code = codes[lane] & 0x0fff;
+        let bit_offset = lane * 12;
+        let mut bit = 0usize;
+        while bit < 12 {
+            if code & (1 << bit) != 0 {
+                let output_bit = bit_offset + bit;
+                packed[output_bit >> 3] |= 1 << (output_bit & 7);
+            }
+            bit += 1;
+        }
+        lane += 1;
+    }
+    packed
+}
+
+#[test]
+fn animation_v3_word_decoder_matches_byte_decoder_for_every_q11_code_and_lane() {
+    #[repr(C, align(4))]
+    struct WordAlignedRecord([u8; psxed_format::animation::POSE_RECORD_SIZE_V3]);
+
+    let translations = [-32768i16, 0x1234, 32767];
+    let mut lane = 0usize;
+    while lane < 9 {
+        let mut code = 0u16;
+        while code < 0x1000 {
+            let mut codes = [0u16; 9];
+            let mut other = 0usize;
+            while other < codes.len() {
+                codes[other] = ((other as u16 * 0x19d) ^ 0x5a5) & 0x0fff;
+                other += 1;
+            }
+            codes[lane] = code;
+
+            let mut record = WordAlignedRecord([0; psxed_format::animation::POSE_RECORD_SIZE_V3]);
+            record.0[..psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3]
+                .copy_from_slice(&pack_q11_codes(codes));
+            let mut translation_offset = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
+            for translation in translations {
+                record.0[translation_offset..translation_offset + 2]
+                    .copy_from_slice(&translation.to_le_bytes());
+                translation_offset += 2;
+            }
+
+            let expected_matrix = unsafe { read_pose_matrix_q11_unchecked(&record.0, 0) };
+            let (matrix, translation) =
+                unsafe { read_pose_v3_word_aligned_unchecked(&record.0, 0) };
+            assert_eq!(matrix, expected_matrix, "lane={lane} code=0x{code:03x}");
+            assert_eq!(
+                translation,
+                Vec3I16::new(translations[0], translations[1], translations[2]),
+                "lane={lane} code=0x{code:03x}"
+            );
+            code += 1;
+        }
+        lane += 1;
+    }
+}
+
+#[test]
+fn animation_v3_aligned_and_unaligned_public_paths_are_identical() {
+    use psxed_format::animation;
+
+    const FRAMES: usize = 3;
+    const BYTES: usize = psxed_format::AssetHeader::SIZE
+        + animation::AnimationHeader::SIZE
+        + FRAMES * animation::POSE_RECORD_SIZE_V3;
+    #[repr(C, align(4))]
+    struct WordAlignedBlob([u8; BYTES]);
+
+    let mut blob = WordAlignedBlob([0; BYTES]);
+    blob.0[0..4].copy_from_slice(&animation::MAGIC);
+    blob.0[4..6].copy_from_slice(&animation::VERSION_V3.to_le_bytes());
+    let payload_len = BYTES - psxed_format::AssetHeader::SIZE;
+    blob.0[8..12].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    blob.0[12..14].copy_from_slice(&1u16.to_le_bytes());
+    blob.0[14..16].copy_from_slice(&(FRAMES as u16).to_le_bytes());
+    blob.0[16..18].copy_from_slice(&15u16.to_le_bytes());
+    blob.0[18..20].copy_from_slice(&2u16.to_le_bytes());
+
+    for frame in 0..FRAMES {
+        let codes = if frame == 1 {
+            [
+                0x200, 0x111, 0xeee, 0x7ff, 0x800, 0x001, 0xfff, 0x333, 0xabc,
+            ]
+        } else {
+            [0x7ff, 0, 0, 0, 0x7ff, 0, 0, 0, 0x7ff]
+        };
+        let base = 20 + frame * animation::POSE_RECORD_SIZE_V3;
+        blob.0[base..base + animation::POSE_ROTATION_BLOCK_SIZE_V3]
+            .copy_from_slice(&pack_q11_codes(codes));
+        for (axis, value) in [frame as i16 * 10, frame as i16 * -20, frame as i16 * 30]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = base + animation::POSE_ROTATION_BLOCK_SIZE_V3 + axis * 2;
+            blob.0[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    let aligned = Animation::from_bytes(&blob.0).expect("aligned v3 animation parses");
+    assert_eq!(aligned.poses.as_ptr() as usize & 3, 0);
+
+    for desired_alignment in [1usize, 2, 3] {
+        let mut storage = std::vec![0u8; BYTES + 3];
+        let base_alignment = storage.as_ptr() as usize & 3;
+        let prefix = (desired_alignment + 4 - base_alignment) & 3;
+        storage[prefix..prefix + BYTES].copy_from_slice(&blob.0);
+        let bytes = &storage[prefix..prefix + BYTES];
+        assert_eq!(bytes.as_ptr() as usize & 3, desired_alignment);
+        let unaligned = Animation::from_bytes(bytes).expect("unaligned v3 animation parses");
+        for phase in [0, 0x400, 0x800, 0x1000, 0x1800] {
+            let aligned_sample = aligned.looped_pose_sample_q12(phase).unwrap();
+            let unaligned_sample = unaligned.looped_pose_sample_q12(phase).unwrap();
+            assert_eq!(aligned_sample.pose(0), unaligned_sample.pose(0));
+            assert_eq!(aligned_sample.gte_pose(0), unaligned_sample.gte_pose(0));
+        }
+    }
+}
+
 #[test]
 fn animation_looped_pose_interpolates_q12_phase() {
     use psxed_format::animation;

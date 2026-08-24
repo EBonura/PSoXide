@@ -178,7 +178,10 @@ impl Scene for Playtest {
     /// consolidated upload is the fix; routing it through the allocator keeps
     /// the font VRAM tracked.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
-        acquire_shared_ui_fonts(&mut self.ui_fonts);
+        assert!(
+            acquire_shared_ui_fonts(&mut self.ui_fonts),
+            "UI font VRAM pack failed"
+        );
         // Streamed UI images live only in menu states. Menu entry uploads any
         // already-cached active-scene images but does not read the disc; those
         // reads are stepped after boot by `update_ui_resources` so real hardware
@@ -1251,7 +1254,7 @@ impl Scene for Playtest {
             );
             self.emit_portal_visibility_counters();
             #[cfg(feature = "cd-stream-bench")]
-            {
+            if !USES_PXBSP {
                 let room_streams = room_streams_arena();
                 telemetry::counter(
                     telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,

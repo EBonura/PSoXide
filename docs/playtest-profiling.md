@@ -84,13 +84,27 @@ emulated timing:
   not be added to `profiled_cpu_cycles` a second time.
 - `--pc-line-log <csv>` counts every retired instruction by canonical 16-byte
   I-cache line. This is exact execution density rather than the periodic sample
-  emitted by `--pc-sample-log`, and is intended for conflict-aware code layout.
+  emitted by `--pc-sample-log`. Set occupancy alone is not evidence of a cache
+  conflict: it cannot say which incoming line actually displaced which victim.
   Add `--pc-line-start-route-tick <N>` to exclude deterministic boot/loading
   work and rank only the gameplay tail of a route.
+- `--icache-event-log <csv>` records every real refill with its direct-mapped
+  set, incoming line/tag, previous victim line/tag/valid mask, miss kind, fill
+  width and charged stall cycles. Add `--icache-event-start-route-tick <N>` to
+  isolate a gameplay window. Rank exact temporal victim-to-incoming pairs with
+  `python3 tools/pc_line_attribution.py <pc-lines.csv> <link.map>
+  --icache-events <events.csv>`; always resolve against the matching executable
+  map.
+- `--instruction-class-log <csv>` writes exact per-route-tick dynamic counts
+  for NOP/delay-slot kinds, memory widths and regions, stack-relative memory,
+  LUI, jumps/branches, multiply/divide and GTE transfers/commands. Use this to
+  bound a low-level proposal before changing generated MIPS.
 - `--stack-profile-log <csv>` observes `$sp` without writing a canary into guest
   memory. Add `--stack-profile-root-pc 0xADDRESS` to measure each completed call
   of a render root from its entry stack pointer through its return; omit the
-  root to measure the complete run.
+  root to measure the complete main-RAM run. Rooted profiles also accept the
+  scratchpad's KUSEG/KSEG0 aliases; the uncached KSEG1 alias remains unmapped on
+  the real CPU and is rejected.
 - `--pc-sample-callsite-log <csv>`: out-of-band PC, `$ra`, `$sp+20`, and
   `$sp+36` samples. The two stack words recover callers through the standard
   compiler-builtins wrapper and its inner 16-byte frame, so time inside
