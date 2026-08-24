@@ -802,7 +802,7 @@ Gate:
 
 - exact animation pose and projected-vertex results;
 - exact model packets and GPU stream;
-- exact display/VRAM across E1M1 and Quake Units Arena;
+- exact display/VRAM across E1M1 and Cortex Ignition Tech Demo 0.1;
 - MIPS disassembly proves fewer RAM loads/stores and no new GTE hazard;
 - real-console hardware-test/capture before shipping.
 

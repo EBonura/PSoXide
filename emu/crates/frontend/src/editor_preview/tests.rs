@@ -674,12 +674,12 @@ fn idle_light_keeps_its_bulb_but_hides_the_room_spanning_radius_ring() {
 }
 
 #[test]
-fn quake_units_arena_saved_camera_has_preview_headroom_and_compact_idle_guides() {
+fn cortex_ignition_tech_demo_0_1_saved_camera_has_preview_headroom_and_compact_idle_guides() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let project_root = repo_root.join("editor/projects/default");
     let project =
-        ProjectDocument::load_from_path(project_root.join("project.ron")).expect("arena loads");
-    assert_eq!(project.name, "Quake Units Arena");
+        ProjectDocument::load_from_path(project_root.join("project.ron")).expect("tech demo loads");
+    assert_eq!(project.name, "Cortex Ignition Tech Demo 0.1");
     let mut textures = crate::editor_textures::EditorTextures::new();
     textures.refresh(&project, &project_root);
     textures.refresh_models(&project, &project_root);
@@ -1366,7 +1366,7 @@ fn brush_polygon_clip_rejects_a_wholly_offscreen_face() {
 
 #[test]
 fn oversized_light_ring_is_clipped_before_it_becomes_a_viewport_slash() {
-    // The saved Quake Units Arena camera and authored light radius that
+    // The saved Cortex Ignition Tech Demo 0.1 camera and authored light radius that
     // exposed this: one ring edge crossed the camera plane, then endpoint
     // projection saturated it to almost the complete i16 screen range.
     let camera = setup_gte_for_camera(ViewportCameraState {
