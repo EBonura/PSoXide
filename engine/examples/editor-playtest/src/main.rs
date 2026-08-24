@@ -376,6 +376,9 @@ struct Playtest {
     /// post-update pose pass consumes these before player melee, keeping enemy
     /// body, equipment, and contact on one retained sample.
     deferred_enemy_attacks: RuntimeDeferredEnemyAttacks,
+    /// Fixed-capacity swept combat projectiles. All-zero is an empty valid
+    /// state, so it remains in scene BSS beside the entity SoA.
+    combat_projectiles: RuntimeCombatProjectiles,
     /// Logic-entity runtime (delay queue, master gating, fan-out)
     /// over the cooked `LOGIC` records (phase 3).
     logic: RuntimeLogic,

@@ -69,8 +69,9 @@ pub const PLAYTEST_VRAM_PHYSICAL_BYTES: usize = 1024 * 512 * 2;
 pub const PLAYTEST_RESIDENT_ASSET_PAGE_BYTES: usize = 2048;
 
 /// Ceiling, in 2 KiB pages, on assets that stay resident for the whole
-/// gameplay session: every model mesh, atlas and animation clip cooked as
-/// `StreamedClass::PersistentGameplay`.
+/// gameplay session. Model animations use
+/// `StreamedClass::PersistentGameplay`; meshes and atlases are staged during
+/// loading, decoded or uploaded, and then discarded.
 ///
 /// A canary, not the real gate. The real gate is the MIPS link, because the
 /// arena is guest `.bss`, and until now the only thing that ever reported the
@@ -85,7 +86,7 @@ pub const PLAYTEST_RESIDENT_ASSET_PAGE_BYTES: usize = 2048;
 /// do. The cap sits 10 pages under the measured point so ordinary code growth
 /// cannot win the race and put the linker back in front of the audit.
 ///
-/// ponytail: one global number, because every model clip is currently
+/// One global number, because every model clip is currently
 /// `PersistentGameplay` and so resident for the entire session. When per-scene
 /// residency lands this becomes a per-scene figure. Re-measure by bisecting the
 /// manifest constant against the link; do not trust this value after a large
@@ -838,9 +839,10 @@ pub fn validate_resident_assets(package: &PlaytestPackage) -> Result<ResidentAss
     Err(format!(
         "session-resident assets need {} pages, {} over the {}-page ceiling \
          ({} B used, {} B over).\n\
-         Every model mesh, atlas and animation clip is cooked PersistentGameplay, so all \
-         of it sits in guest .bss for the whole session; the MIPS link is what fails next \
-         (measured ceiling {} pages).{}\n\
+         Model animation clips remain resident for the whole session; model meshes are \
+         decoded from loading scratch and atlases are uploaded to VRAM, then both staging \
+         payloads are discarded. The MIPS link is what fails next (measured ceiling {} \
+         pages).{}\n\
          Shorten or drop clips, or scope them per scene. Nothing was written; the \
          previously generated output is intact.",
         audit.resident_pages(),

@@ -402,13 +402,14 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
     /// what gets sampled, so dropping the RAM bytes is safe and they reload from
     /// the keep-set if a room wants them again.
     ///
-    /// Model meshes and animation clips are NOT safe. `RuntimeModelAsset` holds a
-    /// `Model<'static>` borrowed from this pool, and clips are read the same way.
-    /// Releasing one leaves that view over a hole, which the next first-fit
-    /// allocation would overwrite underneath it. They stay pinned for the level;
-    /// paging them needs a rebuild path that does not exist yet.
+    /// Model meshes are also safe after loading: their faces, parts, vertices,
+    /// and counts are copied into fixed runtime pools. Animation clips still
+    /// borrow their packed payload and must remain pinned for the level.
     const fn evictable(kind: AssetKind) -> bool {
-        matches!(kind, AssetKind::Texture | AssetKind::RoomWorld)
+        matches!(
+            kind,
+            AssetKind::Texture | AssetKind::RoomWorld | AssetKind::ModelMesh
+        )
     }
 
     /// Make the persistent set match `desired`'s residency needs.
@@ -743,10 +744,10 @@ mod tests {
         assert!(crossing.storage.resident(2), "shared asset retained");
     }
 
-    /// Model bytes back a live `Model<'static>`, so they must survive an
-    /// eviction pass even when no desired room lists them.
+    /// Decoded meshes may be released, while animation bytes still back live
+    /// parsed clips and must survive an eviction pass.
     #[test]
-    fn model_assets_are_never_evicted() {
+    fn decoded_model_meshes_are_evictable_but_animation_clips_are_pinned() {
         type Streamer = PersistentAssetStreamer<4, 8>;
         const ROOMS: &[RoomResidencyRecord] = &[residency(0, &[AssetId(1)], &[])];
         let assets = [
@@ -762,7 +763,7 @@ mod tests {
         streamer.request_rooms(0, &[], &assets, &[RoomIndex(0)], ROOMS);
         assert!(streamer.storage.resident(1), "required texture kept");
         assert!(!streamer.storage.resident(2), "unwanted texture evicted");
-        assert!(streamer.storage.resident(3), "model mesh pinned");
+        assert!(!streamer.storage.resident(3), "decoded model mesh evicted");
         assert!(streamer.storage.resident(4), "animation clip pinned");
     }
 

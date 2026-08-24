@@ -21,7 +21,8 @@ use psx_engine::{
     commit_body_direction_with_trace_provider, commit_body_step_with_trace_provider,
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
     CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
-    CharacterMotorState, CollisionQueryError, CollisionTraceQuery, CollisionTraceShape, OtFrame,
+    CharacterMotorState, CollisionQueryError, CollisionTrace, CollisionTraceQuery,
+    CollisionTraceShape, OtFrame,
     PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
     ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
 };
@@ -690,6 +691,20 @@ impl BspRuntime {
         to: RoomPoint,
         aabb_blockers: &[CharacterCollisionAabb],
     ) -> bool {
+        self.trace_point_segment(from, to, aabb_blockers)
+            .is_ok_and(|trace| !trace.hit())
+    }
+
+    /// Trace a gameplay point sweep through static BSP, transformed brush
+    /// movers, and checked live prop AABBs. Projectile actor collision still
+    /// uses its authored swept-sphere radius; this provider owns only the
+    /// world's centerline clip until arbitrary-radius BSP hulls are cooked.
+    pub(super) fn trace_point_segment(
+        &mut self,
+        from: RoomPoint,
+        to: RoomPoint,
+        aabb_blockers: &[CharacterCollisionAabb],
+    ) -> Result<CollisionTrace, CollisionQueryError> {
         let mut models = [PxbspCollisionModel::new(0, BrushTransform::IDENTITY); MAX_BSP_DOORS];
         let count = self.collision_models(&mut models);
         let mut provider = PxbspCollisionProvider::new(
@@ -702,10 +717,7 @@ impl BspRuntime {
         .expect("validated PXBSP melee occlusion provider");
         let mut provider =
             CharacterBlockerTraceProvider::new_with_aabbs(&mut provider, &[], aabb_blockers);
-        match trace_collision(&mut provider, CollisionTraceQuery::point(from, to)) {
-            Ok(trace) => !trace.hit(),
-            Err(_) => false,
-        }
+        trace_collision(&mut provider, CollisionTraceQuery::point(from, to))
     }
 
     pub(super) fn update_camera(

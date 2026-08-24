@@ -419,10 +419,6 @@ const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/aletha_delivered",
     "assets/models/rust_mantis",
-    // Keep both the delivered heavy-enemy backup and the native animated
-    // model. The Character profile uses the latter; the former remains a
-    // reversible source-of-truth import in every new project.
-    "assets/models/tank_boss_model",
     "assets/models/tank_boss_animated_model",
     "assets/animations/aletha_delivered",
     "assets/animations/gen",
@@ -430,7 +426,6 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     // The mantis's attack / stagger / death, which the enemy FSM needs and
     // which live in their own pack beside its locomotion.
     "assets/animations/mantis_combat",
-    "assets/animations/tank_boss",
     "assets/animations/tank_boss_ai",
     "assets/models/sword1_light",
     "assets/models/sword1_heavy",
@@ -440,13 +435,12 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/textures",
 ];
 
-/// Authoring sources directly referenced by starter Model resources. Large
-/// audition/render directories stay in the canonical default project; a new
-/// map only receives the files required to reopen or reimport its catalogue.
+/// Compact authoring sources retained with the starter catalogue. Generated
+/// audition and review directories are local-only and are never copied into a
+/// new project.
 const STARTER_CHARACTER_SOURCE_ASSET_PATHS: &[&str] = &[
     "source_assets/characters/aletha/Aletha.glb",
     "source_assets/characters/rust_mantis.glb",
-    "source_assets/characters/tank_boss/Enemy_02.fbx",
     "source_assets/characters/tank_boss/animations/heavy_walk_pack",
 ];
 
@@ -460,7 +454,6 @@ fn action_bar_height_for_status(status: &str) -> f32 {
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Aletha Delivered",
     "Rust Mantis",
-    "Tank Boss Model",
     "Tank Boss Animated Model",
     "Sword1 Light",
     "Sword1 Heavy",
@@ -469,7 +462,6 @@ const STARTER_CHARACTER_SKELETON_NAMES: &[&str] = &[
     "Cortex Humanoid 22-Bone Skeleton",
     "Aletha Delivered Skeleton",
     "Sword1 Light Skeleton",
-    "Tank Boss Skeleton",
     "Tank Boss Animated Model Skeleton",
 ];
 const STARTER_CHARACTER_MATERIAL_NAMES: &[&str] = &["Aletha Crystal"];
@@ -478,7 +470,6 @@ const STARTER_WEAPON_NAMES: &[&str] = &["Sword1 Light", "Sword1 Heavy"];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Aletha Delivered Animation Set",
     "Rust Mantis Starter Animation Set",
-    "Tank Boss Animation Set",
     "tank_boss_ai_set",
 ];
 const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &["Aletha", "Rust Mantis Enemy", "Tank Boss"];

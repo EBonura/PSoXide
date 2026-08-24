@@ -1606,6 +1606,18 @@ pub fn build_package(
                             else {
                                 return (None, report);
                             };
+                            let projectile_attack_range = enemy_character
+                                .combat_capsules
+                                .iter()
+                                .find_map(|volume| match volume.role {
+                                    crate::CombatCapsuleRole::ProjectileEmitter {
+                                        action: CharacterAnimationAction::LightAttack,
+                                        min_range,
+                                        max_range,
+                                        ..
+                                    } => Some((min_range, max_range)),
+                                    _ => None,
+                                });
                             let ok =
                                 report.blaming(PlaytestValidationTarget::Node(node.id), |report| {
                                     push_game_entity(
@@ -1626,6 +1638,7 @@ pub fn build_package(
                                         state_clips,
                                         combat_capsule_first,
                                         combat_capsule_count,
+                                        projectile_attack_range,
                                         &mut names,
                                         &mut game_entities,
                                         report,

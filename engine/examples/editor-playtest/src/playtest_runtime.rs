@@ -51,9 +51,18 @@ fn player_blend_ticks(from: PlayerAnim, to: PlayerAnim) -> u32 {
 }
 
 impl Playtest {
-    /// Apply a legacy, untyped incoming hit to the default vitality channel,
-    /// spilling excess damage into the second pool.
+    /// Fixed-point stat multipliers from the four endpoint sockets at the
+    /// current Horizon/Zenith health positions.
+    pub(super) fn vitality_modifiers(&self) -> VitalityModifiers {
+        self.power_up_loadout.modifiers(&self.player_vitality)
+    }
+
+    /// Apply a legacy, untyped incoming hit. Horizon is the migration/default
+    /// channel; damage beyond its remaining health spills into Zenith. New
+    /// coloured attacks can call `DualVitality::apply_damage` directly once
+    /// their authored axis is available.
     pub(super) fn apply_untyped_player_damage(&mut self, damage: u16) -> bool {
+        let damage = self.vitality_modifiers().incoming_damage(damage);
         self.player_vitality
             .apply_spill(VitalityChannelId::One, damage)
             .actor_defeated
@@ -311,6 +320,9 @@ impl Playtest {
         // `BspRuntime::update_motor` can select the exact cooked containing
         // hull instead of silently shrinking the player.
         apply_bsp_debug_body_fallback(&mut config, self.bsp.is_some(), self.character.is_some());
+        let modifiers = self.vitality_modifiers();
+        config.walk_speed = modifiers.movement_speed(config.walk_speed);
+        config.run_speed = modifiers.movement_speed(config.run_speed);
         config
     }
 
@@ -653,6 +665,76 @@ impl Playtest {
                     primitive_packets,
                 );
             }
+        }
+        submitted
+    }
+
+    /// Draw live combat bolts after world submission so their additive quads
+    /// participate in the same depth table as authored particle effects.
+    pub(super) fn draw_combat_projectiles(
+        &self,
+        camera: WorldCamera,
+        ot: &mut OtFrame<'_, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'_>,
+    ) -> usize {
+        let Some(particle_material) = self.particle_material else {
+            return 0;
+        };
+        let mut submitted = 0usize;
+        let mut index = 0usize;
+        while index < MAX_COMBAT_PROJECTILES {
+            let Some(projectile) = self.combat_projectiles.get(index) else {
+                index += 1;
+                continue;
+            };
+            let (room_camera, depth_range) = if self.bsp.is_some() {
+                if projectile.room != self.room_index {
+                    index += 1;
+                    continue;
+                }
+                (
+                    camera,
+                    ROOMS
+                        .get(projectile.room.to_usize())
+                        .map(room_depth_range)
+                        .unwrap_or(WORLD_DEPTH_RANGE),
+                )
+            } else {
+                let Some(active) = self
+                    .window
+                    .rooms
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .find(|active| active.index == projectile.room)
+                else {
+                    index += 1;
+                    continue;
+                };
+                if !self.portal_visibility_draws_room(projectile.room) {
+                    index += 1;
+                    continue;
+                }
+                (
+                    camera_for_room(camera, active),
+                    ROOMS
+                        .get(projectile.room.to_usize())
+                        .map(room_depth_range)
+                        .unwrap_or(WORLD_DEPTH_RANGE),
+                )
+            };
+            submitted += draw_projectile_bolt(
+                projectile.position,
+                projectile.radius,
+                projectile.tint_rgb,
+                room_camera,
+                None,
+                depth_range,
+                particle_material,
+                ot,
+                primitive_packets,
+            );
+            index += 1;
         }
         submitted
     }

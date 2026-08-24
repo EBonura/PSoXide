@@ -1232,10 +1232,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    // Per-room residency: required RAM = the room's world
-    // asset + every model mesh + every animation clip
-    // referenced by an instance OR by the player character in
-    // this room; required VRAM = every distinct texture asset
+    // Per-room residency: required RAM = the room's world asset plus every
+    // persistent animation clip referenced by an instance or player character.
+    // Model mesh source blobs are streamed through transient scratch and decoded
+    // into fixed geometry pools, so they are deliberately absent here.
+    // Required VRAM = every distinct texture asset
     // (room materials + room reflection probes + far-vista panels + model atlases)
     // referenced by this room. Warm lists mirror touching chunks
     // so the runtime can preload neighbours without owning their
@@ -2002,12 +2003,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    out.push_str("/// Compact rig-attached hitboxes and hurtboxes.\n");
+    out.push_str("/// Compact rig-attached hitboxes, hurtboxes, and projectile emitters.\n");
     out.push_str("pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[\n");
     for capsule in &package.combat_capsules {
         let _ = writeln!(
             out,
-            "    CombatCapsuleRecord {{ joint: {}, flags: {}, action: {}, reserved: 0, start: [{}, {}, {}], end: [{}, {}, {}], radius: {}, active_start_frame: {}, active_end_frame: {}, damage: {}, poise_damage: {} }},",
+            "    CombatCapsuleRecord {{ joint: {}, flags: {}, action: {}, reserved: 0, start: [{}, {}, {}], end: [{}, {}, {}], radius: {}, active_start_frame: {}, active_end_frame: {}, damage: {}, poise_damage: {}, projectile_speed: {}, projectile_lifetime_ticks: {}, projectile_min_range: {}, projectile_max_range: {}, projectile_tint_rgb: [{}, {}, {}], projectile_reserved: 0 }},",
             capsule.joint,
             capsule.flags,
             capsule.action,
@@ -2022,6 +2023,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             capsule.active_end_frame,
             capsule.damage,
             capsule.poise_damage,
+            capsule.projectile_speed,
+            capsule.projectile_lifetime_ticks,
+            capsule.projectile_min_range,
+            capsule.projectile_max_range,
+            capsule.projectile_tint_rgb[0],
+            capsule.projectile_tint_rgb[1],
+            capsule.projectile_tint_rgb[2],
         );
     }
     out.push_str("];\n\n");
@@ -2037,7 +2045,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, walk_backward_clip: {}, strafe_left_clip: {}, strafe_right_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, attack_min_range: {}, attack_max_range: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -2075,6 +2083,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.group_attack_delay_ticks,
             entity.windup_ticks,
             entity.recovery_ticks,
+            entity.attack_min_range,
+            entity.attack_max_range,
             entity.poise,
             entity.touch_damage,
             entity.max_health,
@@ -3977,18 +3987,17 @@ fn push_unique(values: &mut Vec<usize>, value: usize) {
     }
 }
 
-/// Add `model_index`'s mesh + atlas + every clip to a room's
-/// residency lists. Idempotent through the caller's seen-set
+/// Add `model_index`'s atlas + every clip to a room's residency lists.
+/// Meshes are decoded from transient loading scratch into the fixed runtime
+/// geometry pools, so their source blobs do not stay resident. Idempotent
+/// through the caller's seen-set
 /// -- also dedupes within `required_ram` / `required_vram` so
 /// callers don't have to.
 ///
-/// Pulled out so the per-room walk can register both placed
-/// MeshInstance models and the player character's model
-/// without duplicating bookkeeping. Without the player path,
-/// a Character whose backing model isn't also placed as a
-/// MeshInstance would be missing from residency entirely --
-/// the runtime would then render the player from un-resident
-/// bytes the moment the room loaded.
+/// Pulled out so the per-room walk can register both placed MeshInstance models
+/// and the player character's model without duplicating bookkeeping. Without
+/// the player path, a Character whose backing model isn't also placed as a
+/// MeshInstance would miss its VRAM atlas and persistent animation clips.
 fn include_model_in_residency(
     package: &PlaytestPackage,
     model_index: u16,
@@ -3998,9 +4007,6 @@ fn include_model_in_residency(
     let Some(model) = package.models.get(model_index as usize) else {
         return;
     };
-    if !required_ram.contains(&model.mesh_asset_index) {
-        required_ram.push(model.mesh_asset_index);
-    }
     if let Some(atlas) = model.texture_asset_index {
         if !required_vram.contains(&atlas) {
             required_vram.push(atlas);

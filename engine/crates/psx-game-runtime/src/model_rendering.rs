@@ -11,10 +11,10 @@
 use psx_asset::{Animation, Model, ModelPart, ModelPoseBlend, ModelVertex};
 use psx_engine::{
     telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PrimitiveSink,
-    ProjectedVertex, RoomPoint, SimTick, TexturedModelGeometry, TexturedModelLayer,
-    TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass,
-    WorldSurfaceOptions, WorldVertex,
+    LocalToWorldScale, Mat3I16, ModelPoseTranslation, ModelUvMapping, ModelUvOffset,
+    PredecodedModelInfo, PrimitiveSink, ProjectedVertex, RoomPoint, SimTick, TexturedModelGeometry,
+    TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera,
+    WorldRenderPass, WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
@@ -146,7 +146,7 @@ impl<const MODEL_VERTEX_CAP: usize, const JOINT_CAP: usize>
 pub struct RuntimeModelAsset {
     /// Index into the cooked `MODELS` table.
     pub index: ModelIndex,
-    pub model: Model<'static>,
+    pub model_info: PredecodedModelInfo,
     pub material: TextureMaterial,
     pub clip_first: ModelClipTableIndex,
     pub clip_count: u16,
@@ -216,6 +216,64 @@ impl RuntimeModelAsset {
         let texture_asset = record.texture_asset?;
         let atlas_bytes = resolve_asset_bytes(texture_asset, AssetKind::Texture)?;
         let atlas_slot = ensure_model_atlas_uploaded(texture_asset, atlas_bytes)?;
+        Self::from_decoded_model(
+            index,
+            record,
+            model,
+            atlas_slot,
+            face_pool,
+            face_cursor,
+            part_pool,
+            part_cursor,
+            vertex_pool,
+            vertex_cursor,
+        )
+    }
+
+    /// Decode one model from short-lived mesh staging bytes and a VRAM-bound
+    /// atlas. All data needed after loading is copied into the supplied pools,
+    /// so `mesh_bytes` may be reused as soon as this function returns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_record_bytes(
+        index: ModelIndex,
+        record: &LevelModelRecord,
+        mesh_bytes: &[u8],
+        atlas_slot: VramSlot,
+        face_pool: &mut [TexturedModelRenderFace],
+        face_cursor: &mut usize,
+        part_pool: &mut [ModelPart],
+        part_cursor: &mut usize,
+        vertex_pool: &mut [ModelVertex],
+        vertex_cursor: &mut usize,
+    ) -> Option<Self> {
+        let model = Model::from_bytes(mesh_bytes).ok()?;
+        Self::from_decoded_model(
+            index,
+            record,
+            model,
+            atlas_slot,
+            face_pool,
+            face_cursor,
+            part_pool,
+            part_cursor,
+            vertex_pool,
+            vertex_cursor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_decoded_model(
+        index: ModelIndex,
+        record: &LevelModelRecord,
+        model: Model<'_>,
+        atlas_slot: VramSlot,
+        face_pool: &mut [TexturedModelRenderFace],
+        face_cursor: &mut usize,
+        part_pool: &mut [ModelPart],
+        part_cursor: &mut usize,
+        vertex_pool: &mut [ModelVertex],
+        vertex_cursor: &mut usize,
+    ) -> Option<Self> {
         let mut next_face_cursor = *face_cursor;
         let face_first = next_face_cursor;
         let face_count = decode_model_render_faces(
@@ -239,7 +297,7 @@ impl RuntimeModelAsset {
         *vertex_cursor = next_vertex_cursor;
         Some(Self {
             index,
-            model,
+            model_info: model.into(),
             material: TextureMaterial::opaque(
                 atlas_slot.clut_word,
                 atlas_slot.tpage_word,
@@ -703,31 +761,14 @@ pub fn load_runtime_models<
     mut resolve_asset_bytes: impl FnMut(AssetId, AssetKind) -> Option<&'static [u8]>,
     mut ensure_model_atlas_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
 ) {
-    let mut i = 0;
-    while i < MAX_RUNTIME_MODELS {
-        models[i] = None;
-        i += 1;
-    }
-
-    i = 0;
-    while i < MAX_RUNTIME_MODEL_CLIPS {
-        clips[i] = None;
-        i += 1;
-    }
-    *model_face_count = 0;
-    *model_part_count = 0;
-    *model_vertex_count = 0;
-
-    for (index, clip) in model_clip_records.iter().enumerate() {
-        if index >= MAX_RUNTIME_MODEL_CLIPS {
-            break;
-        }
-        let Some(bytes) = resolve_asset_bytes(clip.animation_asset, AssetKind::ModelAnimation)
-        else {
-            continue;
-        };
-        clips[index] = Animation::from_bytes(bytes).ok();
-    }
+    reset_runtime_model_tables(
+        models,
+        clips,
+        model_face_count,
+        model_part_count,
+        model_vertex_count,
+    );
+    load_runtime_model_clips(model_clip_records, clips, &mut resolve_asset_bytes);
 
     for (index, record) in model_records.iter().enumerate() {
         if index >= MAX_RUNTIME_MODELS {
@@ -745,6 +786,51 @@ pub fn load_runtime_models<
             &mut resolve_asset_bytes,
             &mut ensure_model_atlas_uploaded,
         );
+    }
+}
+
+/// Clear model descriptors, parsed clips, and predecoded geometry cursors.
+pub fn reset_runtime_model_tables<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+>(
+    models: &mut [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    clips: &mut [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    model_face_count: &mut usize,
+    model_part_count: &mut usize,
+    model_vertex_count: &mut usize,
+) {
+    let mut i = 0;
+    while i < MAX_RUNTIME_MODELS {
+        models[i] = None;
+        i += 1;
+    }
+
+    i = 0;
+    while i < MAX_RUNTIME_MODEL_CLIPS {
+        clips[i] = None;
+        i += 1;
+    }
+    *model_face_count = 0;
+    *model_part_count = 0;
+    *model_vertex_count = 0;
+}
+
+/// Parse every cooked animation clip into the runtime clip table.
+pub fn load_runtime_model_clips<const MAX_RUNTIME_MODEL_CLIPS: usize>(
+    model_clip_records: &'static [LevelModelClipRecord],
+    clips: &mut [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    mut resolve_asset_bytes: impl FnMut(AssetId, AssetKind) -> Option<&'static [u8]>,
+) {
+    for (index, clip) in model_clip_records.iter().enumerate() {
+        if index >= MAX_RUNTIME_MODEL_CLIPS {
+            break;
+        }
+        let Some(bytes) = resolve_asset_bytes(clip.animation_asset, AssetKind::ModelAnimation)
+        else {
+            continue;
+        };
+        clips[index] = Animation::from_bytes(bytes).ok();
     }
 }
 
@@ -1166,7 +1252,7 @@ fn submit_runtime_model_predecoded<
     let stats = if runtime_model.requires_cpu_blend {
         world.submit_textured_model_predecoded_geometry_faces_layered(
             triangles,
-            runtime_model.model,
+            runtime_model.model_info,
             anim,
             phase,
             camera,
@@ -1186,7 +1272,7 @@ fn submit_runtime_model_predecoded<
     } else {
         world.submit_textured_model_primary_joints_predecoded_geometry_faces_layered(
             triangles,
-            runtime_model.model,
+            runtime_model.model_info,
             anim,
             phase,
             camera,
