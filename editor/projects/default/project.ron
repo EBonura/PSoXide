@@ -1,5 +1,5 @@
 (
-    name: "Quake Units Arena",
+    name: "Cortex Ignition Tech Demo 0.1",
     editor_camera: (
         mode: Free,
         orbit_yaw_q12: 57635,
