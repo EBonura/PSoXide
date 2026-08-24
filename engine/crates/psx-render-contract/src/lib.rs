@@ -7,7 +7,36 @@
 //! PXBSP keep those policies in adapters while sharing one validated wire
 //! layout for ordinary convex surfaces and one packet-ready quad command.
 
+/// Runtime bounds retained with a PVS-visible surface.
+///
+/// Compact map records save resident RAM, but repeatedly decoding and
+/// bounding the same visible polygons wastes CPU. Quake-PSX, PXBSP, and
+/// GoldSrc adapters can keep this small semantic record while retaining
+/// their own face, plane, material, and lighting representations.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct RetainedSurfaceBounds {
+    /// Adapter-owned source surface index.
+    pub surface_index: u16,
+    /// Inclusive world- or model-space minimum corner.
+    pub mins: [i16; 3],
+    /// Inclusive world- or model-space maximum corner.
+    pub maxs: [i16; 3],
+}
+
+const _: [(); 14] = [(); core::mem::size_of::<RetainedSurfaceBounds>()];
+
+impl RetainedSurfaceBounds {
+    /// Link-time-zero value for fixed runtime arenas.
+    pub const ZERO: Self = Self {
+        surface_index: 0,
+        mins: [0; 3],
+        maxs: [0; 3],
+    };
+}
+
 /// Compact convex-surface header used by Quake-PSX and PXBSP.
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct CookedDrawSurface {
     /// Index of the supporting BSP plane.
@@ -23,6 +52,8 @@ pub struct CookedDrawSurface {
     /// Primary and secondary authored light-style identifiers.
     pub light_styles: [u8; 2],
 }
+
+const _: [(); CookedDrawSurface::SIZE] = [(); core::mem::size_of::<CookedDrawSurface>()];
 
 impl CookedDrawSurface {
     /// Encoded byte size of one compact surface record.

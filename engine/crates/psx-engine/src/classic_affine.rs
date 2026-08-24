@@ -245,6 +245,48 @@ pub unsafe fn materialize_classic_affine_indexed_vertices(
     }
 }
 
+/// Expand indexed corners whose UV and RGB attributes were both baked by the
+/// cooker.
+///
+/// This is the dominant static-world contract in Quake-derived maps. Selecting
+/// it once per face removes the two per-corner format branches, the light-style
+/// arithmetic, and the dead UV-offset inputs from the hot materialisation loop.
+/// The corner's two aligned words can also be copied directly around the shared
+/// position lookup.
+///
+/// # Safety
+/// `corners` and `destination` must contain `vertex_count` records, every
+/// corner index must address `positions`, and all ranges must be aligned and
+/// non-overlapping.
+pub unsafe fn materialize_classic_affine_indexed_baked_vertices(
+    corners: *const ClassicAffineIndexedCorner,
+    positions: *const ClassicAffinePosition,
+    position_count: usize,
+    vertex_count: usize,
+    destination: *mut ClassicAffineVertex,
+) {
+    let mut index = 0usize;
+    while index < vertex_count {
+        let corner_words = unsafe { corners.add(index).cast::<u32>() };
+        let position_and_uv = unsafe { ptr::read(corner_words) };
+        let position_index = position_and_uv as u16 as usize;
+        debug_assert!(position_index < position_count);
+        let position = unsafe { ptr::read(positions.add(position_index)) };
+        let destination_words = unsafe { destination.add(index).cast::<u32>() };
+        let position_xy =
+            u32::from(position.position[0] as u16) | (u32::from(position.position[1] as u16) << 16);
+        let position_z_uv =
+            u32::from(position.position[2] as u16) | (position_and_uv & 0xffff_0000);
+        let color = unsafe { ptr::read(corner_words.add(1)) };
+        unsafe {
+            ptr::write(destination_words, position_xy);
+            ptr::write(destination_words.add(1), position_z_uv);
+            ptr::write(destination_words.add(2), color);
+        }
+        index += 1;
+    }
+}
+
 /// Expand indexed corners while reusing already projected shared positions.
 ///
 /// # Safety
@@ -2453,6 +2495,8 @@ mod tests {
         assert_eq!(core::mem::align_of::<ClassicAffineSourceVertex>(), 1);
         assert_eq!(size_of::<ClassicAffineWordSourceVertex>(), 12);
         assert_eq!(core::mem::align_of::<ClassicAffineWordSourceVertex>(), 4);
+        assert_eq!(size_of::<ClassicAffineIndexedCorner>(), 8);
+        assert_eq!(core::mem::align_of::<ClassicAffineIndexedCorner>(), 4);
         assert_eq!(size_of::<ClassicAffineProjectedVertex>(), 16);
         assert_eq!(core::mem::align_of::<ClassicAffineProjectedVertex>(), 4);
         assert_eq!(size_of::<ClassicAffinePosition>(), 6);
@@ -2546,6 +2590,53 @@ mod tests {
                 source.len(),
                 specialized.as_mut_ptr(),
                 [10, 252],
+            );
+        }
+        assert_eq!(specialized, generic);
+    }
+
+    #[test]
+    fn indexed_baked_materialization_matches_generic_path() {
+        let positions = [
+            ClassicAffinePosition {
+                position: [-7, 11, 23],
+            },
+            ClassicAffinePosition {
+                position: [31, -19, 5],
+            },
+        ];
+        let corners = [
+            ClassicAffineIndexedCorner {
+                position_index: 1,
+                uv: [250, 4],
+                light: 0x00ab_cdef,
+            },
+            ClassicAffineIndexedCorner {
+                position_index: 0,
+                uv: [9, 17],
+                light: 0x0012_3456,
+            },
+        ];
+        let mut generic = [ClassicAffineVertex::default(); 2];
+        let mut specialized = [ClassicAffineVertex::default(); 2];
+        unsafe {
+            materialize_classic_affine_indexed_vertices(
+                corners.as_ptr(),
+                positions.as_ptr(),
+                positions.len(),
+                corners.len(),
+                generic.as_mut_ptr(),
+                [99, 99],
+                [123, 456],
+                true,
+                true,
+            );
+            materialize_classic_affine_indexed_baked_vertices(
+                corners.as_ptr(),
+                positions.as_ptr(),
+                positions.len(),
+                corners.len(),
+                specialized.as_mut_ptr(),
             );
         }
         assert_eq!(specialized, generic);
