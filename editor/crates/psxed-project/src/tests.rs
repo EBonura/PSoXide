@@ -839,6 +839,7 @@ fn material_versions_preserve_complete_recipes_and_stable_identity() {
     material.blend_mode = PsxBlendMode::Average;
     material.animation.mode = MaterialAnimationMode::UvScroll;
     material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
+    material.layered_sky = false;
 
     let original_recipe = MaterialVersionRecipe::from(&material);
     let llm_version = material.create_version("LLM Gothic");
@@ -851,13 +852,16 @@ fn material_versions_preserve_complete_recipes_and_stable_identity() {
     material.tint = [131, 37, 171];
     material.generated.noise.seed = 0xfeed_beef;
     material.secondary_layer = None;
+    material.layered_sky = true;
     let llm_recipe = MaterialVersionRecipe::from(&material);
 
     assert!(material.activate_version(MaterialVersionId::ORIGINAL));
     assert_eq!(material.active_version_name, "Original");
     assert_eq!(MaterialVersionRecipe::from(&material), original_recipe);
+    assert!(!material.layered_sky);
     assert!(material.activate_version(llm_version));
     assert_eq!(MaterialVersionRecipe::from(&material), llm_recipe);
+    assert!(material.layered_sky);
 
     assert!(material.rename_version(llm_version, "LLM Cathedral"));
     assert!(!material.rename_version(llm_version, "Original"));
