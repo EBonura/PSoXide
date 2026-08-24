@@ -32,7 +32,7 @@ use crate::generated::{
 };
 use crate::{
     ensure_layered_sky_texture_uploaded, ensure_room_texture_uploaded, find_room_texture_vram_slot,
-    PROJECTION,
+    pxbsp_frame_face_chain_arena, pxbsp_visible_face_chain_arena, PROJECTION,
 };
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
@@ -274,7 +274,12 @@ impl BspRuntime {
             return Err(BspRuntimeInitError::NoMaterials);
         }
         crate::game_trace("editor-playtest: bsp renderer begin");
-        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        let mut renderer = Renderer::new_pxbsp_with_external_face_chains(
+            map.faces().len(),
+            map.nodes().len(),
+            pxbsp_visible_face_chain_arena(),
+            pxbsp_frame_face_chain_arena(),
+        );
         crate::game_trace("editor-playtest: bsp renderer ok");
         // The frustum clip must match the projection this example renders
         // with (H and screen half-extents), or it clips too much or too little.

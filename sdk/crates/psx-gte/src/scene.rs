@@ -1133,6 +1133,78 @@ pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
     }
 }
 
+/// Run hardware-safe `NCLIP` while unpacking one aligned model-face record.
+///
+/// Runtime model faces already carry three `vertex | uv << 16` corner words,
+/// with a two-bit palette selector in bits 14..15 of the first vertex word.
+/// The five register-only unpack instructions occupy five of NCLIP's eight
+/// mandatory MAC0 result slots. No GTE input or result hazard is shortened.
+#[inline(always)]
+pub fn screen_area_and_unpack_model_face_scheduled(
+    vertices: [(i16, i16); 3],
+    corner_words: [u32; 3],
+) -> (i32, [u16; 3], u8) {
+    #[cfg(target_arch = "mips")]
+    {
+        let sxy0 = pack_xy(vertices[0].0, vertices[0].1);
+        let sxy1 = pack_xy(vertices[1].0, vertices[1].1);
+        let mut area = pack_xy(vertices[2].0, vertices[2].1);
+        let mut uv0 = corner_words[0];
+        let mut uv1 = corner_words[1];
+        let mut uv2 = corner_words[2];
+        let palette_bank: u32;
+        unsafe {
+            asm!(
+                // MTC2 SXY0..SXY2 and the hardware-confirmed input gap.
+                ".word 0x48886000",
+                ".word 0x48896800",
+                ".word 0x488a7000",
+                ".word 0",
+                ".word 0",
+                ".word 0x4a000006",
+                // Register-only face unpacking inside NCLIP's complete
+                // eight-instruction MAC0 result gap.
+                "srl $14, $11, 14",
+                "andi $14, $14, 3",
+                "srl $11, $11, 16",
+                "srl $12, $12, 16",
+                "srl $13, $13, 16",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                // MFC2 MAC0 plus the CPU load-delay slot.
+                ".word 0x480ac000",
+                ".word 0",
+                in("$8") sxy0,
+                in("$9") sxy1,
+                inlateout("$10") area,
+                inlateout("$11") uv0,
+                inlateout("$12") uv1,
+                inlateout("$13") uv2,
+                lateout("$14") palette_bank,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        (
+            area as i32,
+            [uv0 as u16, uv1 as u16, uv2 as u16],
+            palette_bank as u8,
+        )
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        (
+            screen_area_mac0(vertices),
+            [
+                (corner_words[0] >> 16) as u16,
+                (corner_words[1] >> 16) as u16,
+                (corner_words[2] >> 16) as u16,
+            ],
+            ((corner_words[0] >> 14) & 3) as u8,
+        )
+    }
+}
+
 /// Run hardware-safe `NCLIP` and `AVSZ3` for an already-projected indexed
 /// triangle.
 ///
@@ -1389,6 +1461,20 @@ mod host_smoke {
         assert_eq!(
             screen_area_mac0_scheduled(vertices),
             screen_area_mac0(vertices)
+        );
+    }
+
+    #[test]
+    fn scheduled_nclip_face_unpack_matches_packed_record() {
+        let vertices = [(-320, 112), (47, -91), (511, 230)];
+        let corners = [0xabcd_c123, 0x0123_4567, 0xfedc_89ab];
+        assert_eq!(
+            screen_area_and_unpack_model_face_scheduled(vertices, corners),
+            (
+                screen_area_mac0(vertices),
+                [0xabcd, 0x0123, 0xfedc],
+                ((0xc123 >> 14) & 3) as u8,
+            ),
         );
     }
 

@@ -65,11 +65,49 @@ __psx_rt_exception_handler:
     andi  $27, $27, 0x007c
     beqz  $27, 2f
     nop
+
+    # Preserve a compact unexpected-exception signature before deciding
+    # whether this fault is recoverable. Immediate-abort panics compile to
+    # BREAK, so Cause + EPC are the only reliable shipping diagnostics.
+    lui   $26, %hi(__psx_rt_fault_cause)
+    mfc0  $27, $13
+    nop
+    sw    $27, %lo(__psx_rt_fault_cause)($26)
+    lui   $26, %hi(__psx_rt_fault_epc)
+    mfc0  $27, $14
+    nop
+    sw    $27, %lo(__psx_rt_fault_epc)($26)
+
     lui   $26, %hi(__psx_rt_fault_count)
     lw    $27, %lo(__psx_rt_fault_count)($26)
     nop
     addiu $27, $27, 1
     sw    $27, %lo(__psx_rt_fault_count)($26)
+
+    # Never advance EPC for fatal instruction-side faults. BREAK (ExcCode 9,
+    # 0x24) marks panic=immediate-abort; IBE (ExcCode 6, 0x18) cannot become
+    # executable by skipping one word. For AdEL (ExcCode 4, 0x10), halt only
+    # when BadVAddr == EPC, which identifies a misaligned instruction fetch;
+    # retain the historical skip-and-count policy for data-side AdEL.
+    mfc0  $27, $13
+    nop
+    andi  $27, $27, 0x007c
+    addiu $26, $zero, 0x0024
+    beq   $27, $26, 3f
+    nop
+    addiu $26, $zero, 0x0018
+    beq   $27, $26, 3f
+    nop
+    addiu $26, $zero, 0x0010
+    bne   $27, $26, 4f
+    nop
+    mfc0  $26, $8
+    mfc0  $27, $14
+    nop
+    beq   $26, $27, 3f
+    nop
+
+4:
     mfc0  $26, $14
     nop
     addiu $26, $26, 4
@@ -80,6 +118,9 @@ __psx_rt_exception_handler:
     nop
     jr    $26
     .word 0x42000010
+3:
+    b     3b
+    nop
     .set reorder
     "#
 );
@@ -96,9 +137,21 @@ pub static mut __psx_rt_vblank_count: u32 = 0;
 /// freeze with no diagnostic, indistinguishable from a hung spin. It now
 /// steps over the faulting instruction and counts it here, so a bad
 /// access costs one wrong value instead of the whole program, and the
-/// count says it happened.
+/// count says it happened. Fatal instruction-side faults are deliberately
+/// different: BREAK is the shipping representation of
+/// `panic=immediate-abort`, while IBE and instruction-side AdEL cannot be
+/// repaired by skipping one word. The handler records Cause/EPC and halts for
+/// all three instead of entering unreachable or non-executable code.
 #[no_mangle]
 pub static mut __psx_rt_fault_count: u32 = 0;
+
+/// Raw COP0 Cause captured for the latest unexpected exception.
+#[no_mangle]
+pub static mut __psx_rt_fault_cause: u32 = 0;
+
+/// COP0 EPC captured for the latest unexpected exception.
+#[no_mangle]
+pub static mut __psx_rt_fault_epc: u32 = 0;
 
 /// One queued GP1 word the VBlank handler writes to the GPU at the next
 /// blank edge, then clears. Zero = empty. Written by [`queue_gp1_at_vblank`].
@@ -152,6 +205,18 @@ pub fn install_vblank_counter() {}
 #[inline]
 pub fn fault_count() -> u32 {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_count) }
+}
+
+/// Raw COP0 Cause captured for the latest unexpected exception.
+#[inline]
+pub fn fault_cause() -> u32 {
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_cause) }
+}
+
+/// COP0 EPC captured for the latest unexpected exception.
+#[inline]
+pub fn fault_epc() -> u32 {
+    unsafe { core::ptr::read_volatile(&raw const __psx_rt_fault_epc) }
 }
 
 /// Current monotonic VBlank count.

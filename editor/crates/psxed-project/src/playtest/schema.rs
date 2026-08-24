@@ -128,6 +128,8 @@ pub enum PlaytestWorldGeometry {
 pub struct PlaytestPxbspWorld {
     /// Complete PXBSP file emitted by the brush compiler.
     pub bytes: Vec<u8>,
+    /// Cooker-proven upper bound for both runtime PVS face chains.
+    pub max_visible_faces: usize,
     /// Exact authored body envelopes used for collision hulls one and two.
     pub body_hulls: [psx_bsp::collision_provider::CookedBodyHull; 2],
     /// Texture assets referenced by the resident world's material table.

@@ -23,6 +23,7 @@ dependencies = [
  "psx-level",
  "psx-math",
  "psx-rt",
+ "psx-spu",
  "psx-vram",
  "psxed-format",
 ]

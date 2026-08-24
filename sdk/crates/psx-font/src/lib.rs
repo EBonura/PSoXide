@@ -266,11 +266,21 @@ impl BitmapFont {
 pub struct FontAtlas {
     font: &'static BitmapFont,
     tpage: Tpage,
-    clut: Clut,
+    /// Pre-encoded CLUT word. Storing the two-byte packet value instead of
+    /// the four-byte coordinate handle pays for `uv_origin` without growing
+    /// `FontAtlas` in PS1 RAM, and removes repeated encoding from draw calls.
+    clut_word: u16,
     /// How many glyphs per row of the atlas texture. Picked at
     /// upload time so the texture fits within a single 4bpp tpage.
     glyphs_per_row: u16,
+    /// Page-local texel origin of this atlas inside a packed tpage.
+    uv_origin: (u8, u8),
 }
+
+// The packed origin replaces the space recovered by caching the CLUT packet
+// word, so adding shared-page placement must not grow every resident atlas.
+#[cfg(target_arch = "mips")]
+const _: () = assert!(core::mem::size_of::<FontAtlas>() == 16);
 
 fn scale_q8_i16(value: i16, scale_q8: u16) -> i16 {
     let scaled = i32::from(value)
@@ -398,59 +408,205 @@ fn glyph_quad_uvs(u: u8, v: u8, gw: u8, gh: u8) -> [(u8, u8); 4] {
 /// Halfwords spanned by one 4bpp texture page (64 halfwords = 256 texels).
 const FONT_PAGE_HALFWORDS: usize = 64;
 
-/// Upload several fonts in a **single** `GP0(A0h)` image transfer.
-///
-/// Repeated per-font VRAM uploads desync the GPU command stream on some
-/// targets and corrupt subsequent (world) rendering; packing every glyph
-/// atlas side-by-side into one reserved page run and emitting one transfer
-/// avoids that entirely. Each font keeps its own 4bpp tpage (one 64-halfword
-/// page column) so glyph UVs stay local; all fonts share one 2-entry CLUT
-/// (transparent, white) which `tint` recolours per draw.
-///
-/// `scratch` is a caller-owned buffer (put it in `static mut` BSS, **not** on
-/// the stack); it must hold at least `fonts.len() * 64 * max_atlas_height`
-/// halfwords. `out` receives one `Some(FontAtlas)` per font; trailing slots
-/// are set to `None`. Returns the handles to free the set later, or `None`
-/// (uploading nothing) if a font is too wide, `scratch`/`out` is too small,
-/// or the allocator is out of space.
-pub fn upload_fonts<R: VramRegionSource>(
+/// Maximum number of font atlases accepted by one packed upload. The game
+/// manifest currently caps a scene at eight; keeping this bound at sixteen
+/// also matches the number of 4bpp page columns in 1024-wide VRAM.
+const MAX_PACKED_FONT_ATLASES: usize = 16;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct AtlasPlacement {
+    page: u16,
+    x_halfwords: u16,
+    y: u16,
+}
+
+/// VRAM and scratch requirements for one packed font-set upload.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FontPackMetrics {
+    /// Minimum contiguous page run requested by the bounded packer.
+    pub pages: u16,
+    /// Rows transferred by the single combined `GP0(A0h)` upload.
+    pub upload_rows: u16,
+    /// Caller-owned scratch halfwords required for that upload.
+    pub scratch_halfwords: usize,
+}
+
+#[inline]
+fn placements_overlap(
+    a: AtlasPlacement,
+    a_w: u16,
+    a_h: u16,
+    b: AtlasPlacement,
+    b_w: u16,
+    b_h: u16,
+) -> bool {
+    a.page == b.page
+        && a.x_halfwords < b.x_halfwords + b_w
+        && b.x_halfwords < a.x_halfwords + a_w
+        && a.y < b.y + b_h
+        && b.y < a.y + a_h
+}
+
+/// Plan page-local atlas rectangles with a deterministic, bounded
+/// bottom-left bin layout. Tall atlases are placed first; candidate corners
+/// come only from page edges and already-placed rectangle edges, avoiding a
+/// texel-by-texel search on the PS1 boot path.
+fn plan_font_pack(
     fonts: &[&'static BitmapFont],
-    alloc: &mut R,
-    scratch: &mut [u16],
-    out: &mut [Option<FontAtlas>],
-) -> Option<FontSetVram> {
-    let n = fonts.len();
-    if n == 0 || n > out.len() {
+    placements: &mut [Option<AtlasPlacement>; MAX_PACKED_FONT_ATLASES],
+) -> Option<FontPackMetrics> {
+    if fonts.is_empty() || fonts.len() > MAX_PACKED_FONT_ATLASES {
         return None;
     }
-    let mut max_h = 0u16;
-    for &font in fonts {
-        let (_, _, atlas_h, halfwords_per_row) = font_atlas_dims(font);
-        if halfwords_per_row as usize > FONT_PAGE_HALFWORDS {
-            return None; // a glyph atlas wider than one page can't be paged
+    placements.fill(None);
+
+    let mut page_count = 0u16;
+    for _ in 0..fonts.len() {
+        // Height-first, then width-first is a shelf/bin heuristic that keeps
+        // the page count low while preserving the caller's output ordering.
+        let mut selected = None;
+        let mut selected_key = (0u16, 0u16);
+        for (index, &font) in fonts.iter().enumerate() {
+            if placements[index].is_some() {
+                continue;
+            }
+            let (_, _, height, width) = font_atlas_dims(font);
+            if width == 0 || width as usize > FONT_PAGE_HALFWORDS || height == 0 || height > 256 {
+                return None;
+            }
+            let key = (height, width);
+            if selected.is_none() || key > selected_key {
+                selected = Some(index);
+                selected_key = key;
+            }
         }
-        max_h = max_h.max(atlas_h);
+        let index = selected?;
+        let (_, _, height, width) = font_atlas_dims(fonts[index]);
+
+        let mut chosen = None;
+        for page in 0..=page_count {
+            if page == page_count && page_count >= 16 {
+                break;
+            }
+            let mut page_best = None;
+
+            // In a bottom-left-stable layout, a rectangle's left/bottom edge
+            // touches either the page edge or another rectangle's right/bottom
+            // edge. Enumerating those corners is exhaustive for this policy.
+            for y_source in 0..=fonts.len() {
+                let y = if y_source == 0 {
+                    0
+                } else {
+                    let prior_index = y_source - 1;
+                    let Some(prior) = placements[prior_index] else {
+                        continue;
+                    };
+                    if prior.page != page {
+                        continue;
+                    }
+                    let (_, _, prior_h, _) = font_atlas_dims(fonts[prior_index]);
+                    prior.y + prior_h
+                };
+                if y + height > 256 {
+                    continue;
+                }
+                for x_source in 0..=fonts.len() {
+                    let x_halfwords = if x_source == 0 {
+                        0
+                    } else {
+                        let prior_index = x_source - 1;
+                        let Some(prior) = placements[prior_index] else {
+                            continue;
+                        };
+                        if prior.page != page {
+                            continue;
+                        }
+                        let (_, _, _, prior_w) = font_atlas_dims(fonts[prior_index]);
+                        prior.x_halfwords + prior_w
+                    };
+                    if x_halfwords + width > FONT_PAGE_HALFWORDS as u16 {
+                        continue;
+                    }
+                    let candidate = AtlasPlacement {
+                        page,
+                        x_halfwords,
+                        y,
+                    };
+                    let overlaps = placements.iter().enumerate().any(|(prior_index, prior)| {
+                        let Some(prior) = prior else {
+                            return false;
+                        };
+                        let (_, _, prior_h, prior_w) = font_atlas_dims(fonts[prior_index]);
+                        placements_overlap(candidate, width, height, *prior, prior_w, prior_h)
+                    });
+                    if overlaps {
+                        continue;
+                    }
+                    if page_best.is_none_or(|best: AtlasPlacement| {
+                        (candidate.y, candidate.x_halfwords) < (best.y, best.x_halfwords)
+                    }) {
+                        page_best = Some(candidate);
+                    }
+                }
+            }
+            if let Some(best) = page_best {
+                chosen = Some(best);
+                if page == page_count {
+                    page_count += 1;
+                }
+                break;
+            }
+        }
+        placements[index] = Some(chosen?);
     }
-    let stride = n * FONT_PAGE_HALFWORDS; // halfwords per combined row
-    let total = stride * max_h as usize;
-    if max_h == 0 || total > scratch.len() {
+
+    let upload_rows = placements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, placement)| {
+            let placement = placement.as_ref()?;
+            let (_, _, height, _) = font_atlas_dims(fonts[index]);
+            Some(placement.y + height)
+        })
+        .max()?;
+    let scratch_halfwords = usize::from(page_count)
+        .checked_mul(FONT_PAGE_HALFWORDS)?
+        .checked_mul(usize::from(upload_rows))?;
+    Some(FontPackMetrics {
+        pages: page_count,
+        upload_rows,
+        scratch_halfwords,
+    })
+}
+
+/// Return the page-run and scratch requirements for [`upload_fonts`] without
+/// reserving VRAM or touching the GPU.
+pub fn font_pack_metrics(fonts: &[&'static BitmapFont]) -> Option<FontPackMetrics> {
+    let mut placements = [None; MAX_PACKED_FONT_ATLASES];
+    plan_font_pack(fonts, &mut placements)
+}
+
+fn pack_font_bits(
+    fonts: &[&'static BitmapFont],
+    placements: &[Option<AtlasPlacement>; MAX_PACKED_FONT_ATLASES],
+    metrics: FontPackMetrics,
+    scratch: &mut [u16],
+) -> Option<()> {
+    if metrics.scratch_halfwords > scratch.len() {
         return None;
     }
-
-    let (base, pages) = alloc.alloc_page_run(n as u16, TexDepth::Bit4, 0)?;
-    // CLUT allocation can't fail at boot (the band is empty); if it ever does
-    // the page run is left reserved, which is harmless at boot.
-    let (clut, clut_handle) = alloc.alloc_clut(2)?;
-
-    scratch[..total].fill(0);
+    let stride = usize::from(metrics.pages) * FONT_PAGE_HALFWORDS;
+    scratch[..metrics.scratch_halfwords].fill(0);
     for (slot, &font) in fonts.iter().enumerate() {
+        let placement = placements[slot]?;
         let (glyphs_per_row, _, _, _) = font_atlas_dims(font);
-        let col0 = slot * FONT_PAGE_HALFWORDS;
+        let col0 =
+            usize::from(placement.page) * FONT_PAGE_HALFWORDS + usize::from(placement.x_halfwords);
         for gi in 0..font.glyph_count {
             let atlas_col = gi % glyphs_per_row;
             let atlas_row = gi / glyphs_per_row;
             let base_x = atlas_col * cell_width(font);
-            let base_y = atlas_row * font.glyph_h as u16;
+            let base_y = placement.y + atlas_row * font.glyph_h as u16;
             for row in 0..font.glyph_h {
                 let row_bits = font.glyph_row_packed(gi, row);
                 for col in 0..font.glyph_w as u16 {
@@ -465,11 +621,62 @@ pub fn upload_fonts<R: VramRegionSource>(
                 }
             }
         }
+    }
+    Some(())
+}
+
+/// Upload several fonts in a **single** `GP0(A0h)` image transfer.
+///
+/// Repeated per-font VRAM uploads desync the GPU command stream on some
+/// targets and corrupt subsequent (world) rendering; packing every glyph
+/// atlas side-by-side into one reserved page run and emitting one transfer
+/// avoids that entirely. Multiple atlas rectangles share each 256x256 4bpp
+/// tpage through page-local UV origins; all fonts share one 2-entry CLUT
+/// (transparent, white) which `tint` recolours per draw.
+///
+/// `scratch` is a caller-owned buffer (put it in `static mut` BSS, **not** on
+/// the stack); query [`font_pack_metrics`] for the exact required length.
+/// `out` receives one `Some(FontAtlas)` per font; trailing slots
+/// are set to `None`. Returns the handles to free the set later, or `None`
+/// (uploading nothing) if a font is too wide, `scratch`/`out` is too small,
+/// or the allocator is out of space. Every failure clears all of `out`, so a
+/// caller can never mistake stale or partially prepared handles for the set.
+pub fn upload_fonts<R: VramRegionSource>(
+    fonts: &[&'static BitmapFont],
+    alloc: &mut R,
+    scratch: &mut [u16],
+    out: &mut [Option<FontAtlas>],
+) -> Option<FontSetVram> {
+    let n = fonts.len();
+    out.fill(None);
+    if n == 0 || n > out.len() {
+        return None;
+    }
+    let mut placements = [None; MAX_PACKED_FONT_ATLASES];
+    let metrics = plan_font_pack(fonts, &mut placements)?;
+    if metrics.scratch_halfwords > scratch.len() {
+        return None;
+    }
+
+    let (base, pages) = alloc.alloc_page_run(metrics.pages, TexDepth::Bit4, 0)?;
+    // CLUT allocation can't fail at boot (the band is empty); if it ever does
+    // the page run is left reserved, which is harmless at boot.
+    let (clut, clut_handle) = alloc.alloc_clut(2)?;
+
+    pack_font_bits(fonts, &placements, metrics, scratch)?;
+    for (slot, &font) in fonts.iter().enumerate() {
+        let placement = placements[slot]?;
+        let (glyphs_per_row, _, _, _) = font_atlas_dims(font);
         out[slot] = Some(FontAtlas {
             font,
-            tpage: Tpage::new(base.x() + (slot as u16) * 64, base.y(), TexDepth::Bit4),
-            clut,
+            tpage: Tpage::new(
+                base.x() + placement.page * FONT_PAGE_HALFWORDS as u16,
+                base.y(),
+                TexDepth::Bit4,
+            ),
+            clut_word: clut.uv_clut_word(),
             glyphs_per_row,
+            uv_origin: ((placement.x_halfwords * 4) as u8, placement.y as u8),
         });
     }
     for slot in out.iter_mut().skip(n) {
@@ -477,9 +684,10 @@ pub fn upload_fonts<R: VramRegionSource>(
     }
 
     // One image transfer for the whole combined atlas, then the shared CLUT.
+    let stride = usize::from(metrics.pages) * FONT_PAGE_HALFWORDS;
     upload_16bpp(
-        VramRect::new(base.x(), base.y(), stride as u16, max_h),
-        &scratch[..total],
+        VramRect::new(base.x(), base.y(), stride as u16, metrics.upload_rows),
+        &scratch[..metrics.scratch_halfwords],
     );
     upload_clut(clut, &[Color555::TRANSPARENT, Color555::rgb5(31, 31, 31)]);
 
@@ -604,8 +812,9 @@ impl FontAtlas {
         Self {
             font,
             tpage,
-            clut,
+            clut_word: clut.uv_clut_word(),
             glyphs_per_row,
+            uv_origin: (0, 0),
         }
     }
 
@@ -641,8 +850,8 @@ impl FontAtlas {
         let idx = (cp - first) as u16;
         let col = idx % self.glyphs_per_row;
         let row = idx / self.glyphs_per_row;
-        let u = col * cell_width(self.font);
-        let v = row * self.font.glyph_h as u16;
+        let u = u16::from(self.uv_origin.0) + col * cell_width(self.font);
+        let v = u16::from(self.uv_origin.1) + row * self.font.glyph_h as u16;
         Some((u as u8, v as u8))
     }
 
@@ -693,7 +902,7 @@ impl FontAtlas {
         self.tpage.apply_as_draw_mode();
 
         let font = self.font;
-        let clut_word = self.clut.uv_clut_word();
+        let clut_word = self.clut_word;
         let color_cmd = 0x6400_0000 | pack_color(tint.0, tint.1, tint.2);
         let glyph_size = pack_xy(font.glyph_w as u16, font.glyph_h as u16);
         let gap = i16::from(letter_spacing);
@@ -820,7 +1029,7 @@ impl FontAtlas {
         let gh = font.glyph_h as i16;
         let sw = scale_q8_i16(gw, scale_x_q8);
         let sh = scale_q8_i16(gh, scale_y_q8);
-        let clut = self.clut.uv_clut_word();
+        let clut = self.clut_word;
         let tpage = self.tpage.uv_tpage_word(0);
         let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
             | pack_color(tint.0, tint.1, tint.2);
@@ -890,7 +1099,7 @@ impl FontAtlas {
         let origin_y = -gh / 2;
         let s = sincos::sin_q12(angle_q12);
         let c = sincos::cos_q12(angle_q12);
-        let clut = self.clut.uv_clut_word();
+        let clut = self.clut_word;
         let tpage = self.tpage.uv_tpage_word(0);
         let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
             | pack_color(tint.0, tint.1, tint.2);
@@ -957,7 +1166,7 @@ impl FontAtlas {
         let gh = font.glyph_h as i32;
         let (m00, m01) = (m[0][0] as i32, m[0][1] as i32);
         let (m10, m11) = (m[1][0] as i32, m[1][1] as i32);
-        let clut = self.clut.uv_clut_word();
+        let clut = self.clut_word;
         let tpage = self.tpage.uv_tpage_word(0);
         let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
             | pack_color(tint.0, tint.1, tint.2);
@@ -1055,7 +1264,7 @@ impl FontAtlas {
         let gh = font.glyph_h as i16;
         let sw = gw * scale_x as i16;
         let sh = gh * scale_y as i16;
-        let clut = self.clut.uv_clut_word();
+        let clut = self.clut_word;
         let tpage = self.tpage.uv_tpage_word(0);
         let color0_cmd =
             gp0::polygon_opcode(true, true, true, false, false) | pack_color(top.0, top.1, top.2);
@@ -1109,7 +1318,7 @@ impl FontAtlas {
         let gh = font.glyph_h as i16;
         let sw = scale_q8_i16(gw, scale_x_q8);
         let sh = scale_q8_i16(gh, scale_y_q8);
-        let clut = self.clut.uv_clut_word();
+        let clut = self.clut_word;
         let tpage = self.tpage.uv_tpage_word(0);
         let color0_cmd = gp0::polygon_opcode(true, true, true, false, false)
             | pack_color(colors[0].0, colors[0].1, colors[0].2);
@@ -1205,6 +1414,8 @@ impl TextSink for FontAtlas {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     #[test]
     fn centered_text_is_symmetric_about_the_anchor() {
         // A stub renderer keeps the contract test independent of any atlas
@@ -1262,6 +1473,14 @@ mod tests {
     const TEST_PROPORTIONAL_ADVANCES: [u8; 2] = [3, 7];
     const TEST_PROPORTIONAL_FONT: BitmapFont = BitmapFont {
         glyph_advances: Some(&TEST_PROPORTIONAL_ADVANCES),
+        ..TEST_FONT
+    };
+
+    const TOO_TALL_FONT: BitmapFont = BitmapFont {
+        glyph_w: 255,
+        glyph_h: 255,
+        glyph_count: 2,
+        bitmap: &[],
         ..TEST_FONT
     };
 
@@ -1363,5 +1582,186 @@ mod tests {
         assert!(
             usize::from(halfwords_per_row) * usize::from(atlas_h) <= FontAtlas::MAX_PACK_HALFWORDS
         );
+    }
+
+    const ARENA_FONTS: &[&BitmapFont] = &[
+        &crate::fonts::ZEN_DOTS_DISPLAY,
+        &crate::fonts::ZEN_DOTS,
+        &crate::fonts::KENNEY_FUTURE_NARROW,
+        &crate::fonts::KENNEY_PIXEL,
+        &crate::fonts::KENNEY_FUTURE,
+        &crate::fonts::BASIC,
+    ];
+
+    #[test]
+    fn arena_six_font_set_has_a_provably_minimal_two_page_pack() {
+        let mut placements = [None; MAX_PACKED_FONT_ATLASES];
+        let metrics = plan_font_pack(ARENA_FONTS, &mut placements).unwrap();
+        assert_eq!(metrics.pages, 2, "six fonts must share two tpages");
+        assert_eq!(metrics.upload_rows, 241);
+        assert_eq!(metrics.scratch_halfwords, 2 * 64 * 241);
+        assert_eq!(font_pack_metrics(ARENA_FONTS), Some(metrics));
+
+        // More than one complete page of rectangle area is occupied, so the
+        // two-page result is not merely heuristic for this shipping set: it is
+        // the mathematical minimum without rotating or modifying an atlas.
+        let occupied_halfwords: usize = ARENA_FONTS
+            .iter()
+            .map(|font| {
+                let (_, _, h, w) = font_atlas_dims(font);
+                usize::from(h) * usize::from(w)
+            })
+            .sum();
+        assert!(occupied_halfwords > FONT_PAGE_HALFWORDS * 256);
+        assert!(occupied_halfwords <= 2 * FONT_PAGE_HALFWORDS * 256);
+
+        for (a_index, a) in placements[..ARENA_FONTS.len()].iter().enumerate() {
+            let a = a.unwrap();
+            let (_, _, a_h, a_w) = font_atlas_dims(ARENA_FONTS[a_index]);
+            assert!(a.x_halfwords + a_w <= FONT_PAGE_HALFWORDS as u16);
+            assert!(a.y + a_h <= 256);
+            for (b_index, b) in placements[..a_index].iter().enumerate() {
+                let b = b.unwrap();
+                let (_, _, b_h, b_w) = font_atlas_dims(ARENA_FONTS[b_index]);
+                assert!(!placements_overlap(a, a_w, a_h, b, b_w, b_h));
+            }
+        }
+    }
+
+    #[test]
+    fn packed_arena_atlases_preserve_every_glyph_and_padding_texel() {
+        let mut placements = [None; MAX_PACKED_FONT_ATLASES];
+        let metrics = plan_font_pack(ARENA_FONTS, &mut placements).unwrap();
+        let mut scratch = std::vec![0xFFFF; metrics.scratch_halfwords];
+        pack_font_bits(ARENA_FONTS, &placements, metrics, &mut scratch).unwrap();
+        let stride = usize::from(metrics.pages) * FONT_PAGE_HALFWORDS;
+
+        for (font_index, &font) in ARENA_FONTS.iter().enumerate() {
+            let placement = placements[font_index].unwrap();
+            let (glyphs_per_row, atlas_w, atlas_h, _) = font_atlas_dims(font);
+            let cell_w = cell_width(font);
+            for local_y in 0..atlas_h {
+                let glyph_row = local_y / u16::from(font.glyph_h);
+                let glyph_y = (local_y % u16::from(font.glyph_h)) as u8;
+                for local_x in 0..atlas_w {
+                    let glyph_col = local_x / cell_w;
+                    let glyph_x = local_x % cell_w;
+                    let glyph_index = glyph_row * glyphs_per_row + glyph_col;
+                    let expected =
+                        if glyph_index < font.glyph_count && glyph_x < u16::from(font.glyph_w) {
+                            ((font.glyph_row_packed(glyph_index, glyph_y) >> glyph_x) & 1) as u16
+                        } else {
+                            0
+                        };
+                    let global_halfword = usize::from(placement.page) * FONT_PAGE_HALFWORDS
+                        + usize::from(placement.x_halfwords)
+                        + usize::from(local_x / 4);
+                    let word =
+                        scratch[usize::from(placement.y + local_y) * stride + global_halfword];
+                    let actual = (word >> ((local_x & 3) * 4)) & 0xF;
+                    assert_eq!(
+                        actual, expected,
+                        "font {font_index} texel ({local_x},{local_y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_origins_feed_exact_rect_and_quad_packet_uvs() {
+        let fonts = [&TEST_FONT, &TEST_FONT];
+        let mut placements = [None; MAX_PACKED_FONT_ATLASES];
+        let metrics = plan_font_pack(&fonts, &mut placements).unwrap();
+        assert_eq!(metrics.pages, 1);
+        assert_eq!(placements[0].unwrap().x_halfwords, 0);
+        assert_eq!(placements[1].unwrap().x_halfwords, 4);
+
+        let clut = Clut::new(960, 500);
+        for (index, &font) in fonts.iter().enumerate() {
+            let placement = placements[index].unwrap();
+            let (glyphs_per_row, _, _, _) = font_atlas_dims(font);
+            let atlas = FontAtlas {
+                font,
+                tpage: Tpage::new(placement.page * 64, 0, TexDepth::Bit4),
+                clut_word: clut.uv_clut_word(),
+                glyphs_per_row,
+                uv_origin: ((placement.x_halfwords * 4) as u8, placement.y as u8),
+            };
+            for glyph_index in 0..font.glyph_count {
+                let ch = char::from_u32(u32::from(font.first_char + glyph_index)).unwrap();
+                let (u, v) = atlas.glyph_uv(ch).unwrap();
+                let expected_u = u16::from(atlas.uv_origin.0)
+                    + (glyph_index % glyphs_per_row) * cell_width(font);
+                let expected_v = u16::from(atlas.uv_origin.1)
+                    + (glyph_index / glyphs_per_row) * u16::from(font.glyph_h);
+                assert_eq!((u16::from(u), u16::from(v)), (expected_u, expected_v));
+
+                // GP0(64h) takes this packed UV/CLUT word. Every quad path
+                // shares `glyph_uv` and only extends the same top-left corner.
+                let rect_uv_word = pack_texcoord(u, v, atlas.clut_word);
+                assert_eq!(rect_uv_word & 0xFFFF, u32::from(u) | (u32::from(v) << 8));
+                assert_eq!((rect_uv_word >> 16) as u16, atlas.clut_word);
+                let quad = glyph_quad_uvs(u, v, font.glyph_w, font.glyph_h);
+                assert_eq!(quad[0], (u, v));
+                assert_eq!(quad[3].0, u.saturating_add(font.glyph_w));
+                assert_eq!(quad[3].1, v.saturating_add(font.glyph_h));
+            }
+        }
+    }
+
+    #[test]
+    fn font_pack_planner_fails_closed_outside_its_bound() {
+        assert_eq!(font_pack_metrics(&[]), None);
+        let too_many = [&TEST_FONT; MAX_PACKED_FONT_ATLASES + 1];
+        assert_eq!(font_pack_metrics(&too_many), None);
+
+        assert_eq!(font_pack_metrics(&[&TOO_TALL_FONT]), None);
+    }
+
+    #[test]
+    fn every_pre_upload_failure_clears_stale_atlas_outputs() {
+        struct NoAllocationExpected;
+        impl VramRegionSource for NoAllocationExpected {
+            fn alloc_page_run(
+                &mut self,
+                _count: u16,
+                _depth: TexDepth,
+                _page_y: u16,
+            ) -> Option<(Tpage, VramHandle)> {
+                panic!("preflight failure must not reserve pages")
+            }
+
+            fn alloc_clut(&mut self, _entries: u16) -> Option<(Clut, VramHandle)> {
+                panic!("preflight failure must not reserve a CLUT")
+            }
+        }
+
+        let stale = FontAtlas {
+            font: &TEST_FONT,
+            tpage: Tpage::new(0, 0, TexDepth::Bit4),
+            clut_word: Clut::new(0, 480).uv_clut_word(),
+            glyphs_per_row: 2,
+            uv_origin: (0, 0),
+        };
+        let mut alloc = NoAllocationExpected;
+
+        let mut out = [Some(stale); 2];
+        assert!(upload_fonts(&[], &mut alloc, &mut [], &mut out).is_none());
+        assert!(out.iter().all(Option::is_none));
+
+        out.fill(Some(stale));
+        assert!(upload_fonts(
+            &[&TEST_FONT, &TEST_FONT, &TEST_FONT],
+            &mut alloc,
+            &mut [],
+            &mut out,
+        )
+        .is_none());
+        assert!(out.iter().all(Option::is_none));
+
+        out.fill(Some(stale));
+        assert!(upload_fonts(&[&TEST_FONT], &mut alloc, &mut [], &mut out).is_none());
+        assert!(out.iter().all(Option::is_none));
     }
 }

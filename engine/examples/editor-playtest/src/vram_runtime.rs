@@ -158,8 +158,11 @@ pub(super) fn release_ui_images() {
 /// Acquire the shared UI fonts (reserving the static VRAM regions on
 /// first call); the packing/upload policy lives on
 /// `VramRuntime::acquire_shared_ui_fonts`.
-pub(super) fn acquire_shared_ui_fonts(ui_fonts: &mut [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS]) {
-    vram_arena().acquire_shared_ui_fonts(VRAM_LAYOUT, font_scratch_arena(), UI_FONTS, ui_fonts);
+#[must_use = "false means the complete UI font set is unavailable"]
+pub(super) fn acquire_shared_ui_fonts(
+    ui_fonts: &mut [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS],
+) -> bool {
+    vram_arena().acquire_shared_ui_fonts(VRAM_LAYOUT, font_scratch_arena(), UI_FONTS, ui_fonts)
 }
 
 const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 768;

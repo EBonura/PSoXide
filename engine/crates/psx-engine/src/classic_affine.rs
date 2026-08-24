@@ -2460,8 +2460,8 @@ pub unsafe fn submit_classic_alias_view_model(
 fn classic_clip_code(screen: [i16; 2], profile: ClassicAffineProfile) -> u8 {
     crate::projection::zero_origin_screen_outcode(
         screen,
-        profile.screen_width as i32 - 2,
-        profile.screen_height as i32 - 2,
+        profile.screen_width as i32 - 1,
+        profile.screen_height as i32 - 1,
     )
 }
 
@@ -2469,8 +2469,8 @@ fn classic_clip_code(screen: [i16; 2], profile: ClassicAffineProfile) -> u8 {
 fn classic_tri_screen_clipped(screens: [[i16; 2]; 3], profile: ClassicAffineProfile) -> bool {
     classic_triangle_screen_rejected(
         screens,
-        profile.screen_width as i32 - 2,
-        profile.screen_height as i32 - 2,
+        profile.screen_width as i32 - 1,
+        profile.screen_height as i32 - 1,
     )
 }
 
@@ -2478,8 +2478,8 @@ fn classic_tri_screen_clipped(screens: [[i16; 2]; 3], profile: ClassicAffineProf
 fn classic_quad_screen_clipped(screens: [[i16; 2]; 4], profile: ClassicAffineProfile) -> bool {
     classic_quad_screen_rejected(
         screens,
-        profile.screen_width as i32 - 2,
-        profile.screen_height as i32 - 2,
+        profile.screen_width as i32 - 1,
+        profile.screen_height as i32 - 1,
     )
 }
 
@@ -3236,14 +3236,15 @@ mod tests {
     }
 
     #[test]
-    fn branchless_clip_code_keeps_quake_viewport_boundaries() {
+    fn branchless_clip_code_keeps_inclusive_viewport_boundaries() {
         let profile = ClassicAffineProfile::QUAKE_REFERENCE;
         assert_eq!(classic_clip_code([0, 0], profile), 0);
         assert_eq!(classic_clip_code([318, 238], profile), 0);
+        assert_eq!(classic_clip_code([319, 239], profile), 0);
         assert_eq!(classic_clip_code([-1, 120], profile), 1);
-        assert_eq!(classic_clip_code([319, 120], profile), 2);
+        assert_eq!(classic_clip_code([320, 120], profile), 2);
         assert_eq!(classic_clip_code([160, -1], profile), 4);
-        assert_eq!(classic_clip_code([160, 239], profile), 8);
+        assert_eq!(classic_clip_code([160, 240], profile), 8);
         assert_eq!(classic_clip_code([-1024, -1024], profile), 5);
         assert_eq!(classic_clip_code([1023, 1023], profile), 10);
     }
