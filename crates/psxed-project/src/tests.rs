@@ -2573,7 +2573,6 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
     )));
     for (name, tag) in [
         ("Inventory Player Tab", "tab.player.selected"),
-        ("Inventory Armament Tab", "tab.armament"),
         ("Inventory System Tab", "tab.system"),
     ] {
         let authored_tag = inventory
@@ -2587,6 +2586,19 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
             .unwrap_or_else(|| panic!("missing {name}"));
         assert_eq!(authored_tag, tag);
     }
+    assert_eq!(
+        inventory
+            .nodes()
+            .iter()
+            .filter(|node| matches!(&node.kind, UiNodeKind::Button { tag, .. } if tag.starts_with("tab.")))
+            .count(),
+        2,
+        "Player and System are the only real pause categories"
+    );
+    assert!(inventory.nodes().iter().all(|node| {
+        !node.name.contains("Armament")
+            && !matches!(&node.kind, UiNodeKind::Button { tag, action: UiAction::Game(301), .. } if tag == "tab.armament")
+    }));
     for name in [
         "Inventory L1 Glyph Housing",
         "Inventory L1 Glyph Text",
@@ -2598,6 +2610,28 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
             "missing {name}"
         );
     }
+    let inventory_rail = inventory
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Inventory Tab Rail")
+        .and_then(|node| match node.kind {
+            UiNodeKind::Rect { rect, .. } => Some(rect),
+            _ => None,
+        })
+        .expect("Inventory Tab Rail");
+    assert_eq!(
+        (
+            inventory_rail.x,
+            inventory_rail.y,
+            inventory_rail.width,
+            inventory_rail.height,
+        ),
+        (184, 8, 127, 29)
+    );
+    assert!(inventory
+        .nodes()
+        .iter()
+        .all(|node| node.name != "Player Tab Glow"));
 
     for (name, expected_rect, expected_color) in [
         (
@@ -2761,56 +2795,88 @@ fn default_project_inventory_routes_four_continuous_vitality_poles() {
 }
 
 #[test]
-fn default_project_pause_menu_is_a_paused_live_overlay_with_ps1_shoulder_glyphs() {
+fn default_project_system_overlay_matches_inventory_language_and_exposes_options() {
     let project_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/default/project.ron");
     let project = ProjectDocument::load_from_path(&project_path)
         .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
-    let pause_scene = project
+    let system_scene = project
         .ui_scenes
         .iter()
-        .find(|scene| scene.name == "Pause Menu")
-        .expect("Pause Menu UI scene");
+        .find(|scene| scene.name == "System Overlay")
+        .expect("System Overlay UI scene");
     let gameplay = project
         .scene_states
         .iter()
         .find(|state| state.name == "Gameplay")
         .expect("Gameplay state");
-    let pause = project
+    let system = project
         .scene_states
         .iter()
-        .find(|state| state.name == "Pause Menu")
-        .expect("Pause Menu state");
+        .find(|state| state.name == "System Overlay")
+        .expect("System Overlay state");
 
-    assert_eq!(gameplay.start_state, Some(pause.id));
-    assert_eq!(pause.start_state, Some(gameplay.id));
-    assert_eq!(pause.world, SceneWorldLayer::Gameplay);
-    assert_eq!(pause.ui_scene, Some(pause_scene.id));
-    assert!(pause.ui_input);
-    assert!(pause.pause_world);
+    assert_eq!(gameplay.start_state, Some(system.id));
+    assert_eq!(system.start_state, Some(gameplay.id));
+    assert_eq!(system.world, SceneWorldLayer::Gameplay);
+    assert_eq!(system.ui_scene, Some(system_scene.id));
+    assert!(system.ui_input);
+    assert!(system.pause_world);
+    assert!(project
+        .scene_states
+        .iter()
+        .all(|state| state.name != "Paused Settings"));
 
-    let node_names: HashSet<&str> = pause_scene
+    let node_names: HashSet<&str> = system_scene
         .nodes()
         .iter()
         .map(|node| node.name.as_str())
         .collect();
-    assert!(node_names.contains("Player Tab"));
-    assert!(node_names.contains("Armament Tab"));
+    assert!(node_names.contains("System Player Tab"));
     assert!(node_names.contains("System Tab"));
-    assert!(!node_names.contains("Inventory Tab"));
-    assert!(!node_names.contains("Resume"));
-    assert!(node_names.contains("Settings"));
+    assert!(node_names.iter().all(|name| !name.contains("Armament")));
+    assert!(!node_names.contains("Settings"));
     assert!(node_names.contains("Return To Title"));
     assert_eq!(
-        pause_scene
+        system_scene
             .default_focus
-            .and_then(|id| pause_scene.node(id))
+            .and_then(|id| system_scene.node(id))
             .map(|node| node.name.as_str()),
         Some("System Tab")
     );
+    assert_eq!(
+        system_scene
+            .nodes()
+            .iter()
+            .filter(|node| matches!(&node.kind, UiNodeKind::Button { tag, .. } if tag.starts_with("tab.")))
+            .count(),
+        2
+    );
+    let system_rail = system_scene
+        .nodes()
+        .iter()
+        .find(|node| node.name == "System Tab Rail")
+        .and_then(|node| match node.kind {
+            UiNodeKind::Rect { rect, .. } => Some(rect),
+            _ => None,
+        })
+        .expect("System Tab Rail");
+    assert_eq!(
+        (
+            system_rail.x,
+            system_rail.y,
+            system_rail.width,
+            system_rail.height,
+        ),
+        (184, 8, 127, 29)
+    );
+    assert!(system_scene
+        .nodes()
+        .iter()
+        .all(|node| node.name != "System Tab Glow"));
 
     let housing = |name: &str| {
-        pause_scene
+        system_scene
             .nodes()
             .iter()
             .find(|node| node.name == name)
@@ -2822,20 +2888,107 @@ fn default_project_pause_menu_is_a_paused_live_overlay_with_ps1_shoulder_glyphs(
             })
             .unwrap_or_else(|| panic!("missing geometric {name}"))
     };
-    let left = housing("L1 Glyph Housing");
+    let left = housing("System L1 Glyph Housing");
     assert_eq!(left.corner_cut, 2);
     assert!(left.cut_top_left && left.cut_bottom_right);
     assert!(!left.cut_top_right && !left.cut_bottom_left);
-    let right = housing("R1 Glyph Housing");
+    let right = housing("System R1 Glyph Housing");
     assert_eq!(right.corner_cut, 2);
     assert!(right.cut_top_right && right.cut_bottom_left);
     assert!(!right.cut_top_left && !right.cut_bottom_right);
 
-    for name in ["Top Right Tab Rail", "System Submenu Panel"] {
-        let frame = housing(name);
-        assert_eq!(frame.border_color, [79, 77, 73]);
-        assert_eq!(frame.border_gradient, None);
+    for name in ["System World Dimmer", "System World Quarter Scrim"] {
+        let (rect, color, shape) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Rect {
+                    rect,
+                    color,
+                    shape: Some(shape),
+                    ..
+                } => Some((rect, color, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), (0, 0, 320, 240));
+        assert_eq!(*color, [0, 0, 0]);
+        assert!(shape.semi_transparent_fill);
+        assert_eq!((shape.corner_cut, shape.border_width), (0, 0));
     }
+
+    for name in ["System Tab Rail", "System Panel"] {
+        let frame = housing(name);
+        assert!(!frame.semi_transparent_fill);
+        assert_eq!(frame.corner_cut, 5);
+        assert!(frame.cut_top_left && frame.cut_bottom_right);
+    }
+    assert!(system_scene
+        .nodes()
+        .iter()
+        .all(|node| !node.name.contains("Session")));
+
+    for (name, expected_rect) in [("System Inset Rail", (15, 49, 290, 22))] {
+        let (rect, shape) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Rect {
+                    rect,
+                    shape: Some(shape),
+                    ..
+                } => Some((rect, shape)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!((rect.x, rect.y, rect.width, rect.height), expected_rect);
+        assert_eq!((shape.corner_cut, shape.border_width), (5, 1));
+        assert!(shape.cut_top_left);
+        assert!(!shape.cut_top_right && !shape.cut_bottom_right && !shape.cut_bottom_left);
+        assert!(!shape.semi_transparent_fill);
+    }
+
+    for (name, option) in [
+        ("Screen X", OptionId(1)),
+        ("Screen Y", OptionId(2)),
+        ("Brightness", OptionId(6)),
+        ("Stick Deadzone", OptionId(5)),
+        ("Music Volume", OptionId(3)),
+        ("SFX Volume", OptionId(4)),
+    ] {
+        let (authored_option, rect) = system_scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == name)
+            .and_then(|node| match &node.kind {
+                UiNodeKind::Slider { option, rect, .. } => Some((*option, *rect)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert_eq!(authored_option, option);
+        assert_eq!((rect.x, rect.width, rect.height), (94, 201, 6));
+    }
+    let return_to_title = system_scene
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Return To Title")
+        .and_then(|node| match node.kind {
+            UiNodeKind::Button { rect, .. } => Some(rect),
+            _ => None,
+        })
+        .expect("Return To Title");
+    assert_eq!(
+        (
+            return_to_title.x,
+            return_to_title.y,
+            return_to_title.width,
+            return_to_title.height,
+        ),
+        (94, 201, 201, 18),
+        "Return to Title must be the final aligned row after SFX"
+    );
 }
 
 #[test]
