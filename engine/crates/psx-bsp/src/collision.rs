@@ -4,6 +4,8 @@
 //! authorship). This is PSoXide's canonical allocation-free implementation.
 //! PXBSP positions are Y-up Q20.12 and plane normals are Q3.12.
 
+use core::mem::MaybeUninit;
+
 use crate::{ClipNode, CompactPlane, Leaf, Node, Plane, RecordSlice, Vec3I16, Vec3I32};
 use psx_engine::div_q12_i32;
 use psx_gte::math::Mat3I16;
@@ -175,31 +177,19 @@ struct TraceContinuation {
     end: Vec3I32,
 }
 
-impl TraceContinuation {
-    const EMPTY: Self = Self {
-        far_child: 0,
-        plane_index: 0,
-        side: 0,
-        middle_fraction: 0,
-        end_fraction: 0,
-        middle: Vec3I32 { x: 0, y: 0, z: 0 },
-        end: Vec3I32 { x: 0, y: 0, z: 0 },
-    };
-}
-
 /// Caller-owned workspace for one allocation-free BSP hull trace.
 ///
 /// The fixed stack stores at most [`TRACE_STACK_CAPACITY`] pending far-side
 /// traversals. A trace that needs one more entry returns `false`; the scratch
 /// remains reusable and the caller's output is not modified.
 pub struct TraceScratch {
-    continuations: [TraceContinuation; TRACE_STACK_CAPACITY],
+    continuations: [MaybeUninit<TraceContinuation>; TRACE_STACK_CAPACITY],
 }
 
 impl TraceScratch {
     pub const fn new() -> Self {
         Self {
-            continuations: [TraceContinuation::EMPTY; TRACE_STACK_CAPACITY],
+            continuations: [MaybeUninit::uninit(); TRACE_STACK_CAPACITY],
         }
     }
 }
@@ -504,7 +494,7 @@ impl<'a> CollisionHull<'a> {
                 if continuation_count == TRACE_STACK_CAPACITY {
                     return false;
                 }
-                scratch.continuations[continuation_count] = TraceContinuation {
+                scratch.continuations[continuation_count].write(TraceContinuation {
                     far_child: node.children[side ^ 1],
                     plane_index: node.plane,
                     side: side as u8,
@@ -512,7 +502,7 @@ impl<'a> CollisionHull<'a> {
                     end_fraction,
                     middle,
                     end: segment_end,
-                };
+                });
                 continuation_count += 1;
                 node_index = node.children[side];
                 end_fraction = middle_fraction;
@@ -538,7 +528,10 @@ impl<'a> CollisionHull<'a> {
                 return true;
             }
             continuation_count -= 1;
-            let continuation = scratch.continuations[continuation_count];
+            // This slot was written when it was pushed above, and stack order
+            // guarantees it is popped only after that write.
+            let continuation =
+                unsafe { scratch.continuations[continuation_count].assume_init_read() };
             let Some(far_contents) =
                 self.point_contents_from(continuation.far_child, &continuation.middle)
             else {
