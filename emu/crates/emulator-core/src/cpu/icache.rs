@@ -20,6 +20,20 @@ struct CacheLine {
     words: [u32; WORDS_PER_LINE],
 }
 
+/// Metadata for one instruction-cache refill. This is emulator-owned
+/// diagnostic state; it never participates in the emulated cache contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Refill {
+    pub(super) set: u8,
+    pub(super) incoming_line: u32,
+    pub(super) incoming_tag: u32,
+    pub(super) victim_line: u32,
+    pub(super) victim_tag: u32,
+    pub(super) victim_valid_mask: u8,
+    pub(super) tag_miss: bool,
+    pub(super) fill_words: u8,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct InstructionCache {
     #[serde(with = "crate::serde_big_array::array")]
@@ -45,15 +59,29 @@ impl InstructionCache {
 
     /// Fetch one instruction, filling according to the CXD8606Q's
     /// documented per-word-valid behaviour.
-    pub(super) fn fetch(&mut self, phys: u32, iblksz: u8, bus: &mut Bus) -> (u32, u32) {
+    pub(super) fn fetch(
+        &mut self,
+        phys: u32,
+        iblksz: u8,
+        bus: &mut Bus,
+        capture_refill: bool,
+    ) -> (u32, u32, Option<Refill>) {
         let (line_index, word_index, tag) = Self::coordinates(phys);
         let valid_bit = 1 << word_index;
         let line = &mut self.lines[line_index];
 
         if line.tag == tag && line.valid & valid_bit != 0 {
-            return (line.words[word_index], 0);
+            return (line.words[word_index], 0, None);
         }
 
+        let victim = capture_refill.then(|| {
+            let victim_tag = line.tag;
+            (
+                victim_tag,
+                line.valid,
+                victim_tag | ((line_index as u32) << 4),
+            )
+        });
         let tag_matches = line.tag == tag;
         let filled_words;
         if !tag_matches {
@@ -85,7 +113,17 @@ impl InstructionCache {
             filled_words = WORDS_PER_LINE as u32;
         }
 
-        (line.words[word_index], filled_words)
+        let refill = victim.map(|(victim_tag, victim_valid_mask, victim_line)| Refill {
+            set: line_index as u8,
+            incoming_line: phys & !(LINE_BYTES - 1),
+            incoming_tag: tag,
+            victim_line,
+            victim_tag,
+            victim_valid_mask,
+            tag_miss: !tag_matches,
+            fill_words: filled_words as u8,
+        });
+        (line.words[word_index], filled_words, refill)
     }
 
     /// Cache-isolated data-mode word read.
@@ -150,7 +188,16 @@ mod tests {
         }
         let mut cache = InstructionCache::default();
 
-        assert_eq!(cache.fetch(0x1008, 3, &mut bus), (0x12, 2));
+        let (instruction, filled_words, refill) = cache.fetch(0x1008, 3, &mut bus, true);
+        assert_eq!(instruction, 0x12);
+        assert_eq!(filled_words, 2);
+        let refill = refill.expect("tag miss refill");
+        assert_eq!(refill.set, 0);
+        assert_eq!(refill.incoming_line, 0x1000);
+        assert_eq!(refill.victim_line, 0);
+        assert_eq!(refill.victim_valid_mask, 0);
+        assert!(refill.tag_miss);
+        assert_eq!(refill.fill_words, 2);
         let (tag, valid, words) = cache.line_state(0x1008);
         assert_eq!(tag, 0x1000);
         assert_eq!(valid, 0b1100);
@@ -165,9 +212,15 @@ mod tests {
         }
         let mut cache = InstructionCache::default();
 
-        assert_eq!(cache.fetch(0x2000, 0, &mut bus), (0x20, 2));
+        assert_eq!(cache.fetch(0x2000, 0, &mut bus, true).0, 0x20);
         assert_eq!(cache.line_state(0x2000).1, 0b0011);
-        assert_eq!(cache.fetch(0x2008, 0, &mut bus), (0x22, 4));
+        let (instruction, filled_words, refill) = cache.fetch(0x2008, 0, &mut bus, true);
+        assert_eq!(instruction, 0x22);
+        assert_eq!(filled_words, 4);
+        let refill = refill.expect("invalid-word refill");
+        assert!(!refill.tag_miss);
+        assert_eq!(refill.victim_valid_mask, 0b0011);
+        assert_eq!(refill.fill_words, 4);
         assert_eq!(cache.line_state(0x2000).1, 0b1111);
     }
 
@@ -178,14 +231,38 @@ mod tests {
         bus.write32(0x4000, 0xBBBB_BBBB);
         let mut cache = InstructionCache::default();
 
-        assert_eq!(cache.fetch(0x3000, 3, &mut bus), (0xAAAA_AAAA, 4));
+        assert_eq!(cache.fetch(0x3000, 3, &mut bus, true).0, 0xAAAA_AAAA);
         bus.write32(0x3000, 0xCCCC_CCCC);
-        assert_eq!(cache.fetch(0x3000, 3, &mut bus), (0xAAAA_AAAA, 0));
+        assert_eq!(
+            cache.fetch(0x3000, 3, &mut bus, true),
+            (0xAAAA_AAAA, 0, None)
+        );
 
         // These addresses have the same bits 11:4, so the second tag
         // replaces the first direct-mapped line.
-        assert_eq!(cache.fetch(0x4000, 3, &mut bus), (0xBBBB_BBBB, 4));
-        assert_eq!(cache.fetch(0x3000, 3, &mut bus), (0xCCCC_CCCC, 4));
+        assert_eq!(cache.fetch(0x4000, 3, &mut bus, true).0, 0xBBBB_BBBB);
+        let (instruction, filled_words, refill) = cache.fetch(0x3000, 3, &mut bus, true);
+        assert_eq!(instruction, 0xCCCC_CCCC);
+        assert_eq!(filled_words, 4);
+        let refill = refill.expect("same-set replacement");
+        assert_eq!(refill.victim_line, 0x4000);
+        assert_eq!(refill.victim_tag, 0x4000);
+        assert_eq!(refill.victim_valid_mask, 0b1111);
+    }
+
+    #[test]
+    fn disabled_refill_capture_preserves_fill_width_without_metadata() {
+        let mut bus = bus();
+        bus.write32(0x6008, 0xCAFE_BABE);
+        bus.write32(0x600c, 0x0123_4567);
+        let mut cache = InstructionCache::default();
+
+        let (instruction, filled_words, refill) = cache.fetch(0x6008, 3, &mut bus, false);
+
+        assert_eq!(instruction, 0xCAFE_BABE);
+        assert_eq!(filled_words, 2);
+        assert_eq!(refill, None);
+        assert_eq!(cache.line_state(0x6008).1, 0b1100);
     }
 
     #[test]

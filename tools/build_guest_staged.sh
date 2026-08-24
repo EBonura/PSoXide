@@ -37,6 +37,12 @@ EXE_RELATIVE="build/examples/mipsel-sony-psx/release/editor-playtest.exe"
 # The linker script is reached relative to the guest crate directory, so the
 # stage has to mirror the repository layout rather than flatten it.
 RUSTFLAGS_VALUE="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+# Raw PS-X EXE builds have no symbol table. Ask lld for an optional side map
+# without changing the output image, so an exact profiled binary can be
+# attributed instead of rebuilt through a layout-changing diagnostic path.
+if [ -n "${PSOXIDE_GUEST_LINK_MAP:-}" ]; then
+    RUSTFLAGS_VALUE="$RUSTFLAGS_VALUE -Clink-arg=-Map=$PSOXIDE_GUEST_LINK_MAP"
+fi
 
 # Everything the guest link closure reads. Directories are mirrored with
 # --delete so a removed source file cannot survive in the stage.

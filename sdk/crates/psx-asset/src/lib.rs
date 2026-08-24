@@ -1029,27 +1029,33 @@ impl<'a> Animation<'a> {
     }
 
     /// Decode one v3 (Q11-packed) record: rotation block at +0,
-    /// shifted i16 translations at +14. Byte-wise loads throughout, so
-    /// alignment is irrelevant.
+    /// shifted i16 translations at +14.
+    ///
+    /// Shipping assets are word-aligned by both the generated static wrapper
+    /// and the persistent CD asset pool. That path reads the complete 20-byte
+    /// record as five words; generic callers can still pass an arbitrarily
+    /// aligned byte slice and use the byte-exact fallback.
     ///
     /// # Safety
     /// `base + 20` must be in bounds.
     unsafe fn pose_v3_unchecked(&self, base: usize) -> JointPose {
-        let matrix = unsafe { read_pose_matrix_q11_unchecked(self.poses, base) };
-        let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
-        let translation = Vec3I32::new(
-            decode_packed_translation(
+        let record = unsafe { self.poses.as_ptr().add(base) };
+        let (matrix, packed_translation) = if record as usize & 3 == 0 {
+            unsafe { read_pose_v3_word_aligned_unchecked(self.poses, base) }
+        } else {
+            let matrix = unsafe { read_pose_matrix_q11_unchecked(self.poses, base) };
+            let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
+            let translation = Vec3I16::new(
                 unsafe { read_i16_unchecked(self.poses, base + off) },
-                self.translation_shift,
-            ),
-            decode_packed_translation(
                 unsafe { read_i16_unchecked(self.poses, base + off + 2) },
-                self.translation_shift,
-            ),
-            decode_packed_translation(
                 unsafe { read_i16_unchecked(self.poses, base + off + 4) },
-                self.translation_shift,
-            ),
+            );
+            (matrix, translation)
+        };
+        let translation = Vec3I32::new(
+            decode_packed_translation(packed_translation.x, self.translation_shift),
+            decode_packed_translation(packed_translation.y, self.translation_shift),
+            decode_packed_translation(packed_translation.z, self.translation_shift),
         );
         JointPose {
             matrix,
@@ -1107,16 +1113,24 @@ impl<'a> Animation<'a> {
         let base = frame_offset.checked_add(joint_index as usize * self.pose_record_size)?;
         let bytes = self.poses.get(base..base + self.pose_record_size)?;
         if v3 {
-            // SAFETY: the slice covers the whole 20-byte record.
-            let matrix = unsafe { read_pose_matrix_q11_unchecked(bytes, 0) };
-            let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
-            return Some(GteJointPose {
-                matrix,
-                translation: Vec3I16::new(
+            // SAFETY: the slice covers the whole 20-byte record. Shipping
+            // storage is word-aligned; retain the byte decoder for arbitrary
+            // slices accepted by the public parser.
+            let (matrix, translation) = if bytes.as_ptr() as usize & 3 == 0 {
+                unsafe { read_pose_v3_word_aligned_unchecked(bytes, 0) }
+            } else {
+                let matrix = unsafe { read_pose_matrix_q11_unchecked(bytes, 0) };
+                let off = psxed_format::animation::POSE_ROTATION_BLOCK_SIZE_V3;
+                let translation = Vec3I16::new(
                     read_i16(bytes, off),
                     read_i16(bytes, off + 2),
                     read_i16(bytes, off + 4),
-                ),
+                );
+                (matrix, translation)
+            };
+            return Some(GteJointPose {
+                matrix,
+                translation,
                 translation_shift: self.translation_shift,
             });
         }
@@ -1537,6 +1551,60 @@ unsafe fn read_pose_matrix_q11_unchecked(bytes: &[u8], offset: usize) -> [[i16; 
         [flat[3], flat[4], flat[5]],
         [flat[6], flat[7], flat[8]],
     ]
+}
+
+/// Decode one word-aligned v3 pose record with exactly five aligned loads.
+///
+/// The rotation occupies bytes 0..14 and the three translations occupy
+/// bytes 14..20, so words three and four naturally carry both the final
+/// rotation code and every translation halfword. The returned values are
+/// identical to [`read_pose_matrix_q11_unchecked`] plus three little-endian
+/// `i16` reads; only the load shape differs.
+///
+/// # Safety
+/// `offset + 20` must be in bounds and `bytes.as_ptr().add(offset)` must be
+/// aligned for `u32`.
+#[inline]
+unsafe fn read_pose_v3_word_aligned_unchecked(
+    bytes: &[u8],
+    offset: usize,
+) -> ([[i16; 3]; 3], Vec3I16) {
+    let record = unsafe { bytes.as_ptr().add(offset) };
+    debug_assert_eq!(record as usize & 3, 0);
+    let words = record.cast::<u32>();
+    let w0 = u32::from_le(unsafe { words.add(0).read() });
+    let w1 = u32::from_le(unsafe { words.add(1).read() });
+    let w2 = u32::from_le(unsafe { words.add(2).read() });
+    let w3 = u32::from_le(unsafe { words.add(3).read() });
+    let w4 = u32::from_le(unsafe { words.add(4).read() });
+
+    let p0 = w0 & 0x00ff_ffff;
+    let p1 = (w0 >> 24) | ((w1 & 0x0000_ffff) << 8);
+    let p2 = (w1 >> 16) | ((w2 & 0x0000_00ff) << 16);
+    let p3 = (w2 >> 8) & 0x00ff_ffff;
+    let matrix = [
+        [
+            decode_q11_element((p0 & 0x0fff) as u16),
+            decode_q11_element(((p0 >> 12) & 0x0fff) as u16),
+            decode_q11_element((p1 & 0x0fff) as u16),
+        ],
+        [
+            decode_q11_element(((p1 >> 12) & 0x0fff) as u16),
+            decode_q11_element((p2 & 0x0fff) as u16),
+            decode_q11_element(((p2 >> 12) & 0x0fff) as u16),
+        ],
+        [
+            decode_q11_element((p3 & 0x0fff) as u16),
+            decode_q11_element(((p3 >> 12) & 0x0fff) as u16),
+            decode_q11_element((w3 & 0x0fff) as u16),
+        ],
+    ];
+    let translation = Vec3I16::new(
+        (w3 >> 16) as u16 as i16,
+        w4 as u16 as i16,
+        (w4 >> 16) as u16 as i16,
+    );
+    (matrix, translation)
 }
 
 fn read_pose_matrix(bytes: &[u8]) -> [[i16; 3]; 3] {

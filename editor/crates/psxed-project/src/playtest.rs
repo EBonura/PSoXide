@@ -1122,6 +1122,7 @@ pub fn build_package(
             .texture_asset_index = sky_texture_asset_index;
         world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
             bytes: compiled.pxbsp.bytes,
+            max_visible_faces: compiled.pxbsp.max_visible_faces,
             body_hulls: compiled.body_hulls,
             texture_asset_indices: compiled
                 .textures

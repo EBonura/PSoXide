@@ -1410,19 +1410,34 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             && faces.len() <= triangles.remaining()
             && faces.len() <= self.commands.len().saturating_sub(self.command_len)
         {
-            self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch::<
-                CULL_BACK,
-            >(
-                triangles,
-                projected_vertices,
-                faces,
-                packet_material,
-                uv_offset,
-                palette_banks,
-                options,
-                stats,
-                faces_considered,
-            );
+            if uv_offset.is_zero() {
+                self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch::<
+                    CULL_BACK,
+                >(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    palette_banks,
+                    options,
+                    stats,
+                    faces_considered,
+                );
+            } else {
+                self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch::<
+                    CULL_BACK,
+                >(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    uv_offset,
+                    palette_banks,
+                    options,
+                    stats,
+                    faces_considered,
+                );
+            }
             return false;
         }
 
@@ -1519,6 +1534,116 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             0,
         );
         false
+    }
+
+    /// Monomorphic shipping walker for bucketed, average-depth, packed,
+    /// unclamped, extent-safe model faces with authored UVs. The route checks
+    /// happen once before this function; the inner loop keeps no UV-policy or
+    /// packet-capacity branches. On PS1 the face UV/palette unpack occupies
+    /// five mandatory NCLIP wait slots without shortening either GTE hazard.
+    #[inline(always)]
+    fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_authored_batch<
+        const CULL_BACK: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        palette_banks: bool,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
+        debug_assert!(matches!(self.ordering, WorldCommandOrdering::Bucketed));
+        debug_assert!(faces.len() <= triangles.remaining());
+        debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
+
+        let command_start = self.command_len;
+        let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0usize;
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            let face = faces[face_index];
+            let [ia, ib, ic] = face.vertex_indices();
+            let projected = unsafe {
+                // SAFETY: decoded faces were validated against the completely
+                // projected model vertex slice before entering this batch.
+                [
+                    *projected_vertices.get_unchecked(ia as usize),
+                    *projected_vertices.get_unchecked(ib as usize),
+                    *projected_vertices.get_unchecked(ic as usize),
+                ]
+            };
+            let (area, uv_words, palette_bank) = if CULL_BACK {
+                psx_gte::scene::screen_area_and_unpack_model_face_scheduled(
+                    [
+                        (projected[0].sx, projected[0].sy),
+                        (projected[1].sx, projected[1].sy),
+                        (projected[2].sx, projected[2].sy),
+                    ],
+                    face.corner_words,
+                )
+            } else {
+                (1, face.uv_words(), face.palette_bank())
+            };
+            if CULL_BACK && area <= 0 {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+            let packet_material = if palette_banks {
+                packet_material.with_clut_bank(palette_bank)
+            } else {
+                packet_material
+            };
+            let triangle = unsafe {
+                // SAFETY: the caller preflighted one slot for every input face,
+                // which is a conservative bound after backface culling.
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    [
+                        (projected[0].sx, projected[0].sy),
+                        (projected[1].sx, projected[1].sy),
+                        (projected[2].sx, projected[2].sy),
+                    ],
+                    uv_words,
+                    packet_material,
+                ))
+            } as *mut TriTextured as *mut u32;
+            let depth = ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                .saturating_add(options.depth_bias);
+            let slot = depth_slots.slot(depth);
+            unsafe {
+                // SAFETY: the command preflight reserves one slot per input
+                // face and `submitted_triangles <= face_index`.
+                compact_commands
+                    .add(command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        triangle,
+                        slot,
+                        TriTextured::WORDS,
+                    ));
+            }
+            submitted_triangles += 1;
+            face_index += 1;
+        }
+        self.command_len = command_start + submitted_triangles;
+
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        let submitted = submitted_triangles.min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed));
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            0,
+            processed,
+            processed,
+            culled_triangles,
+            submitted,
+            submitted,
+            0,
+        );
     }
 
     #[inline(always)]

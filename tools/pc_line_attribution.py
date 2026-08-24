@@ -47,6 +47,34 @@ def load_lines(path: pathlib.Path) -> list[tuple[int, int]]:
     return lines
 
 
+def canonical_code_line(physical: int) -> int:
+    """Map a physical code line to the conventional cached/BIOS alias."""
+    if 0x1FC0_0000 <= physical < 0x1FC8_0000:
+        return physical | 0xA000_0000
+    return physical | 0x8000_0000
+
+
+def load_eviction_pairs(
+    path: pathlib.Path,
+) -> list[tuple[int, int, int, int, int]]:
+    """Return (victim, incoming, set, events, stalls) temporal replacements."""
+    totals: dict[tuple[int, int, int], list[int]] = defaultdict(lambda: [0, 0])
+    with path.open(newline="", encoding="utf-8") as source:
+        for row in csv.DictReader(source):
+            if row["miss_kind"] != "tag" or int(row["victim_valid_mask"], 16) == 0:
+                continue
+            victim = canonical_code_line(int(row["victim_line"], 16))
+            incoming = canonical_code_line(int(row["incoming_line"], 16))
+            cache_set = int(row["cache_set"], 16)
+            aggregate = totals[(victim, incoming, cache_set)]
+            aggregate[0] += 1
+            aggregate[1] += int(row["stall_cycles"])
+    return [
+        (victim, incoming, cache_set, counts[0], counts[1])
+        for (victim, incoming, cache_set), counts in totals.items()
+    ]
+
+
 def symbol_for(
     pc: int, symbols: list[tuple[int, int, str]], starts: list[int]
 ) -> str:
@@ -68,6 +96,11 @@ def main() -> int:
     parser.add_argument("pc_lines", type=pathlib.Path)
     parser.add_argument("linker_map", type=pathlib.Path)
     parser.add_argument("--limit", type=int, default=30)
+    parser.add_argument(
+        "--icache-events",
+        type=pathlib.Path,
+        help="exact refill CSV emitted by frontend --icache-event-log",
+    )
     args = parser.parse_args()
 
     lines = load_lines(args.pc_lines)
@@ -109,6 +142,23 @@ def main() -> int:
             f"0x{pc:08x}:{count}:{name}" for pc, count, name in entries[:3]
         )
         print(f"{pressure},{set_total},0x{cache_set:02x},{len(entries)},{top}")
+
+    if args.icache_events is not None:
+        pairs = load_eviction_pairs(args.icache_events)
+        print("\nexact temporal eviction pairs")
+        print(
+            "stall_cycles,events,cache_set,victim_line,victim_symbol,"
+            "incoming_line,incoming_symbol"
+        )
+        for victim, incoming, cache_set, events, stalls in sorted(
+            pairs, key=lambda item: (-item[4], -item[3], item[0], item[1])
+        )[: args.limit]:
+            victim_symbol = symbol_for(victim, symbols, starts)
+            incoming_symbol = symbol_for(incoming, symbols, starts)
+            print(
+                f"{stalls},{events},0x{cache_set:02x},0x{victim:08x},"
+                f"{victim_symbol},0x{incoming:08x},{incoming_symbol}"
+            )
     return 0
 
 

@@ -54,6 +54,10 @@ pub struct PxbspSubmodel {
 pub struct CompiledPxbsp {
     pub bytes: Vec<u8>,
     pub resident_bytes: usize,
+    /// Exact largest unique world-face chain produced by any cooked PVS row.
+    /// The PS1 renderer uses this cooker-owned bound instead of reserving two
+    /// `face_count`-sized transient chains from its bump heap.
+    pub max_visible_faces: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +142,7 @@ pub fn build_pxbsp_with_submodels(
     let materials = pack_materials(payloads.materials)?;
     let entities = pack_entities(payloads.entities)?;
 
+    let max_visible_faces = max_visible_face_chain(&geometry)?;
     let mut lumps: [Vec<u8>; PXBSP_LUMP_COUNT] = core::array::from_fn(|_| Vec::new());
     lumps[PxbspLumpKind::TextureData as usize].extend_from_slice(payloads.texture_data);
     lumps[PxbspLumpKind::SoundData as usize].extend_from_slice(payloads.sound_data);
@@ -178,7 +183,95 @@ pub fn build_pxbsp_with_submodels(
     Ok(CompiledPxbsp {
         bytes: write_pxbsp(&lumps)?,
         resident_bytes,
+        max_visible_faces,
     })
+}
+
+/// Compute the exact persistent PVS-chain bound while the cooker still owns
+/// convenient host memory. Runtime PVS rows address world leaves 1..=N;
+/// submodel faces are drawn through their model ranges and do not enlarge the
+/// world chain.
+fn max_visible_face_chain(geometry: &PackedBspGeometry) -> Result<usize, PxbspBuildError> {
+    let face_count = geometry.faces.len() / FACE_BYTES;
+    let leaf_count = geometry.leaves.len() / LEAF_BYTES;
+    let visible_leaves = usize::try_from(geometry.visible_leaves)
+        .map_err(|_| PxbspBuildError::InvalidReference("visible leaves"))?;
+    if visible_leaves + 1 > leaf_count {
+        return Err(PxbspBuildError::InvalidReference("visible leaves"));
+    }
+    let row_bytes = visible_leaves.div_ceil(8);
+    let mut row = vec![0u8; row_bytes];
+    let mut marked = vec![0u8; face_count.div_ceil(8)];
+    let mut maximum = 0usize;
+
+    for source_leaf in 1..=visible_leaves {
+        let leaf = &geometry.leaves[source_leaf * LEAF_BYTES..(source_leaf + 1) * LEAF_BYTES];
+        let visibility_offset = i32::from_le_bytes(leaf[4..8].try_into().unwrap());
+        if visibility_offset < 0 {
+            continue;
+        }
+        if !decompress_visibility_row(&geometry.visibility, visibility_offset as usize, &mut row) {
+            return Err(PxbspBuildError::InvalidReference("visibility row"));
+        }
+        marked.fill(0);
+        let mut count = 0usize;
+        for visible_index in 0..visible_leaves {
+            if row[visible_index >> 3] & (1 << (visible_index & 7)) == 0 {
+                continue;
+            }
+            let visible_leaf = visible_index + 1;
+            let leaf = &geometry.leaves[visible_leaf * LEAF_BYTES..(visible_leaf + 1) * LEAF_BYTES];
+            let mark_count = usize::from(read_u16(leaf, 2));
+            let first_mark = usize::from(read_u16(leaf, 8));
+            let mark_end = first_mark
+                .checked_add(mark_count)
+                .ok_or(PxbspBuildError::InvalidReference("leaf mark surfaces"))?;
+            if mark_end > geometry.mark_surfaces.len() / MARK_SURFACE_BYTES {
+                return Err(PxbspBuildError::InvalidReference("leaf mark surfaces"));
+            }
+            for mark in first_mark..mark_end {
+                let face =
+                    usize::from(read_u16(&geometry.mark_surfaces, mark * MARK_SURFACE_BYTES));
+                if face >= face_count {
+                    return Err(PxbspBuildError::InvalidReference("mark surface face"));
+                }
+                let mask = 1 << (face & 7);
+                let byte = &mut marked[face >> 3];
+                if *byte & mask == 0 {
+                    *byte |= mask;
+                    count += 1;
+                }
+            }
+        }
+        maximum = maximum.max(count);
+    }
+    Ok(maximum)
+}
+
+fn decompress_visibility_row(input: &[u8], offset: usize, output: &mut [u8]) -> bool {
+    output.fill(0);
+    let mut source = offset;
+    let mut destination = 0usize;
+    while destination < output.len() {
+        let Some(&value) = input.get(source) else {
+            return false;
+        };
+        source += 1;
+        if value != 0 {
+            output[destination] = value;
+            destination += 1;
+            continue;
+        }
+        let Some(&run) = input.get(source) else {
+            return false;
+        };
+        source += 1;
+        if run == 0 || destination + usize::from(run) > output.len() {
+            return false;
+        }
+        destination += usize::from(run);
+    }
+    true
 }
 
 #[derive(Clone, Copy)]
@@ -951,6 +1044,9 @@ mod tests {
         );
         assert!(index.lump(PxbspLumpKind::ClipNodes).len > 0);
         assert_eq!(index.lump(PxbspLumpKind::Materials).len, 16);
+        let face_count = index.lump(PxbspLumpKind::Faces).len as usize / FACE_BYTES;
+        assert!(compiled.max_visible_faces > 0);
+        assert!(compiled.max_visible_faces <= face_count);
         let entities = index.lump(PxbspLumpKind::Entities);
         let table = PxbspEntityTable::new(
             &compiled.bytes[entities.offset as usize..entities.end() as usize],

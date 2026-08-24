@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use emulator_core::{
     button, fast_boot_disc_with_hle, telemetry, warm_bios_for_disc_fast_boot, Bus, ButtonState,
-    Cpu, EmulatorState, DISC_FAST_BOOT_WARMUP_STEPS,
+    Cpu, EmulatorState, InstructionCacheMissKind, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psx_hw::memory;
 // `Gpu` is only constructed for the editor 3D preview dump.
@@ -380,6 +380,29 @@ pub struct LaunchArgs {
     /// loading and menus when profiling a deterministic gameplay route.
     #[arg(long, default_value_t = 0, requires = "pc_line_log")]
     pub pc_line_start_route_tick: u64,
+    /// Attribute MMIO stall cycles to the canonical 16-byte I-cache line of
+    /// the instruction that incurred them. A single device write can stall for
+    /// thousands of cycles, so retired-instruction counts cannot answer where
+    /// device back-pressure is paid.
+    #[arg(long)]
+    pub mmio_stall_line_log: Option<PathBuf>,
+    /// Ignore MMIO stall attribution before this route tick.
+    #[arg(long, default_value_t = 0, requires = "mmio_stall_line_log")]
+    pub mmio_stall_line_start_route_tick: u64,
+    /// Write every exact instruction-cache refill, including the replaced
+    /// victim line and the incoming line. This measures temporal eviction
+    /// pairs rather than inferring conflicts from set occupancy.
+    #[arg(long)]
+    pub icache_event_log: Option<PathBuf>,
+    /// Ignore refill events before this route tick, allowing menu/loading
+    /// traffic to be excluded from a deterministic gameplay profile.
+    #[arg(long, default_value_t = 0, requires = "icache_event_log")]
+    pub icache_event_start_route_tick: u64,
+    /// Write exact dynamic MIPS instruction-class counts per route tick,
+    /// including delay slots, memory widths/regions, stack-relative accesses,
+    /// control flow, multiply/divide and GTE traffic.
+    #[arg(long)]
+    pub instruction_class_log: Option<PathBuf>,
     /// Write stack high-water observations without modifying guest RAM.
     #[arg(long)]
     pub stack_profile_log: Option<PathBuf>,
@@ -1144,7 +1167,9 @@ fn run_headless_launch(
         }
         None => None,
     };
-    cpu.set_cpu_cycle_profile_enabled(args.cpu_cycle_profile_log.is_some());
+    cpu.set_cpu_cycle_profile_enabled(
+        args.cpu_cycle_profile_log.is_some() || args.mmio_stall_line_log.is_some(),
+    );
     let mut cpu_cycle_profile_log = match args.cpu_cycle_profile_log.as_ref() {
         Some(path) => {
             if let Some(parent) = path
@@ -1177,6 +1202,59 @@ fn run_headless_launch(
     };
     let mut last_cpu_cycle_profile = cpu.cpu_cycle_profile();
     let mut pc_line_histogram = args.pc_line_log.as_ref().map(|_| PcLineHistogram::new());
+    let mut mmio_stall_lines = args
+        .mmio_stall_line_log
+        .as_ref()
+        .map(|_| PcLineHistogram::new());
+    let mut last_mmio_stall_cycles = last_cpu_cycle_profile.mmio_stall_cycles;
+    cpu.set_instruction_cache_event_profile_enabled(args.icache_event_log.is_some());
+    let mut icache_event_log = match args.icache_event_log.as_ref() {
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("mkdir {}: {error}", parent.display()))?;
+            }
+            let file = std::fs::File::create(path)
+                .map_err(|error| format!("create I-cache event log {}: {error}", path.display()))?;
+            let mut writer = std::io::BufWriter::new(file);
+            writeln!(
+                writer,
+                "route_tick,tape_frame,cpu_tick,bus_cycles,fetch_pc,cache_set,incoming_line,incoming_tag,victim_line,victim_tag,victim_valid_mask,miss_kind,fill_words,stall_cycles"
+            )
+            .map_err(|error| format!("write I-cache event log {}: {error}", path.display()))?;
+            Some(writer)
+        }
+        None => None,
+    };
+    cpu.set_instruction_class_profile_enabled(args.instruction_class_log.is_some());
+    let mut instruction_class_log = match args.instruction_class_log.as_ref() {
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("mkdir {}: {error}", parent.display()))?;
+            }
+            let file = std::fs::File::create(path).map_err(|error| {
+                format!("create instruction-class log {}: {error}", path.display())
+            })?;
+            let mut writer = std::io::BufWriter::new(file);
+            writeln!(
+                writer,
+                "route_tick,tape_frame,cpu_tick,bus_cycles,instructions,nops,delay_slot_instructions,delay_slot_nops,delay_slot_loads,delay_slot_stores,delay_slot_control_flow,byte_loads,halfword_loads,word_loads,unaligned_loads,byte_stores,halfword_stores,word_stores,unaligned_stores,ram_accesses,scratchpad_accesses,mmio_accesses,other_accesses,sp_relative_loads,sp_relative_stores,lui,direct_jumps,jal,jalr,conditional_branches,multiply,divide,gte_register_transfers,gte_commands"
+            )
+            .map_err(|error| {
+                format!("write instruction-class log {}: {error}", path.display())
+            })?;
+            Some(writer)
+        }
+        None => None,
+    };
+    let mut last_instruction_class_profile = cpu.instruction_class_profile();
     let mut stack_high_water_profile = args
         .stack_profile_log
         .as_ref()
@@ -1332,6 +1410,9 @@ fn run_headless_launch(
                 }
             }
         }
+        // Capture before stepping so a stalling instruction is charged to
+        // itself instead of the PC that follows it.
+        let mmio_attribution_pc = mmio_stall_lines.as_ref().map(|_| cpu.pc());
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
             eprintln!(
@@ -1341,6 +1422,42 @@ fn run_headless_launch(
             );
             stopped_at = Some(i);
             break;
+        }
+        if let (Some(lines), Some(pc)) = (mmio_stall_lines.as_mut(), mmio_attribution_pc) {
+            let now = cpu.cpu_cycle_profile().mmio_stall_cycles;
+            let delta = now.saturating_sub(last_mmio_stall_cycles);
+            last_mmio_stall_cycles = now;
+            if route_ticks >= args.mmio_stall_line_start_route_tick {
+                lines.record_n(pc, delta);
+            }
+        }
+        if icache_event_log.is_some() {
+            if let Some(event) = cpu.take_instruction_cache_refill_event() {
+                if route_ticks >= args.icache_event_start_route_tick {
+                    if let Some(writer) = icache_event_log.as_mut() {
+                        let miss_kind = match event.miss_kind {
+                            InstructionCacheMissKind::Tag => "tag",
+                            InstructionCacheMissKind::InvalidWord => "invalid_word",
+                        };
+                        writeln!(
+                        writer,
+                        "{route_ticks},{tape_cursor},{},{},0x{:08x},0x{:02x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:x},{miss_kind},{},{}",
+                        cpu.tick(),
+                        bus.cycles(),
+                        event.fetch_pc,
+                        event.cache_set,
+                        event.incoming_line,
+                        event.incoming_tag,
+                        event.victim_line,
+                        event.victim_tag,
+                        event.victim_valid_mask,
+                        event.fill_words,
+                        event.stall_cycles,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
         }
         if bus.run_spu_to_current_cycle() != 0 {
             let drained = bus.spu.drain_audio();
@@ -1491,6 +1608,48 @@ fn run_headless_launch(
                 )
                 .map_err(|error| error.to_string())?;
                 last_cpu_cycle_profile = snapshot;
+            }
+            if let Some(writer) = instruction_class_log.as_mut() {
+                let snapshot = cpu.instruction_class_profile();
+                let delta = snapshot.delta_since(last_instruction_class_profile);
+                writeln!(
+                    writer,
+                    "{route_ticks},{tape_cursor},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                    cpu.tick(),
+                    bus.cycles(),
+                    delta.instructions,
+                    delta.nops,
+                    delta.delay_slot_instructions,
+                    delta.delay_slot_nops,
+                    delta.delay_slot_loads,
+                    delta.delay_slot_stores,
+                    delta.delay_slot_control_flow,
+                    delta.byte_loads,
+                    delta.halfword_loads,
+                    delta.word_loads,
+                    delta.unaligned_loads,
+                    delta.byte_stores,
+                    delta.halfword_stores,
+                    delta.word_stores,
+                    delta.unaligned_stores,
+                    delta.ram_accesses,
+                    delta.scratchpad_accesses,
+                    delta.mmio_accesses,
+                    delta.other_accesses,
+                    delta.sp_relative_loads,
+                    delta.sp_relative_stores,
+                    delta.lui,
+                    delta.direct_jumps,
+                    delta.jal,
+                    delta.jalr,
+                    delta.conditional_branches,
+                    delta.multiply,
+                    delta.divide,
+                    delta.gte_register_transfers,
+                    delta.gte_commands,
+                )
+                .map_err(|error| error.to_string())?;
+                last_instruction_class_profile = snapshot;
             }
             if let Some(writer) = gpu_frame_stats_log.as_mut() {
                 let commands = bus.gpu.drain_completed_cmd_log();
@@ -1824,10 +1983,34 @@ fn run_headless_launch(
             }
         }
     }
+    if let Some(writer) = icache_event_log.as_mut() {
+        writer.flush().map_err(|error| error.to_string())?;
+        if emit_summary {
+            if let Some(path) = args.icache_event_log.as_ref() {
+                eprintln!("[cli] exact I-cache events → {}", path.display());
+            }
+        }
+    }
+    if let Some(writer) = instruction_class_log.as_mut() {
+        writer.flush().map_err(|error| error.to_string())?;
+        if emit_summary {
+            if let Some(path) = args.instruction_class_log.as_ref() {
+                eprintln!("[cli] instruction classes → {}", path.display());
+            }
+        }
+    }
     if let (Some(path), Some(histogram)) = (args.pc_line_log.as_ref(), pc_line_histogram.as_ref()) {
-        histogram.write(path)?;
+        histogram.write(path, "instructions")?;
         if emit_summary {
             eprintln!("[cli] PC line histogram → {}", path.display());
+        }
+    }
+    if let (Some(path), Some(histogram)) =
+        (args.mmio_stall_line_log.as_ref(), mmio_stall_lines.as_ref())
+    {
+        histogram.write(path, "mmio_stall_cycles")?;
+        if emit_summary {
+            eprintln!("[cli] MMIO stall attribution → {}", path.display());
         }
     }
     if let (Some(path), Some(profile)) = (
@@ -2591,6 +2774,11 @@ fn validation_launch_args(
         cpu_cycle_profile_log: None,
         pc_line_log: None,
         pc_line_start_route_tick: 0,
+        mmio_stall_line_log: None,
+        mmio_stall_line_start_route_tick: 0,
+        icache_event_log: None,
+        icache_event_start_route_tick: 0,
+        instruction_class_log: None,
         stack_profile_log: None,
         stack_profile_root_pc: None,
         dump_vram: None,
@@ -3579,21 +3767,32 @@ impl PcLineHistogram {
 
     #[inline]
     fn record(&mut self, pc: u32) {
+        self.record_n(pc, 1);
+    }
+
+    #[inline]
+    fn record_n(&mut self, pc: u32, count: u64) {
+        if count == 0 {
+            return;
+        }
         let physical = memory::to_physical(pc);
         if physical < memory::ram::MIRROR_END {
             let offset = physical as usize % memory::ram::SIZE;
-            self.ram[offset / PC_LINE_BYTES] = self.ram[offset / PC_LINE_BYTES].saturating_add(1);
+            self.ram[offset / PC_LINE_BYTES] =
+                self.ram[offset / PC_LINE_BYTES].saturating_add(count);
         } else if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
             .contains(&physical)
         {
             let offset = (physical - memory::bios::BASE) as usize;
-            self.bios[offset / PC_LINE_BYTES] = self.bios[offset / PC_LINE_BYTES].saturating_add(1);
+            self.bios[offset / PC_LINE_BYTES] =
+                self.bios[offset / PC_LINE_BYTES].saturating_add(count);
         } else {
-            *self.other.entry(pc & !0xf).or_insert(0) += 1;
+            let total = self.other.entry(pc & !0xf).or_insert(0);
+            *total = total.saturating_add(count);
         }
     }
 
-    fn write(&self, path: &Path) -> Result<(), String> {
+    fn write(&self, path: &Path, value_name: &str) -> Result<(), String> {
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -3604,7 +3803,7 @@ impl PcLineHistogram {
         let file = std::fs::File::create(path)
             .map_err(|error| format!("create {}: {error}", path.display()))?;
         let mut writer = std::io::BufWriter::new(file);
-        writeln!(writer, "line_pc,instructions,percent").map_err(|error| error.to_string())?;
+        writeln!(writer, "line_pc,{value_name},percent").map_err(|error| error.to_string())?;
 
         let mut ranked = Vec::new();
         ranked.extend(
@@ -3626,13 +3825,13 @@ impl PcLineHistogram {
         ranked.sort_unstable_by(|(pc_a, count_a), (pc_b, count_b)| {
             count_b.cmp(count_a).then_with(|| pc_a.cmp(pc_b))
         });
-        for (line_pc, instructions) in ranked {
+        for (line_pc, count) in ranked {
             let percent = if total == 0 {
                 0.0
             } else {
-                instructions as f64 * 100.0 / total as f64
+                count as f64 * 100.0 / total as f64
             };
-            writeln!(writer, "0x{line_pc:08x},{instructions},{percent:.6}")
+            writeln!(writer, "0x{line_pc:08x},{count},{percent:.6}")
                 .map_err(|error| error.to_string())?;
         }
         writer.flush().map_err(|error| error.to_string())
@@ -3668,18 +3867,30 @@ impl StackHighWaterProfile {
 
     #[inline]
     fn observe(&mut self, pc: u32, sp: u32, return_address: u32) {
-        let Some(sp) = canonical_ram_address(sp) else {
+        let canonical_sp = if self.root_pc.is_some() {
+            canonical_stack_address(sp)
+        } else {
+            // Whole-run stack reporting retains its historical main-RAM-only
+            // meaning. Rooted probes may explicitly follow a scratch stack.
+            canonical_ram_address(sp)
+        };
+        let Some(sp) = canonical_sp else {
             return;
         };
         let pc = canonical_code_address(pc);
         if let Some(root_pc) = self.root_pc {
             if let Some(active) = self.active {
-                if pc == active.return_pc && sp >= active.entry_sp {
+                if pc == active.return_pc
+                    && same_stack_region(sp, active.entry_sp)
+                    && sp >= active.entry_sp
+                {
                     self.finish_active(true);
                     return;
                 }
                 let active = self.active.as_mut().unwrap();
-                active.min_sp = active.min_sp.min(sp);
+                if same_stack_region(sp, active.entry_sp) {
+                    active.min_sp = active.min_sp.min(sp);
+                }
                 active.observations = active.observations.saturating_add(1);
                 return;
             }
@@ -3757,6 +3968,27 @@ fn canonical_ram_address(address: u32) -> Option<u32> {
     let physical = memory::to_physical(address);
     (physical < memory::ram::MIRROR_END)
         .then_some(0x8000_0000 | (physical as usize % memory::ram::SIZE) as u32)
+}
+
+#[inline]
+fn canonical_stack_address(address: u32) -> Option<u32> {
+    if let Some(ram) = canonical_ram_address(address) {
+        return Some(ram);
+    }
+    if (0xA000_0000..0xC000_0000).contains(&address) {
+        return None;
+    }
+    let physical = memory::to_physical(address);
+    (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+        .contains(&physical)
+        .then_some(physical)
+}
+
+#[inline]
+fn same_stack_region(left: u32, right: u32) -> bool {
+    let scratch =
+        memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32;
+    scratch.contains(&left) == scratch.contains(&right)
 }
 
 #[inline]
@@ -4010,6 +4242,16 @@ mod press_script_tests {
             "lines.csv",
             "--pc-line-start-route-tick",
             "88",
+            "--mmio-stall-line-log",
+            "mmio-lines.csv",
+            "--mmio-stall-line-start-route-tick",
+            "77",
+            "--icache-event-log",
+            "icache-events.csv",
+            "--icache-event-start-route-tick",
+            "99",
+            "--instruction-class-log",
+            "instruction-classes.csv",
             "--stack-profile-log",
             "stack.csv",
             "--stack-profile-root-pc",
@@ -4026,6 +4268,20 @@ mod press_script_tests {
         );
         assert_eq!(args.pc_line_log, Some(PathBuf::from("lines.csv")));
         assert_eq!(args.pc_line_start_route_tick, 88);
+        assert_eq!(
+            args.mmio_stall_line_log,
+            Some(PathBuf::from("mmio-lines.csv"))
+        );
+        assert_eq!(args.mmio_stall_line_start_route_tick, 77);
+        assert_eq!(
+            args.icache_event_log,
+            Some(PathBuf::from("icache-events.csv"))
+        );
+        assert_eq!(args.icache_event_start_route_tick, 99);
+        assert_eq!(
+            args.instruction_class_log,
+            Some(PathBuf::from("instruction-classes.csv"))
+        );
         assert_eq!(args.stack_profile_log, Some(PathBuf::from("stack.csv")));
         assert_eq!(args.stack_profile_root_pc, Some(0x8001_2340));
     }
@@ -4038,13 +4294,34 @@ mod press_script_tests {
         histogram.record(0x8000_1004);
         histogram.record(0xa000_100c);
         histogram.record(0xbfc0_0000);
-        histogram.write(&path).expect("write PC-line CSV");
+        histogram
+            .write(&path, "instructions")
+            .expect("write PC-line CSV");
         let csv = std::fs::read_to_string(&path).expect("read PC-line CSV");
         let _ = std::fs::remove_file(&path);
 
         assert!(csv.starts_with("line_pc,instructions,percent\n"));
         assert!(csv.contains("0x80001000,2,66.666667"));
         assert!(csv.contains("0xbfc00000,1,33.333333"));
+    }
+
+    #[test]
+    fn pc_line_histogram_names_and_sums_cycle_values() {
+        let path =
+            std::env::temp_dir().join(format!("psoxide-mmio-lines-{}.csv", std::process::id()));
+        let mut histogram = PcLineHistogram::new();
+        histogram.record_n(0x8000_1004, 1_234);
+        histogram.record_n(0xa000_100c, 6);
+        histogram.record_n(0x8000_2000, 760);
+        histogram
+            .write(&path, "mmio_stall_cycles")
+            .expect("write MMIO-line CSV");
+        let csv = std::fs::read_to_string(&path).expect("read MMIO-line CSV");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(csv.starts_with("line_pc,mmio_stall_cycles,percent\n"));
+        assert!(csv.contains("0x80001000,1240,62.000000"));
+        assert!(csv.contains("0x80002000,760,38.000000"));
     }
 
     #[test]
@@ -4059,6 +4336,21 @@ mod press_script_tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(csv.contains("0,0x80001000,0x80002000,0x801ff000,0x801feec0,320,2,1"));
+    }
+
+    #[test]
+    fn rooted_stack_profile_accepts_cached_scratchpad_aliases() {
+        let path =
+            std::env::temp_dir().join(format!("psoxide-scratch-stack-{}.csv", std::process::id()));
+        let mut profile = StackHighWaterProfile::new(Some(0x8000_1000));
+        profile.observe(0x8000_1000, 0x9f80_03f0, 0x8000_2000);
+        profile.observe(0x8000_1100, 0x1f80_0380, 0x8000_2000);
+        profile.observe(0x8000_2000, 0x9f80_03f0, 0x8000_3000);
+        profile.write(&path).expect("write scratch stack CSV");
+        let csv = std::fs::read_to_string(&path).expect("read scratch stack CSV");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(csv.contains("0,0x80001000,0x80002000,0x1f8003f0,0x1f800380,112,2,1"));
     }
 
     #[cfg(feature = "editor")]

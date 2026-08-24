@@ -87,6 +87,7 @@ mod tests {
 
         let source = crate::playtest::render_manifest_source(&package);
         assert!(source.contains("pub const PLAYTEST_USES_PXBSP: bool = true;"));
+        assert!(source.contains("pub const PXBSP_FACE_CHAIN_CAPACITY: usize = "));
         assert!(source.contains("pub static PXBSP_WORLD: &[u8]"));
         assert!(source.contains("PXBSP_MOVER_NODE_IDS: &[u32] = &[2]"));
         assert!(source.contains("CookedBodyHull::new(1, 1, 4)"));
