@@ -2343,6 +2343,16 @@ pub fn build_package(
         _ => None,
     };
 
+    let weapon_appearances = cook_weapon_appearances(
+        project,
+        &characters,
+        &models,
+        &model_clips,
+        &weapon_for_resource,
+        &equipment,
+        &mut report,
+    );
+
     collapse_exclusive_player_material(
         player_controller,
         &mut characters,
@@ -2686,6 +2696,7 @@ pub fn build_package(
             weapon_hitboxes,
             weapons,
             equipment,
+            weapon_appearances,
             lights,
             particle_emitters,
             interactable_messages,

@@ -435,6 +435,7 @@ pub(crate) fn resource_can_open_in_animation_viewer(data: &ResourceData) -> bool
             | ResourceData::AnimationClip(_)
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)
+            | ResourceData::Weapon(_)
     )
 }
 

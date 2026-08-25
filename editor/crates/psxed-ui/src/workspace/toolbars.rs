@@ -463,23 +463,19 @@ impl EditorWorkspace {
                 ui.separator();
                 if self.active_workspace == WorkspaceView::Material {
                     ui.horizontal_wrapped(|ui| self.draw_material_lab_toolbar(ui));
+                } else if self.active_workspace == WorkspaceView::Animation {
+                    let action = model_animation_viewer::draw_model_animation_viewer_toolbar(
+                        ui,
+                        &mut self.project,
+                        &self.project_dir,
+                        &mut self.animation_viewer,
+                        &mut self.animation_viewer_preview_texture,
+                    );
+                    if let Some(action) = action {
+                        self.handle_animation_viewer_action(action);
+                    }
                 } else {
-                    ui.horizontal(|ui| match self.active_workspace {
-                        WorkspaceView::Animation => {
-                            let action =
-                                model_animation_viewer::draw_model_animation_viewer_toolbar(
-                                    ui,
-                                    &mut self.project,
-                                    &self.project_dir,
-                                    &mut self.animation_viewer,
-                                    &mut self.animation_viewer_preview_texture,
-                                );
-                            if let Some(action) = action {
-                                self.handle_animation_viewer_action(action);
-                            }
-                        }
-                        _ => self.draw_viewport_toolbar(ui),
-                    });
+                    ui.horizontal(|ui| self.draw_viewport_toolbar(ui));
                 }
             });
     }
