@@ -50,7 +50,6 @@ fn main() {
     repair_preview_animator_clip(&project, &mut enemy_components);
 
     project.name = "Quake E1M1 Geometry Benchmark".to_string();
-    project.set_world_format(psxed_project::ProjectWorldFormat::Bsp);
     project.bsp_cook_mode = psxed_project::brush_world::BrushWorldCookMode::Release;
     project.boot = psxed_project::BootTarget::Gameplay;
     let blank = ProjectDocument::new("blank scene");
@@ -59,9 +58,7 @@ fn main() {
     project.scene_states = blank.scene_states;
     project.options.clear();
     project.editor_visibility.show_grid = false;
-    project.editor_visibility.preview_fog = false;
     project.editor_visibility.preview_bounds = false;
-    project.editor_visibility.preview_backface_wireframe = false;
     project.editor_viewport.snap_units = 16 * E1M1_QUAKE_SCALE as u16;
 
     {

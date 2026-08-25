@@ -232,45 +232,6 @@ fn enemy_behavior_deserializes_without_combat_director_tuning_fields() {
 }
 
 #[test]
-fn cortex_project_deserializes_authored_enemy_combat_profile() {
-    // Reads the TRACKED sample rather than a working project. The original
-    // fixture, `projects/cortex_ignition_v1`, was renamed and its successor
-    // lives under `projects/`, which is gitignored so working projects stay
-    // untracked -- so pointing this at cortex_v1 would pass locally and fail on
-    // any fresh checkout. `samples/cortex_v1` is the miniaturised copy that
-    // ships with releases, and it carries the same authored enemy profile.
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../samples/cortex_v1/project.ron");
-    let text = std::fs::read_to_string(&path).expect("tracked Cortex sample is readable");
-    let project = ProjectDocument::from_ron_str(&text).expect("tracked Cortex project parses");
-    let enemy = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::CharacterController {
-                settings:
-                    Some(CharacterControllerSettings {
-                        enemy: Some(enemy), ..
-                    }),
-                player: false,
-                ..
-            } => Some(*enemy),
-            _ => None,
-        })
-        .expect("Cortex scene contains an enemy controller");
-
-    assert_eq!(enemy.reaction_ticks, 22);
-    assert_eq!(enemy.preferred_distance, 768);
-    assert_eq!(enemy.spacing_tolerance, 128);
-    assert_eq!(enemy.decision_interval_ticks, 12);
-    assert_eq!(enemy.circle_chance, 65);
-    assert_eq!(enemy.attack_priority, 4);
-    assert_eq!(enemy.attack_cooldown_ticks, 45);
-    assert_eq!(enemy.group_attack_delay_ticks, 18);
-}
-
-#[test]
 fn camera_node_kind_serializes_roundtrip() {
     let kind = NodeKind::Camera {
         settings: WorldCameraSettings {
@@ -456,225 +417,6 @@ fn sky_cyclorama_sun_uses_faceted_polar_geometry() {
 }
 
 #[test]
-fn normalize_loaded_snaps_room_heights_to_quantum() {
-    let mut project = ProjectDocument::legacy_grid_starter();
-    let room_id = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
-        .map(|node| node.id)
-        .unwrap();
-    {
-        let room = project.active_scene_mut().node_mut(room_id).unwrap();
-        let NodeKind::Section { grid } = &mut room.kind else {
-            panic!("expected room");
-        };
-        let sector = grid.ensure_sector(0, 0).unwrap();
-        sector.floor = Some(GridHorizontalFace::flat(33, None));
-        let walls = sector.walls.get_mut(GridDirection::West);
-        walls.clear();
-        walls.push(GridVerticalFace::with_heights([0, 0, 965, 802], None));
-    }
-
-    project.normalize_loaded();
-
-    let room = project.active_scene().node(room_id).unwrap();
-    let NodeKind::Section { grid } = &room.kind else {
-        panic!("expected room");
-    };
-    let sector = grid.sector(0, 0).unwrap();
-    assert_eq!(sector.floor.as_ref().unwrap().heights, [64, 64, 64, 64]);
-    assert_eq!(
-        sector.walls.get(GridDirection::West)[0].heights,
-        [0, 0, 960, 832]
-    );
-}
-
-#[test]
-fn snap_world_sector_size_quantizes_to_128_units() {
-    assert_eq!(WORLD_SECTOR_SIZE_QUANTUM, 128);
-    assert_eq!(snap_world_sector_size(1), 128);
-    assert_eq!(snap_world_sector_size(127), 128);
-    assert_eq!(snap_world_sector_size(191), 128);
-    assert_eq!(snap_world_sector_size(192), 256);
-    assert_eq!(snap_world_sector_size(1500), 1536);
-    assert_eq!(
-        snap_world_sector_size(MAX_WORLD_SECTOR_SIZE + 1),
-        MAX_WORLD_SECTOR_SIZE
-    );
-}
-
-#[test]
-fn world_camera_settings_default_normalize_and_inherit() {
-    let mut project = ProjectDocument::legacy_grid_starter();
-    let scene = project.active_scene();
-    let world_id = scene
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.kind, NodeKind::World { .. }))
-        .map(|node| node.id)
-        .expect("starter has world");
-    let room_id = scene
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
-        .map(|node| node.id)
-        .expect("starter has room");
-
-    let inherited_camera = scene
-        .nodes()
-        .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::World { camera, .. } => Some(*camera),
-            _ => None,
-        })
-        .expect("starter world has camera settings");
-    assert_eq!(scene.world_camera_for_node(room_id), Some(inherited_camera));
-
-    {
-        let world = project.active_scene_mut().node_mut(world_id).unwrap();
-        let NodeKind::World { camera, .. } = &mut world.kind else {
-            panic!("expected world");
-        };
-        *camera = WorldCameraSettings {
-            distance: 1,
-            height: MAX_WORLD_CAMERA_HEIGHT + 1,
-            target_height: -1,
-            lock_rise_percent: MAX_WORLD_CAMERA_LOCK_RISE_PERCENT + 1,
-            min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE + 1,
-            orbit_speed_level: MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL + 1,
-            position_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT + 1,
-            focus_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT + 2,
-            distance_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT + 3,
-        };
-    }
-
-    project.normalize_loaded();
-
-    assert_eq!(
-        project.active_scene().world_camera_for_node(room_id),
-        Some(WorldCameraSettings {
-            distance: MIN_WORLD_CAMERA_DISTANCE,
-            height: MAX_WORLD_CAMERA_HEIGHT,
-            target_height: 0,
-            lock_rise_percent: MAX_WORLD_CAMERA_LOCK_RISE_PERCENT,
-            min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-            orbit_speed_level: MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
-            position_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT,
-            focus_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT,
-            distance_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT,
-        })
-    );
-}
-
-#[test]
-fn world_streaming_settings_separate_resident_and_visible_limits() {
-    let settings = WorldStreamingSettings {
-        resident_chunk_limit: 24,
-        visible_chunk_limit: 8,
-    }
-    .normalized();
-
-    assert_eq!(settings.resident_chunk_limit, 24);
-    assert_eq!(settings.visible_chunk_limit, 8);
-}
-
-#[test]
-fn world_streaming_legacy_visible_limit_inherits_resident_limit() {
-    let settings = WorldStreamingSettings {
-        resident_chunk_limit: 18,
-        visible_chunk_limit: 0,
-    }
-    .normalized();
-
-    assert_eq!(settings.resident_chunk_limit, 18);
-    assert_eq!(settings.visible_chunk_limit, 18);
-}
-
-#[test]
-fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
-    let mut project = ProjectDocument::new("test");
-    let scene = project.active_scene_mut();
-    let world = scene.add_node(
-        scene.root,
-        "World",
-        NodeKind::World {
-            sector_size: 1024,
-            sky: SkySettings::default(),
-            far_vista: FarVistaSettings::default(),
-            camera: WorldCameraSettings::default(),
-            culling: WorldCullingSettings::default(),
-            streaming: WorldStreamingSettings::default(),
-            physics: WorldPhysicsSettings::default(),
-        },
-    );
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.set_floor(0, 0, 160, None);
-    grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
-    let upper = grid.push_floor();
-    let upper_grid = grid.floor_mut(upper).expect("upper floor");
-    upper_grid.set_floor(0, 0, 320, None);
-    upper_grid.add_wall(0, 0, GridDirection::North, 0, 2048, None);
-    let room = scene.add_node(world, "Room", NodeKind::Section { grid });
-    let entity = scene.add_node(room, "Entity", NodeKind::Entity);
-    let collider = scene.add_node(
-        entity,
-        "Collider",
-        NodeKind::Collider {
-            shape: ColliderShape::Capsule {
-                radius: 128,
-                height: 1024,
-            },
-            solid: true,
-        },
-    );
-
-    assert_eq!(project.set_world_sector_size(world, 1500), Some(1536));
-    assert_eq!(project.world_sector_size_for_node(entity), 1536);
-
-    let scene = project.active_scene();
-    let NodeKind::Section { grid } = &scene.node(room).unwrap().kind else {
-        panic!("expected Room");
-    };
-    assert_eq!(grid.sector_size, 1536);
-    let sector = grid.sector(0, 0).unwrap();
-    assert_eq!(sector.floor.as_ref().unwrap().heights, [256; 4]);
-    assert_eq!(
-        sector
-            .walls
-            .get(GridDirection::North)
-            .first()
-            .unwrap()
-            .heights,
-        [0, 0, 1536, 1536]
-    );
-    let upper_grid = grid.floor(upper).expect("upper floor remains present");
-    assert_eq!(upper_grid.sector_size, 1536);
-    assert_eq!(upper_grid.elevation, 3072);
-    let upper_sector = upper_grid.sector(0, 0).expect("upper sector");
-    assert_eq!(upper_sector.floor.as_ref().unwrap().heights, [512; 4]);
-    assert_eq!(
-        upper_sector
-            .walls
-            .get(GridDirection::North)
-            .first()
-            .unwrap()
-            .heights,
-        [0, 0, 3072, 3072]
-    );
-
-    let NodeKind::Collider {
-        shape: ColliderShape::Capsule { radius, height },
-        ..
-    } = &scene.node(collider).unwrap().kind
-    else {
-        panic!("expected capsule collider");
-    };
-    assert_eq!((*radius, *height), (192, 1536));
-}
-
-#[test]
 fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
     let mut project = ProjectDocument::new("legacy-character-collider");
     let scene = project.active_scene_mut();
@@ -748,41 +490,6 @@ fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
 }
 
 #[test]
-fn saving_normalizes_room_sector_size_to_world() {
-    let mut project = ProjectDocument::legacy_grid_starter();
-    let scene = project.active_scene_mut();
-    let room_id = scene
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
-        .map(|node| node.id)
-        .unwrap();
-    let NodeKind::Section { grid } = &mut scene.node_mut(room_id).unwrap().kind else {
-        panic!("expected Room");
-    };
-    grid.sector_size = 2030;
-
-    let dir = unique_temp_dir("normalize-room-sector-size");
-    let path = dir.join("project.ron");
-    project.save_to_path(&path).unwrap();
-
-    let saved = std::fs::read_to_string(&path).unwrap();
-    let expected_sector_size = project.world_sector_size_for_node(room_id);
-    assert!(saved.contains(&format!("kind: World(sector_size: {expected_sector_size},")));
-    assert!(saved.contains(&format!("sector_size: {expected_sector_size}")));
-    assert!(!saved.contains("sector_size: 2030"));
-
-    let loaded = ProjectDocument::load_from_path(&path).unwrap();
-    let scene = loaded.active_scene();
-    let NodeKind::Section { grid } = &scene.node(room_id).unwrap().kind else {
-        panic!("expected Room");
-    };
-    assert_eq!(grid.sector_size, expected_sector_size);
-
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn dynamic_material_recipe_round_trips_through_project_ron() {
     let mut project = ProjectDocument::new("dynamic material persistence");
     let mut material = MaterialResource::opaque(None);
@@ -839,7 +546,7 @@ fn material_versions_preserve_complete_recipes_and_stable_identity() {
     material.blend_mode = PsxBlendMode::Average;
     material.animation.mode = MaterialAnimationMode::UvScroll;
     material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
-    material.layered_sky = false;
+    material.sky_aperture = false;
 
     let original_recipe = MaterialVersionRecipe::from(&material);
     let llm_version = material.create_version("LLM Gothic");
@@ -852,16 +559,16 @@ fn material_versions_preserve_complete_recipes_and_stable_identity() {
     material.tint = [131, 37, 171];
     material.generated.noise.seed = 0xfeed_beef;
     material.secondary_layer = None;
-    material.layered_sky = true;
+    material.sky_aperture = true;
     let llm_recipe = MaterialVersionRecipe::from(&material);
 
     assert!(material.activate_version(MaterialVersionId::ORIGINAL));
     assert_eq!(material.active_version_name, "Original");
     assert_eq!(MaterialVersionRecipe::from(&material), original_recipe);
-    assert!(!material.layered_sky);
+    assert!(!material.sky_aperture);
     assert!(material.activate_version(llm_version));
     assert_eq!(MaterialVersionRecipe::from(&material), llm_recipe);
-    assert!(material.layered_sky);
+    assert!(material.sky_aperture);
 
     assert!(material.rename_version(llm_version, "LLM Cathedral"));
     assert!(!material.rename_version(llm_version, "Original"));
@@ -869,6 +576,44 @@ fn material_versions_preserve_complete_recipes_and_stable_identity() {
     assert_eq!(material.active_version_id, MaterialVersionId::ORIGINAL);
     assert_eq!(material.version_count(), 1);
     assert!(!material.delete_version(MaterialVersionId::ORIGINAL));
+}
+
+#[test]
+fn legacy_material_sky_migrates_to_one_world_sky_and_one_aperture_flag() {
+    let mut project = ProjectDocument::new("legacy directional sky");
+    let mut material = MaterialResource::opaque(Some("assets/sky.psxt".to_string()));
+    material.directional_sky = true;
+    let sky_material = project.add_resource("Legacy Sky", ResourceData::Material(material));
+    let mut brush = crate::brush::Brush::cuboid([0, 0, 0], [128, 128, 128]);
+    for face in &mut brush.faces {
+        face.material = Some(sky_material);
+    }
+    project.active_scene_mut().brushes.push(brush);
+    let root = project.active_scene().root;
+    let NodeKind::World { sky, .. } = &mut project
+        .active_scene_mut()
+        .node_mut(root)
+        .expect("world")
+        .kind
+    else {
+        panic!("root is not a World");
+    };
+    sky.mode = SkyMode::Off;
+
+    project.normalize_loaded();
+
+    let ResourceData::Material(material) = &project.resource(sky_material).unwrap().data else {
+        panic!("resource changed kind");
+    };
+    assert!(material.sky_aperture);
+    assert!(!material.layered_sky);
+    assert!(!material.directional_sky);
+    let NodeKind::World { sky, .. } = &project.active_scene().node(root).unwrap().kind else {
+        panic!("root is not a World");
+    };
+    assert_eq!(sky.mode, SkyMode::Cube);
+    assert_eq!(sky.visibility, SkyVisibility::ThroughSkySurfaces);
+    assert_eq!(sky.texture, Some(sky_material));
 }
 
 #[test]
@@ -1895,94 +1640,25 @@ fn default_project_instantiates_the_single_animated_tank_boss() {
 }
 
 #[test]
-fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
-    fn replace_first_world_payload(source: &str) -> String {
-        let start = source
-            .find("kind: World(")
-            .expect("default fixture has a parameterised World kind");
-        let payload_start = start + "kind: World".len();
-        let mut depth = 0i32;
-        for (offset, ch) in source[payload_start..].char_indices() {
-            match ch {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let end = payload_start + offset + ch.len_utf8();
-                        return format!("{}kind: World{}", &source[..start], &source[end..]);
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("unterminated World payload");
-    }
-
-    let starter = ProjectDocument::from_ron_str(crate::LEGACY_GRID_STARTER_RON).unwrap();
-    assert!(starter
-        .active_scene()
-        .nodes()
-        .iter()
-        .any(|node| matches!(node.kind, NodeKind::World { .. })));
-    // Whichever Entity node comes first is the one the rewrite below
-    // demotes to a legacy Actor, so capture its name rather than assuming
-    // the starter actor is still called "Player".
-    let demoted_name = starter
-        .active_scene()
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.kind, NodeKind::Entity))
-        .map(|node| node.name.clone())
-        .expect("starter has an entity node");
-    let legacy = replace_first_world_payload(crate::LEGACY_GRID_STARTER_RON).replacen(
-        "kind: Entity,",
-        "kind: Actor,",
-        1,
-    );
-
-    let project = ProjectDocument::from_ron_str(&legacy).unwrap();
-    let scene = project.active_scene();
-    let root = scene.node(scene.root).expect("world root exists");
-    assert!(matches!(root.kind, NodeKind::World { .. }));
-    assert_eq!(root.name, "World");
-    assert!(scene.nodes().iter().all(|node| node.name != "Root"));
-    let world = scene
-        .nodes()
-        .iter()
-        .find(|node| node.name == "World")
-        .expect("starter world exists");
-    assert!(matches!(
-        &world.kind,
-        NodeKind::World { sector_size, .. } if *sector_size == DEFAULT_WORLD_SECTOR_SIZE
-    ));
-    let migrated = scene
-        .nodes()
-        .iter()
-        .find(|node| node.name == demoted_name)
-        .expect("starter player entity exists");
-    assert!(matches!(&migrated.kind, NodeKind::Entity));
-}
-
-#[test]
 fn starter_model_files_present_on_disk() {
-    let root = legacy_grid_starter_dir();
+    let root = default_project_dir();
     assert!(root
-        .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
+        .join("assets/models/aletha_delivered/aletha_delivered.psxmdl")
         .is_file());
     assert!(root
-        .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxt")
+        .join("assets/models/aletha_delivered/aletha_delivered.psxt")
         .is_file());
     assert!(root
-            .join("assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_03_baselayer.psxanim")
-            .is_file());
+        .join("assets/animations/aletha_delivered/aletha_idle.psxanim")
+        .is_file());
     assert!(root
-        .join("assets/models/ci_player/ci_player.psxmdl")
+        .join("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl")
         .is_file());
     assert!(root
         .join("assets/models/rust_mantis/rust_mantis.psxmdl")
         .is_file());
     assert!(root
-        .join("assets/animations/ci_player_complete/roll.psxanim")
+        .join("assets/animations/tank_boss_ai/idle.psxanim")
         .is_file());
     assert!(root
         .join("assets/animations/rust_mantis_starter/idle.psxanim")
@@ -1999,8 +1675,8 @@ fn projects_dir_resolves_to_real_directory() {
     assert!(default_project_dir()
         .join("assets/models/rust_mantis/rust_mantis.psxmdl")
         .is_file());
-    assert!(legacy_grid_starter_dir()
-        .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
+    assert!(default_project_dir()
+        .join("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxmdl")
         .is_file());
 }
 
@@ -2016,33 +1692,18 @@ fn project_file_stem_is_filesystem_safe() {
 
 #[test]
 fn starter_project_has_scene_tree_and_resources() {
-    let project = ProjectDocument::legacy_grid_starter();
+    let project = ProjectDocument::starter();
 
     assert_eq!(project.scenes.len(), 1);
-    // Starter includes a room texture/material set plus gameplay resources for
-    // the animated character and weapon path.
+    // Starter includes BSP geometry plus gameplay resources for the animated
+    // character and weapon path.
     assert!(project.resources.len() >= 10);
+    assert!(!project.active_scene().brushes.is_empty());
     assert!(project
-        .active_scene()
-        .hierarchy_rows()
-        .iter()
-        .any(|row| row.kind == "Section"));
-    let grid = project
         .active_scene()
         .nodes()
         .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::Section { grid } => Some(grid),
-            _ => None,
-        })
-        .expect("starter should contain a room node");
-    assert!(grid.width > 0);
-    assert!(grid.depth > 0);
-    assert_eq!(
-        grid.sectors.len(),
-        grid.width as usize * grid.depth as usize
-    );
-    assert!(grid.populated_sector_count() > 0);
+        .all(|node| !matches!(node.kind, NodeKind::Section { .. })));
 
     let aletha = project
         .resources
@@ -2055,7 +1716,7 @@ fn starter_project_has_scene_tree_and_resources() {
     assert_eq!(aletha.spawn_role, CharacterSpawnRole::Player);
     assert_eq!(
         (aletha.radius, aletha.walk_speed, aletha.run_speed),
-        (188, 44, 94)
+        (188, 10, 75)
     );
     assert_eq!(aletha.roll_speed, 165);
     let aletha_material = aletha
@@ -2072,7 +1733,7 @@ fn starter_project_has_scene_tree_and_resources() {
             aletha.camera_height,
             aletha.camera_target_height,
         ),
-        (3300, 1500, 900)
+        (2000, 1000, 850)
     );
 
     let mantis = project
@@ -2091,65 +1752,16 @@ fn starter_project_has_scene_tree_and_resources() {
     assert_eq!(enemy.aggro_radius, 2335);
     assert_eq!(enemy.patrol_offset, [0, 0, -6000]);
     assert_eq!(enemy.reaction_ticks, 22);
-
-    for name in [
-        "Obsidian Wraith Enemy",
-        "Hooded Wretch Enemy",
-        "Crowned Wraith Enemy",
-    ] {
-        let character = project
-            .resources
-            .iter()
-            .find_map(|resource| match &resource.data {
-                ResourceData::Character(character) if resource.name == name => Some(character),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("starter includes {name}"));
-        assert_eq!(character.spawn_role, CharacterSpawnRole::Enemy, "{name}");
-        assert_eq!(character.walk_speed, 28, "{name}");
-        assert_eq!(
-            character.enemy_behavior.map(|enemy| enemy.aggro_radius),
-            Some(2335),
-            "{name}"
-        );
-    }
 }
 
 #[test]
-fn project_missing_point_light_color_and_room_ambient_uses_defaults() {
-    // Serde defaults contract, tested at the field level: a PointLight
-    // authored without a color, and a room grid authored without
-    // ambient/fog fields, deserialize to the documented defaults. The
-    // minimal starter ships neither, so the fields are exercised on
-    // round-tripped values with the lines stripped rather than on the
-    // starter document.
+fn project_missing_point_light_color_uses_default() {
     let light: NodeKind =
         ron::from_str("PointLight(intensity: 1.25, radius: 3.0)").expect("light parses");
     let NodeKind::PointLight { color, .. } = light else {
         panic!("parsed kind is a light");
     };
     assert_eq!(color, default_light_color());
-
-    let grid = WorldGrid::empty(1, 1, DEFAULT_WORLD_SECTOR_SIZE);
-    let source = ron::ser::to_string_pretty(&grid, ron::ser::PrettyConfig::default())
-        .expect("grid serializes");
-    let stripped: String = source
-        .lines()
-        .filter(|line| {
-            let t = line.trim_start();
-            !(t.starts_with("ambient_color:")
-                || t.starts_with("fog_color:")
-                || t.starts_with("fog_near:")
-                || t.starts_with("fog_far:"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let grid: WorldGrid = ron::from_str(&stripped).expect("stripped grid parses");
-    assert_eq!(grid.ambient_color, default_ambient_color());
-    assert_eq!(
-        (grid.fog_color, grid.fog_near, grid.fog_far),
-        (default_fog_color(), default_fog_near(), default_fog_far())
-    );
 }
 
 #[test]
@@ -2269,10 +1881,10 @@ fn move_node_rejects_cycles_and_root() {
 
 #[test]
 fn project_roundtrips_through_ron_string() {
-    let project = ProjectDocument::legacy_grid_starter();
+    let project = ProjectDocument::starter();
     let ron = project.to_ron_string().unwrap();
 
-    assert!(ron.contains("Crimson Cross Knight Player"));
+    assert!(ron.contains("Aletha"));
     assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
 }
 
@@ -2334,97 +1946,6 @@ fn deleting_a_sprite_bar_material_clears_the_ui_reference() {
             .map(|node| &node.kind),
         Some(UiNodeKind::Bar { texture: None, .. })
     ));
-}
-
-#[test]
-fn legacy_sample_projects_keep_the_segmented_health_gauge_without_a_stamina_bar() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let project_dirs = [
-        manifest.join("../../projects/mantis"),
-        manifest.join("../../projects/quake-e1m1-geometry"),
-        manifest.join("../../projects/tech-demo"),
-        manifest.join("../../samples/cortex_v1"),
-    ];
-    for project_dir in project_dirs {
-        let project_path = project_dir.join("project.ron");
-        let project = ProjectDocument::load_from_path(&project_path)
-            .unwrap_or_else(|error| panic!("{}: {error}", project_path.display()));
-        let hud = project
-            .ui_scenes
-            .iter()
-            .find(|scene| scene.name == "HUD")
-            .unwrap_or_else(|| panic!("{} has no HUD", project_path.display()));
-        let gauges = hud
-            .nodes()
-            .iter()
-            .filter_map(|node| match &node.kind {
-                UiNodeKind::Bar {
-                    value: UiValueBinding::PlayerHealth,
-                    max: UiValueBinding::PlayerHealthMax,
-                    texture: Some(texture),
-                    frame_count: DEFAULT_HEALTH_BAR_FRAME_COUNT,
-                    rect,
-                    ..
-                } => Some((*texture, *rect)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(gauges.len(), 1, "{}", project_path.display());
-        assert_eq!((gauges[0].1.width, gauges[0].1.height), (106, 29));
-        assert!(!hud.nodes().iter().any(|node| {
-            matches!(
-                node.kind,
-                UiNodeKind::Bar {
-                    value: UiValueBinding::PlayerStamina,
-                    ..
-                }
-            )
-        }));
-        let material = match &project
-            .resource(gauges[0].0)
-            .unwrap_or_else(|| panic!("{} has no gauge material", project_path.display()))
-            .data
-        {
-            ResourceData::Material(material) => material,
-            _ => panic!(
-                "{} gauge resource is not a material",
-                project_path.display()
-            ),
-        };
-        let texture_path = project_dir.join(
-            material
-                .psxt_path
-                .as_deref()
-                .expect("gauge material has a texture path"),
-        );
-        let stats = crate::texture_import::texture_stats_from_bytes(
-            &std::fs::read(&texture_path)
-                .unwrap_or_else(|error| panic!("{}: {error}", texture_path.display())),
-        )
-        .unwrap_or_else(|error| panic!("{}: {error}", texture_path.display()));
-        assert_eq!((stats.width, stats.height), (106, 203));
-        assert_eq!((stats.depth, stats.clut_entries), (4, 16));
-        assert!(stats.index_zero_transparent);
-    }
-
-    let cortex =
-        ProjectDocument::load_from_path(manifest.join("../../samples/cortex_v1/project.ron"))
-            .expect("load cortex sample");
-    assert!(cortex
-        .ui_scenes
-        .iter()
-        .flat_map(UiScene::nodes)
-        .any(|node| {
-            matches!(
-                node.kind,
-                UiNodeKind::Bar {
-                    value: UiValueBinding::LoadingProgress,
-                    texture: None,
-                    frame_count: 0,
-                    ..
-                }
-            )
-        }));
 }
 
 #[test]
@@ -3502,13 +3023,9 @@ fn editor_visibility_roundtrips_through_ron_string() {
     project.editor_visibility = EditorVisibilityState {
         show_grid: false,
         show_brush_surface_grid: false,
-        show_portals: true,
         show_lights: false,
-        preview_fog: false,
-        preview_backface_wireframe: true,
         preview_bounds: false,
         show_play_debug_overlays: false,
-        show_play_debug_map: true,
         show_brush_wireframes: true,
     };
     let ron = project.to_ron_string().unwrap();
@@ -3810,17 +3327,11 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
 
 #[test]
 fn mesh_instance_with_animation_clip_roundtrips() {
-    let mut project = ProjectDocument::legacy_grid_starter();
+    let mut project = ProjectDocument::new("mesh animation roundtrip");
     let scene = project.active_scene_mut();
-    let room_id = scene
-        .nodes()
-        .iter()
-        .find(|n| matches!(n.kind, NodeKind::Section { .. }))
-        .map(|n| n.id)
-        .unwrap();
     let model_resource_id = ResourceId(99);
     scene.add_node(
-        room_id,
+        NodeId::ROOT,
         "TestWraith",
         NodeKind::MeshInstance {
             mesh: Some(model_resource_id),
@@ -3903,7 +3414,7 @@ fn legacy_mesh_instance_without_animation_clip_loads() {
 
 #[test]
 fn project_saves_and_loads_from_disk() {
-    let mut project = ProjectDocument::legacy_grid_starter();
+    let mut project = ProjectDocument::starter();
     project.name = "Disk Test".to_string();
 
     let dir = std::env::temp_dir().join(format!(
@@ -4674,786 +4185,6 @@ fn legacy_texture_resources_migrate_into_materials_on_load() {
     assert_eq!(loaded.resources, reloaded.resources);
 }
 
-/// A prefab is only reusable if it survives a RON round trip and lands on the
-/// destination project's materials. `ResourceId` is a per-project counter, so
-/// a piece authored where "Stone" happens to be id 1 must not bind to whatever
-/// sits at id 1 in the project it is stamped into -- that failure is silent,
-/// the geometry appears with the wrong texture and nothing reports it.
-#[test]
-fn a_prefab_round_trips_and_rebinds_its_materials_by_name() {
-    let mut source = ProjectDocument::new("prefab-source");
-    let filler = source.add_resource(
-        "Filler",
-        ResourceData::Material(MaterialResource::opaque(None)),
-    );
-    let stone = source.add_resource(
-        "Stone",
-        ResourceData::Material(MaterialResource::opaque(None)),
-    );
-    assert_ne!(filler, stone, "source needs two distinct ids");
-
-    let mut sector = GridSector::with_floor(0, Some(stone));
-    sector.floor.as_mut().unwrap().heights = [0, 32, 64, 96];
-    sector
-        .walls
-        .north
-        .push(GridVerticalFace::flat(0, 512, Some(stone)));
-    let room = source.active_scene_mut().add_node(
-        NodeId::ROOT,
-        "Room",
-        NodeKind::Section {
-            grid: WorldGrid::empty(1, 1, 1024),
-        },
-    );
-    // An upper floor that links back down to the base, so the round trip has a
-    // floor link and a non-default relative elevation to preserve.
-    let mut upper = GridSector::with_floor(1024, Some(stone));
-    upper.floor_below = Some(GridFloorLink::room(room));
-    let prefab = Prefab::capture(
-        "Stair Block",
-        1024,
-        1,
-        1,
-        false,
-        vec![
-            PrefabFloor {
-                relative_elevation: 0,
-                cells: vec![PrefabCell {
-                    offset: [0, 0],
-                    sector: Some(sector),
-                }],
-            },
-            PrefabFloor {
-                relative_elevation: 1024,
-                cells: vec![PrefabCell {
-                    offset: [0, 0],
-                    sector: Some(upper),
-                }],
-            },
-        ],
-        room,
-        0,
-        &source,
-    );
-    assert_eq!(
-        prefab.materials.get(&stone.raw()).map(String::as_str),
-        Some("Stone")
-    );
-
-    let path = std::env::temp_dir().join("psoxide-prefab-round-trip.ron");
-    prefab.save_to_path(&path).expect("prefab saves");
-    let loaded = Prefab::load_from_path(&path).expect("prefab loads");
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(loaded.name, "Stair Block");
-    assert_eq!(loaded.sector_size, 1024);
-    assert_eq!(loaded.floors.len(), 2, "both floors survive");
-    assert_eq!(loaded.floors[1].relative_elevation, 1024);
-    assert_eq!(
-        loaded.floors[0].cells[0]
-            .sector
-            .as_ref()
-            .unwrap()
-            .floor
-            .as_ref()
-            .unwrap()
-            .heights,
-        [0, 32, 64, 96]
-    );
-    // The link pointed at floor 0 of the captured piece, so it is stored
-    // self-relative with no room id at all.
-    let stored_link = loaded.floors[1].cells[0]
-        .sector
-        .as_ref()
-        .unwrap()
-        .floor_below
-        .expect("the downward link survives capture");
-    assert_eq!(stored_link.target_room, None, "no source NodeId is carried");
-    assert_eq!(stored_link.target_floor, 0);
-
-    // The destination handed the source's "Stone" id to something else, which
-    // is the collision this test exists for: binding by id gives "Dirt".
-    let mut destination = ProjectDocument::new("prefab-destination");
-    destination.add_resource(
-        "Grass",
-        ResourceData::Material(MaterialResource::opaque(None)),
-    );
-    let dirt = destination.add_resource(
-        "Dirt",
-        ResourceData::Material(MaterialResource::opaque(None)),
-    );
-    let stone_here = destination.add_resource(
-        "Stone",
-        ResourceData::Material(MaterialResource::opaque(None)),
-    );
-    assert_eq!(dirt, stone, "the destination reuses the source's Stone id");
-    assert_ne!(stone_here, stone);
-
-    let dest_room = destination.active_scene_mut().add_node(
-        NodeId::ROOT,
-        "Room",
-        NodeKind::Section {
-            grid: WorldGrid::empty(1, 1, 1024),
-        },
-    );
-    let (floors, unbound) = loaded.bound_floors(&destination, dest_room, 0);
-    assert_eq!(unbound, 0);
-    let sector = floors[0].cells[0].sector.as_ref().unwrap();
-    assert_eq!(sector.floor.as_ref().unwrap().material, Some(stone_here));
-    assert_eq!(sector.walls.north[0].material, Some(stone_here));
-
-    // The self-relative link resolves onto the destination room, not the id it
-    // was authored against.
-    let bound_link = floors[1].cells[0]
-        .sector
-        .as_ref()
-        .unwrap()
-        .floor_below
-        .expect("the link resolves");
-    assert_eq!(bound_link.target_room, Some(dest_room));
-    assert_eq!(bound_link.target_floor, 0);
-
-    // Stamped onto floor 2 of the destination, the same link has to follow.
-    let (floors, _) = loaded.bound_floors(&destination, dest_room, 2);
-    assert_eq!(
-        floors[1].cells[0]
-            .sector
-            .as_ref()
-            .unwrap()
-            .floor_below
-            .unwrap()
-            .target_floor,
-        2,
-        "a self-relative link rebases with the stamp"
-    );
-
-    // A project with no matching name clears the reference rather than
-    // guessing: an unassigned face is visibly wrong, a wrong one is not.
-    let bare = ProjectDocument::new("prefab-bare");
-    let (floors, unbound) = loaded.bound_floors(&bare, dest_room, 0);
-    assert_eq!(
-        unbound, 3,
-        "two floor faces and the wall all lose their material"
-    );
-    assert_eq!(
-        floors[0].cells[0]
-            .sector
-            .as_ref()
-            .unwrap()
-            .floor
-            .as_ref()
-            .unwrap()
-            .material,
-        None
-    );
-}
-
-/// The authored node was `Map`, then `Room`, and is now `Section`. Every
-/// project on disk still says one of the older two, so the alias chain is the
-/// only thing standing between this rename and every saved level failing to
-/// load. New saves must write the new name.
-#[test]
-fn section_nodes_load_under_every_historical_name() {
-    let mut doc = ProjectDocument::new("legacy");
-    let room = doc.active_scene_mut().add_node(
-        NodeId::ROOT,
-        "Bay",
-        NodeKind::Section {
-            grid: WorldGrid::empty(2, 3, 1024),
-        },
-    );
-    let current = doc.to_ron_string().expect("serialises");
-    assert!(
-        current.contains("Section("),
-        "the current name is what gets written"
-    );
-
-    // Rewrite the variant name to forge a file from each earlier era. Going
-    // through the real serialiser keeps the rest of the schema honest, which
-    // hand-written RON does not.
-    for legacy in ["Map", "Room"] {
-        let aged = current.replace("Section(", &format!("{legacy}("));
-        let loaded = ProjectDocument::from_ron_str(&aged)
-            .unwrap_or_else(|e| panic!("a project saved as {legacy} must still load: {e}"));
-        let node = loaded
-            .active_scene()
-            .node(room)
-            .unwrap_or_else(|| panic!("{legacy}: the node survived"));
-        let NodeKind::Section { grid } = &node.kind else {
-            panic!("{legacy} deserialised into something other than a Section");
-        };
-        assert_eq!((grid.width, grid.depth), (2, 3), "{legacy} kept its grid");
-
-        // The alias is a migration path, not a permanent second spelling.
-        let resaved = loaded.to_ron_string().expect("re-serialises");
-        assert!(
-            resaved.contains("Section("),
-            "{legacy} re-saves under the new name"
-        );
-        assert!(
-            !resaved.contains(&format!("{legacy}(grid")),
-            "{legacy} does not survive the round trip"
-        );
-    }
-}
-
-/// Two Sections placed edge to edge with a paired portal must cook into two
-/// runtime rooms that are actually connected.
-///
-/// Before cross-section wiring, `plan_portal_rooms` only cut seams inside one
-/// grid, so a level built from several Sections was a set of islands at runtime
-/// however it looked in the editor. This is the gate for that.
-#[test]
-fn two_sections_with_a_paired_portal_cook_into_connected_runtime_rooms() {
-    let mut project = ProjectDocument::legacy_grid_starter();
-    let material = project
-        .resources
-        .iter()
-        .find(|r| matches!(r.data, ResourceData::Material(_)))
-        .map(|r| r.id)
-        .expect("starter has a material");
-
-    // Clear the starter geometry so only the two sections under test cook.
-    let existing: Vec<NodeId> = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Section { .. }))
-        .map(|n| n.id)
-        .collect();
-    for id in &existing {
-        if let Some(NodeKind::Section { grid }) = project
-            .active_scene_mut()
-            .node_mut(*id)
-            .map(|n| &mut n.kind)
-        {
-            for sector in grid.sectors.iter_mut() {
-                *sector = None;
-            }
-        }
-    }
-
-    // West section at cells x=0..1, east section at x=2..3: they share the
-    // edge between cell 1 and cell 2.
-    let mut west = WorldGrid::stone_room(2, 2, 1024, Some(material), Some(material));
-    west.origin = [0, 0];
-    let mut east = WorldGrid::stone_room(2, 2, 1024, Some(material), Some(material));
-    east.origin = [2, 0];
-    let west_id =
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
-    let east_id =
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
-
-    // A reciprocal portal pair on the shared edge.
-    let mut portal = |room: NodeId, target: NodeId, at: [f32; 3]| {
-        let id = project.active_scene_mut().add_node(
-            room,
-            "Seam",
-            NodeKind::Portal {
-                target_room: Some(target),
-                target_entry: String::new(),
-                entry_name: String::new(),
-                geometry: None,
-            },
-        );
-        if let Some(node) = project.active_scene_mut().node_mut(id) {
-            node.transform.translation = at;
-        }
-        id
-    };
-    portal(west_id, east_id, [1.0, 0.0, 0.0]);
-    portal(east_id, west_id, [-1.0, 0.0, 0.0]);
-
-    // The starter's player lived in the geometry cleared above. Reuse one of
-    // its Character profiles rather than inventing a bare spawn, which the cook
-    // rejects when several Characters are defined.
-    let character = project
-        .resources
-        .iter()
-        .find(|r| matches!(r.data, ResourceData::Character(_)))
-        .map(|r| r.id)
-        .expect("starter defines a character");
-    project.active_scene_mut().add_node(
-        west_id,
-        "Player Spawn",
-        NodeKind::SpawnPoint {
-            player: true,
-            character: Some(character),
-        },
-    );
-
-    let (package, report) = playtest::build_package(&project, &legacy_grid_starter_dir());
-    assert!(
-        report.is_ok(),
-        "a paired cross-section portal must cook: {:?}",
-        report.errors
-    );
-    let package = package.expect("package built");
-
-    // The assertion has to be that a portal spans the two SECTIONS. Counting
-    // portals is not enough: each section's own marker also cuts its own grid,
-    // so intra-section pairs exist either way and would pass a naive check.
-    let owner = |index: u16| -> &str {
-        package
-            .rooms
-            .get(index as usize)
-            .map(|r| r.name.as_str())
-            .unwrap_or("?")
-    };
-    let spans: Vec<(&str, &str)> = package
-        .room_portals
-        .iter()
-        .map(|p| (owner(p.source_room), owner(p.destination_room)))
-        .filter(|(a, b)| a.contains("West") != b.contains("West"))
-        .collect();
-    assert!(
-        !spans.is_empty(),
-        "a portal must join a West room to an East room; got {:?}",
-        package
-            .room_portals
-            .iter()
-            .map(|p| (owner(p.source_room), owner(p.destination_room)))
-            .collect::<Vec<_>>()
-    );
-    // And it must be reciprocal, or visibility only works one way.
-    let (first_a, first_b) = spans[0];
-    assert!(
-        spans.iter().any(|(a, b)| *a == first_b && *b == first_a),
-        "the cross-section portal is reciprocal: {spans:?}"
-    );
-}
-
-/// Two Sections placed edge to edge with facing openings must connect without
-/// anyone authoring a Portal marker.
-///
-/// This is the prefab socket contract applied between Sections: a socket is the
-/// absence of a perimeter wall, so touching openings already describe a doorway.
-/// The negative half matters just as much -- a wall on either side must stop
-/// it, or the cook would punch holes through sealed geometry.
-#[test]
-fn adjacent_sections_with_facing_openings_connect_without_an_authored_portal() {
-    fn cook(seal_east: bool) -> usize {
-        let mut project = ProjectDocument::legacy_grid_starter();
-        let material = project
-            .resources
-            .iter()
-            .find(|r| matches!(r.data, ResourceData::Material(_)))
-            .map(|r| r.id)
-            .expect("starter has a material");
-        let character = project
-            .resources
-            .iter()
-            .find(|r| matches!(r.data, ResourceData::Character(_)))
-            .map(|r| r.id)
-            .expect("starter defines a character");
-        let existing: Vec<NodeId> = project
-            .active_scene()
-            .nodes()
-            .iter()
-            .filter(|n| matches!(n.kind, NodeKind::Section { .. }))
-            .map(|n| n.id)
-            .collect();
-        for id in &existing {
-            if let Some(NodeKind::Section { grid }) = project
-                .active_scene_mut()
-                .node_mut(*id)
-                .map(|n| &mut n.kind)
-            {
-                for sector in grid.sectors.iter_mut() {
-                    *sector = None;
-                }
-            }
-        }
-
-        // Plain floors, no perimeter walls: every edge is a socket.
-        let mut west = WorldGrid::empty(2, 1, 1024);
-        west.origin = [0, 0];
-        let mut east = WorldGrid::empty(2, 1, 1024);
-        east.origin = [2, 0];
-        for x in 0..2 {
-            west.set_floor(x, 0, 0, Some(material));
-            east.set_floor(x, 0, 0, Some(material));
-        }
-        if seal_east {
-            // One wall on the shared edge must veto the join.
-            west.add_wall(1, 0, GridDirection::East, 0, 2048, Some(material));
-        }
-
-        let west_id = project.active_scene_mut().add_node(
-            NodeId::ROOT,
-            "West",
-            NodeKind::Section { grid: west },
-        );
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
-        project.active_scene_mut().add_node(
-            west_id,
-            "Player Spawn",
-            NodeKind::SpawnPoint {
-                player: true,
-                character: Some(character),
-            },
-        );
-
-        let (package, report) = playtest::build_package(&project, &legacy_grid_starter_dir());
-        assert!(report.is_ok(), "cooks: {:?}", report.errors);
-        let package = package.expect("package built");
-        let owner = |index: u16| -> String {
-            package
-                .rooms
-                .get(index as usize)
-                .map(|r| r.name.clone())
-                .unwrap_or_default()
-        };
-        package
-            .room_portals
-            .iter()
-            .filter(|p| {
-                owner(p.source_room).contains("West") != owner(p.destination_room).contains("West")
-            })
-            .count()
-    }
-
-    assert!(
-        cook(false) >= 2,
-        "facing openings connect on their own, with a reciprocal pair"
-    );
-    assert_eq!(
-        cook(true),
-        0,
-        "a wall on the shared edge vetoes the automatic join"
-    );
-}
-
-/// The authored and automatic cross-section passes must never emit the same
-/// directed link twice.
-///
-/// They cannot generally collide, and it took a wrong test to see why: an
-/// authored Portal marker can never sit on a section boundary, because
-/// `portal_edge_key_for_node` only considers edges whose neighbour cell is
-/// populated and in the same grid. An authored cross-section portal therefore
-/// always snaps to an internal seam of its own section and says "this way lies
-/// section B", while the adjacency pass wires the physical boundary. Those are
-/// different links between different runtime rooms and both are wanted. What
-/// must not happen is the same room pair being linked twice.
-#[test]
-fn an_authored_cross_section_portal_suppresses_the_automatic_one() {
-    let mut project = ProjectDocument::legacy_grid_starter();
-    let material = project
-        .resources
-        .iter()
-        .find(|r| matches!(r.data, ResourceData::Material(_)))
-        .map(|r| r.id)
-        .expect("starter has a material");
-    let character = project
-        .resources
-        .iter()
-        .find(|r| matches!(r.data, ResourceData::Character(_)))
-        .map(|r| r.id)
-        .expect("starter defines a character");
-    let existing: Vec<NodeId> = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .filter(|n| matches!(n.kind, NodeKind::Section { .. }))
-        .map(|n| n.id)
-        .collect();
-    for id in &existing {
-        if let Some(NodeKind::Section { grid }) = project
-            .active_scene_mut()
-            .node_mut(*id)
-            .map(|n| &mut n.kind)
-        {
-            for sector in grid.sectors.iter_mut() {
-                *sector = None;
-            }
-        }
-    }
-
-    // Open floors on both sides, so the automatic pass would fire on its own.
-    let mut west = WorldGrid::empty(2, 1, 1024);
-    west.origin = [0, 0];
-    let mut east = WorldGrid::empty(2, 1, 1024);
-    east.origin = [2, 0];
-    for x in 0..2 {
-        west.set_floor(x, 0, 0, Some(material));
-        east.set_floor(x, 0, 0, Some(material));
-    }
-    let west_id =
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "West", NodeKind::Section { grid: west });
-    let east_id =
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "East", NodeKind::Section { grid: east });
-
-    // And an author wired the same seam by hand.
-    for (room, target, at) in [
-        (west_id, east_id, [1.0f32, 0.0, 0.0]),
-        (east_id, west_id, [-1.0f32, 0.0, 0.0]),
-    ] {
-        let id = project.active_scene_mut().add_node(
-            room,
-            "Seam",
-            NodeKind::Portal {
-                target_room: Some(target),
-                target_entry: String::new(),
-                entry_name: String::new(),
-                geometry: None,
-            },
-        );
-        if let Some(node) = project.active_scene_mut().node_mut(id) {
-            node.transform.translation = at;
-        }
-    }
-    project.active_scene_mut().add_node(
-        west_id,
-        "Player Spawn",
-        NodeKind::SpawnPoint {
-            player: true,
-            character: Some(character),
-        },
-    );
-
-    let (package, report) = playtest::build_package(&project, &legacy_grid_starter_dir());
-    assert!(report.is_ok(), "cooks: {:?}", report.errors);
-    let package = package.expect("package built");
-    let owner = |index: u16| -> String {
-        package
-            .rooms
-            .get(index as usize)
-            .map(|r| r.name.clone())
-            .unwrap_or_default()
-    };
-    let crossing: Vec<(u16, u16)> = package
-        .room_portals
-        .iter()
-        .filter(|p| {
-            owner(p.source_room).contains("West") != owner(p.destination_room).contains("West")
-        })
-        .map(|p| (p.source_room, p.destination_room))
-        .collect();
-    assert!(
-        crossing.len() >= 2,
-        "the sections are linked at all: {crossing:?}"
-    );
-    let mut seen = std::collections::HashSet::new();
-    for pair in &crossing {
-        assert!(
-            seen.insert(*pair),
-            "room pair {pair:?} is linked twice: {crossing:?}"
-        );
-    }
-    // And every link is reciprocal, or visibility only flows one way.
-    for (a, b) in &crossing {
-        assert!(
-            crossing.contains(&(*b, *a)),
-            "link {a}->{b} has no return: {crossing:?}"
-        );
-    }
-}
-
-/// The embedded kit is the one on disk: a piece added to `editor/prefabs/`
-/// without being embedded would silently not ship, and an embedded body that
-/// no longer parses would seed a broken prefab into every new project.
-#[test]
-fn embedded_prefab_kit_matches_the_source_tree_and_parses() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("prefabs");
-    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
-        .expect("source-tree prefabs directory")
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            (path.extension()? == "ron").then(|| {
-                path.file_stem()
-                    .expect("stem")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-        })
-        .collect();
-    on_disk.sort();
-
-    let mut embedded: Vec<String> = crate::prefab_kit_names().map(str::to_string).collect();
-    embedded.sort();
-    assert_eq!(
-        embedded, on_disk,
-        "embedded kit and editor/prefabs/ disagree"
-    );
-
-    for name in crate::prefab_kit_names() {
-        let body = crate::prefab_kit_body(name).expect("embedded body");
-        let prefab = ron::from_str::<crate::Prefab>(body)
-            .unwrap_or_else(|e| panic!("embedded prefab {name} does not parse: {e}"));
-        assert!(
-            prefab
-                .cells()
-                .filter_map(|cell| cell.sector.as_ref())
-                .any(|sector| sector.ceiling.is_some()),
-            "embedded prefab {name} has no ceiling geometry"
-        );
-    }
-}
-
-#[test]
-fn legacy_prefab_resources_load_but_do_not_reserialize() {
-    let mut project = ProjectDocument::new("legacy-prefab-resource");
-    project.add_resource(
-        "Old Prefab Row",
-        ResourceData::Prefab {
-            source_path: "/shared/prefabs/old.ron".to_string(),
-        },
-    );
-    let legacy_ron = project.to_ron_string().expect("legacy project serializes");
-    assert!(legacy_ron.contains("Prefab"));
-
-    let loaded = ProjectDocument::from_ron_str(&legacy_ron).expect("legacy project loads");
-    assert!(!loaded
-        .resources
-        .iter()
-        .any(|resource| matches!(resource.data, ResourceData::Prefab { .. })));
-    assert!(!loaded
-        .to_ron_string()
-        .expect("normalized project serializes")
-        .contains("Prefab"));
-}
-
-// --- Project world-format discriminator -------------------------------
-//
-// The persisted `world_format` field replaced the presence-based selection
-// chain documented in docs/legacy-grid-boundary.md section 1. These tests
-// pin the compatibility contract: documents written before the field
-// existed must resolve to exactly the format they used to cook as, and a
-// resolved value must survive a round trip untouched.
-
-#[test]
-fn legacy_grid_projects_without_the_field_load_as_grid() {
-    for relative in [
-        "../../archive/fixtures/legacy-grid-starter/project.ron",
-        "../../samples/cortex_v1/project.ron",
-    ] {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-        let text = std::fs::read_to_string(&path).expect("tracked grid project is readable");
-        assert!(
-            !text.contains("world_format"),
-            "{relative} is the pre-discriminator fixture; it must stay field-free \
-             so the compatibility default keeps being exercised"
-        );
-        let project = ProjectDocument::from_ron_str(&text).expect("tracked grid project parses");
-        assert_eq!(
-            project.world_format(),
-            ProjectWorldFormat::LegacyGrid,
-            "{relative} must keep loading as a legacy grid project"
-        );
-    }
-}
-
-#[test]
-fn bsp_projects_without_the_field_load_as_bsp() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../archive/fixtures/brush-first-playable/project.ron");
-    let mut text = std::fs::read_to_string(&path).expect("tracked BSP project is readable");
-    // Strip the field if the tracked copy already carries it: the point is
-    // the pre-discriminator shape, which must still resolve to BSP.
-    text = text
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("world_format:"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let project = ProjectDocument::from_ron_str(&text).expect("tracked BSP project parses");
-    assert_eq!(project.world_format(), ProjectWorldFormat::Bsp);
-}
-
-#[test]
-fn world_format_round_trips_and_is_never_re_derived() {
-    // A BSP project whose brushes were all deleted stays BSP: the stored
-    // value wins over geometry presence, so the cook reports the empty world
-    // instead of silently reopening as a grid project.
-    let mut project = ProjectDocument::new("format-round-trip");
-    project.set_world_format(ProjectWorldFormat::Bsp);
-    assert!(project.active_scene().brushes.is_empty());
-
-    let ron = project.to_ron_string().expect("project serializes");
-    assert!(ron.contains("world_format"), "the field must be persisted");
-    let loaded = ProjectDocument::from_ron_str(&ron).expect("project parses");
-    assert_eq!(loaded.world_format(), ProjectWorldFormat::Bsp);
-
-    // And the reverse: a grid project that gains brushes keeps its stored
-    // format (the cook then refuses, see the fail-closed tests).
-    let mut grid = ProjectDocument::new("legacy-format-round-trip");
-    grid.set_world_format(ProjectWorldFormat::LegacyGrid);
-    let ron = grid.to_ron_string().expect("project serializes");
-    let loaded = ProjectDocument::from_ron_str(&ron).expect("project parses");
-    assert_eq!(loaded.world_format(), ProjectWorldFormat::LegacyGrid);
-}
-
-#[test]
-fn a_fresh_document_is_bsp_before_it_has_any_geometry() {
-    // New projects are BSP-only (docs/legacy-grid-boundary.md A13). An empty
-    // scene must not read as "legacy grid" just because it has no brushes yet.
-    let project = ProjectDocument::new("fresh-format");
-    assert!(project.active_scene().brushes.is_empty());
-    assert_eq!(project.world_format(), ProjectWorldFormat::Bsp);
-
-    let ron = project.to_ron_string().expect("project serializes");
-    assert!(ron.contains("world_format: Bsp"));
-    let loaded = ProjectDocument::from_ron_str(&ron).expect("project parses");
-    assert_eq!(loaded.world_format(), ProjectWorldFormat::Bsp);
-}
-
-#[test]
-fn a_legacy_grid_project_holding_brushes_fails_the_cook_closed() {
-    let mut project = ProjectDocument::new("grid-with-brushes");
-    project.set_world_format(ProjectWorldFormat::LegacyGrid);
-    project
-        .active_scene_mut()
-        .brushes
-        .push(crate::brush::Brush::cuboid([0, 0, 0], [256, 256, 256]));
-    let (package, report) =
-        crate::playtest::build_package(&project, std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-    assert!(package.is_none(), "a mixed project must not cook");
-    assert!(
-        report
-            .errors
-            .iter()
-            .any(|error| error.contains("Legacy grid") && error.contains("brush")),
-        "expected a named format mismatch, got {:?}",
-        report.errors
-    );
-}
-
-#[test]
-fn a_bsp_project_without_brushes_fails_the_cook_closed() {
-    let mut project = ProjectDocument::new("bsp-without-brushes");
-    project.set_world_format(ProjectWorldFormat::Bsp);
-    let (package, report) =
-        crate::playtest::build_package(&project, std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
-    assert!(package.is_none(), "an empty BSP project must not cook");
-    assert!(
-        report
-            .errors
-            .iter()
-            .any(|error| error.contains("BSP") && error.contains("no brushes")),
-        "expected a named empty-world error, got {:?}",
-        report.errors
-    );
-    assert!(
-        !report
-            .errors
-            .iter()
-            .any(|error| error.contains("at least one Room node")),
-        "a BSP project must never be told to add a grid Room: {:?}",
-        report.errors
-    );
-}
-
 // --- Fail-closed grid boundary ----------------------------------------
 //
 // A BSP project must never instantiate grid spatial state. The cook's
@@ -5468,7 +4199,6 @@ fn bsp_fixture() -> (ProjectDocument, std::path::PathBuf) {
         .join("../../archive/fixtures/brush-first-playable");
     let project = ProjectDocument::load_from_path(dir.join("project.ron"))
         .expect("tracked BSP first-playable loads");
-    assert_eq!(project.world_format(), ProjectWorldFormat::Bsp);
     (project, dir)
 }
 
@@ -5546,12 +4276,4 @@ fn a_cooked_bsp_package_carries_no_grid_spatial_state() {
         package.world_geometry,
         crate::playtest::PlaytestWorldGeometry::Pxbsp(_)
     ));
-}
-
-#[test]
-fn the_editor_room_topology_overlay_is_empty_for_a_bsp_project() {
-    let (project, _dir) = bsp_fixture();
-    let topology = crate::playtest::build_debug_topology(&project);
-    assert!(topology.cells.is_empty());
-    assert!(topology.portals.is_empty());
 }

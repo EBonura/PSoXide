@@ -756,12 +756,18 @@ pub struct MaterialResource {
     /// Which side(s) of faces using this material should render.
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
-    /// Quake-style layered sky material: the atlas holds a masked foreground
-    /// tile on the left and a solid background tile on the right. Brush faces
-    /// define apertures; the runtime projects both scrolling layers from the
-    /// camera view direction rather than attaching UVs to those faces.
+    /// Brush faces using this material reveal the World node's scene-level
+    /// sky instead of drawing their authored polygons.
     #[serde(default)]
+    pub sky_aperture: bool,
+    /// Legacy material-level Quake sky choice. Folded into `sky_aperture` and
+    /// the World sky settings at load time, then never written back.
+    #[serde(default, skip_serializing)]
     pub layered_sky: bool,
+    /// Legacy material-level cube sky choice. Folded into `sky_aperture` and
+    /// the World sky settings at load time, then never written back.
+    #[serde(default, skip_serializing)]
+    pub directional_sky: bool,
     /// Stable identity of the recipe currently exposed to preview and cooking.
     /// Legacy project files become version 1 (`Original`).
     #[serde(
@@ -847,10 +853,15 @@ pub struct MaterialVersionRecipe {
     pub secondary_layer: Option<ModelSecondaryLayer>,
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
-    /// Whether brush faces using this recipe reveal the camera-relative,
-    /// two-layer Quake sky instead of drawing their authored polygons.
+    /// Whether brush faces using this recipe reveal the World sky.
     #[serde(default)]
+    pub sky_aperture: bool,
+    /// Parse-only compatibility with old version recipes.
+    #[serde(default, skip_serializing)]
     pub layered_sky: bool,
+    /// Parse-only compatibility with old version recipes.
+    #[serde(default, skip_serializing)]
+    pub directional_sky: bool,
 }
 
 fn default_material_version_id() -> MaterialVersionId {
@@ -992,7 +1003,9 @@ impl MaterialResource {
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Front,
+            sky_aperture: false,
             layered_sky: false,
+            directional_sky: false,
             active_version_id: MaterialVersionId::ORIGINAL,
             active_version_name: default_material_version_name(),
             versions: Vec::new(),
@@ -1051,7 +1064,9 @@ impl MaterialResource {
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Front,
+            sky_aperture: false,
             layered_sky: false,
+            directional_sky: false,
             active_version_id: MaterialVersionId::ORIGINAL,
             active_version_name: default_material_version_name(),
             versions: Vec::new(),
@@ -1189,6 +1204,7 @@ impl MaterialResource {
 
     /// Repair hand-authored or legacy version metadata after deserialization.
     pub fn normalize_versions(&mut self) {
+        self.sky_aperture |= self.layered_sky || self.directional_sky;
         if self.active_version_id.raw() == 0 {
             self.active_version_id = MaterialVersionId::ORIGINAL;
         }
@@ -1212,6 +1228,8 @@ impl MaterialResource {
             .saturating_add(1)
             .max(2);
         for version in &mut self.versions {
+            version.recipe.sky_aperture |=
+                version.recipe.layered_sky || version.recipe.directional_sky;
             if version.id.raw() == 0 || !seen.insert(version.id) {
                 while seen.contains(&MaterialVersionId(next)) {
                     next = next.saturating_add(1);
@@ -1309,7 +1327,9 @@ impl From<&MaterialResource> for MaterialVersionRecipe {
             animation: material.animation,
             secondary_layer: material.secondary_layer.clone(),
             face_sidedness: material.sidedness(),
+            sky_aperture: material.sky_aperture,
             layered_sky: material.layered_sky,
+            directional_sky: material.directional_sky,
         }
     }
 }
@@ -1326,7 +1346,9 @@ impl MaterialVersionRecipe {
         material.animation = self.animation;
         material.secondary_layer = self.secondary_layer;
         material.face_sidedness = self.face_sidedness;
+        material.sky_aperture = self.sky_aperture || self.layered_sky || self.directional_sky;
         material.layered_sky = self.layered_sky;
+        material.directional_sky = self.directional_sky;
         material.legacy_texture = None;
         material.sync_legacy_sidedness();
     }

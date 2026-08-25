@@ -2166,16 +2166,6 @@ pub enum ResourceData {
         /// Project-relative source path.
         source_path: String,
     },
-    /// Legacy project-local pointer to a shared prefab.
-    ///
-    /// Kept only so projects written by the old "Sync Library to Resources"
-    /// command still deserialize. [`ProjectDocument::normalize_loaded`]
-    /// removes these rows immediately; the editor lists `prefabs_dir()`
-    /// directly and never writes library paths to `project.ron`.
-    Prefab {
-        /// Path to the `.ron`, resolved like every other resource path.
-        source_path: String,
-    },
     /// Nested room/prefab reference.
     Scene {
         /// Project-relative room/prefab path.
@@ -2213,7 +2203,6 @@ impl ResourceData {
             Self::AnimationClip(_) => "Animation Clip",
             Self::AnimationSet(_) => "Clip Role Map",
             Self::Mesh { .. } => "Mesh",
-            Self::Prefab { .. } => "Prefab",
             Self::Scene { .. } => "Room",
             Self::Script { .. } => "Script",
             Self::Audio { .. } => "Audio",
