@@ -18,6 +18,7 @@ use psxed_project::{
 
 use crate::editor_helpers::{
     animation_source_authoring_label, collect_animation_clip_authoring_labels,
+    distance_to_segment_2d,
 };
 use crate::icons;
 use crate::model_import_preview::{self, ImportPreviewOptions};
@@ -25,7 +26,7 @@ use crate::searchable_picker::{searchable_picker, SearchablePickerConfig};
 use crate::style::{
     STUDIO_ACCENT, STUDIO_ACCENT_DIM, STUDIO_BORDER, STUDIO_BORDER_DARK, STUDIO_DOCK, STUDIO_HOVER,
     STUDIO_INPUT, STUDIO_PANEL_DARK, STUDIO_PANEL_HEADER, STUDIO_SELECTION, STUDIO_TEXT,
-    STUDIO_TEXT_WEAK, STUDIO_WARNING,
+    STUDIO_TEXT_WEAK,
 };
 
 const TIMELINE_DEFAULT_HEIGHT: f32 = 206.0;
@@ -65,11 +66,29 @@ enum CapsuleEditAxis {
 }
 
 impl CapsuleEditAxis {
+    const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
+
     const fn index(self) -> usize {
         match self {
             Self::X => 0,
             Self::Y => 1,
             Self::Z => 2,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+        }
+    }
+
+    const fn color(self) -> Color32 {
+        match self {
+            Self::X => Color32::from_rgb(240, 92, 92),
+            Self::Y => Color32::from_rgb(110, 226, 110),
+            Self::Z => Color32::from_rgb(116, 160, 255),
         }
     }
 }
@@ -101,7 +120,8 @@ pub(crate) struct ModelAnimationViewerState {
     selected_action: CharacterAnimationAction,
     capsule_edit_tool: CapsuleEditTool,
     capsule_edit_axis: CapsuleEditAxis,
-    socket_drag_fractional_units: f32,
+    gizmo_drag_axis: Option<CapsuleEditAxis>,
+    gizmo_drag_fractional_units: f32,
     timeline_height: f32,
     timeline_resize_origin: Option<f32>,
     timeline_pixels_per_frame: f32,
@@ -141,7 +161,8 @@ impl Default for ModelAnimationViewerState {
             selected_action: CharacterAnimationAction::Idle,
             capsule_edit_tool: CapsuleEditTool::Move,
             capsule_edit_axis: CapsuleEditAxis::X,
-            socket_drag_fractional_units: 0.0,
+            gizmo_drag_axis: None,
+            gizmo_drag_fractional_units: 0.0,
             timeline_height: TIMELINE_DEFAULT_HEIGHT,
             timeline_resize_origin: None,
             timeline_pixels_per_frame: 12.0,
@@ -976,9 +997,9 @@ pub(crate) fn draw_model_animation_viewer(
                 rotation_q12: socket.rotation_q12,
                 selected: index == preview_socket_index,
                 gizmo_mode: if state.capsule_edit_tool == CapsuleEditTool::Rotate {
-                    model_import_preview::PreviewSocketGizmoMode::Rotate
+                    model_import_preview::PreviewGizmoMode::Rotate
                 } else {
-                    model_import_preview::PreviewSocketGizmoMode::Translate
+                    model_import_preview::PreviewGizmoMode::Translate
                 },
             })
             .collect::<Vec<_>>()
@@ -1250,12 +1271,32 @@ pub(crate) fn draw_model_animation_viewer(
             preview_texture.take();
         }
     }
-    if let Some(model_id) = socket_model_id {
+    if let Some(clip_id) = pose_clip_id {
+        let pose_delta = match state.capsule_edit_tool {
+            CapsuleEditTool::Move => preview_interaction
+                .gizmo_move_units
+                .map(AxisEditDelta::Translate),
+            CapsuleEditTool::Rotate => preview_interaction.edit_delta.map(AxisEditDelta::Rotate),
+            CapsuleEditTool::Resize => None,
+        };
+        if let Some(delta) = pose_delta {
+            let frame = state.frame.round().max(0.0) as u16;
+            changed |= manipulate_pose_correction(
+                project,
+                clip_id,
+                state.selected_pose_joint,
+                frame,
+                state.capsule_edit_axis,
+                delta,
+            );
+            preview_texture.take();
+        }
+    } else if let Some(model_id) = socket_model_id {
         let socket_delta = match state.capsule_edit_tool {
             CapsuleEditTool::Move => preview_interaction
-                .socket_move_units
-                .map(SocketEditDelta::Translate),
-            CapsuleEditTool::Rotate => preview_interaction.edit_delta.map(SocketEditDelta::Rotate),
+                .gizmo_move_units
+                .map(AxisEditDelta::Translate),
+            CapsuleEditTool::Rotate => preview_interaction.edit_delta.map(AxisEditDelta::Rotate),
             CapsuleEditTool::Resize => None,
         };
         if let Some(delta) = socket_delta {
@@ -2819,6 +2860,7 @@ fn draw_pose_correction_editor(
             state.selected_pose_joint = selected.unwrap_or(state.selected_pose_joint);
         }
     });
+    draw_axis_gizmo_controls(ui, state, true);
 
     let frame = (state.frame.round().max(0.0) as u16).min(max_frame);
     let Some(resource) = project.resource_mut(clip_id) else {
@@ -2938,6 +2980,44 @@ fn draw_pose_correction_editor(
             .color(STUDIO_TEXT_WEAK),
     );
     changed
+}
+
+fn draw_axis_gizmo_controls(
+    ui: &mut egui::Ui,
+    state: &mut ModelAnimationViewerState,
+    creates_pose_key: bool,
+) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Viewport");
+        ui.selectable_value(&mut state.capsule_edit_tool, CapsuleEditTool::Move, "Move");
+        ui.selectable_value(
+            &mut state.capsule_edit_tool,
+            CapsuleEditTool::Rotate,
+            "Rotate",
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Axis");
+        for axis in CapsuleEditAxis::ALL {
+            ui.selectable_value(&mut state.capsule_edit_axis, axis, axis.label());
+        }
+    });
+    let help = match (state.capsule_edit_tool, creates_pose_key) {
+        (CapsuleEditTool::Rotate, true) => {
+            "Hover a coloured axis until it brightens, then drag it to rotate the selected joint. The first drag creates a correction key at this frame."
+        }
+        (CapsuleEditTool::Rotate, false) => {
+            "Hover a coloured axis until it brightens, then drag it to rotate around that axis."
+        }
+        (_, true) => {
+            "Hover a coloured axis until it brightens, then drag along it to move the selected joint. The first drag creates a correction key at this frame. Hold Shift for precision or Cmd/Ctrl for 4× movement."
+        }
+        (_, false) => {
+            "Hover a coloured axis until it brightens, then drag along it. Motion follows its local direction at every zoom. Hold Shift for precision or Cmd/Ctrl for 4× movement."
+        }
+    };
+    ui.label(RichText::new(help).small().color(STUDIO_TEXT_WEAK));
 }
 
 fn q12_delta_to_degrees(value: i16) -> f32 {
@@ -4001,33 +4081,7 @@ fn draw_attachment_socket_editor(
         }
     });
 
-    ui.horizontal(|ui| {
-        ui.label("Viewport");
-        ui.selectable_value(&mut state.capsule_edit_tool, CapsuleEditTool::Move, "Move");
-        ui.selectable_value(
-            &mut state.capsule_edit_tool,
-            CapsuleEditTool::Rotate,
-            "Rotate",
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Local axis");
-        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::X, "X");
-        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::Y, "Y");
-        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::Z, "Z");
-    });
-    ui.label(
-        RichText::new(match state.capsule_edit_tool {
-            CapsuleEditTool::Rotate => {
-                "Left-drag rotates the socket around the selected local axis."
-            }
-            _ => {
-                "Drag parallel to the selected coloured axis. Motion follows its projected bone-local direction and stays consistent at every zoom. Hold Shift for precision or Cmd/Ctrl for 4× movement."
-            }
-        })
-        .small()
-        .color(STUDIO_TEXT_WEAK),
-    );
+    draw_axis_gizmo_controls(ui, state, false);
     ui.separator();
 
     changed |= crate::inspector_character_ui::attachment_socket_list_editor(
@@ -4067,9 +4121,63 @@ fn attach_selected_socket_to_joint(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum SocketEditDelta {
+enum AxisEditDelta {
     Translate(i32),
     Rotate(Vec2),
+}
+
+fn manipulate_pose_correction(
+    project: &mut ProjectDocument,
+    clip_id: ResourceId,
+    joint: u16,
+    frame: u16,
+    axis: CapsuleEditAxis,
+    delta: AxisEditDelta,
+) -> bool {
+    let edit_amount = match delta {
+        AxisEditDelta::Translate(amount) => amount,
+        AxisEditDelta::Rotate(delta) => (delta.x * 12.0).round() as i32,
+    };
+    if edit_amount == 0 {
+        return false;
+    }
+    let Some(resource) = project.resource_mut(clip_id) else {
+        return false;
+    };
+    let ResourceData::AnimationClip(clip) = &mut resource.data else {
+        return false;
+    };
+    let index = clip
+        .pose_corrections
+        .iter()
+        .position(|key| key.joint == joint && key.frame == frame)
+        .unwrap_or_else(|| {
+            let mut key =
+                psxed_project::sample_pose_correction(&clip.pose_corrections, joint, frame);
+            key.joint = joint;
+            key.frame = frame;
+            clip.pose_corrections.push(key);
+            clip.pose_corrections
+                .sort_by_key(|key| (key.joint, key.frame));
+            clip.pose_corrections
+                .iter()
+                .position(|key| key.joint == joint && key.frame == frame)
+                .expect("inserted pose correction key")
+        });
+    let key = &mut clip.pose_corrections[index];
+    let component = axis.index();
+    match delta {
+        AxisEditDelta::Translate(_) => {
+            key.translation[component] = key.translation[component]
+                .saturating_add(edit_amount)
+                .clamp(-8192, 8192);
+        }
+        AxisEditDelta::Rotate(_) => {
+            let turned = i32::from(key.rotation_q12[component]).saturating_add(edit_amount);
+            key.rotation_q12[component] = ((turned + 2048).rem_euclid(4096) - 2048) as i16;
+        }
+    }
+    true
 }
 
 fn manipulate_selected_socket(
@@ -4077,7 +4185,7 @@ fn manipulate_selected_socket(
     model_id: ResourceId,
     socket_index: usize,
     axis: CapsuleEditAxis,
-    delta: SocketEditDelta,
+    delta: AxisEditDelta,
 ) -> bool {
     let Some(resource) = project.resource_mut(model_id) else {
         return false;
@@ -4089,7 +4197,7 @@ fn manipulate_selected_socket(
         return false;
     };
     match delta {
-        SocketEditDelta::Rotate(delta) => {
+        AxisEditDelta::Rotate(delta) => {
             // 12 q12 turn-units per pixel is the capsule editor's 0.018
             // radians per pixel expressed in turns.
             let amount = (delta.x * 12.0).round() as i32;
@@ -4100,7 +4208,7 @@ fn manipulate_selected_socket(
             let turned = (i32::from(socket.rotation_q12[index]) + amount).rem_euclid(4096);
             socket.rotation_q12[index] = turned as i16;
         }
-        SocketEditDelta::Translate(amount) => {
+        AxisEditDelta::Translate(amount) => {
             if amount == 0 {
                 return false;
             }
@@ -4260,7 +4368,7 @@ fn compact_capsule_coord(value: i32) -> i32 {
 struct PreviewInteraction {
     clicked_joint: Option<u16>,
     edit_delta: Option<Vec2>,
-    socket_move_units: Option<i32>,
+    gizmo_move_units: Option<i32>,
 }
 
 fn draw_playback_controls(
@@ -4600,15 +4708,17 @@ fn draw_preview(
         state.yaw_q12 = (state.yaw_q12 - (delta.x * 6.0) as i32).rem_euclid(4096);
         state.pitch_q12 = (state.pitch_q12 - (delta.y * 4.0) as i32).clamp(64, 960);
     }
-    let edit_delta = ((!combat_capsules.is_empty() || !sockets.is_empty())
+    let primary_drag_delta = (response.dragged_by(egui::PointerButton::Primary)
+        && pointer_delta != Vec2::ZERO)
+        .then_some(pointer_delta);
+    let mut edit_delta = (!combat_capsules.is_empty()
         && response.dragged_by(egui::PointerButton::Primary)
         && pointer_delta != Vec2::ZERO)
         .then_some(pointer_delta);
-    if response.drag_started_by(egui::PointerButton::Primary) && !sockets.is_empty() {
-        state.socket_drag_fractional_units = 0.0;
-    }
-    if response.drag_stopped_by(egui::PointerButton::Primary) {
-        state.socket_drag_fractional_units = 0.0;
+    let primary_down = ui.input(|input| input.pointer.primary_down());
+    if !primary_down {
+        state.gizmo_drag_axis = None;
+        state.gizmo_drag_fractional_units = 0.0;
     }
     if response.hovered() {
         ui.ctx().set_cursor_icon(if joint_picking {
@@ -4756,13 +4866,20 @@ fn draw_preview(
         equipped_weapon,
         character_material,
         selected_joint,
+        state.show_pose_corrections.then_some(
+            if state.capsule_edit_tool == CapsuleEditTool::Rotate {
+                model_import_preview::PreviewGizmoMode::Rotate
+            } else {
+                model_import_preview::PreviewGizmoMode::Translate
+            },
+        ),
     );
 
     let mut clicked_joint = None;
-    let mut socket_move_units = None;
+    let mut gizmo_move_units = None;
     match render {
         Some(render) => {
-            let socket_translation_gizmo = render.selected_socket_translation_gizmo;
+            let viewport_gizmo = render.selected_socket_gizmo.or(render.selected_joint_gizmo);
             let image = render.image;
             let texture_id = match preview_texture {
                 Some(handle) => {
@@ -4790,40 +4907,83 @@ fn draw_preview(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
-            if state.capsule_edit_tool == CapsuleEditTool::Move && !sockets.is_empty() {
-                let modifiers = ui.input(|input| input.modifiers);
-                let speed = if modifiers.shift {
-                    0.25
-                } else if modifiers.command || modifiers.ctrl {
-                    4.0
-                } else {
-                    1.0
-                };
-                if let (Some(delta), Some(gizmo)) = (edit_delta, socket_translation_gizmo) {
-                    if let Some(units) = socket_axis_drag_units(
-                        delta,
-                        preview_rect,
-                        render_size,
-                        gizmo,
-                        state.capsule_edit_axis,
-                    ) {
-                        let accumulated = units * speed + state.socket_drag_fractional_units;
-                        let rounded = accumulated.round() as i32;
-                        state.socket_drag_fractional_units = accumulated - rounded as f32;
-                        socket_move_units = (rounded != 0).then_some(rounded);
-                    } else {
-                        state.socket_drag_fractional_units = 0.0;
-                        painter.text(
-                            preview_rect.left_bottom() + Vec2::new(8.0, -8.0),
-                            Align2::LEFT_BOTTOM,
-                            "Selected axis is edge-on; orbit the camera",
-                            FontId::proportional(12.0),
-                            STUDIO_WARNING,
-                        );
-                    }
+            let hovered_socket_axis = response
+                .hovered()
+                .then(|| response.interact_pointer_pos())
+                .flatten()
+                .and_then(|pointer| {
+                    viewport_gizmo.and_then(|gizmo| {
+                        pick_axis_gizmo(pointer, preview_rect, render_size, gizmo)
+                    })
+                });
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                let pressed_axis = viewport_gizmo.and_then(|gizmo| {
+                    ui.input(|input| input.pointer.press_origin())
+                        .and_then(|pointer| {
+                            pick_axis_gizmo(pointer, preview_rect, render_size, gizmo)
+                        })
+                });
+                state.gizmo_drag_axis = pressed_axis;
+                if let Some(axis) = pressed_axis {
+                    state.capsule_edit_axis = axis;
+                    state.gizmo_drag_fractional_units = 0.0;
                 }
             }
-            if response.clicked() && joint_picking {
+            if response.clicked() {
+                if let Some(axis) = hovered_socket_axis {
+                    state.capsule_edit_axis = axis;
+                }
+            }
+            if let Some(gizmo) = viewport_gizmo {
+                draw_axis_gizmo_overlay(
+                    &painter,
+                    preview_rect,
+                    render_size,
+                    gizmo,
+                    hovered_socket_axis,
+                    state.gizmo_drag_axis,
+                );
+            }
+            if response.hovered() {
+                ui.ctx()
+                    .set_cursor_icon(if state.gizmo_drag_axis.is_some() {
+                        egui::CursorIcon::Grabbing
+                    } else if hovered_socket_axis.is_some() {
+                        egui::CursorIcon::PointingHand
+                    } else if joint_picking {
+                        egui::CursorIcon::Crosshair
+                    } else {
+                        egui::CursorIcon::Grab
+                    });
+            }
+            if let (Some(delta), Some(axis), Some(gizmo)) =
+                (primary_drag_delta, state.gizmo_drag_axis, viewport_gizmo)
+            {
+                state.capsule_edit_axis = axis;
+                match state.capsule_edit_tool {
+                    CapsuleEditTool::Move => {
+                        let modifiers = ui.input(|input| input.modifiers);
+                        let speed = if modifiers.shift {
+                            0.25
+                        } else if modifiers.command || modifiers.ctrl {
+                            4.0
+                        } else {
+                            1.0
+                        };
+                        if let Some(units) =
+                            axis_gizmo_drag_units(delta, preview_rect, render_size, gizmo, axis)
+                        {
+                            let accumulated = units * speed + state.gizmo_drag_fractional_units;
+                            let rounded = accumulated.round() as i32;
+                            state.gizmo_drag_fractional_units = accumulated - rounded as f32;
+                            gizmo_move_units = (rounded != 0).then_some(rounded);
+                        }
+                    }
+                    CapsuleEditTool::Rotate => edit_delta = Some(delta),
+                    CapsuleEditTool::Resize => {}
+                }
+            }
+            if response.clicked() && joint_picking && hovered_socket_axis.is_none() {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     clicked_joint = nearest_preview_joint(
                         pointer,
@@ -4853,15 +5013,99 @@ fn draw_preview(
     PreviewInteraction {
         clicked_joint,
         edit_delta,
-        socket_move_units,
+        gizmo_move_units,
     }
 }
 
-fn socket_axis_drag_units(
+#[derive(Clone, Copy, Debug)]
+struct AxisGizmoScreenAxis {
+    axis: CapsuleEditAxis,
+    start: Pos2,
+    end: Pos2,
+}
+
+fn preview_image_to_screen(point: [f32; 2], preview_rect: Rect, render_size: [usize; 2]) -> Pos2 {
+    Pos2::new(
+        preview_rect.left() + point[0] / render_size[0].max(1) as f32 * preview_rect.width(),
+        preview_rect.top() + point[1] / render_size[1].max(1) as f32 * preview_rect.height(),
+    )
+}
+
+fn axis_gizmo_screen_axes(
+    preview_rect: Rect,
+    render_size: [usize; 2],
+    gizmo: model_import_preview::PreviewAxisGizmo,
+) -> Vec<AxisGizmoScreenAxis> {
+    let start = preview_image_to_screen(gizmo.origin, preview_rect, render_size);
+    CapsuleEditAxis::ALL
+        .into_iter()
+        .filter_map(|axis| {
+            let end =
+                preview_image_to_screen(gizmo.axis_ends[axis.index()], preview_rect, render_size);
+            ((end - start).length_sq() >= 64.0).then_some(AxisGizmoScreenAxis { axis, start, end })
+        })
+        .collect()
+}
+
+fn pick_axis_gizmo(
+    pointer: Pos2,
+    preview_rect: Rect,
+    render_size: [usize; 2],
+    gizmo: model_import_preview::PreviewAxisGizmo,
+) -> Option<CapsuleEditAxis> {
+    axis_gizmo_screen_axes(preview_rect, render_size, gizmo)
+        .into_iter()
+        .filter_map(|screen_axis| {
+            let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
+                .min(pointer.distance(screen_axis.end));
+            (distance <= crate::GIZMO_AXIS_PICK_RADIUS).then_some((distance, screen_axis.axis))
+        })
+        .min_by(|(a, _), (b, _)| a.total_cmp(b))
+        .map(|(_, axis)| axis)
+}
+
+fn draw_axis_gizmo_overlay(
+    painter: &egui::Painter,
+    preview_rect: Rect,
+    render_size: [usize; 2],
+    gizmo: model_import_preview::PreviewAxisGizmo,
+    hovered_axis: Option<CapsuleEditAxis>,
+    active_axis: Option<CapsuleEditAxis>,
+) {
+    let axes = axis_gizmo_screen_axes(preview_rect, render_size, gizmo);
+    let Some(origin) = axes.first().map(|axis| axis.start) else {
+        return;
+    };
+    painter.circle_filled(origin, 4.0, Color32::from_rgb(235, 242, 248));
+    for screen_axis in axes {
+        let highlighted =
+            hovered_axis == Some(screen_axis.axis) || active_axis == Some(screen_axis.axis);
+        let color = crate::gizmo::gizmo_highlight_color(screen_axis.axis.color(), highlighted);
+        painter.line_segment(
+            [screen_axis.start, screen_axis.end],
+            Stroke::new(crate::gizmo::gizmo_axis_stroke_width(highlighted), color),
+        );
+        painter.circle_filled(
+            screen_axis.end,
+            crate::gizmo::gizmo_axis_handle_radius(highlighted),
+            color,
+        );
+        let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
+        painter.text(
+            screen_axis.end + label_offset,
+            Align2::CENTER_CENTER,
+            screen_axis.axis.label(),
+            FontId::monospace(12.0),
+            color,
+        );
+    }
+}
+
+fn axis_gizmo_drag_units(
     pointer_delta: Vec2,
     preview_rect: Rect,
     render_size: [usize; 2],
-    gizmo: model_import_preview::PreviewSocketTranslationGizmo,
+    gizmo: model_import_preview::PreviewAxisGizmo,
     axis: CapsuleEditAxis,
 ) -> Option<f32> {
     let scale = Vec2::new(
@@ -6123,6 +6367,90 @@ mod focus_tests {
         }
     }
 
+    fn project_with_pose_clip() -> (ProjectDocument, ResourceId) {
+        let mut project = ProjectDocument::new("pose-gizmo");
+        let clip = project.add_resource(
+            "Pose Test Clip",
+            ResourceData::AnimationClip(psxed_project::AnimationClipResource {
+                psxanim_path: "assets/pose_test.psxanim".to_string(),
+                skeleton: None,
+                target_model: None,
+                source: None,
+                bake: psxed_project::AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Idle,
+                looping: true,
+                tags: Vec::new(),
+                calibration: Default::default(),
+                pose_corrections: Vec::new(),
+            }),
+        );
+        (project, clip)
+    }
+
+    #[test]
+    fn pose_gizmo_creates_one_key_and_edits_every_move_and_rotation_axis() {
+        let (mut project, clip) = project_with_pose_clip();
+        assert!(manipulate_pose_correction(
+            &mut project,
+            clip,
+            4,
+            7,
+            CapsuleEditAxis::X,
+            AxisEditDelta::Translate(12),
+        ));
+        assert!(manipulate_pose_correction(
+            &mut project,
+            clip,
+            4,
+            7,
+            CapsuleEditAxis::Y,
+            AxisEditDelta::Translate(-6),
+        ));
+        assert!(manipulate_pose_correction(
+            &mut project,
+            clip,
+            4,
+            7,
+            CapsuleEditAxis::Z,
+            AxisEditDelta::Translate(3),
+        ));
+        for axis in CapsuleEditAxis::ALL {
+            assert!(manipulate_pose_correction(
+                &mut project,
+                clip,
+                4,
+                7,
+                axis,
+                AxisEditDelta::Rotate(Vec2::new(10.0, 0.0)),
+            ));
+        }
+        let ResourceData::AnimationClip(animation) = &project.resource(clip).unwrap().data else {
+            panic!("animation clip expected");
+        };
+        assert_eq!(animation.pose_corrections.len(), 1);
+        let key = animation.pose_corrections[0];
+        assert_eq!((key.joint, key.frame), (4, 7));
+        assert_eq!(key.translation, [12, -6, 3]);
+        assert_eq!(key.rotation_q12, [120, 120, 120]);
+    }
+
+    #[test]
+    fn zero_pose_gizmo_drag_does_not_create_a_key() {
+        let (mut project, clip) = project_with_pose_clip();
+        assert!(!manipulate_pose_correction(
+            &mut project,
+            clip,
+            2,
+            5,
+            CapsuleEditAxis::Z,
+            AxisEditDelta::Translate(0),
+        ));
+        let ResourceData::AnimationClip(animation) = &project.resource(clip).unwrap().data else {
+            panic!("animation clip expected");
+        };
+        assert!(animation.pose_corrections.is_empty());
+    }
+
     #[test]
     fn attach_socket_reanchors_on_the_new_joint() {
         let (mut project, id) = project_with_socket_model();
@@ -6146,52 +6474,80 @@ mod focus_tests {
     }
 
     #[test]
-    fn manipulate_socket_moves_along_the_selected_axis() {
+    fn manipulate_socket_moves_along_each_selected_axis() {
         let (mut project, id) = project_with_socket_model();
         assert!(manipulate_selected_socket(
             &mut project,
             id,
             0,
-            CapsuleEditAxis::Y,
-            SocketEditDelta::Translate(20),
+            CapsuleEditAxis::X,
+            AxisEditDelta::Translate(5),
         ));
-        assert_eq!(first_socket(&project, id).translation, [10, 40, 30]);
+        assert!(manipulate_selected_socket(
+            &mut project,
+            id,
+            0,
+            CapsuleEditAxis::Y,
+            AxisEditDelta::Translate(20),
+        ));
+        assert!(manipulate_selected_socket(
+            &mut project,
+            id,
+            0,
+            CapsuleEditAxis::Z,
+            AxisEditDelta::Translate(-10),
+        ));
+        assert_eq!(first_socket(&project, id).translation, [15, 40, 20]);
         assert!(
             !manipulate_selected_socket(
                 &mut project,
                 id,
                 0,
                 CapsuleEditAxis::Y,
-                SocketEditDelta::Translate(0),
+                AxisEditDelta::Translate(0),
             ),
             "a zero drag is a no-op"
         );
     }
 
     #[test]
-    fn manipulate_socket_rotates_in_q12_turns_and_wraps() {
+    fn manipulate_socket_rotates_each_axis_in_q12_turns_and_wraps() {
         let (mut project, id) = project_with_socket_model();
         assert!(manipulate_selected_socket(
             &mut project,
             id,
             0,
+            CapsuleEditAxis::X,
+            AxisEditDelta::Rotate(Vec2::new(10.0, 0.0)),
+        ));
+        assert!(manipulate_selected_socket(
+            &mut project,
+            id,
+            0,
             CapsuleEditAxis::Y,
-            SocketEditDelta::Rotate(Vec2::new(300.0, 0.0)),
+            AxisEditDelta::Rotate(Vec2::new(300.0, 0.0)),
+        ));
+        assert!(manipulate_selected_socket(
+            &mut project,
+            id,
+            0,
+            CapsuleEditAxis::Z,
+            AxisEditDelta::Rotate(Vec2::new(-20.0, 0.0)),
         ));
         // 1024 + 300 * 12 = 4624, wrapping one full turn to 528.
-        assert_eq!(first_socket(&project, id).rotation_q12, [0, 528, 0]);
+        assert_eq!(first_socket(&project, id).rotation_q12, [120, 528, 3856]);
     }
 
     #[test]
-    fn socket_drag_projects_onto_the_visible_axis_at_preview_scale() {
-        let gizmo = model_import_preview::PreviewSocketTranslationGizmo {
+    fn socket_drag_projects_onto_all_visible_axes_at_preview_scale() {
+        let gizmo = model_import_preview::PreviewAxisGizmo {
             origin: [100.0, 100.0],
-            axis_ends: [[150.0, 100.0], [100.0, 125.0], [100.0, 100.5]],
+            axis_ends: [[150.0, 100.0], [100.0, 125.0], [75.0, 75.0]],
             local_axis_units: 200.0,
         };
         let preview = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 480.0));
         assert_eq!(
-            socket_axis_drag_units(
+            axis_gizmo_drag_units(
                 Vec2::new(20.0, 12.0),
                 preview,
                 [320, 240],
@@ -6204,7 +6560,7 @@ mod focus_tests {
             "only the component parallel to the doubled-width X axis contributes"
         );
         assert_eq!(
-            socket_axis_drag_units(
+            axis_gizmo_drag_units(
                 Vec2::new(20.0, 10.0),
                 preview,
                 [320, 240],
@@ -6216,14 +6572,53 @@ mod focus_tests {
             40,
             "the same local motion remains consistent on the vertical axis"
         );
-        assert!(socket_axis_drag_units(
-            Vec2::new(20.0, 0.0),
-            preview,
-            [320, 240],
-            gizmo,
-            CapsuleEditAxis::Z,
-        )
-        .is_none());
+        assert_eq!(
+            axis_gizmo_drag_units(
+                Vec2::new(-10.0, -10.0),
+                preview,
+                [320, 240],
+                gizmo,
+                CapsuleEditAxis::Z,
+            )
+            .unwrap()
+            .round() as i32,
+            40,
+            "the diagonal Z handle responds to drag projected along its screen direction"
+        );
+    }
+
+    #[test]
+    fn socket_gizmo_hover_picks_each_visible_axis_and_ignores_edge_on_axes() {
+        let preview = Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 480.0));
+        let gizmo = model_import_preview::PreviewAxisGizmo {
+            origin: [100.0, 100.0],
+            axis_ends: [[150.0, 100.0], [100.0, 125.0], [75.0, 75.0]],
+            local_axis_units: 200.0,
+        };
+        assert_eq!(
+            pick_axis_gizmo(Pos2::new(250.0, 201.0), preview, [320, 240], gizmo),
+            Some(CapsuleEditAxis::X)
+        );
+        assert_eq!(
+            pick_axis_gizmo(Pos2::new(201.0, 225.0), preview, [320, 240], gizmo),
+            Some(CapsuleEditAxis::Y)
+        );
+        assert_eq!(
+            pick_axis_gizmo(Pos2::new(175.0, 175.0), preview, [320, 240], gizmo),
+            Some(CapsuleEditAxis::Z)
+        );
+        assert_eq!(
+            pick_axis_gizmo(Pos2::new(400.0, 350.0), preview, [320, 240], gizmo),
+            None
+        );
+
+        let edge_on_z = model_import_preview::PreviewAxisGizmo {
+            axis_ends: [[150.0, 100.0], [100.0, 125.0], [100.5, 100.5]],
+            ..gizmo
+        };
+        assert!(axis_gizmo_screen_axes(preview, [320, 240], edge_on_z)
+            .iter()
+            .all(|axis| axis.axis != CapsuleEditAxis::Z));
     }
 
     #[test]
