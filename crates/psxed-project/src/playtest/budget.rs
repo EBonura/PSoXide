@@ -5,7 +5,7 @@ use std::path::Path;
 #[cfg(test)]
 use psx_bsp::pxbsp::PxbspVersion;
 use psx_bsp::pxbsp::{material_flags, PxbspIndex, PxbspLumpKind};
-use psx_bsp::sky::{VIEW_RAY_CUBE_SKY_PACKET_WORDS, VIEW_RAY_SKY_PACKET_WORDS};
+use psx_bsp::sky::VIEW_RAY_SKY_PACKET_WORDS;
 #[cfg(test)]
 use psx_bsp::RecordSlice;
 use psx_bsp::{BrushModel, ClipNode, CookedRecord, Face, Leaf, Node, Plane, SliceReader, Vertex};
@@ -40,9 +40,6 @@ pub const PLAYTEST_PXBSP_PACKET_CAPACITY_CEILING: usize = PLAYTEST_PACKET_LIMIT;
 /// view-ray background instead of drawing the source sky polygons.
 const VIEW_RAY_SKY_PACKET_SLOTS: usize =
     VIEW_RAY_SKY_PACKET_WORDS.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
-/// Primitive-arena slots reserved by the one-pass scenic cube background.
-const VIEW_RAY_CUBE_SKY_PACKET_SLOTS: usize =
-    VIEW_RAY_CUBE_SKY_PACKET_WORDS.div_ceil(PRIMITIVE_PACKET_SLOT_WORDS);
 
 /// Per-project primitive arena capacity for a cooked packet envelope:
 /// the envelope rounded up to a 64-packet step, floored at the baseline
@@ -431,14 +428,8 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
             .and_then(|face| materials.get(face.texture as usize))
             .is_some_and(|material| material.flags & material_flags::LAYERED_SKY != 0)
     };
-    let is_directional_sky = |surface: usize| -> bool {
-        faces
-            .get(surface)
-            .and_then(|face| materials.get(face.texture as usize))
-            .is_some_and(|material| material.flags & material_flags::DIRECTIONAL_SKY != 0)
-    };
     let packet_slots_of = |surface: usize| -> usize {
-        if is_layered_sky(surface) || is_directional_sky(surface) {
+        if is_layered_sky(surface) {
             0
         } else {
             faces.get(surface).map_or(0, |face| {
@@ -449,9 +440,6 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
     let mut total: usize = (0..faces.len()).map(packet_slots_of).sum();
     if (0..faces.len()).any(is_layered_sky) {
         total = total.saturating_add(VIEW_RAY_SKY_PACKET_SLOTS);
-    }
-    if (0..faces.len()).any(is_directional_sky) {
-        total = total.saturating_add(VIEW_RAY_CUBE_SKY_PACKET_SLOTS);
     }
     // The packet arena only ever holds ONE frame's draw, and a frame
     // draws the PVS of one leaf, not the whole map. Size from the worst
@@ -473,7 +461,6 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
         }
         let mut frame_packet_slots = 0usize;
         let mut frame_has_layered_sky = false;
-        let mut frame_has_directional_sky = false;
         for bit in 0..visible_leaves {
             if row[bit / 8] & (1 << (bit % 8)) == 0 {
                 continue;
@@ -489,7 +476,6 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
                 if surface < seen.len() && !seen[surface] {
                     seen[surface] = true;
                     frame_has_layered_sky |= is_layered_sky(surface);
-                    frame_has_directional_sky |= is_directional_sky(surface);
                     frame_packet_slots =
                         frame_packet_slots.saturating_add(packet_slots_of(surface));
                 }
@@ -497,9 +483,6 @@ fn cooked_bsp_packets(package: &PlaytestPackage) -> usize {
         }
         if frame_has_layered_sky {
             frame_packet_slots = frame_packet_slots.saturating_add(VIEW_RAY_SKY_PACKET_SLOTS);
-        }
-        if frame_has_directional_sky {
-            frame_packet_slots = frame_packet_slots.saturating_add(VIEW_RAY_CUBE_SKY_PACKET_SLOTS);
         }
         worst = worst.max(frame_packet_slots);
     }
@@ -918,7 +901,6 @@ mod tests {
         );
         assert_eq!(PRIMITIVE_PACKET_SLOT_WORDS, 14);
         assert_eq!(VIEW_RAY_SKY_PACKET_SLOTS, 172);
-        assert_eq!(VIEW_RAY_CUBE_SKY_PACKET_SLOTS, 165);
     }
 
     /// A resident payload as the cook emits it: model clips carry

@@ -382,8 +382,12 @@ impl UiValueBinding {
             Self::PlayerHealthSecondaryMax => "Player Secondary Health Max",
             Self::PlayerHealthEmptyInfluence => "Player Health Empty Influence",
             Self::PlayerHealthFullInfluence => "Player Health Full Influence",
-            Self::PlayerHealthSecondaryEmptyInfluence => "Player Secondary Health Empty Influence",
-            Self::PlayerHealthSecondaryFullInfluence => "Player Secondary Health Full Influence",
+            Self::PlayerHealthSecondaryEmptyInfluence => {
+                "Player Secondary Health Empty Influence"
+            }
+            Self::PlayerHealthSecondaryFullInfluence => {
+                "Player Secondary Health Full Influence"
+            }
             Self::PlayerStamina => "Player Stamina",
             Self::PlayerStaminaMax => "Player Stamina Max",
             Self::LoadingProgress => "Loading Progress",
