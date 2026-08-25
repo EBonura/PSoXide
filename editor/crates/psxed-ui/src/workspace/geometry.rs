@@ -174,7 +174,7 @@ impl EditorWorkspace {
             && !bsp_select
         {
             self.status = format!(
-                "{} is a BSP brush view; use Top for room-grid and node tools",
+                "{} is a BSP brush view; use Top for node placement",
                 self.orthographic_view.label()
             );
             return;
@@ -236,115 +236,17 @@ impl EditorWorkspace {
                     self.clear_sector_selection();
                 }
             }
-            ViewTool::Place if self.bsp_authoring_root().is_some() => {
+            ViewTool::Place => {
                 self.place_bsp_from_top(world);
             }
-            tool => {
-                let Some(room_id) = self.active_room_id() else {
+            ViewTool::PaintMaterial => {
+                let Some((brush, face)) = self.pick_brush_face_for_selection_at_2d(world) else {
+                    self.status = "Material Paint needs a BSP brush face".to_string();
                     return;
                 };
-                let Some((x, z)) = self.world_to_sector(room_id, world) else {
-                    self.clear_sector_selection();
-                    return;
-                };
-                if self.portal_place_active()
-                    || matches!(tool, ViewTool::PaintMaterial | ViewTool::Water)
-                {
-                    self.clear_sector_selection();
-                    if matches!(tool, ViewTool::PaintMaterial | ViewTool::Water) {
-                        self.clear_primitive_selection_state();
-                    }
-                } else {
-                    self.selection.selected_sector = Some((x, z));
-                    self.selection.selected_sectors.clear();
-                    self.selection.selected_sectors.insert((room_id, x, z));
-                }
-                self.apply_paint(tool, room_id, x, z, world);
+                self.paint_bsp_brush_face_target(brush, face);
             }
         }
-    }
-
-    /// Apply a 2D-viewport click through the same logic as a 3D
-    /// click. Old behaviour kept a separate `apply_paint` body
-    /// here that diverged from the 3D `run_paint_action` (no
-    /// origin awareness, no wall replacement, no `PlaceKind`
-    /// dispatch). Now: lift the click into editor coords, pre-
-    /// compute a `picked_face` for PaintWall when the inferred
-    /// edge already has a wall stack, and hand off. PaintWall uses
-    /// that face's direction to add the next stack entry.
-    pub(crate) fn apply_paint(
-        &mut self,
-        tool: ViewTool,
-        room_id: NodeId,
-        sx: u16,
-        sz: u16,
-        world: [f32; 2],
-    ) {
-        // 2D `world` is already in editor sector-units (the 2D
-        // viewport's native space, room-centre-relative around
-        // `node_world(room)`). Convert through the canonical
-        // helper to get a room-local 3D position the rest of the
-        // paint flow can chew on. `editor_to_room_local` is
-        // origin-aware, so this stays correct after a -X / -Z grow.
-        let (hit_world, picked_face) = {
-            let Some(room) = self.project.active_scene().node(room_id) else {
-                return;
-            };
-            let room_center = node_world(room);
-            let Some(grid) = self.room_grid_view(room_id) else {
-                return;
-            };
-            let editor = [world[0] - room_center[0], world[1] - room_center[1]];
-            let hit = grid.editor_to_room_local(editor);
-
-            // For PaintWall: if the inferred edge already has at
-            // least one wall, hand `run_paint_action` a `FaceRef`
-            // pointing at the top of the stack so the new wall uses
-            // that edge instead of re-inferring from the cell center.
-            // Empty edge -> None -> normal append path.
-            let face = if matches!(tool, ViewTool::PaintWall) {
-                let centre = grid.cell_center_world(sx, sz);
-                let dir = self
-                    .wall_paint_shape
-                    .direction(hit[0] - centre[0], hit[2] - centre[1]);
-                grid.sector(sx, sz).and_then(|sector| {
-                    let walls = sector.walls.get(dir);
-                    let stack = walls.len().checked_sub(1)?;
-                    Some(FaceRef {
-                        room: room_id,
-                        sx,
-                        sz,
-                        kind: FaceKind::Wall {
-                            dir,
-                            stack: stack as u8,
-                        },
-                    })
-                })
-            } else if matches!(tool, ViewTool::PaintMaterial) {
-                grid.sector(sx, sz)
-                    .and_then(|sector| sector.floor.as_ref())
-                    .map(|_| FaceRef {
-                        room: room_id,
-                        sx,
-                        sz,
-                        kind: FaceKind::Floor,
-                    })
-            } else {
-                None
-            };
-            (hit, face)
-        };
-
-        if tool == ViewTool::PaintMaterial && self.material_paint_sampling {
-            let Some(face) = picked_face else {
-                self.status = "Eyedropper needs an existing floor under the cursor".to_string();
-                return;
-            };
-            self.sample_paint_material_from_face(face);
-            return;
-        }
-
-        self.run_paint_action(tool, room_id, sx, sz, picked_face, hit_world);
     }
 
     pub(crate) fn has_geometry_selection(&self) -> bool {
@@ -515,32 +417,8 @@ impl EditorWorkspace {
             return true;
         }
 
-        let Some(clipboard) = self.copy_selected_geometry() else {
-            return false;
-        };
-        let sector_size = self
-            .room_grid_view(clipboard.source_room)
-            .map_or(DEFAULT_WORLD_SECTOR_SIZE, |grid| grid.sector_size);
-        let mut floors = vec![psxed_project::PrefabFloor {
-            relative_elevation: 0,
-            cells: clipboard.cells,
-        }];
-        floors.extend(clipboard.extra_floors);
-        let mut prefab = psxed_project::Prefab::capture(
-            "Clipboard geometry",
-            sector_size,
-            clipboard.width,
-            clipboard.height,
-            clipboard.mode == GeometryClipboardMode::MergePrimitives,
-            floors,
-            clipboard.source_room,
-            self.active_floor,
-            &self.project,
-        );
-        prefab.lights = clipboard.lights;
-        self.portable_geometry_clipboard = Some(PortableGeometryClipboard::World(prefab));
-        self.status = "Copied world geometry for cross-project paste".to_string();
-        true
+        self.status = "Select one or more BSP brushes to copy".to_string();
+        false
     }
 
     /// Paste the portable Room-workspace clipboard into the active project.
@@ -574,7 +452,6 @@ impl EditorWorkspace {
     pub(crate) fn brush_geometry_clipboard_count(&self) -> Option<usize> {
         match self.portable_geometry_clipboard.as_ref()? {
             PortableGeometryClipboard::Brushes(clipboard) => Some(clipboard.brushes.len()),
-            PortableGeometryClipboard::World(_) => None,
         }
     }
 
@@ -613,10 +490,8 @@ impl EditorWorkspace {
             self.status = "Copy brush or world geometry first".to_string();
             return false;
         };
-        match clipboard {
-            PortableGeometryClipboard::Brushes(clipboard) => self.paste_brush_geometry(clipboard),
-            PortableGeometryClipboard::World(prefab) => self.paste_world_geometry(prefab),
-        }
+        let PortableGeometryClipboard::Brushes(clipboard) = clipboard;
+        self.paste_brush_geometry(clipboard)
     }
 
     fn paste_brush_geometry(&mut self, clipboard: BrushGeometryClipboard) -> bool {
@@ -785,51 +660,6 @@ impl EditorWorkspace {
                     });
             });
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
-    }
-
-    fn paste_world_geometry(&mut self, prefab: psxed_project::Prefab) -> bool {
-        let Some(room) = self.active_room_id() else {
-            self.status = "Select a destination section before pasting geometry".to_string();
-            return false;
-        };
-        let Some(grid) = self.room_grid_view(room) else {
-            self.status = "The destination section has no editable grid".to_string();
-            return false;
-        };
-        let origin = self
-            .selection
-            .selected_sector
-            .map_or(grid.origin, |(sx, sz)| {
-                [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32]
-            });
-        let (mut floors, unbound) = prefab.bound_floors(&self.project, room, self.active_floor);
-        if floors.is_empty() {
-            self.status = "The world-geometry clipboard is empty".to_string();
-            return false;
-        }
-        let cells = floors.remove(0).cells;
-        let lead = if unbound == 0 {
-            "Pasting world geometry".to_string()
-        } else {
-            format!("Pasting world geometry ({unbound} missing material references cleared)")
-        };
-        let clipboard = GeometryClipboard {
-            mode: if prefab.merge_primitives {
-                GeometryClipboardMode::MergePrimitives
-            } else {
-                GeometryClipboardMode::ReplaceCells
-            },
-            source_room: room,
-            source_origin: origin,
-            next_paste_origin: origin,
-            width: prefab.width,
-            height: prefab.height,
-            cells,
-            extra_floors: floors,
-            lights: prefab.lights,
-        };
-        self.begin_floating_geometry(clipboard, &lead);
-        true
     }
 
     pub(crate) fn selected_geometry_cell_targets(&self) -> GeometryCellTargets {
@@ -1076,310 +906,6 @@ impl EditorWorkspace {
             "{lead} - move cursor, R rotates, F flips, Shift+F flips vertically, PgUp/PgDn \
              raises and lowers, click places, Esc cancels"
         );
-    }
-
-    /// Tools > Prefabs. Saving names the piece; stamping picks one off disk
-    /// and hands it to the same preview loop Duplicate uses, so rotate / flip /
-    /// place stay exactly as they are.
-    #[allow(dead_code)] // Retained for a future BSP-focused prefab entry point.
-    pub(crate) fn draw_prefab_menu(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut self.prefab_name);
-        });
-        let can_save = self.has_geometry_selection() && !self.prefab_name.trim().is_empty();
-        if ui
-            .add_enabled(can_save, egui::Button::new("Save Selection as Prefab"))
-            .on_disabled_hover_text("Select world geometry and type a name")
-            .clicked()
-        {
-            let name = std::mem::take(&mut self.prefab_name);
-            self.save_selection_as_prefab(&name);
-            ui.close_menu();
-        }
-        if ui.button("Refresh Library").clicked() {
-            self.status = match self.refresh_prefab_library() {
-                Ok(count) => format!("Refreshed shared prefab library - {count} pieces"),
-                Err(error) => format!("Could not refresh prefab library: {error}"),
-            };
-            ui.close_menu();
-        }
-        ui.separator();
-        if self.prefab_library.is_empty() {
-            ui.weak("No prefabs saved yet");
-            return;
-        }
-        let mut stamp = None;
-        for entry in &self.prefab_library {
-            if ui
-                .add_enabled(entry.prefab.is_some(), egui::Button::new(&entry.name))
-                .on_disabled_hover_text(
-                    entry
-                        .load_error
-                        .as_deref()
-                        .unwrap_or("Prefab could not be loaded"),
-                )
-                .clicked()
-            {
-                stamp = Some(entry.path.clone());
-            }
-        }
-        if let Some(path) = stamp {
-            self.stamp_prefab(&path);
-            ui.close_menu();
-        }
-    }
-
-    /// Capture the current geometry selection as a named prefab.
-    #[allow(dead_code)] // Used by the dormant prefab authoring flow and its tests.
-    pub(crate) fn capture_selection_as_prefab(
-        &mut self,
-        name: &str,
-    ) -> Option<psxed_project::Prefab> {
-        let name = name.trim();
-        if name.is_empty() {
-            self.status = "Name the prefab first".to_string();
-            return None;
-        }
-        let clipboard = self.copy_selected_geometry()?;
-        let room = clipboard.source_room;
-        let sector_size = self
-            .room_grid_view(room)
-            .map_or(DEFAULT_WORLD_SECTOR_SIZE, |grid| grid.sector_size);
-        let base_floor = self.active_floor;
-
-        // The selection is made on one floor, so a multi-floor piece is
-        // captured as that footprint taken through the whole stack above it.
-        // Asking the user to select the same shape floor by floor would be the
-        // clicking this feature exists to remove.
-        let mut floors = vec![psxed_project::PrefabFloor {
-            relative_elevation: 0,
-            cells: clipboard.cells.clone(),
-        }];
-        let (world_cells, base_elevation, floor_count) = {
-            let Some(NodeKind::Section { grid }) = self
-                .project
-                .active_scene()
-                .node(room)
-                .map(|node| &node.kind)
-            else {
-                return None;
-            };
-            let base = grid.floor(base_floor)?;
-            // `source_origin` is already in world cells, and each cell offset
-            // is measured from it, so the world address is just their sum.
-            // Floors are free grids with their own `origin`, so world cells are
-            // the only address that means the same thing on all of them.
-            let world_cells: Vec<[i32; 2]> = clipboard
-                .cells
-                .iter()
-                .map(|cell| {
-                    [
-                        clipboard.source_origin[0] + cell.offset[0],
-                        clipboard.source_origin[1] + cell.offset[1],
-                    ]
-                })
-                .collect();
-            (world_cells, base.elevation, grid.floor_count())
-        };
-        for floor_index in (base_floor + 1)..floor_count {
-            let Some(NodeKind::Section { grid }) = self
-                .project
-                .active_scene()
-                .node(room)
-                .map(|node| &node.kind)
-            else {
-                break;
-            };
-            let Some(floor) = grid.floor(floor_index) else {
-                break;
-            };
-            let cells: Vec<psxed_project::PrefabCell> = clipboard
-                .cells
-                .iter()
-                .zip(&world_cells)
-                .map(|(cell, world)| psxed_project::PrefabCell {
-                    offset: cell.offset,
-                    sector: floor
-                        .world_cell_to_array(world[0], world[1])
-                        .and_then(|(sx, sz)| floor.sector(sx, sz))
-                        .cloned(),
-                })
-                .collect();
-            // A stack that runs out of authored geometry stops the piece there
-            // rather than padding it with empty floors.
-            if cells.iter().all(|cell| cell.sector.is_none()) {
-                break;
-            }
-            floors.push(psxed_project::PrefabFloor {
-                relative_elevation: floor.elevation.saturating_sub(base_elevation),
-                cells,
-            });
-        }
-
-        Some(psxed_project::Prefab::capture(
-            name,
-            sector_size,
-            clipboard.width,
-            clipboard.height,
-            clipboard.mode == GeometryClipboardMode::MergePrimitives,
-            floors,
-            room,
-            base_floor,
-            &self.project,
-        ))
-    }
-
-    /// Write the current geometry selection to `editor/prefabs/<name>.ron`.
-    #[allow(dead_code)] // Retained for a future BSP-focused prefab entry point.
-    pub(crate) fn save_selection_as_prefab(&mut self, name: &str) {
-        let Some(prefab) = self.capture_selection_as_prefab(name) else {
-            return;
-        };
-        let path = psxed_project::prefab_path(&prefab.name);
-        self.status = match prefab.save_to_path(&path) {
-            Ok(()) => {
-                let refresh_note = self
-                    .refresh_prefab_library()
-                    .err()
-                    .map(|error| format!("; library refresh failed: {error}"))
-                    .unwrap_or_default();
-                format!("Saved prefab to {}{refresh_note}", path.display())
-            }
-            Err(error) => format!("Could not save prefab: {error}"),
-        };
-    }
-
-    /// Load a prefab and enter the floating preview loop with it. Materials
-    /// are rebound to this project by name; anything the project does not have
-    /// is cleared and counted so the status line can say so.
-    pub(crate) fn stamp_prefab(&mut self, path: &Path) {
-        let prefab = match psxed_project::Prefab::load_from_path(path) {
-            Ok(prefab) => prefab,
-            Err(error) => {
-                self.status = format!("Could not load prefab: {error}");
-                return;
-            }
-        };
-        let Some(room) = self.active_room_id() else {
-            self.status = "Select a section to stamp into".to_string();
-            return;
-        };
-        let grid = self.room_grid_view(room);
-        let origin = grid
-            .as_ref()
-            .map(|grid| match self.selection.selected_sector {
-                Some((sx, sz)) => [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32],
-                None => grid.origin,
-            })
-            .unwrap_or([0, 0]);
-        self.begin_prefab_stamp(prefab, room, origin);
-    }
-
-    pub(crate) fn drop_prefab_2d(&mut self, path: &Path, editor_world: [f32; 2]) {
-        let Some(room) = self.active_room_id() else {
-            self.status = "Drop the prefab over a section".to_string();
-            return;
-        };
-        let Some(origin) = self.floating_origin_from_2d_world(room, editor_world) else {
-            self.status = "Drop the prefab over a section".to_string();
-            return;
-        };
-        self.stamp_prefab_at(path, room, origin);
-    }
-
-    pub(crate) fn drop_prefab_3d(
-        &mut self,
-        path: &Path,
-        face_hit: Option<(FaceRef, [f32; 3])>,
-        ground_hit: Option<[f32; 2]>,
-    ) {
-        let Some(room) = face_hit
-            .map(|(face, _)| face.room)
-            .or_else(|| self.active_room_id())
-        else {
-            self.status = "Drop the prefab onto a section surface".to_string();
-            return;
-        };
-        let origin = face_hit
-            .and_then(|(face, _)| {
-                self.room_grid_view(face.room).map(|grid| {
-                    [
-                        grid.origin[0] + face.sx as i32,
-                        grid.origin[1] + face.sz as i32,
-                    ]
-                })
-            })
-            .or_else(|| self.floating_origin_from_3d_hover(room, None, ground_hit));
-        let Some(origin) = origin else {
-            self.status = "Drop the prefab onto a section surface".to_string();
-            return;
-        };
-        self.stamp_prefab_at(path, room, origin);
-    }
-
-    fn stamp_prefab_at(&mut self, path: &Path, room: NodeId, origin: [i32; 2]) {
-        let prefab = match psxed_project::Prefab::load_from_path(path) {
-            Ok(prefab) => prefab,
-            Err(error) => {
-                self.status = format!("Could not load prefab: {error}");
-                return;
-            }
-        };
-        self.begin_prefab_stamp(prefab, room, origin);
-    }
-
-    fn begin_prefab_stamp(
-        &mut self,
-        prefab: psxed_project::Prefab,
-        room: NodeId,
-        origin: [i32; 2],
-    ) {
-        let (mut floors, unbound) = prefab.bound_floors(&self.project, room, self.active_floor);
-        if floors.is_empty() {
-            self.status = format!("Prefab '{}' has no floors", prefab.name);
-            return;
-        }
-        let cells = floors.remove(0).cells;
-        let extra_floors = floors;
-        let grid = self.room_grid_view(room);
-        let sector_size = grid.map_or(DEFAULT_WORLD_SECTOR_SIZE, |grid| grid.sector_size);
-
-        let mut notes = Vec::new();
-        if sector_size != prefab.sector_size {
-            notes.push(format!(
-                "authored at sector size {} not {sector_size}, heights will not match",
-                prefab.sector_size
-            ));
-        }
-        if unbound > 0 {
-            notes.push(format!("{unbound} material references cleared"));
-        }
-        if !extra_floors.is_empty() {
-            notes.push(format!("{} floors", extra_floors.len() + 1));
-        }
-        let lead = if notes.is_empty() {
-            format!("Stamping '{}'", prefab.name)
-        } else {
-            format!("Stamping '{}' ({})", prefab.name, notes.join("; "))
-        };
-
-        let clipboard = GeometryClipboard {
-            mode: if prefab.merge_primitives {
-                GeometryClipboardMode::MergePrimitives
-            } else {
-                GeometryClipboardMode::ReplaceCells
-            },
-            source_room: room,
-            source_origin: origin,
-            next_paste_origin: origin,
-            width: prefab.width,
-            height: prefab.height,
-            cells,
-            extra_floors,
-            lights: prefab.lights.clone(),
-        };
-        self.begin_floating_geometry(clipboard, &lead);
     }
 
     pub(crate) fn paste_target_room(&self, clipboard: &GeometryClipboard) -> Option<NodeId> {
@@ -2000,7 +1526,7 @@ impl EditorWorkspace {
         self.update_primitive_resource_selection();
     }
 
-    pub(crate) fn add_child(&mut self, mut kind: NodeKind, name: &str) {
+    pub(crate) fn add_child(&mut self, kind: NodeKind, name: &str) {
         let parent = self.selection.selected_node;
         if kind.is_component() {
             let scene = self.project.active_scene();
@@ -2014,13 +1540,6 @@ impl EditorWorkspace {
             }
         }
         self.push_undo();
-        let first_material = self.first_material();
-        if let NodeKind::Section { grid } = &mut kind {
-            *grid = starter_room_grid(
-                self.project.world_sector_size_for_node(parent),
-                first_material,
-            );
-        }
         let id = self
             .project
             .active_scene_mut()
@@ -2046,82 +1565,6 @@ impl EditorWorkspace {
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
         self.status = format!("Added UI {name}");
-        self.mark_dirty();
-    }
-
-    pub(crate) fn create_reciprocal_portal(&mut self, source_portal: NodeId) {
-        let Some(connection) = connection_for_portal(self.project.active_scene(), source_portal)
-        else {
-            self.status = "Could not find portal connection".to_string();
-            return;
-        };
-        let source = if connection.a.portal == source_portal {
-            connection.a
-        } else if let Some(pair) = connection.b {
-            pair
-        } else {
-            connection.a
-        };
-        if source.target_room.is_none() {
-            self.status = "Assign a target room before creating a reciprocal portal".to_string();
-            return;
-        }
-        if connection.status != RoomConnectionStatus::Unpaired {
-            self.status = format!("Connection is {}", connection.status.label());
-            return;
-        }
-
-        let target_room = source.target_room.expect("checked target room");
-        let scene = self.project.active_scene();
-        let Some(source_node) = scene.node(source.portal) else {
-            self.status = "Source portal node is missing".to_string();
-            return;
-        };
-        let Some(target_room_node) = scene.node(target_room) else {
-            self.status = "Target room is missing".to_string();
-            return;
-        };
-        if !matches!(target_room_node.kind, NodeKind::Section { .. }) {
-            self.status = "Target node is not a room".to_string();
-            return;
-        }
-
-        let source_world = portal_marker_world_2d(scene, source_node);
-        let target_center = node_world(target_room_node);
-        let reciprocal_translation = [
-            source_world[0] - target_center[0],
-            source_node.transform.translation[1],
-            source_world[1] - target_center[1],
-        ];
-        let source_name = source_node.name.clone();
-        let source_entry = match &source_node.kind {
-            NodeKind::Portal { entry_name, .. } => entry_name.clone(),
-            _ => String::new(),
-        };
-        let source_room_name = room_display_name(scene, source.room);
-        let target_room_name = room_display_name(scene, target_room);
-        let geometry = source.geometry.as_ref().map(inverted_portal_geometry);
-
-        self.push_undo();
-        let scene = self.project.active_scene_mut();
-        let reciprocal = scene.add_node(
-            target_room,
-            format!("Portal {target_room_name} -> {source_room_name}"),
-            NodeKind::Portal {
-                target_room: Some(source.room),
-                target_entry: source_entry,
-                entry_name: format!("{}_reciprocal", source_name.trim().replace(' ', "_")),
-                geometry,
-            },
-        );
-        if let Some(node) = scene.node_mut(reciprocal) {
-            node.transform.translation = reciprocal_translation;
-        }
-        self.replace_node_selection(reciprocal);
-        self.clear_resource_selection_state();
-        self.clear_primitive_selection_state();
-        self.clear_sector_selection();
-        self.status = "Created reciprocal portal".to_string();
         self.mark_dirty();
     }
 
@@ -2523,58 +1966,6 @@ impl EditorWorkspace {
         Some(id)
     }
 
-    pub(crate) fn delete_selected_sectors(&mut self) {
-        let targets: Vec<SectorSelection> =
-            self.selection.selected_sectors.iter().copied().collect();
-        if targets.is_empty() {
-            return;
-        }
-
-        let first_room = targets[0].0;
-        let target_room = targets
-            .iter()
-            .all(|(room, _, _)| *room == first_room)
-            .then_some(first_room);
-        let deleted_floor = self.active_floor;
-
-        self.push_undo();
-        let mut removed = 0usize;
-        for (room, sx, sz) in targets {
-            let Some(grid) = self.room_floor_grid_mut(room) else {
-                continue;
-            };
-            let Some(index) = grid.sector_index(sx, sz) else {
-                continue;
-            };
-            if grid.sectors[index].take().is_some() {
-                removed += 1;
-            }
-        }
-
-        self.clear_sector_selection();
-        self.clear_primitive_selection_state();
-        if removed > 0 {
-            let removed_layer =
-                target_room.and_then(|room| self.remove_empty_layer_in_room(room, deleted_floor));
-            self.status = if let Some((replacement, count)) = removed_layer {
-                format!(
-                    "Deleted {removed} tile{} and empty layer {}; now editing layer {} of {}",
-                    if removed == 1 { "" } else { "s" },
-                    deleted_floor + 1,
-                    replacement + 1,
-                    count
-                )
-            } else if removed == 1 {
-                "Deleted tile".to_string()
-            } else {
-                format!("Deleted {removed} tiles")
-            };
-            self.mark_dirty();
-        } else {
-            self.status = "No selected tiles had geometry".to_string();
-        }
-    }
-
     /// Delete dispatch for the active selection:
     /// - Face   → remove the face from its sector.
     /// - Edge   → remove the face that owns the edge.
@@ -2963,66 +2354,6 @@ impl EditorWorkspace {
                 self.status = format!("Rename failed: {error}");
             }
         }
-    }
-
-    /// Delete every EXACT duplicate wall segment in the active scene.
-    ///
-    /// A duplicate is byte-identical to one already on the same edge: same
-    /// heights, material, UV transform, solidity and dropped corner. Two of
-    /// them occupy one plane, so the second can never be seen and costs a full
-    /// room surface to draw. The cooker only rejects the different case, where
-    /// two neighbouring sectors each claim one physical edge; a list that
-    /// repeats itself passes straight through into the room cache. cortex_v3
-    /// carried 30 across 185 authored segments.
-    ///
-    /// Counts first so the status line can say nothing was found without
-    /// spending an undo step on a no-op.
-    #[allow(dead_code)] // LegacyGrid repair stays available to tests and migration work.
-    pub(crate) fn remove_duplicate_walls(&mut self) {
-        let room_ids: Vec<_> = self
-            .project
-            .active_scene()
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
-            .map(|node| node.id)
-            .collect();
-
-        let mut found = 0usize;
-        for &id in &room_ids {
-            if let Some(node) = self.project.active_scene().node(id) {
-                if let NodeKind::Section { grid } = &node.kind {
-                    found += grid.duplicate_wall_count_all_floors();
-                }
-            }
-        }
-        if found == 0 {
-            self.status = "No duplicate walls found".to_string();
-            return;
-        }
-
-        self.push_undo();
-        let mut removed = 0usize;
-        let mut rooms_touched = 0usize;
-        for &id in &room_ids {
-            let Some(node) = self.project.active_scene_mut().node_mut(id) else {
-                continue;
-            };
-            let NodeKind::Section { grid } = &mut node.kind else {
-                continue;
-            };
-            let n = grid.dedupe_duplicate_walls_all_floors();
-            if n > 0 {
-                removed += n;
-                rooms_touched += 1;
-            }
-        }
-        self.status = format!(
-            "Removed {removed} duplicate wall segment{} from {rooms_touched} room{}",
-            if removed == 1 { "" } else { "s" },
-            if rooms_touched == 1 { "" } else { "s" },
-        );
-        self.mark_dirty();
     }
 
     /// Snapshot the current project before a discrete mutation.

@@ -795,7 +795,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, position_lag_shift: {}, focus_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, texture_asset: AssetId({}), cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, lock_rise_percent: {}, min_floor_clearance: {}, orbit_speed_level: {}, position_lag_shift: {}, focus_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index
                 .unwrap_or(usize::from(u16::MAX)),
@@ -842,6 +842,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.sky.skybox_columns,
             room.sky.skybox_rows,
             room.sky.flags,
+            room.sky
+                .texture_asset_index
+                .map(|index| index.to_string())
+                .unwrap_or_else(|| "u16::MAX".to_string()),
             sky_cyclorama_quads,
             room.sky
                 .cloud_layer
@@ -3823,7 +3827,7 @@ fn room_required_assets(
     for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
         push_unique(&mut required_vram, *asset_index);
     }
-    if let Some(asset_index) = room.sky.cloud_layer.texture_asset_index {
+    if let Some(asset_index) = room.sky.texture_asset_index {
         push_unique(&mut required_vram, asset_index);
     }
     if let Some(asset_index) = room.reflection_probe_asset_index {

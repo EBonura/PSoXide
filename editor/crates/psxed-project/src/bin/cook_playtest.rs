@@ -117,7 +117,7 @@ fn main() -> ExitCode {
                             }
                         }
                     }
-                    if let Some(sky_texture) = r.sky.cloud_layer.texture_asset_index {
+                    if let Some(sky_texture) = r.sky.texture_asset_index {
                         if !vram_seen.contains(&sky_texture) {
                             vram_seen.push(sky_texture);
                         }

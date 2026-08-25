@@ -22,9 +22,9 @@ use psx_engine::{
     trace_collision, BodyStep, CharacterBlockerTraceProvider, CharacterCollisionAabb,
     CharacterCollisionCylinder, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
     CharacterMotorState, CollisionQueryError, CollisionTrace, CollisionTraceQuery,
-    CollisionTraceShape, OtFrame,
-    PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig, ThirdPersonCameraFrame,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
+    CollisionTraceShape, OtFrame, PrimitivePacketArena, RoomPoint, ThirdPersonCameraConfig,
+    ThirdPersonCameraFrame, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, WorldCamera,
 };
 use psx_level::{find_asset_of_kind, AssetId, AssetKind};
 
@@ -32,8 +32,8 @@ use crate::generated::{
     ASSETS, PXBSP_BODY_HULLS, PXBSP_MOVER_MODEL_INDICES, PXBSP_MOVER_NODE_IDS, PXBSP_WORLD,
 };
 use crate::{
-    ensure_layered_sky_texture_uploaded, ensure_room_texture_uploaded, find_room_texture_vram_slot,
-    pxbsp_frame_face_chain_arena, pxbsp_visible_face_chain_arena, PROJECTION,
+    ensure_room_texture_uploaded, find_room_texture_vram_slot, pxbsp_frame_face_chain_arena,
+    pxbsp_visible_face_chain_arena, PROJECTION,
 };
 
 pub(super) const MAX_BSP_DOORS: usize = 16;
@@ -460,8 +460,13 @@ impl BspRuntime {
     pub(super) fn refresh_materials(&mut self) -> bool {
         let mut ready = true;
         for (index, material) in self.map.materials().iter().enumerate() {
+            if material.flags & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY)
+                != 0
+            {
+                self.materials[index] = None;
+                continue;
+            }
             let asset_id = AssetId(material.texture_asset);
-            let layered_sky = material.flags & material_flags::LAYERED_SKY != 0;
             let slot = match find_room_texture_vram_slot(asset_id) {
                 Some(slot) => Some(slot),
                 None => {
@@ -477,11 +482,7 @@ impl BspRuntime {
                         "PXBSP texture asset {} has no baked bytes; streamed BSP textures are not implemented",
                         material.texture_asset
                     );
-                    if layered_sky {
-                        ensure_layered_sky_texture_uploaded(asset_id, asset.bytes)
-                    } else {
-                        ensure_room_texture_uploaded(asset_id, asset.bytes)
-                    }
+                    ensure_room_texture_uploaded(asset_id, asset.bytes)
                 }
             };
             let Some(slot) = slot else {
@@ -494,18 +495,8 @@ impl BspRuntime {
                 ready = false;
                 continue;
             }
-            let width = if layered_sky {
-                assert_eq!(
-                    slot.texture_width,
-                    slot.texture_height.saturating_mul(2),
-                    "PXBSP layered sky must contain two square side-by-side layers"
-                );
-                u8::try_from(slot.texture_width / 2)
-                    .expect("PXBSP layered-sky layer width exceeds the packet UV contract")
-            } else {
-                u8::try_from(slot.texture_width)
-                    .expect("PXBSP texture width exceeds the packet UV contract")
-            };
+            let width = u8::try_from(slot.texture_width)
+                .expect("PXBSP texture width exceeds the packet UV contract");
             let height = u8::try_from(slot.texture_height)
                 .expect("PXBSP texture height exceeds the packet UV contract");
             self.materials[index] = Some(PxbspTextureBinding {
@@ -517,11 +508,22 @@ impl BspRuntime {
                 texture_size: [width, height],
             });
         }
-        ready && self.materials.iter().all(Option::is_some)
+        ready && self.materials_ready()
     }
 
     pub(super) fn materials_ready(&self) -> bool {
-        !self.materials.is_empty() && self.materials.iter().all(Option::is_some)
+        !self.materials.is_empty()
+            && self
+                .map
+                .materials()
+                .iter()
+                .zip(&self.materials)
+                .all(|(material, binding)| {
+                    material.flags
+                        & (material_flags::SKY_APERTURE | material_flags::DIRECTIONAL_SKY)
+                        != 0
+                        || binding.is_some()
+                })
     }
 
     pub(super) fn tick_doors(&mut self) {
@@ -762,7 +764,7 @@ impl BspRuntime {
         material_tick: u32,
         primitive_packets: &mut PrimitivePacketArena<'_>,
         ot: &mut OtFrame<'_, DEPTH>,
-    ) {
+    ) -> bool {
         assert_eq!(
             DEPTH, 2048,
             "PXBSP packet tags require the canonical 2048-entry ordering table"
@@ -783,9 +785,9 @@ impl BspRuntime {
         let view = load_pxbsp_view(camera);
         let capacity = primitive_packets.remaining_words();
         let Some(mut reservation) = primitive_packets.reserve_packet_words(capacity) else {
-            return;
+            return false;
         };
-        let (used_words, packet_count) = {
+        let (used_words, packet_count, visible_sky_apertures) = {
             let packets = reservation.words_mut();
             let world = self.renderer.draw_pxbsp_world(
                 &self.map,
@@ -797,6 +799,7 @@ impl BspRuntime {
             );
             let mut used_words = world.packet_words;
             let mut packet_count = world.stats.packets as usize;
+            let mut visible_sky_apertures = world.stats.visible_sky_apertures;
 
             for door in self.doors.iter() {
                 let Some(frame) = self.renderer.draw_pxbsp_model(
@@ -817,8 +820,10 @@ impl BspRuntime {
                 packet_count = packet_count
                     .checked_add(frame.stats.packets as usize)
                     .expect("PXBSP packet count overflow");
+                visible_sky_apertures =
+                    visible_sky_apertures.saturating_add(frame.stats.visible_sky_apertures);
             }
-            (used_words, packet_count)
+            (used_words, packet_count, visible_sky_apertures)
         };
         let stream = reservation
             .commit(used_words, packet_count)
@@ -826,6 +831,7 @@ impl BspRuntime {
         unsafe {
             ot.add_committed_tagged_packet_stream_unchecked(stream);
         }
+        visible_sky_apertures != 0
     }
 
     fn collision_models(&self, output: &mut [PxbspCollisionModel; MAX_BSP_DOORS]) -> usize {
@@ -839,7 +845,7 @@ impl BspRuntime {
     }
 }
 
-fn pxbsp_camera(camera: WorldCamera) -> Camera {
+pub(super) fn pxbsp_camera(camera: WorldCamera) -> Camera {
     let orbit_yaw = angle_q12_from_basis(camera.sin_yaw.raw(), camera.cos_yaw.raw());
     // WorldCamera stores the target-to-camera orbit angle with the engine's
     // `x = sin(yaw), z = cos(yaw)` convention; the view direction is the

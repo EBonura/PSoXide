@@ -3,20 +3,72 @@ use super::*;
 /// World sky rendering mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SkyMode {
-    /// Disable authored sky rendering. The renderer clears to
-    /// [`SkySettings::lower_color`] only.
+    /// Disable authored sky rendering. The renderer clears to the lower
+    /// colour only.
     Off,
-    /// Draw a cooked cyclorama before world geometry.
+    /// Draw the cooker-generated panorama before world geometry.
+    #[serde(rename = "Panorama", alias = "Gradient")]
     #[default]
-    Gradient,
+    Panorama,
+    /// Project a masked, two-layer Quake sky from the camera direction.
+    QuakeLayered,
+    /// Project six directional faces from the camera direction.
+    Cube,
+}
+
+impl SkyMode {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Panorama, Self::QuakeLayered, Self::Cube];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Panorama => "Procedural panorama",
+            Self::QuakeLayered => "Quake layered",
+            Self::Cube => "Directional cube",
+        }
+    }
+
+    pub const fn uses_authored_texture(self) -> bool {
+        matches!(self, Self::QuakeLayered | Self::Cube)
+    }
+}
+
+/// Where the scene sky is allowed to appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SkyVisibility {
+    /// Draw the sky as the scene background even without aperture brushes.
+    #[default]
+    Always,
+    /// Reveal the sky only where a visible brush material is marked as a sky
+    /// aperture.
+    ThroughSkySurfaces,
+}
+
+impl SkyVisibility {
+    pub const ALL: [Self; 2] = [Self::Always, Self::ThroughSkySurfaces];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Always => "Always",
+            Self::ThroughSkySurfaces => "Through sky surfaces",
+        }
+    }
 }
 
 /// World-level sky configuration shared by descendant Rooms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkySettings {
-    /// Whether this World renders a sky.
+    /// Which single scene-level sky renderer this World uses.
     #[serde(default)]
     pub mode: SkyMode,
+    /// Whether the sky is a full background or appears only through brush
+    /// apertures.
+    #[serde(default)]
+    pub visibility: SkyVisibility,
+    /// Material whose image supplies the layered or cube atlas. Procedural
+    /// panoramas are generated from the fields below and ignore this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<ResourceId>,
     /// Zenith colour.
     #[serde(default = "default_sky_top_color")]
     pub top_color: [u8; 3],
@@ -182,7 +234,10 @@ impl SkySettings {
             lower_color = blend_rgb(self.lower_color, fog_color, 192);
         }
         ResolvedSkySettings {
-            enabled: self.mode == SkyMode::Gradient,
+            mode: self.mode,
+            visibility: self.visibility,
+            texture: self.texture,
+            enabled: self.mode == SkyMode::Panorama,
             top_color: self.top_color,
             horizon_color,
             lower_color,
@@ -218,7 +273,9 @@ impl SkySettings {
 impl Default for SkySettings {
     fn default() -> Self {
         Self {
-            mode: SkyMode::Gradient,
+            mode: SkyMode::Panorama,
+            visibility: SkyVisibility::Always,
+            texture: None,
             top_color: default_sky_top_color(),
             horizon_color: default_sky_horizon_color(),
             lower_color: default_sky_lower_color(),
@@ -251,7 +308,13 @@ impl Default for SkySettings {
 /// Sky values after room-fog matching and validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedSkySettings {
-    /// Whether the gradient should be drawn.
+    /// Scene-level sky projection selected by the World.
+    pub mode: SkyMode,
+    /// Scene-level visibility policy.
+    pub visibility: SkyVisibility,
+    /// Source material for texture-backed projections.
+    pub texture: Option<ResourceId>,
+    /// Whether the procedural panorama should be baked and drawn.
     pub enabled: bool,
     /// Zenith colour.
     pub top_color: [u8; 3],
@@ -302,6 +365,13 @@ pub struct ResolvedSkySettings {
     /// Resolved cloud layer authoring values used by the cyclorama
     /// generator.
     pub cloud_layer: CloudLayerSettings,
+}
+
+impl ResolvedSkySettings {
+    /// Whether any scene sky renderer is enabled.
+    pub const fn sky_enabled(self) -> bool {
+        !matches!(self.mode, SkyMode::Off)
+    }
 }
 
 /// One generated cyclorama backdrop quad. Directions are unit vectors

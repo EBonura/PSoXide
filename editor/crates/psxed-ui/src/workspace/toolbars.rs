@@ -96,8 +96,6 @@ impl EditorWorkspace {
                         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
                         let resource_drop_hovered =
                             top_view && response.dnd_hover_payload::<ResourceId>().is_some();
-                        let prefab_drop_hovered =
-                            top_view && response.dnd_hover_payload::<PrefabDragPayload>().is_some();
 
                         if !dnd_active
                             && (response.dragged_by(egui::PointerButton::Middle)
@@ -152,31 +150,19 @@ impl EditorWorkspace {
                                 .then(|| response.dnd_release_payload::<ResourceId>())
                                 .flatten()
                                 .map(|payload| *payload);
-                            let dropped_prefab = prefab_drop_hovered
-                                .then(|| response.dnd_release_payload::<PrefabDragPayload>())
-                                .flatten()
-                                .map(|payload| payload.path.clone());
                             if let Some(pointer) =
                                 response.interact_pointer_pos().or(response.hover_pos())
                             {
                                 let world = transform.screen_to_world(pointer);
                                 if let Some(resource_id) = dropped_resource {
                                     self.drop_resource_2d(resource_id, world);
-                                } else if let Some(path) = dropped_prefab {
-                                    self.drop_prefab_2d(&path, world);
                                 }
                             }
                         }
                         let painter = ui.painter_at(rect);
                         painter.rect_filled(rect, 0.0, STUDIO_VIEWPORT);
                         if self.show_grid {
-                            let bsp_only = self.project.world_format().is_bsp();
-                            let base_step = if bsp_only {
-                                self.snap_units.max(1) as f32
-                            } else {
-                                1.0
-                            };
-                            draw_world_grid(&painter, transform, base_step);
+                            draw_world_grid(&painter, transform, self.snap_units.max(1) as f32);
                         }
                         // Background and projected surface grids are independent:
                         // hiding the viewport grid must not also erase the grid
@@ -194,10 +180,6 @@ impl EditorWorkspace {
                                     hidden_scene_nodes: &self.hidden_scene_nodes,
                                     selected: self.selection.selected_node,
                                     selected_nodes: &self.selection.selected_nodes,
-                                    selected_sectors: &self.selection.selected_sectors,
-                                    validation_issue_primitives: &self.validation_issue_primitives,
-                                    validation_issue_rooms: &self.validation_issue_rooms,
-                                    show_portals: self.show_portals,
                                     show_lights: self.show_lights,
                                 },
                             )
@@ -210,11 +192,6 @@ impl EditorWorkspace {
                             .or_else(|| response.interact_pointer_pos())
                             .map(|pos| transform.screen_to_world(pos));
                         if top_view {
-                            if let Some(world) = pointer_world {
-                                self.draw_portal_place_preview_2d(&painter, transform, world);
-                            }
-                        }
-                        if top_view {
                             if let (Some(room), Some(world)) = (
                                 self.floating_geometry.as_ref().map(|preview| preview.room),
                                 pointer_world,
@@ -226,12 +203,6 @@ impl EditorWorkspace {
                                 }
                             }
                         }
-                        let top_hit = pointer_world
-                            .and_then(|world| hits.iter().rev().find(|hit| hit.contains(world)))
-                            .map(|hit| hit.id);
-                        let top_hit_is_room = top_hit
-                            .and_then(|id| self.project.active_scene().node(id))
-                            .is_some_and(|node| matches!(node.kind, NodeKind::Section { .. }));
                         let primary_down = ui
                             .input(|input| input.pointer.button_down(egui::PointerButton::Primary));
                         if !primary_down {
@@ -359,19 +330,14 @@ impl EditorWorkspace {
                             && self.brush_extrude.is_none()
                             && response.drag_started_by(egui::PointerButton::Primary)
                         {
-                            let can_box_select = bsp_brush_marquee
-                                || (top_view && (top_hit.is_none() || top_hit_is_room));
+                            let can_box_select = bsp_brush_marquee;
                             if can_box_select {
                                 if let Some(start) = ui
                                     .input(|input| input.pointer.press_origin())
                                     .or_else(|| response.interact_pointer_pos())
                                 {
                                     let modifiers = ui.input(|input| input.modifiers);
-                                    self.begin_viewport_box_select(
-                                        start,
-                                        top_hit.or_else(|| self.active_room_id()),
-                                        modifiers,
-                                    );
+                                    self.begin_viewport_box_select(start, None, modifiers);
                                 }
                             }
                         }
@@ -427,7 +393,7 @@ impl EditorWorkspace {
                         self.draw_bsp_leak_path_2d(&painter, transform, orthographic_view);
                         draw_axes_gizmo(&painter, rect, orthographic_view);
                         self.draw_bsp_leak_notice(&painter, rect);
-                        if resource_drop_hovered || prefab_drop_hovered {
+                        if resource_drop_hovered {
                             painter.rect_stroke(
                                 rect.shrink(2.0),
                                 2.0,
@@ -437,11 +403,7 @@ impl EditorWorkspace {
                             painter.text(
                                 rect.center_top() + Vec2::new(0.0, 16.0),
                                 Align2::CENTER_TOP,
-                                if prefab_drop_hovered {
-                                    "Drop prefab into scene"
-                                } else {
-                                    "Drop resource into scene"
-                                },
+                                "Drop resource into scene",
                                 FontId::proportional(13.0),
                                 STUDIO_ACCENT,
                             );
@@ -535,21 +497,6 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
-        let bsp_authoring = self.project.world_format().is_bsp();
-        if !bsp_authoring
-            || matches!(
-                self.active_tool,
-                ViewTool::PaintFloor
-                    | ViewTool::PaintWall
-                    | ViewTool::PaintCeiling
-                    | ViewTool::Water
-                    | ViewTool::Erase
-            )
-            || (self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal)
-        {
-            self.active_tool = ViewTool::Select;
-            self.material_paint_sampling = false;
-        }
         self.retain_shortcut_group_flash();
         if self.shortcut_group_flash.is_some() {
             ui.ctx().request_repaint();
@@ -560,20 +507,9 @@ impl EditorWorkspace {
             return;
         }
 
-        if bsp_authoring {
-            self.draw_bsp_mode_strip(ui);
-            self.draw_bsp_add_menu(ui);
-            self.draw_bsp_context_controls(ui);
-        } else {
-            ui.label(
-                RichText::new("Legacy grid · authoring removed")
-                    .small()
-                    .color(STUDIO_TEXT_WEAK),
-            )
-            .on_hover_text(
-                "This project can still be loaded and cooked, but the retired grid geometry tools are no longer exposed.",
-            );
-        }
+        self.draw_bsp_mode_strip(ui);
+        self.draw_bsp_add_menu(ui);
+        self.draw_bsp_context_controls(ui);
         ui.separator();
         self.draw_grid_controls(ui);
         ui.separator();
@@ -624,12 +560,7 @@ impl EditorWorkspace {
                 BrushEditMode::Vertex => BspToolbarMode::Vertex,
                 BrushEditMode::Clip => BspToolbarMode::Clip,
             }),
-            ViewTool::Place
-            | ViewTool::PaintFloor
-            | ViewTool::PaintWall
-            | ViewTool::PaintCeiling
-            | ViewTool::Water
-            | ViewTool::Erase => None,
+            ViewTool::Place => None,
         }
     }
 
@@ -715,10 +646,6 @@ impl EditorWorkspace {
                     .color(STUDIO_TEXT_WEAK),
             );
             for kind in PlaceKind::ALL {
-                // BSP visibility portals are generated by the compiler.
-                if kind == PlaceKind::Portal {
-                    continue;
-                }
                 let selected = self.active_tool == ViewTool::Place && self.place_kind == kind;
                 if toolbar_menu_choice(ui, icons::label(kind.icon(), kind.label()), selected) {
                     self.set_active_tool_cycle_value((ViewTool::Place, Some(kind)));
@@ -817,12 +744,7 @@ impl EditorWorkspace {
                     |ui| self.draw_active_place_options(ui),
                 );
             }
-            ViewTool::Place
-            | ViewTool::PaintFloor
-            | ViewTool::PaintWall
-            | ViewTool::PaintCeiling
-            | ViewTool::Water
-            | ViewTool::Erase => {}
+            ViewTool::Place => {}
         }
     }
 
@@ -1041,8 +963,7 @@ impl EditorWorkspace {
                 ui.weak("Brush geometry always snaps to this interval.");
             },
         );
-        let can_snap_level =
-            self.project.world_format().is_bsp() && !self.project.active_scene().brushes.is_empty();
+        let can_snap_level = !self.project.active_scene().brushes.is_empty();
         if ui
             .add_enabled(
                 can_snap_level,
@@ -1136,9 +1057,7 @@ impl EditorWorkspace {
                 &mut self.material_paint_sampling,
                 icons::text(icons::PIPETTE, 14.0),
             )
-            .on_hover_text(
-                "Eyedropper: sample the material from the next floor, ceiling, or wall you click.",
-            );
+            .on_hover_text("Eyedropper: sample the material from the next BSP face you click.");
         if eyedropper.changed() {
             self.status = if self.material_paint_sampling {
                 "Eyedropper: click a surface to sample its material".to_string()
@@ -1146,79 +1065,6 @@ impl EditorWorkspace {
                 "Eyedropper cancelled".to_string()
             };
             self.mark_shortcut_group_changed(ShortcutGroup::Tool);
-        }
-        if self.project.world_format().is_bsp() {
-            return;
-        }
-        let blend = ui
-            .toggle_value(
-                &mut self.material_paint_blend,
-                icons::label(icons::BLEND, "Blend"),
-            )
-            .on_hover_text(
-                "Blend the painted tile into its surroundings. Connected painted tiles remain continuous.",
-            );
-        if blend.changed() {
-            self.status = if self.material_paint_blend {
-                "Material Paint: Blend".to_string()
-            } else {
-                "Material Paint: Direct".to_string()
-            };
-            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
-        }
-        if self.material_paint_blend {
-            let coverage = self.material_paint_blend_coverage_percent;
-            let detail = self.material_paint_blend_edge_detail;
-            toolbar_option_menu(
-                ui,
-                icons::BLEND,
-                "Details",
-                "Blend details",
-                format!("{coverage}% coverage, {detail} detail"),
-                false,
-                |ui| {
-                    ui.set_min_width(260.0);
-                    ui.label(RichText::new("Blend details").strong());
-                    let coverage_changed = ui
-                        .add(
-                            egui::Slider::new(
-                                &mut self.material_paint_blend_coverage_percent,
-                                5..=95,
-                            )
-                            .text("Coverage")
-                            .suffix("%"),
-                        )
-                        .on_hover_text("How much of each tile is occupied by the painted material.")
-                        .changed();
-                    let detail_changed = ui
-                        .add(
-                            egui::Slider::new(
-                                &mut self.material_paint_blend_edge_detail,
-                                0..=96,
-                            )
-                            .text("Edge detail"),
-                        )
-                        .on_hover_text(
-                            "Adds organic breakup to exposed blend edges while keeping connected edges seamless.",
-                        )
-                        .changed();
-                    ui.horizontal(|ui| {
-                        if ui.button("Reset").clicked() {
-                            self.material_paint_blend_coverage_percent = 50;
-                            self.material_paint_blend_edge_detail = 20;
-                            self.status = "Reset Paint blend details".to_string();
-                        }
-                        ui.weak("Applied on the next stroke");
-                    });
-                    if coverage_changed || detail_changed {
-                        self.status = format!(
-                            "Paint blend: {}% coverage, {} edge detail",
-                            self.material_paint_blend_coverage_percent,
-                            self.material_paint_blend_edge_detail
-                        );
-                    }
-                },
-            );
         }
     }
 
@@ -1371,15 +1217,7 @@ impl EditorWorkspace {
             .num_columns(2)
             .spacing(Vec2::new(14.0, 5.0))
             .show(ui, |ui| {
-                changed |= visibility_menu_row(ui, "portals", "Portals", &mut self.show_portals);
                 changed |= visibility_menu_row(ui, "lights", "Lights", &mut self.show_lights);
-                changed |= visibility_menu_row(ui, "fog", "Fog", &mut self.preview_fog);
-                changed |= visibility_menu_row(
-                    ui,
-                    "backfaces",
-                    "Backfaces",
-                    &mut self.preview_backface_wireframe,
-                );
                 changed |= visibility_menu_row(ui, "bounds", "Bounds", &mut self.preview_bounds);
                 changed |= visibility_menu_row(
                     ui,
@@ -1485,23 +1323,6 @@ impl EditorWorkspace {
         }
     }
 
-    #[allow(dead_code)] // Superseded by the flat BSP mode strip.
-    pub(crate) fn active_tool_group_icon(&self) -> char {
-        match self.active_tool {
-            ViewTool::Place => self.place_kind.icon(),
-            tool => tool.icon(),
-        }
-    }
-
-    #[allow(dead_code)] // Superseded by the flat BSP mode strip.
-    pub(crate) fn active_tool_group_label(&self) -> String {
-        if self.active_tool == ViewTool::Place {
-            self.place_kind.label().to_string()
-        } else {
-            self.active_tool.label().to_string()
-        }
-    }
-
     pub(crate) fn visibility_group_icon(&self) -> char {
         if self.editor_visibility_has_hidden_items() {
             icons::EYE_OFF
@@ -1539,10 +1360,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn editor_visibility_has_hidden_items(&self) -> bool {
-        !self.show_portals
-            || !self.show_lights
-            || !self.preview_fog
-            || !self.preview_backface_wireframe
+        !self.show_lights
             || !self.preview_bounds
             || (!self.last_bsp_leak_path.is_empty() && !self.show_bsp_leak_path)
     }
@@ -1850,7 +1668,7 @@ impl EditorWorkspace {
             if matches!(node.kind, NodeKind::PointLight { .. }) && !self.show_lights {
                 continue;
             }
-            if matches!(node.kind, NodeKind::Portal { .. }) && !self.show_portals {
+            if matches!(node.kind, NodeKind::Portal { .. }) {
                 continue;
             }
             // Find this node's enclosing Room.

@@ -22,6 +22,8 @@ use psx_level::{
 use psx_math::int32::{clamp_i16, mul_q12_i32};
 
 use crate::room_lighting::rgb_tuple;
+#[cfg(feature = "cd-stream-bench")]
+use crate::vram::SkyTextureKind;
 use crate::vram::{
     vram_slot_texture_size_u8, VramSlot, VramSlotClutMode, SKY_PANORAMA_HEIGHT,
     SKY_PANORAMA_PALETTE_BANDS, SKY_PANORAMA_WIDTH,
@@ -124,7 +126,7 @@ impl SkyCyclorama {
         screen_h: i16,
         focal: i32,
         find_sky_panorama_vram_slot: impl Fn(AssetId) -> Option<VramSlot>,
-        ensure_sky_panorama_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
+        mut ensure_sky_panorama_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
         sky_panorama_tpage_word: impl Fn(usize) -> u16,
         sky_panorama_clut_word: impl Fn(usize) -> u16,
         ot: &mut OtFrame<'_, OT_DEPTH>,
@@ -133,22 +135,23 @@ impl SkyCyclorama {
         // use this farthest slot preserve the background contract through the
         // caller's insertion order documented above.
         let sky_ot_slot = psx_engine::DepthSlot::new(OT_DEPTH - 1);
-        if sky.flags & sky_flags::ENABLED == 0 {
+        if sky.flags & sky_flags::ENABLED == 0
+            || (sky.flags & sky_flags::PROJECTION_MASK != 0 && sky.flags & sky_flags::PANORAMA == 0)
+        {
             return;
         }
-        let Some(asset) =
-            find_asset_of_kind(assets, sky.cloud_layer.texture_asset, AssetKind::Texture)
-        else {
+        let Some(asset) = find_asset_of_kind(assets, sky.texture_asset, AssetKind::Texture) else {
             return;
         };
         // Streamed sky assets carry empty baked bytes; they are uploaded on gameplay
         // entry (`load_streamed_sky_from_cd`), so resolve the existing VRAM slot
         // rather than re-parsing empty bytes. Baked builds upload lazily here.
-        if !sky_panorama_resident(
-            asset,
-            find_sky_panorama_vram_slot,
-            ensure_sky_panorama_uploaded,
-        ) {
+        let panorama_ready = if asset.bytes.is_empty() {
+            find_sky_panorama_vram_slot(asset.id).is_some()
+        } else {
+            ensure_sky_panorama_uploaded(asset.id, asset.bytes).is_some()
+        };
+        if !panorama_ready {
             return;
         }
 
@@ -157,7 +160,7 @@ impl SkyCyclorama {
             cos_yaw: camera.cos_yaw.raw(),
             sin_pitch: camera.sin_pitch.raw(),
             cos_pitch: camera.cos_pitch.raw(),
-            texture_asset: sky.cloud_layer.texture_asset.0,
+            texture_asset: sky.texture_asset.0,
             flags: sky.flags as u32,
             columns: sky.skybox_columns,
             rows: sky.skybox_rows,
@@ -510,19 +513,19 @@ fn far_vista_texture_material(
 pub fn room_backdrop_textures_ready(
     record: &psx_level::LevelRoomRecord,
     assets: &'static [LevelAssetRecord],
-    find_sky_panorama_vram_slot: impl Fn(AssetId) -> Option<VramSlot>,
-    ensure_sky_panorama_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
+    find_sky_texture_vram_slot: impl Fn(SkyTextureKind, AssetId) -> Option<VramSlot>,
+    ensure_sky_texture_uploaded: impl FnMut(SkyTextureKind, AssetId, &[u8]) -> Option<VramSlot>,
     ensure_texture_uploaded_with_clut_mode: impl FnMut(
         AssetId,
         &[u8],
         VramSlotClutMode,
     ) -> Option<VramSlot>,
 ) -> bool {
-    sky_panorama_texture_ready(
+    scene_sky_texture_ready(
         record.sky,
         assets,
-        find_sky_panorama_vram_slot,
-        ensure_sky_panorama_uploaded,
+        find_sky_texture_vram_slot,
+        ensure_sky_texture_uploaded,
     ) & far_vista_textures_ready(
         record.far_vista,
         assets,
@@ -531,38 +534,46 @@ pub fn room_backdrop_textures_ready(
 }
 
 #[cfg(feature = "cd-stream-bench")]
-fn sky_panorama_texture_ready(
+fn scene_sky_texture_ready(
     sky: LevelSkyRecord,
     assets: &'static [LevelAssetRecord],
-    find_sky_panorama_vram_slot: impl Fn(AssetId) -> Option<VramSlot>,
-    ensure_sky_panorama_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
+    find_sky_texture_vram_slot: impl Fn(SkyTextureKind, AssetId) -> Option<VramSlot>,
+    ensure_sky_texture_uploaded: impl FnMut(SkyTextureKind, AssetId, &[u8]) -> Option<VramSlot>,
 ) -> bool {
     if sky.flags & sky_flags::ENABLED == 0 {
         return true;
     }
-    let Some(asset) = find_asset_of_kind(assets, sky.cloud_layer.texture_asset, AssetKind::Texture)
-    else {
+    let kind = match sky.flags & sky_flags::PROJECTION_MASK {
+        0 | sky_flags::PANORAMA => SkyTextureKind::Panorama,
+        sky_flags::QUAKE_LAYERED => SkyTextureKind::QuakeLayered,
+        sky_flags::CUBE => SkyTextureKind::Cube,
+        _ => return true,
+    };
+    let Some(asset) = find_asset_of_kind(assets, sky.texture_asset, AssetKind::Texture) else {
         return true;
     };
-    sky_panorama_resident(
+    scene_sky_resident(
+        kind,
         asset,
-        find_sky_panorama_vram_slot,
-        ensure_sky_panorama_uploaded,
+        find_sky_texture_vram_slot,
+        ensure_sky_texture_uploaded,
     )
 }
 
 /// Resolve whether the room sky's panorama is uploaded to VRAM. Streamed sky
 /// assets (empty baked bytes) are uploaded on gameplay entry, so this only
 /// queries the existing slot; baked sky assets upload lazily on first call.
-fn sky_panorama_resident(
+#[cfg(feature = "cd-stream-bench")]
+fn scene_sky_resident(
+    kind: SkyTextureKind,
     asset: &LevelAssetRecord,
-    find_sky_panorama_vram_slot: impl Fn(AssetId) -> Option<VramSlot>,
-    mut ensure_sky_panorama_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
+    find_sky_texture_vram_slot: impl Fn(SkyTextureKind, AssetId) -> Option<VramSlot>,
+    mut ensure_sky_texture_uploaded: impl FnMut(SkyTextureKind, AssetId, &[u8]) -> Option<VramSlot>,
 ) -> bool {
     if asset.bytes.is_empty() {
-        find_sky_panorama_vram_slot(asset.id).is_some()
+        find_sky_texture_vram_slot(kind, asset.id).is_some()
     } else {
-        ensure_sky_panorama_uploaded(asset.id, asset.bytes).is_some()
+        ensure_sky_texture_uploaded(kind, asset.id, asset.bytes).is_some()
     }
 }
 

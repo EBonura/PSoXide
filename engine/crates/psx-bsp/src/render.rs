@@ -33,7 +33,6 @@ use crate::pxbsp::{
 };
 use crate::pxbsp_resident::PxbspResidentMap;
 use crate::resident::ResidentMap;
-use crate::sky::{submit_view_ray_layered_sky, VIEW_RAY_SKY_PACKET_WORDS};
 use crate::{
     CompactPlane, Face, Plane, TextureInfo, Vec3I16, Vec3I32, FACE_BACKSIDE, FACE_BAKED_LIGHT,
     FACE_BAKED_UV, FACE_PAGE_LOCAL_UV, FACE_TWO_SIDED, TEXTURE_INVISIBLE, TEXTURE_LIQUID,
@@ -151,6 +150,8 @@ pub struct PxbspTextureBinding {
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenderStats {
     pub visible_faces: u16,
+    /// Visible brush faces that reveal the caller-owned scene sky.
+    pub visible_sky_apertures: u16,
     pub surface_batches: u16,
     pub visible_entities: u16,
     pub alias_packets: u32,
@@ -1009,7 +1010,6 @@ impl Renderer {
                 materials,
                 material_tick,
                 PxbspFaceSelection::VisibleWorld,
-                Some(view),
                 packet_storage,
             )
         } else {
@@ -1075,7 +1075,6 @@ impl Renderer {
                 first: first_face,
                 end: face_end,
             },
-            None,
             packet_storage,
         );
         self.frame = self.frame.wrapping_add(1);
@@ -1090,7 +1089,6 @@ impl Renderer {
         materials: &[Option<PxbspTextureBinding>],
         material_tick: u32,
         selection: PxbspFaceSelection,
-        sky_view: Option<ViewTransform>,
         packet_storage: &mut [u32],
     ) -> RenderFrame {
         let start = packet_storage.as_mut_ptr();
@@ -1120,7 +1118,6 @@ impl Renderer {
         let mut batch_vertex_count = 0usize;
         let mut batch_surface_count = 0usize;
         let mut batch_worst_words = 0usize;
-        let mut layered_sky_binding = None;
 
         let faces = map.faces();
         let map_materials = map.materials();
@@ -1130,10 +1127,6 @@ impl Renderer {
             let face = unsafe { faces.get_unchecked(face_index) };
             let material_index = face.texture as usize;
             let material = unsafe { map_materials.get_unchecked(material_index) };
-            let Some(binding) = materials.get(material_index).copied().flatten() else {
-                stats.unresolved_material_faces = stats.unresolved_material_faces.saturating_add(1);
-                continue;
-            };
             let authored_front = match selection {
                 PxbspFaceSelection::VisibleWorld => {
                     match packed_face_state(&self.frame_pxbsp_face_state, face_index) {
@@ -1150,6 +1143,21 @@ impl Renderer {
                 continue;
             }
 
+            if material.flags
+                & (crate::pxbsp::material_flags::SKY_APERTURE
+                    | crate::pxbsp::material_flags::DIRECTIONAL_SKY)
+                != 0
+            {
+                stats.visible_faces = stats.visible_faces.saturating_add(1);
+                stats.visible_sky_apertures = stats.visible_sky_apertures.saturating_add(1);
+                continue;
+            }
+
+            let Some(binding) = materials.get(material_index).copied().flatten() else {
+                stats.unresolved_material_faces = stats.unresolved_material_faces.saturating_add(1);
+                continue;
+            };
+
             let source_count = face.vertex_count as usize;
             if source_count > BATCH_MAX_VERTICES {
                 stats.packet_overflow_avoided = true;
@@ -1163,18 +1171,7 @@ impl Renderer {
             let compact_surface = face.flags & FACE_PAGE_LOCAL_UV != 0
                 && material.blend_mode == material_blend::OPAQUE
                 && material.animation_kind == crate::pxbsp::material_animation::STATIC
-                && material.flags & crate::pxbsp::material_flags::LAYERED_SKY == 0;
-            if material.flags & crate::pxbsp::material_flags::LAYERED_SKY != 0 {
-                if sky_view.is_some() {
-                    if let Some(selected) = layered_sky_binding {
-                        debug_assert_eq!(selected, binding);
-                    } else {
-                        layered_sky_binding = Some(binding);
-                    }
-                }
-                stats.visible_faces = stats.visible_faces.saturating_add(1);
-                continue;
-            }
+                && material.flags & crate::pxbsp::material_flags::SKY_APERTURE == 0;
             let uv_offset = if compact_surface {
                 state.page_uv_offset
             } else {
@@ -1281,49 +1278,6 @@ impl Renderer {
         stats.hardware_triangles = stats
             .hardware_triangles
             .wrapping_add(submitted.hardware_triangles);
-
-        // Sky faces are apertures, not textured polygons. Append one bounded
-        // view-ray lattice after the world stream; equal-slot OT prepending
-        // then executes it first, behind every opaque world packet.
-        if let (Some(binding), Some(view)) = (layered_sky_binding, sky_view) {
-            if packet_capacity(next, end, VIEW_RAY_SKY_PACKET_WORDS) {
-                let half_width = self.view_projection.half_width.max(1);
-                let half_height = self.view_projection.half_height.max(1);
-                let screen_size = [
-                    half_width.saturating_mul(2).min(i32::from(i16::MAX)) as i16,
-                    half_height.saturating_mul(2).min(i32::from(i16::MAX)) as i16,
-                ];
-                let screen_center = [
-                    half_width.min(i32::from(i16::MAX)) as i16,
-                    half_height.min(i32::from(i16::MAX)) as i16,
-                ];
-                let projection = self
-                    .view_projection
-                    .focal_length
-                    .clamp(1, i32::from(i16::MAX)) as i16;
-                let submitted = unsafe {
-                    submit_view_ray_layered_sky(
-                        binding.texture_page,
-                        binding.clut,
-                        binding.uv_origin,
-                        binding.texture_size,
-                        view.rotation,
-                        screen_size,
-                        screen_center,
-                        projection,
-                        material_tick,
-                        next,
-                    )
-                };
-                next = submitted.next_packet;
-                stats.packets = stats.packets.wrapping_add(submitted.packets);
-                stats.hardware_triangles = stats
-                    .hardware_triangles
-                    .wrapping_add(submitted.hardware_triangles);
-            } else {
-                stats.packet_overflow_avoided = true;
-            }
-        }
 
         let packet_words = unsafe { next.offset_from(start) as usize };
         RenderFrame {
@@ -2674,7 +2628,7 @@ mod tests {
     }
 
     #[test]
-    fn layered_sky_face_selects_one_constant_cost_view_background() {
+    fn sky_aperture_is_reported_without_a_material_binding() {
         configure_projection();
         let mut lumps = valid_lumps();
         let mut vertices = Vec::new();
@@ -2704,35 +2658,77 @@ mod tests {
             },
             angles: [0; 3],
         };
-        let binding = PxbspTextureBinding {
-            texture_page: 0x0105,
-            clut: 0x1234,
-            texture_window_word: 0xe200_0000,
-            uv_origin: [0; 2],
-            page_uv_origin: [0; 2],
-            // Runtime bindings describe one square half of the 256x128 pair.
-            texture_size: [128; 2],
-        };
-        let mut packets = [0u32; VIEW_RAY_SKY_PACKET_WORDS];
+        let mut packets = [0u32; 16];
         let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
         assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
         let frame = renderer.draw_pxbsp_world(
             &map,
             camera,
             load_pxbsp_view(camera),
-            &[Some(binding)],
+            &[None],
             0,
             &mut packets,
         );
 
         assert_eq!(frame.stats.visible_faces, 1);
+        assert_eq!(frame.stats.visible_sky_apertures, 1);
         assert_eq!(frame.stats.unresolved_material_faces, 0);
         assert!(!frame.stats.packet_overflow_avoided);
-        assert_eq!(frame.stats.packets, 243);
-        assert_eq!(frame.stats.hardware_triangles, 480);
-        assert_eq!(frame.packet_words, VIEW_RAY_SKY_PACKET_WORDS);
-        assert_eq!(packets[0] >> 24, 1, "first packet is the window reset");
-        assert_eq!(packets[2] >> 24, 9, "sky follows with a textured quad");
+        assert_eq!(frame.stats.packets, 0);
+        assert_eq!(frame.stats.hardware_triangles, 0);
+        assert_eq!(frame.packet_words, 0);
+    }
+
+    #[test]
+    fn legacy_directional_sky_bit_migrates_to_the_aperture_contract() {
+        configure_projection();
+        let mut lumps = valid_lumps();
+        let mut vertices = Vec::new();
+        for position in [[64i16, -16, -16], [64, 16, -16], [64, 0, 16]] {
+            for component in position {
+                vertices.extend_from_slice(&component.to_le_bytes());
+            }
+            vertices.extend_from_slice(&[0, 0, 128, 0, 0, 0]);
+        }
+        lumps[PxbspLumpKind::Vertices as usize] = vertices;
+        let mins = [64i16, -16, -16].map(crate::encode_node_bound_min);
+        let maxs = [64i16, 16, 16].map(crate::encode_node_bound_max);
+        lumps[PxbspLumpKind::Nodes as usize][6..9].copy_from_slice(&mins.map(|value| value as u8));
+        lumps[PxbspLumpKind::Nodes as usize][9..12].copy_from_slice(&maxs.map(|value| value as u8));
+        lumps[PxbspLumpKind::Materials as usize][2..4]
+            .copy_from_slice(&material_flags::DIRECTIONAL_SKY.to_le_bytes());
+        let bytes = write_file(&lumps);
+        let mut map = PxbspResidentMap::with_capacity(bytes.len());
+        map.load(10, &mut SliceReader::new(&bytes))
+            .expect("resident map");
+
+        let camera = Camera {
+            origin: Vec3I32 {
+                x: 1 << 12,
+                y: 0,
+                z: 0,
+            },
+            angles: [0; 3],
+        };
+        let mut packets = [0u32; 16];
+        let mut renderer = Renderer::new_pxbsp_with_nodes(map.faces().len(), map.nodes().len());
+        assert!(renderer.mark_visible_pxbsp_faces(&map, camera.origin));
+        let frame = renderer.draw_pxbsp_world(
+            &map,
+            camera,
+            load_pxbsp_view(camera),
+            &[None],
+            0,
+            &mut packets,
+        );
+
+        assert_eq!(frame.stats.visible_faces, 1);
+        assert_eq!(frame.stats.visible_sky_apertures, 1);
+        assert_eq!(frame.stats.unresolved_material_faces, 0);
+        assert!(!frame.stats.packet_overflow_avoided);
+        assert_eq!(frame.stats.packets, 0);
+        assert_eq!(frame.stats.hardware_triangles, 0);
+        assert_eq!(frame.packet_words, 0);
     }
 
     #[test]

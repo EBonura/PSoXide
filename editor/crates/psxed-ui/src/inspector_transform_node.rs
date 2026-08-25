@@ -6,37 +6,30 @@ pub(crate) fn draw_transform_policy_editor(
     inherited_sector_size: i32,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
-    world_sector_size_change: &mut Option<i32>,
 ) -> bool {
     match &mut node.kind {
         NodeKind::World {
-            sector_size,
+            sector_size: _,
             sky,
             far_vista,
             camera: _,
             culling,
-            streaming,
+            streaming: _,
             physics,
-        } => draw_world_grid_settings(
+        } => draw_world_settings(
             ui,
-            *sector_size,
             sky,
             far_vista,
             culling,
-            streaming,
             physics,
             texture_options,
             nav_target,
-            world_sector_size_change,
         ),
         NodeKind::ArchProp { geometry, .. } => {
             arch_prop_transform_editor(ui, &mut node.transform, inherited_sector_size, *geometry)
         }
         _ => match node_transform_inspector(&node.kind) {
             NodeTransformInspector::Hidden => false,
-            NodeTransformInspector::RoomGrid => {
-                room_grid_transform_editor(ui, &mut node.transform, inherited_sector_size)
-            }
             NodeTransformInspector::PositionOnly => {
                 light_transform_editor(ui, &mut node.transform, inherited_sector_size)
             }
@@ -61,7 +54,6 @@ pub(crate) fn draw_transform_policy_editor(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NodeTransformInspector {
     Hidden,
-    RoomGrid,
     PositionOnly,
     PositionYaw,
     PositionFullRotation,
@@ -73,8 +65,9 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         NodeKind::World { .. }
         | NodeKind::Node
         | NodeKind::Group
-        | NodeKind::WaterVolume { .. } => NodeTransformInspector::Hidden,
-        NodeKind::Section { .. } => NodeTransformInspector::RoomGrid,
+        | NodeKind::Section { .. }
+        | NodeKind::WaterVolume { .. }
+        | NodeKind::Portal { .. } => NodeTransformInspector::Hidden,
         NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } | NodeKind::Logic { .. } => {
             NodeTransformInspector::PositionOnly
         }
@@ -86,7 +79,7 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. } => NodeTransformInspector::Hidden,
-        NodeKind::MeshInstance { .. } | NodeKind::SpawnPoint { .. } | NodeKind::Portal { .. } => {
+        NodeKind::MeshInstance { .. } | NodeKind::SpawnPoint { .. } => {
             NodeTransformInspector::PositionYaw
         }
         // Entities allow pitch/roll so placed model props can face any
@@ -101,121 +94,16 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
     }
 }
 
-pub(crate) fn draw_playtest_render_settings(
+pub(crate) fn draw_world_settings(
     ui: &mut egui::Ui,
-    mode: &mut RuntimeDepthSortMode,
-    split_mode: &mut RuntimeTextureSplitMode,
-    room_order_mode: &mut RuntimeRoomDrawOrderMode,
-    texture_split_max_edge: &mut u16,
-) -> bool {
-    let mut changed = false;
-    egui::CollapsingHeader::new(icons::label(icons::BOX, "Playtest Render"))
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Depth Sorting").color(STUDIO_TEXT_WEAK));
-                egui::ComboBox::from_id_salt("playtest-runtime-depth-sort-mode")
-                    .selected_text(mode.label())
-                    .show_ui(ui, |ui| {
-                        for candidate in RuntimeDepthSortMode::ALL {
-                            changed |= ui
-                                .selectable_value(mode, candidate, candidate.label())
-                                .on_hover_text(candidate.description())
-                                .changed();
-                        }
-                    });
-            });
-            ui.weak(mode.description());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Subdivision Scope").color(STUDIO_TEXT_WEAK));
-                egui::ComboBox::from_id_salt("playtest-runtime-texture-split-mode")
-                    .selected_text(split_mode.label())
-                    .show_ui(ui, |ui| {
-                        for candidate in RuntimeTextureSplitMode::ALL {
-                            changed |= ui
-                                .selectable_value(split_mode, candidate, candidate.label())
-                                .on_hover_text(candidate.description())
-                                .changed();
-                        }
-                    });
-            });
-            ui.weak(split_mode.description());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Room Order").color(STUDIO_TEXT_WEAK));
-                egui::ComboBox::from_id_salt("playtest-runtime-room-draw-order-mode")
-                    .selected_text(room_order_mode.label())
-                    .show_ui(ui, |ui| {
-                        for candidate in RuntimeRoomDrawOrderMode::ALL {
-                            changed |= ui
-                                .selectable_value(room_order_mode, candidate, candidate.label())
-                                .on_hover_text(candidate.description())
-                                .changed();
-                        }
-                    });
-            });
-            ui.weak(room_order_mode.description());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Subdivision Edge").color(STUDIO_TEXT_WEAK));
-                let mut next = i32::from(*texture_split_max_edge);
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut next)
-                            .speed(8.0)
-                            .range(0..=512)
-                            .update_while_editing(false),
-                    )
-                    .on_hover_text(
-                        "Optional maximum projected edge length before cached room triangles are split \
-                         beyond the fixed adaptive depth bands. Lower values reduce PS1 ordering \
-                         artifacts at higher CPU cost; 0 keeps only the depth-band schedule.",
-                    )
-                    .changed()
-                {
-                    *texture_split_max_edge = next.clamp(0, 512) as u16;
-                    changed = true;
-                }
-            });
-            ui.weak(
-                "0 uses only adaptive depth bands. Lower values add progressively finer edge-based splitting.",
-            );
-        });
-    changed
-}
-
-pub(crate) fn draw_world_grid_settings(
-    ui: &mut egui::Ui,
-    sector_size: i32,
     sky: &mut SkySettings,
     far_vista: &mut FarVistaSettings,
     culling: &mut WorldCullingSettings,
-    streaming: &mut WorldStreamingSettings,
     physics: &mut WorldPhysicsSettings,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
-    world_sector_size_change: &mut Option<i32>,
 ) -> bool {
     let mut changed = false;
-    egui::CollapsingHeader::new(icons::label(icons::GRID, "World Grid"))
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Sector Size").color(STUDIO_TEXT_WEAK));
-                let mut next = sector_size;
-                let response = ui.add(
-                    egui::DragValue::new(&mut next)
-                        .speed(WORLD_SECTOR_SIZE_QUANTUM as f64)
-                        .range(MIN_WORLD_SECTOR_SIZE..=MAX_WORLD_SECTOR_SIZE)
-                        .update_while_editing(false),
-                );
-                if next != sector_size {
-                    *world_sector_size_change = Some(psxed_project::snap_world_sector_size(next));
-                    changed = true;
-                }
-                response
-                    .on_hover_text(format!("Snaps to {}-unit steps", WORLD_SECTOR_SIZE_QUANTUM));
-                ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
-            });
-        });
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Physics"))
         .default_open(true)
         .show(ui, |ui| {
@@ -236,60 +124,65 @@ pub(crate) fn draw_world_grid_settings(
                 ui.label(RichText::new("units/tick^2").color(STUDIO_TEXT_WEAK));
             });
         });
-    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Streaming"))
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Resident Rooms").color(STUDIO_TEXT_WEAK));
-                let mut limit = streaming.resident_chunk_limit as i32;
-                if ui
-                    .add(egui::DragValue::new(&mut limit).speed(1.0).range(
-                        MIN_WORLD_STREAMING_RESIDENT_CHUNKS as i32
-                            ..=MAX_WORLD_STREAMING_RESIDENT_CHUNKS as i32,
-                    ))
-                    .changed()
-                {
-                    streaming.resident_chunk_limit = limit as u8;
-                    *streaming = streaming.normalized();
-                    changed = true;
-                }
-                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Visible Rooms").color(STUDIO_TEXT_WEAK));
-                let mut limit = streaming.visible_chunk_limit as i32;
-                let max_visible = streaming.resident_chunk_limit.clamp(
-                    MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
-                    MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
-                );
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut limit)
-                            .speed(1.0)
-                            .range(MIN_WORLD_STREAMING_VISIBLE_CHUNKS as i32..=max_visible as i32),
-                    )
-                    .changed()
-                {
-                    streaming.visible_chunk_limit = limit as u8;
-                    *streaming = streaming.normalized();
-                    changed = true;
-                }
-                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
-            });
-        });
     egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
         .default_open(true)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Mode").color(STUDIO_TEXT_WEAK));
-                changed |= ui
-                    .selectable_value(&mut sky.mode, SkyMode::Gradient, "Gradient")
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut sky.mode, SkyMode::Off, "Off")
-                    .changed();
+                egui::ComboBox::from_id_salt("world-sky-mode")
+                    .selected_text(sky.mode.label())
+                    .show_ui(ui, |ui| {
+                        for mode in SkyMode::ALL {
+                            changed |= ui
+                                .selectable_value(&mut sky.mode, mode, mode.label())
+                                .changed();
+                        }
+                    });
             });
-            if sky.mode == SkyMode::Gradient {
+            if sky.mode != SkyMode::Off {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Visible").color(STUDIO_TEXT_WEAK));
+                    egui::ComboBox::from_id_salt("world-sky-visibility")
+                        .selected_text(sky.visibility.label())
+                        .show_ui(ui, |ui| {
+                            for visibility in SkyVisibility::ALL {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut sky.visibility,
+                                        visibility,
+                                        visibility.label(),
+                                    )
+                                    .changed();
+                            }
+                        });
+                });
+            }
+            if sky.mode.uses_authored_texture() {
+                changed |= texture_resource_picker(
+                    ui,
+                    "Sky Texture",
+                    &mut sky.texture,
+                    texture_options,
+                    nav_target,
+                );
+                let help = match sky.mode {
+                    SkyMode::QuakeLayered => {
+                        "4bpp atlas with two equal square layers side by side, for example 256×128. Palette index 0 masks the foreground."
+                    }
+                    SkyMode::Cube => {
+                        "1536×256 4bpp atlas containing six adjacent 256×256 faces and six 16-colour palettes."
+                    }
+                    _ => "",
+                };
+                ui.label(RichText::new(help).small().color(STUDIO_TEXT_WEAK));
+                if sky.texture.is_none() {
+                    ui.colored_label(
+                        STUDIO_WARNING,
+                        "Choose a textured Material before building this sky.",
+                    );
+                }
+            }
+            if sky.mode == SkyMode::Panorama {
                 changed |= color_editor(ui, "Top", &mut sky.top_color);
                 changed |= color_editor(ui, "Horizon", &mut sky.horizon_color);
                 changed |= color_editor(ui, "Lower", &mut sky.lower_color);
@@ -478,7 +371,7 @@ pub(crate) fn draw_world_grid_settings(
                     }
                 });
                 changed |= ui
-                    .checkbox(&mut sky.match_room_fog, "Match room fog")
+                    .checkbox(&mut sky.match_room_fog, "Match world fog")
                     .changed();
                 ui.separator();
                 let cloud = &mut sky.cloud_layer;
@@ -574,34 +467,6 @@ pub(crate) fn draw_world_grid_settings(
                     .changed();
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Chunk Radius").color(STUDIO_TEXT_WEAK));
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut culling.chunk_activation_radius_sectors)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS
-                                    ..=MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
-                            ),
-                    )
-                    .changed();
-                ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Visibility Radius").color(STUDIO_TEXT_WEAK));
-                let mut radius = culling.visibility_radius as i32;
-                if ui
-                    .add(egui::DragValue::new(&mut radius).speed(1.0).range(
-                        MIN_WORLD_VISIBILITY_RADIUS as i32..=MAX_WORLD_VISIBILITY_RADIUS as i32,
-                    ))
-                    .changed()
-                {
-                    culling.visibility_radius = radius as u16;
-                    changed = true;
-                }
-                ui.label(RichText::new("cells").color(STUDIO_TEXT_WEAK));
-            });
         });
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Far Vista"))
         .default_open(true)
@@ -682,7 +547,7 @@ pub(crate) fn draw_world_grid_settings(
             });
             changed |= color_editor(ui, "Tint", &mut far_vista.tint);
             changed |= ui
-                .checkbox(&mut far_vista.match_room_fog, "Match room fog")
+                .checkbox(&mut far_vista.match_room_fog, "Match world fog")
                 .changed();
         });
     changed
@@ -1030,66 +895,6 @@ pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: Worl
         egui::TextStyle::Small.resolve(ui.style()),
         STUDIO_TEXT_WEAK,
     );
-}
-
-pub(crate) fn room_grid_transform_editor(
-    ui: &mut egui::Ui,
-    transform: &mut psxed_project::Transform3,
-    sector_size: i32,
-) -> bool {
-    let mut changed = false;
-    inspector_property_row(ui, icons::label(icons::MOVE, "Grid Position"), |ui| {
-        ui.horizontal_wrapped(|ui| {
-            let mut x = transform.translation[0].round() as i32;
-            let mut z = transform.translation[2].round() as i32;
-            let mut moved = false;
-            moved |= ui
-                .add(egui::DragValue::new(&mut x).prefix("X ").speed(1.0))
-                .changed();
-            moved |= ui
-                .add(egui::DragValue::new(&mut z).prefix("Z ").speed(1.0))
-                .changed();
-            if moved {
-                // Edit X/Z only; preserve the room's elevation (Y), which is the
-                // vertical stacking axis edited on the Elevation row below.
-                transform.translation[0] = x as f32;
-                transform.translation[2] = z as f32;
-                changed = true;
-            }
-            ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
-        });
-    });
-
-    inspector_property_row(ui, icons::label(icons::MOVE, "Elevation"), |ui| {
-        ui.horizontal_wrapped(|ui| {
-        let mut y = transform.translation[1].round() as i32;
-        let response = ui.add(egui::DragValue::new(&mut y).speed(1.0)).on_hover_text(
-            "Vertical level of this room, in sectors. Stack rooms by giving them different elevations; cooked to the room's origin_y.",
-        );
-        if response.changed() {
-            transform.translation[1] = y as f32;
-            changed = true;
-        }
-        ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
-        });
-    });
-
-    inspector_property_row(ui, icons::label(icons::ROTATE_3D, "Rotation"), |ui| {
-        ui.horizontal_wrapped(|ui| {
-            let mut yaw = cardinal_yaw(transform.rotation_degrees[1]);
-            for candidate in [0, 90, 180, 270] {
-                if ui
-                    .selectable_value(&mut yaw, candidate, format!("{candidate}°"))
-                    .changed()
-                {
-                    transform.rotation_degrees = [0.0, yaw as f32, 0.0];
-                    transform.scale = [1.0, 1.0, 1.0];
-                    changed = true;
-                }
-            }
-        });
-    });
-    changed
 }
 
 pub(crate) fn entity_transform_editor(
@@ -2131,6 +1936,16 @@ pub(crate) fn draw_node_kind_editor(
     kind: &mut NodeKind,
     ctx: NodeKindEditorContext<'_>,
 ) -> bool {
+    if matches!(
+        kind,
+        NodeKind::Section { .. } | NodeKind::WaterVolume { .. } | NodeKind::Portal { .. }
+    ) {
+        ui.colored_label(
+            Color32::from_rgb(220, 160, 80),
+            "This retired grid-world node is read-only. BSP brushes and ordinary entities are the supported authoring path.",
+        );
+        return false;
+    }
     let NodeKindEditorContext {
         material_options,
         material_texture_dimensions,
@@ -2159,9 +1974,7 @@ pub(crate) fn draw_node_kind_editor(
             ui.weak("Entity host. Add component children for rendering, collision, interaction, lighting, or logic.");
         }
         NodeKind::World { .. } => {
-            ui.weak(
-                "Streamed-region group; holds Section children, camera, sky, and far vista settings.",
-            );
+            ui.weak("BSP world root; holds global physics, camera, sky, and far vista settings.");
         }
         NodeKind::Section { grid } => {
             ui.horizontal(|ui| {
@@ -2601,7 +2414,7 @@ pub(crate) fn draw_node_kind_editor(
                 }
             });
             ui.weak(
-                "Each face has independent offset, span, rotation, and mirroring. 1:1 keeps the same native texel density as room surfaces instead of stretching one tile across the face.",
+                "Each face has independent offset, span, rotation, and mirroring. 1:1 keeps the project's native world-space texel density instead of stretching one tile across the face.",
             );
             for (face, name) in psxed_project::BOX_PROP_FACE_NAMES.iter().enumerate() {
                 egui::CollapsingHeader::new(*name)
@@ -2624,7 +2437,9 @@ pub(crate) fn draw_node_kind_editor(
                             let one_to_one = ui
                                 .add_enabled(texture_size.is_some(), egui::Button::new("1:1 Texels"))
                                 .on_hover_text(
-                                    "Use the material's native texel density: one texture tile per room sector, repeated across larger faces.",
+                                    format!(
+                                        "Use the material's native texel density: one texture tile per {inherited_sector_size} world units, repeated across larger faces."
+                                    ),
                                 );
                             if one_to_one.clicked() {
                                 uvs[face].span = box_prop_face_native_texel_span(
@@ -3112,7 +2927,7 @@ pub(crate) fn draw_node_kind_editor(
             collision_enabled,
         } => {
             ui.weak(
-                "Tile-native extruded arch. The footprint snaps to room grid lines; vertical controls use the same 64-unit quantum as room geometry.",
+                "Procedural extruded arch. Its footprint uses the project level scale; vertical controls use a 64-unit quantum.",
             );
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Portion").color(STUDIO_TEXT_WEAK));
@@ -3135,7 +2950,7 @@ pub(crate) fn draw_node_kind_editor(
                                 psxed_project::ARCH_PROP_MIN_TILES
                                     ..=psxed_project::ARCH_PROP_MAX_TILES,
                             )
-                            .suffix(" tiles"),
+                            .suffix(" steps"),
                     )
                     .changed();
                 ui.label("Depth");
@@ -3146,7 +2961,7 @@ pub(crate) fn draw_node_kind_editor(
                                 psxed_project::ARCH_PROP_MIN_TILES
                                     ..=psxed_project::ARCH_PROP_MAX_TILES,
                             )
-                            .suffix(" tiles"),
+                            .suffix(" steps"),
                     )
                     .changed();
             });
@@ -3210,7 +3025,7 @@ pub(crate) fn draw_node_kind_editor(
                 );
             }
             ui.weak(format!(
-                "{}×{} sectors · {} units total height",
+                "{}×{} level steps · {} units total height",
                 geometry.span_tiles,
                 geometry.depth_tiles,
                 u32::from(
@@ -3221,7 +3036,7 @@ pub(crate) fn draw_node_kind_editor(
             ));
             ui.colored_label(
                 Color32::from_rgb(180, 150, 90),
-                "Arch props do not carve room walls; place them in an authored open span.",
+                "Arch props do not carve BSP; place them in an authored open span.",
             );
 
             ui.separator();
@@ -3431,7 +3246,7 @@ pub(crate) fn draw_node_kind_editor(
                 changed = true;
             }
             autoplay_response.on_hover_text(
-                "Advance the editor preview clip in the room viewport. Off freezes the model on the Pose Frame below.",
+                "Advance the editor preview clip in the 3D viewport. Off freezes the model on the Pose Frame below.",
             );
             if !*autoplay {
                 ui.horizontal(|ui| {
@@ -3813,20 +3628,12 @@ pub(crate) fn draw_node_kind_editor(
                     });
                 }
                 psxed_project::LogicNodeKind::Door {
-                    box_prop,
+                    box_prop: _,
                     start_open,
                     open_offset,
                     travel_ticks,
                 } => {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Grid Box Prop").color(STUDIO_TEXT_WEAK));
-                        changed |= ui.text_edit_singleline(box_prop).changed();
-                    });
-                    if box_prop.trim().is_empty() {
-                        ui.weak(
-                            "Optional for brush-bound doors; required by the frozen grid cook.",
-                        );
-                    }
+                    ui.weak("Bind this door from the BSP brush inspector.");
                     changed |= ui.checkbox(start_open, "Start open").changed();
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Open offset").color(STUDIO_TEXT_WEAK));
@@ -3916,12 +3723,21 @@ pub(crate) fn draw_node_kind_editor(
                         .text(icons::label(icons::SUN, "Intensity (× 1.0)")),
                 )
                 .changed();
-            changed |= ui
+            let radius_scale = inherited_sector_size.max(1) as f32;
+            let mut radius_units = *radius * radius_scale;
+            if ui
                 .add(
-                    egui::Slider::new(radius, 0.0..=8.0)
-                        .text(icons::label(icons::WAYPOINT, "Radius (sectors)")),
+                    egui::DragValue::new(&mut radius_units)
+                        .speed(64.0)
+                        .range(0.0..=u16::MAX as f32)
+                        .prefix("Radius ")
+                        .suffix(" units"),
                 )
-                .changed();
+                .changed()
+            {
+                *radius = radius_units / radius_scale;
+                changed = true;
+            }
             // Validation warnings -- match what the playtest cooker
             // refuses, so authors see the issue before they cook.
             if *radius <= 0.0 {
@@ -4592,5 +4408,86 @@ pub(crate) fn viewport_camera_mode_label(mode: ViewportCameraMode) -> &'static s
     match mode {
         ViewportCameraMode::Orbit => "Orbit",
         ViewportCameraMode::Free => "Free",
+    }
+}
+
+#[cfg(test)]
+mod sky_ux_tests {
+    use super::*;
+
+    fn collect_text(shape: &egui::epaint::Shape, out: &mut String) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                out.push_str(&text.galley.job.text);
+                out.push(' ');
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn world_sky_editor_exposes_one_projection_source_and_visibility_policy() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .expect("default proportional font family");
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("lucide".into()), proportional);
+        ctx.set_fonts(fonts);
+        let mut sky = SkySettings {
+            mode: SkyMode::Cube,
+            visibility: SkyVisibility::ThroughSkySurfaces,
+            texture: None,
+            ..SkySettings::default()
+        };
+        let mut far_vista = FarVistaSettings::default();
+        let mut culling = WorldCullingSettings::default();
+        let mut physics = WorldPhysicsSettings::default();
+        let mut nav_target = None;
+        let mut project = ProjectDocument::new("sky ux");
+        let atlas = project.add_resource(
+            "Sunset Atlas",
+            ResourceData::Material(MaterialResource::opaque(Some("sky.psxt".to_string()))),
+        );
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(520.0, 2200.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_world_settings(
+                        ui,
+                        &mut sky,
+                        &mut far_vista,
+                        &mut culling,
+                        &mut physics,
+                        &[(atlas, "Sunset Atlas".to_string())],
+                        &mut nav_target,
+                    );
+                });
+            },
+        );
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            collect_text(&clipped.shape, &mut text);
+        }
+        assert!(text.contains("Directional cube"), "{text}");
+        assert!(text.contains("Through sky surfaces"), "{text}");
+        assert!(text.contains("Sky Texture"), "{text}");
+        assert!(text.contains("1536×256"), "{text}");
+        assert!(
+            text.contains("Choose a textured Material before building this sky"),
+            "{text}"
+        );
     }
 }

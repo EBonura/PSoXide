@@ -1,8 +1,8 @@
 # `.psxw` Format Roadmap
 
-> HISTORICAL for new projects (2026-08-11): `.psxw` is the legacy grid world
-> format. New projects are BSP-first (PXBSP); grid remains compatibility-only
-> per `docs/legacy-grid-boundary.md`.
+> RETIRED (2026-08-25): `.psxw` was the deleted grid-world format. Editor
+> projects and playtest cooking are BSP-only (PXBSP). This roadmap remains
+> historical format documentation, not an active product plan.
 
 The active world wire format is **VERSION = 5** (`psxed_format::world::VERSION`).
 It's the shape `psxed-project` cooks and the main shape

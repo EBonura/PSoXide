@@ -2,8 +2,6 @@ use super::*;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SurfaceRole {
-    Floor,
-    Wall,
     Object,
 }
 
@@ -14,8 +12,6 @@ pub(crate) fn material_color(
 ) -> Color32 {
     let Some(id) = material else {
         return match role {
-            SurfaceRole::Floor => STUDIO_ROOM_FLOOR,
-            SurfaceRole::Wall => STUDIO_ROOM_WALL,
             SurfaceRole::Object => Color32::from_rgb(125, 155, 190),
         };
     };
@@ -32,8 +28,6 @@ pub(crate) fn material_color(
         Color32::from_rgba_unmultiplied(122, 176, 198, 118)
     } else {
         match role {
-            SurfaceRole::Floor => STUDIO_ROOM_FLOOR,
-            SurfaceRole::Wall => STUDIO_ROOM_WALL,
             SurfaceRole::Object => Color32::from_rgb(125, 155, 190),
         }
     };
@@ -585,21 +579,6 @@ pub(crate) fn distance_to_segment_2d(point: Pos2, a: Pos2, b: Pos2) -> f32 {
     (point - closest).length()
 }
 
-pub(crate) fn point_segment_dist2_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
-    let ab = [b[0] - a[0], b[1] - a[1]];
-    let ap = [point[0] - a[0], point[1] - a[1]];
-    let len_sq = ab[0] * ab[0] + ab[1] * ab[1];
-    let t = if len_sq > f32::EPSILON {
-        ((ap[0] * ab[0] + ap[1] * ab[1]) / len_sq).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let closest = [a[0] + ab[0] * t, a[1] + ab[1] * t];
-    let dx = point[0] - closest[0];
-    let dz = point[1] - closest[1];
-    dx * dx + dz * dz
-}
-
 pub(crate) fn polygon_area_2d(points: &[Pos2]) -> f32 {
     if points.len() < 3 {
         return 0.0;
@@ -699,25 +678,6 @@ pub(crate) fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// Lowercase + non-alphanumeric → `_`, matching the cooker's clip
-/// naming convention so room files line up with the asset cooker.
-pub(crate) fn sanitise_room_filename(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('_') {
-            out.push('_');
-        }
-    }
-    let trimmed = out.trim_matches('_').to_string();
-    if trimmed.is_empty() {
-        "room".to_string()
-    } else {
-        trimmed
-    }
-}
-
 /// Walk the active scene and collect every Room node as an
 /// `(id, display name)` pair, used by Portal pickers.
 /// Walk parent links until a `NodeKind::Section` is found.
@@ -743,28 +703,10 @@ pub(crate) fn enclosing_room_id(scene: &psxed_project::Scene, node_id: NodeId) -
 /// translation must resolve units through here, or BSP entities drift at
 /// 1/1024 speed again.
 pub(crate) fn node_translation_sector_size(
-    project: &psxed_project::ProjectDocument,
-    node_id: NodeId,
+    _project: &psxed_project::ProjectDocument,
+    _node_id: NodeId,
 ) -> i32 {
-    let scene = project.active_scene();
-    // A node under a Section room always authors in that grid's sectors,
-    // regardless of project format.
-    if let Some(sector_size) = enclosing_room_id(scene, node_id)
-        .and_then(|room_id| scene.node(room_id))
-        .and_then(|room| match &room.kind {
-            NodeKind::Section { grid } => Some(grid.sector_size.max(1)),
-            _ => None,
-        })
-    {
-        return sector_size;
-    }
-    // Roomless nodes: raw world units in BSP scenes, World-default sectors
-    // in grid scenes.
-    if project.world_format().is_bsp() {
-        1
-    } else {
-        project.world_sector_size_for_node(node_id)
-    }
+    1
 }
 
 pub(crate) fn portal_seam_bounds_3d(

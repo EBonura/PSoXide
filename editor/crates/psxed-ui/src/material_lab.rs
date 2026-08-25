@@ -477,7 +477,7 @@ pub(crate) fn draw_material_settings(
         ui.separator();
         ui.heading("Surface");
         draw_material_sidedness(ui, material);
-        draw_layered_sky_mode(ui, material);
+        draw_sky_mode(ui, material);
     });
     *material != original
 }
@@ -497,9 +497,7 @@ fn draw_primary_layer_settings_inner(
         MaterialTextureMode::Transition => {
             draw_transition_settings(ui, &mut material.transition, material_options, owner)
         }
-        MaterialTextureMode::ReflectiveProbe => {
-            draw_reflection_settings(ui, &mut material.reflection)
-        }
+        MaterialTextureMode::ReflectiveProbe => draw_retired_reflection_notice(ui),
     }
     ui.add_space(6.0);
     section_frame().show(ui, |ui| {
@@ -534,11 +532,6 @@ fn draw_material_source_presets(ui: &mut egui::Ui, selected_mode: &mut MaterialT
                 MaterialTextureMode::SimpleImage,
                 icons::PALETTE,
                 "Imported PSXT or model atlas",
-            ),
-            (
-                MaterialTextureMode::ReflectiveProbe,
-                icons::EYE,
-                "Baked room environment",
             ),
             (
                 MaterialTextureMode::Generated,
@@ -878,21 +871,15 @@ fn draw_q8_scale(ui: &mut egui::Ui, value: &mut u16) {
     }
 }
 
-fn draw_reflection_settings(ui: &mut egui::Ui, reflection: &mut ReflectionProbeMaterial) {
+fn draw_retired_reflection_notice(ui: &mut egui::Ui) {
     section_frame().show(ui, |ui| {
-        ui.heading("Room reflection probe");
-        ui.label(
-            RichText::new("Mirror-like environment mapping from the active room's baked 4bpp probe.")
-                .color(STUDIO_TEXT_WEAK),
+        ui.colored_label(
+            STUDIO_WARNING,
+            "Reflective Probe belonged to the retired room-grid renderer.",
         );
-        ui.add(egui::Slider::new(&mut reflection.strength, 0..=255).text("Strength"));
-        ui.add(egui::Slider::new(&mut reflection.roughness, 0..=255).text("Roughness"));
-        ui.add_space(6.0);
         ui.label(
-            RichText::new(
-                "The active room is baked automatically to a 64x64 4bpp probe. Runtime reflections switch probes as the actor crosses rooms.",
-            )
-            .color(STUDIO_TEXT_WEAK),
+            RichText::new("Choose Image, Generated, or Transition above before building.")
+                .color(STUDIO_TEXT_WEAK),
         );
     });
 }
@@ -938,7 +925,7 @@ fn draw_secondary_layer_settings_inner(
         MaterialTextureMode::Transition => {
             draw_transition_settings(ui, &mut layer.transition, material_options, owner)
         }
-        MaterialTextureMode::ReflectiveProbe => draw_reflection_settings(ui, &mut layer.reflection),
+        MaterialTextureMode::ReflectiveProbe => draw_retired_reflection_notice(ui),
     }
     ui.add_space(6.0);
     section_frame().show(ui, |ui| {
@@ -1032,39 +1019,18 @@ fn draw_material_sidedness(ui: &mut egui::Ui, material: &mut MaterialResource) {
     material.sync_legacy_sidedness();
 }
 
-fn draw_layered_sky_mode(ui: &mut egui::Ui, material: &mut MaterialResource) {
+fn draw_sky_mode(ui: &mut egui::Ui, material: &mut MaterialResource) {
     ui.add_space(6.0);
-    let has_image_source =
-        material.texture_mode == MaterialTextureMode::SimpleImage && material.psxt_path.is_some();
-    let response = ui.add_enabled(
-        has_image_source || material.layered_sky,
-        egui::Checkbox::new(&mut material.layered_sky, "Layered sky aperture"),
-    );
-    if !has_image_source && !material.layered_sky {
-        response.on_disabled_hover_text(
-            "Choose a Simple Image source before enabling the layered sky.",
+    ui.checkbox(&mut material.sky_aperture, "Sky aperture")
+        .on_hover_text(
+            "Faces using this material reveal the World node's sky. The World chooses the sky projection and texture.",
         );
-    } else {
-        response.on_hover_text(
-            "Brush faces keep their collision but reveal a camera-relative Quake-style sky.",
-        );
-    }
-
-    if material.layered_sky {
+    if material.sky_aperture {
         ui.label(
-            RichText::new(
-                "Requires a 4bpp atlas containing two equal square layers side by side (for example 256×128). Palette index 0 masks the foreground layer.",
-            )
-            .small()
-            .color(STUDIO_TEXT_WEAK),
+            RichText::new("Configure the sky once on the World node.")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
         );
-        if !has_image_source {
-            ui.label(
-                RichText::new("Select a Simple Image atlas before building this material.")
-                    .small()
-                    .color(STUDIO_TEXT_WEAK),
-            );
-        }
     }
 }
 
@@ -1086,33 +1052,6 @@ fn draw_material_lab_preview(
     );
     ui.add_space(8.0);
 
-    let mut probe_signature = String::new();
-    let needs_probe = material.texture_mode == MaterialTextureMode::ReflectiveProbe
-        || material
-            .enabled_secondary_layer()
-            .is_some_and(|layer| layer.texture_mode == MaterialTextureMode::ReflectiveProbe);
-    let probe_image = if needs_probe {
-        let project_root = workspace.project_root().to_path_buf();
-        workspace.active_room_id().and_then(|room| {
-            let node = workspace.project.active_scene().node(room)?;
-            let NodeKind::Section { grid } = &node.kind else {
-                return None;
-            };
-            let bytes = psxed_project::generate_room_reflection_probe_psxt(
-                &workspace.project,
-                grid,
-                &project_root,
-            )
-            .ok()?;
-            let checksum = bytes
-                .iter()
-                .fold(0u32, |hash, byte| hash.rotate_left(5) ^ u32::from(*byte));
-            probe_signature = format!("room={}:probe={checksum:08x}", room.raw());
-            decode_psxt_thumbnail(&bytes).map(|(image, _)| image)
-        })
-    } else {
-        None
-    };
     let mut preview_error = None;
     let image = match material.texture_mode {
         MaterialTextureMode::Generated => {
@@ -1138,7 +1077,7 @@ fn draw_material_lab_preview(
             .resource(material_id)
             .and_then(|resource| workspace.texture_thumb_entry(resource))
             .map(|entry| entry.image.clone()),
-        MaterialTextureMode::ReflectiveProbe => probe_image.clone(),
+        MaterialTextureMode::ReflectiveProbe => None,
     };
     let overlay_image =
         material
@@ -1170,10 +1109,10 @@ fn draw_material_lab_preview(
                         .ok()
                         .and_then(|bytes| decode_psxt_thumbnail(&bytes).map(|(image, _)| image))
                 }),
-                MaterialTextureMode::ReflectiveProbe => probe_image.clone(),
+                MaterialTextureMode::ReflectiveProbe => None,
             });
 
-    let signature = format!("{material:?}:{probe_signature}");
+    let signature = format!("{material:?}");
     if workspace.material_lab.preview_signature != signature {
         workspace.material_lab.preview_signature = signature;
         workspace.material_lab.base_preview_image = image;
@@ -1502,7 +1441,7 @@ mod tests {
         material.texture_mode = MaterialTextureMode::Generated;
         material.generated.noise_enabled = true;
         material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
-        material.layered_sky = true;
+        material.sky_aperture = true;
         material
             .secondary_layer
             .as_mut()
@@ -1569,12 +1508,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            rendered_text.contains("Layered sky aperture"),
-            "shared material editors must expose the Quake sky material flag"
+            rendered_text.contains("Sky aperture"),
+            "shared material editors must expose the aperture toggle"
         );
         assert!(
-            rendered_text.contains("two equal square layers side by side"),
-            "the authoring control must state the required PS1 atlas layout"
+            rendered_text.contains("Configure the sky once on the World node"),
+            "the authoring control must point to the single World sky owner"
         );
         assert_eq!(
             compact_grid_labels.len(),

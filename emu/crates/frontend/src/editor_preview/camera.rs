@@ -18,21 +18,7 @@ pub(super) fn setup_gte_for_camera(camera: ViewportCameraState) -> psx_engine::W
     //   row1 = -up   (PSX screen Y points down, so we flip)
     //   row2 = forward (= +Z in camera space; camera looks along view direction)
     // Matches `psx_engine::render3d::camera_gte_view_matrix`.
-    let view = Mat3I16 {
-        m: [
-            [clamp_i16(cos_y), 0, clamp_i16(-sin_y)],
-            [
-                clamp_i16(-((sin_y * sin_p) >> 12)),
-                clamp_i16(-cos_p),
-                clamp_i16(-((cos_y * sin_p) >> 12)),
-            ],
-            [
-                clamp_i16(-((sin_y * cos_p) >> 12)),
-                clamp_i16(sin_p),
-                clamp_i16(-((cos_y * cos_p) >> 12)),
-            ],
-        ],
-    };
+    let view = preview_view_rotation(camera);
 
     // Vertex emit will subtract `anchor` from each world coord
     // (see `world_to_view`), so anything inside ±i16 of the
@@ -85,6 +71,30 @@ pub(super) fn setup_gte_for_camera(camera: ViewportCameraState) -> psx_engine::W
         psx_engine::Q12::from_raw(sin_p),
         psx_engine::Q12::from_raw(cos_p),
     )
+}
+
+/// World-to-view Q12 rotation shared by geometry setup and the exact runtime
+/// sky projection kernels.
+pub(super) fn preview_view_rotation(camera: ViewportCameraState) -> Mat3I16 {
+    let cos_p = cos_q12_turn(camera.pitch_q12);
+    let sin_p = sin_q12_turn(camera.pitch_q12);
+    let cos_y = cos_q12_turn(camera.yaw_q12);
+    let sin_y = sin_q12_turn(camera.yaw_q12);
+    Mat3I16 {
+        m: [
+            [clamp_i16(cos_y), 0, clamp_i16(-sin_y)],
+            [
+                clamp_i16(-((sin_y * sin_p) >> 12)),
+                clamp_i16(-cos_p),
+                clamp_i16(-((cos_y * sin_p) >> 12)),
+            ],
+            [
+                clamp_i16(-((sin_y * cos_p) >> 12)),
+                clamp_i16(sin_p),
+                clamp_i16(-((cos_y * cos_p) >> 12)),
+            ],
+        ],
+    }
 }
 
 /// Shared anchor that `world_to_view` subtracts from each vertex

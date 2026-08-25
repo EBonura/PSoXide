@@ -359,9 +359,7 @@ impl ViewportTool3d for SelectTool {
     }
 }
 
-/// Paint/erase/water/place tools: one shared dispatcher that re-picks the
-/// face under the interact pointer and hands off to `dispatch_paint_3d`
-/// (previously the non-select branch of `draw_viewport_3d_body`).
+/// BSP material-paint and entity-placement dispatcher.
 pub(crate) struct PaintDispatchTool;
 
 impl PaintDispatchTool {
@@ -369,10 +367,7 @@ impl PaintDispatchTool {
         let Some(pos) = frame.pointer_interact else {
             return;
         };
-        if ws.active_tool == ViewTool::Place
-            && ws.active_room_id().is_none()
-            && ws.bsp_authoring_root().is_some()
-        {
+        if ws.active_tool == ViewTool::Place {
             let Some((brush, face, hit)) = ws.pick_brush_face_with_hit(frame.rect, pos) else {
                 ws.status = "Place on an upward-facing BSP brush surface".to_string();
                 return;
@@ -380,17 +375,11 @@ impl PaintDispatchTool {
             ws.place_bsp_on_brush_face(brush, face, hit);
             return;
         }
-        // BSP scenes have no grid cells, so Material Paint addresses brush
-        // faces directly instead of falling through to the room lane.
-        if ws.bsp_face_paint_active() {
+        if ws.active_tool == ViewTool::PaintMaterial && ws.bsp_face_paint_active() {
             ws.paint_bsp_brush_face(frame.rect, pos);
             return;
         }
-        let face_hit = ws.pick_face_with_hit(frame.rect, pos);
-        let fallback = ws
-            .active_room_id()
-            .and_then(|room| ws.pick_3d_paint_world(frame.rect, pos, room));
-        ws.dispatch_paint_3d(face_hit, fallback);
+        ws.status = "Material Paint needs a BSP brush face".to_string();
     }
 }
 
@@ -1853,33 +1842,6 @@ impl EditorWorkspace {
         self.reconcile_brush_elements();
     }
 
-    /// Replace the selected brush with six hollow wall slabs (one undo
-    /// step); the first slab stays selected. No-op when not hollowable.
-    #[allow(dead_code)] // Kept as the explicit-thickness primitive behind CSG Hollow.
-    pub(crate) fn hollow_selected_brush(&mut self, thickness: i32) {
-        let Some(index) = self.selected_brush else {
-            return;
-        };
-        let Some(slabs) = self
-            .project
-            .active_scene()
-            .brushes
-            .get(index)
-            .and_then(|brush| brush.hollow(thickness))
-        else {
-            return;
-        };
-        self.push_undo();
-        let scene = self.project.active_scene_mut();
-        let mut slabs = slabs.into_iter();
-        scene.brushes[index] = slabs.next().expect("hollow returns six slabs");
-        scene.brushes.extend(slabs);
-        self.selected_brush_face = None;
-        self.selected_brush_faces.clear();
-        self.selected_brush_elements.clear();
-        self.mark_dirty();
-    }
-
     /// Snap every point of the selected brush to the editor grid step,
     /// as one undo step.
     pub(crate) fn snap_selected_brush(&mut self) {
@@ -1907,10 +1869,6 @@ impl EditorWorkspace {
     /// ones. Authors can lower the grid interval and retry without any partial
     /// mutation. A successful repair is one undo step.
     pub(crate) fn snap_all_brushes_to_grid(&mut self) {
-        if !self.project.world_format().is_bsp() {
-            self.status = "Snap level is available for BSP brush projects".to_string();
-            return;
-        }
         let step = i32::from(self.snap_units.max(1));
         let brushes = &self.project.active_scene().brushes;
         if brushes.is_empty() {

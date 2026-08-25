@@ -1,45 +1,12 @@
 use super::*;
 
-#[test]
-fn play_chunk_debug_map_follows_player_layer_then_editor_layer() {
-    let cell = |runtime_room_index, floor_index, elevation| PlayChunkDebugMapCell {
-        runtime_room_index,
-        project_room_id: NodeId::ROOT,
-        portal_room_index: runtime_room_index,
-        array_cell: [0, 0],
-        center: [0.0, 0.0],
-        half: [0.5, 0.5],
-        room_origin: [0.0, 0.0],
-        runtime_origin: [0, 0],
-        sector_size: 1024.0,
-        floor_index,
-        elevation,
-    };
-    let map = PlayChunkDebugMap {
-        cells: vec![cell(2, 0, 0), cell(7, 1, 2048)],
-        portals: Vec::new(),
-    };
-
-    let player_on_upper = EditorPlaytestMetrics {
-        player_map_valid: true,
-        player_room_index: 7,
-        ..Default::default()
-    };
-    assert_eq!(map.display_floor(player_on_upper, 0), 1);
-    assert_eq!(map.display_floor(EditorPlaytestMetrics::default(), 1), 1);
-    assert_eq!(map.display_floor(EditorPlaytestMetrics::default(), 99), 0);
-    assert_eq!(map.floor_count(), 2);
-}
-
 mod animation_studio;
 mod ashen_sanctum;
 mod brush_tools;
 mod entity_resources;
 mod geometry_resources;
 mod interaction_rig;
-mod layer_authoring;
 mod orthographic_brush;
-mod placement_painting;
 mod project_workspace;
 mod scene_tree_selection;
 mod ui_layout;
@@ -480,57 +447,6 @@ fn starter_player_entity(scene: &psxed_project::Scene) -> &psxed_project::SceneN
         .expect("starter has an Entity")
 }
 
-fn floor_heights(workspace: &EditorWorkspace, room: NodeId, sx: u16, sz: u16) -> [i32; 4] {
-    let scene = workspace.project.active_scene();
-    let node = scene.node(room).expect("room node exists");
-    let NodeKind::Section { grid } = &node.kind else {
-        panic!("active room is a room node");
-    };
-    grid.sector(sx, sz)
-        .and_then(|sector| sector.floor.as_ref())
-        .expect("starter floor exists")
-        .heights
-}
-
-fn floor_triangle_heights(
-    workspace: &EditorWorkspace,
-    room: NodeId,
-    sx: u16,
-    sz: u16,
-    triangle: HorizontalTriangleIndex,
-) -> [i32; 3] {
-    let scene = workspace.project.active_scene();
-    let node = scene.node(room).expect("room node exists");
-    let NodeKind::Section { grid } = &node.kind else {
-        panic!("active room is a room node");
-    };
-    grid.sector(sx, sz)
-        .and_then(|sector| sector.floor.as_ref())
-        .expect("starter floor exists")
-        .triangle_heights(triangle.idx())
-}
-
-fn first_floor_sector(workspace: &EditorWorkspace, room: NodeId) -> (u16, u16) {
-    let scene = workspace.project.active_scene();
-    let node = scene.node(room).expect("room node exists");
-    let NodeKind::Section { grid } = &node.kind else {
-        panic!("active room is a room node");
-    };
-    grid.sectors
-        .iter()
-        .enumerate()
-        .find_map(|(index, sector)| {
-            sector
-                .as_ref()
-                .and_then(|sector| sector.floor.as_ref())
-                .map(|_| {
-                    let index = index as u16;
-                    (index / grid.depth, index % grid.depth)
-                })
-        })
-        .expect("starter has a floor sector")
-}
-
 fn resource_search_token(resource: &Resource) -> String {
     resource
         .name
@@ -567,7 +483,6 @@ fn workspace_with_populated_grid(label: &str, width: u16, depth: u16) -> (Editor
     let mut project = ProjectDocument::new(label);
     // A grid fixture has to say so: new documents are BSP, and the grid room
     // topology a BSP project reports is deliberately empty.
-    project.set_world_format(psxed_project::ProjectWorldFormat::LegacyGrid);
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
         "Room",
@@ -579,18 +494,4 @@ fn workspace_with_populated_grid(label: &str, width: u16, depth: u16) -> (Editor
         EditorWorkspace::with_project(test_temp_dir(label), project),
         room,
     )
-}
-
-fn test_model_resource(name: &str) -> psxed_project::ModelResource {
-    psxed_project::ModelResource {
-        model_path: format!("assets/models/{name}.psxmdl"),
-        source_path: None,
-        texture_path: None,
-        skeleton: None,
-        world_height: 1024,
-        collision_radius: default_model_collision_radius_for_height(1024),
-        scale_q8: [MODEL_SCALE_ONE_Q8; 3],
-        default_visual_yaw_q12: 0,
-        attachments: Vec::new(),
-    }
 }

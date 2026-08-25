@@ -309,41 +309,6 @@ fn interpolate_preview_clip_vertex(
     }
 }
 
-/// Per-face emit with one uniform colour: routes to the Gouraud or
-/// textured pool based on `shade`, packing UVs only when textured.
-pub(crate) fn emit_face_tri(
-    scratch: &mut PreviewScratch,
-    p: [psx_gte::scene::Projected; 3],
-    uvs: [(u8, u8); 3],
-    shade: FaceShade,
-) -> bool {
-    let colors = match shade {
-        FaceShade::Flat { rgb, .. } => [rgb; 3],
-        FaceShade::Textured { tint, .. } => [tint; 3],
-    };
-    emit_face_tri_lit(scratch, p, uvs, shade, colors)
-}
-
-/// Per-face emit with per-vertex colours (the baked-lighting path):
-/// the packets are Gouraud, so lit brush faces interpolate exactly
-/// like the cooked game instead of showing flat triangle plates.
-pub(crate) fn emit_face_tri_lit(
-    scratch: &mut PreviewScratch,
-    p: [psx_gte::scene::Projected; 3],
-    uvs: [(u8, u8); 3],
-    shade: FaceShade,
-    colors: [(u8, u8, u8); 3],
-) -> bool {
-    emit_face_tri_lit_at_slot(
-        scratch,
-        p,
-        uvs,
-        shade,
-        colors,
-        room_depth_slot(projected_avg_sz(p)),
-    )
-}
-
 /// Emit one face triangle at a surface-owned OT slot. BSP brush polygons are
 /// often fans of several triangles; sorting every triangle by its own centroid
 /// lets another wall land between the halves of one planar face, producing the
@@ -629,25 +594,6 @@ pub(crate) fn push_textured_material_tri_split(
     }
     scratch.tex_used = idx + 1;
     true
-}
-
-/// Compose a [`TriGouraud`] from three projected vertices, store it
-/// in the next slot of the static `tris` array, and link it into the
-/// OT keyed on average screen-space depth.
-pub(crate) fn push_tri(
-    scratch: &mut PreviewScratch,
-    p: [psx_gte::scene::Projected; 3],
-    rgb: (u8, u8, u8),
-) -> bool {
-    push_tri_colors(scratch, p, [rgb; 3])
-}
-
-pub(crate) fn push_tri_colors(
-    scratch: &mut PreviewScratch,
-    p: [psx_gte::scene::Projected; 3],
-    colors: [(u8, u8, u8); 3],
-) -> bool {
-    push_tri_colors_at_slot(scratch, p, colors, room_depth_slot(projected_avg_sz(p)))
 }
 
 pub(crate) fn push_tri_colors_at_slot(

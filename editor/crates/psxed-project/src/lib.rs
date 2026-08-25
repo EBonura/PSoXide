@@ -39,10 +39,7 @@ pub mod streaming;
 pub mod texture_import;
 mod ui_types;
 pub mod units;
-pub mod world_cook;
 pub use ui_types::*;
-mod prefab;
-pub use prefab::*;
 mod scene_grid_types;
 pub use scene_grid_types::*;
 mod box_prop_erosion;
@@ -66,17 +63,6 @@ pub use document_types::*;
 /// of truth -- edits to the on-disk file propagate to `starter()` on
 /// the next build.
 const DEFAULT_PROJECT_RON: &str = include_str!("../../../projects/default/project.ron");
-/// The pre-BSP grid mega-project (the old default): kept as a tracked
-/// fixture because a large share of the cook/playtest suites exercise
-/// the grid pipeline through its scenes and resources.
-const LEGACY_GRID_STARTER_RON: &str =
-    include_str!("../../../archive/fixtures/legacy-grid-starter/project.ron");
-
-/// On-disk root of the legacy grid fixture (asset-backed tests).
-pub fn legacy_grid_starter_dir() -> PathBuf {
-    fixtures_dir().join("legacy-grid-starter")
-}
-
 /// Tracked reference projects that are not user projects: test fixtures,
 /// gate slices and the New Project template. They live outside
 /// [`projects_dir`] so the editor's project browser only lists real
@@ -275,12 +261,6 @@ mod projects_dir_tests {
         let project = ProjectDocument::load_from_path(root.join("project.ron"))
             .expect("load BSP-first project template");
         assert_eq!(project.active_scene().brushes.len(), 5);
-        assert!(project
-            .active_scene()
-            .nodes()
-            .iter()
-            .all(|node| !matches!(node.kind, NodeKind::Section { .. })));
-
         let solved = project
             .active_scene()
             .brushes
@@ -433,9 +413,7 @@ pub fn project_file_stem(name: &str) -> String {
     }
 }
 
-/// Legacy grid sample directory (`editor/projects/default/`). Always present
-/// in the source tree and retained as the compatibility/fallback project while
-/// existing grid content remains supported.
+/// Bundled starter project directory (`editor/projects/default/`).
 pub fn default_project_dir() -> PathBuf {
     projects_dir().join("default")
 }
@@ -480,12 +458,6 @@ pub fn list_projects() -> std::io::Result<Vec<PathBuf>> {
     out.sort();
     Ok(out)
 }
-
-pub use world_cook::{
-    cook_world_grid, encode_world_grid_psxw, CookedGridHorizontalFace, CookedGridSector,
-    CookedGridVerticalFace, CookedGridWalls, CookedWorldGrid, CookedWorldMaterial,
-    WorldGridCookError, WorldGridFaceKind,
-};
 
 /// Errors raised while reading or writing editor project documents.
 #[derive(Debug)]

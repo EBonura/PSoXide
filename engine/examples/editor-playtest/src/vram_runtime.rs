@@ -8,7 +8,7 @@
 use super::*;
 use psx_game_runtime::vram::VramLayout;
 
-pub(super) use psx_game_runtime::vram::{VramSlot, VramSlotClutMode};
+pub(super) use psx_game_runtime::vram::{SkyTextureKind, VramSlot, VramSlotClutMode};
 
 /// This example's VRAM placement, threaded into every crate
 /// `VramRuntime` method as one value (the PROJECTION pattern).
@@ -150,19 +150,18 @@ pub(super) fn retire_menu_ui_cache() {
 /// Free every streamed UI image VRAM slot created by `load_ui_images_for_scene`.
 /// Called on gameplay entry so the room textures reclaim that VRAM. Fonts are
 /// shared and are NOT released here.
-#[cfg(feature = "cd-stream-bench")]
 pub(super) fn release_ui_images() {
     vram_arena().release_ui_images();
 }
 
-/// Acquire the shared UI fonts (reserving the static VRAM regions on
-/// first call); the packing/upload policy lives on
-/// `VramRuntime::acquire_shared_ui_fonts`.
+/// Acquire the active scene's UI fonts (reserving static VRAM regions on the
+/// first call). A different slice replaces and releases the previous pack.
 #[must_use = "false means the complete UI font set is unavailable"]
-pub(super) fn acquire_shared_ui_fonts(
+pub(super) fn acquire_ui_fonts(
+    fonts: &'static [&'static psx_font::BitmapFont],
     ui_fonts: &mut [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS],
 ) -> bool {
-    vram_arena().acquire_shared_ui_fonts(VRAM_LAYOUT, font_scratch_arena(), UI_FONTS, ui_fonts)
+    vram_arena().acquire_shared_ui_fonts(VRAM_LAYOUT, font_scratch_arena(), fonts, ui_fonts)
 }
 
 const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 768;
@@ -219,6 +218,14 @@ pub(super) fn find_sky_panorama_vram_slot(asset_id: AssetId) -> Option<VramSlot>
     vram_arena().find_sky_panorama_vram_slot(asset_id)
 }
 
+/// Look up the scene-level sky through the shared residency owner.
+pub(super) fn find_sky_texture_vram_slot(
+    kind: SkyTextureKind,
+    asset_id: AssetId,
+) -> Option<VramSlot> {
+    vram_arena().find_sky_texture_vram_slot(kind, asset_id)
+}
+
 /// Ready room-texture slot (either 4bpp CLUT mode) for `asset_id`.
 pub(super) fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
     vram_arena().find_room_texture_vram_slot(asset_id)
@@ -243,13 +250,13 @@ pub(super) fn ensure_room_texture_uploaded(
     vram_arena().ensure_room_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
 }
 
-/// Upload a Quake two-layer sky pair, preserving transparent palette index
-/// zero and allowing the source to span a complete 256-texel tpage.
-pub(super) fn ensure_layered_sky_texture_uploaded(
+/// Upload whichever scene sky the World selected.
+pub(super) fn ensure_sky_texture_uploaded(
+    kind: SkyTextureKind,
     asset_id: AssetId,
     asset_bytes: &[u8],
 ) -> Option<VramSlot> {
-    vram_arena().ensure_layered_sky_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
+    vram_arena().ensure_sky_texture_uploaded(VRAM_LAYOUT, kind, asset_id, asset_bytes)
 }
 
 /// Queue (or resolve) the room-owned reflection probe. The active-room window
@@ -347,6 +354,7 @@ pub(super) fn ensure_sky_panorama_uploaded(
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn load_streamed_sky_from_cd() {
     vram_arena().load_streamed_sky_from_cd(
+        VRAM_LAYOUT,
         cd_arena(),
         font_scratch_arena(),
         GAMEPLAY_PACK_MAX_CHUNK_BYTES,
@@ -357,10 +365,10 @@ pub(super) fn load_streamed_sky_from_cd() {
     );
 }
 
-/// Free the streamed sky panorama's VRAM on gameplay exit.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) fn release_streamed_sky() {
-    vram_arena().release_streamed_sky();
+/// Return every gameplay-owned texture page and CLUT before a front-end scene
+/// becomes active.
+pub(super) fn release_gameplay_vram() {
+    vram_arena().release_gameplay_vram();
 }
 
 /// Upload an 8bpp model atlas to the dedicated model VRAM region.

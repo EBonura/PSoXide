@@ -1,5 +1,9 @@
 # Floors: vertical levels within a room
 
+> RETIRED (2026-08-25): this plan describes the deleted grid-world floor
+> authoring system. BSP projects author vertical space directly with brushes;
+> no stacked-floor editor workflow remains.
+
 Supersedes the earlier VR2 "stack separate room nodes + manual vertical
 portals" framing (that plan doc has been removed; see git history). A project authors a single Room (one
 grid plus manually placed portals that the cook splits into streaming regions), so

@@ -3,9 +3,9 @@ use super::*;
 #[test]
 fn dragging_selected_node_moves_it_in_xz_space() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let spawn = starter_player_entity(workspace.project.active_scene()).id;
-    let sector_size = node_translation_sector_size(&workspace.project, spawn);
+    let snap = f32::from(workspace.snap_units.max(1));
     let start = workspace
         .project
         .active_scene()
@@ -15,21 +15,14 @@ fn dragging_selected_node_moves_it_in_xz_space() {
         .translation;
 
     workspace.selection.selected_node = spawn;
-    workspace.drag_selected_node(Vec2::new(96.0, -48.0));
+    workspace.drag_selected_node(Vec2::new(
+        workspace.viewport_zoom * snap,
+        -workspace.viewport_zoom * snap,
+    ));
 
     let node = workspace.project.active_scene().node(spawn).unwrap();
-    assert!(
-        (node.transform.translation[0]
-            - snap_node_transform_component_to_world_step(start[0] + 1.0, sector_size))
-        .abs()
-            < 0.001
-    );
-    assert!(
-        (node.transform.translation[2]
-            - snap_node_transform_component_to_world_step(start[2] + 0.5, sector_size))
-        .abs()
-            < 0.001
-    );
+    assert!((node.transform.translation[0] - (start[0] + snap)).abs() < 0.001);
+    assert!((node.transform.translation[2] - (start[2] + snap)).abs() < 0.001);
     assert!(workspace.is_dirty());
 }
 
@@ -110,7 +103,7 @@ fn node_transform_inspector_hides_unused_transform_fields() {
         node_transform_inspector(&NodeKind::Section {
             grid: WorldGrid::empty(1, 1, DEFAULT_WORLD_SECTOR_SIZE),
         }),
-        NodeTransformInspector::RoomGrid
+        NodeTransformInspector::Hidden
     );
     assert_eq!(
         node_transform_inspector(&NodeKind::PointLight {
@@ -181,14 +174,9 @@ fn tree_drag_autoscroll_delta_tracks_edge_bands() {
 #[test]
 fn scene_tree_select_clears_inspector_shadow_selection() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let scene = workspace.project.active_scene();
-    let room = scene
-        .nodes()
-        .iter()
-        .find(|node| matches!(node.kind, NodeKind::Section { .. }))
-        .expect("starter scene has a Room")
-        .id;
+    let room = NodeId::ROOT;
     let spawn = starter_player_entity(scene).id;
     let resource = workspace
         .project
@@ -211,7 +199,7 @@ fn scene_tree_select_clears_inspector_shadow_selection() {
             id: spawn,
             modifiers: egui::Modifiers::NONE,
         },
-        &[NodeId::ROOT, room, spawn],
+        &[NodeId::ROOT, spawn],
     );
 
     assert_eq!(workspace.selection.selected_node, spawn);
@@ -222,7 +210,7 @@ fn scene_tree_select_clears_inspector_shadow_selection() {
 #[test]
 fn scene_tree_ctrl_toggles_node_multi_selection() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let order = workspace.scene_node_order();
     let ids: Vec<NodeId> = order
         .iter()
@@ -268,7 +256,7 @@ fn scene_tree_ctrl_toggles_node_multi_selection() {
 #[test]
 fn scene_tree_shift_selects_visible_node_range() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let order = workspace.scene_node_order();
     let ids: Vec<NodeId> = order
         .iter()
@@ -562,7 +550,7 @@ fn ui_node_clipboard_pastes_subtree_into_another_ui_scene() {
 #[test]
 fn resource_browser_supports_ctrl_and_shift_multi_selection() {
     let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     let order: Vec<ResourceId> = workspace
         .project
         .resources
@@ -623,7 +611,7 @@ fn select_all_current_scope_selects_scene_nodes_outside_select_tool() {
         .active_scene_mut()
         .add_node(room, "Entity", NodeKind::Entity);
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
-    workspace.active_tool = ViewTool::PaintFloor;
+    workspace.active_tool = ViewTool::Place;
 
     workspace.select_all_current_scope();
 
@@ -718,143 +706,6 @@ fn select_all_current_scope_respects_edge_and_vertex_modes() {
         .selected_primitives
         .iter()
         .all(|selection| matches!(selection, Selection::Vertex(_))));
-}
-
-#[test]
-fn ctrl_selected_sector_delete_removes_all_selected_tiles() {
-    let mut project = ProjectDocument::new("ctrl-delete");
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    grid.set_floor(0, 0, 0, None);
-    grid.set_floor(1, 0, 0, None);
-    let room =
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
-    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
-    let coords = [(0u16, 0u16), (1u16, 0u16)];
-
-    let mut ctrl = egui::Modifiers::NONE;
-    ctrl.ctrl = true;
-    workspace.select_sector((room, coords[0].0, coords[0].1), egui::Modifiers::NONE);
-    workspace.select_sector((room, coords[1].0, coords[1].1), ctrl);
-
-    assert_eq!(workspace.selection.selected_sectors.len(), 2);
-
-    workspace.delete_selected_sectors();
-
-    let scene = workspace.project.active_scene();
-    let node = scene.node(room).expect("room node exists");
-    let NodeKind::Section { grid } = &node.kind else {
-        panic!("active room is a room node");
-    };
-    assert!(grid.sector(coords[0].0, coords[0].1).is_none());
-    assert!(grid.sector(coords[1].0, coords[1].1).is_none());
-    assert!(workspace.selection.selected_sectors.is_empty());
-}
-
-#[test]
-fn deleting_every_tile_removes_the_now_empty_layer_in_the_same_undo_step() {
-    let mut project = ProjectDocument::new("delete-emptied-layer");
-    let mut grid = WorldGrid::empty(1, 1, 1024);
-    grid.set_floor(0, 0, 0, None);
-    grid.push_floor();
-    grid.floor_mut(1).unwrap().set_floor(0, 0, 0, None);
-    let room =
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
-    project
-        .active_scene_mut()
-        .node_mut(room)
-        .unwrap()
-        .transform
-        .translation[1] = -2.0;
-    let upper_entity = project
-        .active_scene_mut()
-        .add_node(room, "Upper entity", NodeKind::Entity);
-    project
-        .active_scene_mut()
-        .node_mut(upper_entity)
-        .unwrap()
-        .floor = 1;
-
-    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
-    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
-    workspace.delete_selected_sectors();
-
-    let scene = workspace.project.active_scene();
-    let room_node = scene.node(room).unwrap();
-    let NodeKind::Section { grid } = &room_node.kind else {
-        panic!("room node");
-    };
-    assert_eq!(grid.floor_count(), 1);
-    assert!(grid.sector(0, 0).unwrap().floor.is_some());
-    assert_eq!(room_node.transform.translation[1], 0.0);
-    assert_eq!(scene.node(upper_entity).unwrap().floor, 0);
-    assert_eq!(workspace.active_floor, 0);
-
-    workspace.do_undo();
-    let scene = workspace.project.active_scene();
-    let room_node = scene.node(room).unwrap();
-    let NodeKind::Section { grid } = &room_node.kind else {
-        panic!("room node");
-    };
-    assert_eq!(grid.floor_count(), 2);
-    assert!(grid.sector(0, 0).unwrap().floor.is_some());
-    assert!(grid.floor(1).unwrap().sector(0, 0).unwrap().floor.is_some());
-    assert_eq!(room_node.transform.translation[1], -2.0);
-    assert_eq!(scene.node(upper_entity).unwrap().floor, 1);
-}
-
-#[test]
-fn autotile_selected_sector_walls_updates_all_selected_tiles() {
-    let mut project = ProjectDocument::new("autotile-selected-tiles");
-    let mut grid = WorldGrid::empty(2, 1, 1024);
-    for sx in 0..=1 {
-        grid.add_wall(sx, 0, GridDirection::North, 0, 2048, None);
-    }
-    let room =
-        project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "Room", NodeKind::Section { grid });
-    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
-    let mut ctrl = egui::Modifiers::NONE;
-    ctrl.ctrl = true;
-
-    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
-    workspace.select_sector((room, 1, 0), ctrl);
-
-    assert_eq!(workspace.autotile_selected_sector_walls(), 2);
-
-    let grid = workspace.room_grid_view(room).unwrap();
-    for sx in 0..=1 {
-        let wall = &grid.sector(sx, 0).unwrap().walls.get(GridDirection::North)[0];
-        assert_eq!(wall.uv.span, [0, 128]);
-    }
-    assert!(workspace.is_dirty());
-}
-
-#[test]
-fn shift_selects_sector_rectangle_from_anchor() {
-    let mut workspace =
-        EditorWorkspace::open_directory(psxed_project::legacy_grid_starter_dir()).unwrap();
-    let room = workspace.active_room_id().expect("starter has room");
-
-    let mut shift = egui::Modifiers::NONE;
-    shift.shift = true;
-    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
-    workspace.select_sector((room, 1, 1), shift);
-
-    assert_eq!(workspace.selection.selected_sectors.len(), 4);
-    for sx in 0..=1 {
-        for sz in 0..=1 {
-            assert!(workspace
-                .selection
-                .selected_sectors
-                .contains(&(room, sx, sz)));
-        }
-    }
-    assert_eq!(workspace.selection.selected_sector, Some((1, 1)));
 }
 
 #[test]

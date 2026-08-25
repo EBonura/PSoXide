@@ -33,12 +33,12 @@ mod resource_browser;
 use resource_browser::*;
 mod searchable_picker;
 use searchable_picker::*;
+mod inspector_controls;
+use inspector_controls::*;
 mod editor_helpers;
 use editor_helpers::*;
 mod animation_catalogue;
 use animation_catalogue::*;
-mod sector_inspector;
-use sector_inspector::*;
 mod workspace;
 pub use geometry::face_corner_world;
 use geometry::*;
@@ -68,16 +68,9 @@ use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 use psxed_project::portal_rooms::{
-    extract_portal_room_grid, plan_portal_rooms, portal_edge_for_node, portal_seam_edges_for_edge,
-    portal_seam_edges_for_node, PortalEdge, PortalRoomConfig,
-};
-use psxed_project::room_connections::{
-    connection_for_portal, derive_room_connections, RoomConnection, RoomConnectionStatus,
+    plan_portal_rooms, portal_seam_edges_for_node, PortalEdge, PortalRoomConfig,
 };
 use psxed_project::spatial::{euler_degrees_to_matrix, rotate_euler_degrees, RotationSpace};
-#[cfg(test)]
-use psxed_project::streaming::SceneResourceUse;
-use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
     default_model_collision_radius_for_height, default_ui_font_scale, default_ui_letter_spacing,
     snap_height, ui_font_scale_f32_to_q8, ui_font_scale_q8_to_f32, BootTarget,
@@ -87,25 +80,19 @@ use psxed_project::{
     GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     InteractableKind, MaterialAnimationMode, MaterialFaceSidedness, MaterialResource,
     MaterialTextureMode, NodeId, NodeKind, NodeRow, OptionId, OptionKind, ParticleEmitterSettings,
-    PhysicsBodySettings, ProjectDocument, PsxBlendMode, ReflectionProbeMaterial, Resource,
-    ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, Scene, SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings,
+    PhysicsBodySettings, ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, Scene,
+    SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings, SkyVisibility,
     TransitionMaskShape, TransitionMaterialTexture, UiAction, UiAnchor, UiFontChoice, UiGradient,
     UiGradientDirection, UiImageEffect, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
-    UiSceneId, UiSfxBindings, UiSfxCue, UiShapeStyle, UiTextAlign, UiValueBinding, WaterVolumeCell,
-    WaterVolumeSettings, WorldCameraSettings, WorldCullingSettings, WorldGrid,
-    WorldPhysicsSettings, WorldStreamingSettings, AUTO_PAINT_BLEND_PREFIX,
-    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
+    UiSceneId, UiSfxBindings, UiSfxCue, UiShapeStyle, UiTextAlign, UiValueBinding,
+    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldPhysicsSettings,
+    AUTO_PAINT_BLEND_PREFIX, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
     MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
-    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
-    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
-    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
-    MAX_WORLD_VISIBILITY_RADIUS, MIN_PHYSICS_WEIGHT_Q8, MIN_UI_FONT_SCALE, MIN_UI_LETTER_SPACING,
-    MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
-    MIN_WORLD_GRAVITY_PER_TICK, MIN_WORLD_SECTOR_SIZE, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MIN_WORLD_STREAMING_VISIBLE_CHUNKS, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8,
-    PHYSICS_WEIGHT_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX,
-    SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_QUANTUM,
+    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK,
+    MIN_PHYSICS_WEIGHT_Q8, MIN_UI_FONT_SCALE, MIN_UI_LETTER_SPACING, MIN_WORLD_CAMERA_DISTANCE,
+    MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_GRAVITY_PER_TICK, MODEL_SCALE_ONE_Q8, PHYSICS_WEIGHT_ONE_Q8,
+    SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN,
+    SKY_MOUNTAIN_HEIGHT_PERCENT_MAX,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -292,7 +279,7 @@ fn bsp_leak_geometry_fingerprint(project: &ProjectDocument) -> u64 {
     }
 
     let mut hash = 0xcbf29ce484222325u64;
-    mix(&mut hash, project.world_format().is_bsp() as u64);
+    mix(&mut hash, 1);
     let scene = project.active_scene();
     mix(&mut hash, scene.brushes.len() as u64);
     for brush in &scene.brushes {
@@ -409,17 +396,13 @@ const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
 const PSOXIDE_APP_ICON_PNG: &[u8] =
     include_bytes!("../../../../assets/branding/psoxide-app-icon.png");
-const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
-const PLAY_PORTAL_DEBUG_SCREEN_CY: i32 = 120;
-const PLAY_PORTAL_DEBUG_FOCAL: i32 = 320;
-const PLAY_PORTAL_DEBUG_NEAR_Z: i32 = 64;
-const PLAY_PORTAL_DEBUG_FAR_Z: i32 = 16_384;
-const PLAY_PORTAL_DEBUG_MAX_DEPTH: u8 = 8;
-const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/aletha_delivered",
     "assets/models/rust_mantis",
     "assets/models/tank_boss_animated_model",
+    // Sword, Mantis, and Tank reference this canonical atlas instead of
+    // retaining byte-identical copies in each model directory.
+    "assets/models/shared_enemy_01",
     "assets/animations/aletha_delivered",
     "assets/animations/gen",
     "assets/animations/rust_mantis_starter",
@@ -547,17 +530,12 @@ struct ActionBarStatus<'a> {
     border: Color32,
 }
 
-// LegacyGrid shortcuts remain represented while old projects stay loadable,
-// even though BSP authoring no longer exposes every legacy toolbar group.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShortcutGroup {
     Workspace,
     Tool,
     Transform,
     Selection,
-    Surface,
-    Vertex,
     Visibility,
     Camera,
     Viewport,
@@ -637,9 +615,6 @@ pub struct EditorWorkspace {
     gizmo_space: GizmoSpace,
     /// Transform mode for pointer drags in the 2D UI canvas.
     ui_transform_mode: UiTransformMode,
-    /// Whether floor/ceiling face picks address the authored quad
-    /// or one triangle half of the current split.
-    horizontal_edit_mode: HorizontalEditMode,
     /// Whether vertex edits move every coincident face-corner, or
     /// only the selected face's own corner data.
     vertex_connectivity: VertexConnectivity,
@@ -666,29 +641,6 @@ pub struct EditorWorkspace {
     /// action-bar status is easy to miss on a wide editor window, so geometry
     /// clipboard actions also announce themselves over the viewport.
     clipboard_notice: Option<ClipboardNotice>,
-    /// Name typed into the Prefabs menu for the next "Save Selection".
-    #[allow(dead_code)] // Retained with the dormant prefab authoring helpers.
-    prefab_name: String,
-    /// Shared editor-library prefabs, cached outside project data. Refreshed
-    /// after saves and on explicit request so panel paint never hits disk.
-    prefab_library: Vec<PrefabLibraryEntry>,
-    /// What the next paint click would target. Cell variant fires
-    /// for floor / ceiling / erase / place; Wall variant fires for
-    /// PaintWall. World-cell coords let the preview track cells
-    /// outside the current grid bounds -- the renderer outlines
-    /// them as ghosts at the world position the auto-grow would
-    /// place them.
-    paint_target_preview: Option<PaintTargetPreview>,
-    /// Last paint stamp committed during the current drag. Edge-
-    /// aware so dragging across different edges of the same cell
-    /// stamps each one (PaintWall sweeping a cell can hit N then
-    /// E without the dedupe blocking the second click), but
-    /// dwelling on the same edge doesn't re-stack walls. Reset
-    /// to `None` whenever a new primary click starts.
-    last_paint_stamp: Option<PaintStamp>,
-    /// Wall brush targeting mode. Cardinal keeps the old nearest-edge
-    /// behavior; diagonal modes stamp a wall across the cell.
-    wall_paint_shape: WallPaintShape,
     /// `Some((id, buffer))` while a scene-tree row is in rename mode.
     /// Buffer holds the in-flight string the user is typing; commit /
     /// cancel finalises against the actual node name.
@@ -770,29 +722,20 @@ pub struct EditorWorkspace {
     /// `active_tool == Place`. Player Spawn is unique per world;
     /// the others are additive markers.
     place_kind: PlaceKind,
-    /// Cardinal edge used by the dedicated Portal placement tool.
-    /// The marker is written at the edge midpoint so the cooker can
-    /// snap it back to the authored seam.
-    portal_place_direction: GridDirection,
     /// Resource chosen in the Place toolbar. Kept separate from the
     /// resource browser selection so repeated placement doesn't lose
     /// the chosen Model/Profile/Image after each click.
     place_resource: Option<ResourceId>,
-    /// Material the next Floor / Wall / Ceiling paint will use when
-    /// pinned. `None` means Auto: use the selected Material resource
-    /// if one is active, otherwise fall back to a tool-specific
-    /// material name hint.
+    /// Material the next BSP face paint will use when pinned. `None` means
+    /// Auto: use the selected Material resource if one is active.
     brush_material: Option<ResourceId>,
-    /// When true, the material Paint tool bakes a transition onto the one
-    /// clicked face. Neighboring faces are context only and never mutated.
-    material_paint_blend: bool,
     /// One-shot eyedropper state for Material Paint. The next existing face
     /// click samples its logical material into the shared brush/resource
     /// selection, then automatically returns to painting.
     material_paint_sampling: bool,
     /// `true` once the in-flight Material Paint gesture has painted at least
-    /// one BSP brush face. Cleared at every primary press alongside
-    /// `last_paint_stamp`, so a drag across a whole wall costs one undo step.
+    /// one BSP brush face. Cleared at every primary press, so a drag across a
+    /// whole wall costs one undo step.
     brush_face_paint_stroke: bool,
     /// Index into the active scene's brushes, when one is selected.
     selected_brush: Option<usize>,
@@ -867,30 +810,15 @@ pub struct EditorWorkspace {
     /// in-flight source/target live on `BrushVertexDrag` so releasing B does
     /// not interrupt a gesture that has already started.
     brush_vertex_snap_hover: Option<[f64; 3]>,
-    /// Percentage of the painted material kept by generated Paint blends.
-    /// Stored as a human-facing percentage and converted to the transition
-    /// recipe's byte threshold when a stroke is baked.
-    material_paint_blend_coverage_percent: u8,
-    /// Organic variation applied to the exposed edge of generated blends.
-    /// The transition baker clamps this to its seam-safe 0..=96 range.
-    material_paint_blend_edge_detail: u8,
-    /// Active Water subtool: select an existing volume, add cells to the
-    /// selected volume, or erase cells from any volume on the active floor.
-    water_tool_mode: WaterToolMode,
     snap_units: u16,
     show_grid: bool,
     /// TrenchBroom-style projection of the global grid over BSP faces.
     show_brush_surface_grid: bool,
-    show_portals: bool,
     show_lights: bool,
     /// Wireframe outlines for unselected brushes (View menu toggle).
     show_brush_wireframes: bool,
-    preview_fog: bool,
-    preview_backface_wireframe: bool,
     preview_bounds: bool,
     show_play_debug_overlays: bool,
-    show_play_debug_map: bool,
-    play_debug_map_view: PlayDebugMapView,
     play_frame_times_ms: VecDeque<f32>,
     play_frame_last_sample_serial: Option<u32>,
     play_debug_terminal_lines: VecDeque<String>,
@@ -1105,14 +1033,8 @@ struct ResourceClick {
     modifiers: egui::Modifiers,
 }
 
-#[derive(Debug, Clone)]
-struct PrefabDragPayload {
-    path: PathBuf,
-}
-
 enum ProjectFileRowAction {
     Select(ResourceClick),
-    SelectPrefab(PathBuf),
     ToggleFolder(String),
 }
 
@@ -1229,7 +1151,6 @@ struct PsxtStats {
 /// the editor crate (not psxed-project) because the status
 /// string is editor-facing UI text.
 struct PackageSummary {
-    rooms: usize,
     assets: usize,
     textures: usize,
     materials: usize,
@@ -1240,22 +1161,6 @@ struct PackageSummary {
     /// Display name of the player's resolved Character, or
     /// `None` when no player controller was emitted.
     player_character: Option<String>,
-}
-
-/// Per-stamp paint dedupe key. Two paint events with equal stamps
-/// are considered redundant during a single drag -- typically the
-/// second is dropped. The edge component lets PaintWall stamp
-/// multiple edges of the same cell without dwelling on one
-/// re-firing the same wall.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PaintStamp {
-    room: NodeId,
-    sx: u16,
-    sz: u16,
-    tool: ViewTool,
-    triangle: Option<HorizontalTriangleIndex>,
-    edge: Option<GridDirection>,
-    stack: Option<u8>,
 }
 
 /// Three-mode selection switch -- Blender-style. `Face` keeps
@@ -1269,21 +1174,12 @@ pub enum SelectionMode {
     Vertex,
 }
 
-#[allow(dead_code)] // LegacyGrid selection UI is hidden but its data remains supported.
 impl SelectionMode {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Face => "Face",
             Self::Edge => "Edge",
             Self::Vertex => "Vertex",
-        }
-    }
-
-    const fn icon(self) -> char {
-        match self {
-            Self::Face => icons::SQUARE,
-            Self::Edge => icons::SCAN,
-            Self::Vertex => icons::CIRCLE_DOT,
         }
     }
 }
@@ -1300,9 +1196,8 @@ pub(crate) enum BrushElement {
     Vertex([i64; 3]),
 }
 
-/// Direct BSP transform grammar. This is deliberately separate from the
-/// legacy grid primitive [`SelectionMode`]: brushes need an explicit
-/// whole-object Move state as well as Face/Edge/Vertex reshape states.
+/// Direct BSP transform grammar. Brushes need an explicit whole-object Move
+/// state as well as Face/Edge/Vertex reshape states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum BrushEditMode {
     #[default]
@@ -1315,8 +1210,8 @@ enum BrushEditMode {
     Clip,
 }
 
-#[allow(dead_code)] // Some labels remain useful to tests and dormant inspector affordances.
 impl BrushEditMode {
+    #[allow(dead_code)] // Exercised by the mode-strip completeness test.
     const ALL: [Self; 5] = [Self::Move, Self::Face, Self::Edge, Self::Vertex, Self::Clip];
 
     const fn label(self) -> &'static str {
@@ -1341,16 +1236,6 @@ impl BrushEditMode {
         }
     }
 
-    const fn toolbar_hint(self) -> &'static str {
-        match self {
-            Self::Move => "Select whole brushes and entities",
-            Self::Face => "Select faces; drag normal to extrude",
-            Self::Edge => "Drag edge",
-            Self::Vertex => "Drag vertex",
-            Self::Clip => "Click points, Enter cuts",
-        }
-    }
-
     const fn selection_mode(self) -> Option<SelectionMode> {
         match self {
             Self::Move => None,
@@ -1362,7 +1247,7 @@ impl BrushEditMode {
     }
 }
 
-/// The flat, BSP-first mode strip shown in the Room workspace.
+/// The flat, BSP-first mode strip shown in the 3D workspace.
 ///
 /// This combines the old top-level tool and nested brush-edit mode into one
 /// user-facing state machine. `Select` owns whole brushes and entities;
@@ -1473,59 +1358,13 @@ impl UiTransformMode {
     }
 }
 
-/// Floor/ceiling edit granularity for Select mode.
-#[allow(dead_code)] // Persisted LegacyGrid editing state remains readable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum HorizontalEditMode {
-    #[default]
-    Quad,
-    Triangle,
-}
-
-#[allow(dead_code)]
-impl HorizontalEditMode {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Quad => "Quad",
-            Self::Triangle => "Tri",
-        }
-    }
-
-    const fn icon(self) -> char {
-        match self {
-            Self::Quad => icons::SQUARE,
-            Self::Triangle => icons::PLAY,
-        }
-    }
-}
-
 /// Vertex propagation behavior for primitive height edits.
-#[allow(dead_code)] // Persisted LegacyGrid editing state remains readable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum VertexConnectivity {
     /// Move every face-corner currently sharing the same physical
     /// vertex. Existing project behavior.
     #[default]
     Welded,
-    /// Move only the selected face/edge/vertex corner records.
-    Detached,
-}
-
-#[allow(dead_code)]
-impl VertexConnectivity {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Welded => "Welded",
-            Self::Detached => "Detached",
-        }
-    }
-
-    const fn icon(self) -> char {
-        match self {
-            Self::Welded => icons::BLEND,
-            Self::Detached => icons::COPY,
-        }
-    }
 }
 
 /// In-flight drag-translate stroke. Captured at drag-start
@@ -1763,15 +1602,14 @@ struct GeometryClipboard {
     /// Floors stacked above `cells`, base floor first above the active one.
     /// Always empty for Duplicate, which works one floor at a time; only a
     /// multi-floor prefab fills it.
-    extra_floors: Vec<psxed_project::PrefabFloor>,
+    extra_floors: Vec<GeometryClipboardFloor>,
     /// Lights the piece carries. Empty for Duplicate.
-    lights: Vec<psxed_project::PrefabLight>,
+    lights: Vec<GeometryClipboardLight>,
 }
 
 #[derive(Debug, Clone)]
 enum PortableGeometryClipboard {
     Brushes(BrushGeometryClipboard),
-    World(psxed_project::Prefab),
 }
 
 #[derive(Debug, Clone)]
@@ -1818,10 +1656,26 @@ enum GeometryClipboardMode {
     MergePrimitives,
 }
 
-/// The clipboard cell and the prefab cell are the same thing: an offset plus
-/// an optional sector. Sharing the type is what lets a prefab be written and
-/// read with no conversion layer.
-type GeometryClipboardCell = psxed_project::PrefabCell;
+#[derive(Debug, Clone)]
+struct GeometryClipboardCell {
+    offset: [i32; 2],
+    sector: Option<GridSector>,
+}
+
+#[derive(Debug, Clone)]
+struct GeometryClipboardFloor {
+    relative_elevation: i32,
+    cells: Vec<GeometryClipboardCell>,
+}
+
+#[derive(Debug, Clone)]
+struct GeometryClipboardLight {
+    cell: [i32; 2],
+    height_sectors: f32,
+    color: [u8; 3],
+    intensity: f32,
+    radius: f32,
+}
 
 #[derive(Debug, Clone)]
 struct FloatingGeometryPlacement {
@@ -1850,9 +1704,9 @@ struct FloatingGeometryPlacement {
     selected_primitives: Vec<Selection>,
     cells: Vec<GeometryClipboardCell>,
     /// Upper floors of a multi-floor prefab. Empty for Duplicate.
-    extra_floors: Vec<psxed_project::PrefabFloor>,
+    extra_floors: Vec<GeometryClipboardFloor>,
     /// Lights the piece carries, materialised as child nodes on commit.
-    lights: Vec<psxed_project::PrefabLight>,
+    lights: Vec<GeometryClipboardLight>,
     /// Walls the latest preview pass dropped for landing on an edge a
     /// neighbour already claimed. Reported once on commit rather than every
     /// preview frame, which would fight the rotate / flip status messages.
@@ -2112,9 +1966,6 @@ struct SelectionState {
     node_selection_anchor: Option<NodeId>,
     /// Primary selected resource (content browser / inspector).
     selected_resource: Option<ResourceId>,
-    /// Shared prefab selected in the filesystem or content browser. This is
-    /// editor state only and is never serialized into `project.ron`.
-    selected_prefab: Option<PathBuf>,
     /// Multi-selection of resources.
     selected_resources: HashSet<ResourceId>,
     /// Anchor for Shift-click resource range selection.
@@ -2180,7 +2031,6 @@ impl SelectionState {
         )
         .unwrap_or(NodeId::ROOT);
         self.selected_resource = None;
-        self.selected_prefab = None;
         self.selected_resources.clear();
         self.resource_selection_anchor = None;
         self.clear_primitives();
@@ -2210,7 +2060,6 @@ impl SelectionState {
             order,
             id,
         );
-        self.selected_prefab = None;
         self.selected_node = NodeId::ROOT;
         self.selected_nodes.clear();
         self.node_selection_anchor = None;
@@ -2274,10 +2123,6 @@ pub struct ViewportCameraState {
 pub struct EditorCameraPreviewRequest {
     /// Camera state to render from.
     pub camera: ViewportCameraState,
-    /// Room window to render for the preview.
-    pub active_room: Option<NodeId>,
-    /// Floor to render as the preview's active floor.
-    pub active_floor: usize,
 }
 
 /// Transient character transform consumed by the native editor renderer.
@@ -2587,7 +2432,6 @@ impl ViewportCameraState {
     }
 }
 
-#[allow(dead_code)] // Retired LegacyGrid tools remain decodable for old projects and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewTool {
     /// Click to select; press-and-drag on a selected primitive
@@ -2595,19 +2439,9 @@ enum ViewTool {
     /// 3D viewport. No separate "Move" tool -- the same gesture
     /// handles both select and move.
     Select,
-    /// Paint a floor onto the sector under the cursor (Room context).
-    PaintFloor,
-    /// Paint a wall on the directed edge under the cursor.
-    PaintWall,
-    /// Paint a ceiling on the sector under the cursor.
-    PaintCeiling,
-    /// Repaint exactly one existing floor, ceiling, or wall face.
+    /// Repaint exactly one existing BSP brush face.
     PaintMaterial,
-    /// Paint cells into a first-class Water Volume on the active Room floor.
-    Water,
-    /// Clear the painted surface under the cursor.
-    Erase,
-    /// Drop a child entity node into the sector under the cursor.
+    /// Drop an entity node onto a BSP surface.
     /// The kind of node placed is controlled by `place_kind`.
     Place,
     /// Drag a world-space convex brush on the active Top/Front/Side plane;
@@ -2909,40 +2743,6 @@ pub(crate) struct BrushFaceExtrudeNew {
     pub(crate) applied: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaterToolMode {
-    Add,
-    Erase,
-    Select,
-}
-
-#[allow(dead_code)] // Legacy diagonal-wall authoring remains load-compatible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WallPaintShape {
-    Cardinal,
-    NorthWestSouthEast,
-    NorthEastSouthWest,
-}
-
-#[allow(dead_code)]
-impl WallPaintShape {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Cardinal => "Cardinal",
-            Self::NorthWestSouthEast => "NW-SE",
-            Self::NorthEastSouthWest => "NE-SW",
-        }
-    }
-
-    fn direction(self, dx: f32, dz: f32) -> GridDirection {
-        match self {
-            Self::Cardinal => edge_from_world_offset(dx, dz),
-            Self::NorthWestSouthEast => GridDirection::NorthWestSouthEast,
-            Self::NorthEastSouthWest => GridDirection::NorthEastSouthWest,
-        }
-    }
-}
-
 /// Variants of the `Place` tool. Maps directly onto the
 /// `NodeKind` produced by a Place click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2974,16 +2774,13 @@ enum PlaceKind {
     PointLightMarker,
     /// Fixed-budget point-projected sprite particle emitter.
     ParticleEmitter,
-    /// `Portal` marker. Runtime cooking snaps it to the nearest
-    /// cardinal sector edge and treats that edge as an open seam.
-    Portal,
     /// Placed `Logic` graph node (trigger volume by default; switch
     /// the kind to relay/multisource/door in the inspector).
     Logic,
 }
 
 impl PlaceKind {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 11] = [
         Self::PlayerSpawn,
         Self::SpawnMarker,
         Self::ModelInstance,
@@ -2994,7 +2791,6 @@ impl PlaceKind {
         Self::ArchProp,
         Self::PointLightMarker,
         Self::ParticleEmitter,
-        Self::Portal,
         Self::Logic,
     ];
 
@@ -3010,7 +2806,6 @@ impl PlaceKind {
             Self::ArchProp => "Arch Prop",
             Self::PointLightMarker => "Point Light",
             Self::ParticleEmitter => "Particle Emitter",
-            Self::Portal => "Portal",
             Self::Logic => "Logic",
         }
     }
@@ -3026,58 +2821,21 @@ impl PlaceKind {
             Self::ArchProp => icons::WAYPOINT,
             Self::PointLightMarker => icons::SUN,
             Self::ParticleEmitter => icons::FOCUS,
-            Self::Portal => icons::WAYPOINT,
             Self::Logic => icons::BLEND,
         }
     }
 }
 
-#[allow(dead_code)]
 impl ViewTool {
     const fn label(self) -> &'static str {
         match self {
             Self::Select => "Select",
-            Self::PaintFloor => "Floor",
-            Self::PaintWall => "Wall",
-            Self::PaintCeiling => "Ceiling",
             Self::PaintMaterial => "Paint",
-            Self::Water => "Water",
-            Self::Erase => "Erase",
             Self::Place => "Place",
             // "Draw": creates and clips brushes. Selecting/reshaping them
             // lives in Select, so the two tools stop reading as duplicates.
             Self::Brush => "Draw",
         }
-    }
-
-    const fn icon(self) -> char {
-        match self {
-            Self::Select => icons::POINTER,
-            Self::PaintFloor => icons::GRID,
-            Self::PaintWall => icons::BRICK_WALL,
-            Self::PaintCeiling => icons::LAYERS,
-            Self::PaintMaterial => icons::PALETTE,
-            Self::Water => icons::BLEND,
-            Self::Erase => icons::TRASH,
-            Self::Place => icons::PLUS,
-            Self::Brush => icons::BOX,
-        }
-    }
-
-    /// `true` when the tool only makes sense once a Room is the
-    /// active context -- viewport clicks should be suppressed
-    /// otherwise so we don't paint into thin air.
-    const fn requires_room_context(self) -> bool {
-        matches!(
-            self,
-            Self::PaintFloor
-                | Self::PaintWall
-                | Self::PaintCeiling
-                | Self::PaintMaterial
-                | Self::Water
-                | Self::Erase
-                | Self::Place
-        )
     }
 }
 
@@ -3091,8 +2849,6 @@ enum ResourceFilter {
     Character,
     Weapon,
     Mesh,
-    Prefab,
-    Room,
     Other,
 }
 
@@ -3153,8 +2909,6 @@ impl ResourceFilter {
             Self::Character => "Character Profiles",
             Self::Weapon => "Weapon",
             Self::Mesh => "Mesh",
-            Self::Prefab => "Prefab",
-            Self::Room => "Room",
             Self::Other => "Other",
         }
     }
@@ -3169,8 +2923,6 @@ impl ResourceFilter {
             Self::Character => icons::MAP_PIN,
             Self::Weapon => icons::WAYPOINT,
             Self::Mesh => icons::BOX,
-            Self::Prefab => icons::LAYERS,
-            Self::Room => icons::GRID,
             Self::Other => icons::FILE,
         }
     }
@@ -3191,9 +2943,6 @@ impl ResourceFilter {
             Self::Character => matches!(data, ResourceData::Character(_)),
             Self::Weapon => matches!(data, ResourceData::Weapon(_)),
             Self::Mesh => matches!(data, ResourceData::Mesh { .. }),
-            // Shared prefabs are virtual browser entries, not project data.
-            Self::Prefab => false,
-            Self::Room => matches!(data, ResourceData::Scene { .. }),
             Self::Other => matches!(
                 data,
                 ResourceData::Script { .. } | ResourceData::Audio { .. }
@@ -3244,16 +2993,6 @@ fn decode_embedded_png(bytes: &[u8]) -> Option<ColorImage> {
 }
 
 impl EditorWorkspace {
-    /// Select a Room Topology diagnostic view for deterministic/headless UI
-    /// capture. Returns false for an unknown label.
-    pub fn set_play_debug_map_view(&mut self, label: &str) -> bool {
-        let Some(view) = PlayDebugMapView::parse(label) else {
-            return false;
-        };
-        self.play_debug_map_view = view;
-        self.show_play_debug_map = true;
-        true
-    }
     /// Current top-level workspace, exposed for native startup validation.
     pub const fn active_workspace_view(&self) -> EditorWorkspaceView {
         self.active_workspace.to_project()
@@ -3333,9 +3072,8 @@ impl EditorWorkspace {
         self.status = format!("Workspace: {}", self.active_workspace.label());
     }
 
-    /// Enter the Room workspace's Top orthographic viewport. This is kept
-    /// separate from the legacy UI workspace even though both are labelled
-    /// "2D" in older command-line surfaces.
+    /// Enter the 3D workspace's Top orthographic BSP viewport. This remains
+    /// separate from the UI workspace even though both use a 2D canvas.
     pub fn show_room_orthographic(&mut self) {
         self.active_workspace = WorkspaceView::Room;
         self.view_2d = true;
@@ -3363,7 +3101,6 @@ impl EditorWorkspace {
         workspace.dirty = dirty;
         workspace.status =
             sync_status.unwrap_or_else(|| format!("Loaded {}", short_path(&workspace.project_dir)));
-        workspace.select_first_room();
         #[cfg(debug_assertions)]
         {
             workspace.focus_debug_scene_node_from_env();
@@ -3436,13 +3173,11 @@ impl EditorWorkspace {
             .active_ui_scene()
             .map(|scene| scene.root)
             .unwrap_or(UiNodeId::ROOT);
-        let prefab_library = load_prefab_library().unwrap_or_default();
         let project_watch = ProjectWatchState::capture(&project_dir, &project);
         let last_bsp_leak_path = read_cached_bsp_leak_path(&project_dir).unwrap_or_default();
         let cached_bsp_leak_points = last_bsp_leak_path.len();
         let bsp_leak_geometry_fingerprint = bsp_leak_geometry_fingerprint(&project);
-        let refresh_bsp_leak =
-            project.world_format().is_bsp() && !project.active_scene().brushes.is_empty();
+        let refresh_bsp_leak = !project.active_scene().brushes.is_empty();
         Self {
             project,
             project_dir,
@@ -3456,7 +3191,6 @@ impl EditorWorkspace {
                 selected_nodes: HashSet::new(),
                 node_selection_anchor: None,
                 selected_resource: None,
-                selected_prefab: None,
                 selected_resources: HashSet::new(),
                 resource_selection_anchor: None,
                 selected_sector: None,
@@ -3473,7 +3207,6 @@ impl EditorWorkspace {
             transform_gizmo_mode: TransformGizmoMode::Move,
             gizmo_space: GizmoSpace::Global,
             ui_transform_mode: UiTransformMode::Move,
-            horizontal_edit_mode: HorizontalEditMode::default(),
             vertex_connectivity: VertexConnectivity::default(),
             validation_issue_primitives: Vec::new(),
             validation_issue_rooms: HashSet::new(),
@@ -3481,11 +3214,6 @@ impl EditorWorkspace {
             floating_geometry: None,
             portable_geometry_clipboard: None,
             clipboard_notice: None,
-            prefab_name: String::new(),
-            prefab_library,
-            paint_target_preview: None,
-            last_paint_stamp: None,
-            wall_paint_shape: WallPaintShape::Cardinal,
             renaming: None,
             pending_rename_focus: false,
             active_ui_scene_index: 0,
@@ -3515,10 +3243,8 @@ impl EditorWorkspace {
             resource_delete_confirm: None,
             active_tool: ViewTool::Select,
             place_kind: PlaceKind::PlayerSpawn,
-            portal_place_direction: GridDirection::North,
             place_resource: None,
             brush_material: None,
-            material_paint_blend: false,
             material_paint_sampling: false,
             brush_face_paint_stroke: false,
             selected_brush: None,
@@ -3545,26 +3271,18 @@ impl EditorWorkspace {
             brush_vertex_snap_key_down: false,
             brush_vertex_snap_enabled: false,
             brush_vertex_snap_hover: None,
-            material_paint_blend_coverage_percent: 50,
-            material_paint_blend_edge_detail: 20,
-            water_tool_mode: WaterToolMode::Add,
             snap_units: 16,
             show_grid: editor_visibility.show_grid,
             show_brush_surface_grid: editor_visibility.show_brush_surface_grid,
-            show_portals: editor_visibility.show_portals,
             show_lights: editor_visibility.show_lights,
-            preview_fog: editor_visibility.preview_fog,
-            preview_backface_wireframe: editor_visibility.preview_backface_wireframe,
             preview_bounds: editor_visibility.preview_bounds,
             show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
-            show_play_debug_map: editor_visibility.show_play_debug_map,
             show_brush_wireframes: editor_visibility.show_brush_wireframes,
-            play_debug_map_view: PlayDebugMapView::default(),
             play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
             play_frame_last_sample_serial: None,
             play_debug_terminal_lines: VecDeque::with_capacity(PLAY_DEBUG_TERMINAL_LINE_CAP),
             shortcut_group_flash: None,
-            // The Room workspace still uses the bit-faithful 3D preview by
+            // The 3D workspace uses the bit-faithful BSP preview by
             // default, but the top-level workspace itself is restored from
             // the project so UI/Animation authoring reopens where it left off.
             view_2d: false,
@@ -3718,13 +3436,9 @@ impl EditorWorkspace {
         EditorVisibilityState {
             show_grid: self.show_grid,
             show_brush_surface_grid: self.show_brush_surface_grid,
-            show_portals: self.show_portals,
             show_lights: self.show_lights,
-            preview_fog: self.preview_fog,
-            preview_backface_wireframe: self.preview_backface_wireframe,
             preview_bounds: self.preview_bounds,
             show_play_debug_overlays: self.show_play_debug_overlays,
-            show_play_debug_map: self.show_play_debug_map,
             show_brush_wireframes: self.show_brush_wireframes,
         }
     }
@@ -3741,13 +3455,9 @@ impl EditorWorkspace {
         let editor_visibility = self.project.editor_visibility;
         self.show_grid = editor_visibility.show_grid;
         self.show_brush_surface_grid = editor_visibility.show_brush_surface_grid;
-        self.show_portals = editor_visibility.show_portals;
         self.show_lights = editor_visibility.show_lights;
-        self.preview_fog = editor_visibility.preview_fog;
-        self.preview_backface_wireframe = editor_visibility.preview_backface_wireframe;
         self.preview_bounds = editor_visibility.preview_bounds;
         self.show_play_debug_overlays = editor_visibility.show_play_debug_overlays;
-        self.show_play_debug_map = editor_visibility.show_play_debug_map;
         self.show_brush_wireframes = editor_visibility.show_brush_wireframes;
     }
 
@@ -3875,14 +3585,6 @@ impl EditorWorkspace {
     }
 
     fn schedule_bsp_leak_refresh(&mut self) {
-        if !self.project.world_format().is_bsp() {
-            self.last_bsp_leak_path.clear();
-            self.last_bsp_leak_opening.clear();
-            self.bsp_leak_opening_path_index = None;
-            self.bsp_leak_path_current = true;
-            self.bsp_leak_refresh_due = None;
-            return;
-        }
         self.bsp_leak_refresh_revision = self.bsp_leak_refresh_revision.wrapping_add(1);
         self.bsp_leak_refresh_due = Some(Instant::now() + BSP_LEAK_REFRESH_DEBOUNCE);
         self.bsp_leak_path_current = false;
@@ -4124,8 +3826,7 @@ impl EditorWorkspace {
                 self.last_bsp_leak_opening.clear();
                 self.bsp_leak_opening_path_index = None;
                 let fingerprint = bsp_leak_geometry_fingerprint(&self.project);
-                let refresh_bsp_leak = self.project.world_format().is_bsp()
-                    && !self.project.active_scene().brushes.is_empty();
+                let refresh_bsp_leak = !self.project.active_scene().brushes.is_empty();
                 self.bsp_leak_refresh_revision = self.bsp_leak_refresh_revision.wrapping_add(1);
                 self.bsp_leak_path_current = !refresh_bsp_leak;
                 self.bsp_leak_geometry_fingerprint = if refresh_bsp_leak {
@@ -4138,7 +3839,6 @@ impl EditorWorkspace {
                 self.bsp_leak_cursor = 0;
                 self.status = sync_status
                     .unwrap_or_else(|| format!("Reloaded {}", short_path(&self.project_dir)));
-                self.select_first_room();
                 self.apply_project_editor_camera();
                 self.frame_bsp_camera_if_uninitialized();
                 self.apply_project_editor_visibility();
@@ -4310,7 +4010,6 @@ impl EditorWorkspace {
                         "es"
                     }
                 ),
-                PortableGeometryClipboard::World(_) => "world geometry ready to paste".to_string(),
             };
             opened.status = format!("{}; clipboard retained ({retained})", opened.status);
             opened.show_clipboard_notice(format!("Clipboard retained: {retained}"), true);
@@ -4402,26 +4101,6 @@ impl EditorWorkspace {
         }
     }
 
-    /// Select the first Room in the active scene if one exists.
-    /// Default state is `selected_node = ROOT`, which leaves the
-    /// inspector empty and gates the paint tools -- selecting a
-    /// concrete Room straight after construction or load makes the
-    /// editor immediately useful for the common case (one Room per
-    /// project).
-    fn select_first_room(&mut self) {
-        if let Some(room_id) = self
-            .project
-            .active_scene()
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::Section { .. }))
-            .map(|node| node.id)
-        {
-            self.replace_node_selection(room_id);
-            self.frame_3d_on_room(room_id);
-        }
-    }
-
     /// Debug-only focus hook used by deterministic native-editor captures.
     /// Normal editor startup remains unchanged unless the environment variable
     /// is explicitly provided to a debug build.
@@ -4457,19 +4136,12 @@ impl EditorWorkspace {
             "paint" | "material" => ViewTool::PaintMaterial,
             _ => return,
         };
-        if !self.project.world_format().is_bsp() {
-            return;
-        }
         self.active_tool = tool;
-        self.material_paint_blend = std::env::var("PSXED_DEBUG_PAINT_BLEND")
-            .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
         self.material_paint_sampling = tool == ViewTool::PaintMaterial
             && std::env::var("PSXED_DEBUG_PAINT_SAMPLE")
                 .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
         self.status = if self.material_paint_sampling {
             "Eyedropper: click a surface to sample its material".to_string()
-        } else if self.material_paint_blend {
-            "Material Paint: Blend".to_string()
         } else {
             "Material Paint: Direct".to_string()
         };
@@ -4502,37 +4174,6 @@ impl EditorWorkspace {
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
         true
-    }
-
-    /// Position the orbit camera so `room_id`'s grid fills the
-    /// viewport at startup. Pulls back to ~1.6× the room diagonal
-    /// in world units, which lands a 3/4 view that shows all four
-    /// walls plus the floor without the corners clipping.
-    fn frame_3d_on_room(&mut self, room_id: NodeId) {
-        let Some((center, half)) = self.room_bounds_3d(room_id) else {
-            return;
-        };
-        // Default 3/4 view: yaw 8/64 turn (45° off the +Z axis),
-        // pitch 4/64 (~22° looking down). Mirrors the showcase
-        // demos' first-frame angle.
-        self.camera_rig.yaw = 256;
-        self.camera_rig.pitch = 256;
-        self.fit_3d_bounds(center, half);
-    }
-
-    /// Move the 3D orbit target onto `center` and choose a radius
-    /// that fits `half` without changing yaw/pitch. Used for startup
-    /// and explicit whole-room framing.
-    fn fit_3d_bounds(&mut self, center: [f32; 3], half: [f32; 3]) {
-        self.camera_rig.target = [
-            round_to_i32(center[0]),
-            round_to_i32(center[1]),
-            round_to_i32(center[2]),
-        ];
-        self.camera_rig.radius = frame_radius_for_3d_bounds(half);
-        if self.camera_rig.mode == ViewportCameraMode::Free {
-            self.camera_rig.sync_free_to_orbit();
-        }
     }
 
     fn room_bounds_3d(&self, room_id: NodeId) -> Option<([f32; 3], [f32; 3])> {
@@ -4646,72 +4287,9 @@ impl EditorWorkspace {
         ))
     }
 
-    /// Cook every Room in the active scene to a per-Room `.psxw`
-    /// blob under `<project_dir>/cooked/`.
-    ///
-    /// Returns a one-line summary on success. Fails when the project
-    /// has not yet been saved (no anchor for `<project_dir>`), or
-    /// when any room's grid cooker rejects its inputs (see
-    /// `WorldGridCookError`).
-    pub fn cook_world_to_disk(&mut self) -> Result<String, String> {
-        self.project.normalize_loaded();
-        self.clear_validation_issues();
-        let cooked_dir = self.project_dir.join("cooked");
-        std::fs::create_dir_all(&cooked_dir)
-            .map_err(|error| format!("mkdir {}: {error}", cooked_dir.display()))?;
-
-        let scene = self.project.active_scene();
-        let rooms: Vec<(NodeId, String)> = scene
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
-            .map(|node| (node.id, node.name.clone()))
-            .collect();
-        if rooms.is_empty() {
-            return Err("No Section nodes in the active scene".to_string());
-        }
-
-        let mut total_bytes = 0usize;
-        let mut written = 0usize;
-        for (room_id, room_name) in &rooms {
-            let cook_result = {
-                let scene = self.project.active_scene();
-                let Some(node) = scene.node(*room_id) else {
-                    continue;
-                };
-                let NodeKind::Section { grid } = &node.kind else {
-                    continue;
-                };
-                psxed_project::world_cook::encode_world_grid_psxw(&self.project, grid)
-            };
-            let bytes = match cook_result {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    self.record_world_cook_error(*room_id, &error, [0, 0]);
-                    return Err(format!("cook \"{room_name}\": {error}"));
-                }
-            };
-            let filename = sanitise_room_filename(room_name);
-            let path = cooked_dir.join(format!("{filename}.psxw"));
-            std::fs::write(&path, &bytes)
-                .map_err(|error| format!("write {}: {error}", path.display()))?;
-            total_bytes += bytes.len();
-            written += 1;
-        }
-
-        Ok(format!(
-            "Cooked {} room{} ({} KiB) into {}",
-            written,
-            if written == 1 { "" } else { "s" },
-            total_bytes / 1024,
-            cooked_dir.display(),
-        ))
-    }
-
-    /// Cook the active project into the playtest example's
-    /// `generated/` directory. Validates the scene tree, cooks
-    /// every populated Room into `rooms/room_NNN.psxw`, and
-    /// writes a fresh ignored cooked manifest. Returns a status
+    /// Cook the active BSP project into the playtest example's
+    /// `generated/` directory and write a fresh ignored cooked manifest.
+    /// Returns a status
     /// string suitable for `self.status`. The "& Play" half is
     /// up to the caller -- the editor doesn't spawn child
     /// processes from this path; instead the status string
@@ -4731,9 +4309,9 @@ impl EditorWorkspace {
             &project,
             &self.project_dir,
         ));
-        // Build once: Cortex-sized projects have enough materials, animation,
-        // world geometry, and portal topology that doing this again merely for
-        // the status summary makes every Play launch needlessly expensive.
+        // Build once: projects have enough materials, animation and BSP
+        // geometry that doing this again merely for the status summary makes
+        // every Play launch needlessly expensive.
         let (package, report) = psxed_project::playtest::build_package(&project, &self.project_dir);
         let cooked_bsp_leak_path = package
             .as_ref()
@@ -4745,7 +4323,6 @@ impl EditorWorkspace {
             })
             .unwrap_or_default();
         let summary = package.as_ref().map(|p| PackageSummary {
-            rooms: p.rooms.len(),
             assets: p.assets.len(),
             textures: p.texture_asset_count(),
             materials: p.materials.len(),
@@ -4768,12 +4345,9 @@ impl EditorWorkspace {
             .map_err(|e| format!("write playtest output: {e}"))?;
         if !report.is_ok() {
             self.last_cook_errors = report.errors.clone();
-            if !report
+            let _ = report
                 .focus_target()
-                .is_some_and(|target| self.focus_playtest_validation_target(target))
-            {
-                self.record_first_playtest_world_cook_issue(&project);
-            }
+                .is_some_and(|target| self.focus_playtest_validation_target(target));
             return Err(format!(
                 "playtest validation failed: {}",
                 report.error_messages().join("; ")
@@ -4820,9 +4394,7 @@ impl EditorWorkspace {
                     None => ", no player".to_string(),
                 };
                 format!(
-                    " - {} room{}, {} model{}, {} character{}{}, {} light{}, {} asset{}, {} texture{}, {} material{}, {} entit{}",
-                    s.rooms,
-                    if s.rooms == 1 { "" } else { "s" },
+                    " - {} model{}, {} character{}{}, {} light{}, {} asset{}, {} texture{}, {} material{}, {} entit{}",
                     s.models,
                     if s.models == 1 { "" } else { "s" },
                     s.characters,

@@ -64,15 +64,14 @@ fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
 
 #[test]
 fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
-    let bytes = std::fs::read(
-        crate::legacy_grid_starter_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
-    )
-    .expect("starter Delven texture exists");
+    let bytes =
+        std::fs::read(crate::default_project_dir().join("assets/textures/sanctum_slate.psxt"))
+            .expect("starter slate texture exists");
     let asset = PlaytestAsset {
         kind: PlaytestAssetKind::Texture,
         bytes,
         filename: "texture_000.psxt".to_string(),
-        source_label: "Delven slateflr1a q2".to_string(),
+        source_label: "Sanctum slate".to_string(),
         streamed_class: StreamedClass::None,
     };
 
@@ -82,19 +81,19 @@ fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
 #[test]
 fn model_atlas_vram_bytes_match_runtime_atlas_upload() {
     let bytes = std::fs::read(
-        crate::legacy_grid_starter_dir()
-            .join("assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt"),
+        crate::default_project_dir()
+            .join("assets/models/tank_boss_animated_model/tank_boss_animated_model.psxt"),
     )
-    .expect("starter wraith atlas exists");
+    .expect("starter tank atlas exists");
     let asset = PlaytestAsset {
         kind: PlaytestAssetKind::Texture,
         bytes,
-        filename: "models/model_000_obsidian_wraith/atlas.psxt".to_string(),
-        source_label: "Obsidian Wraith atlas".to_string(),
+        filename: "models/model_000_tank_boss/atlas.psxt".to_string(),
+        source_label: "Tank Boss atlas".to_string(),
         streamed_class: StreamedClass::None,
     };
 
-    assert_eq!(asset_vram_bytes(&asset), 64 * 128 * 2 + 256 * 2);
+    assert_eq!(asset_vram_bytes(&asset), 32 * 128 * 2 + 16 * 2);
 }
 
 #[test]
@@ -803,6 +802,7 @@ fn test_room(world_asset_index: usize) -> PlaytestRoom {
             skybox_columns: 16,
             skybox_rows: 10,
             flags: 0,
+            texture_asset_index: None,
             cyclorama_quads: Vec::new(),
             cloud_layer: PlaytestCloudLayer {
                 texture_asset_index: None,

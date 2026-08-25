@@ -52,7 +52,6 @@ pub(crate) const STUDIO_ERROR: Color32 = Color32::from_rgb(235, 107, 107);
 pub(crate) const STUDIO_ERROR_DIM: Color32 = Color32::from_rgb(98, 42, 48);
 pub(crate) const STUDIO_TREE_GUIDE: Color32 = Color32::from_rgb(45, 52, 63);
 pub(crate) const STUDIO_ROOM_FLOOR: Color32 = Color32::from_rgb(119, 132, 143);
-pub(crate) const STUDIO_ROOM_WALL: Color32 = Color32::from_rgb(126, 73, 43);
 
 pub(crate) const PANEL_HEADER_MIN_HEIGHT: f32 = 26.0;
 

@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn spawn_character_auto_picks_single_character() {
-        let mut project = ProjectDocument::legacy_grid_starter();
+        let mut project = ProjectDocument::starter();
         let first_character = project
             .resources
             .iter()
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn spawn_character_reports_ambiguity() {
-        let project = ProjectDocument::legacy_grid_starter();
+        let project = ProjectDocument::starter();
         let character_count = project
             .resources
             .iter()

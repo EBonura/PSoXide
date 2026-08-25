@@ -11,6 +11,7 @@
 # Cooked runtime clips under assets/animations remain tracked.
 default/source_assets/**/animations/candidates/
 default/source_assets/**/animations/previews/
+default/source_assets/**/previews/
 **/cooked/
 **/baked/
 **/logs/

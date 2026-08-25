@@ -208,12 +208,16 @@ pub mod material_flags {
     pub const FACE_BACK: u16 = 0x0001;
     /// Draw both sides of the authored face.
     pub const FACE_BOTH: u16 = 0x0002;
-    /// Quake-style layered sky surface: the material's atlas holds a masked
-    /// foreground and solid background tile side by side. Marked faces select
-    /// the camera-direction sky background and act only as apertures.
-    pub const LAYERED_SKY: u16 = 0x0004;
+    /// The face is an aperture into the scene-level sky and does not submit
+    /// its authored polygon.
+    pub const SKY_APERTURE: u16 = 0x0004;
+    /// Compatibility alias for older callers and cooked maps.
+    pub const LAYERED_SKY: u16 = SKY_APERTURE;
+    /// Parse-only compatibility bit used by the former material-owned cube
+    /// sky. New cookers write `SKY_APERTURE` for every sky surface.
+    pub const DIRECTIONAL_SKY: u16 = 0x0008;
     /// All flags understood by PXBSP version one.
-    pub const KNOWN: u16 = FACE_MASK | LAYERED_SKY;
+    pub const KNOWN: u16 = FACE_MASK | SKY_APERTURE | DIRECTIONAL_SKY;
 }
 
 /// PSoXide material blend codes stored in [`PxbspMaterial::blend_mode`].

@@ -25,24 +25,8 @@ impl EditorWorkspace {
             return None;
         }
 
-        let room = self.active_room_id();
-        let floor = psxed_project::floor_view::node_floor(scene, host_id);
         let settings = settings.normalized();
-        let player = room
-            .and_then(|room_id| {
-                let NodeKind::Section { grid } = &scene.node(room_id)?.kind else {
-                    return None;
-                };
-                let floor_grid = grid.floor(floor)?;
-                let mut origin = psxed_project::spatial::floor_anchored_node_preview_origin(
-                    floor_grid,
-                    &host.transform,
-                );
-                origin[1] = origin[1]
-                    .saturating_add(psxed_project::floor_view::floor_offset(grid, floor, floor));
-                Some(origin)
-            })
-            .unwrap_or_else(|| host.transform.translation.map(round_to_i32));
+        let player = host.transform.translation.map(round_to_i32);
         let target = [
             player[0],
             player[1].saturating_add(settings.target_height),
@@ -61,8 +45,6 @@ impl EditorWorkspace {
                 target,
                 position: target,
             },
-            active_room: room,
-            active_floor: floor,
         })
     }
 
@@ -98,7 +80,6 @@ impl EditorWorkspace {
         self.update_brush_vertex_snap_hover_3d(rect, response.hover_pos());
         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
         let resource_drop_hovered = response.dnd_hover_payload::<ResourceId>().is_some();
-        let prefab_drop_hovered = response.dnd_hover_payload::<PrefabDragPayload>().is_some();
 
         // Sims-style: primary button always belongs to the active
         // tool -- click-and-drag floors / walls / entities into the
@@ -116,12 +97,8 @@ impl EditorWorkspace {
             }
         }
 
-        // Hover tracking: every frame the pointer is over the panel,
-        // ray-pick which cell it's on so the renderer can stamp a
-        // translucent overlay there. Cleared when the pointer leaves.
-        // For PaintWall, ALSO track which edge of the cell the pointer
-        // is closest to so the renderer can preview the targeted wall
-        // edge before the click.
+        // Preserve the old room-plane projection only for a retained portable
+        // clipboard preview. Normal BSP tools resolve their own world hit.
         let hover_world = response
             .hover_pos()
             .and_then(|pointer| self.pick_3d_world(rect, pointer));
@@ -139,16 +116,6 @@ impl EditorWorkspace {
                     })
                     .map(|n| n.id)
             });
-        let paint_tool = matches!(
-            self.active_tool,
-            ViewTool::PaintFloor
-                | ViewTool::PaintWall
-                | ViewTool::PaintCeiling
-                | ViewTool::PaintMaterial
-                | ViewTool::Water
-                | ViewTool::Erase
-                | ViewTool::Place
-        );
         let select_tool = matches!(self.active_tool, ViewTool::Select);
         let select_drag_active = matches!(
             self.interaction,
@@ -218,24 +185,8 @@ impl EditorWorkspace {
         // Hover-track via the same target resolver used for clicks
         // and drags, so foreground gizmos/entities consume the
         // pointer before scene faces behind them can highlight.
-        self.selection.hovered_primitive = if self.portal_place_active() {
-            None
-        } else {
-            pointer_target.and_then(|target| target.primitive_selection())
-        };
-        // Paint preview: world-cell coords let the ghost outline
-        // appear over cells outside the current grid, exactly
-        // where the auto-grow would create them.
-        self.paint_target_preview = if paint_tool {
-            hover_room.and_then(|room| {
-                let paint_world = response
-                    .hover_pos()
-                    .and_then(|pointer| self.pick_3d_paint_world(rect, pointer, room));
-                self.compute_paint_target_preview(room, face_hit, paint_world)
-            })
-        } else {
-            None
-        };
+        self.selection.hovered_primitive =
+            pointer_target.and_then(|target| target.primitive_selection());
         if let Some(room) = self.floating_geometry.as_ref().map(|preview| preview.room) {
             if let Some(origin) = self.floating_origin_from_3d_hover(room, face_hit, hover_world) {
                 self.track_floating_geometry_pointer_origin(origin);
@@ -245,24 +196,11 @@ impl EditorWorkspace {
             .then(|| response.dnd_release_payload::<ResourceId>())
             .flatten()
             .map(|payload| *payload);
-        let dropped_prefab = prefab_drop_hovered
-            .then(|| response.dnd_release_payload::<PrefabDragPayload>())
-            .flatten()
-            .map(|payload| payload.path.clone());
         if self.floating_geometry.is_none() {
             if let Some(resource_id) = dropped_resource {
-                let bsp_drop = self.active_room_id().is_none()
-                    && self.bsp_authoring_root().is_some()
-                    && response.hover_pos().is_some();
-                if bsp_drop {
-                    if let Some(pointer) = response.hover_pos() {
-                        self.drop_resource_bsp_3d(resource_id, rect, pointer);
-                    }
-                } else {
-                    self.drop_resource_3d(resource_id, face_hit, hover_world);
+                if let Some(pointer) = response.hover_pos() {
+                    self.drop_resource_bsp_3d(resource_id, rect, pointer);
                 }
-            } else if let Some(path) = dropped_prefab {
-                self.drop_prefab_3d(&path, face_hit, hover_world);
             }
         }
 
@@ -291,7 +229,6 @@ impl EditorWorkspace {
             if response.drag_started_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Primary)
             {
-                self.last_paint_stamp = None;
                 self.brush_face_paint_stroke = false;
             }
 
@@ -390,7 +327,7 @@ impl EditorWorkspace {
         self.draw_node_gizmo(&painter, rect, hovered_node_handle);
         draw_viewport_box_select_marquee(&painter, self.viewport_3d_box_select_rect());
         self.draw_brush_overlay(&painter, rect);
-        if resource_drop_hovered || prefab_drop_hovered {
+        if resource_drop_hovered {
             painter.rect_stroke(
                 rect.shrink(2.0),
                 2.0,
@@ -400,11 +337,7 @@ impl EditorWorkspace {
             painter.text(
                 rect.center_top() + Vec2::new(0.0, 16.0),
                 Align2::CENTER_TOP,
-                if prefab_drop_hovered {
-                    "Drop prefab into scene"
-                } else {
-                    "Drop resource into scene"
-                },
+                "Drop resource into scene",
                 FontId::proportional(13.0),
                 STUDIO_ACCENT,
             );
@@ -868,7 +801,6 @@ impl EditorWorkspace {
         let can_replay = !recording;
 
         let show_debug_overlays = self.show_play_debug_overlays;
-        let show_debug_map = self.show_play_debug_map;
         let debug_rect = Rect::from_min_size(
             rect.left_top() + Vec2::new(44.0, 8.0),
             Vec2::new(320.0, 171.0),
@@ -1045,18 +977,6 @@ impl EditorWorkspace {
                 STUDIO_TEXT,
             );
         }
-        if show_debug_map {
-            if let Some(metrics) = viewport_3d.play_metrics {
-                draw_play_chunk_debug_map(
-                    &painter,
-                    rect,
-                    &self.project,
-                    metrics,
-                    self.play_debug_map_view,
-                    self.active_floor,
-                );
-            }
-        }
         self.draw_play_overlay_visibility_menu(ui, visibility_rect);
         if draw_play_overlay_icon_button(
             ui,
@@ -1135,7 +1055,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_play_overlay_visibility_menu(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        let icon = if !self.show_play_debug_overlays || !self.show_play_debug_map {
+        let icon = if !self.show_play_debug_overlays {
             icons::EYE_OFF
         } else {
             icons::EYE
@@ -1158,22 +1078,6 @@ impl EditorWorkspace {
                                 "Profiler",
                                 &mut self.show_play_debug_overlays,
                             );
-                            changed |= visibility_menu_row(
-                                ui,
-                                "play-overlay-map",
-                                "Portal map",
-                                &mut self.show_play_debug_map,
-                            );
-                            ui.label("Map view");
-                            ui.horizontal(|ui| {
-                                for view in PlayDebugMapView::ALL {
-                                    ui.selectable_value(
-                                        &mut self.play_debug_map_view,
-                                        view,
-                                        view.label(),
-                                    );
-                                }
-                            });
                         });
                     if changed {
                         self.persist_editor_visibility_state();
@@ -1287,19 +1191,6 @@ impl EditorWorkspace {
         })
     }
 
-    /// Whether the editor preview should visualize authored room fog.
-    /// This is an editor-only view option; it does not change the
-    /// room's cooked `fog_enabled` setting.
-    pub fn preview_fog_enabled(&self) -> bool {
-        self.preview_fog
-    }
-
-    /// Whether the editor preview should draw passive outlines for
-    /// one-sided faces whose rendered side is currently culled.
-    pub fn preview_backface_wireframe_enabled(&self) -> bool {
-        self.preview_backface_wireframe
-    }
-
     /// Whether the editor preview should draw entity/image/collision
     /// bounds. Picking stays enabled; this only hides the visual boxes.
     pub fn preview_bounds_enabled(&self) -> bool {
@@ -1324,10 +1215,6 @@ impl EditorWorkspace {
     /// changing the toolbar value updates every viewport consistently.
     pub fn grid_snap_units(&self) -> u16 {
         self.snap_units.max(1)
-    }
-
-    pub fn show_portals_enabled(&self) -> bool {
-        self.show_portals
     }
 
     pub fn show_lights_enabled(&self) -> bool {
@@ -1441,161 +1328,12 @@ impl EditorWorkspace {
         self.selection_mode
     }
 
-    /// What the next paint click would target. Frontend reads
-    /// this every frame for paint tools and outlines either a
-    /// cell ghost (Floor / Ceiling / Erase / Place) or a wall
-    /// ghost (PaintWall) at the world position the click would
-    /// commit to.
-    pub fn paint_target_preview(&self) -> Option<PaintTargetPreview> {
-        self.paint_target_preview
-    }
-
     /// Scene node whose 3D bounding box currently sits under
     /// the pointer (Select tool only). Frontend reads it each
     /// frame so the editor preview can highlight the box and
     /// the click handler can promote it to a selection.
     pub fn hovered_entity_node(&self) -> Option<NodeId> {
         self.selection.hovered_entity_node
-    }
-
-    /// Commit the most recent hover-tracked face to `selected_face`.
-    /// Called from the click handler when the Select tool is active,
-    /// independent of `dispatch_3d_tool`'s ground-plane sector
-    /// requirement so wall / ceiling clicks register even when the
-    /// ray-on-Y=0 hit lands beyond the room. Also surfaces the
-    /// face's material in the resources panel so the user sees
-    /// which material is on the picked surface.
-    pub(crate) fn face_hit_for_paint_tool(
-        &self,
-        face_hit: Option<(FaceRef, [f32; 3])>,
-    ) -> Option<(FaceRef, [f32; 3])> {
-        match self.active_tool {
-            ViewTool::PaintCeiling => {
-                face_hit.filter(|(face, _)| matches!(face.kind, FaceKind::Ceiling))
-            }
-            _ => face_hit,
-        }
-    }
-
-    /// Resolve what the next paint click would target. World-cell
-    /// coords (which can be negative) let the preview track cells
-    /// outside the current grid -- exactly the cases `auto-grow`
-    /// would rescue at click time. `fallback_hit` is already picked
-    /// on the tool's target plane, so ceiling paint targets the
-    /// ceiling plane instead of the floor under it.
-    pub(crate) fn compute_paint_target_preview(
-        &self,
-        room_id: NodeId,
-        face_hit: Option<(FaceRef, [f32; 3])>,
-        fallback_hit: Option<[f32; 2]>,
-    ) -> Option<PaintTargetPreview> {
-        let grid = self.room_grid_view(room_id)?;
-        if self.active_tool == ViewTool::PaintMaterial {
-            // The regular hovered-primitive overlay already outlines the
-            // exact ray-picked face. Never draw a cell/add-geometry ghost for
-            // material painting.
-            return None;
-        }
-        if self.portal_place_active() {
-            let (world_cell_x, world_cell_z) =
-                self.paint_preview_world_cell(room_id, grid, face_hit, fallback_hit)?;
-            return Some(PaintTargetPreview::PortalEdge {
-                world_cell_x,
-                world_cell_z,
-                dir: self.portal_place_direction,
-                valid: portal_edge_valid_for_world_cell(
-                    grid,
-                    world_cell_x,
-                    world_cell_z,
-                    self.portal_place_direction,
-                ),
-            });
-        }
-        let is_paint_wall = matches!(self.active_tool, ViewTool::PaintWall);
-        let face_hit = self.face_hit_for_paint_tool(face_hit);
-
-        // Cursor over an existing wall while PaintWall is active --
-        // the click adds the next stack entry on that same edge, so
-        // preview the next-free stack at its array-derived world cell.
-        if is_paint_wall {
-            if let Some((
-                FaceRef {
-                    sx,
-                    sz,
-                    kind: FaceKind::Wall { dir, .. },
-                    ..
-                },
-                _,
-            )) = face_hit
-            {
-                let stack = grid
-                    .sector(sx, sz)
-                    .map(|sector| sector.walls.get(dir).len() as u8)
-                    .unwrap_or(0);
-                return Some(PaintTargetPreview::Wall {
-                    world_cell_x: grid.origin[0] + sx as i32,
-                    world_cell_z: grid.origin[1] + sz as i32,
-                    dir,
-                    stack,
-                });
-            }
-        }
-
-        // Compute the world cell the cursor is over. Use the face
-        // hit when present (works for walls / floors / ceilings of
-        // existing cells); otherwise fall back to the floor-plane
-        // hit, which can land on cells the grid doesn't cover yet.
-        let (world_cell_x, world_cell_z, hit_world) = if let Some((face, hit)) = face_hit {
-            (
-                grid.origin[0] + face.sx as i32,
-                grid.origin[1] + face.sz as i32,
-                hit,
-            )
-        } else {
-            let editor = fallback_hit?;
-            let hit = self.editor_world_to_world3(room_id, editor);
-            (
-                grid.world_x_to_cell(hit[0]),
-                grid.world_z_to_cell(hit[2]),
-                hit,
-            )
-        };
-
-        if is_paint_wall {
-            // Cell centre in raw world units -- the inferred edge
-            // matches the dispatch's `run_paint_action` because
-            // both use the same axis convention.
-            let s = grid.sector_size as f32;
-            let cell_center_x = (world_cell_x as f32 + 0.5) * s;
-            let cell_center_z = (world_cell_z as f32 + 0.5) * s;
-            let dir = self
-                .wall_paint_shape
-                .direction(hit_world[0] - cell_center_x, hit_world[2] - cell_center_z);
-            // Stack index points just past any existing walls on
-            // that edge -- `add_wall` will append there.
-            let stack = grid
-                .world_cell_to_array(world_cell_x, world_cell_z)
-                .and_then(|(sx, sz)| grid.sector(sx, sz))
-                .map(|sector| sector.walls.get(dir).len() as u8)
-                .unwrap_or(0);
-            Some(PaintTargetPreview::Wall {
-                world_cell_x,
-                world_cell_z,
-                dir,
-                stack,
-            })
-        } else {
-            let kind = match self.active_tool {
-                ViewTool::PaintFloor => PaintCellPreviewKind::Floor,
-                ViewTool::PaintCeiling => PaintCellPreviewKind::Ceiling,
-                _ => PaintCellPreviewKind::Ground,
-            };
-            Some(PaintTargetPreview::Cell {
-                world_cell_x,
-                world_cell_z,
-                kind,
-            })
-        }
     }
 }
 

@@ -28,20 +28,14 @@
 //! care. The residency manager already tracks RAM/VRAM membership
 //! independently of where bytes live.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use psx_bsp::collision_provider::select_body_hull;
-use psx_engine::{
-    cache_room_vertex_lit_surfaces, CachedRoomCell, CachedRoomSurface, RuntimeRoom,
-    WorldRenderMaterial, WorldVertex,
-};
 use psx_level::{
-    box_prop_flags, character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags,
-    model_clip_flags, particle_emitter_flags, room_flags, sky_flags, visibility_cell_flags,
-    visibility_edge_flags,
+    box_prop_flags, character_action_flags, cloud_layer_flags, image_prop_flags, model_clip_flags,
+    particle_emitter_flags, sky_flags,
 };
-use psxed_format::world as psxw;
 use psxed_format::{
     texture::{
         Depth as TextureDepth, TextureHeader, MAGIC as TEXTURE_MAGIC, VERSION as TEXTURE_VERSION,
@@ -49,18 +43,13 @@ use psxed_format::{
     AssetHeader,
 };
 
-use crate::portal_rooms::{extract_portal_room_grid, plan_portal_rooms, PortalRoomConfig};
-use crate::world_cook::{
-    cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
-};
 use crate::{
     clamp_ui_font_scale, default_ui_font_scale, default_ui_letter_spacing, AnimationRole,
-    CharacterAnimationAction, CharacterControllerSettings, NodeId, NodeKind, OptionId, OptionKind,
+    CharacterAnimationAction, CharacterControllerSettings, NodeKind, OptionId, OptionKind,
     ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode, ResourceData,
     ResourceId, SceneNode, UiAction, UiAnchor, UiGradient, UiImageEffect, UiNodeId, UiNodeKind,
-    UiRect, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldGrid,
-    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES, MAX_UI_LETTER_SPACING,
-    MIN_UI_LETTER_SPACING, PHYSICS_WEIGHT_ONE_Q8,
+    UiRect, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldStreamingSettings,
+    MAX_UI_LETTER_SPACING, MIN_UI_LETTER_SPACING, PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -79,10 +68,6 @@ pub use cook_entities::{
 };
 mod cook_props_lights;
 pub(crate) use cook_props_lights::*;
-mod cook_visibility;
-pub(crate) use cook_visibility::*;
-mod cook_world;
-pub(crate) use cook_world::*;
 
 use assets::{
     expect_room_material_depth, find_resource, load_psxt_bytes, material_texture_bytes,
@@ -96,12 +81,25 @@ pub use manifest::{
 pub use performance::{playtest_performance_envelope, PlaytestPerformanceEnvelope};
 pub use schema::*;
 
-#[cfg(test)]
-const DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
-const ATMOSPHERE_DENSITY_MAX: i32 = 96;
-const ATMOSPHERE_FALL_SPEED_MAX_Q4: i32 = 64;
-const ATMOSPHERE_WIND_SPEED_MIN_Q4: i32 = -64;
-const ATMOSPHERE_WIND_SPEED_MAX_Q4: i32 = 64;
+fn runtime_sky_flags(sky: crate::ResolvedSkySettings) -> u16 {
+    if !sky.sky_enabled() {
+        return 0;
+    }
+    let projection = match sky.mode {
+        crate::SkyMode::Off => 0,
+        crate::SkyMode::Panorama => sky_flags::PANORAMA,
+        crate::SkyMode::QuakeLayered => sky_flags::QUAKE_LAYERED,
+        crate::SkyMode::Cube => sky_flags::CUBE,
+    };
+    sky_flags::ENABLED
+        | projection
+        | if sky.visibility == crate::SkyVisibility::ThroughSkySurfaces {
+            sky_flags::THROUGH_SKY_SURFACES
+        } else {
+            0
+        }
+}
+
 const UI_LARGE_IMAGE_STRIP_WIDTH: u16 = 160;
 const UI_LARGE_IMAGE_MAX_DIMENSION: u16 = 256;
 
@@ -253,59 +251,6 @@ pub(crate) struct PlayerSpawnCandidate<'a> {
     animator: Option<AnimatorComponent<'a>>,
 }
 
-fn clamp_atmosphere_density(value: i32) -> u8 {
-    value.clamp(0, ATMOSPHERE_DENSITY_MAX) as u8
-}
-
-fn clamp_atmosphere_fall_speed_q4(value: i32) -> i16 {
-    value.clamp(0, ATMOSPHERE_FALL_SPEED_MAX_Q4) as i16
-}
-
-fn clamp_atmosphere_wind_speed_q4(value: i32) -> i16 {
-    value.clamp(ATMOSPHERE_WIND_SPEED_MIN_Q4, ATMOSPHERE_WIND_SPEED_MAX_Q4) as i16
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct AuthoredRoomChunk {
-    room_index: u16,
-    authored_room: u32,
-    chunk_index: u16,
-    array_origin: [u16; 2],
-    world_origin: [i32; 2],
-    size: [u16; 2],
-    cells: Vec<[u16; 2]>,
-    neighbours: [Option<u16>; 4],
-    triangles: usize,
-    psxw_bytes: usize,
-    static_lit_bytes: usize,
-    populated_cells: u16,
-    /// Which floor of the room this chunk belongs to (0 = base grid).
-    /// Drives auto-stacked vertical links between consecutive floors.
-    floor_idx: usize,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingRoomFloorLink {
-    room: u16,
-    x: u16,
-    z: u16,
-    world_cell: [i32; 2],
-    above_room: Option<NodeId>,
-    below_room: Option<NodeId>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CookedRoomBakeInput {
-    room_index: u16,
-    world_asset_index: usize,
-    world_origin: [i32; 2],
-    /// This chunk's floor elevation in engine units (the room's
-    /// `origin_y`). Used to keep light spill from crossing floors:
-    /// a light only bleeds onto a chunk on (roughly) its own level.
-    origin_y: i32,
-    cooked: CookedWorldGrid,
-}
-
 fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) -> u8 {
     std::env::var("PSXED_PLAYTEST_RESIDENT_CHUNK_LIMIT")
         .ok()
@@ -317,6 +262,18 @@ fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) ->
             )
         })
         .unwrap_or(streaming.resident_chunk_limit)
+}
+
+pub(crate) fn yaw_from_degrees(degrees: f32) -> i16 {
+    angle_from_degrees(degrees)
+}
+
+pub(crate) fn angle_from_degrees(degrees: f32) -> i16 {
+    crate::spatial::euler_degrees_to_q12(degrees) as i16
+}
+
+pub(crate) fn checked_u32(value: usize, what: &str) -> Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{what} exceeds u32"))
 }
 
 /// Build a playtest package from `project`. Validates the scene
@@ -351,14 +308,8 @@ pub fn build_package(
     // BSP projects cook at engine (Quake) scale: divide every authored
     // length by WORLD_UNIT_DIVISOR on an in-memory clone. Authored
     // files and the editor's preview stay at the historical scale.
-    // Both formats hand the cook Q8 movement speeds (see units.rs); the
-    // grid path only converts the representation, lengths stay authored.
     let mut scaled_project = project.clone();
-    if project.world_format() == crate::ProjectWorldFormat::Bsp {
-        crate::units::scale_project_to_engine_units(&mut scaled_project);
-    } else {
-        crate::units::speeds_to_q8_unscaled(&mut scaled_project);
-    }
+    crate::units::scale_project_to_engine_units(&mut scaled_project);
     let project = &scaled_project;
     let mut report = PlaytestValidationReport::default();
     let scene = project.active_scene();
@@ -370,40 +321,13 @@ pub fn build_package(
         .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
         .collect();
     room_nodes.sort_by_key(|node| node.id.raw());
-    // The persisted discriminator, not geometry presence, selects the world
-    // pipeline (docs/legacy-grid-boundary.md section 1). Content that
-    // contradicts it is a hard error rather than a silent preference, so a
-    // BSP project can never cook grid spatial state and a legacy project can
-    // never quietly drop authored brushes.
-    let world_format = project.world_format();
-    let uses_pxbsp = world_format.is_bsp();
-    if world_format.is_legacy_grid() && !scene.brushes.is_empty() {
-        report.error_at(
-            PlaytestValidationTarget::Brush {
-                brush: 0,
-                face: None,
-            },
-            format!(
-                "project format is {} but the active scene holds {} brush(es); \
-                 the grid pipeline cannot cook brush geometry and refuses to \
-                 discard it - move the brushes to a BSP project",
-                world_format.label(),
-                scene.brushes.len()
-            ),
-        );
-        return (None, report);
-    }
-    if uses_pxbsp && scene.brushes.is_empty() {
-        report.error(format!(
-            "project format is {} but the active scene holds no brushes; \
-             a BSP project has no other world source and will not fall back \
-             to the grid pipeline",
-            world_format.label()
-        ));
+    let uses_pxbsp = true;
+    if scene.brushes.is_empty() {
+        report.error("the active scene holds no brushes; BSP is the sole world source");
         return (None, report);
     }
 
-    if uses_pxbsp && !room_nodes.is_empty() {
+    if !room_nodes.is_empty() {
         // Previously these were dropped in silence and the cook went green
         // with the authored Sections missing from the level. A BSP project
         // has exactly one spatial authority, so a Section is a contradiction
@@ -412,19 +336,12 @@ pub fn build_package(
         report.error_at(
             PlaytestValidationTarget::Node(node.id),
             format!(
-                "project format is {} but the scene holds {} grid Section \
-                 node(s), starting with '{}'; PXBSP is the only spatial \
-                 authority in a BSP project and the Sections would be \
-                 discarded - delete them or open the project as legacy grid",
-                world_format.label(),
+                "the scene holds {} removed grid Section node(s), starting \
+                 with '{}'; delete the obsolete nodes before building",
                 room_nodes.len(),
                 node.name
             ),
         );
-        return (None, report);
-    }
-    if room_nodes.is_empty() && !uses_pxbsp {
-        report.error("playtest needs at least one Room node - none found");
         return (None, report);
     }
 
@@ -433,7 +350,7 @@ pub fn build_package(
     // pay for two cooks. Empty grids skip with a warning.
     let mut assets: Vec<PlaytestAsset> = Vec::new();
     let mut rooms: Vec<PlaytestRoom> = Vec::new();
-    let mut materials: Vec<PlaytestMaterial> = Vec::new();
+    let materials: Vec<PlaytestMaterial> = Vec::new();
     // Resolved psxt path → index into `assets` for texture page
     // deduplication (materials sharing one image share one page).
     // First-use order is deterministic because we walk rooms +
@@ -455,701 +372,242 @@ pub fn build_package(
                     })
         )
     });
-    let mut room_chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
-    let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
-    let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
-    let mut visibility_cells: Vec<PlaytestVisibilityCell> = Vec::new();
-    let mut visibility_pvs: Vec<PlaytestVisibilityPvs> = Vec::new();
-    let mut visibility_pvs_bits: Vec<u8> = Vec::new();
-    let mut room_surface_caches: Vec<PlaytestRoomSurfaceCache> = Vec::new();
-    let mut room_cache_cells: Vec<PlaytestCachedRoomCell> = Vec::new();
-    let mut room_cache_cell_vertices: Vec<u16> = Vec::new();
-    let mut room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
-    let mut room_cache_surfaces: Vec<PlaytestCachedRoomSurface> = Vec::new();
-    let mut room_portals: Vec<PlaytestRoomPortal> = Vec::new();
-    let mut pending_floor_links: Vec<PendingRoomFloorLink> = Vec::new();
-    let room_near_rooms: Vec<u16> = Vec::new();
-    let mut world_geometry = PlaytestWorldGeometry::Grid;
-
-    for room_node in &room_nodes {
-        let NodeKind::Section { grid: base_grid } = &room_node.kind else {
-            continue;
-        };
-        if base_grid.populated_sector_count() == 0 {
-            report.warn(format!(
-                "Section '{}' has no geometry - skipped",
-                room_node.name
-            ));
-            continue;
-        }
-        // Vertical room placement. The room's base Y is the Room node's
-        // `Transform3::translation[1]` (in sectors, like X/Z). Each floor
-        // then adds its own `elevation` delta on top, so stacked floors
-        // cook as independent chunk sets at their own heights. The
-        // integer-only runtime never sees the host f32.
-        let room_origin_y_base = (f64::from(room_node.transform.translation[1])
-            * f64::from(base_grid.sector_size)) as i32;
-        let base_elevation = base_grid.elevation;
-        // Cook floor 0 (the base grid) plus every floor above it. Each
-        // floor runs the full per-floor chunk pipeline below.
-        for floor_idx in 0..base_grid.floor_count() {
-            let Some(grid) = base_grid.floor(floor_idx) else {
-                continue;
-            };
-            if grid.populated_sector_count() == 0 {
-                continue;
-            }
-            let room_origin_y = room_origin_y_base + (grid.elevation - base_elevation);
-            let streaming = scene
-                .world_streaming_for_node(room_node.id)
-                .unwrap_or_default()
-                .normalized();
-            let resolved_physics = scene
-                .world_physics_for_node(room_node.id)
-                .unwrap_or_default()
-                .normalized();
-            let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
-            if plan.over_budget_count() > 0 {
-                report.warn(format!(
-                    "Section '{}' produced {} runtime room(s) still over budget",
-                    room_node.name,
-                    plan.over_budget_count()
-                ));
-            }
-            let portal_room_count = plan.room_count();
-            let room_index_base = rooms.len();
-            let room_portal_base = room_portals.len();
-            for portal in &plan.portals {
-                let source_room = room_index_base.saturating_add(portal.source_room);
-                let destination_room = room_index_base.saturating_add(portal.destination_room);
-                room_portals.push(PlaytestRoomPortal {
-                    source_room: u16::try_from(source_room).unwrap_or(u16::MAX),
-                    destination_room: u16::try_from(destination_room).unwrap_or(u16::MAX),
-                    kind: if portal.vertical { 1 } else { 0 },
-                    normal: portal.normal_world,
-                    vertices: portal.vertices_world,
-                });
-            }
-            for portal_room in plan.rooms {
-                let chunk_grid = extract_portal_room_grid(grid, &portal_room);
-                if chunk_grid.populated_sector_count() == 0 {
-                    continue;
-                }
-                let cooked = match cook_world_grid(project, &chunk_grid) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        report.error(cook_error_for_node(&room_node.name, e));
-                        return (None, report);
-                    }
-                };
-                let room_index = u16::try_from(rooms.len()).unwrap_or(u16::MAX);
-                room_chunks_by_node
-                    .entry(room_node.id)
-                    .or_default()
-                    .push(AuthoredRoomChunk {
-                        room_index,
-                        authored_room: room_node.id.raw() as u32,
-                        chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
-                        array_origin: portal_room.array_origin,
-                        world_origin: portal_room.world_origin,
-                        size: portal_room.size,
-                        cells: portal_room.cells.clone(),
-                        neighbours: portal_room.neighbours.map(|neighbour| {
-                            neighbour.and_then(|index| {
-                                u16::try_from(room_index_base.saturating_add(index)).ok()
-                            })
-                        }),
-                        triangles: portal_room.budget.triangles,
-                        psxw_bytes: portal_room.budget.psxw_bytes,
-                        static_lit_bytes: portal_room.budget.psxw_static_lit_bytes,
-                        populated_cells: u16::try_from(chunk_grid.populated_sector_count())
-                            .unwrap_or(u16::MAX),
-                        floor_idx,
-                    });
-                collect_pending_floor_links(room_index, &chunk_grid, &mut pending_floor_links);
-
-                // Room asset goes into the master table first (ahead of
-                // any material textures discovered while walking it).
-                let world_asset_index = assets.len();
-                assets.push(PlaytestAsset {
-                    kind: PlaytestAssetKind::RoomWorld,
-                    bytes: Vec::new(),
-                    filename: format!("room_{:03}.psxw", room_index),
-                    source_label: runtime_room_name(
-                        &room_node.name,
-                        portal_room_count,
-                        portal_room.index,
-                    ),
-                    streamed_class: StreamedClass::None,
-                });
-
-                // Walk material slots in slot order. The cooker emits
-                // CookedWorldMaterial per resolved slot id; we build
-                // PlaytestMaterial mirrors keyed to (room, local_slot)
-                // and register each unique texture asset on first use.
-                let material_first = u16::try_from(materials.len()).unwrap_or(u16::MAX);
-                let mut sorted_materials: Vec<&CookedWorldMaterial> =
-                    cooked.materials.iter().collect();
-                sorted_materials.sort_by_key(|m| m.slot);
-
-                for cooked_material in sorted_materials {
-                    let material_resource = find_resource(project, cooked_material.source);
-                    let material_label = material_resource
-                        .map(|resource| resource.name.clone())
-                        .unwrap_or_else(|| format!("material #{}", cooked_material.source.raw()));
-                    let Some(material_resource) = material_resource else {
-                        report.error(format!(
-                            "Section '{}' material slot {} references missing resource #{}",
-                            room_node.name,
-                            cooked_material.slot,
-                            cooked_material.source.raw(),
-                        ));
-                        return (None, report);
-                    };
-                    let (texture_key, texture_bytes) =
-                        match material_texture_bytes(project, material_resource, project_root) {
-                            Ok(Some(source)) => source,
-                            Ok(None) => {
-                                report.error(format!(
-                                    "Section '{}' material slot {} has no texture (resource #{})",
-                                    room_node.name,
-                                    cooked_material.slot,
-                                    cooked_material.source.raw(),
-                                ));
-                                return (None, report);
-                            }
-                            Err(msg) => {
-                                report.error(format!(
-                                    "Section '{}' material slot {}: {}",
-                                    room_node.name, cooked_material.slot, msg,
-                                ));
-                                return (None, report);
-                            }
-                        };
-                    // Texture pages dedupe by resolved path: materials
-                    // sharing one .psxt share one cooked asset.
-                    let texture_asset_index =
-                        if let Some(&existing) = texture_asset_for_path.get(&texture_key) {
-                            existing
-                        } else {
-                            let bytes = texture_bytes;
-                            // Room materials must be 4bpp (16-entry CLUT) --
-                            // both the editor preview's material upload
-                            // path and the runtime room material slots
-                            // assume the 4bpp tpage layout. Loud failure
-                            // here beats wrong-colour rendering at runtime.
-                            if let Err(msg) = expect_room_material_depth(&material_label, &bytes) {
-                                report.error(format!(
-                                    "Section '{}' material slot {}: {}",
-                                    room_node.name, cooked_material.slot, msg,
-                                ));
-                                return (None, report);
-                            }
-                            let texture_index = texture_asset_for_path.len();
-                            let new_index = assets.len();
-                            assets.push(PlaytestAsset {
-                                kind: PlaytestAssetKind::Texture,
-                                bytes,
-                                filename: format!("texture_{:03}.psxt", texture_index),
-                                source_label: material_label.clone(),
-                                streamed_class: StreamedClass::None,
-                            });
-                            texture_asset_for_path.insert(texture_key, new_index);
-                            new_index
-                        };
-
-                    materials.push(PlaytestMaterial {
-                        room: room_index,
-                        local_slot: cooked_material.slot,
-                        texture_asset_index,
-                        tint_rgb: cooked_material.tint,
-                        blend_mode: cooked_material.blend_mode,
-                        animation: cooked_material.animation,
-                        face_sidedness: cooked_material.face_sidedness,
-                    });
-                }
-                let material_count =
-                    u16::try_from(materials.len() - material_first as usize).unwrap_or(u16::MAX);
-                // The runtime keeps a fixed per-room material table of
-                // psx_level::MAX_ROOM_MATERIALS slots and silently drops any
-                // material whose local_slot is >= that cap, which makes every
-                // surface on the dropped slot invisible at runtime. Fail the cook
-                // loudly here instead (this was the demo10 invisible frieze/stairs
-                // root cause, which had no signal until the runtime telemetry and
-                // this guard were added).
-                if material_count as usize > psx_level::MAX_ROOM_MATERIALS {
-                    report.error(format!(
-                        "Room '{}' uses {} distinct materials but the per-room cap \
-                         is {} (psx_level::MAX_ROOM_MATERIALS). Reduce the room's \
-                         materials or raise the cap; over-cap materials render \
-                         invisible at runtime.",
-                        room_node.name,
-                        material_count,
-                        psx_level::MAX_ROOM_MATERIALS,
-                    ));
-                    return (None, report);
-                }
-
-                let resolved_culling = scene
-                    .world_culling_for_node(room_node.id)
-                    .unwrap_or_default()
-                    .normalized();
-                append_room_visibility(
-                    room_index,
-                    &cooked,
-                    resolved_culling.visibility_radius,
-                    &mut room_visibility,
-                    &mut visibility_cells,
-                    &mut visibility_pvs,
-                    &mut visibility_pvs_bits,
-                );
-
-                let resolved_sky = scene
-                    .world_sky_for_node(room_node.id)
-                    .unwrap_or_default()
-                    .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
-                let resolved_far_vista = scene
-                    .world_far_vista_for_node(room_node.id)
-                    .unwrap_or_default()
-                    .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
-                let resolved_camera = scene
-                    .world_camera_for_node(room_node.id)
-                    .unwrap_or_default()
-                    .normalized();
-                let far_vista_texture_asset_indices = if resolved_far_vista.enabled {
-                    let assigned_panels = resolved_far_vista
-                        .texture_panels
-                        .iter()
-                        .any(Option::is_some);
-                    if assigned_panels {
-                        resolved_far_vista
-                            .texture_panels
-                            .iter()
-                            .take(active_far_vista_panel_count(
-                                &resolved_far_vista.texture_panels,
-                                resolved_far_vista.segments,
-                            ))
-                            .enumerate()
-                            .map(|(panel_index, texture_id)| {
-                                texture_id.and_then(|texture_id| {
-                                    let context = format!(
-                                        "Room '{}' far vista panel {}",
-                                        room_node.name,
-                                        panel_index + 1
-                                    );
-                                    cook_far_vista_texture_asset(
-                                        project,
-                                        project_root,
-                                        texture_id,
-                                        &context,
-                                        &mut texture_asset_for_path,
-                                        &mut assets,
-                                        &mut report,
-                                    )
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    } else {
-                        resolved_far_vista
-                            .texture
-                            .and_then(|texture_id| {
-                                let context = format!("Room '{}' far vista", room_node.name);
-                                cook_far_vista_texture_asset(
-                                    project,
-                                    project_root,
-                                    texture_id,
-                                    &context,
-                                    &mut texture_asset_for_path,
-                                    &mut assets,
-                                    &mut report,
-                                )
-                            })
-                            .into_iter()
-                            .map(Some)
-                            .collect::<Vec<_>>()
-                    }
-                } else {
-                    Vec::new()
-                };
-                let far_vista_has_texture =
-                    far_vista_texture_asset_indices.iter().any(Option::is_some);
-                let sky_texture_asset_index = cook_sky_panorama_texture_asset(
-                    resolved_sky,
-                    &mut sky_texture_assets,
-                    &mut assets,
-                );
-                let atmosphere_density = clamp_atmosphere_density(chunk_grid.atmosphere_density);
-                let atmosphere_fall_speed_q4 =
-                    clamp_atmosphere_fall_speed_q4(chunk_grid.atmosphere_fall_speed_q4);
-                let atmosphere_wind_speed_q4 =
-                    clamp_atmosphere_wind_speed_q4(chunk_grid.atmosphere_wind_speed_q4);
-                let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
-                let reflection_probe_asset_index = if uses_room_reflection_probes {
-                    let bytes = match crate::generate_room_reflection_probe_psxt(
-                        project,
-                        &chunk_grid,
-                        project_root,
-                    ) {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            report.error(format!(
-                                "Room '{}' reflection probe could not be baked: {error}",
-                                room_node.name
-                            ));
-                            return (None, report);
-                        }
-                    };
-                    let asset_index = assets.len();
-                    assets.push(PlaytestAsset {
-                        kind: PlaytestAssetKind::Texture,
-                        bytes,
-                        filename: format!("room_probe_{room_index:03}.psxt"),
-                        source_label: format!(
-                            "{} reflection probe",
-                            runtime_room_name(
-                                &room_node.name,
-                                portal_room_count,
-                                portal_room.index,
-                            )
-                        ),
-                        streamed_class: StreamedClass::None,
-                    });
-                    Some(asset_index)
-                } else {
-                    None
-                };
-
-                rooms.push(PlaytestRoom {
-                    name: runtime_room_name(&room_node.name, portal_room_count, portal_room.index),
-                    world_asset_index: Some(world_asset_index),
-                    reflection_probe_asset_index,
-                    origin_x: chunk_grid.origin[0],
-                    origin_z: chunk_grid.origin[1],
-                    origin_y: room_origin_y,
-                    sector_size: chunk_grid.sector_size,
-                    draw_distance: resolved_culling.draw_distance,
-                    chunk_activation_radius_sectors: resolved_culling
-                        .chunk_activation_radius_sectors,
-                    visibility_radius: resolved_culling.visibility_radius,
-                    resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
-                    visible_chunk_limit: streaming.visible_chunk_limit,
-                    gravity_per_tick: resolved_physics.gravity_per_tick,
-                    material_first,
-                    material_count,
-                    portal_first: if portal_room.portal_count == 0 {
-                        0
-                    } else {
-                        u16::try_from(room_portal_base.saturating_add(portal_room.portal_first))
-                            .unwrap_or(u16::MAX)
-                    },
-                    portal_count: u8::try_from(portal_room.portal_count).unwrap_or(u8::MAX),
-                    near_room_first: 0,
-                    near_room_count: 0,
-                    overlapped_room_first: 0,
-                    overlapped_room_count: 0,
-                    fog_rgb: chunk_grid.fog_color,
-                    fog_near: chunk_grid.fog_near,
-                    fog_far: chunk_grid.fog_far,
-                    atmosphere_rgb: chunk_grid.atmosphere_color,
-                    atmosphere_density,
-                    atmosphere_fall_speed_q4,
-                    atmosphere_wind_speed_q4,
-                    sky: PlaytestSky {
-                        top_rgb: resolved_sky.top_color,
-                        horizon_rgb: resolved_sky.horizon_color,
-                        bottom_rgb: resolved_sky.lower_color,
-                        horizon_percent: resolved_sky.horizon_percent,
-                        horizon_thickness_percent: resolved_sky.horizon_thickness_percent,
-                        skybox_columns: resolved_sky.skybox_columns,
-                        skybox_rows: resolved_sky.skybox_rows,
-                        flags: if resolved_sky.enabled {
-                            sky_flags::ENABLED
-                        } else {
-                            0
-                        },
-                        cyclorama_quads: Vec::new(),
-                        cloud_layer: PlaytestCloudLayer {
-                            texture_asset_index: sky_texture_asset_index,
-                            color_rgb: resolved_sky.cloud_layer.color,
-                            density: resolved_sky.cloud_layer.density,
-                            altitude: resolved_sky.cloud_layer.altitude,
-                            extent: resolved_sky.cloud_layer.extent,
-                            tile_count: resolved_sky.cloud_layer.tile_count,
-                            scroll_speed: resolved_sky.cloud_layer.scroll_speed,
-                            noise_seed: resolved_sky.cloud_layer.noise_seed,
-                            flags: if resolved_sky.cloud_layer.enabled && resolved_sky.enabled {
-                                cloud_layer_flags::ENABLED
-                            } else {
-                                0
-                            },
-                        },
-                    },
-                    far_vista: PlaytestFarVista {
-                        texture_asset_indices: far_vista_texture_asset_indices,
-                        radius: resolved_far_vista.radius,
-                        height: resolved_far_vista.height,
-                        vertical_offset: resolved_far_vista.vertical_offset,
-                        segments: resolved_far_vista.segments,
-                        rotation_degrees: resolved_far_vista.rotation_degrees,
-                        tint_rgb: resolved_far_vista.tint,
-                        flags: if resolved_far_vista.enabled {
-                            far_vista_flags::ENABLED
-                                | if far_vista_has_texture {
-                                    far_vista_flags::TEXTURED
-                                } else {
-                                    0
-                                }
-                        } else {
-                            0
-                        },
-                    },
-                    camera: PlaytestCamera {
-                        distance: resolved_camera.distance,
-                        height: resolved_camera.height,
-                        target_height: resolved_camera.target_height,
-                        lock_rise_percent: resolved_camera.lock_rise_percent,
-                        min_floor_clearance: resolved_camera.min_floor_clearance,
-                        orbit_speed_level: resolved_camera.orbit_speed_level,
-                        position_lag_shift: resolved_camera.position_lag_shift,
-                        focus_lag_shift: resolved_camera.focus_lag_shift,
-                        distance_lag_shift: resolved_camera.distance_lag_shift,
-                    },
-                    flags: if chunk_grid.fog_enabled {
-                        room_flags::FOG_ENABLED
-                    } else {
-                        0
-                    } | if atmosphere_enabled {
-                        room_flags::ATMOSPHERE_ENABLED
-                    } else {
-                        0
-                    },
-                });
-                room_bake_inputs.push(CookedRoomBakeInput {
-                    room_index,
-                    world_asset_index,
-                    world_origin: portal_room.world_origin,
-                    origin_y: room_origin_y,
-                    cooked,
-                });
-            }
-        }
+    if uses_room_reflection_probes {
+        report.error(
+            "room reflection-probe materials belonged to the removed grid renderer; use an image or generated material",
+        );
+        return (None, report);
     }
-    if uses_pxbsp {
-        // The singleton record retains shared world/camera/sky settings for
-        // the ordinary gameplay pipeline. Geometry, collision, visibility,
-        // and spatial activation come exclusively from resident PXBSP; there
-        // is deliberately no synthetic WorldGrid, PSXW asset, room chunk, or
-        // grid-PVS bake hiding behind this metadata anchor.
-        let world_sector_size = scene
-            .world_sector_size_for_node(scene.root)
-            .unwrap_or(1024)
-            .max(1);
-        let resolved_camera = scene
-            .world_camera_for_node(scene.root)
-            .unwrap_or_default()
-            .normalized();
-        let resolved_culling = scene
-            .world_culling_for_node(scene.root)
-            .unwrap_or_default()
-            .normalized();
-        let streaming = scene
-            .world_streaming_for_node(scene.root)
-            .unwrap_or_default()
-            .normalized();
-        let resolved_physics = scene
-            .world_physics_for_node(scene.root)
-            .unwrap_or_default()
-            .normalized();
-        let resolved_sky = scene
-            .world_sky_for_node(scene.root)
-            .unwrap_or_default()
-            .resolved_for_room(false, [0; 3]);
-        let resolved_far_vista = scene
-            .world_far_vista_for_node(scene.root)
-            .unwrap_or_default()
-            .resolved_for_room(false, [0; 3]);
-        rooms.push(PlaytestRoom {
-            name: "PXBSP World".to_string(),
-            world_asset_index: None,
-            reflection_probe_asset_index: None,
-            origin_x: 0,
-            origin_z: 0,
-            origin_y: 0,
-            sector_size: world_sector_size,
-            draw_distance: resolved_culling.draw_distance,
-            chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
-            visibility_radius: resolved_culling.visibility_radius,
-            resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
-            visible_chunk_limit: streaming.visible_chunk_limit,
-            gravity_per_tick: resolved_physics.gravity_per_tick,
-            material_first: 0,
-            material_count: 0,
-            portal_first: 0,
-            portal_count: 0,
-            near_room_first: 0,
-            near_room_count: 0,
-            overlapped_room_first: 0,
-            overlapped_room_count: 0,
-            fog_rgb: [0; 3],
-            fog_near: 0,
-            fog_far: resolved_culling.draw_distance,
-            atmosphere_rgb: [0; 3],
-            atmosphere_density: 0,
-            atmosphere_fall_speed_q4: 0,
-            atmosphere_wind_speed_q4: 0,
-            sky: PlaytestSky {
-                top_rgb: resolved_sky.top_color,
-                horizon_rgb: resolved_sky.horizon_color,
-                bottom_rgb: resolved_sky.lower_color,
-                horizon_percent: resolved_sky.horizon_percent,
-                horizon_thickness_percent: resolved_sky.horizon_thickness_percent,
-                skybox_columns: resolved_sky.skybox_columns,
-                skybox_rows: resolved_sky.skybox_rows,
-                flags: if resolved_sky.enabled {
-                    sky_flags::ENABLED
+    let room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
+    let visibility_cells: Vec<PlaytestVisibilityCell> = Vec::new();
+    let visibility_pvs: Vec<PlaytestVisibilityPvs> = Vec::new();
+    let visibility_pvs_bits: Vec<u8> = Vec::new();
+    let room_surface_caches: Vec<PlaytestRoomSurfaceCache> = Vec::new();
+    let room_cache_cells: Vec<PlaytestCachedRoomCell> = Vec::new();
+    let room_cache_cell_vertices: Vec<u16> = Vec::new();
+    let room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
+    let room_cache_surfaces: Vec<PlaytestCachedRoomSurface> = Vec::new();
+    let room_portals: Vec<PlaytestRoomPortal> = Vec::new();
+    let room_near_rooms: Vec<u16> = Vec::new();
+
+    // The singleton record retains shared world/camera/sky settings for
+    // the ordinary gameplay pipeline. Geometry, collision, visibility,
+    // and spatial activation come exclusively from resident PXBSP; there
+    // is deliberately no synthetic WorldGrid, PSXW asset, room chunk, or
+    // grid-PVS bake hiding behind this metadata anchor.
+    let world_sector_size = scene
+        .world_sector_size_for_node(scene.root)
+        .unwrap_or(1024)
+        .max(1);
+    let resolved_camera = scene
+        .world_camera_for_node(scene.root)
+        .unwrap_or_default()
+        .normalized();
+    let resolved_culling = scene
+        .world_culling_for_node(scene.root)
+        .unwrap_or_default()
+        .normalized();
+    let streaming = scene
+        .world_streaming_for_node(scene.root)
+        .unwrap_or_default()
+        .normalized();
+    let resolved_physics = scene
+        .world_physics_for_node(scene.root)
+        .unwrap_or_default()
+        .normalized();
+    let resolved_sky = scene
+        .world_sky_for_node(scene.root)
+        .unwrap_or_default()
+        .resolved_for_room(false, [0; 3]);
+    let resolved_far_vista = scene
+        .world_far_vista_for_node(scene.root)
+        .unwrap_or_default()
+        .resolved_for_room(false, [0; 3]);
+    rooms.push(PlaytestRoom {
+        name: "PXBSP World".to_string(),
+        world_asset_index: None,
+        reflection_probe_asset_index: None,
+        origin_x: 0,
+        origin_z: 0,
+        origin_y: 0,
+        sector_size: world_sector_size,
+        draw_distance: resolved_culling.draw_distance,
+        chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
+        visibility_radius: resolved_culling.visibility_radius,
+        resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
+        visible_chunk_limit: streaming.visible_chunk_limit,
+        gravity_per_tick: resolved_physics.gravity_per_tick,
+        material_first: 0,
+        material_count: 0,
+        portal_first: 0,
+        portal_count: 0,
+        near_room_first: 0,
+        near_room_count: 0,
+        overlapped_room_first: 0,
+        overlapped_room_count: 0,
+        fog_rgb: [0; 3],
+        fog_near: 0,
+        fog_far: resolved_culling.draw_distance,
+        atmosphere_rgb: [0; 3],
+        atmosphere_density: 0,
+        atmosphere_fall_speed_q4: 0,
+        atmosphere_wind_speed_q4: 0,
+        sky: PlaytestSky {
+            top_rgb: resolved_sky.top_color,
+            horizon_rgb: resolved_sky.horizon_color,
+            bottom_rgb: resolved_sky.lower_color,
+            horizon_percent: resolved_sky.horizon_percent,
+            horizon_thickness_percent: resolved_sky.horizon_thickness_percent,
+            skybox_columns: resolved_sky.skybox_columns,
+            skybox_rows: resolved_sky.skybox_rows,
+            flags: runtime_sky_flags(resolved_sky),
+            texture_asset_index: None,
+            cyclorama_quads: Vec::new(),
+            cloud_layer: PlaytestCloudLayer {
+                texture_asset_index: None,
+                color_rgb: resolved_sky.cloud_layer.color,
+                density: resolved_sky.cloud_layer.density,
+                altitude: resolved_sky.cloud_layer.altitude,
+                extent: resolved_sky.cloud_layer.extent,
+                tile_count: resolved_sky.cloud_layer.tile_count,
+                scroll_speed: resolved_sky.cloud_layer.scroll_speed,
+                noise_seed: resolved_sky.cloud_layer.noise_seed,
+                flags: if resolved_sky.cloud_layer.enabled && resolved_sky.enabled {
+                    cloud_layer_flags::ENABLED
                 } else {
                     0
                 },
-                cyclorama_quads: Vec::new(),
-                cloud_layer: PlaytestCloudLayer {
-                    texture_asset_index: None,
-                    color_rgb: resolved_sky.cloud_layer.color,
-                    density: resolved_sky.cloud_layer.density,
-                    altitude: resolved_sky.cloud_layer.altitude,
-                    extent: resolved_sky.cloud_layer.extent,
-                    tile_count: resolved_sky.cloud_layer.tile_count,
-                    scroll_speed: resolved_sky.cloud_layer.scroll_speed,
-                    noise_seed: resolved_sky.cloud_layer.noise_seed,
-                    flags: if resolved_sky.cloud_layer.enabled && resolved_sky.enabled {
-                        cloud_layer_flags::ENABLED
-                    } else {
-                        0
-                    },
-                },
             },
-            far_vista: PlaytestFarVista {
-                texture_asset_indices: Vec::new(),
-                radius: resolved_far_vista.radius,
-                height: resolved_far_vista.height,
-                vertical_offset: resolved_far_vista.vertical_offset,
-                segments: resolved_far_vista.segments,
-                rotation_degrees: resolved_far_vista.rotation_degrees,
-                tint_rgb: resolved_far_vista.tint,
-                flags: 0,
-            },
-            camera: PlaytestCamera {
-                distance: resolved_camera.distance,
-                height: resolved_camera.height,
-                target_height: resolved_camera.target_height,
-                lock_rise_percent: resolved_camera.lock_rise_percent,
-                min_floor_clearance: resolved_camera.min_floor_clearance,
-                orbit_speed_level: resolved_camera.orbit_speed_level,
-                position_lag_shift: resolved_camera.position_lag_shift,
-                focus_lag_shift: resolved_camera.focus_lag_shift,
-                distance_lag_shift: resolved_camera.distance_lag_shift,
-            },
+        },
+        far_vista: PlaytestFarVista {
+            texture_asset_indices: Vec::new(),
+            radius: resolved_far_vista.radius,
+            height: resolved_far_vista.height,
+            vertical_offset: resolved_far_vista.vertical_offset,
+            segments: resolved_far_vista.segments,
+            rotation_degrees: resolved_far_vista.rotation_degrees,
+            tint_rgb: resolved_far_vista.tint,
             flags: 0,
-        });
+        },
+        camera: PlaytestCamera {
+            distance: resolved_camera.distance,
+            height: resolved_camera.height,
+            target_height: resolved_camera.target_height,
+            lock_rise_percent: resolved_camera.lock_rise_percent,
+            min_floor_clearance: resolved_camera.min_floor_clearance,
+            orbit_speed_level: resolved_camera.orbit_speed_level,
+            position_lag_shift: resolved_camera.position_lag_shift,
+            focus_lag_shift: resolved_camera.focus_lag_shift,
+            distance_lag_shift: resolved_camera.distance_lag_shift,
+        },
+        flags: 0,
+    });
 
-        let texture_asset_base = match u16::try_from(assets.len()) {
-            Ok(base) => base,
-            Err(_) => {
-                report.error("PXBSP texture asset base exceeds u16");
-                return (None, report);
-            }
-        };
-        let compiled = match crate::brush_world::compile_brush_world(
-            project,
-            crate::brush_world::BrushWorldCookOptions {
-                project_root,
-                mode: project.bsp_cook_mode,
-                ambient: [32; 3],
-                texture_asset_base,
-            },
-        ) {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                report.error_maybe_at(
-                    brush_world_validation_target(&error),
-                    format!("brush world compile failed: {error}"),
-                );
-                return (None, report);
-            }
-        };
-        for texture in &compiled.textures {
-            let expected = assets.len();
-            if usize::from(texture.asset_id) != expected {
-                report.error(format!(
-                    "PXBSP texture asset {} does not match master asset slot {expected}",
-                    texture.asset_id
-                ));
-                return (None, report);
-            }
-            texture_asset_for_path.insert(texture.key.clone(), expected);
-            assets.push(PlaytestAsset {
-                kind: PlaytestAssetKind::Texture,
-                bytes: texture.bytes.clone(),
-                filename: format!("texture_{:03}.psxt", texture.asset_id),
-                source_label: texture.key.clone(),
-                streamed_class: StreamedClass::None,
-            });
+    let texture_asset_base = match u16::try_from(assets.len()) {
+        Ok(base) => base,
+        Err(_) => {
+            report.error("PXBSP texture asset base exceeds u16");
+            return (None, report);
         }
-        if !compiled.leak_path.is_empty() {
-            report.warn(format!(
+    };
+    let compiled = match crate::brush_world::compile_brush_world(
+        project,
+        crate::brush_world::BrushWorldCookOptions {
+            project_root,
+            mode: project.bsp_cook_mode,
+            ambient: [32; 3],
+            texture_asset_base,
+        },
+    ) {
+        Ok(compiled) => compiled,
+        Err(error) => {
+            report.error_maybe_at(
+                brush_world_validation_target(&error),
+                format!("brush world compile failed: {error}"),
+            );
+            return (None, report);
+        }
+    };
+    for texture in &compiled.textures {
+        let expected = assets.len();
+        if usize::from(texture.asset_id) != expected {
+            report.error(format!(
+                "PXBSP texture asset {} does not match master asset slot {expected}",
+                texture.asset_id
+            ));
+            return (None, report);
+        }
+        texture_asset_for_path.insert(texture.key.clone(), expected);
+        assets.push(PlaytestAsset {
+            kind: PlaytestAssetKind::Texture,
+            bytes: texture.bytes.clone(),
+            filename: format!("texture_{:03}.psxt", texture.asset_id),
+            source_label: texture.key.clone(),
+            streamed_class: StreamedClass::None,
+        });
+    }
+    if !compiled.leak_path.is_empty() {
+        report.warn(format!(
                 "BSP leak reaches the infinite exterior through {} pointfile points; portal PVS includes the opening and writes {}",
                 compiled.leak_path.len(),
                 crate::brush_playtest::BRUSH_LEAK_FILENAME,
             ));
-        }
-        let authored_leak_path: Vec<_> = compiled
-            .leak_path
-            .iter()
-            .map(|point| {
-                point.map(|coordinate| coordinate.saturating_mul(crate::units::WORLD_UNIT_DIVISOR))
-            })
-            .collect();
-        // PXBSP rooms use the same authored panorama and gameplay-transient
-        // lifetime as grid rooms. Register it after the brush textures so
-        // enabling or disabling a sky cannot renumber PXBSP material assets
-        // or perturb the resident world bytes.
-        let sky_texture_asset_index =
-            cook_sky_panorama_texture_asset(resolved_sky, &mut sky_texture_assets, &mut assets);
-        rooms
-            .last_mut()
-            .expect("PXBSP metadata room was just appended")
-            .sky
-            .cloud_layer
-            .texture_asset_index = sky_texture_asset_index;
-        world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
-            bytes: compiled.pxbsp.bytes,
-            max_visible_faces: compiled.pxbsp.max_visible_faces,
-            body_hulls: compiled.body_hulls,
-            texture_asset_indices: compiled
-                .textures
-                .iter()
-                .map(|texture| usize::from(texture.asset_id))
-                .collect(),
-            movers: compiled
-                .movers
-                .iter()
-                .map(|mover| PlaytestPxbspMover {
-                    node: mover.node.raw() as u32,
-                    model_index: mover.model_index,
-                })
-                .collect(),
-            leak_path: authored_leak_path,
-        });
     }
+    let authored_leak_path: Vec<_> = compiled
+        .leak_path
+        .iter()
+        .map(|point| {
+            point.map(|coordinate| coordinate.saturating_mul(crate::units::WORLD_UNIT_DIVISOR))
+        })
+        .collect();
+    // PXBSP rooms use the same authored panorama and gameplay-transient
+    // lifetime as grid rooms. Register it after the brush textures so
+    // enabling or disabling a sky cannot renumber PXBSP material assets
+    // or perturb the resident world bytes.
+    let sky_texture_asset_index = cook_scene_sky_texture_asset(
+        project,
+        project_root,
+        resolved_sky,
+        &mut sky_texture_assets,
+        &mut assets,
+        &mut report,
+    );
+    rooms
+        .last_mut()
+        .expect("PXBSP metadata room was just appended")
+        .sky
+        .texture_asset_index = sky_texture_asset_index;
+    rooms
+        .last_mut()
+        .expect("PXBSP metadata room was just appended")
+        .sky
+        .cloud_layer
+        .texture_asset_index = sky_texture_asset_index;
+    let world_geometry = PlaytestWorldGeometry::Pxbsp(PlaytestPxbspWorld {
+        bytes: compiled.pxbsp.bytes,
+        max_visible_faces: compiled.pxbsp.max_visible_faces,
+        body_hulls: compiled.body_hulls,
+        texture_asset_indices: compiled
+            .textures
+            .iter()
+            .map(|texture| usize::from(texture.asset_id))
+            .collect(),
+        movers: compiled
+            .movers
+            .iter()
+            .map(|mover| PlaytestPxbspMover {
+                node: mover.node.raw() as u32,
+                model_index: mover.model_index,
+            })
+            .collect(),
+        leak_path: authored_leak_path,
+    });
 
     if rooms.is_empty() {
-        report.error("every Room is empty - cook needs at least one populated room");
+        report.error("BSP cook did not produce its world metadata record");
         return (None, report);
     }
-    let mut chunks = if uses_pxbsp {
-        Vec::new()
-    } else {
-        build_playtest_chunks(&room_chunks_by_node, rooms.len())
-    };
+    let chunks = Vec::new();
 
     // Pass 3: spawn + entities + model instances + lights.
     let mut player_spawns: Vec<PlayerSpawnCandidate<'_>> = Vec::new();
@@ -1168,7 +626,7 @@ pub fn build_package(
     let mut arch_props: Vec<PlaytestArchProp> = Vec::new();
     let mut arch_prop_surfaces: Vec<PlaytestArchPropSurface> = Vec::new();
     let mut arch_prop_collisions: Vec<PlaytestArchPropCollision> = Vec::new();
-    let mut water_cells: Vec<PlaytestWaterCell> = Vec::new();
+    let water_cells: Vec<PlaytestWaterCell> = Vec::new();
     let mut combat_capsules: Vec<PlaytestCombatCapsule> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
@@ -1193,136 +651,7 @@ pub fn build_package(
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut warned_unsupported: HashSet<&'static str> = HashSet::new();
 
-    // Water is authored as a sparse world-cell footprint on a Room floor.
-    // Resolve each cell through the exact portal-room plan so split rooms and
-    // stacked floors inherit the correct runtime room/local coordinates.
-    // The compact WATER_CELLS table is both the authoritative gameplay lookup
-    // and the stateless render source; water never consumes BoxProp state or
-    // collision-blocker capacity.
-    let mut occupied_water_cells: HashSet<(u16, u16, u16)> = HashSet::new();
-    for node in scene.nodes() {
-        let NodeKind::WaterVolume {
-            material,
-            cells,
-            settings,
-        } = &node.kind
-        else {
-            continue;
-        };
-        let Some(room_node) = enclosing_room(scene, node) else {
-            report.warn(format!(
-                "Water Volume '{}' has no enclosing Room - skipped",
-                node.name
-            ));
-            continue;
-        };
-        let NodeKind::Section { grid: base_grid } = &room_node.kind else {
-            continue;
-        };
-        let floor_index = node.floor.min(base_grid.floor_count().saturating_sub(1));
-        let Some(grid) = base_grid.floor(floor_index) else {
-            continue;
-        };
-        let normalized = settings.normalized();
-        if cells.is_empty() {
-            report.warn(format!("Water Volume '{}' has no painted cells", node.name));
-            continue;
-        }
-        let surface = material.and_then(|material_id| {
-            resolve_material_texture_asset(
-                project,
-                project_root,
-                &format!("Water Volume '{}' surface", node.name),
-                material_id,
-                &mut texture_asset_for_path,
-                &mut assets,
-                &mut report,
-            )
-            .map(|(texture_asset_index, tint_rgb)| {
-                let (blend_mode, animation) = project
-                    .resource(material_id)
-                    .and_then(|resource| match &resource.data {
-                        ResourceData::Material(material) => Some((
-                            manifest::model_override_blend_code(material.blend_mode),
-                            material.animation,
-                        )),
-                        _ => None,
-                    })
-                    .unwrap_or((
-                        psx_level::model_override_blend::AVERAGE,
-                        crate::MaterialAnimation::default(),
-                    ));
-                (texture_asset_index, blend_mode, tint_rgb, animation)
-            })
-        });
-        for cell in cells {
-            let Some((array_x, array_z)) = grid.world_cell_to_array(cell.x, cell.z) else {
-                report.warn(format!(
-                    "Water Volume '{}' cell {},{} lies outside floor {} - skipped",
-                    node.name,
-                    cell.x,
-                    cell.z,
-                    floor_index + 1,
-                ));
-                continue;
-            };
-            let Some(sector) = grid.sector(array_x, array_z) else {
-                report.warn(format!(
-                    "Water Volume '{}' cell {},{} has no terrain sector - skipped",
-                    node.name, cell.x, cell.z,
-                ));
-                continue;
-            };
-            let Some(floor) = sector.floor.as_ref() else {
-                report.warn(format!(
-                    "Water Volume '{}' cell {},{} has no floor - skipped",
-                    node.name, cell.x, cell.z,
-                ));
-                continue;
-            };
-            let Some(chunk) = room_chunks_by_node.get(&room_node.id).and_then(|chunks| {
-                chunks.iter().find(|chunk| {
-                    chunk.floor_idx == floor_index && chunk.cells.contains(&[array_x, array_z])
-                })
-            }) else {
-                report.warn(format!(
-                    "Water Volume '{}' cell {},{} did not map to a runtime room - skipped",
-                    node.name, cell.x, cell.z,
-                ));
-                continue;
-            };
-            let local_x = array_x.saturating_sub(chunk.array_origin[0]);
-            let local_z = array_z.saturating_sub(chunk.array_origin[1]);
-            if !occupied_water_cells.insert((chunk.room_index, local_x, local_z)) {
-                report.warn(format!(
-                    "Water Volume '{}' overlaps another volume at {},{} - later cell skipped",
-                    node.name, cell.x, cell.z,
-                ));
-                continue;
-            }
-            let floor_y = floor.lowest_height();
-            let depth = normalized.height_above_floor;
-            let surface_y = floor_y.saturating_add(i32::from(depth));
-            water_cells.push(PlaytestWaterCell {
-                room: chunk.room_index,
-                x: local_x,
-                z: local_z,
-                texture_asset_index: surface.map(|surface| surface.0),
-                blend_mode: surface
-                    .map(|surface| surface.1)
-                    .unwrap_or(psx_level::model_override_blend::AVERAGE),
-                tint_rgb: surface.map(|surface| surface.2).unwrap_or([128; 3]),
-                animation: surface.map(|surface| surface.3).unwrap_or_default(),
-                surface_y,
-                depth,
-                lethal_depth: normalized.lethal_depth,
-                movement_percent: normalized.movement_percent,
-                death_delay_ticks: normalized.death_delay_ticks,
-                death_submerge_depth: normalized.death_submerge_depth,
-            });
-        }
-    }
-    water_cells.sort_by_key(|cell| (cell.room, cell.x, cell.z));
+    // Water is authored as BSP liquid brushes and is compiled with the world geometry.
 
     for node in scene.nodes() {
         if node.id == scene.root || matches!(node.kind, NodeKind::Section { .. }) {
@@ -1331,63 +660,14 @@ pub fn build_package(
         if node.kind.is_component() {
             continue;
         }
-        let (room_index, raw_pos, floor_pos, placement_sector_size) = if uses_pxbsp {
-            // Brush scenes author transforms directly in engine/world units.
-            // Region zero is the temporary residency envelope; positions stay
-            // world-space so the BSP renderer, tracer, actors, and sockets all
-            // consume the same coordinates.
-            let pos = node.transform.translation.map(|value| value.round() as i32);
-            (
-                0,
-                pos,
-                pos,
-                rooms.first().map(|room| room.sector_size).unwrap_or(1024),
-            )
-        } else {
-            let Some(room_node) = enclosing_room(scene, node) else {
-                if !matches!(
-                    node.kind,
-                    NodeKind::Node
-                        | NodeKind::Group
-                        | NodeKind::Node3D
-                        | NodeKind::Entity
-                        | NodeKind::World { .. }
-                ) {
-                    report.warn(format!(
-                        "{} '{}' has no enclosing Room - dropped",
-                        node.kind.label(),
-                        node.name
-                    ));
-                }
-                continue;
-            };
-            let NodeKind::Section { grid } = &room_node.kind else {
-                continue;
-            };
-            let Some(chunk) = room_chunks_by_node
-                .get(&room_node.id)
-                .and_then(|chunks| chunk_for_node(node, grid, chunks))
-            else {
-                if !matches!(
-                    node.kind,
-                    NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
-                ) {
-                    report.warn(format!(
-                        "{} '{}' is outside cooked Room '{}' chunks - dropped",
-                        node.kind.label(),
-                        node.name,
-                        room_node.name
-                    ));
-                }
-                continue;
-            };
-            (
-                chunk.room_index,
-                node_chunk_local_position(node, grid, chunk),
-                floor_anchored_node_chunk_local_position(node, grid, chunk),
-                grid.sector_size,
-            )
-        };
+        // BSP point entities author transforms directly in world units.
+        let pos = node.transform.translation.map(|value| value.round() as i32);
+        let (room_index, raw_pos, floor_pos, placement_sector_size) = (
+            0,
+            pos,
+            pos,
+            rooms.first().map(|room| room.sector_size).unwrap_or(1024),
+        );
         let pitch = angle_from_degrees(node.transform.rotation_degrees[0]);
         let yaw = yaw_from_degrees(node.transform.rotation_degrees[1]);
         let roll = angle_from_degrees(node.transform.rotation_degrees[2]);
@@ -2377,140 +1657,9 @@ pub fn build_package(
         return (None, report);
     }
 
-    let mut lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
-    bake_static_surface_lights(&mut room_bake_inputs, &lights);
-    bake_static_image_prop_lights(&mut image_props, &room_bake_inputs, &lights);
-    bake_static_box_prop_lights(
-        &mut box_props,
-        &mut box_prop_surfaces,
-        &room_bake_inputs,
-        &lights,
-    );
-    bake_static_cylinder_prop_lights(
-        &cylinder_props,
-        &mut cylinder_prop_surfaces,
-        &room_bake_inputs,
-        &lights,
-    );
-    bake_static_arch_prop_lights(
-        &arch_props,
-        &mut arch_prop_surfaces,
-        &room_bake_inputs,
-        &lights,
-    );
-    for room in &room_bake_inputs {
-        let bytes = match room.cooked.to_psxw_bytes() {
-            Ok(b) => b,
-            Err(e) => {
-                report.error(cook_error_for_node(
-                    rooms
-                        .get(room.room_index as usize)
-                        .map(|room| room.name.as_str())
-                        .unwrap_or("<room>"),
-                    e,
-                ));
-                return (None, report);
-            }
-        };
-        if bytes.len() > MAX_ROOM_BYTES {
-            let room_name = rooms
-                .get(room.room_index as usize)
-                .map(|room| room.name.as_str())
-                .unwrap_or("<room>");
-            report.error(format!(
-                "Room '{room_name}' static-lit .psxw is {} bytes; cap is {}",
-                bytes.len(),
-                MAX_ROOM_BYTES,
-            ));
-            return (None, report);
-        }
-        if let Err(msg) = append_room_surface_cache(
-            room.room_index,
-            &bytes,
-            &materials,
-            &assets,
-            &mut room_surface_caches,
-            &mut room_cache_cells,
-            &mut room_cache_cell_vertices,
-            &mut room_cache_vertices,
-            &mut room_cache_surfaces,
-        ) {
-            report.error(msg);
-            return (None, report);
-        }
-        assign_visibility_cache_cell_indices(
-            room.room_index,
-            &room_visibility,
-            &mut visibility_cells,
-            &room_surface_caches,
-            &room_cache_cells,
-        );
-        if let Some(asset) = assets.get_mut(room.world_asset_index) {
-            asset.bytes = bytes;
-        }
-        if let Some(chunk) = chunks.get_mut(room.room_index as usize) {
-            chunk.static_lit_bytes = assets
-                .get(room.world_asset_index)
-                .map(|asset| asset.bytes.len())
-                .unwrap_or(chunk.static_lit_bytes);
-        }
-    }
-
-    let mut room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
-    room_floor_links.extend(auto_wire_floor_stack_links(&room_chunks_by_node));
-    room_portals.extend(auto_wire_floor_stack_portals(scene, &room_chunks_by_node));
-    room_portals.extend(auto_wire_floor_terrace_portals(scene, &room_chunks_by_node));
-    // Portals that join two Sections. Until this, every Section cooked as its
-    // own island and a level built from more than one of them was disconnected
-    // at runtime no matter how the editor drew it.
-    let wiring = cross_section_portals(scene, &room_chunks_by_node);
-    let (cross_section, cross_issues, wired_edges) = (wiring.portals, wiring.issues, wiring.edges);
-    room_portals.extend(cross_section);
-    // Sections placed edge to edge with facing openings connect on their own.
-    room_portals.extend(auto_adjacent_section_portals(
-        scene,
-        &room_chunks_by_node,
-        &wired_edges,
-    ));
-    for issue in cross_issues {
-        let portal_name = scene
-            .node(issue.portal)
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| format!("#{}", issue.portal.raw()));
-        let section_name = scene
-            .node(issue.room)
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| format!("#{}", issue.room.raw()));
-        let message = format!(
-            "Portal '{portal_name}' in Section '{section_name}' is {} - it connects nothing at runtime",
-            issue.status.label()
-        );
-        // An unassigned portal is work in progress; a broken pairing is a door
-        // the player can see and never use, so that one fails the build.
-        match issue.status {
-            crate::room_connections::RoomConnectionStatus::Unassigned => report.warn(message),
-            _ => report.error_at(PlaytestValidationTarget::Node(issue.portal), message),
-        }
-    }
-    let room_overlapped_rooms = assign_floor_stack_overlaps(&mut rooms, &room_chunks_by_node);
-    // The runtime visibility BFS reads each room's portals as the
-    // contiguous slice [portal_first, portal_first+portal_count). The
-    // per-room ranges set during the cook loop only covered the
-    // horizontal portals from `plan_portal_rooms`; the vertical
-    // floor-stack portals were appended afterwards and would be
-    // unreferenced (room.portal_count wouldn't include them, so the BFS
-    // never scans them). Regroup the whole table by source_room and
-    // rebuild every room's range so both kinds are reachable.
-    regroup_room_portals(&mut rooms, &mut room_portals);
-    rebuild_portal_connected_visibility_pvs(
-        &rooms,
-        &chunks,
-        &room_portals,
-        &mut room_visibility,
-        &visibility_cells,
-        &mut visibility_pvs,
-        &mut visibility_pvs_bits,
-    );
+    let mut lights = lights;
+    let room_floor_links = Vec::new();
+    let room_overlapped_rooms = Vec::new();
     let (ui_nodes, ui_paints, ui_scenes, ui_sfx_samples, ui_sfx_cues, game_flow, cdda_tracks) =
         cook_ui_nodes(
             project,
@@ -2542,60 +1691,52 @@ pub fn build_package(
     //     metadata (gravity, camera, sky, fog) with `world_asset_index: None`;
     //   * the header-only WORLD.PAK the manifest writes from an empty world
     //     pack order, kept so the disc layout and loader contract stay stable.
-    if uses_pxbsp {
-        let leaks: [(&str, usize); 9] = [
-            ("room chunks", chunks.len()),
-            ("room visibility rows", room_visibility.len()),
-            ("visibility cells", visibility_cells.len()),
-            ("visibility PVS rows", visibility_pvs.len()),
-            ("room surface caches", room_surface_caches.len()),
-            ("room portals", room_portals.len()),
-            ("room floor links", room_floor_links.len()),
-            ("water cells", water_cells.len()),
-            (
-                "PSXW world assets",
-                assets
-                    .iter()
-                    .filter(|asset| asset.kind == PlaytestAssetKind::RoomWorld)
-                    .count(),
-            ),
-        ];
-        for (what, count) in leaks {
-            if count != 0 {
-                report.error(format!(
-                    "BSP project cooked {count} {what}; PXBSP is the only \
+    let leaks: [(&str, usize); 9] = [
+        ("room chunks", chunks.len()),
+        ("room visibility rows", room_visibility.len()),
+        ("visibility cells", visibility_cells.len()),
+        ("visibility PVS rows", visibility_pvs.len()),
+        ("room surface caches", room_surface_caches.len()),
+        ("room portals", room_portals.len()),
+        ("room floor links", room_floor_links.len()),
+        ("water cells", water_cells.len()),
+        (
+            "PSXW world assets",
+            assets
+                .iter()
+                .filter(|asset| asset.kind == PlaytestAssetKind::RoomWorld)
+                .count(),
+        ),
+    ];
+    for (what, count) in leaks {
+        if count != 0 {
+            report.error(format!(
+                "BSP project cooked {count} {what}; PXBSP is the only \
                      spatial authority and grid spatial state must never be \
                      produced for a BSP project"
-                ));
-            }
-        }
-        if rooms.len() != 1 {
-            report.error(format!(
-                "BSP project cooked {} room records; exactly one non-spatial \
-                 metadata room is expected",
-                rooms.len()
             ));
         }
-        if rooms.iter().any(|room| room.world_asset_index.is_some()) {
-            report.error(
-                "BSP project cooked a room referencing a PSXW world asset; the \
-                 metadata room must carry no world geometry",
-            );
-        }
-        if !matches!(world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
-            report.error(
-                "BSP project produced a grid world geometry payload; the cook \
-                 would ship a level with no world",
-            );
-        }
-        if !report.is_ok() {
-            return (None, report);
-        }
-    } else if matches!(world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
+    }
+    if rooms.len() != 1 {
+        report.error(format!(
+            "BSP project cooked {} room records; exactly one non-spatial \
+                 metadata room is expected",
+            rooms.len()
+        ));
+    }
+    if rooms.iter().any(|room| room.world_asset_index.is_some()) {
         report.error(
-            "legacy grid project produced a PXBSP world payload; the grid \
-             runtime cannot consume it",
+            "BSP project cooked a room referencing a PSXW world asset; the \
+                 metadata room must carry no world geometry",
         );
+    }
+    if !matches!(world_geometry, PlaytestWorldGeometry::Pxbsp(_)) {
+        report.error(
+            "BSP project produced a grid world geometry payload; the cook \
+                 would ship a level with no world",
+        );
+    }
+    if !report.is_ok() {
         return (None, report);
     }
 
@@ -2712,147 +1853,6 @@ pub fn build_package(
     )
 }
 
-/// Build the same runtime-room/cell/portal topology as [`build_package`]
-/// without resolving textures, models, or other play assets. This is cheap
-/// enough for editor diagnostics and, importantly, prevents the Room Rings
-/// overlay from maintaining a second approximation of the cooker.
-pub fn build_debug_topology(project: &ProjectDocument) -> PlaytestDebugTopology {
-    let scene = project.active_scene();
-    // A BSP project has no grid rooms, cells, or portals to show. Returning
-    // empty rather than walking any stray Section keeps this overlay from
-    // being the one place that still builds grid topology for a BSP project
-    // (the cook itself refuses that scene outright).
-    if project.world_format().is_bsp() {
-        return PlaytestDebugTopology::default();
-    }
-    let mut room_nodes: Vec<&SceneNode> = scene
-        .nodes()
-        .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Section { .. }))
-        .collect();
-    room_nodes.sort_by_key(|node| node.id.raw());
-
-    let mut cells = Vec::new();
-    let mut portals = Vec::new();
-    let mut chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
-    let mut runtime_room_count = 0usize;
-    for room_node in room_nodes {
-        let NodeKind::Section { grid: base_grid } = &room_node.kind else {
-            continue;
-        };
-        if base_grid.populated_sector_count() == 0 {
-            continue;
-        }
-        let room_origin_y_base = (f64::from(room_node.transform.translation[1])
-            * f64::from(base_grid.sector_size)) as i32;
-        let base_elevation = base_grid.elevation;
-        for floor_index in 0..base_grid.floor_count() {
-            let Some(grid) = base_grid.floor(floor_index) else {
-                continue;
-            };
-            if grid.populated_sector_count() == 0 {
-                continue;
-            }
-            let elevation = room_origin_y_base + (grid.elevation - base_elevation);
-            let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
-            let room_index_base = runtime_room_count;
-            for portal in &plan.portals {
-                portals.push(PlaytestRoomPortal {
-                    source_room: u16::try_from(room_index_base.saturating_add(portal.source_room))
-                        .unwrap_or(u16::MAX),
-                    destination_room: u16::try_from(
-                        room_index_base.saturating_add(portal.destination_room),
-                    )
-                    .unwrap_or(u16::MAX),
-                    kind: if portal.vertical { 1 } else { 0 },
-                    normal: portal.normal_world,
-                    vertices: portal.vertices_world,
-                });
-            }
-            for portal_room in plan.rooms {
-                let chunk_grid = extract_portal_room_grid(grid, &portal_room);
-                if chunk_grid.populated_sector_count() == 0 {
-                    continue;
-                }
-                let runtime_room_index = runtime_room_count;
-                let node_center = [
-                    room_node.transform.translation[0],
-                    room_node.transform.translation[2],
-                ];
-                let room_origin = [
-                    node_center[0] + portal_room.array_origin[0] as f32 - grid.width as f32 * 0.5,
-                    node_center[1] + portal_room.array_origin[1] as f32 - grid.depth as f32 * 0.5,
-                ];
-                for array_cell in &portal_room.cells {
-                    let local_center = [
-                        array_cell[0] as f32 + 0.5 - grid.width as f32 * 0.5,
-                        array_cell[1] as f32 + 0.5 - grid.depth as f32 * 0.5,
-                    ];
-                    cells.push(PlaytestDebugTopologyCell {
-                        runtime_room_index,
-                        authored_room: room_node.id.raw() as u32,
-                        portal_room_index: portal_room.index,
-                        floor_index,
-                        array_cell: *array_cell,
-                        center: [
-                            node_center[0] + local_center[0],
-                            node_center[1] + local_center[1],
-                        ],
-                        half: [0.5, 0.5],
-                        room_origin,
-                        runtime_origin: portal_room.world_origin,
-                        elevation,
-                        sector_size: grid.sector_size.max(1),
-                    });
-                }
-                let room_index = u16::try_from(runtime_room_index).unwrap_or(u16::MAX);
-                chunks_by_node
-                    .entry(room_node.id)
-                    .or_default()
-                    .push(AuthoredRoomChunk {
-                        room_index,
-                        authored_room: room_node.id.raw() as u32,
-                        chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
-                        array_origin: portal_room.array_origin,
-                        world_origin: portal_room.world_origin,
-                        size: portal_room.size,
-                        cells: portal_room.cells,
-                        neighbours: portal_room.neighbours.map(|neighbour| {
-                            neighbour.and_then(|index| {
-                                u16::try_from(room_index_base.saturating_add(index)).ok()
-                            })
-                        }),
-                        triangles: portal_room.budget.triangles,
-                        psxw_bytes: portal_room.budget.psxw_bytes,
-                        static_lit_bytes: portal_room.budget.psxw_static_lit_bytes,
-                        populated_cells: u16::try_from(chunk_grid.populated_sector_count())
-                            .unwrap_or(u16::MAX),
-                        floor_idx: floor_index,
-                    });
-                runtime_room_count += 1;
-            }
-        }
-    }
-    portals.extend(auto_wire_floor_stack_portals(scene, &chunks_by_node));
-    portals.extend(auto_wire_floor_terrace_portals(scene, &chunks_by_node));
-    portals.sort_by_key(|portal| portal.source_room);
-    PlaytestDebugTopology {
-        cells,
-        portals: portals
-            .into_iter()
-            .enumerate()
-            .map(|(portal_index, portal)| PlaytestDebugTopologyPortal {
-                portal_index,
-                portal,
-            })
-            .collect(),
-    }
-}
-
-/// Preserve the exact PS1 blend equation while reducing the common player
-/// crystal material from two full model submissions to one. This deliberately
-/// stays narrow: sharing the model or using any other blend pairing keeps the
-/// authored two-pass path unchanged.
 fn collapse_exclusive_player_material(
     player_controller: Option<PlaytestPlayerController>,
     characters: &mut [PlaytestCharacter],

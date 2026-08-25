@@ -71,7 +71,8 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
                 ui.label("Project name");
-                let response = ui.add(egui::TextEdit::singleline(name).hint_text("e.g. Test Room"));
+                let response =
+                    ui.add(egui::TextEdit::singleline(name).hint_text("e.g. Test Level"));
                 let preview_stem = if name.trim().is_empty() {
                     "<name>".to_string()
                 } else {
